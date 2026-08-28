@@ -106,8 +106,8 @@
 //!              v
 //! +-------------------------+                 +-----------------------------+
 //! | REGISTERED              |---------------->| CloseContext C = E + R      |
-//! | exact C, D; W superset  |                 | PaymentContext: anchor,e,op |
-//! | admission deadline A    |                 +--------------+--------------+
+//! | exact C; derived D;     |                 | PaymentContext: anchor,e,op |
+//! | W superset; deadline A  |                 +--------------+--------------+
 //! +------+------------------+                                |
 //!        |                                                   | only now may the
 //!        |                                                   | operator release

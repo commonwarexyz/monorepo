@@ -3,7 +3,10 @@
 use crate::{
     protocol::{DepositEvent, Key, MAX_ACCOUNTS, verify_registration_signature},
     rpc,
-    settlement::{AdmissionOutcome, Settlement, SettlementStatus, SettlementSubmission},
+    settlement::{
+        AdmissionOutcome, ClaimOutcome, DepositPresence, Settlement, SettlementStatus,
+        SettlementSubmission,
+    },
     store::MAX_DESTINATION_BYTES,
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -42,11 +45,24 @@ pub(crate) const METHOD_BEGIN_HARD_FAULT_SETTLEMENT: u8 = 10;
 pub(crate) const METHOD_CLAIM_HARD_FAULT: u8 = 11;
 pub(crate) const METHOD_CLAIM_PENDING_DEPOSIT: u8 = 12;
 pub(crate) const METHOD_CONFIRM_REGISTRATION: u8 = 13;
+pub(crate) const METHOD_CLAIM_ROOTS: u8 = 14;
 
 const MAX_BATCH_ITEMS: usize = 1_024;
 const MAX_STATE_OPENINGS: usize = 5;
 const CERTIFICATE_PARTICIPANTS: usize = 4;
-const MAX_CHALLENGE_BYTES: usize = 16 * 1024;
+
+/// Bounds one encoded challenge. The largest canonical challenge is an inconsistent receipt
+/// range whose upper endpoint is a full payment witness over a send at the protocol entry
+/// limit (10,466 bytes) and whose lower endpoint is a scoped payment witness over another
+/// such send (10,426 bytes), 20,894 bytes with both enum tags. 32 KiB covers that maximum
+/// with headroom and stays far below the 4 MiB frame budget.
+///
+/// No challenge size depends on the operator's account count. The receipt-range and fork
+/// families carry no openings at all, and the opening-carrying families are depth-bounded
+/// structurally: every opening decodes at most `bmt::MAX_LEVELS` sibling hashes per position,
+/// their lookup leaves are fixed size, and one entry-limit payment witness plus those bounded
+/// openings stays below the receipt-range maximum.
+const MAX_CHALLENGE_BYTES: usize = 32 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum AdmitError {
@@ -113,6 +129,120 @@ impl Read for RegistrationQuery {
 }
 
 pub(crate) type DepositRequest = DepositEvent;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ClaimRootsRequest {
+    pub(crate) batch_id: BatchId<Digest>,
+}
+
+impl Write for ClaimRootsRequest {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.batch_id.write(buf);
+    }
+}
+
+impl EncodeSize for ClaimRootsRequest {
+    fn encode_size(&self) -> usize {
+        self.batch_id.encode_size()
+    }
+}
+
+impl Read for ClaimRootsRequest {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+        Ok(Self {
+            batch_id: BatchId::read(buf)?,
+        })
+    }
+}
+
+/// The claim roots of one finalized batch, against which claimants verify their evidence
+/// locally before caching it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ClaimRootsResponse {
+    pub(crate) withdrawal_outputs: VectorRoot<Digest>,
+    pub(crate) change: VectorRoot<Digest>,
+}
+
+impl From<crate::settlement::ClaimRoots> for ClaimRootsResponse {
+    fn from(roots: crate::settlement::ClaimRoots) -> Self {
+        Self {
+            withdrawal_outputs: roots.withdrawal_outputs,
+            change: roots.change,
+        }
+    }
+}
+
+impl Write for ClaimRootsResponse {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.withdrawal_outputs.write(buf);
+        self.change.write(buf);
+    }
+}
+
+impl EncodeSize for ClaimRootsResponse {
+    fn encode_size(&self) -> usize {
+        self.withdrawal_outputs.encode_size() + self.change.encode_size()
+    }
+}
+
+impl Read for ClaimRootsResponse {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+        Ok(Self {
+            withdrawal_outputs: VectorRoot::read(buf)?,
+            change: VectorRoot::read(buf)?,
+        })
+    }
+}
+
+/// Settlement's answer to one deposit confirmation, carried out of band from the transport
+/// error channel so a depositor can act on the definitive absence of a custody record.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DepositConfirmation {
+    /// The exact event is recorded, so its custody moved and the id must be retried.
+    Recorded,
+    /// The id is unknown, so no custody moved and the event is safe to abandon.
+    Unknown,
+}
+
+impl From<DepositPresence> for DepositConfirmation {
+    fn from(presence: DepositPresence) -> Self {
+        match presence {
+            DepositPresence::Recorded => Self::Recorded,
+            DepositPresence::Unknown => Self::Unknown,
+        }
+    }
+}
+
+impl Write for DepositConfirmation {
+    fn write(&self, buf: &mut impl BufMut) {
+        match self {
+            Self::Recorded => 0_u8.write(buf),
+            Self::Unknown => 1_u8.write(buf),
+        }
+    }
+}
+
+impl EncodeSize for DepositConfirmation {
+    fn encode_size(&self) -> usize {
+        1
+    }
+}
+
+impl Read for DepositConfirmation {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+        match u8::read(buf)? {
+            0 => Ok(Self::Recorded),
+            1 => Ok(Self::Unknown),
+            tag => Err(CodecError::InvalidEnum(tag)),
+        }
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ChallengeRequest {
@@ -257,11 +387,17 @@ impl Read for QueueWithdrawalRequest {
     }
 }
 
+/// The deposit boundary travels as the signed root of the batch the operator built its
+/// context from. Settlement derives the exact records from its own custody state, so a
+/// diverging deposit view is rejected at registration without consuming the slot.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RegisterEpochRequest {
     pub(crate) epoch: u64,
     pub(crate) predecessor_liability: u64,
-    pub(crate) deposits: DepositBatch<Key>,
+    pub(crate) deposits_root: VectorRoot<Digest>,
+    /// Root of the operator's full staged deposit set, deferred aggregates included, so a
+    /// deposit view divergence a deferral hides from the boundary is still rejected.
+    pub(crate) staged_root: VectorRoot<Digest>,
     pub(crate) withdrawals: WithdrawalBatch<Key, Digest>,
     /// One predecessor-root opening per withdrawal in batch order. Settlement selects the
     /// ones proving its operator-carried extras certifiable.
@@ -273,7 +409,8 @@ impl Write for RegisterEpochRequest {
     fn write(&self, buf: &mut impl BufMut) {
         self.epoch.write(buf);
         self.predecessor_liability.write(buf);
-        self.deposits.write(buf);
+        self.deposits_root.write(buf);
+        self.staged_root.write(buf);
         self.withdrawals.write(buf);
         self.openings.write(buf);
         self.signature.write(buf);
@@ -284,7 +421,8 @@ impl EncodeSize for RegisterEpochRequest {
     fn encode_size(&self) -> usize {
         self.epoch.encode_size()
             + self.predecessor_liability.encode_size()
-            + self.deposits.encode_size()
+            + self.deposits_root.encode_size()
+            + self.staged_root.encode_size()
             + self.withdrawals.encode_size()
             + self.openings.encode_size()
             + self.signature.encode_size()
@@ -298,7 +436,8 @@ impl Read for RegisterEpochRequest {
         Ok(Self {
             epoch: u64::read(buf)?,
             predecessor_liability: u64::read(buf)?,
-            deposits: DepositBatch::read_cfg(buf, &RangeCfg::new(0..=MAX_BATCH_ITEMS))?,
+            deposits_root: VectorRoot::read(buf)?,
+            staged_root: VectorRoot::read(buf)?,
             withdrawals: WithdrawalBatch::read_cfg(
                 buf,
                 &(
@@ -478,6 +617,9 @@ pub(crate) struct StatusResponse {
     pub(crate) now: u64,
     pub(crate) deployment: Digest,
     pub(crate) state_root: VectorRoot<Digest>,
+    /// Highest finalized epoch. Epochs finalize in order, so the state root covers every
+    /// epoch at or below it.
+    pub(crate) last_finalized: Option<u64>,
     pub(crate) custody_balance: u64,
     pub(crate) claimable_balance: u64,
     pub(crate) hard_faulted: bool,
@@ -489,6 +631,7 @@ impl From<SettlementStatus> for StatusResponse {
             now: status.now,
             deployment: status.deployment,
             state_root: status.state_root,
+            last_finalized: status.last_finalized,
             custody_balance: status.custody_balance,
             claimable_balance: status.claimable_balance,
             hard_faulted: status.hard_faulted,
@@ -501,6 +644,7 @@ impl Write for StatusResponse {
         self.now.write(buf);
         self.deployment.write(buf);
         self.state_root.write(buf);
+        self.last_finalized.write(buf);
         self.custody_balance.write(buf);
         self.claimable_balance.write(buf);
         self.hard_faulted.write(buf);
@@ -512,6 +656,7 @@ impl EncodeSize for StatusResponse {
         self.now.encode_size()
             + self.deployment.encode_size()
             + self.state_root.encode_size()
+            + self.last_finalized.encode_size()
             + self.custody_balance.encode_size()
             + self.claimable_balance.encode_size()
             + self.hard_faulted.encode_size()
@@ -526,6 +671,7 @@ impl Read for StatusResponse {
             now: u64::read(buf)?,
             deployment: Digest::read(buf)?,
             state_root: VectorRoot::read(buf)?,
+            last_finalized: Option::<u64>::read(buf)?,
             custody_balance: u64::read(buf)?,
             claimable_balance: u64::read(buf)?,
             hard_faulted: bool::read(buf)?,
@@ -671,6 +817,69 @@ impl Read for WithdrawalResponse {
             amount: u64::read(buf)?,
             destination: Bytes::read_cfg(buf, &RangeCfg::new(0..=MAX_DESTINATION_BYTES))?,
         })
+    }
+}
+
+/// The settlement-side resolution of one finalized-batch claim, carried out of band from
+/// the transport error channel so the claimant can act on a definitive verdict without
+/// matching a message string.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ClaimResponse<T> {
+    /// The claim was released against a finalized batch.
+    Released(T),
+    /// The batch is not claimable now. It may simply not have finalized yet, so the exact
+    /// claim must be retried later and never discarded.
+    Unavailable,
+    /// Settlement adjudicated the exact claim against an immutable finalized batch and
+    /// rejected it. The verdict can never change, so the claimant must discard the claim.
+    Invalid,
+}
+
+pub(crate) type WithdrawalClaimResponse = ClaimResponse<WithdrawalResponse>;
+pub(crate) type ExternalPayoutClaimResponse = ClaimResponse<ExternalPayoutResponse>;
+
+impl<T, U: Into<T>> From<ClaimOutcome<U>> for ClaimResponse<T> {
+    fn from(outcome: ClaimOutcome<U>) -> Self {
+        match outcome {
+            ClaimOutcome::Released(release) => Self::Released(release.into()),
+            ClaimOutcome::Unavailable => Self::Unavailable,
+            ClaimOutcome::Invalid => Self::Invalid,
+        }
+    }
+}
+
+impl<T: Write> Write for ClaimResponse<T> {
+    fn write(&self, buf: &mut impl BufMut) {
+        match self {
+            Self::Released(release) => {
+                0_u8.write(buf);
+                release.write(buf);
+            }
+            Self::Unavailable => 1_u8.write(buf),
+            Self::Invalid => 2_u8.write(buf),
+        }
+    }
+}
+
+impl<T: EncodeSize> EncodeSize for ClaimResponse<T> {
+    fn encode_size(&self) -> usize {
+        1 + match self {
+            Self::Released(release) => release.encode_size(),
+            Self::Unavailable | Self::Invalid => 0,
+        }
+    }
+}
+
+impl<T: Read<Cfg = ()>> Read for ClaimResponse<T> {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+        match u8::read(buf)? {
+            0 => Ok(Self::Released(T::read(buf)?)),
+            1 => Ok(Self::Unavailable),
+            2 => Ok(Self::Invalid),
+            tag => Err(CodecError::InvalidEnum(tag)),
+        }
     }
 }
 
@@ -1112,7 +1321,8 @@ fn dispatch(settlement: &mut Settlement, request: rpc::Request) -> anyhow::Resul
                 verify_registration_signature(
                     request.epoch,
                     request.predecessor_liability,
-                    &request.deposits,
+                    &request.deposits_root,
+                    &request.staged_root,
                     &request.withdrawals,
                     &request.signature,
                 ),
@@ -1122,7 +1332,8 @@ fn dispatch(settlement: &mut Settlement, request: rpc::Request) -> anyhow::Resul
                 .register_epoch(
                     request.epoch,
                     request.predecessor_liability,
-                    request.deposits,
+                    request.deposits_root,
+                    request.staged_root,
                     request.withdrawals,
                     &request.openings,
                 )
@@ -1145,26 +1356,26 @@ fn dispatch(settlement: &mut Settlement, request: rpc::Request) -> anyhow::Resul
         METHOD_CLAIM_WITHDRAWAL => {
             let request = WithdrawalClaimRequest::decode(request.body)
                 .context("decode withdrawal-claim request")?;
-            let release = settlement
+            let outcome = settlement
                 .claim_withdrawal(request.batch_id, &request.claim)
                 .context("apply withdrawal-claim request")?;
-            Ok(WithdrawalResponse::from(release).encode())
+            Ok(WithdrawalClaimResponse::from(outcome).encode())
         }
         METHOD_CLAIM_EXTERNAL_PAYOUT => {
             let request = ExternalPayoutClaimRequest::decode(request.body)
                 .context("decode external-payout-claim request")?;
-            let payout = settlement
+            let outcome = settlement
                 .claim_external_payout(request.batch_id, &request.claim)
                 .context("apply external-payout-claim request")?;
-            Ok(ExternalPayoutResponse::from(payout).encode())
+            Ok(ExternalPayoutClaimResponse::from(outcome).encode())
         }
         METHOD_CONFIRM_DEPOSIT => {
             let request = DepositRequest::decode(request.body)
                 .context("decode deposit-confirmation request")?;
-            settlement
+            let presence = settlement
                 .confirm_deposit(&request)
                 .context("confirm settlement deposit")?;
-            Ok(Bytes::new())
+            Ok(DepositConfirmation::from(presence).encode())
         }
         METHOD_CONFIRM_REGISTRATION => {
             let request =
@@ -1173,6 +1384,14 @@ fn dispatch(settlement: &mut Settlement, request: rpc::Request) -> anyhow::Resul
                 .confirm_registration(request.epoch, &request.anchor, &request.state_root)
                 .context("confirm payment registration")?;
             Ok(Bytes::new())
+        }
+        METHOD_CLAIM_ROOTS => {
+            let request =
+                ClaimRootsRequest::decode(request.body).context("decode claim-roots request")?;
+            let roots = settlement
+                .claim_roots(request.batch_id)
+                .context("look up finalized claim roots")?;
+            Ok(roots.map(ClaimRootsResponse::from).encode())
         }
         METHOD_CHALLENGE => {
             let request =
@@ -1223,18 +1442,7 @@ async fn invoke<E: Network>(
     method: u8,
     body: Bytes,
 ) -> Result<Bytes> {
-    let response = rpc::call(network, address, &rpc::Request { method, body })
-        .await
-        .context("call settlement")?;
-    match response {
-        rpc::Response::Success { body } => Ok(body),
-        rpc::Response::Error { error } => {
-            bail!(
-                "settlement rejected request: {}",
-                String::from_utf8_lossy(&error)
-            )
-        }
-    }
+    rpc::invoke(network, address, "settlement", method, body).await
 }
 
 async fn invoke_empty<E: Network>(
@@ -1268,8 +1476,29 @@ pub(crate) async fn confirm_deposit<E: Network>(
     network: &E,
     address: SocketAddr,
     request: DepositRequest,
-) -> Result<()> {
-    invoke_empty(network, address, METHOD_CONFIRM_DEPOSIT, request.encode()).await
+) -> Result<DepositConfirmation> {
+    DepositConfirmation::decode(
+        invoke(network, address, METHOD_CONFIRM_DEPOSIT, request.encode()).await?,
+    )
+    .context("decode deposit confirmation")
+}
+
+/// Looks up a finalized batch's claim roots, or `None` while the batch is unknown.
+pub(crate) async fn claim_roots<E: Network>(
+    network: &E,
+    address: SocketAddr,
+    batch_id: BatchId<Digest>,
+) -> Result<Option<ClaimRootsResponse>> {
+    Option::<ClaimRootsResponse>::decode(
+        invoke(
+            network,
+            address,
+            METHOD_CLAIM_ROOTS,
+            ClaimRootsRequest { batch_id }.encode(),
+        )
+        .await?,
+    )
+    .context("decode finalized claim roots")
 }
 
 pub(crate) async fn confirm_registration<E: Network>(
@@ -1341,19 +1570,19 @@ pub(crate) async fn claim_withdrawal<E: Network>(
     network: &E,
     address: SocketAddr,
     request: WithdrawalClaimRequest,
-) -> Result<WithdrawalResponse> {
-    WithdrawalResponse::decode(
+) -> Result<WithdrawalClaimResponse> {
+    WithdrawalClaimResponse::decode(
         invoke(network, address, METHOD_CLAIM_WITHDRAWAL, request.encode()).await?,
     )
-    .context("decode withdrawal response")
+    .context("decode withdrawal claim resolution")
 }
 
 pub(crate) async fn claim_external_payout<E: Network>(
     network: &E,
     address: SocketAddr,
     request: ExternalPayoutClaimRequest,
-) -> Result<ExternalPayoutResponse> {
-    ExternalPayoutResponse::decode(
+) -> Result<ExternalPayoutClaimResponse> {
+    ExternalPayoutClaimResponse::decode(
         invoke(
             network,
             address,
@@ -1362,7 +1591,7 @@ pub(crate) async fn claim_external_payout<E: Network>(
         )
         .await?,
     )
-    .context("decode external payout")
+    .context("decode external payout claim resolution")
 }
 
 #[allow(dead_code, reason = "the recovery client is an integration surface")]
@@ -1440,10 +1669,12 @@ pub(crate) fn admit_blocking(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{Protocol, identities, wallets};
+    use crate::protocol::{Payment, Protocol, Wallet, identities, operator_key, wallets};
     use bytes::BytesMut;
     use commonware_clearing::bajillion::{
         boundary::{DepositRecord, SignedWithdrawal, WithdrawalAction},
+        challenge::{Challenge, RangeLower, ReceiptForkWitness},
+        payment::{Entry, MAX_ENTRIES, PaymentContext, PaymentWitness, SignedReceipt, SignedSend},
         state::{AccountState, StateLeaf},
         transition::StateCache,
     };
@@ -1480,12 +1711,19 @@ mod tests {
         withdrawals: WithdrawalBatch<Key, Digest>,
     ) -> RegisterEpochRequest {
         let protocol = Protocol::new(std::num::NonZeroUsize::MIN).unwrap();
-        let signature =
-            protocol.sign_registration(epoch, predecessor_liability, &deposits, &withdrawals);
+        let deposits_root = deposits.root::<Sha256>().unwrap();
+        let signature = protocol.sign_registration(
+            epoch,
+            predecessor_liability,
+            &deposits_root,
+            &deposits_root,
+            &withdrawals,
+        );
         RegisterEpochRequest {
             epoch,
             predecessor_liability,
-            deposits,
+            deposits_root,
+            staged_root: deposits_root,
             withdrawals,
             openings: Vec::new(),
             signature,
@@ -1558,6 +1796,106 @@ mod tests {
     }
 
     #[test]
+    fn challenge_bound_admits_the_maximal_canonical_proof() {
+        let protocol = Protocol::new(std::num::NonZeroUsize::MIN).unwrap();
+        let payer = wallets().remove(0);
+        let context = PaymentContext::new(
+            Sha256::hash(&[b"maximal-challenge-context"]),
+            0,
+            operator_key(),
+        );
+        let entries = (0..MAX_ENTRIES)
+            .map(|index| {
+                let seed = 20_000 + u64::try_from(index).unwrap();
+                Entry::new(Wallet::from_seed("recipient", seed).public_key(), 1).unwrap()
+            })
+            .collect::<Vec<_>>();
+        let payment = |previous_debit: u64| {
+            let send = SignedSend::sign_next_batch(
+                &context,
+                payer.signer(),
+                entries.clone(),
+                previous_debit,
+            )
+            .unwrap();
+            let recipient = send.body().entries()[0].recipient().clone();
+            let receipt = SignedReceipt::issue_next::<Sha256, _>(
+                &context,
+                &send,
+                &recipient,
+                0,
+                0,
+                0,
+                protocol.operator(),
+            )
+            .unwrap();
+            Payment::new::<Sha256>(&context, send, receipt).unwrap()
+        };
+        let upper = payment(0);
+        let lower = payment(256);
+
+        // The largest canonical proof: an inconsistent receipt range over two endpoints at
+        // the protocol entry limit, one complete payment witness and one scoped witness.
+        let range: Challenge<Key, Digest> = Challenge::InconsistentReceiptRange {
+            upper: Box::new(PaymentWitness::from_payment(&upper)),
+            lower: RangeLower::from_payment(&lower),
+        };
+        let evidence = range.encode();
+        assert_eq!(evidence.len(), 20_894);
+        assert!(evidence.len() <= MAX_CHALLENGE_BYTES);
+
+        // The densest receipt fork projects to its same-index relation and stays smaller.
+        let fork = Challenge::receipt_fork(&upper, &lower);
+        assert!(matches!(
+            &fork,
+            Challenge::ReceiptFork { fork }
+                if matches!(fork.as_ref(), ReceiptForkWitness::SameIndex { .. })
+        ));
+        assert!(fork.encode().len() <= evidence.len());
+
+        // The maximal proof clears the request decode bound and the frame budget.
+        let request = ChallengeRequest {
+            batch_id: BatchId::new(Sha256::hash(&[b"maximal-challenge-batch"])),
+            evidence,
+        };
+        assert!(request.encode_size() <= rpc::MAX_BODY_SIZE);
+        assert_eq!(ChallengeRequest::decode(request.encode()).unwrap(), request);
+    }
+
+    #[test]
+    fn claim_resolution_codecs_round_trip_and_reject_unknown_tags() {
+        for response in [
+            WithdrawalClaimResponse::Released(WithdrawalResponse {
+                amount: 7,
+                destination: Bytes::from_static(b"destination"),
+            }),
+            WithdrawalClaimResponse::Unavailable,
+            WithdrawalClaimResponse::Invalid,
+        ] {
+            assert_eq!(
+                WithdrawalClaimResponse::decode(response.encode()).unwrap(),
+                response
+            );
+        }
+        assert!(WithdrawalClaimResponse::decode(Bytes::from_static(&[3])).is_err());
+
+        for response in [
+            ExternalPayoutClaimResponse::Released(ExternalPayoutResponse {
+                recipient: identities()[0].key.clone(),
+                amount: 7,
+            }),
+            ExternalPayoutClaimResponse::Unavailable,
+            ExternalPayoutClaimResponse::Invalid,
+        ] {
+            assert_eq!(
+                ExternalPayoutClaimResponse::decode(response.encode()).unwrap(),
+                response
+            );
+        }
+        assert!(ExternalPayoutClaimResponse::decode(Bytes::from_static(&[3])).is_err());
+    }
+
+    #[test]
     fn recovery_response_codecs_preserve_fault_metadata_and_optional_withdrawal() {
         let batch_id = BatchId::new(Sha256::hash(&[b"fault-metadata-batch"]));
         let account = identities()[0].key.clone();
@@ -1619,6 +1957,19 @@ mod tests {
         let mut settlement = Settlement::new().unwrap();
         let error = error_text(handle(&mut settlement, request(u8::MAX, Bytes::new())));
         assert!(error.contains("unknown settlement RPC method 255"));
+    }
+
+    #[test]
+    fn unknown_claim_roots_lookup_returns_absence() {
+        let mut settlement = Settlement::new().unwrap();
+        let lookup = ClaimRootsRequest {
+            batch_id: BatchId::new(Sha256::hash(&[b"unknown-claim-roots"])),
+        };
+        let body = success_body(handle(
+            &mut settlement,
+            request(METHOD_CLAIM_ROOTS, lookup.encode()),
+        ));
+        assert_eq!(Option::<ClaimRootsResponse>::decode(body).unwrap(), None);
     }
 
     #[test]
@@ -1687,6 +2038,11 @@ mod tests {
         let mut oversized_batch = BytesMut::new();
         0_u64.write(&mut oversized_batch);
         400_u64.write(&mut oversized_batch);
+        let oversized_root = VectorRoot {
+            digest: Sha256::hash(&[b"oversized-batch-root"]),
+        };
+        oversized_root.write(&mut oversized_batch);
+        oversized_root.write(&mut oversized_batch);
         (MAX_BATCH_ITEMS + 1).write(&mut oversized_batch);
         let error = error_text(handle(
             &mut settlement,
@@ -1893,9 +2249,8 @@ mod tests {
     #[test]
     fn epoch_registration_rpc_rejects_a_gap_without_consuming_the_slot() {
         let mut settlement = Settlement::new().unwrap();
-        let deposits = DepositBatch::empty();
         let withdrawals = WithdrawalBatch::empty();
-        let skipped = signed_registration(1, 400, deposits.clone(), withdrawals.clone());
+        let skipped = signed_registration(1, 400, DepositBatch::empty(), withdrawals.clone());
 
         let error = error_text(handle(
             &mut settlement,
@@ -1903,7 +2258,7 @@ mod tests {
         ));
         assert!(error.contains("settlement boundary epoch is not consecutive"));
 
-        let first = signed_registration(0, 400, deposits, withdrawals);
+        let first = signed_registration(0, 400, DepositBatch::empty(), withdrawals);
         assert!(
             success_body(handle(
                 &mut settlement,
@@ -1936,7 +2291,7 @@ mod tests {
         ));
         assert!(error.contains("payment registration is no longer live"));
 
-        let registration = signed_registration(0, 400, deposits, withdrawals);
+        let registration = signed_registration(0, 400, DepositBatch::empty(), withdrawals);
         assert!(
             success_body(handle(
                 &mut settlement,

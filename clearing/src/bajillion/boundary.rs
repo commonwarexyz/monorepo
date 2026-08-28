@@ -593,14 +593,6 @@ impl<P: PublicKey, D: Digest> WithdrawalBatch<P, D> {
             .map(|index| &self.requests[index])
     }
 
-    /// Verifies every request against the exact deployment and finalized state root.
-    pub fn verify_context(&self, deployment: &D, state_root: &D) -> Result<(), BoundaryError> {
-        for request in &self.requests {
-            request.verify_context(deployment, state_root)?;
-        }
-        Ok(())
-    }
-
     /// Verifies every request's deployment and signature.
     ///
     /// Authorization roots are deliberately checked when each request enters
@@ -1050,9 +1042,6 @@ mod tests {
                 .action(),
             &WithdrawalAction::Close
         );
-        let (deployment, state_root) = context();
-        assert_eq!(requests.verify_context(&deployment, &state_root), Ok(()));
-
         assert_eq!(
             WithdrawalBatch::new(vec![
                 withdrawal(&a, amount(1), b"one"),
@@ -1091,7 +1080,10 @@ mod tests {
 
         assert_eq!(requests.verify_deployment(&deployment), Ok(()));
         assert_eq!(
-            requests.verify_context(&deployment, &first_root),
+            requests
+                .request_for(&second.public_key())
+                .unwrap()
+                .verify_context(&deployment, &first_root),
             Err(BoundaryError::WrongContext)
         );
         assert_eq!(

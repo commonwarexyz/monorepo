@@ -268,9 +268,13 @@ impl ClaimModel {
         let Some(reserve) = state.reserves[kind][batch].checked_sub(amount) else {
             return false;
         };
-        let Some(claimable) = state.claimable.checked_sub(amount) else {
-            return false;
-        };
+
+        // The global reserve equals the sum of every per-batch reserve at all
+        // reachable states, so the per-batch gate above already covered this.
+        let claimable = state
+            .claimable
+            .checked_sub(amount)
+            .expect("reserves_are_exact: the global reserve covers every per-batch reserve");
         let Some(custody) = state.custody.checked_sub(amount) else {
             return false;
         };

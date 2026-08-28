@@ -7,9 +7,10 @@ use crate::protocol::{
 };
 use anyhow::{Context, Result, ensure};
 use commonware_clearing::bajillion::{
-    boundary::{SignedWithdrawal, WithdrawalAction},
+    boundary::{DepositBatch, DepositRecord, SignedWithdrawal, WithdrawalAction},
     commitment::VectorRoot,
     payment::{PaymentContext, SignedReceipt, SignedSend},
+    settlement::SettlementChain,
     state::AccountState,
     transition::{BatchId, EpochContext, ExternalPayoutClaim, Header, RootBundle, WithdrawalClaim},
 };
@@ -30,7 +31,7 @@ use std::{
 };
 use thiserror::Error;
 
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 const MAX_CLAIM_BYTES: usize = 16 * 1024;
 const MAX_CLOSE_ERROR_BYTES: usize = 4 * 1024;
 pub(crate) const MAX_DESTINATION_BYTES: usize = 256;
@@ -111,7 +112,7 @@ pub(crate) struct MutationFailed {
 pub(crate) struct CloseRejected(&'static str);
 
 impl CommitUnknown {
-    const fn new(operation: &'static str, source: rusqlite::Error) -> Self {
+    pub(crate) const fn new(operation: &'static str, source: rusqlite::Error) -> Self {
         Self { operation, source }
     }
 }
@@ -191,6 +192,12 @@ pub(crate) struct EpochData {
     pub(crate) payments: Vec<StoredPayment>,
     pub(crate) receive_shards: Vec<StoredShardEndpoint>,
     pub(crate) deposits: Vec<DepositEvent>,
+    /// Deposit events parked past this epoch: their aggregates are exactly offset by this
+    /// epoch's withdrawals, so the chain defers them whole and this epoch's account state
+    /// never credits them. A `carried_from` marks the epoch a row was first staged in,
+    /// and repeated exact offsets chain the park forward one epoch at a time, so a row
+    /// belongs to the staged set of every epoch from its origin through its landing.
+    pub(crate) carried: Vec<DepositEvent>,
     pub(crate) withdrawals: Vec<StoredWithdrawal>,
 }
 
@@ -275,6 +282,7 @@ struct EntryPlan {
 }
 
 pub(crate) struct StagedDeposit {
+    /// Epoch whose boundary includes the event, the successor when the aggregate defers.
     pub(crate) epoch: u64,
     pub(crate) id: Digest,
     pub(crate) account: Key,
@@ -479,7 +487,11 @@ impl Store {
                  epoch INTEGER NOT NULL CHECK (epoch >= 0),
                  event_id BLOB NOT NULL UNIQUE CHECK (length(event_id) = 32),
                  account BLOB NOT NULL CHECK (length(account) = 32),
-                 amount INTEGER NOT NULL CHECK (amount > 0)
+                 amount INTEGER NOT NULL CHECK (amount > 0),
+                 carried_from INTEGER CHECK (
+                     carried_from IS NULL
+                     OR (carried_from >= 0 AND carried_from < epoch)
+                 )
              );
              CREATE INDEX IF NOT EXISTS deposits_epoch_sequence
                  ON deposits(epoch, sequence);
@@ -951,36 +963,45 @@ impl Store {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
 
-        let deposit_count = connection.query_row(
-            "SELECT count(*) FROM deposits WHERE epoch = ?1",
-            [epoch_sql],
-            |row| row.get::<_, i64>(0),
-        )?;
-        let deposit_count =
-            usize::try_from(deposit_count).context("invalid deposit event count")?;
-        ensure!(
-            deposit_count <= MAX_DEPOSIT_EVENTS,
-            "epoch deposit event count exceeds its configured bound"
-        );
-        let mut statement = connection.prepare(
-            "SELECT length(event_id), event_id, length(account), account, amount
-             FROM deposits WHERE epoch = ?1 ORDER BY sequence",
-        )?;
-        let deposits = statement
-            .query_map([epoch_sql], |row| {
-                let event_id = read_fixed_blob(row, 0, 1, Digest::SIZE, "deposit id")?;
-                let account = read_fixed_blob(row, 2, 3, Key::SIZE, "deposit account")?;
-                Ok(DepositEvent {
-                    id: Digest::decode(event_id.as_slice()).map_err(|error| {
-                        to_sqlite_error(anyhow::anyhow!("decode deposit id: {error}"))
-                    })?,
-                    account: Key::decode(account.as_slice()).map_err(|error| {
-                        to_sqlite_error(anyhow::anyhow!("decode deposit account: {error}"))
-                    })?,
-                    amount: from_sql_u64(row.get(4)?, "deposit amount").map_err(to_sqlite_error)?,
-                })
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let read_deposits = |filter: &str| -> Result<Vec<DepositEvent>> {
+            let count = connection.query_row(
+                &format!("SELECT count(*) FROM deposits WHERE {filter}"),
+                [epoch_sql],
+                |row| row.get::<_, i64>(0),
+            )?;
+            let count = usize::try_from(count).context("invalid deposit event count")?;
+            ensure!(
+                count <= MAX_DEPOSIT_EVENTS,
+                "epoch deposit event count exceeds its configured bound"
+            );
+            let mut statement = connection.prepare(&format!(
+                "SELECT length(event_id), event_id, length(account), account, amount
+                 FROM deposits WHERE {filter} ORDER BY sequence"
+            ))?;
+            let deposits = statement
+                .query_map([epoch_sql], |row| {
+                    let event_id = read_fixed_blob(row, 0, 1, Digest::SIZE, "deposit id")?;
+                    let account = read_fixed_blob(row, 2, 3, Key::SIZE, "deposit account")?;
+                    Ok(DepositEvent {
+                        id: Digest::decode(event_id.as_slice()).map_err(|error| {
+                            to_sqlite_error(anyhow::anyhow!("decode deposit id: {error}"))
+                        })?,
+                        account: Key::decode(account.as_slice()).map_err(|error| {
+                            to_sqlite_error(anyhow::anyhow!("decode deposit account: {error}"))
+                        })?,
+                        amount: from_sql_u64(row.get(4)?, "deposit amount")
+                            .map_err(to_sqlite_error)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(deposits)
+        };
+        let deposits = read_deposits("epoch = ?1")?;
+
+        // A parked row's staged history is the contiguous epochs from its origin through
+        // its landing, so this epoch's parked set stays addressable after cutover credits
+        // it onward, and even after a later epoch parks it again.
+        let carried = read_deposits("carried_from <= ?1 AND epoch > ?1")?;
         let withdrawal_count = connection.query_row(
             "SELECT count(*) FROM withdrawals WHERE epoch = ?1",
             [epoch_sql],
@@ -1022,6 +1043,7 @@ impl Store {
             payments,
             receive_shards,
             deposits,
+            carried,
             withdrawals,
         })
     }
@@ -1056,23 +1078,26 @@ impl Store {
                 ensure!(updated == 1, "operator metadata disappeared during payment");
             }
 
+            // One batch acknowledgment issues every receipt against one verified send: the
+            // plan verified the payer authorization above, and the operator signs its own
+            // receipts here, so no per-entry send verification remains.
+            let starts = plan
+                .entries
+                .iter()
+                .map(|entry| (shard, entry.previous_credit, entry.previous_index))
+                .collect::<Vec<_>>();
+            let issued =
+                SignedReceipt::issue_next_batch::<Sha256, _>(context, &send, &starts, operator)
+                    .context("issue operator receipts")?;
+
             // Every entry lands in this one transaction: the payer debit, each recipient credit,
             // each shard advance, and each linked payment row commit or roll back together.
             let mut sequence = None;
             let mut receipts = Vec::with_capacity(plan.entries.len());
-            for entry in &plan.entries {
-                let receipt = SignedReceipt::issue_next::<Sha256, _>(
-                    context,
-                    &send,
-                    &entry.recipient_key,
-                    shard,
-                    entry.previous_credit,
-                    entry.previous_index,
-                    operator,
-                )
-                .context("issue operator receipt")?;
-                let payment = Payment::new::<Sha256>(context, send.clone(), receipt)
-                    .context("link accepted payment")?;
+            for (entry, receipt) in plan.entries.iter().zip(issued) {
+                // The operator issued this receipt for this exact send, so the pair links
+                // by construction.
+                let payment = Payment::from_parts_unchecked(send.clone(), receipt);
                 if let Some(recipient) = entry.recipient.as_ref() {
                     upsert_account_state(transaction, epoch, recipient)?;
                 }
@@ -1195,9 +1220,6 @@ impl Store {
                 deposit_events < MAX_DEPOSIT_EVENTS,
                 "deposit event capacity is exhausted"
             );
-            let deposit_events = deposit_events
-                .checked_add(1)
-                .context("deposit event count overflow")?;
             let payment_count: i64 = transaction.query_row(
                 "SELECT count(*) FROM payments WHERE epoch = ?1",
                 [sql_u64(epoch, "epoch")?],
@@ -1207,37 +1229,123 @@ impl Store {
                 payment_count == 0,
                 "deposits are frozen after the first payment in an epoch"
             );
-            let live_liability = checked_sql_add(
-                metadata_live_liability(transaction)?,
-                amount,
-                "live liability",
-            )?;
             let key = identity.key.clone();
+            let staged = staged_account_deposits(transaction, epoch, &key)?;
+            let aggregate = checked_sql_add(
+                checked_sql_add(
+                    staged.included_total,
+                    staged.parked_total,
+                    "account deposit total",
+                )?,
+                amount,
+                "account deposit total",
+            )?;
+
+            // The chain's boundary rule decides where this event lands: an aggregate
+            // exactly offset by the account's staged withdrawal defers whole to the
+            // successor epoch, and a grown aggregate that no longer offsets returns.
+            // Storage stays normalized so an epoch's rows and account state carry exactly
+            // its boundary-included deposits.
+            let defers = deposit_defers(transaction, epoch, &key, aggregate)?;
+            let successor = epoch.checked_add(1).context("epoch overflow")?;
             let account = effective_account(transaction, epoch, &key)?;
-            let account = if let Some(mut account) = account {
-                account.current.balance =
-                    checked_sql_add(account.current.balance, amount, "deposit account balance")?;
-                account
+            let (landing_epoch, account, live_liability, deposit_events) = if defers {
+                // Parking preserves a row's origin so every epoch of its staged history
+                // stays addressable, and a carried-in row parks onward like a fresh one.
+                let parked = transaction.execute(
+                    "UPDATE deposits
+                     SET epoch = ?1, carried_from = COALESCE(carried_from, ?2)
+                     WHERE account = ?3 AND epoch = ?2",
+                    params![
+                        sql_u64(successor, "epoch")?,
+                        sql_u64(epoch, "epoch")?,
+                        key.as_ref(),
+                    ],
+                )?;
+                ensure!(
+                    parked == staged.included_events,
+                    "staged deposit rows changed during deferral"
+                );
+                let mut account = account.context("deferring account is not in the live state")?;
+                account.current.balance = account
+                    .current
+                    .balance
+                    .checked_sub(staged.included_total)
+                    .context("deferred aggregate exceeds the live balance")?;
+                let live_liability = metadata_live_liability(transaction)?
+                    .checked_sub(staged.included_total)
+                    .context("deferred aggregate exceeds live liability")?;
+                let deposit_events = deposit_events
+                    .checked_sub(staged.included_events)
+                    .context("deferred deposit event count underflow")?;
+                (successor, account, live_liability, deposit_events)
             } else {
-                StoredAccount {
-                    name: identity.name.to_string(),
-                    key: key.clone(),
-                    predecessor: AccountState::default(),
-                    current: AccountState {
-                        balance: amount,
-                        active: true,
-                        ..AccountState::default()
-                    },
-                }
+                let returned = if staged.parked_total > 0 {
+                    // The grown aggregate no longer offsets the withdrawal exactly, so
+                    // the parked rows return to this epoch's boundary with their credit.
+                    // A row this epoch first staged loses its mark, and a carried-in row
+                    // keeps its origin.
+                    let unparked = transaction.execute(
+                        "UPDATE deposits
+                         SET epoch = ?1,
+                             carried_from = CASE
+                                 WHEN carried_from = ?1 THEN NULL ELSE carried_from
+                             END
+                         WHERE account = ?2 AND carried_from <= ?1 AND epoch > ?1",
+                        params![sql_u64(epoch, "epoch")?, key.as_ref()],
+                    )?;
+                    ensure!(
+                        unparked == staged.parked_events,
+                        "parked deposit rows changed during return"
+                    );
+                    staged.parked_total
+                } else {
+                    0
+                };
+                let credit = checked_sql_add(returned, amount, "deposit credit")?;
+                let account = if let Some(mut account) = account {
+                    account.current.balance = checked_sql_add(
+                        account.current.balance,
+                        credit,
+                        "deposit account balance",
+                    )?;
+                    account
+                } else {
+                    StoredAccount {
+                        name: identity.name.to_string(),
+                        key: key.clone(),
+                        predecessor: AccountState::default(),
+                        current: AccountState {
+                            balance: credit,
+                            active: true,
+                            ..AccountState::default()
+                        },
+                    }
+                };
+                let live_liability = checked_sql_add(
+                    metadata_live_liability(transaction)?,
+                    credit,
+                    "live liability",
+                )?;
+                let deposit_events = deposit_events
+                    .checked_add(staged.parked_events)
+                    .and_then(|count| count.checked_add(1))
+                    .context("deposit event count overflow")?;
+                ensure!(
+                    deposit_events <= MAX_DEPOSIT_EVENTS,
+                    "deposit event capacity is exhausted"
+                );
+                (epoch, account, live_liability, deposit_events)
             };
             transaction.execute(
-                "INSERT INTO deposits(epoch, event_id, account, amount)
-             VALUES(?1, ?2, ?3, ?4)",
+                "INSERT INTO deposits(epoch, event_id, account, amount, carried_from)
+             VALUES(?1, ?2, ?3, ?4, ?5)",
                 params![
-                    sql_u64(epoch, "epoch")?,
+                    sql_u64(landing_epoch, "epoch")?,
                     event.id.as_ref(),
                     key.as_ref(),
                     amount_sql,
+                    defers.then(|| sql_u64(epoch, "epoch")).transpose()?,
                 ],
             )?;
             upsert_account_state(transaction, epoch, &account)?;
@@ -1252,7 +1360,7 @@ impl Store {
                 ],
             )?;
             Ok(StagedDeposit {
-                epoch,
+                epoch: landing_epoch,
                 id: event.id,
                 account: event.account.clone(),
                 amount,
@@ -1310,9 +1418,60 @@ impl Store {
 
             let mut account = effective_account(transaction, epoch, request.account())?
                 .context("withdrawing account is not in the live state")?;
+            let mut deferred_total = 0_u64;
+            let mut deferred_events = 0_usize;
             let applied_amount = match request.body().action() {
                 WithdrawalAction::Amount(amount) => {
                     let amount = amount.get();
+                    let staged = staged_account_deposits(transaction, epoch, request.account())?;
+
+                    // The operator may never refuse or fail to represent any shape a
+                    // permissionless settlement path can force into the registration: the
+                    // chain's queue accepts an exact offset of a carried-in aggregate and
+                    // defers it again, so intake must park it again, not refuse it.
+                    if SettlementChain::<Sha256, Key>::withdrawal_defers_deposit(
+                        request,
+                        staged.included_total,
+                    ) {
+                        // The exact offset defers now: park the aggregate for the
+                        // successor epoch and remove its credit, mirroring the chain's
+                        // boundary rule. Parking preserves a row's origin so every epoch
+                        // of its staged history stays addressable.
+                        let successor = epoch.checked_add(1).context("epoch overflow")?;
+                        let parked = transaction.execute(
+                            "UPDATE deposits
+                             SET epoch = ?1, carried_from = COALESCE(carried_from, ?2)
+                             WHERE account = ?3 AND epoch = ?2",
+                            params![
+                                sql_u64(successor, "epoch")?,
+                                sql_u64(epoch, "epoch")?,
+                                request.account().as_ref(),
+                            ],
+                        )?;
+                        ensure!(
+                            parked == staged.included_events,
+                            "staged deposit rows changed during deferral"
+                        );
+                        account.current.balance = account
+                            .current
+                            .balance
+                            .checked_sub(staged.included_total)
+                            .context("deferred aggregate exceeds the live balance")?;
+                        deferred_total = staged.included_total;
+                        deferred_events = staged.included_events;
+                    } else if amount > staged.included_total {
+                        // A later deposit can complete the exact offset, deferring the
+                        // whole aggregate, so the amount must stay coverable without it.
+                        let uncovered = account
+                            .current
+                            .balance
+                            .checked_sub(staged.included_total)
+                            .context("staged deposits exceed the live balance")?;
+                        ensure!(
+                            uncovered >= amount,
+                            "withdrawal exceeds the balance available without its deposit aggregate"
+                        );
+                    }
                     ensure!(
                         account.current.balance >= amount,
                         "withdrawal exceeds the live balance"
@@ -1341,13 +1500,20 @@ impl Store {
                 Some(amount) => {
                     let live_liability = metadata_live_liability(transaction)?
                         .checked_sub(amount)
-                        .context("withdrawal exceeds live liability")?;
+                        .context("withdrawal exceeds live liability")?
+                        .checked_sub(deferred_total)
+                        .context("deferred aggregate exceeds live liability")?;
+                    let deposit_events = metadata_deposit_events(transaction)?
+                        .checked_sub(deferred_events)
+                        .context("deferred deposit event count underflow")?;
                     transaction.execute(
-                        "UPDATE operator_meta SET payment_context = ?1, live_liability = ?2
+                        "UPDATE operator_meta
+                     SET payment_context = ?1, live_liability = ?2, deposit_events = ?3
                      WHERE singleton = 1",
                         params![
                             replacement.encode().as_ref(),
                             live_liability.to_be_bytes().as_slice(),
+                            sql_usize(deposit_events, "deposit event count")?,
                         ],
                     )?;
                 }
@@ -1460,8 +1626,88 @@ impl Store {
                 ensure!(updated == 1, "pending Close disappeared during cutover");
             }
 
+            // Deferred aggregates were parked as the successor's rows at intake, whatever
+            // epoch first staged them. Credit them now so the successor opens with those
+            // deposits staged, exactly as the chain carries an exactly offset deposit
+            // into its next boundary.
+            let carried = {
+                let mut statement = transaction.prepare(
+                    "SELECT length(account), account, sum(amount), count(*)
+                     FROM deposits WHERE carried_from <= ?1 AND epoch > ?1
+                     GROUP BY account ORDER BY account",
+                )?;
+                statement
+                    .query_map([epoch_sql], |row| {
+                        let account =
+                            read_fixed_blob(row, 0, 1, Key::SIZE, "carried deposit account")?;
+                        Ok((account, row.get::<_, i64>(2)?, row.get::<_, i64>(3)?))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            let mut carried_records = Vec::with_capacity(carried.len());
+            let mut carried_total = 0_u64;
+            let mut carried_events = 0_usize;
+            for (encoded_account, amount, count) in carried {
+                let key = Key::decode(encoded_account.as_slice())
+                    .context("decode carried deposit account")?;
+                let amount = from_sql_u64(amount, "carried deposit amount")?;
+                let count = usize::try_from(count).context("invalid carried deposit count")?;
+                let account = match effective_account(transaction, next_epoch, &key)? {
+                    Some(mut account) => {
+                        account.current.balance = checked_sql_add(
+                            account.current.balance,
+                            amount,
+                            "carried deposit balance",
+                        )?;
+                        account
+                    }
+                    None => {
+                        let name: String = transaction.query_row(
+                            "SELECT name FROM account_identities WHERE public_key = ?1",
+                            [key.as_ref()],
+                            |row| row.get(0),
+                        )?;
+                        StoredAccount {
+                            name,
+                            key: key.clone(),
+                            predecessor: AccountState::default(),
+                            current: AccountState {
+                                balance: amount,
+                                active: true,
+                                ..AccountState::default()
+                            },
+                        }
+                    }
+                };
+                upsert_account_state(transaction, next_epoch, &account)?;
+                carried_records
+                    .push(DepositRecord::new(key, amount).context("carried deposit record")?);
+                carried_total = checked_sql_add(carried_total, amount, "carried deposit total")?;
+                carried_events = carried_events
+                    .checked_add(count)
+                    .context("carried deposit count overflow")?;
+            }
+            ensure!(
+                carried_events <= MAX_DEPOSIT_EVENTS,
+                "carried deposit events exceed the epoch bound"
+            );
+            let carried_root = DepositBatch::new(carried_records)
+                .context("aggregate carried deposits")?
+                .root::<Sha256>()
+                .context("commit carried deposit boundary")?;
+            ensure!(
+                successor.deposit_root() == &carried_root,
+                "successor context does not stage the carried deposits"
+            );
+            let live_liability = checked_sql_add(
+                successor_liability,
+                carried_total,
+                "successor live liability",
+            )?;
+
             // Close projections and the epoch transition share one commit. Unchanged accounts remain
-            // copy-on-write, so cutover work is proportional to the number of Close authorizations.
+            // copy-on-write, so cutover work is proportional to the number of Close authorizations
+            // and carried deposits.
             transaction.execute(
                 "INSERT INTO close_jobs(epoch, status, payment_context)
              VALUES(?1, 'closing', ?2)",
@@ -1469,12 +1715,13 @@ impl Store {
             )?;
             transaction.execute(
                 "UPDATE operator_meta
-             SET epoch = ?1, live_liability = ?2, payment_context = ?3, deposit_events = 0
+             SET epoch = ?1, live_liability = ?2, payment_context = ?3, deposit_events = ?4
              WHERE singleton = 1",
                 params![
                     sql_u64(next_epoch, "epoch")?,
-                    successor_liability.to_be_bytes().as_slice(),
+                    live_liability.to_be_bytes().as_slice(),
                     successor.payment().encode().as_ref(),
+                    sql_usize(carried_events, "carried deposit count")?,
                 ],
             )?;
             Ok(())
@@ -1964,6 +2211,16 @@ impl Store {
             from_sql_u64(epoch, "settlement epoch")?,
             roots.successor,
         )))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn settlement_roots(&self, epoch: u64) -> Result<RootBundle<Digest>> {
+        let encoded: Vec<u8> = self.connection.query_row(
+            "SELECT length(roots), roots FROM settlements WHERE epoch = ?1",
+            [sql_u64(epoch, "epoch")?],
+            |row| read_fixed_blob(row, 0, 1, RootBundle::<Digest>::SIZE, "settlement roots"),
+        )?;
+        RootBundle::decode(encoded.as_slice()).context("decode settlement roots")
     }
 
     pub(crate) fn next_closing_epoch(&self) -> Result<Option<u64>> {
@@ -2521,6 +2778,92 @@ fn pending_close_accounts(
             Ok((request, account))
         })
         .collect()
+}
+
+/// One account's staged deposit shape for the current epoch.
+struct StagedAccountDeposits {
+    /// Aggregate of rows the current epoch's boundary includes.
+    included_total: u64,
+    /// Number of included rows.
+    included_events: usize,
+    /// Aggregate of rows parked for the successor epoch.
+    parked_total: u64,
+    /// Number of parked rows.
+    parked_events: usize,
+}
+
+fn staged_account_deposits(
+    connection: &Connection,
+    epoch: u64,
+    account: &Key,
+) -> Result<StagedAccountDeposits> {
+    let epoch_sql = sql_u64(epoch, "epoch")?;
+    let mut statement = connection.prepare(
+        "SELECT amount, epoch FROM deposits
+         WHERE account = ?1 AND (epoch = ?2 OR (carried_from <= ?2 AND epoch > ?2))",
+    )?;
+    let rows = statement
+        .query_map(params![account.as_ref(), epoch_sql], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut staged = StagedAccountDeposits {
+        included_total: 0,
+        included_events: 0,
+        parked_total: 0,
+        parked_events: 0,
+    };
+    for (amount, row_epoch) in rows {
+        let amount = from_sql_u64(amount, "deposit amount")?;
+        if row_epoch == epoch_sql {
+            staged.included_total =
+                checked_sql_add(staged.included_total, amount, "staged deposit aggregate")?;
+            staged.included_events += 1;
+        } else {
+            staged.parked_total =
+                checked_sql_add(staged.parked_total, amount, "parked deposit aggregate")?;
+            staged.parked_events += 1;
+        }
+    }
+    Ok(staged)
+}
+
+fn epoch_withdrawal(
+    connection: &Connection,
+    epoch: u64,
+    account: &Key,
+) -> Result<Option<SignedWithdrawal<Key, Digest>>> {
+    connection
+        .query_row(
+            "SELECT length(encoded), encoded
+             FROM withdrawals WHERE epoch = ?1 AND account = ?2",
+            params![sql_u64(epoch, "epoch")?, account.as_ref()],
+            |row| read_bounded_blob(row, 0, 1, MAX_WITHDRAWAL_BYTES, "encoded withdrawal"),
+        )
+        .optional()?
+        .map(|encoded| {
+            SignedWithdrawal::<Key, Digest>::decode_cfg(
+                encoded.as_slice(),
+                &RangeCfg::new(0..=MAX_DESTINATION_BYTES),
+            )
+            .context("decode staged withdrawal")
+        })
+        .transpose()
+}
+
+/// Whether an aggregate exactly offset by the account's staged withdrawal defers whole to
+/// the successor epoch, the chain's boundary rule.
+fn deposit_defers(
+    connection: &Connection,
+    epoch: u64,
+    account: &Key,
+    aggregate: u64,
+) -> Result<bool> {
+    Ok(
+        epoch_withdrawal(connection, epoch, account)?.is_some_and(|request| {
+            SettlementChain::<Sha256, Key>::withdrawal_defers_deposit(&request, aggregate)
+        }),
+    )
 }
 
 fn validate_applied_withdrawal(

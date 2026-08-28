@@ -52,6 +52,10 @@ const MAX_POSITIONS: usize = 8;
 const MAX_PROOF_DIGESTS: usize = 64;
 const MAX_STATES: usize = 16;
 const MAX_ROWS: usize = 8;
+
+// Bounds each sanitized transition leaf balance so the aggregate liability of
+// every possible leaf count fits u64, keeping cache construction infallible.
+const MAX_LEAF_BALANCE: u64 = u64::MAX / (MAX_STATES + MAX_ROWS) as u64;
 const MAX_SHARDS_PER_ACCOUNT: usize = 8;
 const MAX_BOUNDARY_RECORDS: usize = 8;
 const NON_WITHDRAWAL_SLICE_MUTATIONS: u8 = 32;
@@ -753,13 +757,21 @@ fn fuzz_challenge(case: ChallengeCase) {
                 .expect("validated close has canonical payer evidence"),
         ),
     };
+
+    // Rows are strictly account-sorted and shard sets align one-for-one with
+    // them, so the recipient's set sits at the recipient row's index.
+    let recipient_row = close
+        .rows
+        .iter()
+        .position(|row| row.account == recipient_account)
+        .expect("challenge fixture recipient has a changed row");
     let higher = Challenge::HigherShardTip {
         payment: Box::new(PaymentWitness::from_payment(&acknowledged)),
         recipient: Box::new(
             index
                 .higher_shard_tip_lookup::<Sha256>(
                     &recipient_account,
-                    Some(&close.shard_sets[0]),
+                    Some(&close.shard_sets[recipient_row]),
                     case.shard,
                 )
                 .expect("validated close has canonical composed recipient evidence"),
@@ -1279,7 +1291,7 @@ fn fuzz_transition(mut case: TransitionCase) {
         .cloned()
         .map(|mut leaf| {
             leaf.state.active = true;
-            leaf.state.balance = leaf.state.balance.max(1);
+            leaf.state.balance = (leaf.state.balance % MAX_LEAF_BALANCE).max(1);
             leaf
         })
         .chain(
@@ -1289,7 +1301,7 @@ fn fuzz_transition(mut case: TransitionCase) {
                 .map(|row| StateLeaf {
                     account: row.account.clone(),
                     state: AccountState {
-                        balance: row.predecessor.balance.max(1),
+                        balance: (row.predecessor.balance % MAX_LEAF_BALANCE).max(1),
                         ..row.predecessor
                     },
                 }),

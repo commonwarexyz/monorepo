@@ -260,11 +260,10 @@ where
     // The dealing must contain exactly the validator's deterministic assignment before any local
     // proof work can be accepted.
     let expected = assigned_slice_indices::<H, D>(committee, context.assignment(), validator)?;
-    if dealing.len() != expected.len()
-        || dealing
-            .iter()
-            .map(|slice| slice.index)
-            .ne(expected.iter().copied())
+    if dealing
+        .iter()
+        .map(|slice| slice.index)
+        .ne(expected.iter().copied())
     {
         return Err(AdmissionError::IncompleteAssignment);
     }

@@ -158,18 +158,13 @@ impl<P: PublicKey, D: Digest> StateAbsence<P, D> {
         root: &VectorRoot<D>,
         account: &P,
     ) -> Result<(), ChallengeError> {
-        let len = self.opening.proof.leaf_count;
-        let insertion = self
-            .opening
-            .start
-            .checked_add(u32::from(self.predecessor.is_some()))
+        self.opening
+            .bracket(self.predecessor.is_some(), 0, self.successor.is_some())
             .ok_or(ChallengeError::LookupOrder)?;
-        if self.predecessor.is_some() != (insertion > 0)
-            || self.successor.is_some() != (insertion < len)
-            || self
-                .predecessor
-                .as_ref()
-                .is_some_and(|leaf| leaf.account >= *account)
+        if self
+            .predecessor
+            .as_ref()
+            .is_some_and(|leaf| leaf.account >= *account)
             || self
                 .successor
                 .as_ref()
@@ -361,17 +356,13 @@ impl<P: PublicKey, D: Digest> ChangeAbsence<P, D> {
         root: &VectorRoot<D>,
         account: &P,
     ) -> Result<(), ChallengeError> {
-        let insertion = self
-            .opening
-            .start
-            .checked_add(u32::from(self.predecessor.is_some()))
+        self.opening
+            .bracket(self.predecessor.is_some(), 0, self.successor.is_some())
             .ok_or(ChallengeError::LookupOrder)?;
-        if self.predecessor.is_some() != (insertion > 0)
-            || self.successor.is_some() != (insertion < self.opening.proof.leaf_count)
-            || self
-                .predecessor
-                .as_ref()
-                .is_some_and(|leaf| leaf.account() >= account)
+        if self
+            .predecessor
+            .as_ref()
+            .is_some_and(|leaf| leaf.account() >= account)
             || self
                 .successor
                 .as_ref()

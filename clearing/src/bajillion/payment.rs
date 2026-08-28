@@ -317,7 +317,8 @@ impl<P: PublicKey, D: Digest> SendBody<P, D> {
         TxId(H::hash(&[TX_ID_HASH_NAMESPACE, body.as_ref()]))
     }
 
-    fn validate_context(&self, context: &PaymentContext<P, D>) -> Result<(), PaymentError> {
+    /// Validates the epoch binding and entry canonicality, returning the checked batch total.
+    fn validate_context(&self, context: &PaymentContext<P, D>) -> Result<Amount, PaymentError> {
         if self.anchor != *context.anchor() || self.epoch != context.epoch() {
             return Err(PaymentError::WrongContext);
         }
@@ -325,11 +326,10 @@ impl<P: PublicKey, D: Digest> SendBody<P, D> {
         if self.cumulative_debit < total {
             return Err(PaymentError::MalformedDebitEndpoint);
         }
-        Ok(())
+        Ok(total)
     }
 
-    fn validate_next(&self, previous_debit: Amount) -> Result<(), PaymentError> {
-        let total = self.total().ok_or(PaymentError::ArithmeticOverflow)?;
+    fn validate_next(&self, previous_debit: Amount, total: Amount) -> Result<(), PaymentError> {
         let expected = previous_debit
             .checked_add(total)
             .ok_or(PaymentError::ArithmeticOverflow)?;
@@ -337,6 +337,15 @@ impl<P: PublicKey, D: Digest> SendBody<P, D> {
             return Err(PaymentError::NonConsecutiveDebit);
         }
         Ok(())
+    }
+
+    /// Returns whether this body is the exact debit successor of `previous_debit`.
+    ///
+    /// This is the arithmetic half of [`SignedSend::verify_next`] for callers that have
+    /// already authenticated the send and only need the endpoint rule.
+    pub fn is_next(&self, previous_debit: Amount) -> bool {
+        self.total()
+            .is_some_and(|total| self.validate_next(previous_debit, total).is_ok())
     }
 }
 
@@ -487,7 +496,11 @@ impl<P: PublicKey, D: Digest> SignedSend<P, D> {
 
     /// Verifies intrinsic fields, epoch context, and the payer signature.
     pub fn verify(&self, context: &PaymentContext<P, D>) -> Result<(), PaymentError> {
-        self.body.validate_context(context)?;
+        self.verify_total(context).map(|_| ())
+    }
+
+    fn verify_total(&self, context: &PaymentContext<P, D>) -> Result<Amount, PaymentError> {
+        let total = self.body.validate_context(context)?;
         if !self.body.payer.verify(
             SEND_SIGNATURE_NAMESPACE,
             &self.body.encode(),
@@ -495,7 +508,7 @@ impl<P: PublicKey, D: Digest> SignedSend<P, D> {
         ) {
             return Err(PaymentError::InvalidPayerSignature);
         }
-        Ok(())
+        Ok(total)
     }
 
     /// Verifies the send and proves it is the exact successor of `previous_debit`.
@@ -504,8 +517,8 @@ impl<P: PublicKey, D: Digest> SignedSend<P, D> {
         context: &PaymentContext<P, D>,
         previous_debit: Amount,
     ) -> Result<(), PaymentError> {
-        self.verify(context)?;
-        self.body.validate_next(previous_debit)
+        let total = self.verify_total(context)?;
+        self.body.validate_next(previous_debit, total)
     }
 }
 
@@ -671,6 +684,12 @@ impl<P: PublicKey, D: Digest> SignedReceipt<P, D> {
     ///
     /// A batched send is acknowledged entry by entry: the caller issues one receipt per entry
     /// and must persist all of them atomically with the payer's debit.
+    ///
+    /// This validates the recipient shard chain but deliberately not the payer debit chain.
+    /// Before issuing, the caller must prove the send is the exact successor of the payer's
+    /// acknowledged debit endpoint and is affordable, for example via [`SignedSend::verify_next`]
+    /// against its own records. An acknowledgment of an inflated `cumulative_debit` is winning
+    /// challenge evidence against the operator.
     #[allow(clippy::too_many_arguments)]
     pub fn issue_next<H: Hasher<Digest = D>, S: Signer<PublicKey = P, Signature = P::Signature>>(
         context: &PaymentContext<P, D>,
@@ -689,6 +708,71 @@ impl<P: PublicKey, D: Digest> SignedReceipt<P, D> {
             .body
             .entry(recipient)
             .ok_or(PaymentError::UnknownRecipient)?;
+        Self::issue_entry(
+            context,
+            entry,
+            send.tx_id::<H>(),
+            shard,
+            previous_credit,
+            previous_index,
+            operator,
+        )
+    }
+
+    /// Issues the exact successor receipt for every entry of one send.
+    ///
+    /// The send is verified once and its transaction identifier is computed once, so a batch
+    /// acknowledgment does not repeat per-entry send work. `starts` supplies each entry
+    /// recipient's current receive-shard endpoint as `(shard, credit, index)` in the batch's
+    /// canonical entry order. The debit-chain precondition of [`Self::issue_next`] applies
+    /// unchanged.
+    pub fn issue_next_batch<
+        H: Hasher<Digest = D>,
+        S: Signer<PublicKey = P, Signature = P::Signature>,
+    >(
+        context: &PaymentContext<P, D>,
+        send: &SignedSend<P, D>,
+        starts: &[(Shard, Amount, ReceiptIndex)],
+        operator: &S,
+    ) -> Result<Vec<Self>, PaymentError> {
+        assert_eq!(
+            starts.len(),
+            send.body.entries().len(),
+            "one shard endpoint per batch entry"
+        );
+        if operator.public_key() != *context.operator() {
+            return Err(PaymentError::WrongOperator);
+        }
+        send.verify(context)?;
+        let tx_id = send.tx_id::<H>();
+        send.body
+            .entries()
+            .iter()
+            .zip(starts)
+            .map(|(entry, (shard, previous_credit, previous_index))| {
+                Self::issue_entry(
+                    context,
+                    entry,
+                    tx_id,
+                    *shard,
+                    *previous_credit,
+                    *previous_index,
+                    operator,
+                )
+            })
+            .collect()
+    }
+
+    /// Issues the exact successor receipt for one already-verified send entry.
+    fn issue_entry<S: Signer<PublicKey = P, Signature = P::Signature>>(
+        context: &PaymentContext<P, D>,
+        entry: &Entry<P>,
+        tx_id: TxId<D>,
+        shard: Shard,
+        previous_credit: Amount,
+        previous_index: ReceiptIndex,
+        operator: &S,
+    ) -> Result<Self, PaymentError> {
         let cumulative_shard_credit = previous_credit
             .checked_add(entry.amount)
             .ok_or(PaymentError::ArithmeticOverflow)?;
@@ -701,11 +785,23 @@ impl<P: PublicKey, D: Digest> SignedReceipt<P, D> {
             recipient: entry.recipient.clone(),
             shard,
             amount: entry.amount,
-            tx_id: send.tx_id::<H>(),
+            tx_id,
             cumulative_shard_credit,
             index,
         };
         Ok(Self::sign_body_by_authority(body, operator))
+    }
+
+    /// Returns whether this receipt acknowledges one exact entry of the identified send.
+    ///
+    /// `tx_id` must be the identifier of `send`. This is the single linkage rule shared by
+    /// every acceptance verifier: the receipt commits the send's transaction identifier and
+    /// names one entry recipient with that entry's exact amount.
+    pub fn links(&self, send: &SendBody<P, D>, tx_id: &TxId<D>) -> bool {
+        self.body.tx_id == *tx_id
+            && send
+                .entry(&self.body.recipient)
+                .is_some_and(|entry| entry.amount == self.body.amount)
     }
 
     /// Signs an explicit receipt body with the supplied key authority.
@@ -857,11 +953,7 @@ impl<P: PublicKey, D: Digest> Payment<P, D> {
     /// Entry lookup assumes the canonical recipient order that send verification enforces, so
     /// linkage must only be checked together with [`SignedSend::verify`].
     fn validate_linkage<H: Hasher<Digest = D>>(&self) -> Result<(), PaymentError> {
-        if self.receipt.body.tx_id != self.send.tx_id::<H>() {
-            return Err(PaymentError::ReceiptMismatch);
-        }
-        let entry = self.send.body.entry(&self.receipt.body.recipient);
-        if !entry.is_some_and(|entry| entry.amount == self.receipt.body.amount) {
+        if !self.receipt.links(&self.send.body, &self.send.tx_id::<H>()) {
             return Err(PaymentError::ReceiptMismatch);
         }
         Ok(())
@@ -909,22 +1001,34 @@ impl<P: PublicKey, D: Digest> Payment<P, D> {
         context: &PaymentContext<P, D>,
         strategy: &impl Strategy,
     ) -> Result<(), PaymentError> {
-        strategy.try_run(
+        self.linked_total_with_strategy::<H>(context, strategy)
+            .map(|_| ())
+    }
+
+    fn linked_total_with_strategy<H: Hasher<Digest = D>>(
+        &self,
+        context: &PaymentContext<P, D>,
+        strategy: &impl Strategy,
+    ) -> Result<Amount, PaymentError> {
+        let total = strategy.try_run(
             2,
             || {
-                self.send.verify(context)?;
-                self.receipt.verify(context)
+                let total = self.send.verify_total(context)?;
+                self.receipt.verify(context)?;
+                Ok(total)
             },
             || {
-                let (send, receipt) = strategy.join(
-                    || self.send.verify(context),
+                let (total, receipt) = strategy.join(
+                    || self.send.verify_total(context),
                     || self.receipt.verify(context),
                 );
-                send?;
-                receipt
+                let total = total?;
+                receipt?;
+                Ok(total)
             },
         )?;
-        self.validate_linkage::<H>()
+        self.validate_linkage::<H>()?;
+        Ok(total)
     }
 
     /// Verifies linked evidence and the payer's exact next debit endpoint.
@@ -933,8 +1037,8 @@ impl<P: PublicKey, D: Digest> Payment<P, D> {
         context: &PaymentContext<P, D>,
         previous_debit: Amount,
     ) -> Result<(), PaymentError> {
-        self.verify_linked::<H>(context)?;
-        self.send.body.validate_next(previous_debit)
+        let total = self.linked_total_with_strategy::<H>(context, &Sequential)?;
+        self.send.body.validate_next(previous_debit, total)
     }
 
     /// Verifies a public terminal receipt endpoint from the canonical zero opening.
@@ -1245,6 +1349,11 @@ fn verify_same_shard<P: PublicKey, D: Digest>(
 }
 
 /// Verifies two linked endpoints and their positive-credit range feasibility.
+///
+/// The caller must present the endpoints in shard order: `lower` strictly precedes `upper`.
+/// A feasible pair supplied in reverse order fails with
+/// [`PaymentError::InfeasibleReceiptRange`], so adjudicators must settle ordering separately
+/// before treating infeasibility as operator fault.
 pub fn verify_receipt_range<H: Hasher<Digest = D>, P: PublicKey, D: Digest>(
     context: &PaymentContext<P, D>,
     lower: &Payment<P, D>,
@@ -1264,6 +1373,28 @@ pub fn verify_receipt_range<H: Hasher<Digest = D>, P: PublicKey, D: Digest>(
         upper.receipt.body.index,
     ) {
         return Err(PaymentError::InfeasibleReceiptRange);
+    }
+    Ok(())
+}
+
+/// Verifies one accepted batch: the shared send once and every receipt against it.
+///
+/// This is the batch counterpart of [`Payment::verify_linked`]. The send signature and
+/// transaction identifier are computed once, and each receipt must be a correctly signed
+/// acknowledgment of one entry of this exact send. Receipt distinctness and completeness
+/// stay with the caller.
+pub fn verify_acceptance<H: Hasher<Digest = D>, P: PublicKey, D: Digest>(
+    context: &PaymentContext<P, D>,
+    send: &SignedSend<P, D>,
+    receipts: &[SignedReceipt<P, D>],
+) -> Result<(), PaymentError> {
+    send.verify(context)?;
+    let tx_id = send.tx_id::<H>();
+    for receipt in receipts {
+        receipt.verify(context)?;
+        if !receipt.links(&send.body, &tx_id) {
+            return Err(PaymentError::ReceiptMismatch);
+        }
     }
     Ok(())
 }

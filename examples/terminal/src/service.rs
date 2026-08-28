@@ -86,7 +86,7 @@ async fn prepare_request<E: Network>(
 ) -> Result<Option<rpc::Response>> {
     match request {
         operator_rpc::OperatorRequest::AcknowledgeWithdrawal(request) => {
-            let release = settlement_rpc::claim_withdrawal(
+            let release = match settlement_rpc::claim_withdrawal(
                 network,
                 settlement_address,
                 settlement_rpc::WithdrawalClaimRequest {
@@ -95,7 +95,16 @@ async fn prepare_request<E: Network>(
                 },
             )
             .await
-            .context("confirm settlement withdrawal claim")?;
+            .context("confirm settlement withdrawal claim")?
+            {
+                settlement_rpc::WithdrawalClaimResponse::Released(release) => release,
+                settlement_rpc::WithdrawalClaimResponse::Unavailable => {
+                    anyhow::bail!("withdrawal batch is not claimable yet")
+                }
+                settlement_rpc::WithdrawalClaimResponse::Invalid => {
+                    anyhow::bail!("settlement rejected the withdrawal claim")
+                }
+            };
             ensure!(
                 release.destination == *request.claim.output().destination()
                     && release.amount == request.claim.output().amount(),
@@ -106,7 +115,7 @@ async fn prepare_request<E: Network>(
             )));
         }
         operator_rpc::OperatorRequest::AcknowledgeExternalPayout(request) => {
-            let payout = settlement_rpc::claim_external_payout(
+            let payout = match settlement_rpc::claim_external_payout(
                 network,
                 settlement_address,
                 settlement_rpc::ExternalPayoutClaimRequest {
@@ -115,7 +124,16 @@ async fn prepare_request<E: Network>(
                 },
             )
             .await
-            .context("confirm settlement external payout claim")?;
+            .context("confirm settlement external payout claim")?
+            {
+                settlement_rpc::ExternalPayoutClaimResponse::Released(payout) => payout,
+                settlement_rpc::ExternalPayoutClaimResponse::Unavailable => {
+                    anyhow::bail!("external-payout batch is not claimable yet")
+                }
+                settlement_rpc::ExternalPayoutClaimResponse::Invalid => {
+                    anyhow::bail!("settlement rejected the external payout claim")
+                }
+            };
             ensure!(
                 &payout.recipient == request.claim.recipient(),
                 "settlement returned another external payout recipient"
@@ -140,9 +158,14 @@ async fn prepare_request<E: Network>(
             }
         }
         operator_rpc::OperatorRequest::ApplyDeposit(request) => {
-            settlement_rpc::confirm_deposit(network, settlement_address, request.clone())
-                .await
-                .context("confirm settlement deposit")?;
+            let confirmation =
+                settlement_rpc::confirm_deposit(network, settlement_address, request.clone())
+                    .await
+                    .context("confirm settlement deposit")?;
+            ensure!(
+                confirmation == settlement_rpc::DepositConfirmation::Recorded,
+                "deposit is not recorded by settlement"
+            );
             false
         }
         _ => false,
@@ -158,7 +181,8 @@ async fn prepare_request<E: Network>(
         settlement_rpc::RegisterEpochRequest {
             epoch: registration.epoch,
             predecessor_liability: registration.predecessor_liability,
-            deposits: registration.deposits,
+            deposits_root: registration.deposits_root,
+            staged_root: registration.staged_root,
             withdrawals: registration.withdrawals,
             openings: registration.openings,
             signature: registration.signature,
@@ -179,7 +203,7 @@ mod tests {
     };
     use bytes::Bytes;
     use commonware_clearing::bajillion::{
-        boundary::{SignedWithdrawal, WithdrawalAction},
+        boundary::{DepositBatch, SignedWithdrawal, WithdrawalAction},
         payment::SignedSend,
     };
     use commonware_codec::{DecodeExt as _, Encode as _};
@@ -576,9 +600,11 @@ mod tests {
             let mut agent = Agent::open(databases.agent(), 0).unwrap();
             let payer = agent.account();
             let registration = operator.settlement_registration().unwrap();
+
+            // The fresh operator carries no deposits, so the empty batch is its boundary.
             let epoch_context = crate::protocol::epoch_context(
                 registration.epoch,
-                &registration.deposits,
+                &DepositBatch::empty(),
                 &registration.withdrawals,
                 registration.predecessor_liability,
             )
@@ -707,12 +733,12 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(retained_opening_count, 1);
-            let receipt_count = agent_database
-                .query_row("SELECT COUNT(*) FROM agent_receipts", [], |row| {
+            let settled_count = agent_database
+                .query_row("SELECT COUNT(*) FROM agent_payments", [], |row| {
                     row.get::<_, i64>(0)
                 })
                 .unwrap();
-            assert_eq!(receipt_count, 0);
+            assert_eq!(settled_count, 0);
             let persisted_send = agent_database
                 .query_row("SELECT send FROM agent_pending_payment", [], |row| {
                     row.get::<_, Vec<u8>>(0)

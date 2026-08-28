@@ -5,8 +5,8 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, EncodeSize, Error as CodecError, RangeCfg, Read, Write};
 use commonware_cryptography::{Hasher, bls12381::primitives::group::G2};
 use commonware_utils::{
-    Participant,
-    ordered::{Error as OrderedError, Set},
+    N3f1, Participant,
+    ordered::{Error as OrderedError, Quorum as _, Set},
 };
 use thiserror::Error;
 
@@ -56,18 +56,18 @@ impl Committee {
     }
 
     /// Number of Byzantine validators tolerated by the committee.
-    pub const fn faults(&self) -> usize {
-        (self.0.len() - 1) / 3
+    pub fn faults(&self) -> usize {
+        self.0.max_faults::<N3f1>() as usize
     }
 
     /// Exact number of attestations in an admission certificate.
-    pub const fn quorum(&self) -> usize {
-        self.faults() * 2 + 1
+    pub fn quorum(&self) -> usize {
+        self.0.quorum::<N3f1>() as usize
     }
 
     /// Finds a validator's canonical certificate index.
     pub fn index_of(&self, validator: &G2) -> Option<Participant> {
-        self.0.position(validator).map(Participant::from_usize)
+        self.0.index(validator)
     }
 
     /// Commits to the exact canonical BLS participant set.
@@ -298,6 +298,11 @@ pub mod bls12381 {
         }
 
         /// Assembles exactly `2f+1` distinct in-committee votes.
+        ///
+        /// This checks encoding, committee membership, and uniqueness, but deliberately not the
+        /// signatures themselves. The caller must verify every vote with [`Self::verify_vote`]
+        /// before assembly. One unverified non-signature yields a certificate that fails
+        /// settlement verification with no way to attribute the faulty signer.
         pub fn assemble_exact<I>(&self, input: I) -> Result<Certificate, Error>
         where
             I: IntoIterator<Item = Vote>,

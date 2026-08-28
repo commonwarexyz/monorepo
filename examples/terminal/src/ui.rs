@@ -1,9 +1,9 @@
 //! Ratatui presentation for one independently owned agent wallet.
 
 use crate::{
-    agent::{Agent, DepositOutcome, WithdrawalOutcome},
+    agent::{Agent, DepositOutcome, PaymentOutcome, WithdrawalOutcome},
     operator::DEFAULT_AMOUNT,
-    operator_rpc::{PollCloseResponse, StatusResponse as OperatorStatus},
+    operator_rpc::{AcceptedBatchResponse, PollCloseResponse, StatusResponse as OperatorStatus},
     settlement_rpc::StatusResponse as SettlementStatus,
 };
 use anyhow::{Context, Result};
@@ -121,7 +121,7 @@ pub(crate) async fn run<E: Network>(
     let mut state = UiState::new();
     state.recipient = agent.default_recipient();
     loop {
-        refresh(network, operator, settlement, &agent, &mut state).await?;
+        refresh(network, operator, settlement, &mut agent, &mut state).await?;
         terminal
             .terminal
             .draw(|frame| render(frame, &agent, &state))
@@ -158,9 +158,12 @@ pub(crate) async fn run<E: Network>(
                     )
                     .await
                 {
-                    Ok(payment) => state.log(format!(
+                    Ok(PaymentOutcome::Accepted(payment)) => state.log(format!(
                         "epoch {} payment #{} to {recipient}: {}",
                         payment.epoch, payment.sequence, payment.total
+                    )),
+                    Ok(PaymentOutcome::CommittedUnheld { epoch, total }) => state.log(format!(
+                        "epoch {epoch} payment for {total} committed in a finalized close; receipts unheld"
                     )),
                     Err(error) => state.log(format!("payment rejected: {error:#}")),
                 }
@@ -192,13 +195,19 @@ pub(crate) async fn run<E: Network>(
                         .pay(network, settlement, operator, &state.staged)
                         .await
                     {
-                        Ok(payment) => {
+                        Ok(PaymentOutcome::Accepted(payment)) => {
                             state.log(format!(
                                 "epoch {} batch #{} paid {} across {} recipients",
                                 payment.epoch,
                                 payment.sequence,
                                 payment.total,
                                 payment.acceptance.receipts.len()
+                            ));
+                            state.staged.clear();
+                        }
+                        Ok(PaymentOutcome::CommittedUnheld { epoch, total }) => {
+                            state.log(format!(
+                                "epoch {epoch} batch for {total} committed in a finalized close; receipts unheld"
                             ));
                             state.staged.clear();
                         }
@@ -335,7 +344,7 @@ async fn refresh<E: Network>(
     network: &E,
     operator: SocketAddr,
     settlement: SocketAddr,
-    agent: &Agent,
+    agent: &mut Agent,
     state: &mut UiState,
 ) -> Result<()> {
     if let Some(epoch) = state.pending_closes.front().copied() {
@@ -365,7 +374,9 @@ async fn refresh<E: Network>(
     }
     state.operator = agent.operator_status(network, operator).await.ok();
     state.settlement = agent.settlement_status(network, settlement).await.ok();
-    state.balance = agent.balance(network, operator).await.ok();
+
+    // The verified balance poll also refreshes the wallet's frozen-root recovery opening.
+    state.balance = agent.balance(network, settlement, operator).await.ok();
     Ok(())
 }
 
@@ -494,6 +505,16 @@ fn render(frame: &mut Frame<'_>, agent: &Agent, state: &UiState) {
     frame.render_widget(footer, sections[3]);
 }
 
+/// Unwraps a receipts-held acceptance, which every scripted payment expects.
+fn accepted(outcome: PaymentOutcome) -> Result<AcceptedBatchResponse> {
+    match outcome {
+        PaymentOutcome::Accepted(payment) => Ok(*payment),
+        PaymentOutcome::CommittedUnheld { epoch, .. } => {
+            anyhow::bail!("epoch {epoch} payment committed without receipts")
+        }
+    }
+}
+
 pub(crate) async fn scripted<E: Network>(
     network: &E,
     operator: SocketAddr,
@@ -524,14 +545,16 @@ pub(crate) async fn scripted<E: Network>(
         ),
     };
     println!("epoch {} carried withdrawal 3", withdrawal);
-    let payment = agent.pay(network, settlement, operator, &[(1, 5)]).await?;
+    let payment = accepted(agent.pay(network, settlement, operator, &[(1, 5)]).await?)?;
     println!(
         "epoch {} accepted payment #{}",
         payment.epoch, payment.sequence
     );
-    let batch = agent
-        .pay(network, settlement, operator, &[(2, 2), (3, 1)])
-        .await?;
+    let batch = accepted(
+        agent
+            .pay(network, settlement, operator, &[(2, 2), (3, 1)])
+            .await?,
+    )?;
     println!(
         "epoch {} accepted batch #{} paying {} across {} recipients",
         batch.epoch,
@@ -539,17 +562,19 @@ pub(crate) async fn scripted<E: Network>(
         batch.total,
         batch.acceptance.receipts.len()
     );
-    let external = agent
-        .pay(
-            network,
-            settlement,
-            operator,
-            &[(agent.recipient_count() - 1, 2)],
-        )
-        .await?;
+    let external_payment = accepted(
+        agent
+            .pay(
+                network,
+                settlement,
+                operator,
+                &[(agent.recipient_count() - 1, 2)],
+            )
+            .await?,
+    )?;
     println!(
         "epoch {} accepted external payment #{}",
-        external.epoch, external.sequence
+        external_payment.epoch, external_payment.sequence
     );
     let close = agent.start_close(network, operator).await?;
     println!("epoch {} cut and closing asynchronously", close.epoch);
@@ -575,7 +600,7 @@ pub(crate) async fn scripted<E: Network>(
             }
         }
     }
-    let successor = agent.pay(network, settlement, operator, &[(1, 1)]).await?;
+    let successor = accepted(agent.pay(network, settlement, operator, &[(1, 1)]).await?)?;
     println!(
         "epoch {} accepted successor payment #{} after epoch {} finalized",
         successor.epoch, successor.sequence, close.epoch
@@ -641,7 +666,7 @@ mod tests {
             });
 
             let operator_address = SocketAddr::from(([127, 0, 0, 1], 1));
-            let agent = Agent::new(0).unwrap();
+            let mut agent = Agent::new(0).unwrap();
             let mut state = UiState::new();
             state.pending_closes.push_back(7);
 
@@ -649,7 +674,7 @@ mod tests {
                 &context,
                 operator_address,
                 settlement_address,
-                &agent,
+                &mut agent,
                 &mut state,
             )
             .await

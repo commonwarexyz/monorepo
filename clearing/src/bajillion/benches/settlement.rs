@@ -112,7 +112,6 @@ impl Validators {
 #[derive(Clone)]
 struct AdmissionFixture {
     context: TestContext,
-    deposits: DepositBatch<VerifyingKey>,
     withdrawals: TestWithdrawals,
     header: TestHeader,
     roots: RootBundle<Digest>,
@@ -250,6 +249,11 @@ fn context(
     deposits: &DepositBatch<VerifyingKey>,
     withdrawals: &TestWithdrawals,
 ) -> TestContext {
+    // Sequential registrations must present strictly increasing admission
+    // deadlines, so each epoch's deadlines advance from the base constants
+    // while keeping the exact configured challenge duration.
+    let admission_deadline = ADMISSION_DEADLINE + epoch;
+    let challenge_deadline = admission_deadline + (CHALLENGE_DEADLINE - ADMISSION_DEADLINE);
     EpochContext::new::<Sha256>(
         deployment(),
         epoch,
@@ -257,8 +261,8 @@ fn context(
         deposits,
         withdrawals,
         cache.liability(),
-        ADMISSION_DEADLINE,
-        CHALLENGE_DEADLINE,
+        admission_deadline,
+        challenge_deadline,
         CloseLimits::protocol_maximum(),
         Assignment::new(validators.committee.commitment::<Sha256>(), 0)
             .expect("benchmark assignment is valid"),
@@ -343,7 +347,6 @@ fn admission_fixture(
     let certificate = validators.certificate(&close.header);
     AdmissionFixture {
         context,
-        deposits,
         withdrawals,
         header: close.header,
         roots: close.roots,
@@ -355,7 +358,6 @@ fn admission_fixture(
 fn admit_fixture(chain: &mut TestChain, admission: AdmissionFixture) {
     let AdmissionFixture {
         context,
-        deposits,
         withdrawals,
         header,
         roots,
@@ -363,7 +365,7 @@ fn admit_fixture(chain: &mut TestChain, admission: AdmissionFixture) {
         certificate,
     } = admission;
     chain
-        .register_close(0, context, deposits, withdrawals, &[], |_| true)
+        .register_close(0, context, withdrawals, &[], |_| true)
         .expect("benchmark close can be registered");
     chain
         .admit(0, header, roots, terminal_proof, certificate)
@@ -481,7 +483,6 @@ fn admit_input(source: &CloseSource) -> AdmitInput {
     queue_withdrawals(&mut chain, &source.withdrawals);
     let AdmissionFixture {
         context,
-        deposits,
         withdrawals,
         header,
         roots,
@@ -489,7 +490,7 @@ fn admit_input(source: &CloseSource) -> AdmitInput {
         certificate,
     } = source.admission.clone();
     chain
-        .register_close(0, context, deposits, withdrawals, &[], |_| true)
+        .register_close(0, context, withdrawals, &[], |_| true)
         .expect("benchmark close can be registered");
     AdmitInput {
         chain,

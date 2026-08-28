@@ -572,21 +572,16 @@ where
     if range.rows.len() != shard_sets.len() {
         return Err(TransitionError::ShardAlignment);
     }
-    let len = range.opening.proof.leaf_count;
-    let actual_start = range
-        .opening
-        .start
-        .checked_add(u32::from(range.predecessor.is_some()))
-        .ok_or(TransitionError::SliceRange)?;
     let members = u32::try_from(range.rows.len()).map_err(|_| TransitionError::SliceRange)?;
-    let actual_end = actual_start
-        .checked_add(members)
-        .filter(|end| *end <= len)
+    let positions = range
+        .opening
+        .bracket(
+            range.predecessor.is_some(),
+            members,
+            range.successor.is_some(),
+        )
         .ok_or(TransitionError::SliceRange)?;
-    if actual_start != start
-        || actual_end != end
-        || range.predecessor.is_some() != (start > 0)
-        || range.successor.is_some() != (end < len)
+    if positions != (start..end)
         || range
             .predecessor
             .iter()
@@ -689,20 +684,16 @@ where
     if u64::from(len) > max_states || len > commitment::MAX_VECTOR_LENGTH {
         return Err(TransitionError::SliceStateRange);
     }
-    let actual_start = range
-        .opening
-        .start
-        .checked_add(u32::from(range.predecessor.is_some()))
-        .ok_or(TransitionError::SliceStateRange)?;
     let count = u32::try_from(members.len()).map_err(|_| TransitionError::SliceStateRange)?;
-    let actual_end = actual_start
-        .checked_add(count)
-        .filter(|end| *end <= len)
-        .ok_or(TransitionError::SliceStateRange)?;
-    if actual_start != positions.start
-        || actual_end != positions.end
-        || range.predecessor.is_some() != (positions.start > 0)
-        || range.successor.is_some() != (positions.end < len)
+    if range
+        .opening
+        .bracket(
+            range.predecessor.is_some(),
+            count,
+            range.successor.is_some(),
+        )
+        .ok_or(TransitionError::SliceStateRange)?
+        != positions
     {
         return Err(TransitionError::SliceStateRange);
     }
@@ -757,7 +748,6 @@ where
 {
     validate_header::<H, P, D>(context, header, roots)?;
     validate_boundary_roots::<H, P, D>(context, deposits, withdrawals)?;
-    withdrawals.verify_deployment(context.deployment())?;
     Ok(())
 }
 
@@ -782,9 +772,6 @@ where
         return Err(TransitionError::SliceIndex);
     }
     validate_coverage_range::<H, D>(assignment, slice.index, &roots.coverage, &slice.coverage)?;
-    if slice.shard_sets.len() != slice.changes.rows.len() {
-        return Err(TransitionError::ShardAlignment);
-    }
     validate_change_range::<H, P, D>(
         assignment,
         slice.index,
@@ -912,9 +899,11 @@ where
     validate_slice_after_header::<H, P, D>(context, deposits, withdrawals, roots, slice, false)
 }
 
-fn state_boundaries<P: PublicKey>(
-    leaves: &[StateLeaf<P>],
+fn boundaries<P: PublicKey, T>(
+    items: &[T],
+    account: impl Fn(&T) -> &P,
     slice_bits: u8,
+    overflow: impl Fn() -> TransitionError,
 ) -> Result<Vec<u32>, TransitionError> {
     if slice_bits > super::MAX_SLICE_BITS {
         return Err(TransitionError::SliceBits);
@@ -924,8 +913,8 @@ fn state_boundaries<P: PublicKey>(
     boundaries.push(0);
     let mut cursor = 0_usize;
     for index in 0..slice_count {
-        while let Some(leaf) = leaves.get(cursor) {
-            let member = account_slice(&leaf.account, slice_bits)?;
+        while let Some(item) = items.get(cursor) {
+            let member = account_slice(account(item), slice_bits)?;
             if member < index {
                 return Err(TransitionError::NonCanonicalSliceOrder);
             }
@@ -934,39 +923,36 @@ fn state_boundaries<P: PublicKey>(
             }
             cursor += 1;
         }
-        boundaries.push(u32::try_from(cursor).map_err(|_| TransitionError::TooManyStates)?);
+        boundaries.push(u32::try_from(cursor).map_err(|_| overflow())?);
     }
-    if cursor != leaves.len() {
+    if cursor != items.len() {
         return Err(TransitionError::NonCanonicalSliceOrder);
     }
     Ok(boundaries)
+}
+
+fn state_boundaries<P: PublicKey>(
+    leaves: &[StateLeaf<P>],
+    slice_bits: u8,
+) -> Result<Vec<u32>, TransitionError> {
+    boundaries(
+        leaves,
+        |leaf| &leaf.account,
+        slice_bits,
+        || TransitionError::TooManyStates,
+    )
 }
 
 fn row_boundaries<P: PublicKey, D: Digest>(
     rows: &[AccountRow<P, D>],
     slice_bits: u8,
 ) -> Result<Vec<u32>, TransitionError> {
-    let slice_count = 1_u16 << slice_bits;
-    let mut boundaries = Vec::with_capacity(usize::from(slice_count) + 1);
-    boundaries.push(0);
-    let mut cursor = 0_usize;
-    for index in 0..slice_count {
-        while let Some(row) = rows.get(cursor) {
-            let member = account_slice(&row.account, slice_bits)?;
-            if member < index {
-                return Err(TransitionError::NonCanonicalSliceOrder);
-            }
-            if member != index {
-                break;
-            }
-            cursor += 1;
-        }
-        boundaries.push(u32::try_from(cursor).map_err(|_| TransitionError::TooManyRows)?);
-    }
-    if cursor != rows.len() {
-        return Err(TransitionError::NonCanonicalSliceOrder);
-    }
-    Ok(boundaries)
+    boundaries(
+        rows,
+        |row| &row.account,
+        slice_bits,
+        || TransitionError::TooManyRows,
+    )
 }
 
 pub(super) fn derive_coverage<P: PublicKey, D: Digest>(
@@ -1019,22 +1005,11 @@ fn build_state_range<P: PublicKey, D: Digest>(
     start: u32,
     end: u32,
 ) -> Result<StateRange<P, D>, TransitionError> {
-    let len = u32::try_from(leaves.len()).map_err(|_| TransitionError::TooManyStates)?;
-    if start > end || end > len {
-        return Err(TransitionError::SliceStateRange);
-    }
-    let predecessor = start
-        .checked_sub(1)
-        .map(|position| leaves[position as usize].clone());
-    let successor = (end < len).then(|| leaves[end as usize].clone());
-    let proof_start = start.saturating_sub(u32::from(predecessor.is_some()));
-    let proof_end = end
-        .checked_add(u32::from(successor.is_some()))
-        .ok_or(TransitionError::SliceStateRange)?;
+    let (predecessor, successor, opening) = tree.bracket(leaves, start..end)?;
     Ok(StateRange {
         predecessor,
         successor,
-        opening: tree.range_opening(proof_start, proof_end - proof_start)?,
+        opening,
     })
 }
 
@@ -1058,9 +1033,6 @@ where
     validate_slice_header::<H, P, D>(context, deposits, withdrawals, &close.header, &close.roots)?;
     if cache.root() != *context.predecessor_root() {
         return Err(TransitionError::PredecessorRoot);
-    }
-    if close.rows.len() != close.shard_sets.len() {
-        return Err(TransitionError::ShardAlignment);
     }
     let (change_leaves, change_guards, changes) =
         change_material_with_strategy::<H, P, D>(&close.rows, &close.shard_sets, strategy)?;
@@ -1195,18 +1167,8 @@ where
         let end_boundary = coverage_boundaries[slice + 1];
         let start = start_boundary.change as usize;
         let end = end_boundary.change as usize;
-        let predecessor = start
-            .checked_sub(1)
-            .map(|position| change_guards[position].clone());
-        let change_successor = change_guards.get(end).cloned();
-        let proof_start = start.saturating_sub(usize::from(predecessor.is_some()));
-        let proof_end = end
-            .checked_add(usize::from(change_successor.is_some()))
-            .ok_or(TransitionError::SliceRange)?;
-        let opening = changes.range_opening(
-            u32::try_from(proof_start).map_err(|_| TransitionError::SliceRange)?,
-            u32::try_from(proof_end - proof_start).map_err(|_| TransitionError::SliceRange)?,
-        )?;
+        let (predecessor, change_successor, opening) =
+            changes.bracket(change_guards, start_boundary.change..end_boundary.change)?;
         let withdrawal_start = u32::try_from(start_boundary.prefix.withdrawal_count)
             .map_err(|_| TransitionError::SliceRange)?;
         let withdrawal_end = u32::try_from(end_boundary.prefix.withdrawal_count)

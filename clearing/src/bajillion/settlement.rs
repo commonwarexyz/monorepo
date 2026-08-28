@@ -36,7 +36,7 @@ use alloc::{
     vec::Vec,
 };
 use bytes::{Bytes, BytesMut};
-use commonware_codec::{Encode, RangeCfg, Read};
+use commonware_codec::{Encode, EncodeSize, RangeCfg, Read, Write};
 use commonware_cryptography::{Digest, Hasher, PublicKey};
 use commonware_parallel::{Sequential, Strategy};
 use core::{
@@ -332,12 +332,12 @@ struct PackedWithdrawals<P: PublicKey, D: Digest> {
 
 impl<P: PublicKey, D: Digest> PackedWithdrawals<P, D> {
     fn new(requests: &[SignedWithdrawal<P, D>]) -> Self {
-        let mut encoded = BytesMut::new();
+        let mut encoded =
+            BytesMut::with_capacity(requests.iter().map(EncodeSize::encode_size).sum());
         let mut index = Vec::with_capacity(requests.len());
         for request in requests {
-            let encoded_request = request.encode();
             let start = encoded.len();
-            encoded.extend_from_slice(&encoded_request);
+            request.write(&mut encoded);
             index.push(PackedWithdrawalIndex {
                 start,
                 end: encoded.len(),
@@ -423,7 +423,6 @@ struct HardFaultClaims<P: PublicKey, D: Digest> {
     state_liability: u64,
     remaining_state_liability: u64,
     unfinalized_deposit_total: u64,
-    remaining_deposit_total: u64,
     custody_balance: u64,
     deposits: BTreeMap<P, u64>,
     pending_withdrawals: BTreeMap<P, SignedWithdrawal<P, D>>,
@@ -450,6 +449,7 @@ where
     deployment: H::Digest,
     operator: P,
     certificate_scheme: bls12381::Scheme,
+    committee_commitment: H::Digest,
     current_state_root: VectorRoot<H::Digest>,
     current_liability: u64,
     custody_balance: u64,
@@ -512,6 +512,10 @@ where
         Ok(Self {
             deployment,
             operator,
+
+            // The committee is immutable for the deployment, so its commitment
+            // is computed once instead of per registration.
+            committee_commitment: committee.commitment::<H>(),
             certificate_scheme: bls12381::Scheme::verifier(committee),
             current_state_root: current_state.root(),
             current_liability,
@@ -743,7 +747,12 @@ where
         self.ensure_epoch_offset_available(if deferred { 4 } else { 3 })
     }
 
-    const fn withdrawal_defers_deposit(
+    /// Returns whether a pending withdrawal exactly offsets the account's staged deposit.
+    ///
+    /// An exactly offset deposit defers inclusion by one close while keeping its original
+    /// deadline. Embeddings gate intake with this predicate so their accepted shapes match
+    /// registration's canonical boundary exactly.
+    pub const fn withdrawal_defers_deposit(
         request: &SignedWithdrawal<P, H::Digest>,
         deposit_amount: u64,
     ) -> bool {
@@ -751,17 +760,6 @@ where
             request.body().action(),
             WithdrawalAction::Amount(withdrawal) if withdrawal.get() == deposit_amount
         )
-    }
-
-    fn check_phase_custody(&self) -> Result<(), SettlementError> {
-        let expected = self
-            .current_liability
-            .checked_add(self.unfinalized_deposit_total)
-            .ok_or(SettlementError::CustodyArithmetic)?;
-        if expected != self.custody_balance {
-            return Err(SettlementError::CustodyMismatch);
-        }
-        Ok(())
     }
 
     fn ensure_deposit_capacity(&self) -> Result<(), SettlementError> {
@@ -783,7 +781,6 @@ where
         amount: u64,
     ) -> Result<(), SettlementError> {
         self.ensure_operating_at(now)?;
-        self.ensure_deposit_epoch_available(false)?;
         if self.registered.is_some() {
             return Err(SettlementError::EpochAlreadyActive);
         }
@@ -804,13 +801,11 @@ where
             .map_or(0, |deposit| deposit.amount)
             .checked_add(amount)
             .ok_or(SettlementError::CustodyArithmetic)?;
-        if self
+        let deferred = self
             .pending_withdrawals
             .get(&account)
-            .is_some_and(|request| Self::withdrawal_defers_deposit(request, amount_for_account))
-        {
-            self.ensure_deposit_epoch_available(true)?;
-        }
+            .is_some_and(|request| Self::withdrawal_defers_deposit(request, amount_for_account));
+        self.ensure_deposit_epoch_available(deferred)?;
         let pending = PendingDeposit {
             amount: amount_for_account,
             deadline: previous.map_or(deadline, |deposit| deposit.deadline.min(deadline)),
@@ -1042,7 +1037,6 @@ where
         &mut self,
         now: u64,
         context: EpochContext<P, H::Digest>,
-        deposits: DepositBatch<P>,
         withdrawals: WithdrawalBatch<P, H::Digest>,
         extra_openings: &[StateOpening<P, H::Digest>],
         destination_is_eligible: F,
@@ -1054,7 +1048,6 @@ where
         self.register_close(
             now,
             context,
-            deposits,
             withdrawals,
             extra_openings,
             destination_is_eligible,
@@ -1071,11 +1064,14 @@ where
     /// opening per extra in batch order, proving the account is live and its
     /// amount coverable at registration. Later epoch spending can still lower
     /// the tail, which certification settles with a zero release.
+    ///
+    /// The deposit boundary is not an input. It is derived here as
+    /// [`Self::boundary_deposits`] of the batch, and the context must commit to
+    /// exactly that canonical batch through its deposit root.
     pub fn register_close<F>(
         &mut self,
         now: u64,
         context: CloseContext<P, H::Digest>,
-        deposits: DepositBatch<P>,
         withdrawals: WithdrawalBatch<P, H::Digest>,
         extra_openings: &[StateOpening<P, H::Digest>],
         destination_is_eligible: F,
@@ -1114,18 +1110,14 @@ where
         if context.predecessor_liability() != self.head_liability() {
             return Err(SettlementError::LiabilityAncestry);
         }
-        if context.assignment().committee()
-            != &self.certificate_scheme.committee().commitment::<H>()
-        {
+        if context.assignment().committee() != &self.committee_commitment {
             return Err(SettlementError::CommitteeMismatch);
         }
+        let deposits = self.boundary_deposits(&withdrawals);
         if context.deposit_root() != &deposits.root::<H>()?
             || context.withdrawal_root() != &withdrawals.root::<H>()?
         {
             return Err(SettlementError::BoundaryRoot);
-        }
-        if deposits != self.boundary_deposits(&withdrawals) {
-            return Err(SettlementError::DepositWitness);
         }
         // Every chain-queued request must appear verbatim. Operator-carried
         // extras run the shared intake battery, and each must outlive the
@@ -1195,7 +1187,6 @@ where
         if openings.next().is_some() {
             return Err(SettlementError::WithdrawalOpeningCount);
         }
-        self.check_phase_custody()?;
 
         let withdrawal_deadline = withdrawals
             .requests()
@@ -1221,9 +1212,6 @@ where
         certificate: bls12381::Certificate,
     ) -> Result<BatchId<H::Digest>, SettlementError> {
         self.ensure_operating_at(now)?;
-        if self.pipeline.len() >= self.config.max_pending_epochs.get() {
-            return Err(SettlementError::PipelineFull);
-        }
         let registered = self
             .registered
             .as_ref()
@@ -1232,25 +1220,19 @@ where
         if !self.certificate_scheme.verify_exact(&header, &certificate) {
             return Err(SettlementError::InvalidCertificate);
         }
-        let totals = verify_terminal_proof_after_header::<H, P, H::Digest>(
+
+        // The certified release may fall below the batch's requested sum
+        // because uncovered amounts release zero. Over-release fails the
+        // liability equation inside the terminal proof.
+        let (totals, successor_liability) = verify_terminal_proof_after_header::<H, P, H::Digest>(
             &registered.context,
             &registered.deposits,
             &registered.withdrawals,
             &roots,
             &terminal_proof,
         )?;
-        // The certified release may fall below the batch's requested sum because
-        // uncovered amounts release zero. Over-release fails the liability
-        // subtraction below.
         let withdrawal_total = totals.withdrawal;
         let payout_total = totals.payout;
-        let successor_liability = registered
-            .context
-            .predecessor_liability()
-            .checked_add(registered.deposits.total())
-            .and_then(|liability| liability.checked_sub(withdrawal_total))
-            .and_then(|liability| liability.checked_sub(payout_total))
-            .ok_or(SettlementError::CustodyArithmetic)?;
 
         let batch_id = header.batch_id::<H>();
         let registered = self
@@ -1404,80 +1386,48 @@ where
             .expected_epoch
             .checked_add(1)
             .ok_or(SettlementError::EpochOverflow)?;
-        let (
-            batch_id,
-            epoch,
-            successor_root,
-            successor_liability,
-            withdrawal_total,
-            payout_total,
-            custody_balance,
-            claimable_balance,
-            unfinalized_deposit_total,
-        ) = {
-            let entry = self
-                .pipeline
-                .front()
-                .ok_or(SettlementError::NoPendingBatch)?;
-            match &entry.batch.status {
-                BatchStatus::Pending => {}
-                BatchStatus::Challenged(_) | BatchStatus::Invalidated(_) => {
-                    return Err(SettlementError::BatchInvalidated);
-                }
+        let entry = self
+            .pipeline
+            .front()
+            .ok_or(SettlementError::NoPendingBatch)?;
+        match &entry.batch.status {
+            BatchStatus::Pending => {}
+            BatchStatus::Challenged(_) | BatchStatus::Invalidated(_) => {
+                return Err(SettlementError::BatchInvalidated);
             }
-            if now <= entry.admitted.context.challenge_deadline() {
-                return Err(SettlementError::ChallengeWindowOpen);
-            }
-            let epoch = entry.admitted.context.payment().epoch();
-            if epoch != self.expected_epoch {
-                return Err(SettlementError::EpochSequence);
-            }
+        }
+        if now <= entry.admitted.context.challenge_deadline() {
+            return Err(SettlementError::ChallengeWindowOpen);
+        }
+        let epoch = entry.admitted.context.payment().epoch();
 
-            let withdrawal_total = entry.admitted.withdrawal_total;
-            let payout_total = entry.admitted.payout_total;
-            let reserve_total = withdrawal_total
-                .checked_add(payout_total)
-                .ok_or(SettlementError::CustodyArithmetic)?;
-            let claimable_balance = self
-                .claimable_balance
-                .checked_add(reserve_total)
-                .ok_or(SettlementError::CustodyArithmetic)?;
-            let custody_balance = self
-                .custody_balance
-                .checked_sub(reserve_total)
-                .ok_or(SettlementError::CustodyArithmetic)?;
-            let unfinalized_deposit_total = self
-                .unfinalized_deposit_total
-                .checked_sub(entry.admitted.deposit_total)
-                .ok_or(SettlementError::CustodyArithmetic)?;
-            let successor_liability = entry.batch.successor_liability;
-            let expected_custody = successor_liability
-                .checked_add(unfinalized_deposit_total)
-                .ok_or(SettlementError::CustodyArithmetic)?;
-            if custody_balance != expected_custody {
-                return Err(SettlementError::CustodyMismatch);
-            }
-            let batch_id = entry.batch.header.batch_id::<H>();
-            if reserve_total != 0 && self.claimable_batches.contains_key(&batch_id) {
-                return Err(SettlementError::ClaimBatchCollision);
-            }
-            (
-                batch_id,
-                epoch,
-                entry.batch.roots.successor,
-                successor_liability,
-                withdrawal_total,
-                payout_total,
-                custody_balance,
-                claimable_balance,
-                unfinalized_deposit_total,
-            )
-        };
+        let withdrawal_total = entry.admitted.withdrawal_total;
+        let payout_total = entry.admitted.payout_total;
+        let reserve_total = withdrawal_total
+            .checked_add(payout_total)
+            .ok_or(SettlementError::CustodyArithmetic)?;
+        let claimable_balance = self
+            .claimable_balance
+            .checked_add(reserve_total)
+            .ok_or(SettlementError::CustodyArithmetic)?;
+        let custody_balance = self
+            .custody_balance
+            .checked_sub(reserve_total)
+            .ok_or(SettlementError::CustodyArithmetic)?;
+        let unfinalized_deposit_total = self
+            .unfinalized_deposit_total
+            .checked_sub(entry.admitted.deposit_total)
+            .ok_or(SettlementError::CustodyArithmetic)?;
+        let successor_liability = entry.batch.successor_liability;
+        let batch_id = entry.batch.header.batch_id::<H>();
+        if reserve_total != 0 && self.claimable_batches.contains_key(&batch_id) {
+            return Err(SettlementError::ClaimBatchCollision);
+        }
 
         let finalized = FinalizedBatch {
             batch_id,
             epoch,
-            successor_root,
+            successor_root: entry.batch.roots.successor,
             withdrawal_total,
             payout_total,
             custody_balance,
@@ -1519,26 +1469,29 @@ where
         &mut self,
         batch_id: BatchId<H::Digest>,
         claim: &ExternalPayoutClaim<P, H::Digest>,
-    ) -> Result<ExternalPayout<P>, SettlementError> {
+    ) -> Result<ExternalPayout<P>, ClaimError> {
         let payout = {
             let batch = self
                 .claimable_batches
                 .get(&batch_id)
-                .ok_or(SettlementError::ClaimBatchUnavailable)?;
+                .ok_or(ClaimError::Unavailable)?;
             if batch.claimed_payouts.contains(&claim.position()) {
-                return Err(SettlementError::ClaimAlreadyConsumed);
+                return Err(ClaimError::Consumed);
             }
             let payout = claim.verify::<H>(&batch.change_root)?;
             batch
                 .payout_remaining
                 .checked_sub(payout.amount)
-                .ok_or(SettlementError::ClaimReserve)?;
+                .ok_or(ClaimError::Reserve)?;
             payout
         };
+
+        // The global reserve always equals the sum of every batch's
+        // remainings, so the per-batch gate above already covered this amount.
         let claimable_balance = self
             .claimable_balance
             .checked_sub(payout.amount)
-            .ok_or(SettlementError::ClaimReserve)?;
+            .expect("claimable balance covers every per-batch reserve");
         let remove_batch = {
             let batch = self
                 .claimable_batches
@@ -1565,28 +1518,31 @@ where
         &mut self,
         batch_id: BatchId<H::Digest>,
         claim: &WithdrawalClaim<H::Digest>,
-    ) -> Result<WithdrawalOutput, SettlementError> {
+    ) -> Result<WithdrawalOutput, ClaimError> {
         let (output, position) = {
             let batch = self
                 .claimable_batches
                 .get(&batch_id)
-                .ok_or(SettlementError::ClaimBatchUnavailable)?;
+                .ok_or(ClaimError::Unavailable)?;
             let position = claim.position();
             if batch.claimed_withdrawals.contains(&position) {
-                return Err(SettlementError::ClaimAlreadyConsumed);
+                return Err(ClaimError::Consumed);
             }
             let output = claim.verify::<H>(&batch.withdrawal_outputs)?;
             let amount = output.amount();
             batch
                 .withdrawal_remaining
                 .checked_sub(amount)
-                .ok_or(SettlementError::ClaimReserve)?;
+                .ok_or(ClaimError::Reserve)?;
             (output, position)
         };
+
+        // The global reserve always equals the sum of every batch's
+        // remainings, so the per-batch gate above already covered this amount.
         let claimable_balance = self
             .claimable_balance
             .checked_sub(output.amount())
-            .ok_or(SettlementError::ClaimReserve)?;
+            .expect("claimable balance covers every per-batch reserve");
         let remove_batch = {
             let batch = self
                 .claimable_batches
@@ -1650,10 +1606,6 @@ where
                 .unfinalized_deposit_total
                 .checked_sub(amount)
                 .ok_or(SettlementError::CustodyArithmetic)?;
-            let remaining_deposit_total = claims
-                .remaining_deposit_total
-                .checked_sub(amount)
-                .ok_or(SettlementError::CustodyArithmetic)?;
 
             let claims = self
                 .hard_fault_claims
@@ -1663,7 +1615,6 @@ where
                 .deposits
                 .remove(account)
                 .expect("the terminal deposit was checked above");
-            claims.remaining_deposit_total = remaining_deposit_total;
             self.custody_balance = custody_balance;
             self.unfinalized_deposit_total = unfinalized_deposit_total;
             self.finish_hard_fault_if_drained();
@@ -1786,7 +1737,6 @@ where
             state_liability: self.current_liability,
             remaining_state_liability: self.current_liability,
             unfinalized_deposit_total: deposit_total,
-            remaining_deposit_total: deposit_total,
             custody_balance: self.custody_balance,
             deposits: terminal_deposits,
             pending_withdrawals,
@@ -1902,7 +1852,10 @@ where
         let Some(claims) = self.hard_fault_claims.as_ref() else {
             return;
         };
-        if claims.remaining_state_liability != 0 || claims.remaining_deposit_total != 0 {
+
+        // The chain counter mirrors the terminal deposit table exactly during
+        // the claims phase, so it is the remaining-deposit gate.
+        if claims.remaining_state_liability != 0 || self.unfinalized_deposit_total != 0 {
             return;
         }
         assert!(claims.deposits.is_empty());
@@ -1920,6 +1873,15 @@ where
     #[must_use]
     pub const fn current_state_root(&self) -> VectorRoot<H::Digest> {
         self.current_state_root
+    }
+
+    /// Returns the next epoch to finalize.
+    ///
+    /// Together with [`Self::current_state_root`] this is the chain's own coherent
+    /// finality fact: the current root covers exactly the epochs below this one.
+    #[must_use]
+    pub const fn expected_epoch(&self) -> u64 {
+        self.expected_epoch
     }
 
     /// Returns active custody backing live liability and unfinalized deposits.
@@ -1982,6 +1944,28 @@ where
     }
 }
 
+/// Batch-claim adjudication failure.
+///
+/// The taxonomy is the embedding's retry contract. [`Self::Unavailable`] is the only arm that
+/// can change with chain state: the batch may not have finalized yet, may be fully drained, or
+/// may never exist, and settlement cannot distinguish those cases. Every other arm is final for
+/// the exact claim, because it was adjudicated against an immutable finalized batch.
+#[derive(Debug, Error)]
+pub enum ClaimError {
+    /// No batch with this identifier currently holds an unclaimed reserve.
+    #[error("claim batch is unavailable")]
+    Unavailable,
+    /// The exact claim position was already consumed.
+    #[error("claim was already consumed")]
+    Consumed,
+    /// The claimed amount exceeds the batch's remaining reserve.
+    #[error("claim exceeds the remaining batch reserve")]
+    Reserve,
+    /// The claim proof does not verify against the finalized batch.
+    #[error(transparent)]
+    Proof(#[from] TransitionError),
+}
+
 /// Settlement lifecycle failure.
 #[derive(Debug, Error)]
 pub enum SettlementError {
@@ -2012,24 +1996,18 @@ pub enum SettlementError {
     /// Supplied exact batches do not match the context's sealed roots.
     #[error("boundary batches do not match their sealed roots")]
     BoundaryRoot,
-    /// Supplied deposits do not equal the exact staged deposit batch.
-    #[error("registered deposits do not equal the staged deposit batch")]
+    /// An admitted close's packed deposit batch does not decode exactly.
+    #[error("admitted deposit batch does not decode exactly")]
     DepositWitness,
     /// Supplied withdrawals do not equal the exact staged withdrawal batch.
     #[error("registered withdrawals do not equal the staged withdrawal batch")]
     WithdrawalWitness,
-    /// No finalized claim reserve exists for the requested batch.
-    #[error("finalized claim batch is unavailable")]
-    ClaimBatchUnavailable,
     /// Two finalized headers resolved to one claim-batch identifier.
     #[error("finalized claim batch identifier collision")]
     ClaimBatchCollision,
     /// The exact finalized claim was already consumed.
     #[error("finalized claim was already consumed")]
     ClaimAlreadyConsumed,
-    /// A claim exceeds its remaining finalized reserve.
-    #[error("claim exceeds the finalized reserve")]
-    ClaimReserve,
     /// Deposits must carry value.
     #[error("deposit amount must be positive")]
     ZeroDeposit,
@@ -2268,10 +2246,9 @@ mod tests {
                 admission_deadline,
                 challenge_deadline,
             );
-            let result =
-                fixture
-                    .chain
-                    .register_close(0, context, deposits, withdrawals, &[], |_| true);
+            let result = fixture
+                .chain
+                .register_close(0, context, withdrawals, &[], |_| true);
             (fixture, result)
         };
 
@@ -2335,14 +2312,9 @@ mod tests {
                 admission_deadline,
                 challenge_deadline,
             );
-            let result = fixture.chain.register_close(
-                1,
-                context,
-                deposits.clone(),
-                withdrawals.clone(),
-                &[],
-                |_| true,
-            );
+            let result = fixture
+                .chain
+                .register_close(1, context, withdrawals.clone(), &[], |_| true);
             assert_eq!(
                 core::mem::discriminant(&result.unwrap_err()),
                 core::mem::discriminant(&expected)
@@ -2363,7 +2335,7 @@ mod tests {
         );
         fixture
             .chain
-            .register_close(1, context, deposits, withdrawals, &[], |_| true)
+            .register_close(1, context, withdrawals, &[], |_| true)
             .unwrap();
 
         let base = harness(&[10]);
@@ -2775,7 +2747,7 @@ mod tests {
         assert_eq!(accepted_payment.amount(), 3);
         fixture
             .chain
-            .register_close(0, registered, deposits, withdrawals, &[], |_| true)
+            .register_close(0, registered, withdrawals, &[], |_| true)
             .unwrap();
 
         assert_eq!(
@@ -3085,9 +3057,7 @@ mod tests {
         )
         .unwrap();
         chain
-            .register_close(now, context, deposits, withdrawals, extra_openings, |_| {
-                true
-            })
+            .register_close(now, context, withdrawals, extra_openings, |_| true)
             .unwrap();
         chain
             .admit(now, close.header, close.roots, terminal_proof, certificate)
@@ -3920,7 +3890,7 @@ mod tests {
         let registered_anchor = *registered.payment().anchor();
         fixture
             .chain
-            .register_close(7, registered, deposits, withdrawals, &[], |_| true)
+            .register_close(7, registered, withdrawals, &[], |_| true)
             .unwrap();
         assert!(matches!(
             fixture.chain.fault_expired(7),
@@ -3953,14 +3923,9 @@ mod tests {
             3,
         );
         assert!(matches!(
-            fixture.chain.register_close(
-                1,
-                skipped_genesis,
-                deposits.clone(),
-                withdrawals.clone(),
-                &[],
-                |_| true
-            ),
+            fixture
+                .chain
+                .register_close(1, skipped_genesis, withdrawals.clone(), &[], |_| true),
             Err(SettlementError::EpochSequence)
         ));
 
@@ -3999,14 +3964,9 @@ mod tests {
             4,
         );
         assert!(matches!(
-            fixture.chain.register_close(
-                2,
-                skipped_successor,
-                deposits.clone(),
-                withdrawals.clone(),
-                &[],
-                |_| true
-            ),
+            fixture
+                .chain
+                .register_close(2, skipped_successor, withdrawals.clone(), &[], |_| true),
             Err(SettlementError::EpochSequence)
         ));
 
@@ -4023,7 +3983,7 @@ mod tests {
         );
         fixture
             .chain
-            .register_close(2, successor, deposits, withdrawals, &[], |_| true)
+            .register_close(2, successor, withdrawals, &[], |_| true)
             .unwrap();
         assert_eq!(fixture.chain.pending_epoch_count(), 1);
     }
@@ -4056,7 +4016,7 @@ mod tests {
         let registered_anchor = *registered.payment().anchor();
         fixture
             .chain
-            .register_close(0, registered, deposits, withdrawals, &[], |_| true)
+            .register_close(0, registered, withdrawals, &[], |_| true)
             .unwrap();
 
         assert!(matches!(
@@ -4132,7 +4092,7 @@ mod tests {
         let anchor = *registered.payment().anchor();
         fixture
             .chain
-            .register_close(0, registered, deposits, withdrawals, &[], |_| true)
+            .register_close(0, registered, withdrawals, &[], |_| true)
             .unwrap();
 
         assert_eq!(
@@ -4184,7 +4144,7 @@ mod tests {
         );
         fixture
             .chain
-            .register_close(0, registered, deposits, withdrawals, &[], |_| true)
+            .register_close(0, registered, withdrawals, &[], |_| true)
             .unwrap();
 
         assert!(matches!(
@@ -4232,14 +4192,9 @@ mod tests {
         );
 
         assert!(matches!(
-            fixture.chain.register_close(
-                2,
-                stale,
-                deposits.clone(),
-                withdrawals.clone(),
-                &[],
-                |_| true
-            ),
+            fixture
+                .chain
+                .register_close(2, stale, withdrawals.clone(), &[], |_| true),
             Err(SettlementError::AdmissionAfterDeadline)
         ));
         assert!(fixture.chain.hard_fault().is_none());
@@ -4258,7 +4213,7 @@ mod tests {
         let anchor = *fresh.payment().anchor();
         fixture
             .chain
-            .register_close(2, fresh, deposits, withdrawals, &[], |_| true)
+            .register_close(2, fresh, withdrawals, &[], |_| true)
             .unwrap();
 
         assert_eq!(
@@ -4299,14 +4254,7 @@ mod tests {
         let registered_anchor = *close_context.payment().anchor();
         unadmitted
             .chain
-            .register_close(
-                u64::MAX - 2,
-                close_context,
-                deposits,
-                withdrawals,
-                &[],
-                |_| true,
-            )
+            .register_close(u64::MAX - 2, close_context, withdrawals, &[], |_| true)
             .unwrap();
         assert!(matches!(
             unadmitted.chain.fault_expired(u64::MAX - 2),
@@ -4342,7 +4290,7 @@ mod tests {
 
         fixture
             .chain
-            .register_epoch(0, epoch, deposits, withdrawals, &[], |_| true)
+            .register_epoch(0, epoch, withdrawals, &[], |_| true)
             .unwrap();
 
         assert_eq!(
@@ -4378,7 +4326,7 @@ mod tests {
         assert!(matches!(
             fixture
                 .chain
-                .register_close(0, close_context, deposits, withdrawals, &[], |_| true),
+                .register_close(0, close_context, withdrawals, &[], |_| true),
             Err(SettlementError::OperatorMismatch)
         ));
     }
@@ -4630,7 +4578,7 @@ mod tests {
         assert!(matches!(
             fixture
                 .chain
-                .register_close(8, replay_context, deposits, replay, &[], |_| true),
+                .register_close(8, replay_context, replay, &[], |_| true),
             Err(SettlementError::DuplicateWithdrawalAuthorization)
         ));
     }
@@ -4678,14 +4626,9 @@ mod tests {
             7,
         );
         assert!(matches!(
-            fixture.chain.register_close(
-                5,
-                missing_context,
-                deposits.clone(),
-                missing,
-                &[],
-                |_| true
-            ),
+            fixture
+                .chain
+                .register_close(5, missing_context, missing, &[], |_| true),
             Err(SettlementError::WithdrawalWitness)
         ));
 
@@ -4716,14 +4659,9 @@ mod tests {
             7,
         );
         assert!(matches!(
-            fixture.chain.register_close(
-                4,
-                horizon_context,
-                deposits.clone(),
-                horizon,
-                &[],
-                |_| true
-            ),
+            fixture
+                .chain
+                .register_close(4, horizon_context, horizon, &[], |_| true),
             Err(SettlementError::WithdrawalDeadlineTooSoon)
         ));
 
@@ -4754,7 +4692,7 @@ mod tests {
         assert!(matches!(
             fixture
                 .chain
-                .register_close(5, late_context, deposits.clone(), late, &[], |_| true),
+                .register_close(5, late_context, late, &[], |_| true),
             Err(SettlementError::WithdrawalDeadlineTooLate)
         ));
 
@@ -4786,7 +4724,6 @@ mod tests {
             fixture.chain.register_close(
                 5,
                 carried_context,
-                deposits.clone(),
                 carried,
                 &[],
                 |destination: &Bytes| destination.as_ref() != b"extra".as_slice(),
@@ -4842,14 +4779,9 @@ mod tests {
             9,
         );
         assert!(matches!(
-            fixture.chain.register_close(
-                6,
-                duplicate_context,
-                deposits.clone(),
-                duplicate,
-                &[],
-                |_| true
-            ),
+            fixture
+                .chain
+                .register_close(6, duplicate_context, duplicate, &[], |_| true),
             Err(SettlementError::DuplicateWithdrawal)
         ));
 
@@ -4878,7 +4810,7 @@ mod tests {
         assert!(matches!(
             fixture
                 .chain
-                .register_close(6, stale_context, deposits.clone(), stale, &[], |_| true),
+                .register_close(6, stale_context, stale, &[], |_| true),
             Err(SettlementError::Boundary(BoundaryError::WrongContext))
         ));
 
@@ -4907,21 +4839,15 @@ mod tests {
         );
         let opening = successor.opening(&fresh_signer.public_key()).unwrap();
         assert!(matches!(
-            fixture.chain.register_close(
-                6,
-                valid_context.clone(),
-                deposits.clone(),
-                valid.clone(),
-                &[],
-                |_| true,
-            ),
+            fixture
+                .chain
+                .register_close(6, valid_context.clone(), valid.clone(), &[], |_| true,),
             Err(SettlementError::WithdrawalOpeningCount)
         ));
         assert!(matches!(
             fixture.chain.register_close(
                 6,
                 valid_context.clone(),
-                deposits.clone(),
                 valid.clone(),
                 &[opening.clone(), opening.clone()],
                 |_| true,
@@ -4932,7 +4858,6 @@ mod tests {
             fixture.chain.register_close(
                 6,
                 valid_context.clone(),
-                deposits.clone(),
                 valid.clone(),
                 &[successor.opening(&queued_signer.public_key()).unwrap()],
                 |_| true,
@@ -4943,7 +4868,7 @@ mod tests {
         // A valid carried request registers once the gates pass.
         fixture
             .chain
-            .register_close(6, valid_context, deposits, valid, &[opening], |_| true)
+            .register_close(6, valid_context, valid, &[opening], |_| true)
             .unwrap();
     }
 
@@ -5008,7 +4933,6 @@ mod tests {
             fixture.chain.register_epoch(
                 4,
                 unaffordable_epoch,
-                deposits,
                 unaffordable,
                 core::slice::from_ref(&opening),
                 |_| true,
@@ -5282,7 +5206,7 @@ mod tests {
         assert_withdrawal_output(&output, &request, 2);
         assert!(matches!(
             fixture.chain.claim_withdrawal(batch_id, &claim),
-            Err(SettlementError::ClaimBatchUnavailable | SettlementError::ClaimAlreadyConsumed)
+            Err(ClaimError::Unavailable | ClaimError::Consumed)
         ));
         assert_eq!(
             fixture
@@ -5442,7 +5366,7 @@ mod tests {
         );
         fixture
             .chain
-            .register_close(1, close_context, deposits, withdrawals, &[], |_| true)
+            .register_close(1, close_context, withdrawals, &[], |_| true)
             .unwrap();
         assert!(matches!(
             fixture.chain.claim_pending_deposit(4, &account),
@@ -5671,7 +5595,7 @@ mod tests {
         assert_eq!(fixture.chain.claimable_balance(), 0);
         assert!(matches!(
             fixture.chain.claim_withdrawal(batch_id, &claim),
-            Err(SettlementError::ClaimBatchUnavailable | SettlementError::ClaimAlreadyConsumed)
+            Err(ClaimError::Unavailable | ClaimError::Consumed)
         ));
         assert_eq!(fixture.chain.current_state_root(), destroyed.root());
         assert_eq!(fixture.chain.custody_balance(), 0);
@@ -5774,7 +5698,7 @@ mod tests {
 
         assert!(matches!(
             fixture.chain.claim_external_payout(batch_id, &claim),
-            Err(SettlementError::ClaimBatchUnavailable)
+            Err(ClaimError::Unavailable)
         ));
         let finalized = fixture.chain.finalize(3).unwrap();
         assert_eq!(finalized.payout_total, 20);
@@ -5790,7 +5714,7 @@ mod tests {
         assert_eq!(fixture.chain.claimable_balance(), 0);
         assert!(matches!(
             fixture.chain.claim_external_payout(batch_id, &claim),
-            Err(SettlementError::ClaimBatchUnavailable | SettlementError::ClaimAlreadyConsumed)
+            Err(ClaimError::Unavailable | ClaimError::Consumed)
         ));
     }
 
@@ -5867,7 +5791,7 @@ mod tests {
 
         assert!(matches!(
             fixture.chain.claim_external_payout(batch_id, &claim),
-            Err(SettlementError::Transition(TransitionError::PayoutClaim))
+            Err(ClaimError::Proof(TransitionError::PayoutClaim))
         ));
         assert_eq!(fixture.chain.claimable_balance(), 19);
         let batch = fixture.chain.claimable_batches.get(&batch_id).unwrap();
@@ -6009,7 +5933,7 @@ mod tests {
         let consumed_before = batch_before.claimed_withdrawals.len();
         assert!(matches!(
             fixture.chain.claim_withdrawal(batch_id, &malformed),
-            Err(SettlementError::Transition(TransitionError::Commitment(_)))
+            Err(ClaimError::Proof(TransitionError::Commitment(_)))
         ));
         let batch_after = fixture.chain.claimable_batches.get(&batch_id).unwrap();
         assert_eq!(fixture.chain.claimable_balance(), claimable_before);
@@ -6024,7 +5948,7 @@ mod tests {
         assert_eq!(fixture.chain.claimable_balance(), queued[0].3);
         assert!(matches!(
             fixture.chain.claim_withdrawal(batch_id, &claims[1]),
-            Err(SettlementError::ClaimAlreadyConsumed)
+            Err(ClaimError::Consumed)
         ));
         let output = fixture
             .chain
@@ -6034,7 +5958,7 @@ mod tests {
         assert_eq!(fixture.chain.claimable_balance(), 0);
         assert!(matches!(
             fixture.chain.claim_withdrawal(batch_id, &claims[0]),
-            Err(SettlementError::ClaimBatchUnavailable)
+            Err(ClaimError::Unavailable)
         ));
     }
 
@@ -6158,7 +6082,7 @@ mod tests {
 
         assert!(matches!(
             fixture.chain.claim_withdrawal(second_batch, &first_claim),
-            Err(SettlementError::Transition(_))
+            Err(ClaimError::Proof(_))
         ));
         assert_eq!(fixture.chain.claimable_balance(), 7);
         assert_withdrawal_output(
@@ -6171,7 +6095,7 @@ mod tests {
         );
         assert!(matches!(
             fixture.chain.claim_withdrawal(first_batch, &first_claim),
-            Err(SettlementError::ClaimBatchUnavailable)
+            Err(ClaimError::Unavailable)
         ));
         assert_withdrawal_output(
             &fixture
@@ -6183,7 +6107,7 @@ mod tests {
         );
         assert!(matches!(
             fixture.chain.claim_withdrawal(second_batch, &second_claim),
-            Err(SettlementError::ClaimBatchUnavailable)
+            Err(ClaimError::Unavailable)
         ));
         assert_eq!(fixture.chain.claimable_balance(), 0);
     }
@@ -6470,7 +6394,7 @@ mod tests {
         assert_eq!(fixture.chain.claimable_balance(), 4);
         assert!(matches!(
             fixture.chain.claim_withdrawal(second_id, &claim),
-            Err(SettlementError::ClaimBatchUnavailable)
+            Err(ClaimError::Unavailable)
         ));
         assert_eq!(fixture.chain.claimable_balance(), 4);
         assert_withdrawal_output(
@@ -6480,7 +6404,7 @@ mod tests {
         );
         assert!(matches!(
             fixture.chain.claim_withdrawal(first_id, &claim),
-            Err(SettlementError::ClaimBatchUnavailable)
+            Err(ClaimError::Unavailable)
         ));
         assert_eq!(fixture.chain.claimable_balance(), 0);
     }
@@ -7460,7 +7384,7 @@ mod tests {
         .unwrap();
         fixture
             .chain
-            .register_close(1, close_context, deposits, withdrawals, &[], |_| true)
+            .register_close(1, close_context, withdrawals, &[], |_| true)
             .unwrap();
 
         fixture
@@ -7609,7 +7533,7 @@ mod tests {
         assert_eq!(fixture.chain.current_state_root(), successor.root());
         assert!(matches!(
             fixture.chain.claim_withdrawal(batch_id, &claim),
-            Err(SettlementError::ClaimBatchUnavailable)
+            Err(ClaimError::Unavailable)
         ));
     }
 

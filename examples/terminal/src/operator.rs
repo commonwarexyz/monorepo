@@ -28,7 +28,7 @@ use commonware_clearing::bajillion::{
     challenge::StateOpening,
     commitment::VectorRoot,
     credit::{ShardHead, ShardSet},
-    payment::{PaymentContext, SignedSend, verify_receipt_step},
+    payment::{PaymentContext, SignedSend, TxId, verify_receipt_step},
     state::{AccountRow, AccountState, Prefix, SettlementOutput, StateLeaf},
     transition::{BatchId, ExternalPayoutClaim, WithdrawalClaim},
 };
@@ -76,22 +76,16 @@ pub(crate) struct WithdrawalOpening {
     pub(crate) opening: StateOpening<Key, Digest>,
 }
 
-/// The commitment status of one send, resolved independent of the operating fence.
-pub(crate) enum PaymentResolution {
-    /// The send committed in an epoch. The batch is authoritative even while the operator is
-    /// fenced.
-    Committed(Box<AcceptedBatch>),
-    /// The send committed in no epoch. This is positive proof of non-commitment.
-    Absent,
-    /// A storage fault prevents a trustworthy read. Retry after the operator restarts.
-    Unavailable,
-}
-
 #[derive(Clone)]
 pub(crate) struct SettlementRegistration {
     pub(crate) epoch: u64,
     pub(crate) predecessor_liability: u64,
-    pub(crate) deposits: DepositBatch<Key>,
+    pub(crate) deposits_root: VectorRoot<Digest>,
+    /// Root of the full staged deposit set, deferred aggregates included. Settlement
+    /// checks it against its own custody record, because a deferral hides its account
+    /// from both derived boundaries and the boundary roots alone cannot see a deposit the
+    /// operator never credited.
+    pub(crate) staged_root: VectorRoot<Digest>,
     pub(crate) withdrawals: WithdrawalBatch<Key, Digest>,
     /// One predecessor-root opening per withdrawal in batch order. Settlement uses them to
     /// prove each operator-carried request certifiable before it registers the close.
@@ -321,28 +315,21 @@ impl Operator {
         })
     }
 
-    /// Resolves whether a specific send already committed, independent of the operating fence.
+    /// Reads the committed batch for one send, a plain durable lookup by transaction id.
     ///
-    /// A committed batch is authoritative even while the operator is fenced from admitting new
-    /// state (a failed predecessor close), so this reads the durable committed rows ahead of the
-    /// `ensure_operating` gate. A genuine storage fault is different: the project treats a failed
-    /// mutable operation as fatal and requires a restart before the instance is trusted again, so
-    /// this refuses to read past `store_fault` and reports the resolution as unavailable. Both an
-    /// unavailable resolution and an absent one are honest: unavailable means retry later (perhaps
-    /// after a restart), while absent is positive proof the send committed in no epoch.
-    pub(crate) fn resolve_payment(
+    /// This is an optional receipts fetch for a wallet that already decided commitment from
+    /// a finalized settlement root. It carries no verdict, so it stays readable across the
+    /// operating fence (a failed predecessor close leaves committed rows intact) but still
+    /// refuses to read past a storage fault, which is fatal until the operator restarts.
+    pub(crate) fn accepted_batch(
         &self,
         send: &SignedSend<Key, Digest>,
-    ) -> Result<PaymentResolution> {
-        if self.store_fault.is_some() {
-            return Ok(PaymentResolution::Unavailable);
-        }
-        Ok(self
-            .store
-            .accepted_batch(send)?
-            .map_or(PaymentResolution::Absent, |batch| {
-                PaymentResolution::Committed(Box::new(batch))
-            }))
+    ) -> Result<Option<AcceptedBatch>> {
+        ensure!(
+            self.store_fault.is_none(),
+            "a storage fault blocks committed-batch reads until the operator restarts"
+        );
+        self.store.accepted_batch(send)
     }
 
     pub(crate) fn accept_send(&mut self, send: SignedSend<Key, Digest>) -> Result<AcceptedBatch> {
@@ -424,6 +411,10 @@ impl Operator {
             .iter()
             .find(|identity| identity.key == event.account)
             .context("deposit account is not a configured operator identity")?;
+
+        // Settlement already holds custody for this event, so no shape may be refused
+        // here: an aggregate exactly offsetting the carried withdrawal defers to the
+        // successor epoch instead, mirroring the chain's boundary rule.
         let replacement = registration_with_deposit(
             &self.protocol,
             &self.registration,
@@ -508,16 +499,9 @@ impl Operator {
             .verify_context(&self.protocol.deployment(), &quote.root.digest)
             .context("verify withdrawal context")?;
 
-        // Settlement refuses to register a carried amount that exactly offsets the close's
-        // staged deposit (that shape must defer the deposit through the queue), so fail it
-        // here instead of wedging the epoch at registration.
-        if let WithdrawalAction::Amount(amount) = request.body().action() {
-            let deposited = self.registration.deposits.amount_for(request.account());
-            ensure!(
-                deposited == 0 || amount.get() != deposited,
-                "a carried withdrawal cannot exactly offset the staged deposit"
-            );
-        }
+        // An amount exactly offsetting the staged aggregate defers it to the successor
+        // epoch inside the store, which also gates certifiability: the amount must stay
+        // coverable without any aggregate a later deposit could turn into an exact offset.
         let replacement =
             registration_with_withdrawal(&self.protocol, &self.registration, request.clone())
                 .context("prospective withdrawal does not fit the epoch anchor")?;
@@ -581,9 +565,12 @@ impl Operator {
         let epoch = expected_epoch;
         let payment_context = self.registration.context.payment().clone();
         let next_epoch = self.next_openable_epoch()?;
+
+        // Deferred aggregates already live as the successor's parked rows, so the
+        // successor context opens with them staged.
         let successor = self.protocol.registration(
             next_epoch,
-            DepositBatch::empty(),
+            self.registration.deferred.clone(),
             WithdrawalBatch::empty(),
             self.store.successor_liability()?,
         )?;
@@ -744,6 +731,15 @@ impl Operator {
     }
 
     #[cfg(test)]
+    pub(crate) fn settlement_roots(
+        &self,
+        epoch: u64,
+    ) -> Result<commonware_clearing::bajillion::transition::RootBundle<Digest>> {
+        self.ensure_store_usable()?;
+        self.store.settlement_roots(epoch)
+    }
+
+    #[cfg(test)]
     pub(crate) fn snapshot(&self) -> Result<StoreSnapshot> {
         self.ensure_store_usable()?;
         let mut snapshot = self.store.snapshot()?;
@@ -771,7 +767,6 @@ impl Operator {
         self.next_openable_epoch()?;
         let epoch = self.registration.context.payment().epoch();
         let predecessor_liability = self.registration.context.predecessor_liability();
-        let deposits = self.registration.deposits.clone();
         let withdrawals = self.registration.withdrawals.clone();
         let openings = if withdrawals.requests().is_empty() {
             Vec::new()
@@ -793,13 +788,31 @@ impl Operator {
                 })
                 .collect::<Result<Vec<_>>>()?
         };
-        let signature =
-            self.protocol
-                .sign_registration(epoch, predecessor_liability, &deposits, &withdrawals);
+
+        // The committed boundary is derived through the chain's own deferral rule, so the
+        // roots agree by construction whenever the deposit sets agree. The staged root
+        // carries the full set alongside so settlement can also see set divergence a
+        // deferral would hide from both boundaries.
+        let deposits_root = self
+            .registration
+            .deposits
+            .root::<Sha256>()
+            .context("commit registration deposit boundary")?;
+        let staged_root = staged_deposits(&self.registration)?
+            .root::<Sha256>()
+            .context("commit registration staged deposits")?;
+        let signature = self.protocol.sign_registration(
+            epoch,
+            predecessor_liability,
+            &deposits_root,
+            &staged_root,
+            &withdrawals,
+        );
         Ok(SettlementRegistration {
             epoch,
             predecessor_liability,
-            deposits,
+            deposits_root,
+            staged_root,
             withdrawals,
             openings,
             signature,
@@ -1138,32 +1151,63 @@ fn genesis_root(protocol: &Protocol, identities: &[AccountIdentity]) -> Result<V
     )
 }
 
-fn registration_for(protocol: &Protocol, data: &EpochData) -> Result<EpochRegistration> {
-    let mut deposits = BTreeMap::<Key, u64>::new();
-    for stored in &data.deposits {
-        let amount = deposits.entry(stored.account.clone()).or_default();
+/// Folds deposit events into their canonical per-account aggregate batch.
+fn deposit_batch<'a>(
+    events: impl IntoIterator<Item = &'a DepositEvent>,
+) -> Result<DepositBatch<Key>> {
+    let mut aggregates = BTreeMap::<Key, u64>::new();
+    for event in events {
+        let amount = aggregates.entry(event.account.clone()).or_default();
         *amount = amount
-            .checked_add(stored.amount)
+            .checked_add(event.amount)
             .context("deposit total overflow")?;
     }
-    let deposits = DepositBatch::new(
-        deposits
+    Ok(DepositBatch::new(
+        aggregates
             .into_iter()
             .map(|(account, amount)| DepositRecord::new(account, amount))
             .collect::<Result<Vec<_>, _>>()?,
-    )?;
+    )?)
+}
+
+/// Returns a registration's full staged aggregates, included and deferred together.
+fn staged_deposits(registration: &EpochRegistration) -> Result<DepositBatch<Key>> {
+    Ok(DepositBatch::new(
+        registration
+            .deposits
+            .records()
+            .iter()
+            .chain(registration.deferred.records())
+            .cloned()
+            .collect(),
+    )?)
+}
+
+fn registration_for(protocol: &Protocol, data: &EpochData) -> Result<EpochRegistration> {
+    let included = deposit_batch(&data.deposits)?;
+    let carried = deposit_batch(&data.carried)?;
+    let staged = deposit_batch(data.deposits.iter().chain(&data.carried))?;
     let withdrawals = WithdrawalBatch::new(
         data.withdrawals
             .iter()
             .map(|stored| stored.request.clone())
             .collect(),
     )?;
-    protocol.registration(
+    let registration = protocol.registration(
         data.epoch,
-        deposits,
+        staged,
         withdrawals,
         predecessor_liability(data)?,
-    )
+    )?;
+
+    // Storage keeps every epoch normalized: its rows and account state carry exactly its
+    // boundary-included deposits, and deferred aggregates live as parked rows. The
+    // derived split must reproduce that partition exactly.
+    ensure!(
+        registration.deposits == included && registration.deferred == carried,
+        "stored deposit partition differs from the derived boundary"
+    );
+    Ok(registration)
 }
 
 fn registration_with_deposit(
@@ -1173,25 +1217,24 @@ fn registration_with_deposit(
     amount: u64,
 ) -> Result<EpochRegistration> {
     ensure!(amount > 0, "deposit amount must be positive");
-    let mut deposits = current
-        .deposits
+    let mut aggregates = staged_deposits(current)?
         .records()
         .iter()
         .map(|record| (record.account().clone(), record.amount()))
         .collect::<BTreeMap<_, _>>();
-    let total = deposits.entry(account).or_default();
+    let total = aggregates.entry(account).or_default();
     *total = total
         .checked_add(amount)
         .context("deposit total overflow")?;
-    let deposits = DepositBatch::new(
-        deposits
+    let staged = DepositBatch::new(
+        aggregates
             .into_iter()
             .map(|(account, amount)| DepositRecord::new(account, amount))
             .collect::<Result<Vec<_>, _>>()?,
     )?;
     protocol.registration(
         current.context.payment().epoch(),
-        deposits,
+        staged,
         current.withdrawals.clone(),
         current.context.predecessor_liability(),
     )
@@ -1207,7 +1250,7 @@ fn registration_with_withdrawal(
     let withdrawals = WithdrawalBatch::new(requests)?;
     protocol.registration(
         current.context.payment().epoch(),
-        current.deposits.clone(),
+        staged_deposits(current)?,
         withdrawals,
         current.context.predecessor_liability(),
     )
@@ -1264,9 +1307,14 @@ fn prepare_epoch(
         "there are no payments, deposits, or withdrawals to close"
     );
     let assembled = assemble_epoch(protocol, &data, &registration)?;
+
+    // The completion rehearsal must stage the full deposit set, deferred aggregates
+    // included, to reproduce the authoritative chain's boundary and custody exactly.
+    let mut events = data.deposits;
+    events.extend(data.carried);
     protocol.prepare(
         registration,
-        data.deposits,
+        events,
         assembled.predecessor,
         assembled.rows,
         assembled.shard_sets,
@@ -1317,24 +1365,53 @@ fn assemble_epoch(
         .iter()
         .map(|(key, account)| (key.clone(), account.predecessor.cumulative_debit))
         .collect::<BTreeMap<_, _>>();
-    let mut payer_batches = BTreeMap::<Key, Digest>::new();
+    let mut payer_batches = BTreeMap::<Key, (TxId<Digest>, SignedSend<Key, Digest>)>::new();
     let mut receipt_endpoints = BTreeMap::<(Key, u64), (u64, u64)>::new();
     let mut outgoing = BTreeMap::<Key, Payment>::new();
     let mut heads = BTreeMap::<Key, BTreeMap<u64, Payment>>::new();
 
     for stored in &data.payments {
         let payment = &stored.payment;
-        ensure!(
-            stored.tx_id == payment.send().tx_id::<Sha256>().into_digest(),
-            "stored transaction id does not match its payment"
-        );
-        payment
-            .verify_linked_with_strategy::<Sha256>(
-                registration.context.payment(),
-                protocol.strategy(),
-            )
-            .with_context(|| format!("verify stored payment {}", stored.sequence))?;
         let payer = payment.payer().clone();
+
+        // Rows of one batched send carry byte-identical copies of one send. The batch's
+        // first row verifies that send and binds the stored transaction id, so a later row
+        // proves only that it carries the same send, that its receipt is operator signed,
+        // and that the receipt links to one exact entry of that verified send.
+        let head_tx_id = match payer_batches
+            .get(&payer)
+            .filter(|(tx_id, _)| tx_id.into_digest() == stored.tx_id)
+        {
+            Some((batch_tx_id, batch_send)) => {
+                ensure!(
+                    payment.send() == batch_send,
+                    "stored batch entry does not carry its verified send"
+                );
+                payment
+                    .receipt()
+                    .verify(registration.context.payment())
+                    .with_context(|| format!("verify stored payment {}", stored.sequence))?;
+                ensure!(
+                    payment.receipt().links(batch_send.body(), batch_tx_id),
+                    "stored batch entry is not linked to its send"
+                );
+                None
+            }
+            None => {
+                let tx_id = payment.send().tx_id::<Sha256>();
+                ensure!(
+                    stored.tx_id == tx_id.into_digest(),
+                    "stored transaction id does not match its payment"
+                );
+                payment
+                    .verify_linked_with_strategy::<Sha256>(
+                        registration.context.payment(),
+                        protocol.strategy(),
+                    )
+                    .with_context(|| format!("verify stored payment {}", stored.sequence))?;
+                Some(tx_id)
+            }
+        };
         let recipient = payment.recipient().clone();
         let payer_account = accounts
             .get(&payer)
@@ -1359,19 +1436,19 @@ fn assemble_epoch(
             .get(&payer)
             .copied()
             .context("payer endpoint is missing")?;
-        if payer_batches.get(&payer) == Some(&stored.tx_id) {
-            // Later entries of one batched send share the endpoint its first entry advanced.
-            ensure!(
-                payment.send().body().cumulative_debit() == previous_debit,
-                "stored batch entry endpoint is inconsistent"
-            );
-        } else {
+        if let Some(tx_id) = head_tx_id {
             payment
                 .send()
                 .verify_next(registration.context.payment(), previous_debit)
                 .context("stored payer endpoint is not consecutive")?;
             payer_endpoints.insert(payer.clone(), payment.send().body().cumulative_debit());
-            payer_batches.insert(payer.clone(), stored.tx_id);
+            payer_batches.insert(payer.clone(), (tx_id, payment.send().clone()));
+        } else {
+            // Later entries of one batched send share the endpoint its first entry advanced.
+            ensure!(
+                payment.send().body().cumulative_debit() == previous_debit,
+                "stored batch entry endpoint is inconsistent"
+            );
         }
 
         let shard = payment.receipt().body().shard();
@@ -1682,6 +1759,13 @@ mod tests {
         Operator::in_memory(NonZeroUsize::new(2).unwrap()).unwrap()
     }
 
+    fn released<T: std::fmt::Debug>(outcome: crate::settlement::ClaimOutcome<T>) -> T {
+        match outcome {
+            crate::settlement::ClaimOutcome::Released(value) => value,
+            other => panic!("claim was not released: {other:?}"),
+        }
+    }
+
     fn amount(value: u64) -> WithdrawalAction {
         WithdrawalAction::Amount(NonZeroU64::new(value).unwrap())
     }
@@ -1696,7 +1780,7 @@ mod tests {
             .protocol
             .registration(
                 epoch.checked_add(1).unwrap(),
-                DepositBatch::empty(),
+                operator.registration.deferred.clone(),
                 WithdrawalBatch::empty(),
                 operator.store.successor_liability().unwrap(),
             )
@@ -1732,7 +1816,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_payment_is_authoritative_across_the_operating_fence() {
+    fn accepted_batch_reads_across_the_operating_fence() {
         let mut operator = operator();
         let payer = operator.wallets[0].public_key();
         let quote = operator.payment_quote(&payer).unwrap();
@@ -1759,31 +1843,21 @@ mod tests {
         )
         .unwrap();
 
-        // A close fence blocks admitting new state but leaves the committed rows readable, so a
-        // committed send still resolves authoritatively and an uncommitted one resolves as absent.
+        // A close fence blocks admitting new state but leaves the committed rows readable.
         operator.close_fault = Some("fenced after a failed predecessor close".to_string());
         assert!(operator.accept_send(send.clone()).is_err());
-        let PaymentResolution::Committed(resolved) = operator.resolve_payment(&send).unwrap()
-        else {
-            panic!("a fenced operator failed to resolve a committed send");
-        };
+        let resolved = operator
+            .accepted_batch(&send)
+            .unwrap()
+            .expect("a fenced operator failed to read a committed batch");
         assert_eq!(resolved.acceptance, committed.acceptance);
-        assert!(matches!(
-            operator.resolve_payment(&uncommitted).unwrap(),
-            PaymentResolution::Absent
-        ));
+        assert!(operator.accepted_batch(&uncommitted).unwrap().is_none());
 
-        // A storage fault is fatal to the instance until it restarts, so resolution refuses to
-        // read past it and reports the availability signal instead of a false absence.
+        // A storage fault is fatal to the instance until it restarts, so the read refuses
+        // to answer instead of reporting a false absence.
         operator.store_fault = Some("the SQLite connection is unusable".to_string());
-        assert!(matches!(
-            operator.resolve_payment(&send).unwrap(),
-            PaymentResolution::Unavailable
-        ));
-        assert!(matches!(
-            operator.resolve_payment(&uncommitted).unwrap(),
-            PaymentResolution::Unavailable
-        ));
+        assert!(operator.accepted_batch(&send).is_err());
+        assert!(operator.accepted_batch(&uncommitted).is_err());
     }
 
     #[test]
@@ -3221,13 +3295,15 @@ mod tests {
         operator.pay(0, operator.wallet_count(), 100).unwrap();
         let data = operator.store.load_current().unwrap();
         let mut settlement = crate::settlement::Settlement::new().unwrap();
+        let registration = operator.settlement_registration().unwrap();
         settlement
             .register_epoch(
-                data.epoch,
-                operator.registration.context.predecessor_liability(),
-                operator.registration.deposits.clone(),
-                operator.registration.withdrawals.clone(),
-                &operator.settlement_registration().unwrap().openings,
+                registration.epoch,
+                registration.predecessor_liability,
+                registration.deposits_root,
+                registration.staged_root,
+                registration.withdrawals,
+                &registration.openings,
             )
             .unwrap();
         let prepared =
@@ -3243,15 +3319,19 @@ mod tests {
             .admit(SettlementSubmission::from(&result))
             .unwrap();
         let claim = result.external_claims.first().unwrap();
-        let payout = settlement
-            .claim_external_payout(finalized.batch_id, claim)
-            .unwrap();
-        assert_eq!(payout.recipient, external_identity().key);
-        assert_eq!(payout.amount, 100);
-        assert_eq!(
+        let payout = released(
             settlement
                 .claim_external_payout(finalized.batch_id, claim)
                 .unwrap(),
+        );
+        assert_eq!(payout.recipient, external_identity().key);
+        assert_eq!(payout.amount, 100);
+        assert_eq!(
+            released(
+                settlement
+                    .claim_external_payout(finalized.batch_id, claim)
+                    .unwrap(),
+            ),
             payout
         );
         operator
@@ -3288,13 +3368,15 @@ mod tests {
 
         operator.pay(0, operator.wallet_count(), 100).unwrap();
         let data = operator.store.load_current().unwrap();
+        let registration = operator.settlement_registration().unwrap();
         settlement
             .register_epoch(
-                data.epoch,
-                operator.registration.context.predecessor_liability(),
-                operator.registration.deposits.clone(),
-                operator.registration.withdrawals.clone(),
-                &operator.settlement_registration().unwrap().openings,
+                registration.epoch,
+                registration.predecessor_liability,
+                registration.deposits_root,
+                registration.staged_root,
+                registration.withdrawals,
+                &registration.openings,
             )
             .unwrap();
         let prepared =
@@ -3315,13 +3397,15 @@ mod tests {
 
         operator.pay(1, operator.wallet_count(), 100).unwrap();
         let data = operator.store.load_current().unwrap();
+        let registration = operator.settlement_registration().unwrap();
         settlement
             .register_epoch(
-                data.epoch,
-                operator.registration.context.predecessor_liability(),
-                operator.registration.deposits.clone(),
-                operator.registration.withdrawals.clone(),
-                &operator.settlement_registration().unwrap().openings,
+                registration.epoch,
+                registration.predecessor_liability,
+                registration.deposits_root,
+                registration.staged_root,
+                registration.withdrawals,
+                &registration.openings,
             )
             .unwrap();
         let prepared =
@@ -3339,30 +3423,60 @@ mod tests {
 
         let first_claim = first.external_claims.first().unwrap();
         assert_eq!(first_claim.position(), 0);
-        let first_payout = settlement
-            .claim_external_payout(first_finalized.batch_id, first_claim)
-            .unwrap();
         let second_claim = second.external_claims.first().unwrap();
         assert_eq!(second_claim.position(), 0);
         assert_ne!(second_finalized.batch_id, first_finalized.batch_id);
-        let second_payout = settlement
-            .claim_external_payout(second_finalized.batch_id, second_claim)
-            .unwrap();
+
+        // An unknown batch is an availability signal, never a verdict on the claim.
         assert_eq!(
             settlement
-                .claim_external_payout(second_finalized.batch_id, second_claim)
+                .claim_external_payout(
+                    BatchId::new(Sha256::hash(&[b"unknown-payout-batch"])),
+                    first_claim,
+                )
                 .unwrap(),
-            second_payout
+            crate::settlement::ClaimOutcome::Unavailable
         );
-        assert!(
+
+        // A claim adjudicated against the wrong finalized batch is definitively invalid.
+        assert_eq!(
             settlement
                 .claim_external_payout(first_finalized.batch_id, second_claim)
-                .is_err()
+                .unwrap(),
+            crate::settlement::ClaimOutcome::Invalid
         );
-        assert_eq!(
+        let first_payout = released(
             settlement
                 .claim_external_payout(first_finalized.batch_id, first_claim)
                 .unwrap(),
+        );
+        let second_payout = released(
+            settlement
+                .claim_external_payout(second_finalized.batch_id, second_claim)
+                .unwrap(),
+        );
+        assert_eq!(
+            released(
+                settlement
+                    .claim_external_payout(second_finalized.batch_id, second_claim)
+                    .unwrap(),
+            ),
+            second_payout
+        );
+
+        // A consumed position replays only for the exact recorded claim.
+        assert_eq!(
+            settlement
+                .claim_external_payout(first_finalized.batch_id, second_claim)
+                .unwrap(),
+            crate::settlement::ClaimOutcome::Invalid
+        );
+        assert_eq!(
+            released(
+                settlement
+                    .claim_external_payout(first_finalized.batch_id, first_claim)
+                    .unwrap(),
+            ),
             first_payout
         );
         assert_eq!(settlement.status().unwrap().claimable_balance, 0);
@@ -3383,13 +3497,15 @@ mod tests {
                 vec![first_opening.opening],
             )
             .unwrap();
+        let registration = operator.settlement_registration().unwrap();
         settlement
             .register_epoch(
-                data.epoch,
-                operator.registration.context.predecessor_liability(),
-                operator.registration.deposits.clone(),
-                operator.registration.withdrawals.clone(),
-                &operator.settlement_registration().unwrap().openings,
+                registration.epoch,
+                registration.predecessor_liability,
+                registration.deposits_root,
+                registration.staged_root,
+                registration.withdrawals,
+                &registration.openings,
             )
             .unwrap();
         let prepared =
@@ -3410,9 +3526,22 @@ mod tests {
 
         let first_claim = first.withdrawal_claims.first().unwrap();
         assert_eq!(first_claim.position(), 0);
-        let first_output = settlement
-            .claim_withdrawal(first_finalized.batch_id, first_claim)
-            .unwrap();
+
+        // An unknown batch is an availability signal, never a verdict on the claim.
+        assert_eq!(
+            settlement
+                .claim_withdrawal(
+                    BatchId::new(Sha256::hash(&[b"unknown-withdrawal-batch"])),
+                    first_claim,
+                )
+                .unwrap(),
+            crate::settlement::ClaimOutcome::Unavailable
+        );
+        let first_output = released(
+            settlement
+                .claim_withdrawal(first_finalized.batch_id, first_claim)
+                .unwrap(),
+        );
 
         operator.withdraw(1, amount(30)).unwrap();
         let second_account = operator.wallets[1].public_key();
@@ -3424,13 +3553,15 @@ mod tests {
                 vec![second_opening.opening],
             )
             .unwrap();
+        let registration = operator.settlement_registration().unwrap();
         settlement
             .register_epoch(
-                data.epoch,
-                operator.registration.context.predecessor_liability(),
-                operator.registration.deposits.clone(),
-                operator.registration.withdrawals.clone(),
-                &operator.settlement_registration().unwrap().openings,
+                registration.epoch,
+                registration.predecessor_liability,
+                registration.deposits_root,
+                registration.staged_root,
+                registration.withdrawals,
+                &registration.openings,
             )
             .unwrap();
         let prepared =
@@ -3448,24 +3579,33 @@ mod tests {
         let second_claim = second.withdrawal_claims.first().unwrap();
         assert_eq!(second_claim.position(), 0);
         assert_ne!(second_finalized.batch_id, first_finalized.batch_id);
-        let second_output = settlement
-            .claim_withdrawal(second_finalized.batch_id, second_claim)
-            .unwrap();
-        assert_eq!(
+        let second_output = released(
             settlement
                 .claim_withdrawal(second_finalized.batch_id, second_claim)
                 .unwrap(),
-            second_output
-        );
-        assert!(
-            settlement
-                .claim_withdrawal(first_finalized.batch_id, second_claim)
-                .is_err()
         );
         assert_eq!(
+            released(
+                settlement
+                    .claim_withdrawal(second_finalized.batch_id, second_claim)
+                    .unwrap(),
+            ),
+            second_output
+        );
+
+        // A consumed position replays only for the exact recorded claim.
+        assert_eq!(
             settlement
-                .claim_withdrawal(first_finalized.batch_id, first_claim)
+                .claim_withdrawal(first_finalized.batch_id, second_claim)
                 .unwrap(),
+            crate::settlement::ClaimOutcome::Invalid
+        );
+        assert_eq!(
+            released(
+                settlement
+                    .claim_withdrawal(first_finalized.batch_id, first_claim)
+                    .unwrap(),
+            ),
             first_output
         );
         assert_eq!(settlement.status().unwrap().claimable_balance, 0);
@@ -3552,13 +3692,15 @@ mod tests {
         settlement
             .queue_withdrawal(request, vec![opening.opening])
             .unwrap();
+        let registration = operator.settlement_registration().unwrap();
         settlement
             .register_epoch(
-                data.epoch,
-                operator.registration.context.predecessor_liability(),
-                operator.registration.deposits.clone(),
-                operator.registration.withdrawals.clone(),
-                &operator.settlement_registration().unwrap().openings,
+                registration.epoch,
+                registration.predecessor_liability,
+                registration.deposits_root,
+                registration.staged_root,
+                registration.withdrawals,
+                &registration.openings,
             )
             .unwrap();
         let prepared =
@@ -3587,88 +3729,381 @@ mod tests {
             .admit(SettlementSubmission::from(&result))
             .unwrap();
         assert_eq!(finalized.batch_id, batch_id);
-        let release = settlement
-            .claim_withdrawal(evidence.batch_id, &evidence.claim)
-            .unwrap();
+        let release = released(
+            settlement
+                .claim_withdrawal(evidence.batch_id, &evidence.claim)
+                .unwrap(),
+        );
         assert_eq!(release.amount(), 25);
         assert_eq!(release.destination().as_ref(), b"Alice");
         assert_eq!(&release, evidence.claim.output());
         assert_eq!(
-            settlement
-                .claim_withdrawal(evidence.batch_id, &evidence.claim)
-                .unwrap(),
+            released(
+                settlement
+                    .claim_withdrawal(evidence.batch_id, &evidence.claim)
+                    .unwrap(),
+            ),
             release
         );
     }
 
     #[test]
-    fn exact_offset_is_rejected_at_staging_and_queueing_but_close_composes() {
-        let mut first_operator = operator();
-        let staged = first_operator.deposit(0, 10).unwrap();
-        let event = DepositEvent {
-            id: staged.id,
-            account: staged.account,
-            amount: staged.amount,
+    fn exact_offset_deposit_defers_and_settles_in_the_next_epoch() {
+        let mut operator = operator();
+        let mut settlement = crate::settlement::Settlement::new().unwrap();
+        let account = operator.wallets[0].public_key();
+        let deposit_deadline = crate::protocol::settlement_config()
+            .deposit_inclusion_timeout
+            .get();
+        let event = |label: &'static [u8], amount: u64| DepositEvent {
+            id: Sha256::hash(&[label]),
+            account: account.clone(),
+            amount,
         };
-        let mut settlement = crate::settlement::Settlement::new().unwrap();
-        settlement.deposit(event).unwrap();
 
-        // The operator refuses to carry the offset shape, and the settlement queue
-        // refuses to defer it, so neither intake can wedge a registration.
-        let error = first_operator
-            .withdraw(0, amount(10))
-            .err()
-            .expect("exact-offset staging must be refused");
-        assert!(format!("{error:#}").contains("exactly offset"));
-        let offset = SignedWithdrawal::sign(
-            first_operator.protocol.deployment(),
-            settlement.status().unwrap().state_root.digest,
-            Bytes::from_static(b"Alice"),
-            amount(10),
-            50,
-            first_operator.wallets[0].signer(),
+        // The verified honest sequence: deposit 3, carried withdrawal Amount(7), then
+        // deposit 4. Settlement takes custody first, so the operator must credit every
+        // recorded event without refusing any shape.
+        let first = event(b"honest-offset-deposit-3", 3);
+        settlement.deposit(first.clone()).unwrap();
+        operator.apply_deposit(first).unwrap();
+        operator.withdraw(0, amount(7)).unwrap();
+        let second = event(b"honest-offset-deposit-4", 4);
+        settlement.deposit(second.clone()).unwrap();
+        let staged = operator.apply_deposit(second).unwrap();
+        assert_eq!(staged.epoch, 1);
+
+        // The deferring aggregate is unspendable during the deferring epoch: this close's
+        // row for the account carries no deposit.
+        assert_eq!(operator.payment_quote(&account).unwrap().state.balance, 93);
+        assert!(operator.pay(0, 1, 94).is_err());
+        operator.pay(0, 1, 5).unwrap();
+
+        // Registration succeeds with the whole aggregate deferred: the committed boundary
+        // is empty and the staged view matches settlement's custody record.
+        let registration = operator.settlement_registration().unwrap();
+        assert_eq!(
+            registration.deposits_root,
+            DepositBatch::<Key>::empty().root::<Sha256>().unwrap()
         );
-        let error = settlement.queue_withdrawal(offset, Vec::new()).unwrap_err();
-        assert!(format!("{error:#}").contains("exactly offset"));
-
-        let mut second_operator = operator();
-        let account = second_operator.wallets[0].public_key();
-        let opening = second_operator.withdrawal_opening(&account).unwrap();
-        second_operator
-            .withdraw(0, WithdrawalAction::Close)
-            .unwrap();
-        let staged = second_operator.deposit(0, 1).unwrap();
-        let request = second_operator.store.load_current().unwrap().withdrawals[0]
-            .request
-            .clone();
-        let mut settlement = crate::settlement::Settlement::new().unwrap();
         settlement
-            .queue_withdrawal(request, vec![opening.opening])
+            .register_epoch(
+                registration.epoch,
+                registration.predecessor_liability,
+                registration.deposits_root,
+                registration.staged_root,
+                registration.withdrawals,
+                &registration.openings,
+            )
             .unwrap();
+        rotate_epoch(&mut operator, 0);
+
+        // The close worker loads the frozen epoch after cutover, so the deferral must
+        // re-derive from the parked rows alone.
+        let frozen = operator.store.epoch_reader().load(0).unwrap();
+        let recovered = registration_for(&operator.protocol, &frozen).unwrap();
+        let prepared = prepare_epoch(&operator.protocol, frozen, recovered).unwrap();
+        let first_close = operator
+            .protocol
+            .complete(prepared, &mut TestRng::new(51))
+            .unwrap();
+        let first_finalized = settlement
+            .admit(SettlementSubmission::from(&first_close))
+            .unwrap();
+
+        // The rehearsal staged the deferred aggregate too, so it reproduces the
+        // authoritative finalization exactly, custody included.
+        assert_eq!(first_finalized, first_close.finalized);
+        operator
+            .store
+            .finish_close(&first_close, operator.genesis_root)
+            .unwrap();
+        let release = released(
+            settlement
+                .claim_withdrawal(first_finalized.batch_id, &first_close.withdrawal_claims[0])
+                .unwrap(),
+        );
+        assert_eq!(release.amount(), 7);
+
+        // The deferred aggregate lands staged and spendable in the successor epoch.
+        assert_eq!(operator.payment_quote(&account).unwrap().state.balance, 95);
+        let registration = operator.settlement_registration().unwrap();
+        assert_eq!(registration.epoch, 1);
+        settlement
+            .register_epoch(
+                registration.epoch,
+                registration.predecessor_liability,
+                registration.deposits_root,
+                registration.staged_root,
+                registration.withdrawals,
+                &registration.openings,
+            )
+            .unwrap();
+        let data = operator.store.load_current().unwrap();
+        let prepared =
+            prepare_epoch(&operator.protocol, data, operator.registration.clone()).unwrap();
+        rotate_epoch(&mut operator, 1);
+        let second_close = operator
+            .protocol
+            .complete(prepared, &mut TestRng::new(52))
+            .unwrap();
+        let second_finalized = settlement
+            .admit(SettlementSubmission::from(&second_close))
+            .unwrap();
+        assert_eq!(second_finalized, second_close.finalized);
+        operator
+            .store
+            .finish_close(&second_close, operator.genesis_root)
+            .unwrap();
+
+        // The deferral consumed one close of deadline headroom and the demo geometry
+        // still lands the deposit well before its inclusion deadline.
+        let status = settlement.status().unwrap();
+        assert!(!status.hard_faulted);
+        assert!(status.now < deposit_deadline);
+    }
+
+    #[test]
+    fn exact_offset_withdrawal_defers_at_intake() {
+        let mut operator = operator();
+        let account = operator.wallets[0].public_key();
+        operator.deposit(0, 7).unwrap();
+        assert_eq!(operator.payment_quote(&account).unwrap().state.balance, 107);
+
+        operator.withdraw(0, amount(7)).unwrap();
+        assert_eq!(operator.payment_quote(&account).unwrap().state.balance, 93);
+        assert_eq!(operator.registration.deposits.amount_for(&account), 0);
+        assert_eq!(operator.registration.deferred.amount_for(&account), 7);
+    }
+
+    #[test]
+    fn growing_aggregate_returns_a_parked_deposit_to_its_epoch() {
+        let mut operator = operator();
+        let account = operator.wallets[0].public_key();
+        operator.deposit(0, 7).unwrap();
+        operator.withdraw(0, amount(7)).unwrap();
+        assert_eq!(operator.payment_quote(&account).unwrap().state.balance, 93);
+
+        // The grown aggregate no longer offsets the withdrawal exactly, so the whole
+        // aggregate returns to this epoch's boundary with its credit.
+        operator.deposit(0, 5).unwrap();
+        assert_eq!(operator.payment_quote(&account).unwrap().state.balance, 105);
+        assert_eq!(operator.registration.deposits.amount_for(&account), 12);
+        assert!(operator.registration.deferred.is_empty());
+    }
+
+    #[test]
+    fn growing_aggregate_returns_a_re_parked_carried_deposit() {
+        let mut operator = operator();
+        let account = operator.wallets[0].public_key();
+        operator.deposit(0, 7).unwrap();
+        operator.withdraw(0, amount(7)).unwrap();
+        let data = operator.store.load_current().unwrap();
+        let prepared =
+            prepare_epoch(&operator.protocol, data, operator.registration.clone()).unwrap();
+        rotate_epoch(&mut operator, 0);
+        operator
+            .finish_prepared(prepared, &mut TestRng::new(57))
+            .unwrap();
+        assert_eq!(operator.payment_quote(&account).unwrap().state.balance, 100);
+
+        // A carried exact offset parks the carried-in aggregate again, and a later
+        // deposit that breaks the offset returns it whole with its origin intact.
+        operator.withdraw(0, amount(7)).unwrap();
+        assert_eq!(operator.payment_quote(&account).unwrap().state.balance, 86);
+        assert_eq!(operator.registration.deferred.amount_for(&account), 7);
+        operator.deposit(0, 5).unwrap();
+        assert_eq!(operator.payment_quote(&account).unwrap().state.balance, 98);
+        assert_eq!(operator.registration.deposits.amount_for(&account), 12);
+        assert!(operator.registration.deferred.is_empty());
+    }
+
+    #[test]
+    fn parked_deposit_survives_operator_restart() {
+        let database = TempDatabase::new();
+        let account = wallets()[0].public_key();
+        {
+            let mut operator =
+                Operator::open(database.path(), NonZeroUsize::new(2).unwrap()).unwrap();
+            operator.deposit(0, 7).unwrap();
+            operator.withdraw(0, amount(7)).unwrap();
+        }
+
+        let operator = Operator::open(database.path(), NonZeroUsize::new(2).unwrap()).unwrap();
+        assert_eq!(operator.registration.deferred.amount_for(&account), 7);
+        assert_eq!(operator.payment_quote(&account).unwrap().state.balance, 93);
+    }
+
+    #[test]
+    fn offsetable_withdrawal_must_be_coverable_without_the_aggregate() {
+        let mut operator = operator();
+        let account = operator.wallets[0].public_key();
+        operator.deposit(0, 5).unwrap();
+
+        // A later deposit could grow the aggregate into an exact offset, deferring it
+        // whole, so the amount must stay coverable without the aggregate.
+        let error = operator
+            .withdraw(0, amount(101))
+            .err()
+            .expect("an offsetable underfunded withdrawal must be refused");
+        assert!(
+            format!("{error:#}").contains("without its deposit aggregate"),
+            "unexpected error: {error:#}"
+        );
+        assert_eq!(operator.payment_quote(&account).unwrap().state.balance, 105);
+        operator.withdraw(0, amount(100)).unwrap();
+        assert_eq!(operator.payment_quote(&account).unwrap().state.balance, 5);
+    }
+
+    #[test]
+    fn queued_exact_offset_re_defers_the_carried_aggregate() {
+        let mut operator = operator();
+        let mut settlement = crate::settlement::Settlement::new().unwrap();
+        let account = operator.wallets[0].public_key();
+        let deposit_deadline = crate::protocol::settlement_config()
+            .deposit_inclusion_timeout
+            .get();
+        let register = |settlement: &mut crate::settlement::Settlement, operator: &mut Operator| {
+            let registration = operator.settlement_registration().unwrap();
+            settlement
+                .register_epoch(
+                    registration.epoch,
+                    registration.predecessor_liability,
+                    registration.deposits_root,
+                    registration.staged_root,
+                    registration.withdrawals,
+                    &registration.openings,
+                )
+                .unwrap();
+        };
+        let close = |settlement: &mut crate::settlement::Settlement,
+                     operator: &mut Operator,
+                     epoch: u64,
+                     seed: u64| {
+            rotate_epoch(operator, epoch);
+            let frozen = operator.store.epoch_reader().load(epoch).unwrap();
+            let recovered = registration_for(&operator.protocol, &frozen).unwrap();
+            let prepared = prepare_epoch(&operator.protocol, frozen, recovered).unwrap();
+            let result = operator
+                .protocol
+                .complete(prepared, &mut TestRng::new(seed))
+                .unwrap();
+            let finalized = settlement
+                .admit(SettlementSubmission::from(&result))
+                .unwrap();
+            assert_eq!(finalized, result.finalized);
+            operator
+                .store
+                .finish_close(&result, operator.genesis_root)
+                .unwrap();
+            result
+        };
+
+        // The deposit parks under a carried exact-offset withdrawal and lands in the
+        // successor epoch.
         let event = DepositEvent {
-            id: staged.id,
-            account: staged.account,
-            amount: staged.amount,
+            id: Sha256::hash(&[b"re-deferral-deposit"]),
+            account: account.clone(),
+            amount: 7,
         };
         settlement.deposit(event.clone()).unwrap();
-        settlement.confirm_deposit(&event).unwrap();
+        operator.apply_deposit(event).unwrap();
+        operator.withdraw(0, amount(7)).unwrap();
+        register(&mut settlement, &mut operator);
+        let first_close = close(&mut settlement, &mut operator, 0, 54);
+        assert_eq!(operator.payment_quote(&account).unwrap().state.balance, 100);
 
-        let mut third_operator = operator();
-        let staged = third_operator.deposit(0, 1).unwrap();
-        let event = DepositEvent {
-            id: staged.id,
-            account: staged.account,
-            amount: staged.amount,
-        };
-        let opening = third_operator.withdrawal_opening(&account).unwrap();
-        third_operator.withdraw(0, WithdrawalAction::Close).unwrap();
-        let request = third_operator.store.load_current().unwrap().withdrawals[0]
-            .request
-            .clone();
-        let mut settlement = crate::settlement::Settlement::new().unwrap();
-        settlement.deposit(event).unwrap();
+        // A QUEUED withdrawal exactly offsets the carried-in aggregate in its landing
+        // epoch. The chain accepts and defers again, so the operator must represent the
+        // shape, and the aggregate parks onward instead of wedging the registration.
+        let opening = operator.withdrawal_opening(&account).unwrap();
+        let queued = SignedWithdrawal::sign(
+            operator.protocol.deployment(),
+            opening.root.digest,
+            Bytes::from_static(b"Alice"),
+            amount(7),
+            50,
+            operator.wallets[0].signer(),
+        );
         settlement
-            .queue_withdrawal(request, vec![opening.opening])
+            .queue_withdrawal(queued.clone(), vec![opening.opening])
+            .unwrap();
+        operator.apply_withdrawal(queued).unwrap();
+        assert_eq!(operator.payment_quote(&account).unwrap().state.balance, 86);
+        assert_eq!(operator.registration.deferred.amount_for(&account), 7);
+        register(&mut settlement, &mut operator);
+        let second_close = close(&mut settlement, &mut operator, 1, 55);
+
+        // The twice-deferred deposit lands spendable two epochs after intake and is
+        // included well before its inclusion deadline in the demo geometry.
+        assert_eq!(operator.payment_quote(&account).unwrap().state.balance, 93);
+        assert_eq!(operator.registration.deposits.amount_for(&account), 7);
+        register(&mut settlement, &mut operator);
+        close(&mut settlement, &mut operator, 2, 56);
+        let status = settlement.status().unwrap();
+        assert!(!status.hard_faulted);
+        assert!(status.now < deposit_deadline);
+
+        // Both withdrawal reserves release.
+        for result in [&first_close, &second_close] {
+            let release = released(
+                settlement
+                    .claim_withdrawal(result.finalized.batch_id, &result.withdrawal_claims[0])
+                    .unwrap(),
+            );
+            assert_eq!(release.amount(), 7);
+        }
+    }
+
+    #[test]
+    fn hidden_staged_divergence_is_rejected_at_registration_until_the_credit_heals() {
+        let mut operator = operator();
+        let mut settlement = crate::settlement::Settlement::new().unwrap();
+        let account = operator.wallets[0].public_key();
+
+        // Settlement records custody the operator never credited, and the carried
+        // withdrawal exactly offsets the unseen aggregate: both derived boundaries
+        // exclude the account, so only the staged view can expose the divergence.
+        let event = DepositEvent {
+            id: Sha256::hash(&[b"hidden-divergence-deposit"]),
+            account,
+            amount: 7,
+        };
+        settlement.deposit(event.clone()).unwrap();
+        operator.withdraw(0, amount(7)).unwrap();
+        let registration = operator.settlement_registration().unwrap();
+        assert_eq!(
+            registration.deposits_root,
+            DepositBatch::<Key>::empty().root::<Sha256>().unwrap()
+        );
+        let error = settlement
+            .register_epoch(
+                registration.epoch,
+                registration.predecessor_liability,
+                registration.deposits_root,
+                registration.staged_root,
+                registration.withdrawals,
+                &registration.openings,
+            )
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("operator staged deposits differ from settlement"),
+            "unexpected error: {error:#}"
+        );
+
+        // The wallet's credit retry heals the view and registration proceeds with the
+        // aggregate deferred on both sides.
+        operator.apply_deposit(event).unwrap();
+        let registration = operator.settlement_registration().unwrap();
+        settlement
+            .register_epoch(
+                registration.epoch,
+                registration.predecessor_liability,
+                registration.deposits_root,
+                registration.staged_root,
+                registration.withdrawals,
+                &registration.openings,
+            )
             .unwrap();
     }
 
@@ -3743,13 +4178,15 @@ mod tests {
         operator.pay(0, 1, 1).unwrap();
         let data = operator.store.load_current().unwrap();
         let mut settlement = crate::settlement::Settlement::new().unwrap();
+        let registration = operator.settlement_registration().unwrap();
         settlement
             .register_epoch(
-                data.epoch,
-                operator.registration.context.predecessor_liability(),
-                operator.registration.deposits.clone(),
-                operator.registration.withdrawals.clone(),
-                &operator.settlement_registration().unwrap().openings,
+                registration.epoch,
+                registration.predecessor_liability,
+                registration.deposits_root,
+                registration.staged_root,
+                registration.withdrawals,
+                &registration.openings,
             )
             .unwrap();
         let prepared =

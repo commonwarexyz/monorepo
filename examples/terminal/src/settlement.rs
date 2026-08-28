@@ -16,8 +16,8 @@ use commonware_clearing::bajillion::{
     challenge::{StateOpening, Verdict},
     commitment::VectorRoot,
     settlement::{
-        DepositRefund, FinalizedBatch, HardFaultRelease, HardFaultSettlement, SettlementChain,
-        SettlementError,
+        ClaimError, DepositRefund, FinalizedBatch, HardFaultRelease, HardFaultSettlement,
+        SettlementChain, SettlementError,
     },
     state::{AccountState, StateLeaf},
     transition::{
@@ -41,6 +41,7 @@ type ClaimedPayout = (ExternalPayoutClaim<Key, Digest>, ExternalPayout<Key>);
 type ProvenChallenge = (Bytes, Verdict);
 type HardFaultClaimKey = (Digest, u32);
 type HardFaultClaim = (StateOpening<Key, Digest>, HardFaultRelease<Key>);
+
 type FinalizedAdmission = (SettlementSubmission, FinalizedBatch<Digest>);
 
 /// Bounded response-loss replay state. The map and insertion order are updated together so
@@ -97,6 +98,47 @@ pub(crate) enum AdmissionOutcome {
     Finalized(FinalizedBatch<Digest>),
 }
 
+/// One finalized-batch claim resolution, split by whether the exact claim can ever succeed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ClaimOutcome<T> {
+    /// The claim was released against a finalized batch.
+    Released(T),
+    /// The batch is not claimable now. It may simply not have finalized yet, so the exact
+    /// claim must be retried later and never discarded.
+    Unavailable,
+    /// The claim was adjudicated against an immutable finalized batch and rejected. The
+    /// verdict can never change, so the claimant must discard the claim.
+    Invalid,
+}
+
+/// Maps one chain claim rejection onto the retry contract: an unavailable batch is the only
+/// state-dependent answer, and every adjudicated rejection is final for the exact claim.
+fn claim_rejection<T>(error: ClaimError) -> ClaimOutcome<T> {
+    match error {
+        ClaimError::Unavailable => ClaimOutcome::Unavailable,
+        ClaimError::Consumed | ClaimError::Reserve | ClaimError::Proof(_) => ClaimOutcome::Invalid,
+    }
+}
+
+/// The claim roots of one finalized batch.
+///
+/// Wallets verify claim evidence locally against these roots, so the record must outlive
+/// the chain's claimable reserve, which drains once every claim is consumed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ClaimRoots {
+    pub(crate) withdrawal_outputs: VectorRoot<Digest>,
+    pub(crate) change: VectorRoot<Digest>,
+}
+
+/// Whether settlement holds a custody record for one exact deposit event.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DepositPresence {
+    /// The exact event is recorded, so its custody moved.
+    Recorded,
+    /// The id is unknown, so no custody moved and the event is safe to abandon.
+    Unknown,
+}
+
 impl From<&SettlementResult> for SettlementSubmission {
     fn from(result: &SettlementResult) -> Self {
         Self {
@@ -117,6 +159,9 @@ pub(crate) struct SettlementStatus {
     pub(crate) now: u64,
     pub(crate) deployment: Digest,
     pub(crate) state_root: VectorRoot<Digest>,
+    /// Highest finalized epoch. Epochs finalize in order, so the state root covers every
+    /// epoch at or below it.
+    pub(crate) last_finalized: Option<u64>,
     pub(crate) custody_balance: u64,
     pub(crate) claimable_balance: u64,
     pub(crate) hard_faulted: bool,
@@ -126,7 +171,9 @@ pub(crate) struct SettlementStatus {
 struct RegisteredEpoch {
     epoch: u64,
     predecessor_liability: u64,
+    anchor: Digest,
     deposits: DepositBatch<Key>,
+    staged_root: VectorRoot<Digest>,
     withdrawals: WithdrawalBatch<Key, Digest>,
     admitted: Option<SettlementSubmission>,
 }
@@ -143,7 +190,10 @@ pub(crate) struct Settlement {
     liveness_clock: Option<LivenessClock>,
     registered: Option<RegisteredEpoch>,
     deposits: BTreeMap<Digest, DepositEvent>,
-    last_finalized_epoch: Option<u64>,
+    /// The claim roots of every finalized batch, about 100 bytes per epoch. Claims stay
+    /// claimable indefinitely and claimants verify operator-served evidence against these
+    /// roots, so unlike the bounded replay caches this record is never evicted.
+    finalized_batches: BTreeMap<BatchId<Digest>, ClaimRoots>,
     finalized_replays: ReplayCache<u64, FinalizedAdmission>,
     challenge_replays: ReplayCache<BatchId<Digest>, ProvenChallenge>,
     withdrawal_replays: BTreeMap<WithdrawalClaimKey, ClaimedWithdrawal>,
@@ -160,11 +210,18 @@ const fn eligible(destination: &Bytes) -> bool {
 
 impl Settlement {
     pub(crate) fn new() -> Result<Self> {
-        Self::with_config(settlement_config())
+        Self::with_config(settlement_config(), 0)
+    }
+
+    /// Opens a settlement whose first boundary epoch is `epoch`, for horizon tests.
+    #[cfg(test)]
+    pub(crate) fn at_epoch(epoch: u64) -> Result<Self> {
+        Self::with_config(settlement_config(), epoch)
     }
 
     fn with_config(
         config: commonware_clearing::bajillion::settlement::SettlementConfig,
+        epoch: u64,
     ) -> Result<Self> {
         let finalized_replays = config.max_pending_epochs;
         let challenge_replays = config.max_pending_epochs;
@@ -189,7 +246,7 @@ impl Settlement {
             operator_key(),
             committee()?,
             &state,
-            0,
+            epoch,
             config,
         )
         .context("construct settlement chain")?;
@@ -199,7 +256,7 @@ impl Settlement {
             liveness_clock: None,
             registered: None,
             deposits: BTreeMap::new(),
-            last_finalized_epoch: None,
+            finalized_batches: BTreeMap::new(),
             finalized_replays: ReplayCache::new(finalized_replays),
             challenge_replays: ReplayCache::new(challenge_replays),
             withdrawal_replays: BTreeMap::new(),
@@ -262,7 +319,13 @@ impl Settlement {
             .context("finalize close on settlement")?;
         self.liveness_clock = None;
         self.registered = None;
-        self.last_finalized_epoch = Some(submission.epoch);
+        self.finalized_batches.insert(
+            finalized.batch_id,
+            ClaimRoots {
+                withdrawal_outputs: submission.roots.withdrawal_outputs,
+                change: submission.roots.change,
+            },
+        );
         self.finalized_replays
             .insert(submission.epoch, (submission, finalized));
         Ok(true)
@@ -310,14 +373,27 @@ impl Settlement {
 
     pub(crate) fn status(&mut self) -> Result<SettlementStatus> {
         self.observe_time()?;
+
+        // The root and the finality horizon come from the chain's one coherent fact, so
+        // the pair served to wallets can never desync.
         Ok(SettlementStatus {
             now: self.now,
             deployment: deployment(),
             state_root: self.chain.current_state_root(),
+            last_finalized: self.chain.expected_epoch().checked_sub(1),
             custody_balance: self.chain.custody_balance(),
             claimable_balance: self.chain.claimable_balance(),
             hard_faulted: self.chain.hard_fault().is_some(),
         })
+    }
+
+    /// Returns the claim roots of a finalized batch, or `None` while it is unknown.
+    ///
+    /// An unknown batch is an availability signal, never a verdict: the batch may simply
+    /// not have finalized yet.
+    pub(crate) fn claim_roots(&mut self, batch_id: BatchId<Digest>) -> Result<Option<ClaimRoots>> {
+        self.observe_time()?;
+        Ok(self.finalized_batches.get(&batch_id).copied())
     }
 
     pub(crate) fn deposit(&mut self, event: DepositEvent) -> Result<()> {
@@ -339,7 +415,7 @@ impl Settlement {
             self.registered.is_none(),
             "the next settlement epoch is already registered"
         );
-        ensure_balance_intake_horizon(self.next_boundary_epoch()?)?;
+        ensure_balance_intake_horizon(self.next_boundary_epoch())?;
 
         // The example operator persists monetary values in SQLite INTEGER columns. Apply that
         // deployment-wide domain before settlement takes custody so operator credit cannot fail.
@@ -353,20 +429,6 @@ impl Settlement {
             holdings <= SQLITE_U64_MAX,
             "deposit exceeds the operator storage domain"
         );
-        if let Some(withdrawal) = self.chain.pending_withdrawals().request_for(&event.account) {
-            let deposited = self
-                .chain
-                .pending_deposits()
-                .amount_for(&event.account)
-                .checked_add(event.amount)
-                .context("account deposit total overflow")?;
-            if let WithdrawalAction::Amount(amount) = withdrawal.body().action() {
-                ensure!(
-                    amount.get() != deposited,
-                    "this terminal does not defer an exactly offset deposit"
-                );
-            }
-        }
         self.chain
             .record_deposit(self.now, event.id, event.account.clone(), event.amount)
             .context("record custody deposit")?;
@@ -375,23 +437,27 @@ impl Settlement {
         Ok(())
     }
 
-    pub(crate) fn confirm_deposit(&mut self, event: &DepositEvent) -> Result<()> {
+    pub(crate) fn confirm_deposit(&mut self, event: &DepositEvent) -> Result<DepositPresence> {
         self.observe_time()?;
         ensure!(
             self.chain.hard_fault().is_none(),
             "settlement deployment is permanently hard-faulted"
         );
-        let existing = self
-            .deposits
-            .get(&event.id)
-            .context("deposit is not recorded by settlement")?;
+        let Some(existing) = self.deposits.get(&event.id) else {
+            return Ok(DepositPresence::Unknown);
+        };
         ensure!(
             existing.account == event.account && existing.amount == event.amount,
             "deposit id was recorded for another event"
         );
-        Ok(())
+        Ok(DepositPresence::Recorded)
     }
 
+    /// Confirms one payment context is the live registration.
+    ///
+    /// Only the live submit path needs this gate. A send resolved after its epoch was cut
+    /// concludes commitment from a finalized state root instead, which is post-registration
+    /// by definition, so no finalized history is served here.
     pub(crate) fn confirm_registration(
         &mut self,
         epoch: u64,
@@ -406,17 +472,10 @@ impl Settlement {
         let registered = self
             .registered
             .as_ref()
+            .filter(|registered| registered.epoch == epoch)
             .context("payment registration is no longer live")?;
-        let context = epoch_context(
-            registered.epoch,
-            &registered.deposits,
-            &registered.withdrawals,
-            registered.predecessor_liability,
-        )?;
         ensure!(
-            registered.epoch == epoch
-                && context.payment().anchor() == anchor
-                && self.chain.current_state_root() == *state_root,
+            registered.anchor == *anchor && self.chain.current_state_root() == *state_root,
             "payment registration does not match"
         );
         Ok(())
@@ -440,17 +499,10 @@ impl Settlement {
             self.registered.is_none(),
             "the next settlement epoch is already registered"
         );
-        let epoch = self.next_boundary_epoch()?;
+        let epoch = self.next_boundary_epoch();
         match request.body().action() {
             WithdrawalAction::Amount(_) => ensure_amount_withdrawal_horizon(epoch)?,
             WithdrawalAction::Close => ensure_close_horizon(epoch)?,
-        }
-        let deposited = self.chain.pending_deposits().amount_for(request.account());
-        if let WithdrawalAction::Amount(amount) = request.body().action() {
-            ensure!(
-                amount.get() != deposited,
-                "this terminal does not defer an exactly offset deposit"
-            );
         }
         self.chain
             .queue_withdrawal(self.now, request, &openings, eligible)
@@ -463,7 +515,8 @@ impl Settlement {
         &mut self,
         epoch: u64,
         predecessor_liability: u64,
-        deposits: DepositBatch<Key>,
+        deposits_root: VectorRoot<Digest>,
+        staged_root: VectorRoot<Digest>,
         withdrawals: WithdrawalBatch<Key, Digest>,
         openings: &[StateOpening<Key, Digest>],
     ) -> Result<()> {
@@ -473,15 +526,20 @@ impl Settlement {
             .as_ref()
             .filter(|entry| entry.epoch == epoch)
         {
+            let registered_root = existing
+                .deposits
+                .root::<Sha256>()
+                .context("commit registered deposit boundary")?;
             ensure!(
                 existing.predecessor_liability == predecessor_liability
-                    && existing.deposits == deposits
+                    && registered_root == deposits_root
+                    && existing.staged_root == staged_root
                     && existing.withdrawals == withdrawals,
                 "epoch registration changed after it was accepted"
             );
             return Ok(());
         }
-        let expected = self.next_boundary_epoch()?;
+        let expected = self.next_boundary_epoch();
         ensure!(
             epoch == expected,
             "settlement boundary epoch is not consecutive"
@@ -491,8 +549,31 @@ impl Settlement {
             self.registered.is_none(),
             "another payment context is already registered"
         );
+
+        // The full staged view must agree before the boundary is derived: a deferral
+        // hides its account from both derived boundaries, so root equality alone cannot
+        // see a deposit the operator never credited.
+        let staged = self.chain.boundary_deposits(&WithdrawalBatch::empty());
         ensure!(
-            self.chain.pending_deposits() == deposits,
+            staged
+                .root::<Sha256>()
+                .context("commit staged deposit view")?
+                == staged_root,
+            "operator staged deposits differ from settlement"
+        );
+
+        // The canonical boundary is settlement's own custody record with the chain's
+        // deferral rule applied: a carried extra that exactly offsets a staged deposit
+        // defers that deposit to a successor epoch. The operator commits the root of the
+        // boundary it built its context from, so a diverging deposit view (for example, a
+        // lost operator credit) is rejected here without consuming the registration slot,
+        // instead of registering an epoch that could never be admitted.
+        let deposits = self.chain.boundary_deposits(&withdrawals);
+        let derived_root = deposits
+            .root::<Sha256>()
+            .context("commit derived deposit boundary")?;
+        ensure!(
+            derived_root == deposits_root,
             "operator deposit boundary differs from settlement"
         );
 
@@ -521,11 +602,11 @@ impl Settlement {
             })
             .collect::<Result<Vec<_>>>()?;
         let context = epoch_context(epoch, &deposits, &withdrawals, predecessor_liability)?;
+        let anchor = *context.payment().anchor();
         self.chain
             .register_epoch(
                 self.now,
                 context,
-                deposits.clone(),
                 withdrawals.clone(),
                 &extra_openings,
                 eligible,
@@ -534,7 +615,9 @@ impl Settlement {
         self.registered = Some(RegisteredEpoch {
             epoch,
             predecessor_liability,
+            anchor,
             deposits,
+            staged_root,
             withdrawals,
             admitted: None,
         });
@@ -542,10 +625,8 @@ impl Settlement {
         Ok(())
     }
 
-    fn next_boundary_epoch(&self) -> Result<u64> {
-        self.last_finalized_epoch
-            .map_or(Some(0), |epoch| epoch.checked_add(1))
-            .context("settlement epoch overflow")
+    const fn next_boundary_epoch(&self) -> u64 {
+        self.chain.expected_epoch()
     }
 
     pub(crate) fn admit_submission(
@@ -561,8 +642,7 @@ impl Settlement {
             return Ok(AdmissionOutcome::Finalized(*finalized));
         }
         ensure!(
-            self.last_finalized_epoch
-                .is_none_or(|epoch| submission.epoch > epoch),
+            submission.epoch >= self.chain.expected_epoch(),
             "settlement admission replay expired"
         );
         let boundary = self
@@ -723,40 +803,50 @@ impl Settlement {
         &mut self,
         batch_id: BatchId<Digest>,
         claim: &WithdrawalClaim<Digest>,
-    ) -> Result<WithdrawalOutput> {
+    ) -> Result<ClaimOutcome<WithdrawalOutput>> {
         self.observe_time()?;
         let key = (batch_id, claim.position());
         if let Some((existing, release)) = self.withdrawal_replays.get(&key) {
-            ensure!(existing == claim, "withdrawal claim position was reused");
-            return Ok(release.clone());
+            if existing == claim {
+                return Ok(ClaimOutcome::Released(release.clone()));
+            }
+
+            // The recorded release consumed this position with different evidence, so this
+            // exact claim can never succeed.
+            return Ok(ClaimOutcome::Invalid);
         }
-        let release = self
-            .chain
-            .claim_withdrawal(batch_id, claim)
-            .context("claim finalized withdrawal")?;
+        let release = match self.chain.claim_withdrawal(batch_id, claim) {
+            Ok(release) => release,
+            Err(error) => return Ok(claim_rejection(error)),
+        };
         self.withdrawal_replays
             .insert(key, (claim.clone(), release.clone()));
-        Ok(release)
+        Ok(ClaimOutcome::Released(release))
     }
 
     pub(crate) fn claim_external_payout(
         &mut self,
         batch_id: BatchId<Digest>,
         claim: &ExternalPayoutClaim<Key, Digest>,
-    ) -> Result<ExternalPayout<Key>> {
+    ) -> Result<ClaimOutcome<ExternalPayout<Key>>> {
         self.observe_time()?;
         let key = (batch_id, claim.position());
         if let Some((existing, payout)) = self.payout_replays.get(&key) {
-            ensure!(existing == claim, "external payout position was reused");
-            return Ok(payout.clone());
+            if existing == claim {
+                return Ok(ClaimOutcome::Released(payout.clone()));
+            }
+
+            // The recorded release consumed this position with different evidence, so this
+            // exact claim can never succeed.
+            return Ok(ClaimOutcome::Invalid);
         }
-        let payout = self
-            .chain
-            .claim_external_payout(batch_id, claim)
-            .context("claim finalized external payout")?;
+        let payout = match self.chain.claim_external_payout(batch_id, claim) {
+            Ok(payout) => payout,
+            Err(error) => return Ok(claim_rejection(error)),
+        };
         self.payout_replays
             .insert(key, (claim.clone(), payout.clone()));
-        Ok(payout)
+        Ok(ClaimOutcome::Released(payout))
     }
 }
 
@@ -777,6 +867,10 @@ mod tests {
     use commonware_cryptography::{Hasher, Sha256};
     use commonware_utils::TestRng;
     use std::num::NonZeroU64;
+
+    fn empty_root() -> VectorRoot<Digest> {
+        DepositBatch::<Key>::empty().root::<Sha256>().unwrap()
+    }
 
     fn admission_fixture() -> (
         Settlement,
@@ -811,7 +905,14 @@ mod tests {
         let deposits =
             DepositBatch::new(vec![DepositRecord::new(account.clone(), 1).unwrap()]).unwrap();
         settlement
-            .register_epoch(0, 400, deposits.clone(), WithdrawalBatch::empty(), &[])
+            .register_epoch(
+                0,
+                400,
+                deposits.root::<Sha256>().unwrap(),
+                deposits.root::<Sha256>().unwrap(),
+                WithdrawalBatch::empty(),
+                &[],
+            )
             .unwrap();
 
         let predecessor_state = predecessor[0].state;
@@ -913,6 +1014,21 @@ mod tests {
         assert_eq!(
             settlement.admit_submission(submission.clone()).unwrap(),
             AdmissionOutcome::Finalized(finalized)
+        );
+
+        // Finalization retains the batch's claim roots forever, keyed by its identity.
+        assert_eq!(
+            settlement.claim_roots(finalized.batch_id).unwrap(),
+            Some(ClaimRoots {
+                withdrawal_outputs: result.roots.withdrawal_outputs,
+                change: result.roots.change,
+            })
+        );
+        assert_eq!(
+            settlement
+                .claim_roots(BatchId::new(Sha256::hash(&[b"unknown-claim-batch"])))
+                .unwrap(),
+            None
         );
 
         let mut conflicting = submission;
@@ -1032,7 +1148,10 @@ mod tests {
         };
         settlement.deposit(event.clone()).unwrap();
         settlement.deposit(event.clone()).unwrap();
-        settlement.confirm_deposit(&event).unwrap();
+        assert_eq!(
+            settlement.confirm_deposit(&event).unwrap(),
+            DepositPresence::Recorded
+        );
 
         let conflicting = DepositEvent { amount: 8, ..event };
         assert!(settlement.deposit(conflicting.clone()).is_err());
@@ -1051,7 +1170,10 @@ mod tests {
         };
 
         assert!(settlement.deposit(event.clone()).is_err());
-        assert!(settlement.confirm_deposit(&event).is_err());
+        assert_eq!(
+            settlement.confirm_deposit(&event).unwrap(),
+            DepositPresence::Unknown
+        );
         assert_eq!(
             settlement.status().unwrap().custody_balance,
             before.custody_balance
@@ -1062,10 +1184,24 @@ mod tests {
     fn epoch_registration_is_idempotent_and_rejects_late_custody_events() {
         let mut settlement = Settlement::new().unwrap();
         settlement
-            .register_epoch(0, 400, DepositBatch::empty(), WithdrawalBatch::empty(), &[])
+            .register_epoch(
+                0,
+                400,
+                empty_root(),
+                empty_root(),
+                WithdrawalBatch::empty(),
+                &[],
+            )
             .unwrap();
         settlement
-            .register_epoch(0, 400, DepositBatch::empty(), WithdrawalBatch::empty(), &[])
+            .register_epoch(
+                0,
+                400,
+                empty_root(),
+                empty_root(),
+                WithdrawalBatch::empty(),
+                &[],
+            )
             .unwrap();
         let event = DepositEvent {
             id: Sha256::hash(&[b"late-deposit"]),
@@ -1085,7 +1221,7 @@ mod tests {
         let admission_deadline = context.admission_deadline();
 
         settlement
-            .register_epoch(0, 400, deposits, withdrawals, &[])
+            .register_epoch(0, 400, empty_root(), empty_root(), withdrawals, &[])
             .unwrap();
 
         assert_eq!(
@@ -1116,7 +1252,7 @@ mod tests {
                 .is_err()
         );
         settlement
-            .register_epoch(0, 400, deposits, withdrawals, &[])
+            .register_epoch(0, 400, empty_root(), empty_root(), withdrawals, &[])
             .unwrap();
         for _ in 0..2 {
             settlement
@@ -1177,6 +1313,8 @@ mod tests {
             .confirm_registration(epoch, &anchor, &result.predecessor_root)
             .unwrap();
 
+        // Finalization retires the live slot. A send resolved after the cut concludes
+        // commitment from the finalized root instead of this query.
         settlement.advance_logical_time(1).unwrap();
         assert!(settlement.registered.is_none());
         assert!(
@@ -1184,6 +1322,7 @@ mod tests {
                 .confirm_registration(epoch, &anchor, &result.predecessor_root)
                 .is_err()
         );
+        assert_eq!(settlement.status().unwrap().last_finalized, Some(epoch));
     }
 
     #[test]
@@ -1213,9 +1352,20 @@ mod tests {
         assert_eq!(status.now, 2);
         assert!(!status.hard_faulted);
 
-        let deposits = settlement.chain.pending_deposits();
+        let deposits_root = settlement
+            .chain
+            .pending_deposits()
+            .root::<Sha256>()
+            .unwrap();
         settlement
-            .register_epoch(0, 400, deposits, WithdrawalBatch::empty(), &[])
+            .register_epoch(
+                0,
+                400,
+                deposits_root,
+                deposits_root,
+                WithdrawalBatch::empty(),
+                &[],
+            )
             .unwrap();
         assert_eq!(settlement.registered.as_ref().unwrap().epoch, 0);
     }
@@ -1256,9 +1406,122 @@ mod tests {
 
         let withdrawals = settlement.chain.pending_withdrawals();
         settlement
-            .register_epoch(0, 400, DepositBatch::empty(), withdrawals, &[])
+            .register_epoch(0, 400, empty_root(), empty_root(), withdrawals, &[])
             .unwrap();
         assert_eq!(settlement.registered.as_ref().unwrap().epoch, 0);
+    }
+
+    #[test]
+    fn divergent_deposit_boundary_is_rejected_without_consuming_the_slot() {
+        let mut settlement = Settlement::new().unwrap();
+        let event = DepositEvent {
+            id: Sha256::hash(&[b"lost-apply-window-deposit"]),
+            account: identities()[0].key.clone(),
+            amount: 7,
+        };
+        settlement.deposit(event).unwrap();
+
+        // An operator whose credit was lost still believes the boundary is empty. The
+        // divergent commitment fails cleanly and keeps the slot open.
+        let error = settlement
+            .register_epoch(
+                0,
+                400,
+                empty_root(),
+                empty_root(),
+                WithdrawalBatch::empty(),
+                &[],
+            )
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("operator staged deposits differ from settlement"),
+            "unexpected error: {error:#}"
+        );
+        assert!(settlement.registered.is_none());
+
+        // After the operator applies the deposit, its healed view registers the epoch.
+        let deposits_root = settlement
+            .chain
+            .pending_deposits()
+            .root::<Sha256>()
+            .unwrap();
+        settlement
+            .register_epoch(
+                0,
+                400,
+                deposits_root,
+                deposits_root,
+                WithdrawalBatch::empty(),
+                &[],
+            )
+            .unwrap();
+        assert_eq!(settlement.registered.as_ref().unwrap().epoch, 0);
+    }
+
+    #[test]
+    fn carried_offset_withdrawal_defers_the_staged_deposit_and_registers() {
+        let mut settlement = Settlement::new().unwrap();
+        let signers = wallets();
+        let account = signers[0].public_key();
+        settlement
+            .deposit(DepositEvent {
+                id: Sha256::hash(&[b"carried-offset-deposit"]),
+                account: account.clone(),
+                amount: 7,
+            })
+            .unwrap();
+
+        let mut leaves = identities()
+            .into_iter()
+            .map(|identity| StateLeaf {
+                account: identity.key,
+                state: AccountState {
+                    balance: INITIAL_BALANCE,
+                    active: true,
+                    ..AccountState::default()
+                },
+            })
+            .collect::<Vec<_>>();
+        leaves.sort_unstable_by(|left, right| left.account.cmp(&right.account));
+        let cache = StateCache::new::<Sha256>(leaves).unwrap();
+
+        // A carried extra exactly offsetting the staged deposit reaches the chain at
+        // registration. The chain defers the deposit to a successor epoch, and the
+        // boundary this epoch registers is empty.
+        let carried = SignedWithdrawal::sign(
+            deployment(),
+            cache.root().digest,
+            Bytes::from_static(b"carried-offset-withdrawal"),
+            WithdrawalAction::Amount(NonZeroU64::new(7).unwrap()),
+            50,
+            signers[0].signer(),
+        );
+        let withdrawals = WithdrawalBatch::new(vec![carried]).unwrap();
+        assert_eq!(
+            settlement
+                .chain
+                .boundary_deposits(&withdrawals)
+                .root::<Sha256>()
+                .unwrap(),
+            empty_root()
+        );
+        let staged_root = settlement
+            .chain
+            .boundary_deposits(&WithdrawalBatch::empty())
+            .root::<Sha256>()
+            .unwrap();
+        settlement
+            .register_epoch(
+                0,
+                400,
+                empty_root(),
+                staged_root,
+                withdrawals,
+                &[cache.opening(&account).unwrap()],
+            )
+            .unwrap();
+        assert_eq!(settlement.registered.as_ref().unwrap().epoch, 0);
+        assert_eq!(settlement.chain.pending_deposits().amount_for(&account), 7);
     }
 
     #[test]
@@ -1293,7 +1556,14 @@ mod tests {
             .unwrap();
 
         let error = settlement
-            .register_epoch(0, 400, DepositBatch::empty(), WithdrawalBatch::empty(), &[])
+            .register_epoch(
+                0,
+                400,
+                empty_root(),
+                empty_root(),
+                WithdrawalBatch::empty(),
+                &[],
+            )
             .unwrap_err();
         assert!(
             format!("{error:#}").contains("omits a queued settlement withdrawal"),
@@ -1314,7 +1584,7 @@ mod tests {
         // The carried extra registers only with a predecessor-root opening proving it
         // certifiable. The queued request needs none.
         let error = settlement
-            .register_epoch(0, 400, DepositBatch::empty(), withdrawals.clone(), &[])
+            .register_epoch(0, 400, empty_root(), empty_root(), withdrawals.clone(), &[])
             .unwrap_err();
         assert!(
             format!("{error:#}").contains("missing an opening"),
@@ -1324,7 +1594,8 @@ mod tests {
             .register_epoch(
                 0,
                 400,
-                DepositBatch::empty(),
+                empty_root(),
+                empty_root(),
                 withdrawals,
                 &[cache.opening(&carried_account).unwrap()],
             )
@@ -1353,7 +1624,14 @@ mod tests {
             .unwrap()
             .admission_deadline();
         settlement
-            .register_epoch(0, 400, deposits, withdrawals, &[])
+            .register_epoch(
+                0,
+                400,
+                deposits.root::<Sha256>().unwrap(),
+                deposits.root::<Sha256>().unwrap(),
+                withdrawals,
+                &[],
+            )
             .unwrap();
 
         settlement.advance_logical_time(admission_deadline).unwrap();
@@ -1384,7 +1662,8 @@ mod tests {
                 .register_epoch(
                     1,
                     successor_liability,
-                    DepositBatch::empty(),
+                    empty_root(),
+                    empty_root(),
                     WithdrawalBatch::empty(),
                     &[],
                 )
@@ -1403,7 +1682,8 @@ mod tests {
                 .register_epoch(
                     1,
                     successor_liability,
-                    DepositBatch::empty(),
+                    empty_root(),
+                    empty_root(),
                     WithdrawalBatch::empty(),
                     &[],
                 )
@@ -1415,7 +1695,8 @@ mod tests {
             .register_epoch(
                 1,
                 successor_liability,
-                DepositBatch::empty(),
+                empty_root(),
+                empty_root(),
                 WithdrawalBatch::empty(),
                 &[],
             )
@@ -1431,29 +1712,26 @@ mod tests {
             amount: 1,
         };
 
-        let mut deposit = Settlement::new().unwrap();
-        deposit.last_finalized_epoch = Some(terminal_epoch - 1);
+        let mut deposit = Settlement::at_epoch(terminal_epoch).unwrap();
         let before = deposit.status().unwrap();
         assert!(deposit.deposit(event.clone()).is_err());
-        assert!(deposit.confirm_deposit(&event).is_err());
+        assert_eq!(
+            deposit.confirm_deposit(&event).unwrap(),
+            DepositPresence::Unknown
+        );
         assert_eq!(
             deposit.status().unwrap().custody_balance,
             before.custody_balance
         );
 
-        let mut replay = Settlement::new().unwrap();
-        replay.deposit(event.clone()).unwrap();
-        replay.last_finalized_epoch = Some(terminal_epoch - 1);
-        replay.deposit(event).unwrap();
-
-        let mut registration = Settlement::new().unwrap();
-        registration.last_finalized_epoch = Some(terminal_epoch - 1);
+        let mut registration = Settlement::at_epoch(terminal_epoch).unwrap();
         assert!(
             registration
                 .register_epoch(
                     terminal_epoch,
                     400,
-                    DepositBatch::empty(),
+                    empty_root(),
+                    empty_root(),
                     WithdrawalBatch::empty(),
                     &[],
                 )
@@ -1471,12 +1749,14 @@ mod tests {
             account: identities()[0].key.clone(),
             amount: 1,
         };
-        let mut settlement = Settlement::new().unwrap();
-        settlement.last_finalized_epoch = Some(epoch - 1);
+        let mut settlement = Settlement::at_epoch(epoch).unwrap();
 
         let before = settlement.status().unwrap();
         assert!(settlement.deposit(event.clone()).is_err());
-        assert!(settlement.confirm_deposit(&event).is_err());
+        assert_eq!(
+            settlement.confirm_deposit(&event).unwrap(),
+            DepositPresence::Unknown
+        );
         assert_eq!(
             settlement.status().unwrap().custody_balance,
             before.custody_balance

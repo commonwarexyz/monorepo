@@ -305,13 +305,13 @@ impl<P: PublicKey, D: Digest> Read for AccountRow<P, D> {
 }
 
 /// Settlement and challenge projection derived from one fully validated changed row.
+///
+/// Composing the committed [`ChangeValue`] keeps this projection and the guarded compact value
+/// structurally identical, so no field can exist here without being committed by the guard.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AccountChange<P: PublicKey, D: Digest> {
     account: P,
-    output: SettlementOutput,
-    terminal_debit: u64,
-    outgoing_digest: D,
-    credit_tip_root: VectorRoot<D>,
+    value: ChangeValue<D>,
 }
 
 /// Account-relative value for a compact change membership opening.
@@ -345,10 +345,7 @@ where
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
             account: u.arbitrary()?,
-            output: u.arbitrary()?,
-            terminal_debit: u.arbitrary()?,
-            outgoing_digest: u.arbitrary()?,
-            credit_tip_root: u.arbitrary()?,
+            value: u.arbitrary()?,
         })
     }
 }
@@ -391,12 +388,16 @@ impl<P: PublicKey, D: Digest> AccountChange<P, D> {
         }
         Ok(Self {
             account: row.account.clone(),
-            output: row.output,
-            terminal_debit: row.successor.cumulative_debit,
-            outgoing_digest: Self::derive_outgoing_digest::<H>(
-                row.outgoing.as_ref().map(|payment| payment.send().body()),
-            ),
-            credit_tip_root: shards.root::<H>()?,
+            value: ChangeValue {
+                core: ChangeValueCore {
+                    output: row.output,
+                    terminal_debit: row.successor.cumulative_debit,
+                    outgoing_digest: Self::derive_outgoing_digest::<H>(
+                        row.outgoing.as_ref().map(|payment| payment.send().body()),
+                    ),
+                },
+                credit_tip_root: shards.root::<H>()?,
+            },
         })
     }
 
@@ -407,45 +408,32 @@ impl<P: PublicKey, D: Digest> AccountChange<P, D> {
 
     /// Returns the committed settlement output.
     pub const fn output(&self) -> SettlementOutput {
-        self.output
+        self.value.core.output
     }
 
     /// Returns this leaf's compact change value, paired elsewhere with a membership lookup target.
     #[must_use]
     pub const fn value(&self) -> ChangeValue<D> {
-        ChangeValue {
-            core: ChangeValueCore {
-                output: self.output,
-                terminal_debit: self.terminal_debit,
-                outgoing_digest: self.outgoing_digest,
-            },
-            credit_tip_root: self.credit_tip_root,
-        }
+        self.value
     }
 
     /// Projects the exact leaf committed by the change vector.
     pub fn guard<H: Hasher<Digest = D>>(&self) -> ChangeGuard<P, D> {
-        ChangeGuard::from_value::<H>(self.account.clone(), &self.value())
+        ChangeGuard::from_value::<H>(self.account.clone(), &self.value)
     }
 
     pub(crate) const fn from_value(account: P, value: ChangeValue<D>) -> Self {
-        Self {
-            account,
-            output: value.core.output,
-            terminal_debit: value.core.terminal_debit,
-            outgoing_digest: value.core.outgoing_digest,
-            credit_tip_root: value.credit_tip_root,
-        }
+        Self { account, value }
     }
 
     /// Returns the public terminal cumulative debit.
     pub const fn terminal_debit(&self) -> u64 {
-        self.terminal_debit
+        self.value.core.terminal_debit
     }
 
     /// Returns the compact per-account credit-tip root.
     pub const fn credit_tip_root(&self) -> VectorRoot<D> {
-        self.credit_tip_root
+        self.value.credit_tip_root
     }
 
     /// Returns whether `send` is the exact committed terminal outgoing authorization.
@@ -454,12 +442,12 @@ impl<P: PublicKey, D: Digest> AccountChange<P, D> {
     /// deliberately does not pin one acknowledging receipt: a batched send is acknowledged by
     /// one receipt per entry, and any of them may accompany the committed evidence.
     pub fn matches_outgoing<H: Hasher<Digest = D>>(&self, send: &SendBody<P, D>) -> bool {
-        self.outgoing_digest == Self::derive_outgoing_digest::<H>(Some(send))
+        self.value.core.outgoing_digest == Self::derive_outgoing_digest::<H>(Some(send))
     }
 
     /// Returns whether this leaf commits no outgoing payment.
     pub fn has_no_outgoing<H: Hasher<Digest = D>>(&self) -> bool {
-        self.outgoing_digest == Self::derive_outgoing_digest::<H>(None)
+        self.value.core.outgoing_digest == Self::derive_outgoing_digest::<H>(None)
     }
 
     fn derive_outgoing_digest<H: Hasher<Digest = D>>(send: Option<&SendBody<P, D>>) -> D {
@@ -568,16 +556,13 @@ impl<D: Digest> Read for ChangeValueCore<D> {
 impl<P: PublicKey, D: Digest> Write for AccountChange<P, D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.account.write(buf);
-        self.output.write(buf);
-        self.terminal_debit.write(buf);
-        self.outgoing_digest.write(buf);
-        self.credit_tip_root.write(buf);
+        self.value.write(buf);
     }
 }
 
 impl<P: PublicKey, D: Digest> EncodeSize for AccountChange<P, D> {
     fn encode_size(&self) -> usize {
-        P::SIZE + self.output.encode_size() + u64::SIZE + D::SIZE + VectorRoot::<D>::SIZE
+        P::SIZE + self.value.encode_size()
     }
 }
 
@@ -587,10 +572,7 @@ impl<P: PublicKey, D: Digest> Read for AccountChange<P, D> {
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self {
             account: P::read(buf)?,
-            output: SettlementOutput::read(buf)?,
-            terminal_debit: u64::read(buf)?,
-            outgoing_digest: D::read(buf)?,
-            credit_tip_root: VectorRoot::read(buf)?,
+            value: ChangeValue::read(buf)?,
         })
     }
 }

@@ -1,7 +1,7 @@
 //! Bounded operator RPC bodies and synchronous dispatch.
 
 use crate::{
-    operator::{CloseEvent, Operator, PaymentResolution},
+    operator::{CloseEvent, Operator},
     protocol::{Acceptance, DepositEvent, Key, MAX_ACCOUNTS},
     rpc,
     store::MAX_DESTINATION_BYTES,
@@ -37,7 +37,7 @@ pub(crate) const METHOD_WITHDRAWAL_EVIDENCE: u8 = 8;
 pub(crate) const METHOD_ACKNOWLEDGE_WITHDRAWAL: u8 = 9;
 pub(crate) const METHOD_EXTERNAL_PAYOUT_EVIDENCE: u8 = 10;
 pub(crate) const METHOD_ACKNOWLEDGE_EXTERNAL_PAYOUT: u8 = 11;
-pub(crate) const METHOD_RESOLVE_PAYMENT: u8 = 12;
+pub(crate) const METHOD_ACCEPTED_BATCH: u8 = 12;
 
 const MAX_CLOSE_HEADER_BYTES: usize = 64;
 const MAX_CLOSE_ERROR_BYTES: usize = 1_024;
@@ -325,6 +325,17 @@ pub(crate) struct AcceptedBatchResponse {
     pub(crate) acceptance: Acceptance,
 }
 
+impl From<crate::store::AcceptedBatch> for AcceptedBatchResponse {
+    fn from(accepted: crate::store::AcceptedBatch) -> Self {
+        Self {
+            epoch: accepted.epoch,
+            sequence: accepted.sequence,
+            total: accepted.total,
+            acceptance: accepted.acceptance,
+        }
+    }
+}
+
 impl Write for AcceptedBatchResponse {
     fn write(&self, buf: &mut impl BufMut) {
         self.epoch.write(buf);
@@ -353,50 +364,6 @@ impl Read for AcceptedBatchResponse {
             total: u64::read(buf)?,
             acceptance: Acceptance::read(buf)?,
         })
-    }
-}
-
-/// The commitment status of one probed send, carried out of band from the transport error
-/// channel so the wallet can act on a definitive verdict without stringly matching a message.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum PaymentResolutionResponse {
-    Committed(Box<AcceptedBatchResponse>),
-    Absent,
-    Unavailable,
-}
-
-impl Write for PaymentResolutionResponse {
-    fn write(&self, buf: &mut impl BufMut) {
-        match self {
-            Self::Committed(batch) => {
-                0u8.write(buf);
-                batch.write(buf);
-            }
-            Self::Absent => 1u8.write(buf),
-            Self::Unavailable => 2u8.write(buf),
-        }
-    }
-}
-
-impl EncodeSize for PaymentResolutionResponse {
-    fn encode_size(&self) -> usize {
-        1 + match self {
-            Self::Committed(batch) => batch.encode_size(),
-            Self::Absent | Self::Unavailable => 0,
-        }
-    }
-}
-
-impl Read for PaymentResolutionResponse {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        match u8::read(buf)? {
-            0 => Ok(Self::Committed(Box::new(AcceptedBatchResponse::read(buf)?))),
-            1 => Ok(Self::Absent),
-            2 => Ok(Self::Unavailable),
-            tag => Err(CodecError::InvalidEnum(tag)),
-        }
     }
 }
 
@@ -761,7 +728,7 @@ pub(crate) enum OperatorRequest {
     Status,
     PaymentQuote(PaymentQuoteRequest),
     AcceptSend(AcceptSendRequest),
-    ResolvePayment(AcceptSendRequest),
+    AcceptedBatch(AcceptSendRequest),
     ApplyDeposit(ApplyDepositRequest),
     WithdrawalOpening(WithdrawalOpeningRequest),
     ApplyWithdrawal(ApplyWithdrawalRequest),
@@ -785,9 +752,9 @@ pub(crate) fn decode_request(request: rpc::Request) -> Result<OperatorRequest> {
         METHOD_ACCEPT_SEND => AcceptSendRequest::decode(body)
             .map(OperatorRequest::AcceptSend)
             .context("decode accept-send request"),
-        METHOD_RESOLVE_PAYMENT => AcceptSendRequest::decode(body)
-            .map(OperatorRequest::ResolvePayment)
-            .context("decode resolve-payment request"),
+        METHOD_ACCEPTED_BATCH => AcceptSendRequest::decode(body)
+            .map(OperatorRequest::AcceptedBatch)
+            .context("decode accepted-batch request"),
         METHOD_APPLY_DEPOSIT => ApplyDepositRequest::decode(body)
             .map(OperatorRequest::ApplyDeposit)
             .context("decode apply-deposit request"),
@@ -840,32 +807,13 @@ fn dispatch(operator: &mut Operator, request: OperatorRequest) -> Result<Bytes> 
             let accepted = operator
                 .accept_send(request.send)
                 .context("accept payment send")?;
-            Ok(AcceptedBatchResponse {
-                epoch: accepted.epoch,
-                sequence: accepted.sequence,
-                total: accepted.total,
-                acceptance: accepted.acceptance,
-            }
-            .encode())
+            Ok(AcceptedBatchResponse::from(accepted).encode())
         }
-        OperatorRequest::ResolvePayment(request) => {
-            let resolution = operator
-                .resolve_payment(&request.send)
-                .context("resolve payment commitment")?;
-            Ok(match resolution {
-                PaymentResolution::Committed(batch) => {
-                    let batch = *batch;
-                    PaymentResolutionResponse::Committed(Box::new(AcceptedBatchResponse {
-                        epoch: batch.epoch,
-                        sequence: batch.sequence,
-                        total: batch.total,
-                        acceptance: batch.acceptance,
-                    }))
-                }
-                PaymentResolution::Absent => PaymentResolutionResponse::Absent,
-                PaymentResolution::Unavailable => PaymentResolutionResponse::Unavailable,
-            }
-            .encode())
+        OperatorRequest::AcceptedBatch(request) => {
+            let batch = operator
+                .accepted_batch(&request.send)
+                .context("read accepted batch")?;
+            Ok(batch.map(AcceptedBatchResponse::from).encode())
         }
         OperatorRequest::ApplyDeposit(request) => {
             let staged = operator.apply_deposit(request).context("apply deposit")?;
@@ -995,18 +943,7 @@ async fn invoke<E: Network>(
     method: u8,
     body: Bytes,
 ) -> Result<Bytes> {
-    let response = rpc::call(network, address, &rpc::Request { method, body })
-        .await
-        .context("call operator")?;
-    match response {
-        rpc::Response::Success { body } => Ok(body),
-        rpc::Response::Error { error } => {
-            bail!(
-                "operator rejected request: {}",
-                String::from_utf8_lossy(&error)
-            )
-        }
-    }
+    rpc::invoke(network, address, "operator", method, body).await
 }
 
 pub(crate) async fn status<E: Network>(network: &E, address: SocketAddr) -> Result<StatusResponse> {
@@ -1036,22 +973,20 @@ pub(crate) async fn accept_send<E: Network>(
     .context("decode accepted payment")
 }
 
-/// Resolves whether a specific send already committed, independent of the operating fence.
+/// Fetches the committed batch for one send, if the operator holds it.
 ///
-/// The operator answers with a structured verdict rather than an error message: `Committed` is
-/// authoritative even while the operator is fenced from admitting new state, `Absent` is positive
-/// proof the send committed in no epoch, and `Unavailable` means a storage fault blocks a
-/// trustworthy read and the caller must retry later. A transport failure surfaces as `Err` and is
-/// likewise retryable.
-pub(crate) async fn resolve_payment<E: Network>(
+/// This is an optional receipts fetch for a wallet that already decided commitment from a
+/// finalized settlement root. It is never a verdict: absence or failure here leaves the
+/// wallet's own conclusion unchanged.
+pub(crate) async fn accepted_batch<E: Network>(
     network: &E,
     address: SocketAddr,
     request: AcceptSendRequest,
-) -> Result<PaymentResolutionResponse> {
-    PaymentResolutionResponse::decode(
-        invoke(network, address, METHOD_RESOLVE_PAYMENT, request.encode()).await?,
+) -> Result<Option<AcceptedBatchResponse>> {
+    Option::<AcceptedBatchResponse>::decode(
+        invoke(network, address, METHOD_ACCEPTED_BATCH, request.encode()).await?,
     )
-    .context("decode payment resolution")
+    .context("decode accepted batch")
 }
 
 pub(crate) async fn apply_deposit<E: Network>(
@@ -1671,27 +1606,18 @@ mod tests {
         )))
         .unwrap();
 
-        for response in [
-            PaymentResolutionResponse::Committed(Box::new(accepted)),
-            PaymentResolutionResponse::Absent,
-            PaymentResolutionResponse::Unavailable,
-        ] {
+        for response in [Some(accepted), None] {
             let encoded = response.encode();
             assert_eq!(
-                PaymentResolutionResponse::decode(encoded).unwrap(),
+                Option::<AcceptedBatchResponse>::decode(encoded).unwrap(),
                 response
             );
         }
 
-        assert!(matches!(
-            PaymentResolutionResponse::decode(Bytes::from_static(&[3])),
-            Err(CodecError::InvalidEnum(3))
-        ));
-
-        let mut trailing = PaymentResolutionResponse::Absent.encode().to_vec();
+        let mut trailing = None::<AcceptedBatchResponse>.encode().to_vec();
         trailing.push(0xff);
         assert!(matches!(
-            PaymentResolutionResponse::decode(Bytes::from(trailing)),
+            Option::<AcceptedBatchResponse>::decode(Bytes::from(trailing)),
             Err(CodecError::ExtraData(1))
         ));
     }

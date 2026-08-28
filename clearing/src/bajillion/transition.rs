@@ -438,6 +438,9 @@ impl<P: PublicKey, D: Digest> EpochContext<P, D> {
     /// representable later timestamp for finalization or expiry. The predecessor liability remains
     /// authenticated, but [`CloseContext`] adds its exact state root later so successor payments can
     /// begin while the predecessor close is constructed.
+    ///
+    /// This is the single verification point for the boundary batches. Every later validation
+    /// pins its batch arguments to the roots committed here instead of re-verifying them.
     #[allow(clippy::too_many_arguments)]
     pub fn new<H: Hasher<Digest = D>>(
         deployment: D,
@@ -454,7 +457,13 @@ impl<P: PublicKey, D: Digest> EpochContext<P, D> {
         if admission_deadline >= challenge_deadline || challenge_deadline == u64::MAX {
             return Err(TransitionError::DeadlineOrder);
         }
-        validated_boundary_accounts(&deployment, deposits, withdrawals, &limits)?;
+        validate_boundary_batches(&deployment, deposits, withdrawals, &limits)?;
+
+        // A sealed boundary must leave a buildable close. Every account's
+        // post-deposit holdings stay representable because the aggregate does.
+        predecessor_liability
+            .checked_add(deposits.total())
+            .ok_or(TransitionError::LiabilityOverflow)?;
 
         let deposit_root = deposits.root::<H>()?;
         let withdrawal_root = withdrawals.root::<H>()?;
@@ -508,7 +517,7 @@ impl<P: PublicKey, D: Digest> EpochContext<P, D> {
         if cache.liability() != self.predecessor_liability {
             return Err(TransitionError::PredecessorLiability);
         }
-        validate_sealed_boundaries(cache, &self.deployment, deposits, withdrawals, &self.limits)?;
+        validate_sealed_boundaries(cache, deposits, withdrawals, &self.limits)?;
         Ok(CloseContext {
             epoch: self,
             predecessor_root: cache.root(),
@@ -774,6 +783,7 @@ impl<D: Digest> TerminalProof<D> {
         validate_header::<H, P, D>(context, header, roots)?;
         validate_boundary_roots::<H, P, D>(context, deposits, withdrawals)?;
         verify_terminal_proof_after_header::<H, P, D>(context, deposits, withdrawals, roots, self)
+            .map(|(prefix, _)| prefix)
     }
 }
 
@@ -1302,10 +1312,6 @@ impl<P: PublicKey, D: Digest> StateCache<P, D> {
         leaves: Vec<StateLeaf<P>>,
         strategy: &impl Strategy,
     ) -> Result<Self, TransitionError> {
-        let len = u32::try_from(leaves.len()).map_err(|_| TransitionError::TooManyStates)?;
-        if len > commitment::MAX_VECTOR_LENGTH {
-            return Err(TransitionError::TooManyStates);
-        }
         if leaves
             .windows(2)
             .any(|pair| pair[0].account >= pair[1].account)
@@ -1386,19 +1392,14 @@ impl<P: PublicKey, D: Digest> StateCache<P, D> {
                 proof: self.tree.opening(position as u32)?,
             }))),
             Err(insertion) => {
-                let predecessor = insertion
-                    .checked_sub(1)
-                    .map(|position| self.leaves[position].clone());
-                let successor = self.leaves.get(insertion).cloned();
-                let start = insertion.saturating_sub(usize::from(predecessor.is_some()));
-                let count = usize::from(predecessor.is_some()) + usize::from(successor.is_some());
+                let insertion =
+                    u32::try_from(insertion).map_err(|_| TransitionError::TooManyStates)?;
+                let (predecessor, successor, opening) =
+                    self.tree.bracket(&self.leaves, insertion..insertion)?;
                 Ok(StateLookup::Absent(StateAbsence {
                     predecessor,
                     successor,
-                    opening: self.tree.range_opening(
-                        u32::try_from(start).map_err(|_| TransitionError::TooManyStates)?,
-                        u32::try_from(count).map_err(|_| TransitionError::TooManyStates)?,
-                    )?,
+                    opening,
                 }))
             }
         }
@@ -1435,24 +1436,15 @@ where
     Ok(builder.build(strategy)?)
 }
 
+/// Derives the unchanged live-state suffix of a close.
+///
+/// The caller must supply strictly account-sorted inputs: `predecessor` comes
+/// from a validated [`StateCache`] and `rows` must already have passed the
+/// canonical-order scan.
 fn derive_unchanged<P: PublicKey, D: Digest>(
     predecessor: &[StateLeaf<P>],
     rows: &[AccountRow<P, D>],
 ) -> Result<Vec<StateLeaf<P>>, TransitionError> {
-    if predecessor
-        .windows(2)
-        .any(|pair| pair[0].account >= pair[1].account)
-        || predecessor.iter().any(|leaf| !is_live_state(&leaf.state))
-    {
-        return Err(TransitionError::NonCanonicalStateOrder);
-    }
-    if rows
-        .windows(2)
-        .any(|pair| pair[0].account >= pair[1].account)
-    {
-        return Err(TransitionError::NonCanonicalRows);
-    }
-
     let mut unchanged = Vec::with_capacity(predecessor.len().saturating_sub(rows.len()));
     let mut state = 0_usize;
     for row in rows {
@@ -1585,13 +1577,10 @@ fn derive_state_vectors<P: PublicKey, D: Digest>(
     Ok((predecessor, successor))
 }
 
-fn validated_boundary_accounts<'a, P: PublicKey, D: Digest>(
-    deployment: &D,
+fn boundary_accounts<'a, P: PublicKey, D: Digest>(
     deposits: &'a DepositBatch<P>,
     withdrawals: &'a WithdrawalBatch<P, D>,
-    limits: &CloseLimits,
-) -> Result<BTreeSet<&'a P>, TransitionError> {
-    withdrawals.verify_deployment(deployment)?;
+) -> BTreeSet<&'a P> {
     let mut accounts = BTreeSet::new();
     accounts.extend(deposits.records().iter().map(|record| record.account()));
     accounts.extend(
@@ -1600,6 +1589,17 @@ fn validated_boundary_accounts<'a, P: PublicKey, D: Digest>(
             .iter()
             .map(|request| request.account()),
     );
+    accounts
+}
+
+fn validate_boundary_batches<P: PublicKey, D: Digest>(
+    deployment: &D,
+    deposits: &DepositBatch<P>,
+    withdrawals: &WithdrawalBatch<P, D>,
+    limits: &CloseLimits,
+) -> Result<(), TransitionError> {
+    withdrawals.verify_deployment(deployment)?;
+    let accounts = boundary_accounts(deposits, withdrawals);
     let account_count = u64::try_from(accounts.len()).map_err(|_| TransitionError::CloseLimit)?;
     let withdrawal_count =
         u64::try_from(withdrawals.len()).map_err(|_| TransitionError::CloseLimit)?;
@@ -1609,17 +1609,18 @@ fn validated_boundary_accounts<'a, P: PublicKey, D: Digest>(
     {
         return Err(TransitionError::CloseLimit);
     }
-    Ok(accounts)
+    Ok(())
 }
 
 fn validate_sealed_boundaries<P: PublicKey, D: Digest>(
     cache: &StateCache<P, D>,
-    deployment: &D,
     deposits: &DepositBatch<P>,
     withdrawals: &WithdrawalBatch<P, D>,
     limits: &CloseLimits,
 ) -> Result<(), TransitionError> {
-    let accounts = validated_boundary_accounts(deployment, deposits, withdrawals, limits)?;
+    // The bound roots pin these batches byte-identical to the ones the epoch
+    // registration validated, so only the cache-relative rules run here.
+    let accounts = boundary_accounts(deposits, withdrawals);
     if u64::try_from(cache.len()).map_err(|_| TransitionError::CloseLimit)? > limits.max_states {
         return Err(TransitionError::CloseLimit);
     }
@@ -1759,19 +1760,14 @@ impl<P: PublicKey, D: Digest> ChallengeIndex<P, D> {
                 proof: self.tree.opening(position as u32)?,
             }))),
             Err(insertion) => {
-                let predecessor = insertion
-                    .checked_sub(1)
-                    .map(|position| self.guards[position].clone());
-                let successor = self.guards.get(insertion).cloned();
-                let start = insertion.saturating_sub(usize::from(predecessor.is_some()));
-                let count = usize::from(predecessor.is_some()) + usize::from(successor.is_some());
+                let insertion =
+                    u32::try_from(insertion).map_err(|_| TransitionError::SliceRange)?;
+                let (predecessor, successor, opening) =
+                    self.tree.bracket(&self.guards, insertion..insertion)?;
                 Ok(ChangeLookup::Absent(ChangeAbsence {
                     predecessor,
                     successor,
-                    opening: self.tree.range_opening(
-                        u32::try_from(start).map_err(|_| TransitionError::SliceRange)?,
-                        u32::try_from(count).map_err(|_| TransitionError::SliceRange)?,
-                    )?,
+                    opening,
                 }))
             }
         }
@@ -2014,9 +2010,6 @@ where
     {
         return Err(TransitionError::NonCanonicalRows);
     }
-    if rows.len() != shard_sets.len() {
-        return Err(TransitionError::ShardAlignment);
-    }
     let totals = rows.last().map_or_else(Prefix::default, |row| row.prefix);
     validate_corpus_limits(context, &rows, &shard_sets, totals)?;
     validate_boundary_roots::<H, P, D>(context, deposits, withdrawals)?;
@@ -2167,15 +2160,9 @@ where
 
 fn validate_corpus_shape<P: PublicKey, D: Digest>(
     close: &Close<P, D>,
-    limits: &CloseLimits,
 ) -> Result<(), TransitionError> {
     let rows = u32::try_from(close.rows.len()).map_err(|_| TransitionError::TooManyRows)?;
-    let unchanged =
-        u64::try_from(close.unchanged.len()).map_err(|_| TransitionError::TooManyStates)?;
-    if rows > commitment::MAX_VECTOR_LENGTH
-        || u64::from(rows) > limits.max_rows()
-        || unchanged > limits.max_states()
-    {
+    if rows > commitment::MAX_VECTOR_LENGTH {
         return Err(TransitionError::RowCount);
     }
     if close.rows.len() != close.shard_sets.len() {
@@ -2185,12 +2172,10 @@ fn validate_corpus_shape<P: PublicKey, D: Digest>(
 }
 
 fn validate_boundaries<P: PublicKey, D: Digest>(
-    context: &CloseContext<P, D>,
     deposits: &DepositBatch<P>,
     withdrawals: &WithdrawalBatch<P, D>,
     close: &Close<P, D>,
 ) -> Result<(), TransitionError> {
-    withdrawals.verify_deployment(context.deployment())?;
     for record in deposits.records() {
         if close
             .rows
@@ -2212,13 +2197,14 @@ fn validate_boundaries<P: PublicKey, D: Digest>(
     Ok(())
 }
 
+/// Validates one terminal prefix and returns the successor liability it settles to.
 pub(crate) fn validate_terminal_prefix<P: PublicKey, D: Digest>(
     context: &CloseContext<P, D>,
     deposits: &DepositBatch<P>,
     withdrawals: &WithdrawalBatch<P, D>,
     row_count: u32,
     totals: Prefix,
-) -> Result<(), TransitionError> {
+) -> Result<u64, TransitionError> {
     let withdrawal_count =
         u64::try_from(withdrawals.len()).map_err(|_| TransitionError::BoundaryTotals)?;
     // The released withdrawal total is certified row-derived and may fall below
@@ -2248,8 +2234,7 @@ pub(crate) fn validate_terminal_prefix<P: PublicKey, D: Digest>(
         totals.deposit,
         totals.withdrawal,
         totals.payout,
-    )?;
-    Ok(())
+    )
 }
 
 pub(crate) fn verify_terminal_proof_after_header<H, P, D>(
@@ -2258,7 +2243,7 @@ pub(crate) fn verify_terminal_proof_after_header<H, P, D>(
     withdrawals: &WithdrawalBatch<P, D>,
     roots: &RootBundle<D>,
     proof: &TerminalProof<D>,
-) -> Result<Prefix, TransitionError>
+) -> Result<(Prefix, u64), TransitionError>
 where
     H: Hasher<Digest = D>,
     P: PublicKey,
@@ -2271,7 +2256,6 @@ where
     if proof.terminal_opening.position != terminal_position
         || proof.terminal_opening.proof.leaf_count != coverage_len
         || u64::from(proof.terminal.predecessor) > context.limits().max_states()
-        || u64::from(proof.terminal.change) > context.limits().max_rows()
         || u64::from(proof.terminal.successor) > context.limits().max_states()
     {
         return Err(TransitionError::TerminalProof);
@@ -2281,14 +2265,14 @@ where
         &roots.coverage,
         &proof.terminal.encode(),
     )?;
-    validate_terminal_prefix(
+    let successor_liability = validate_terminal_prefix(
         context,
         deposits,
         withdrawals,
         proof.terminal.change,
         proof.terminal.prefix,
     )?;
-    Ok(proof.terminal.prefix)
+    Ok((proof.terminal.prefix, successor_liability))
 }
 
 fn validate_boundary_roots<H, P, D>(
@@ -2354,20 +2338,18 @@ where
 
     let registered = row.predecessor.active || deposit != 0;
     let payout = if registered { 0 } else { credit };
-    if !registered && (row.successor.active || debit != 0 || credit == 0 || withdrawal.is_some()) {
+
+    // An unregistered row may only route credits out as an external payout.
+    // The balance equation below rejects any residual state it would retain.
+    if !registered && (credit == 0 || withdrawal.is_some()) {
         return Err(TransitionError::AccountActivity);
     }
-    let has_effect =
-        debit != 0 || credit != 0 || receipts != 0 || deposit != 0 || withdrawal.is_some();
-    if (!row.is_changed() && !(has_effect && !row.predecessor.active && !row.successor.active))
-        || (!row.predecessor.active && !row.successor.active && !has_effect)
-    {
+
+    // An unchanged active row is stuffing. An unchanged absent row survives
+    // only when it carries an effect, such as a deposit consumed exactly by
+    // its own withdrawal, because the activity guard rejects the rest.
+    if !row.is_changed() && row.predecessor.active {
         return Err(TransitionError::UnchangedRow);
-    }
-    if withdrawal.is_some_and(|request| matches!(request.body().action(), WithdrawalAction::Close))
-        && (row.successor.balance != 0 || row.successor.active)
-    {
-        return Err(TransitionError::AccountActivity);
     }
     if u128::from(row.successor.balance)
         + u128::from(debit)
@@ -2478,7 +2460,7 @@ where
     D: Digest,
 {
     validate_header::<H, P, D>(context, &close.header, &close.roots)?;
-    validate_corpus_shape(close, context.limits())?;
+    validate_corpus_shape(close)?;
     if close
         .rows
         .windows(2)
@@ -2492,7 +2474,7 @@ where
         .map_or_else(Prefix::default, |row| row.prefix);
     validate_corpus_limits(context, &close.rows, &close.shard_sets, totals)?;
     validate_boundary_roots::<H, P, D>(context, deposits, withdrawals)?;
-    validate_boundaries(context, deposits, withdrawals, close)
+    validate_boundaries(deposits, withdrawals, close)
 }
 
 fn validate_close_rows<H, P, D>(
@@ -2517,7 +2499,8 @@ where
         }
     }
     let row_count = u32::try_from(close.rows.len()).map_err(|_| TransitionError::TooManyRows)?;
-    validate_terminal_prefix(context, deposits, withdrawals, row_count, prefix)
+    validate_terminal_prefix(context, deposits, withdrawals, row_count, prefix)?;
+    Ok(())
 }
 
 fn validate_prepared_close<H, P, D>(
@@ -2531,32 +2514,11 @@ where
     P: PublicKey,
     D: Digest,
 {
+    // Every retained tree and derived vector was fixed at the single
+    // construction site from these same inputs, and the header pins the
+    // context, so only the public close relation needs validation.
     let close = prepared.close();
     validate_close_preamble::<H, P, D>(context, deposits, withdrawals, close)?;
-    let slice_bits = prepared.slice_bits();
-    if slice_bits != context.assignment().slice_bits() {
-        return Err(TransitionError::SliceBits);
-    }
-    if prepared.changes.root() != close.roots.change {
-        return Err(TransitionError::ChangeRoot);
-    }
-    if prepared.withdrawal_output_tree.root() != close.roots.withdrawal_outputs
-        || prepared.withdrawal_outputs
-            != derive_withdrawal_outputs::<P, D>(&close.rows, withdrawals)?
-    {
-        return Err(TransitionError::WithdrawalOutputRoot);
-    }
-    let (predecessor, successor) =
-        derive_state_vectors(&close.unchanged, &close.rows, context.limits().max_states())?;
-    if prepared.successor_leaves != successor || prepared.successor.root() != close.roots.successor
-    {
-        return Err(TransitionError::SuccessorRoot);
-    }
-    let coverage = slice::derive_coverage(&close.rows, &predecessor, &successor, slice_bits)?;
-    if prepared.coverage_boundaries != coverage || prepared.coverage.root() != close.roots.coverage
-    {
-        return Err(TransitionError::SliceCoverage);
-    }
     validate_close_rows::<H, P, D>(context, deposits, withdrawals, close)
 }
 
@@ -3588,40 +3550,173 @@ mod tests {
     }
 
     #[test]
-    fn terminal_prefix_liability_uses_widened_checked_arithmetic() {
+    fn successor_liability_uses_widened_checked_arithmetic() {
+        assert_eq!(
+            checked_successor_liability(u64::MAX, 1, 1, 0).unwrap(),
+            u64::MAX
+        );
+        assert!(matches!(
+            checked_successor_liability(u64::MAX, 1, 0, 0),
+            Err(TransitionError::LiabilityOverflow)
+        ));
+        assert!(matches!(
+            checked_successor_liability(0, 0, 1, 0),
+            Err(TransitionError::LiabilityEquation)
+        ));
+    }
+
+    #[test]
+    fn sealed_boundary_requires_representable_holdings() {
         let operator = SigningKey::from_seed(104);
         let account = SigningKey::from_seed(105).public_key();
+        let deposits = DepositBatch::new(vec![DepositRecord::new(account, 1).unwrap()]).unwrap();
+
+        // A deposit-only boundary on a saturated ledger has no buildable close,
+        // so registration must reject it before it can wedge the epoch.
+        assert!(matches!(
+            EpochContext::<VerifyingKey, ShaDigest>::new::<Sha256>(
+                Sha256::hash(&[b"deployment"]),
+                15,
+                operator.public_key(),
+                &deposits,
+                &WithdrawalBatch::empty(),
+                u64::MAX,
+                9,
+                10,
+                CloseLimits::protocol_maximum(),
+                assignment(0),
+            ),
+            Err(TransitionError::LiabilityOverflow)
+        ));
+    }
+
+    #[test]
+    fn row_stuffing_is_rejected() {
+        let operator = SigningKey::from_seed(106);
+        let mut accounts = [SigningKey::from_seed(107), SigningKey::from_seed(108)];
+        accounts.sort_by_key(SigningKey::public_key);
+        let registered = accounts[0].public_key();
+        let absent = accounts[1].public_key();
+        let opening = state(100);
         let cache = StateCache::new::<Sha256>(vec![StateLeaf {
-            account: account.clone(),
-            state: state(u64::MAX),
+            account: registered.clone(),
+            state: opening,
         }])
         .unwrap();
-        let deposits = DepositBatch::new(vec![DepositRecord::new(account, 1).unwrap()]).unwrap();
+        let deposits = DepositBatch::empty();
         let withdrawals = WithdrawalBatch::empty();
         let context = close_context::<Sha256, _, _>(
-            Sha256::hash(&[b"deployment"]),
-            15,
+            Sha256::hash(&[b"row-stuffing"]),
+            4,
             operator.public_key(),
             &cache,
             &deposits,
             &withdrawals,
+            8,
             9,
-            10,
             CloseLimits::protocol_maximum(),
             assignment(0),
         )
         .unwrap();
-        let mut totals = Prefix {
-            deposit: 1,
-            withdrawal: 1,
-            ..Prefix::default()
-        };
-        validate_terminal_prefix(&context, &deposits, &withdrawals, 1, totals).unwrap();
 
-        totals.withdrawal = 0;
+        // An unchanged active row is stuffing.
+        let unchanged = AccountRow {
+            account: registered.clone(),
+            predecessor: opening,
+            successor: opening,
+            outgoing: None,
+            output: SettlementOutput::None,
+            prefix: Prefix::default(),
+        };
+        let shards = ShardSet::empty(context.payment().epoch(), registered);
         assert!(matches!(
-            validate_terminal_prefix(&context, &deposits, &withdrawals, 1, totals),
-            Err(TransitionError::LiabilityOverflow)
+            validate_row::<Sha256, _, _>(&context, &deposits, &withdrawals, &unchanged, &shards),
+            Err(TransitionError::UnchangedRow)
+        ));
+
+        // An absent row with no effects is unregistered inactivity.
+        let inactive = AccountRow {
+            account: absent.clone(),
+            predecessor: AccountState::default(),
+            successor: AccountState::default(),
+            outgoing: None,
+            output: SettlementOutput::None,
+            prefix: Prefix::default(),
+        };
+        let shards = ShardSet::empty(context.payment().epoch(), absent.clone());
+        assert!(matches!(
+            validate_row::<Sha256, _, _>(&context, &deposits, &withdrawals, &inactive, &shards),
+            Err(TransitionError::AccountActivity)
+        ));
+
+        // An unregistered credit may only route out as an external payout, so
+        // retained successor state fails the balance equation.
+        let retained = AccountRow {
+            account: absent.clone(),
+            predecessor: AccountState::default(),
+            successor: AccountState {
+                balance: 30,
+                cumulative_credit: 30,
+                active: true,
+                ..AccountState::default()
+            },
+            outgoing: None,
+            output: SettlementOutput::None,
+            prefix: Prefix::default(),
+        };
+        let shards = ShardSet::empty(context.payment().epoch(), absent);
+        assert!(matches!(
+            validate_row::<Sha256, _, _>(&context, &deposits, &withdrawals, &retained, &shards),
+            Err(TransitionError::BalanceEquation)
+        ));
+    }
+
+    #[test]
+    fn close_row_with_retained_successor_fails_the_balance_equation() {
+        let operator = SigningKey::from_seed(109);
+        let payer = SigningKey::from_seed(110);
+        let opening = state(100);
+        let cache = StateCache::new::<Sha256>(vec![StateLeaf {
+            account: payer.public_key(),
+            state: opening,
+        }])
+        .unwrap();
+        let deployment = Sha256::hash(&[b"close-balance"]);
+        let deposits = DepositBatch::empty();
+        let withdrawals = WithdrawalBatch::new(vec![SignedWithdrawal::sign(
+            deployment,
+            cache.root().digest,
+            Bytes::from_static(b"destination"),
+            WithdrawalAction::Close,
+            100,
+            &payer,
+        )])
+        .unwrap();
+        let context = close_context::<Sha256, _, _>(
+            deployment,
+            4,
+            operator.public_key(),
+            &cache,
+            &deposits,
+            &withdrawals,
+            8,
+            9,
+            CloseLimits::protocol_maximum(),
+            assignment(0),
+        )
+        .unwrap();
+        let row = AccountRow {
+            account: payer.public_key(),
+            predecessor: opening,
+            successor: state(50),
+            outgoing: None,
+            output: SettlementOutput::Withdrawal(100),
+            prefix: Prefix::default(),
+        };
+        let shards = ShardSet::empty(context.payment().epoch(), payer.public_key());
+        assert!(matches!(
+            validate_row::<Sha256, _, _>(&context, &deposits, &withdrawals, &row, &shards),
+            Err(TransitionError::BalanceEquation)
         ));
     }
 

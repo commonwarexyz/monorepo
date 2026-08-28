@@ -329,17 +329,12 @@ impl<P: PublicKey, D: Digest> ShardSet<P, D> {
                     .opening(u32::try_from(position).map_err(|_| Error::IndexOutOfRange)?)?,
             }),
             Err(position) => {
-                let predecessor = position.checked_sub(1).map(|index| tips[index].clone());
-                let successor = tips.get(position).cloned();
-                let start = position.saturating_sub(usize::from(predecessor.is_some()));
-                let count = usize::from(predecessor.is_some()) + usize::from(successor.is_some());
+                let position = u32::try_from(position).map_err(|_| Error::IndexOutOfRange)?;
+                let (predecessor, successor, opening) = tree.bracket(&tips, position..position)?;
                 Ok(CreditTipLookup::Absent {
                     predecessor,
                     successor,
-                    opening: tree.range_opening(
-                        u32::try_from(start).map_err(|_| Error::IndexOutOfRange)?,
-                        u32::try_from(count).map_err(|_| Error::IndexOutOfRange)?,
-                    )?,
+                    opening,
                 })
             }
         }
@@ -458,19 +453,14 @@ impl<D: Digest> CreditTipLookup<D> {
                 successor,
                 opening,
             } => {
-                let insertion = opening
-                    .start
-                    .checked_add(u32::from(predecessor.is_some()))
+                opening
+                    .bracket(predecessor.is_some(), 0, successor.is_some())
                     .ok_or(Error::LookupOrder)?;
-                if predecessor.is_some() != (insertion > 0)
-                    || successor.is_some() != (insertion < opening.proof.leaf_count)
-                    || predecessor.as_ref().is_some_and(|tip| {
-                        tip.shard >= shard || tip.cumulative_credit == 0 || tip.index == 0
-                    })
-                    || successor.as_ref().is_some_and(|tip| {
-                        tip.shard <= shard || tip.cumulative_credit == 0 || tip.index == 0
-                    })
-                {
+                if predecessor.as_ref().is_some_and(|tip| {
+                    tip.shard >= shard || tip.cumulative_credit == 0 || tip.index == 0
+                }) || successor.as_ref().is_some_and(|tip| {
+                    tip.shard <= shard || tip.cumulative_credit == 0 || tip.index == 0
+                }) {
                     return Err(Error::LookupOrder);
                 }
                 let encoded = predecessor

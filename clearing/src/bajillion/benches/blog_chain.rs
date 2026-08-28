@@ -494,7 +494,6 @@ fn preflight_chain(
         .register_close(
             0,
             close.context.clone(),
-            close.deposits.clone(),
             close.withdrawals.clone(),
             &[],
             |_| true,

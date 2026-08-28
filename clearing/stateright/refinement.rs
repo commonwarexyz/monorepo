@@ -445,9 +445,26 @@ struct RefinementDriver {
 
 impl RefinementDriver {
     fn new() -> Self {
+        let fixture = refinement_harness();
+
+        // The spec breaks same-deadline expiry ties by account index while
+        // production breaks them by public-key byte order, so the driver keys
+        // must sort in account-index order for the two rules to coincide.
+        // Carol's key is searched rather than pinned so any harness account
+        // set keeps the ordering structurally.
+        assert!(fixture.accounts[0].public_key() < fixture.accounts[1].public_key());
+        let carol = (0..)
+            .map(SigningKey::from_seed)
+            .find(|carol| {
+                fixture
+                    .accounts
+                    .iter()
+                    .all(|account| account.public_key() < carol.public_key())
+            })
+            .expect("some seed yields a key above every harness account");
         Self {
-            fixture: refinement_harness(),
-            carol: SigningKey::from_seed(12),
+            fixture,
+            carol,
             now: 0,
             model: spec::SettlementModel::default(),
             state: spec::SettlementState::default(),
@@ -814,7 +831,6 @@ impl RefinementDriver {
         let result = self.fixture.chain.register_close(
             u64::from(self.now),
             material.context.clone(),
-            material.deposits.clone(),
             material.withdrawals.clone(),
             &material.extra_openings,
             |_| true,
@@ -1699,8 +1715,11 @@ impl RefinementDriver {
                     claims.remaining_state_liability,
                     u64::from(*remaining_state)
                 );
+
+                // The chain counter is the remaining-deposit total for the
+                // whole claims phase.
                 assert_eq!(
-                    claims.remaining_deposit_total,
+                    chain.unfinalized_deposit_total,
                     u64::from(*remaining_deposits)
                 );
                 for account in ACCOUNTS {

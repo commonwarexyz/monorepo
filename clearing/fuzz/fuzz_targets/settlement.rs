@@ -968,6 +968,17 @@ impl Harness {
             .map_or(&self.finalized, |slot| &slot.successor)
     }
 
+    // A fresh fixture deadline clears both now and the pipeline tail, so a
+    // registration can satisfy the strict admission monotonicity rule while
+    // the oracle still predicts rejections for stale or distant deadlines.
+    fn fixture_admission_deadline(&self) -> u64 {
+        let tail = self
+            .slots
+            .back()
+            .map_or(0, |slot| slot.context.admission_deadline());
+        self.now.saturating_add(2).max(tail.saturating_add(1))
+    }
+
     fn make_context(
         &self,
         epoch: u64,
@@ -997,8 +1008,8 @@ impl Harness {
         let cache = self.tail_cache();
         let deposits = self.deposit_batch();
         let withdrawals = self.withdrawal_batch();
-        let admission_deadline = self.now.saturating_add(2);
-        let challenge_deadline = admission_deadline.saturating_add(2);
+        let admission_deadline = self.fixture_admission_deadline();
+        let challenge_deadline = admission_deadline.saturating_add(CHALLENGE_DURATION);
         let context = self.make_context(
             self.next_epoch(),
             cache,
@@ -1053,8 +1064,8 @@ impl Harness {
 
         let deposits = DepositBatch::empty();
         let withdrawals = self.withdrawal_batch();
-        let admission_deadline = self.now.saturating_add(2);
-        let challenge_deadline = admission_deadline.saturating_add(2);
+        let admission_deadline = self.fixture_admission_deadline();
+        let challenge_deadline = admission_deadline.saturating_add(CHALLENGE_DURATION);
         let context = self.make_context(
             self.next_epoch(),
             cache,
@@ -1718,24 +1729,38 @@ impl Harness {
             prepared.context.clone()
         };
         let observation = self.predict_observation(now);
+
+        // Mirror validate_epoch_deadlines: a strictly later admission deadline
+        // than the pipeline tail, a bounded admission delay from the tail (or
+        // from now when the pipeline is empty), and an exact challenge
+        // duration (the config sets minimum and maximum equal).
+        let tail_deadline = self
+            .slots
+            .back()
+            .map(|slot| slot.context.admission_deadline());
+        let deadline_base = tail_deadline.unwrap_or(now);
+        let deadlines_valid = (tail_deadline.is_none()
+            || context.admission_deadline() > deadline_base)
+            && context.admission_deadline()
+                <= deadline_base.saturating_add(MAX_EPOCH_ADMISSION_DELAY)
+            && context
+                .challenge_deadline()
+                .checked_sub(context.admission_deadline())
+                == Some(CHALLENGE_DURATION);
         let expected = if self.operates_after(&observation)
             && self.registered.is_none()
             && self.slots.len() < MAX_PENDING_EPOCHS
             && now <= context.admission_deadline()
+            && deadlines_valid
             && context == prepared.context
         {
             OutcomeClass::Success
         } else {
             OutcomeClass::Error
         };
-        let result = self.chain.register_close(
-            now,
-            context,
-            prepared.deposits.clone(),
-            prepared.withdrawals.clone(),
-            &[],
-            |_| true,
-        );
+        let result =
+            self.chain
+                .register_close(now, context, prepared.withdrawals.clone(), &[], |_| true);
         assert_eq!(OutcomeClass::of(&result), expected);
         self.apply_observation(now, &observation);
         if expected == OutcomeClass::Success {
@@ -2802,16 +2827,19 @@ impl Harness {
             assert_eq!(settlement.invalid_from, self.invalid_from);
             assert_eq!(settlement.frozen_state_root, self.finalized.root());
             assert_eq!(settlement.state_liability, self.finalized.liability());
-            assert_eq!(
-                settlement.unfinalized_deposit_total,
-                unfinalized_deposit_total
-            );
-            assert_eq!(settlement.custody_balance, self.custody);
 
             if let Some(replay) = replay {
                 assert_eq!(settlement, &replay);
                 assert_eq!(before, self.snapshot());
             } else {
+                // The frozen boundary replays verbatim, so the live custody
+                // and deposit totals only match when it is first frozen.
+                // Later claims drain the live values below the snapshot.
+                assert_eq!(
+                    settlement.unfinalized_deposit_total,
+                    unfinalized_deposit_total
+                );
+                assert_eq!(settlement.custody_balance, self.custody);
                 for slot in &self.slots {
                     for record in slot.deposits.records() {
                         let aggregate = self
@@ -2858,11 +2886,20 @@ impl Harness {
         if expected == OutcomeClass::Success {
             let leaf = selected.expect("a canonical terminal claim selects one live leaf");
             let request = self.outstanding.get(&leaf.account).cloned();
+
+            // Coverage is all-or-nothing at the frozen root: an amount the
+            // frozen balance cannot cover releases zero and the whole balance
+            // stays residual. The uncovered arm is unreachable today because
+            // register never carries operator extras and chain-queued
+            // requests are covered by construction.
             let withdrawal_amount =
                 request
                     .as_ref()
                     .map_or(0, |request| match request.body().action() {
-                        WithdrawalAction::Amount(amount) => amount.get(),
+                        WithdrawalAction::Amount(amount) if amount.get() <= leaf.state.balance => {
+                            amount.get()
+                        }
+                        WithdrawalAction::Amount(_) => 0,
                         WithdrawalAction::Close => leaf.state.balance,
                     });
             let release = result.expect("the oracle predicted a terminal state release");

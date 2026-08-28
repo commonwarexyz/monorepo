@@ -480,7 +480,38 @@ impl<D: Digest> Tree<D> {
             proof: self.inner.range_proof(start, end - 1)?,
         })
     }
+
+    /// Opens the adjacent bracket around one contiguous member interval.
+    ///
+    /// The disclosure covers `items[span]` plus each immediate neighbor that
+    /// exists, so a verifier can prove ordered membership or, for an empty
+    /// span, ordered absence at the insertion point. The neighbor values are
+    /// returned with the opening. [`RangeOpening::bracket`] validates the
+    /// mirrored presence and position rules.
+    pub(crate) fn bracket<T: Clone>(
+        &self,
+        items: &[T],
+        span: core::ops::Range<u32>,
+    ) -> Result<Bracket<T, D>, Error> {
+        let len =
+            u32::try_from(items.len()).map_err(|_| Error::TooManyValues(items.len() as u64))?;
+        if span.start > span.end || span.end > len {
+            return Err(Error::NonCanonicalPositions);
+        }
+        let predecessor = span
+            .start
+            .checked_sub(1)
+            .map(|position| items[position as usize].clone());
+        let successor = (span.end < len).then(|| items[span.end as usize].clone());
+        let start = span.start - u32::from(predecessor.is_some());
+        let count = span.end - start + u32::from(successor.is_some());
+        let opening = self.range_opening(start, count)?;
+        Ok((predecessor, successor, opening))
+    }
 }
+
+/// One contiguous member interval's adjacent neighbors and shared opening.
+type Bracket<T, D> = (Option<T>, Option<T>, RangeOpening<D>);
 
 /// A bounded BMT proof for one contiguous range of encoded vector values.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -492,6 +523,25 @@ pub struct RangeOpening<D: Digest> {
 }
 
 impl<D: Digest> RangeOpening<D> {
+    /// Validates bracket presence and bounds around one contiguous member interval.
+    ///
+    /// A neighbor must be disclosed exactly when leaves exist on that side, so
+    /// the members provably occupy the returned positions between their
+    /// immediate neighbors. Returns `None` for a non-canonical shape. Callers
+    /// must still check their type's key ordering against the disclosed
+    /// neighbors before verifying the opening.
+    pub(crate) fn bracket(
+        &self,
+        predecessor: bool,
+        members: u32,
+        successor: bool,
+    ) -> Option<core::ops::Range<u32>> {
+        let len = self.proof.leaf_count;
+        let start = self.start.checked_add(u32::from(predecessor))?;
+        let end = start.checked_add(members).filter(|end| *end <= len)?;
+        (predecessor == (start > 0) && successor == (end < len)).then_some(start..end)
+    }
+
     fn validate_shape(&self) -> Result<(), Error> {
         check_len(self.proof.leaf_count)?;
         if self.proof.leaf_count == 0 {
@@ -524,17 +574,34 @@ impl<D: Digest> RangeOpening<D> {
         }
         let count = u32::try_from(encoded_values.len())
             .map_err(|_| Error::TooManyValues(encoded_values.len() as u64))?;
-        let end = self
-            .start
+        self.start
             .checked_add(count)
             .filter(|end| *end <= len)
             .ok_or(Error::NonCanonicalPositions)?;
         let mut leaves = Vec::with_capacity(encoded_values.len());
-        for (position, encoded) in (self.start..end).zip(encoded_values) {
-            leaves.push((
-                leaf_digest::<H>(kind, len, position, encoded.as_ref())?,
-                position,
-            ));
+        for (pair_index, values) in encoded_values.chunks(2).enumerate() {
+            // Interleave leaf hashing pairwise, matching the builder's two-lane path.
+            let first_position = self.start + (pair_index as u32) * 2;
+            match values {
+                [first, second] => {
+                    let second_position = first_position + 1;
+                    let (first, second) = leaf_digest_pair::<H>(
+                        kind,
+                        len,
+                        first_position,
+                        first.as_ref(),
+                        second_position,
+                        second.as_ref(),
+                    )?;
+                    leaves.push((first, first_position));
+                    leaves.push((second, second_position));
+                }
+                [first] => leaves.push((
+                    leaf_digest::<H>(kind, len, first_position, first.as_ref())?,
+                    first_position,
+                )),
+                _ => unreachable!("chunks(2) yields one or two values"),
+            }
         }
         let inner = self
             .proof

@@ -1318,7 +1318,6 @@ impl SettlementModel {
         if !Self::operating(state)
             || certified.registration() != registration
             || state.now > candidate.admission_deadline
-            || state.pipeline.len() >= self.max_pending
             || !Self::registration_matches(state, registration)
             || !Self::candidate_matches_registration(batch, registration)
         {
@@ -1494,7 +1493,6 @@ impl SettlementModel {
         let candidate = batch.candidate();
         if state.status[batch.index()] != BatchStatus::Pending
             || state.now <= candidate.challenge_deadline
-            || candidate.epoch != state.expected_epoch
         {
             return None;
         }

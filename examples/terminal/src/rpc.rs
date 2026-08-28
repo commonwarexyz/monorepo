@@ -1,5 +1,6 @@
 //! Native, one-request/one-response framing for the terminal roles.
 
+use anyhow::{Context as _, bail};
 use bytes::Bytes;
 use commonware_codec::{
     BufsMut, Decode, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
@@ -194,6 +195,28 @@ pub(crate) async fn call<E: Network>(
     let (mut sink, mut stream) = network.dial(address).await?;
     send_request(&mut sink, request).await?;
     recv_response(&mut stream).await.map_err(Into::into)
+}
+
+/// Executes one request against the named role and unwraps its response envelope.
+pub(crate) async fn invoke<E: Network>(
+    network: &E,
+    address: std::net::SocketAddr,
+    role: &'static str,
+    method: u8,
+    body: Bytes,
+) -> anyhow::Result<Bytes> {
+    let response = call(network, address, &Request { method, body })
+        .await
+        .with_context(|| format!("call {role}"))?;
+    match response {
+        Response::Success { body } => Ok(body),
+        Response::Error { error } => {
+            bail!(
+                "{role} rejected request: {}",
+                String::from_utf8_lossy(&error)
+            )
+        }
+    }
 }
 
 /// Serves one bounded request at a time.

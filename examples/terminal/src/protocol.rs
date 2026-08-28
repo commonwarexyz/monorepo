@@ -5,10 +5,11 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use commonware_clearing::bajillion::{
     admission::{Committee, SealedDealing, Vote, assigned_slice_indices, bls12381, seal},
     boundary::{DepositBatch, WithdrawalAction, WithdrawalBatch},
+    commitment::VectorRoot,
     credit::ShardSet,
-    payment::{MAX_ENTRIES, PaymentContext, SignedReceipt, SignedSend},
+    payment::{MAX_ENTRIES, PaymentContext, SignedReceipt, SignedSend, verify_acceptance},
     settlement::{EpochDeadlinePolicy, FinalizedBatch, SettlementChain, SettlementConfig},
-    state::{AccountRow, StateLeaf},
+    state::{AccountRow, SettlementOutput, StateLeaf},
     transition::{
         Assignment, CloseContext, CloseLimits, EpochContext, ExternalPayoutClaim, Header,
         PreparedClose, RootBundle, StateCache, WithdrawalClaim, prepare_close_with_strategy,
@@ -153,19 +154,21 @@ impl Acceptance {
             self.receipts.len() == self.send.body().entries().len(),
             "acceptance does not cover every send entry"
         );
-        for (payment, entry) in self.payments().zip(self.send.body().entries()) {
+
+        // Entries are strictly recipient-sorted and unique, so positional recipient equality
+        // proves the receipts cover every entry exactly once.
+        for (receipt, entry) in self.receipts.iter().zip(self.send.body().entries()) {
             ensure!(
-                payment.recipient() == entry.recipient(),
+                receipt.body().recipient() == entry.recipient(),
                 "acceptance receipts are not in entry order"
             );
-            payment
-                .verify_linked::<Sha256>(context)
-                .context("verify acceptance receipt")?;
         }
-        Ok(())
+        verify_acceptance::<Sha256, _, _>(context, &self.send, &self.receipts)
+            .context("verify acceptance receipt")
     }
 
     /// Reassembles one transferable linked pair per entry.
+    #[cfg(test)]
     pub(crate) fn payments(&self) -> impl Iterator<Item = Payment> + '_ {
         self.receipts
             .iter()
@@ -237,7 +240,11 @@ impl Read for DepositEvent {
 /// Root-independent epoch authorization paired with its sealed boundary inputs.
 #[derive(Clone)]
 pub(crate) struct EpochRegistration {
+    /// Deposit records the sealed boundary includes.
     pub(crate) deposits: DepositBatch<Key>,
+    /// Staged aggregates exactly offset by a batch withdrawal. The chain defers each one
+    /// whole to the successor epoch, so the sealed boundary excludes them.
+    pub(crate) deferred: DepositBatch<Key>,
     pub(crate) withdrawals: WithdrawalBatch<Key, Digest>,
     pub(crate) context: EpochContext<Key, Digest>,
 }
@@ -346,18 +353,21 @@ pub(crate) fn operator_key() -> Key {
 fn registration_message(
     epoch: u64,
     predecessor_liability: u64,
-    deposits: &DepositBatch<Key>,
+    deposits_root: &VectorRoot<Digest>,
+    staged_root: &VectorRoot<Digest>,
     withdrawals: &WithdrawalBatch<Key, Digest>,
 ) -> Bytes {
     let mut message = BytesMut::with_capacity(
         epoch.encode_size()
             + predecessor_liability.encode_size()
-            + deposits.encode_size()
+            + deposits_root.encode_size()
+            + staged_root.encode_size()
             + withdrawals.encode_size(),
     );
     epoch.write(&mut message);
     predecessor_liability.write(&mut message);
-    deposits.write(&mut message);
+    deposits_root.write(&mut message);
+    staged_root.write(&mut message);
     withdrawals.write(&mut message);
     message.freeze()
 }
@@ -365,13 +375,20 @@ fn registration_message(
 pub(crate) fn verify_registration_signature(
     epoch: u64,
     predecessor_liability: u64,
-    deposits: &DepositBatch<Key>,
+    deposits_root: &VectorRoot<Digest>,
+    staged_root: &VectorRoot<Digest>,
     withdrawals: &WithdrawalBatch<Key, Digest>,
     signature: &Signature,
 ) -> bool {
     operator_key().verify(
         REGISTRATION_SIGNATURE_NAMESPACE,
-        &registration_message(epoch, predecessor_liability, deposits, withdrawals),
+        &registration_message(
+            epoch,
+            predecessor_liability,
+            deposits_root,
+            staged_root,
+            withdrawals,
+        ),
         signature,
     )
 }
@@ -466,22 +483,52 @@ impl Protocol {
         &self,
         epoch: u64,
         predecessor_liability: u64,
-        deposits: &DepositBatch<Key>,
+        deposits_root: &VectorRoot<Digest>,
+        staged_root: &VectorRoot<Digest>,
         withdrawals: &WithdrawalBatch<Key, Digest>,
     ) -> Signature {
         self.operator.sign(
             REGISTRATION_SIGNATURE_NAMESPACE,
-            &registration_message(epoch, predecessor_liability, deposits, withdrawals),
+            &registration_message(
+                epoch,
+                predecessor_liability,
+                deposits_root,
+                staged_root,
+                withdrawals,
+            ),
         )
     }
 
     pub(crate) fn registration(
         &self,
         epoch: u64,
-        deposits: DepositBatch<Key>,
+        staged: DepositBatch<Key>,
         withdrawals: WithdrawalBatch<Key, Digest>,
         predecessor_liability: u64,
     ) -> Result<EpochRegistration> {
+        // Mirror the chain's boundary rule: a staged aggregate exactly offset by a batch
+        // withdrawal defers whole to the successor epoch, so the sealed context commits
+        // only the included records and the boundary roots agree by construction whenever
+        // the deposit sets agree.
+        let mut deposits = Vec::new();
+        let mut deferred = Vec::new();
+        for record in staged.records() {
+            let defers = withdrawals
+                .request_for(record.account())
+                .is_some_and(|request| {
+                    SettlementChain::<Sha256, Key>::withdrawal_defers_deposit(
+                        request,
+                        record.amount(),
+                    )
+                });
+            if defers {
+                deferred.push(record.clone());
+            } else {
+                deposits.push(record.clone());
+            }
+        }
+        let deposits = DepositBatch::new(deposits).context("split included deposit boundary")?;
+        let deferred = DepositBatch::new(deferred).context("split deferred deposit boundary")?;
         let context = epoch_context(epoch, &deposits, &withdrawals, predecessor_liability)?;
         ensure!(
             context.deployment() == &self.deployment
@@ -491,6 +538,7 @@ impl Protocol {
         );
         Ok(EpochRegistration {
             deposits,
+            deferred,
             withdrawals,
             context,
         })
@@ -622,7 +670,7 @@ impl Protocol {
             .close()
             .rows
             .iter()
-            .filter(|row| !row.predecessor.active && deposits.amount_for(&row.account) == 0)
+            .filter(|row| matches!(row.output, SettlementOutput::ExternalPayout(_)))
             .map(|row| {
                 prepared
                     .external_payout_claim(&row.account)
@@ -689,7 +737,6 @@ impl Protocol {
             .register_close(
                 now,
                 context.clone(),
-                deposits.clone(),
                 withdrawals.clone(),
                 &extra_openings,
                 |_| true,
