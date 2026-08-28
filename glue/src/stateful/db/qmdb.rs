@@ -35,7 +35,7 @@ pub trait Qmdb: sync::Database<Config: Send> + Sync {
     type Floor: Default + Send;
 
     /// Batch rooted at the applied state.
-    fn batch(&self) -> Self::Batch;
+    fn new_batch(&self) -> Self::Batch;
 
     /// Merkleize `batch` against the applied state.
     fn merkleize(
@@ -46,7 +46,7 @@ pub trait Qmdb: sync::Database<Config: Send> + Sync {
     ) -> impl Future<Output = Result<Arc<Self::MerkleizedBatch>, Error<Self::Family>>> + Send;
 
     /// Apply a merkleized batch.
-    fn apply_merkleized(
+    fn apply(
         self,
         batch: Arc<Self::MerkleizedBatch>,
     ) -> impl Future<Output = Result<Self, Error<Self::Family>>> + Send;
@@ -201,7 +201,7 @@ impl<D: Qmdb> ManagedDb<D::Context> for D {
     fn new_batch(database: BatchContext<'_, Self>) -> Unmerkleized<D> {
         let (database, shared) = database.into_parts();
         Unmerkleized {
-            batch: database.batch(),
+            batch: database.new_batch(),
             db: shared,
             metadata: None,
             floor: D::Floor::default(),
@@ -213,7 +213,7 @@ impl<D: Qmdb> ManagedDb<D::Context> for D {
     }
 
     async fn apply(self, batch: Merkleized<D>) -> Result<Self, Error<D::Family>> {
-        self.apply_merkleized(batch.inner).await
+        Qmdb::apply(self, batch.inner).await
     }
 
     async fn finalize(self) -> Result<(Self, Handle<()>), Error<D::Family>> {

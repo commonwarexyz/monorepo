@@ -55,7 +55,7 @@ where
     type Metadata = V::Value;
     type Floor = Option<Location<F>>;
 
-    fn batch(&self) -> Self::Batch {
+    fn new_batch(&self) -> Self::Batch {
         self.new_batch()
     }
 
@@ -69,7 +69,7 @@ where
         Ok(batch.merkleize(self, metadata, floor).await)
     }
 
-    async fn apply_merkleized(self, batch: Arc<Self::MerkleizedBatch>) -> Result<Self, Error<F>> {
+    async fn apply(self, batch: Arc<Self::MerkleizedBatch>) -> Result<Self, Error<F>> {
         let (db, _) = self.apply_batch(batch).await?;
         Ok(db)
     }
@@ -92,7 +92,7 @@ mod tests {
     use super::*;
     use crate::stateful::db::{
         ManagedDb, Shared, StateSyncDb, SyncSession, Unmerkleized as _,
-        tests::configs::{immutable_compact_fixed_config, sync_config},
+        tests::configs::{immutable::compact_fixed_config, sync_config},
     };
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_parallel::Sequential;
@@ -106,7 +106,7 @@ mod tests {
     #[test]
     fn managed_db_apply_and_finalize_persists_fixed_immutable_unjournaled_batches() {
         deterministic::Runner::default().start(|context| async move {
-            let config = immutable_compact_fixed_config(&context, "managed-db");
+            let config = compact_fixed_config(&context, "managed-db");
             let db = CompactFixedDb::init(context.child("db"), config)
                 .await
                 .unwrap();
@@ -141,7 +141,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let source = CompactFixedDb::init(
                 context.child("source"),
-                immutable_compact_fixed_config(&context, "source"),
+                compact_fixed_config(&context, "source"),
             )
             .await
             .unwrap();
@@ -159,7 +159,7 @@ mod tests {
             let (_update_tx, update_rx) = mpsc::channel(1);
             let synced = <CompactFixedDb as StateSyncDb<_, Arc<CompactFixedDb>>>::sync_db(
                 context.child("target"),
-                immutable_compact_fixed_config(&context, "target"),
+                compact_fixed_config(&context, "target"),
                 Arc::new(source),
                 SyncSession {
                     target: target.clone(),
@@ -181,7 +181,7 @@ mod tests {
     fn managed_db_prune_bounds_fixed_immutable_unjournaled_rewind_history() {
         deterministic::Runner::default().start(|context| async move {
             // One witness entry per section so pruning takes effect at entry granularity.
-            let mut config = immutable_compact_fixed_config(&context, "prune");
+            let mut config = compact_fixed_config(&context, "prune");
             config.witness.items_per_section = NZU64!(1);
             let mut db = CompactFixedDb::init(context.child("db"), config)
                 .await

@@ -254,7 +254,7 @@ where
     type Metadata = V::Value;
     type Floor = ();
 
-    fn batch(&self) -> Self::Batch {
+    fn new_batch(&self) -> Self::Batch {
         self.new_batch()
     }
 
@@ -267,7 +267,7 @@ where
         batch.merkleize(self, metadata).await
     }
 
-    async fn apply_merkleized(self, batch: Arc<Self::MerkleizedBatch>) -> Result<Self, Error<F>> {
+    async fn apply(self, batch: Arc<Self::MerkleizedBatch>) -> Result<Self, Error<F>> {
         let (db, _) = self.apply_batch(batch).await?;
         Ok(db)
     }
@@ -288,7 +288,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stateful::db::{ManagedDb, Unmerkleized as _, tests::configs::any_fixed_config};
+    use crate::stateful::db::{ManagedDb, Unmerkleized as _, tests::configs::any::fixed_config};
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
@@ -303,7 +303,7 @@ mod tests {
     #[test]
     fn unmerkleized_batch_falls_through_to_applied_state() {
         deterministic::Runner::default().start(|context| async move {
-            let config = any_fixed_config(&context, "unordered-fixed-live-fallback");
+            let config = fixed_config(&context, "unordered-fixed-live-fallback");
             let db = <UnorderedFixedDb as ManagedDb<_>>::init(context.child("db"), config)
                 .await
                 .unwrap();
@@ -330,7 +330,7 @@ mod tests {
     #[test]
     fn unordered_fixed_staged_merkleize_matches_explicit_writes() {
         deterministic::Runner::default().start(|context| async move {
-            let config = any_fixed_config(&context, "unordered-fixed-glue-staged");
+            let config = fixed_config(&context, "unordered-fixed-glue-staged");
             let db = <UnorderedFixedDb as ManagedDb<_>>::init(context.child("db"), config)
                 .await
                 .unwrap();
@@ -418,7 +418,7 @@ mod tests {
                 inner: context,
                 pending: pending.clone(),
             };
-            let config = any_fixed_config(&delayed, "unordered-fixed-deferred");
+            let config = fixed_config(&delayed, "unordered-fixed-deferred");
             let db = drive_pending_syncs(
                 &pending,
                 <DelayedFixedDb as ManagedDb<_>>::init(delayed.child("db"), config),

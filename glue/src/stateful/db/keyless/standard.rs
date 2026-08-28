@@ -104,7 +104,7 @@ where
     type Metadata = V::Value;
     type Floor = Option<Location<F>>;
 
-    fn batch(&self) -> Self::Batch {
+    fn new_batch(&self) -> Self::Batch {
         self.new_batch()
     }
 
@@ -118,7 +118,7 @@ where
         Ok(batch.merkleize(self, metadata, floor).await)
     }
 
-    async fn apply_merkleized(self, batch: Arc<Self::MerkleizedBatch>) -> Result<Self, Error<F>> {
+    async fn apply(self, batch: Arc<Self::MerkleizedBatch>) -> Result<Self, Error<F>> {
         let (db, _) = self.apply_batch(batch).await?;
         Ok(db)
     }
@@ -140,7 +140,7 @@ where
 mod tests {
     use super::*;
     use crate::stateful::db::{
-        ManagedDb, Shared, Unmerkleized as _, tests::configs::keyless_fixed_config,
+        ManagedDb, Shared, Unmerkleized as _, tests::configs::keyless::fixed_config,
     };
     use commonware_cryptography::Sha256;
     use commonware_parallel::Sequential;
@@ -153,7 +153,7 @@ mod tests {
     #[test]
     fn managed_db_apply_and_finalize_persists_fixed_keyless_batches() {
         deterministic::Runner::default().start(|context| async move {
-            let config = keyless_fixed_config(&context, "managed-db");
+            let config = fixed_config(&context, "managed-db");
             let db = FixedDb::init(context.child("db"), config).await.unwrap();
             let db = Shared::new("test", db);
 
@@ -184,7 +184,7 @@ mod tests {
     #[test]
     fn managed_db_prune_drops_history_below_the_target_floor() {
         deterministic::Runner::default().start(|context| async move {
-            let config = keyless_fixed_config(&context, "prune");
+            let config = fixed_config(&context, "prune");
             let db = FixedDb::init(context.child("db"), config).await.unwrap();
             let db = Shared::new("test", db);
 
@@ -224,7 +224,7 @@ mod tests {
     #[test]
     fn merkleize_rejects_floor_at_batch_size() {
         deterministic::Runner::default().start(|context| async move {
-            let config = keyless_fixed_config(&context, "floor-at-size");
+            let config = fixed_config(&context, "floor-at-size");
             let db = FixedDb::init(context.child("db"), config).await.unwrap();
             let db = Shared::new("test", db);
 

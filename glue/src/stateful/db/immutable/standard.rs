@@ -105,7 +105,7 @@ where
     type Metadata = V::Value;
     type Floor = Option<Location<F>>;
 
-    fn batch(&self) -> Self::Batch {
+    fn new_batch(&self) -> Self::Batch {
         self.new_batch()
     }
 
@@ -119,7 +119,7 @@ where
         Ok(batch.merkleize(self, metadata, floor).await)
     }
 
-    async fn apply_merkleized(self, batch: Arc<Self::MerkleizedBatch>) -> Result<Self, Error<F>> {
+    async fn apply(self, batch: Arc<Self::MerkleizedBatch>) -> Result<Self, Error<F>> {
         let (db, _) = self.apply_batch(batch).await?;
         Ok(db)
     }
@@ -140,7 +140,7 @@ where
 #[cfg(test)]
 mod tests {
     use crate::stateful::db::{
-        ManagedDb, Shared, Unmerkleized as _, tests::configs::immutable_fixed_config,
+        ManagedDb, Shared, Unmerkleized as _, tests::configs::immutable::fixed_config,
     };
     use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
     use commonware_parallel::Sequential;
@@ -154,7 +154,7 @@ mod tests {
     #[test]
     fn managed_db_apply_and_finalize_persists_fixed_immutable_batches() {
         deterministic::Runner::default().start(|context| async move {
-            let config = immutable_fixed_config(&context, "managed-db");
+            let config = fixed_config(&context, "managed-db");
             let db = FixedDb::init(context.child("db"), config).await.unwrap();
             let db = Shared::new("test", db);
             let key = Sha256::hash(&[b"key"]);

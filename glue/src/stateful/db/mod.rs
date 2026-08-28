@@ -1985,173 +1985,189 @@ pub(crate) mod tests {
             }
         }
 
-        pub(crate) fn any_fixed_config(
-            context: &impl BufferPooler,
-            suffix: &str,
-        ) -> storage_any::FixedConfig<TwoCap, Sequential> {
-            let partition = format!("any-{suffix}");
-            storage_any::Config {
-                merkle_config: merkle_config(context, &partition),
-                journal_config: fixed_journal_config(context, &partition),
-                translator: TwoCap,
-                init_cache_size: Some(NZUsize!(1024)),
-                init_buffer: NZUsize!(1 << 21),
-                init_concurrency: (),
+        pub(crate) mod any {
+            use super::*;
+
+            pub(crate) fn fixed_config(
+                context: &impl BufferPooler,
+                suffix: &str,
+            ) -> storage_any::FixedConfig<TwoCap, Sequential> {
+                let partition = format!("any-{suffix}");
+                storage_any::Config {
+                    merkle_config: merkle_config(context, &partition),
+                    journal_config: fixed_journal_config(context, &partition),
+                    translator: TwoCap,
+                    init_cache_size: Some(NZUsize!(1024)),
+                    init_buffer: NZUsize!(1 << 21),
+                    init_concurrency: (),
+                }
+            }
+            pub(crate) fn variable_config(
+                context: &impl BufferPooler,
+                suffix: &str,
+            ) -> storage_any::VariableConfig<TwoCap, ((), ()), Sequential> {
+                let partition = format!("any-{suffix}");
+                storage_any::Config {
+                    merkle_config: merkle_config(context, &partition),
+                    journal_config: variable_journal_config(context, &partition, ((), ())),
+                    translator: TwoCap,
+                    init_cache_size: Some(NZUsize!(1024)),
+                    init_buffer: NZUsize!(1 << 21),
+                    init_concurrency: (),
+                }
             }
         }
 
-        pub(crate) fn any_variable_config(
-            context: &impl BufferPooler,
-            suffix: &str,
-        ) -> storage_any::VariableConfig<TwoCap, ((), ()), Sequential> {
-            let partition = format!("any-{suffix}");
-            storage_any::Config {
-                merkle_config: merkle_config(context, &partition),
-                journal_config: variable_journal_config(context, &partition, ((), ())),
-                translator: TwoCap,
-                init_cache_size: Some(NZUsize!(1024)),
-                init_buffer: NZUsize!(1 << 21),
-                init_concurrency: (),
+        pub(crate) mod current {
+            use super::*;
+
+            pub(crate) fn fixed_config(
+                context: &impl BufferPooler,
+                suffix: &str,
+            ) -> storage_current::FixedConfig<TwoCap, Sequential> {
+                let partition = format!("current-{suffix}");
+                storage_current::Config {
+                    merkle_config: merkle_config(context, &partition),
+                    journal_config: fixed_journal_config(context, &partition),
+                    grafted_metadata_partition: format!("{partition}-grafted-metadata"),
+                    translator: TwoCap,
+                    init_cache_size: Some(NZUsize!(1024)),
+                    init_buffer: NZUsize!(1 << 21),
+                    init_concurrency: (),
+                }
+            }
+            pub(crate) fn variable_config(
+                context: &impl BufferPooler,
+                suffix: &str,
+            ) -> storage_current::VariableConfig<TwoCap, ((), ()), Sequential> {
+                let partition = format!("current-{suffix}");
+                storage_current::Config {
+                    merkle_config: merkle_config(context, &partition),
+                    journal_config: variable_journal_config(context, &partition, ((), ())),
+                    grafted_metadata_partition: format!("{partition}-grafted-metadata"),
+                    translator: TwoCap,
+                    init_cache_size: Some(NZUsize!(1024)),
+                    init_buffer: NZUsize!(1 << 21),
+                    init_concurrency: (),
+                }
             }
         }
 
-        pub(crate) fn current_fixed_config(
-            context: &impl BufferPooler,
-            suffix: &str,
-        ) -> storage_current::FixedConfig<TwoCap, Sequential> {
-            let partition = format!("current-{suffix}");
-            storage_current::Config {
-                merkle_config: merkle_config(context, &partition),
-                journal_config: fixed_journal_config(context, &partition),
-                grafted_metadata_partition: format!("{partition}-grafted-metadata"),
-                translator: TwoCap,
-                init_cache_size: Some(NZUsize!(1024)),
-                init_buffer: NZUsize!(1 << 21),
-                init_concurrency: (),
+        pub(crate) mod immutable {
+            use super::*;
+
+            pub(crate) fn fixed_config(
+                context: &impl BufferPooler,
+                suffix: &str,
+            ) -> storage_immutable::fixed::Config<TwoCap, Sequential> {
+                let partition = format!("immutable-{suffix}");
+                storage_immutable::Config {
+                    merkle_config: merkle_config(context, &partition),
+                    log: fixed_journal_config(context, &partition),
+                    translator: TwoCap,
+                    init_cache_size: Some(NZUsize!(1024)),
+                    init_buffer: NZUsize!(1 << 21),
+                }
+            }
+            pub(crate) fn variable_config(
+                context: &impl BufferPooler,
+                suffix: &str,
+            ) -> storage_immutable::variable::Config<TwoCap, ((), ()), Sequential> {
+                let partition = format!("immutable-{suffix}");
+                storage_immutable::Config {
+                    merkle_config: merkle_config(context, &partition),
+                    log: variable_journal_config(context, &partition, ((), ())),
+                    translator: TwoCap,
+                    init_cache_size: Some(NZUsize!(1024)),
+                    init_buffer: NZUsize!(1 << 21),
+                }
+            }
+            pub(crate) fn compact_fixed_config(
+                context: &impl BufferPooler,
+                suffix: &str,
+            ) -> storage_immutable::fixed::CompactConfig<Sequential> {
+                storage_immutable::CompactConfig {
+                    strategy: Sequential,
+                    witness: variable_journal_config(
+                        context,
+                        &format!("immutable-compact-{suffix}"),
+                        (),
+                    ),
+                    commit_codec_config: (),
+                }
+            }
+            pub(crate) fn compact_variable_config(
+                context: &impl BufferPooler,
+                suffix: &str,
+            ) -> storage_immutable::variable::CompactConfig<((), ()), Sequential> {
+                storage_immutable::CompactConfig {
+                    strategy: Sequential,
+                    witness: variable_journal_config(
+                        context,
+                        &format!("immutable-compact-{suffix}"),
+                        (),
+                    ),
+                    commit_codec_config: ((), ()),
+                }
             }
         }
 
-        pub(crate) fn current_variable_config(
-            context: &impl BufferPooler,
-            suffix: &str,
-        ) -> storage_current::VariableConfig<TwoCap, ((), ()), Sequential> {
-            let partition = format!("current-{suffix}");
-            storage_current::Config {
-                merkle_config: merkle_config(context, &partition),
-                journal_config: variable_journal_config(context, &partition, ((), ())),
-                grafted_metadata_partition: format!("{partition}-grafted-metadata"),
-                translator: TwoCap,
-                init_cache_size: Some(NZUsize!(1024)),
-                init_buffer: NZUsize!(1 << 21),
-                init_concurrency: (),
-            }
-        }
+        pub(crate) mod keyless {
+            use super::*;
 
-        pub(crate) fn immutable_fixed_config(
-            context: &impl BufferPooler,
-            suffix: &str,
-        ) -> storage_immutable::fixed::Config<TwoCap, Sequential> {
-            let partition = format!("immutable-{suffix}");
-            storage_immutable::Config {
-                merkle_config: merkle_config(context, &partition),
-                log: fixed_journal_config(context, &partition),
-                translator: TwoCap,
-                init_cache_size: Some(NZUsize!(1024)),
-                init_buffer: NZUsize!(1 << 21),
+            pub(crate) fn fixed_config(
+                context: &impl BufferPooler,
+                suffix: &str,
+            ) -> storage_keyless::fixed::Config<Sequential> {
+                let partition = format!("keyless-{suffix}");
+                storage_keyless::Config {
+                    merkle: merkle_config(context, &partition),
+                    log: fixed_journal_config(context, &partition),
+                }
             }
-        }
-
-        pub(crate) fn immutable_variable_config(
-            context: &impl BufferPooler,
-            suffix: &str,
-        ) -> storage_immutable::variable::Config<TwoCap, ((), ()), Sequential> {
-            let partition = format!("immutable-{suffix}");
-            storage_immutable::Config {
-                merkle_config: merkle_config(context, &partition),
-                log: variable_journal_config(context, &partition, ((), ())),
-                translator: TwoCap,
-                init_cache_size: Some(NZUsize!(1024)),
-                init_buffer: NZUsize!(1 << 21),
+            pub(crate) fn variable_config(
+                context: &impl BufferPooler,
+                suffix: &str,
+            ) -> storage_keyless::variable::Config<(), Sequential> {
+                let partition = format!("keyless-{suffix}");
+                storage_keyless::Config {
+                    merkle: merkle_config(context, &partition),
+                    log: variable_journal_config(context, &partition, ()),
+                }
             }
-        }
-
-        pub(crate) fn keyless_fixed_config(
-            context: &impl BufferPooler,
-            suffix: &str,
-        ) -> storage_keyless::fixed::Config<Sequential> {
-            let partition = format!("keyless-{suffix}");
-            storage_keyless::Config {
-                merkle: merkle_config(context, &partition),
-                log: fixed_journal_config(context, &partition),
+            pub(crate) fn compact_fixed_config(
+                context: &impl BufferPooler,
+                suffix: &str,
+            ) -> storage_keyless::fixed::CompactConfig<Sequential> {
+                storage_keyless::CompactConfig {
+                    strategy: Sequential,
+                    witness: variable_journal_config(
+                        context,
+                        &format!("keyless-compact-{suffix}"),
+                        (),
+                    ),
+                    commit_codec_config: (),
+                }
             }
-        }
-
-        pub(crate) fn keyless_variable_config(
-            context: &impl BufferPooler,
-            suffix: &str,
-        ) -> storage_keyless::variable::Config<(), Sequential> {
-            let partition = format!("keyless-{suffix}");
-            storage_keyless::Config {
-                merkle: merkle_config(context, &partition),
-                log: variable_journal_config(context, &partition, ()),
-            }
-        }
-
-        pub(crate) fn immutable_compact_fixed_config(
-            context: &impl BufferPooler,
-            suffix: &str,
-        ) -> storage_immutable::fixed::CompactConfig<Sequential> {
-            storage_immutable::CompactConfig {
-                strategy: Sequential,
-                witness: variable_journal_config(
-                    context,
-                    &format!("immutable-compact-{suffix}"),
-                    (),
-                ),
-                commit_codec_config: (),
-            }
-        }
-
-        pub(crate) fn immutable_compact_variable_config(
-            context: &impl BufferPooler,
-            suffix: &str,
-        ) -> storage_immutable::variable::CompactConfig<((), ()), Sequential> {
-            storage_immutable::CompactConfig {
-                strategy: Sequential,
-                witness: variable_journal_config(
-                    context,
-                    &format!("immutable-compact-{suffix}"),
-                    (),
-                ),
-                commit_codec_config: ((), ()),
-            }
-        }
-
-        pub(crate) fn keyless_compact_fixed_config(
-            context: &impl BufferPooler,
-            suffix: &str,
-        ) -> storage_keyless::fixed::CompactConfig<Sequential> {
-            storage_keyless::CompactConfig {
-                strategy: Sequential,
-                witness: variable_journal_config(context, &format!("keyless-compact-{suffix}"), ()),
-                commit_codec_config: (),
-            }
-        }
-
-        pub(crate) fn keyless_compact_variable_config(
-            context: &impl BufferPooler,
-            suffix: &str,
-        ) -> storage_keyless::variable::CompactConfig<(), Sequential> {
-            storage_keyless::CompactConfig {
-                strategy: Sequential,
-                witness: variable_journal_config(context, &format!("keyless-compact-{suffix}"), ()),
-                commit_codec_config: (),
+            pub(crate) fn compact_variable_config(
+                context: &impl BufferPooler,
+                suffix: &str,
+            ) -> storage_keyless::variable::CompactConfig<(), Sequential> {
+                storage_keyless::CompactConfig {
+                    strategy: Sequential,
+                    witness: variable_journal_config(
+                        context,
+                        &format!("keyless-compact-{suffix}"),
+                        (),
+                    ),
+                    commit_codec_config: (),
+                }
             }
         }
     }
 
     mod managed_db_lifecycle {
-        use super::{ManagedDb, Shared, configs::*};
+        use super::{ManagedDb, Shared, configs};
         use crate::stateful::db::{Merkleized as _, Unmerkleized as _, qmdb::Qmdb};
         use commonware_cryptography::{Sha256, sha256::Digest};
         use commonware_parallel::Sequential;
@@ -2303,7 +2319,9 @@ pub(crate) mod tests {
                 .expect("forked batch must merkleize");
 
             let (slot, database) = db.write().await;
-            let database = T::apply(database, first.clone()).await.unwrap();
+            let database = <T as ManagedDb<Context>>::apply(database, first.clone())
+                .await
+                .unwrap();
             let after_first = database.sync_target();
             assert!(T::matches_sync_target(&first, &after_first));
             let mut wrong_root = after_first.clone();
@@ -2313,7 +2331,9 @@ pub(crate) mod tests {
             wrong_range.range =
                 non_empty_range!(after_first.range.start(), after_first.range.end() + 1);
             assert!(!T::matches_sync_target(&first, &wrong_range));
-            let database = T::apply(database, second.clone()).await.unwrap();
+            let database = <T as ManagedDb<Context>>::apply(database, second.clone())
+                .await
+                .unwrap();
             let after_second = database.sync_target();
             assert!(T::matches_sync_target(&second, &after_second));
             assert!(!T::matches_sync_target(&second, &after_first));
@@ -2356,46 +2376,46 @@ pub(crate) mod tests {
         }
 
         #[rstest]
-        #[case::any_fixed(PhantomData::<AnyFixed>, any_fixed_config)]
-        #[case::any_variable(PhantomData::<AnyVariable>, any_variable_config)]
+        #[case::any_fixed(PhantomData::<AnyFixed>, configs::any::fixed_config)]
+        #[case::any_variable(PhantomData::<AnyVariable>, configs::any::variable_config)]
         #[case::current_unordered_fixed(
             PhantomData::<CurrentUnorderedFixed>,
-            current_fixed_config
+            configs::current::fixed_config
         )]
         #[case::current_ordered_fixed(
             PhantomData::<CurrentOrderedFixed>,
-            current_fixed_config
+            configs::current::fixed_config
         )]
         #[case::current_unordered_variable(
             PhantomData::<CurrentUnorderedVariable>,
-            current_variable_config
+            configs::current::variable_config
         )]
         #[case::current_ordered_variable(
             PhantomData::<CurrentOrderedVariable>,
-            current_variable_config
+            configs::current::variable_config
         )]
-        #[case::immutable_fixed(PhantomData::<ImmutableFixed>, immutable_fixed_config)]
+        #[case::immutable_fixed(PhantomData::<ImmutableFixed>, configs::immutable::fixed_config)]
         #[case::immutable_variable(
             PhantomData::<ImmutableVariable>,
-            immutable_variable_config
+            configs::immutable::variable_config
         )]
         #[case::immutable_compact_fixed(
             PhantomData::<ImmutableCompactFixed>,
-            immutable_compact_fixed_config
+            configs::immutable::compact_fixed_config
         )]
         #[case::immutable_compact_variable(
             PhantomData::<ImmutableCompactVariable>,
-            immutable_compact_variable_config
+            configs::immutable::compact_variable_config
         )]
-        #[case::keyless_fixed(PhantomData::<KeylessFixed>, keyless_fixed_config)]
-        #[case::keyless_variable(PhantomData::<KeylessVariable>, keyless_variable_config)]
+        #[case::keyless_fixed(PhantomData::<KeylessFixed>, configs::keyless::fixed_config)]
+        #[case::keyless_variable(PhantomData::<KeylessVariable>, configs::keyless::variable_config)]
         #[case::keyless_compact_fixed(
             PhantomData::<KeylessCompactFixed>,
-            keyless_compact_fixed_config
+            configs::keyless::compact_fixed_config
         )]
         #[case::keyless_compact_variable(
             PhantomData::<KeylessCompactVariable>,
-            keyless_compact_variable_config
+            configs::keyless::compact_variable_config
         )]
         fn lifecycle_round_trips_from_initial_sync_target<T>(
             #[case] _db: PhantomData<T>,

@@ -306,7 +306,7 @@ where
     type Metadata = V::Value;
     type Floor = ();
 
-    fn batch(&self) -> Self::Batch {
+    fn new_batch(&self) -> Self::Batch {
         self.new_batch()
     }
 
@@ -319,7 +319,7 @@ where
         batch.merkleize(self, metadata).await
     }
 
-    async fn apply_merkleized(self, batch: Arc<Self::MerkleizedBatch>) -> Result<Self, Error<F>> {
+    async fn apply(self, batch: Arc<Self::MerkleizedBatch>) -> Result<Self, Error<F>> {
         let (db, _) = self.apply_batch(batch).await?;
         Ok(db)
     }
@@ -355,7 +355,7 @@ where
     type Metadata = V::Value;
     type Floor = ();
 
-    fn batch(&self) -> Self::Batch {
+    fn new_batch(&self) -> Self::Batch {
         self.new_batch()
     }
 
@@ -368,7 +368,7 @@ where
         batch.merkleize(self, metadata).await
     }
 
-    async fn apply_merkleized(self, batch: Arc<Self::MerkleizedBatch>) -> Result<Self, Error<F>> {
+    async fn apply(self, batch: Arc<Self::MerkleizedBatch>) -> Result<Self, Error<F>> {
         let (db, _) = self.apply_batch(batch).await?;
         Ok(db)
     }
@@ -391,7 +391,7 @@ mod tests {
     use super::*;
     use crate::stateful::db::{
         ManagedDb, Unmerkleized as _,
-        tests::configs::{current_fixed_config, current_variable_config},
+        tests::configs::current::{fixed_config, variable_config},
     };
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_parallel::Sequential;
@@ -426,7 +426,7 @@ mod tests {
     #[test]
     fn ordered_fixed_managed_db_applies_batch_and_proves_exclusion() {
         deterministic::Runner::default().start(|context| async move {
-            let config = current_fixed_config(&context, "ordered-fixed-managed-db");
+            let config = fixed_config(&context, "ordered-fixed-managed-db");
             let db = <OrderedFixedDb as ManagedDb<_>>::init(context.child("db"), config)
                 .await
                 .unwrap();
@@ -467,7 +467,7 @@ mod tests {
     #[test]
     fn ordered_fixed_staged_merkleize_matches_explicit_writes() {
         deterministic::Runner::default().start(|context| async move {
-            let config = current_fixed_config(&context, "ordered-fixed-glue-staged");
+            let config = fixed_config(&context, "ordered-fixed-glue-staged");
             let db = <OrderedFixedDb as ManagedDb<_>>::init(context.child("db"), config)
                 .await
                 .unwrap();
@@ -540,7 +540,7 @@ mod tests {
     #[test]
     fn ordered_variable_managed_db_applies_batch_and_proves_exclusion() {
         deterministic::Runner::default().start(|context| async move {
-            let config = current_variable_config(&context, "ordered-variable-managed-db");
+            let config = variable_config(&context, "ordered-variable-managed-db");
             let db = <OrderedVariableDb as ManagedDb<_>>::init(context.child("db"), config)
                 .await
                 .unwrap();
