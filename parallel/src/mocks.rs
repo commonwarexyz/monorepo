@@ -15,7 +15,16 @@ pub fn inline(parallelism: NonZeroUsize) -> Rayon {
 
 /// Returns a strategy whose spawned jobs never run: `workers` workers are registered but never
 /// started, so offloaded jobs queue forever.
+///
+/// # Panics
+///
+/// Panics if `workers` is 1: `spawn` runs jobs inline at submission on a single-worker pool,
+/// which would violate this mock's contract.
 pub fn pending(workers: NonZeroUsize) -> Rayon {
+    assert!(
+        workers.get() >= 2,
+        "pending requires a multi-worker pool: spawn inlines jobs on a single-worker pool"
+    );
     let pool: ThreadPool = Arc::new(
         ThreadPoolBuilder::new()
             .num_threads(workers.get())
