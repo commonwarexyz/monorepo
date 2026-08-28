@@ -183,10 +183,10 @@ p256 = { version = "0.14.0", default-features = false }
 parking_lot = "0.12.5"
 paste = "1.0.15"
 pin-project = "1.1.13"
+prettyplease = { version = "=0.2.37", features = ["verbatim"] }
 proc-macro-crate = "3.5.0"
 proc-macro2 = "1.0"
 prometheus-client = "0.25.0"
-prettyplease = { version = "=0.2.37", features = ["verbatim"] }
 proptest = "1.11.0"
 prost = "0.14.4"
 prost-build = "0.14.4"
