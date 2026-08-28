@@ -85,10 +85,16 @@ fn run_stdin() -> Result<(), String> {
         .map_err(|error| format!("failed to read stdin: {error}"))?;
     let output = commonware_fmt::file::format(&source)
         .map_err(|error| format!("failed to format stdin: {error}"))?;
-    io::stdout()
-        .lock()
-        .write_all(output.text().as_bytes())
-        .map_err(|error| format!("failed to write stdout: {error}"))
+    write_output(io::stdout().lock(), output.text())
+}
+
+fn write_output(mut writer: impl io::Write, output: &str) -> Result<(), String> {
+    writer
+        .write_all(output.as_bytes())
+        .map_err(|error| format!("failed to write stdout: {error}"))?;
+    writer
+        .flush()
+        .map_err(|error| format!("failed to flush stdout: {error}"))
 }
 
 fn run_files(paths: &[PathBuf], check: bool) -> Outcome {
@@ -189,6 +195,18 @@ fn collect_files(paths: &[PathBuf], errors: &mut Vec<String>) -> Vec<Input> {
 mod tests {
     use super::*;
 
+    struct FlushError;
+
+    impl io::Write for FlushError {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::Error::other("flush failed"))
+        }
+    }
+
     struct TempDir(tempfile::TempDir);
 
     impl TempDir {
@@ -210,6 +228,13 @@ mod tests {
         assert!(Args::try_parse_from(["commonware-fmt"]).is_err());
         assert!(Args::try_parse_from(["commonware-fmt", "--stdin", "--check"]).is_err());
         assert!(Args::try_parse_from(["commonware-fmt", "--stdin", "input.rs"]).is_err());
+    }
+
+    #[test]
+    fn reports_buffered_stdout_errors() {
+        let error = write_output(FlushError, "output").unwrap_err();
+
+        assert_eq!(error, "failed to flush stdout: flush failed");
     }
 
     #[test]

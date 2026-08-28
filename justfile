@@ -26,7 +26,10 @@ pre-pr: lint test-docs test
 fix-fmt *args='':
     #!/usr/bin/env bash
     set -euo pipefail
-    mapfile -d '' -t source_files < <(find . -path ./target -prune -o -name '*.rs' -type f -print0)
+    source_files=()
+    while IFS= read -r -d '' source_file; do
+        source_files+=("$source_file")
+    done < <(find . -path ./target -prune -o -name '*.rs' -type f -print0)
     if [ "${#source_files[@]}" -eq 0 ]; then
         exit 0
     fi
@@ -45,7 +48,10 @@ check-toml-fmt:
 check-fmt:
     #!/usr/bin/env bash
     set -euo pipefail
-    mapfile -d '' -t source_files < <(find . -path ./target -prune -o -name '*.rs' -type f -print0)
+    source_files=()
+    while IFS= read -r -d '' source_file; do
+        source_files+=("$source_file")
+    done < <(find . -path ./target -prune -o -name '*.rs' -type f -print0)
     if [ "${#source_files[@]}" -eq 0 ]; then
         exit 0
     fi
