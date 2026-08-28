@@ -31,7 +31,7 @@ where
     /// A notification from consensus that a [`Commitment`] has been discovered.
     Discovered {
         /// The [`Commitment`] of the proposed block.
-        commitment: Commitment,
+        commitment: Commitment<B, C, H>,
         /// The leader's public key.
         leader: P,
         /// The round in which the commitment was proposed.
@@ -44,14 +44,14 @@ where
     /// for the commitment, but it does not satisfy assigned shard verification.
     Notarized {
         /// The [`Commitment`] of the notarized block.
-        commitment: Commitment,
+        commitment: Commitment<B, C, H>,
         /// The round in which the commitment was notarized.
         round: Round,
     },
     /// A request to get a reconstructed block, if available.
     GetByCommitment {
         /// The [`Commitment`] of the block to get.
-        commitment: Commitment,
+        commitment: Commitment<B, C, H>,
         /// The response channel.
         response: oneshot::Sender<Option<Arc<CodedBlock<B, C, H>>>>,
     },
@@ -74,15 +74,15 @@ where
     /// is cached because they trivially have all shards.
     SubscribeAssignedShardVerified {
         /// The block's commitment.
-        commitment: Commitment,
+        commitment: Commitment<B, C, H>,
         /// The response channel.
         response: oneshot::Sender<()>,
     },
     /// A request to open a subscription for the reconstruction of a [`CodedBlock`]
     /// by its [`Commitment`].
     SubscribeByCommitment {
-        /// The block's digest.
-        commitment: Commitment,
+        /// The block's commitment.
+        commitment: Commitment<B, C, H>,
         /// The response channel.
         response: oneshot::Sender<Arc<CodedBlock<B, C, H>>>,
     },
@@ -98,7 +98,7 @@ where
     /// progress.
     Retire {
         /// The retirement to apply.
-        update: Retirement<Commitment>,
+        update: Retirement<Commitment<B, C, H>>,
     },
 }
 
@@ -244,7 +244,7 @@ where
     /// MUST be validated for `commitment`. The engine classifies the commitment's
     /// shards against that epoch's participant set, so an unvalidated epoch can
     /// misclassify shards from honest peers.
-    pub fn discovered(&self, commitment: Commitment, leader: P, round: Round) {
+    pub fn discovered(&self, commitment: Commitment<B, C, H>, leader: P, round: Round) {
         let _ = self.sender.enqueue(Message::Discovered {
             commitment,
             leader,
@@ -261,14 +261,14 @@ where
     /// lets the engine drain sender-indexed gossip shards from its peer buffers
     /// for the commitment. Leader-specific validation and assigned shard
     /// verification still require a later [`Self::discovered`] call.
-    pub fn notarized(&self, commitment: Commitment, round: Round) {
+    pub fn notarized(&self, commitment: Commitment<B, C, H>, round: Round) {
         let _ = self
             .sender
             .enqueue(Message::Notarized { commitment, round });
     }
 
     /// Request a reconstructed block by its [`Commitment`].
-    pub async fn get(&self, commitment: Commitment) -> Option<Arc<CodedBlock<B, C, H>>> {
+    pub async fn get(&self, commitment: Commitment<B, C, H>) -> Option<Arc<CodedBlock<B, C, H>>> {
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::GetByCommitment {
             commitment,
@@ -298,7 +298,7 @@ where
     /// is cached because they trivially have all shards.
     pub fn subscribe_assigned_shard_verified(
         &self,
-        commitment: Commitment,
+        commitment: Commitment<B, C, H>,
     ) -> oneshot::Receiver<()> {
         let (responder, receiver) = oneshot::channel();
         let _ = self
@@ -311,7 +311,10 @@ where
     }
 
     /// Subscribe to the reconstruction of a [`CodedBlock`] by its [`Commitment`].
-    pub fn subscribe(&self, commitment: Commitment) -> oneshot::Receiver<Arc<CodedBlock<B, C, H>>> {
+    pub fn subscribe(
+        &self,
+        commitment: Commitment<B, C, H>,
+    ) -> oneshot::Receiver<Arc<CodedBlock<B, C, H>>> {
         let (responder, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::SubscribeByCommitment {
             commitment,
@@ -342,7 +345,7 @@ where
     /// Assigned-shard subscriptions for retired state are closed. Exact-commitment subscriptions
     /// close only for exact retirements. Other block subscriptions remain open for local ingress.
     /// Digest subscriptions remain open, and later consensus notifications may recreate state.
-    pub fn retire(&self, update: Retirement<Commitment>) {
+    pub fn retire(&self, update: Retirement<Commitment<B, C, H>>) {
         let _ = self.sender.enqueue(Message::Retire { update });
     }
 }

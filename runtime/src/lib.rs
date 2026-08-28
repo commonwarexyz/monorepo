@@ -3320,7 +3320,7 @@ mod tests {
             let strategy = context.child("pool").strategy(NZUsize!(1)).manual();
 
             let output = strategy
-                .spawn(|strategy| strategy.map_collect_vec(0..2, |i| i + 1))
+                .spawn(2, |strategy| strategy.map_collect_vec(0..2, |i| i + 1))
                 .await;
 
             assert_eq!(output, vec![1, 2]);
