@@ -698,8 +698,11 @@ where
         let mut marshaled = self.clone();
         let round = context.round;
 
-        // Subscribe before exposing the certification gate so verification receives a transient
-        // cache hit even if the later certification hint skips fetching.
+        // Verification needs the full block but waits only for local delivery. Certification starts
+        // recovery only when the block is not buffered. If a buffered block is evicted before
+        // verification registers its wait, verification is left with neither the block nor an
+        // active fetch. Register the wait before publishing the gate so it receives the buffered
+        // block or is waiting when recovery delivers it.
         let block_request = marshal.subscribe_by_digest(digest, DigestFallback::Wait);
         let (task_tx, task_rx) = oneshot::channel();
         self.gates.insert(round, digest, task_rx);

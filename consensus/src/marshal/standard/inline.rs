@@ -427,8 +427,11 @@ where
     ) -> oneshot::Receiver<bool> {
         let round = context.round;
 
-        // Subscribe before exposing the durability gate so verification receives a transient cache
-        // hit even if the later certification hint skips fetching.
+        // Verification needs the full block but waits only for local delivery. Certification starts
+        // recovery only when the block is not buffered. If a buffered block is evicted before
+        // verification registers its wait, verification is left with neither the block nor an
+        // active fetch. Register the wait before publishing the gate so it receives the buffered
+        // block or is waiting when recovery delivers it.
         let block_request = self
             .marshal
             .subscribe_by_digest(digest, DigestFallback::Wait);
