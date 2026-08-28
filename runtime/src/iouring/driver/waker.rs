@@ -33,16 +33,16 @@
 //! Running 000
 //!   |-- wake ------------------------------> Latched 100
 //!   |-- park_idle -------------------------> FutexArmed 001
-//!   |                                          |-- wake + futex signal --> FutexSignalled 101
+//!   |                                          |-- wake --> FutexArmed+Latched 101
 //!   |-- arm -------------------------------> EventfdArmed 010
-//!                                              |-- wake + eventfd signal -> EventfdSignalled 110
+//!                                              |-- wake --> EventfdArmed+Latched 110
 //!
 //! Latched 100
-//!   |-- park_idle + skip blocking ---------> FutexSignalled 101
-//!   |-- arm + skip blocking ---------------> EventfdSignalled 110
+//!   |-- park_idle + skip blocking ---------> FutexArmed+Latched 101
+//!   |-- arm + skip blocking ---------------> EventfdArmed+Latched 110
 //!
-//! {FutexArmed 001, FutexSignalled 101,
-//!  EventfdArmed 010, EventfdSignalled 110}
+//! {FutexArmed 001, FutexArmed+Latched 101,
+//!  EventfdArmed 010, EventfdArmed+Latched 110}
 //!   |-- clear_wait ------------------------> Running 000
 //!
 //! Impossible: 011 and 111
@@ -56,6 +56,10 @@
 //! bit. Both targets cannot be armed because the loop is the sole armer, each
 //! arming path asserts that no target is already armed, and `wake` never sets a
 //! target bit.
+//!
+//! States 101 and 110 mean only that a target is armed and a wake is latched.
+//! The atomic state is updated before the futex wake or eventfd write, so the
+//! bits alone do not prove that the kernel signal has completed.
 
 use super::UserData;
 use io_uring::squeue::SubmissionQueue;
@@ -97,14 +101,16 @@ const WAITING_MASK: u32 = WAITING_ON_FUTEX_BIT | WAITING_ON_EVENTFD_BIT;
 /// blocking section.
 ///
 /// While this guard is live, the loop is armed to receive an eventfd-based
-/// wake if producers publish new work or the final handle disconnects.
+/// wake when a producer publishes through [`RingWaker::wake`].
 pub struct ArmGuard<'a> {
+    /// Wake source whose wait epoch is cleared when the guard drops.
     waker: &'a RingWaker,
+    /// Whether the post-arm RMW snapshot already contained a wake latch.
     wake_latched: bool,
 }
 
 impl ArmGuard<'_> {
-    /// Return whether a wake was already latched before or during arming.
+    /// Return whether the post-arm RMW snapshot already contained a wake latch.
     pub const fn wake_latched(&self) -> bool {
         self.wake_latched
     }
@@ -118,16 +124,14 @@ impl Drop for ArmGuard<'_> {
 
 /// Shared wake state used by submitters and the io_uring loop.
 ///
-/// `state` stores the wait target and sticky wake latch. Producers (the
-/// executor's `Tasks::queue` and `queue_root`,
-/// `register_alarm`, and the driver's orphan mailbox) publish through their
-/// own synchronized containers and use only the out-of-band
-/// `WAKE_LATCHED_BIT` latch via [`RingWaker::wake`], the task and alarm
-/// producers only when called from a foreign thread (same-thread deliveries
-/// are observed by the executor's pre-park rechecks) and the orphan mailbox
-/// unconditionally. After arming a wait
-/// target, the loop blocks only if the same post-arm snapshot still shows no
-/// latched wake.
+/// `state` stores the wait target and sticky wake latch. Producers publish
+/// through their own synchronized containers. Foreign `queue_normal` and
+/// `queue_root` publication calls `unpark_foreign`. `queue_wake` performs the
+/// same owner check itself and calls this wake source directly. Alarm
+/// registration also signals only from a foreign thread because same-thread
+/// delivery is found by the loop's pre-park rechecks. The orphan mailbox
+/// signals unconditionally. After arming a wait target, the loop blocks only
+/// if the same post-arm snapshot still shows no latched wake.
 ///
 /// Blocking follows an arm-and-recheck protocol:
 /// - The loop arms a wait target.
@@ -186,6 +190,7 @@ struct RingWakerInner {
 /// coupling correctness to exact eventfd coalescing behavior.
 #[derive(Clone)]
 pub struct RingWaker {
+    /// Shared packed state and platform-specific wake surfaces.
     inner: Arc<RingWakerInner>,
 }
 
@@ -238,6 +243,10 @@ impl RingWaker {
     /// All claimed wakes flow through this path, whether they come from a task
     /// enqueue, an alarm registration, or an orphan-mailbox push from a
     /// foreign thread.
+    ///
+    /// Panics if an armed futex or eventfd target cannot be signalled after
+    /// retrying interruptions. The latch coalesces later calls, so returning
+    /// after such a failure could leave the event loop blocked indefinitely.
     pub fn wake(&self) {
         // The wake payload lives in a separately synchronized container (the
         // ready queue, the alarm heap, or the orphan mailbox). The `Release`
@@ -287,8 +296,8 @@ impl RingWaker {
     ///
     /// Returns `Some(duration)` only if `futex_wait` actually blocked in the
     /// kernel and later resumed. Returns `None` if the armed snapshot already
-    /// showed a latched wake, or if a concurrent state change rejected the
-    /// snapshot before the thread could sleep.
+    /// showed a latched wake, a concurrent state change rejected the snapshot,
+    /// or an unexpected futex error was logged and treated as a failed park.
     pub fn park_idle(&self) -> Option<Duration> {
         // Arming only updates the wake state machine. It does not publish queue
         // memory or consume any wake publication, so `Relaxed` is sufficient
@@ -367,6 +376,7 @@ impl RingWaker {
     ///
     /// Retries on `EINTR`. Treats `EAGAIN` as "nothing to drain". Without
     /// `EFD_SEMAPHORE`, one successful read drains the full counter to zero.
+    /// Other read failures are logged and return without draining the counter.
     #[cfg(not(feature = "loom"))]
     pub fn acknowledge(&self) {
         let mut value: u64 = 0;

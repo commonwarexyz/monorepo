@@ -1,19 +1,20 @@
-//! A single-threaded runtime driven by an io_uring event loop.
+//! A runtime whose workers pair a single-threaded executor with an io_uring
+//! event loop.
 //!
-//! This module provides a runtime whose executor and I/O driver share one thread: the
-//! thread that calls [crate::Runner::start] on [Runner] alternates between polling tasks
-//! and operating an io_uring event loop that services all storage and network I/O. When
-//! no task is runnable, the executor parks inside the event loop's wait primitives until
-//! a completion arrives, a timer fires, or another thread wakes a task.
+//! The thread that calls [crate::Runner::start] runs the root worker. Every
+//! dedicated task and blocking shared task runs as the root of another worker
+//! on its own thread. Each worker owns one ring shared by its executor, storage
+//! adapter, and network adapter. Its thread alternates between polling tasks
+//! and driving ring-backed I/O, then parks when neither side can make progress.
 //!
 //! This module is enabled by the `iouring` feature and is only available on Linux.
 //!
 //! # Kernel Requirements
 //!
-//! This runtime requires Linux kernel 6.1 or newer: the ring is configured with
-//! `IORING_SETUP_SINGLE_ISSUER` and `IORING_SETUP_DEFER_TASKRUN` (the runtime thread
-//! creates the ring and is the only submitter). The internal `eventfd` wake path also
-//! relies on io_uring multishot poll (Linux 5.13+).
+//! This runtime requires Linux kernel 6.1 or newer. Each worker creates its
+//! ring with `IORING_SETUP_SINGLE_ISSUER` and `IORING_SETUP_DEFER_TASKRUN` and
+//! remains its only submitter. The internal `eventfd` wake path also relies on
+//! io_uring multishot poll (Linux 5.13 or newer).
 //!
 //! # Worker Affinity
 //!
@@ -21,15 +22,19 @@
 //! with `blocking == true`) runs as the root of a worker on its own thread with its
 //! own ring. Ring-bound resources ([crate::Blob]s, [crate::Sink]s, [crate::Stream]s,
 //! [crate::Listener]s, and in-flight operation futures) are bound to the worker that
-//! created them: **using one from another worker panics** with "io_uring runtime
-//! operations must run on the runtime thread". Like any other task panic, it is
-//! caught by the using task's wrapper and resolves the task's handle with
-//! [Error::Exited](crate::Error::Exited) when the runtime is configured with
-//! `catch_panics(true)`. With the default `catch_panics(false)` the panic is
-//! forwarded to the root and unwinds [crate::Runner::start]. Moving a blob or
-//! socket into a dedicated task works on the tokio runtime but not here. This is a
-//! deliberate trade: thread affinity is what lets the op path run without locks. Move
-//! plain data between workers and open resources on the worker that uses them.
+//! created them. Network and storage operations remain worker-affine even when
+//! a particular call completes synchronously or from cached data. Calling one
+//! from another worker panics with "io_uring runtime operations must run on the
+//! runtime thread". Inside a spawned task, [Config::with_catch_panics] controls
+//! whether that panic becomes [Error::Exited](crate::Error::Exited) or unwinds
+//! [crate::Runner::start] after cleanup. Root and ordinary runtime-infrastructure
+//! panics likewise unwind
+//! `start` after mandatory cleanup. A panic during mandatory ring drain aborts
+//! the process because unwinding could release resources still referenced by
+//! the kernel. Moving a blob or socket into a dedicated task works on the tokio
+//! runtime but not here. This trade lets the op path avoid locks.
+//! Move plain data between workers and open resources on the worker that uses
+//! them.
 //!
 //! Task handles, contexts (spawning, sleeping, stopping), and channels may cross
 //! workers. Ring-bound resource values may also be dropped on another worker.
@@ -37,13 +42,42 @@
 //! resources remain alive until completion. An idle resource's descriptor may
 //! instead close on the thread that drops its final owner.
 //!
+//! # Request Lifecycle
+//!
+//! A request changes owners as it moves from a task to the kernel and back:
+//!
+//! ```text
+//! task future owns Request
+//!          |
+//!          v
+//! DriverHandle admission -- no unreserved capacity --> capacity FIFO
+//!          |                                             |
+//!          |<---------------- reserved waiter slot ------+
+//!          v
+//! waiter owns Request --> backlog --> SQE --> io_uring --> operation CQE
+//!                                              |                 |
+//!                                              |                 +-- nonterminal --> backlog
+//!                                              |                 |
+//!                                              |                 +-- Op output stays in waiter
+//!                                              |                 |
+//!                                              |                 `-- Ticket output published
+//!                                              |                     before waiter recycle
+//!                                              |
+//! foreign drop --> orphan mailbox --> owner worker --> cancel, detach, or free
+//! ```
+//!
+//! The waiter retains every resource the kernel may reference until the
+//! original operation CQE arrives. A cancel CQE acknowledges cancellation but
+//! does not retire those resources. RawWaker drop and wake callbacks run only
+//! after the driver releases its mutable operation-state borrow.
+//!
 //! # Timeout Handling
 //!
 //! Requests can optionally carry an absolute deadline. When present:
-//! - The loop tracks deadline ticks in a userspace timing wheel, scheduling each
-//!   request's deadline at its first staging
-//! - Requests whose deadline already expired at first staging complete immediately
-//!   with timeout before any SQE is issued
+//!
+//! - The capacity FIFO owns the absolute deadline before waiter admission
+//! - A deadline that expires before admission completes locally without a waiter
+//! - First staging transfers the deadline to the worker's userspace timing wheel
 //! - Requests that still have an SQE in flight submit an async-cancel SQE on expiry
 //! - Requests parked only in the backlog time out locally without cancel SQEs
 //! - Timeouts apply to the whole logical request, not individual SQEs
@@ -53,22 +87,29 @@
 //!
 //! # Shutdown Process
 //!
-//! At teardown (after every task has been dropped, which eagerly cancels their
-//! abandoned operations), the runtime closes the driver and drains the loop:
-//! 1. New admissions fail with their kind-specific error
-//! 2. The drain waits for all progressing requests to complete or be cancelled
-//! 3. If `shutdown_timeout` is configured, it is a cancellation grace measured from
-//!    drain entry. Every request still outstanding when the grace expires is cancelled,
-//!    then the drain waits for the kernel to retire it (buffers stay owned until then)
-//! 4. Ready results owned by escaped tickets survive the drain in the ticket arena:
-//!    they hold no kernel resources or waiter slots and are reclaimed when polled or dropped
+//! Each worker tears down and drains its own ring. The root worker drains before
+//! [crate::Runner::start] closes the worker registry and joins the remaining
+//! worker threads, which independently perform the same teardown:
+//!
+//! 1. The worker closes timers and task registration, then drops its tasks
+//! 2. Unadmitted requests and capacity registrations are released locally
+//! 3. Admitted requests whose observers were dropped are wound down. Cancelable
+//!    requests are cancelled, while writes and data syncs detach and continue
+//!    to preserve their durability contract
+//! 4. New admissions fail with their kind-specific error
+//! 5. The drain waits for all progressing requests to complete or retire,
+//!    including pending tickets retained outside the torn-down task graph
+//! 6. If `shutdown_timeout` is configured, it triggers cancellation after a
+//!    grace period, but kernel retirement remains unbounded
+//! 7. Ready escaped-ticket results survive in the ticket arena until poll or drop
 //!
 //! # Liveness Model
 //!
-//! The ring size bounds waiter-backed operations, not dependency closure. New submissions
-//! park on a FIFO capacity wait list when the waiter table is full. Freeing slots grants them
-//! to queued admissions in order, and each grant stays reserved until its owner polls
-//! or cancels. Fresh submissions cannot consume capacity reserved for older attempts.
+//! Each worker's ring size also bounds its waiter-backed operations, not
+//! dependency closure. New submissions park on a FIFO capacity wait list when
+//! no unreserved waiter slot is available. Freeing slots grants them to queued
+//! admissions in order, and each grant stays reserved until its owner polls or
+//! cancels. Fresh submissions cannot consume capacity reserved for older attempts.
 //! Already-admitted requests may still be restaged ahead of fresh admissions according
 //! to the driver's submission policy.
 //!
@@ -95,6 +136,7 @@
 //! to run.
 //!
 //! Operational guidance:
+//!
 //! - Workloads that may create causal dependencies across queued and admitted requests must use
 //!   per-request timeouts.
 //! - If cancellation is disabled, callers must guarantee that admitted requests never depend on
@@ -102,7 +144,7 @@
 //! - Ready detached tickets do not count toward waiter capacity. Their waiter is recycled before
 //!   the ticket waker runs, so retaining a completed accept or sync ticket cannot block admission.
 //! - A timed request's deadline includes time spent waiting for capacity. The event loop parks no
-//!   longer than the earliest admission or active-request deadline, so a full waiter table cannot
+//!   longer than the earliest admission or active-request deadline, so capacity saturation cannot
 //!   hide timeout progress.
 
 mod driver;
@@ -120,7 +162,7 @@ use std::time::Duration;
 /// See `man io_uring`.
 #[derive(Clone, Debug)]
 pub struct RingConfig {
-    /// Requested size of the ring.
+    /// Requested size of each worker's ring.
     ///
     /// This value is rounded up to the next power of two when constructing
     /// the event loop, so the configured in-flight waiter capacity matches the

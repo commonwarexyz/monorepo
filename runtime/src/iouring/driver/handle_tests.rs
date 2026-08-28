@@ -184,6 +184,8 @@ fn test_op_waker_reentrant_drop_runs_after_ops_borrow() {
     let mut op = Op::new(&handle, recv_request());
     assert!(Pin::new(&mut op).poll(&mut reentrant_cx).is_pending());
 
+    // Replacing the stored waker must release Ops before its drop callback
+    // re-enters the driver to orphan `target`.
     let noop = futures::task::noop_waker();
     let mut noop_cx = Context::from_waker(&noop);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -232,6 +234,8 @@ fn test_ticket_waker_reentrant_drop_runs_after_ops_borrow() {
         })
     });
 
+    // Replacing the ticket waker must release Ops before its drop callback
+    // re-enters the driver to orphan `target`.
     let noop = futures::task::noop_waker();
     let mut cx = Context::from_waker(&noop);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

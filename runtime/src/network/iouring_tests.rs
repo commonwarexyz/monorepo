@@ -129,18 +129,9 @@ fn test_stress_trait() {
 
 #[test]
 fn test_ipv6_end_to_end() {
-    // Property: the AF_INET6 socket arm and the full v6 sockaddr path
-    // work end to end through bind, dial, accept, and a bidirectional
-    // exchange.
-    // Setup: preflight host IPv6 loopback with the standard library, so
-    // the skip can never hide an io_uring regression (a backend
-    // BindFailed discards errno and must fail the test, not skip it).
-    // Action: bind on [::1]:0 through the io_uring front end, dial the
-    // bound address, accept, and exchange one payload in each direction.
-    // Expected: both payloads round-trip byte for byte.
+    // Preflight with the standard library so skipping means the host lacks
+    // IPv6 loopback. An io_uring `BindFailed` must remain a test failure.
     if std::net::TcpListener::bind("[::1]:0").is_err() {
-        // This host has no IPv6 loopback, so the io_uring path cannot be
-        // exercised in this environment.
         return;
     }
 
@@ -491,16 +482,8 @@ fn test_closed_driver_fallbacks() {
 
 #[test]
 fn test_closed_driver_public_dial_and_accept() {
-    // Property: the public wrappers pin two deliberately different
-    // closed-driver error surfaces. `Listener::accept` maps every
-    // non-timeout ticket error to Closed for tokio parity, while
-    // `Network::dial` propagates the internal ConnectionFailed fallback
-    // unmapped.
-    // Setup: bind a listener (synchronous socket setup that needs no
-    // driver), then close the driver.
-    // Action: await the public accept and dial wrappers.
-    // Expected: accept yields Closed and retains no pending ticket, and
-    // dial yields ConnectionFailed.
+    // Accept normalizes the internal fallback to `Closed` for tokio parity,
+    // while dial exposes `ConnectionFailed` unchanged.
     let (mut harness, network) = test_network(Config::default());
     let mut listener = harness
         .block_on(network.bind("127.0.0.1:0".parse().unwrap()))
@@ -509,7 +492,6 @@ fn test_closed_driver_public_dial_and_accept() {
 
     harness.close_admission();
 
-    // The public accept surface is Closed, not the internal fallback.
     assert!(matches!(
         harness.block_on(listener.accept()),
         Err(Error::Closed)
@@ -519,7 +501,6 @@ fn test_closed_driver_public_dial_and_accept() {
         "a failed accept must not retain a pending ticket"
     );
 
-    // The public dial surface keeps the internal fallback unmapped.
     assert!(matches!(
         harness.block_on(network.dial(addr)),
         Err(Error::ConnectionFailed)

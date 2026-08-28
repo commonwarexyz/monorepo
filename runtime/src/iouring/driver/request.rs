@@ -21,8 +21,8 @@
 //! | [`Request::Accept`] | `Accept` | None | Accepted fd `0` | Optional | No | Transient while active | Reason |
 //! | [`Request::Connect`] | `Connect` | None | Success | Optional | No | Transient while active, `EALREADY` always | Reason |
 //! | [`Request::ReadAt`] | `Read` | Resubmit to requested length | [`Error::BlobInsufficientLength`] | None | No | Transient, cache fallback | [`Error::Closed`] |
-//! | [`Request::WriteAt`] | `Write` or `Writev`, optional `Fsync` | Resubmit to empty, then sync | [`Error::WriteFailed`] while writing, success while syncing | None | Yes | Transient, cache fallback | [`Error::Closed`] |
-//! | [`Request::Sync`] | `Fsync` | None | Success | None | Yes | Transient | [`Error::Closed`] |
+//! | [`Request::WriteAt`] | `Write` or `Writev`, optional data-only `Fsync` | Resubmit to empty, then sync | [`Error::WriteFailed`] while writing, success while syncing | None | Yes | Transient, cache fallback | [`Error::Closed`] |
+//! | [`Request::Sync`] | Data-only `Fsync` | None | Success | None | Yes | Transient | [`Error::Closed`] |
 
 use super::waiter::{CancelReason, WaiterId, WaiterState};
 use crate::{Buf, Error, IoBuf, IoBufMut, IoBufs, WriteOptions, iouring::RawSocketAddr};
@@ -59,7 +59,8 @@ const fn single_buffer_sqe_len(len: usize) -> u32 {
 pub(crate) enum Cache {
     /// Use the operating system's normal page-cache behavior.
     Enabled,
-    /// Best-effort bypass of the page cache while the backend supports it.
+    /// Best-effort bypass of the page cache while the shared capability hint
+    /// says the backend supports it.
     Disabled(Arc<AtomicBool>),
 }
 
@@ -69,6 +70,8 @@ impl Cache {
     /// another request has already found the hint unsupported.
     fn rw_flag(&mut self) -> i32 {
         match self {
+            // This monotonic flag is only a capability hint and protects no
+            // accompanying data, so relaxed ordering is sufficient.
             Self::Disabled(supported) if supported.load(Ordering::Relaxed) => libc::RWF_DONTCACHE,
             Self::Disabled(_) => {
                 *self = Self::Enabled;
@@ -86,6 +89,8 @@ impl Cache {
         }
         match std::mem::replace(self, Self::Enabled) {
             Self::Disabled(supported) => {
+                // See `rw_flag`: publishing this monotonic hint carries no
+                // other state that needs synchronization.
                 supported.store(false, Ordering::Relaxed);
                 true
             }
@@ -101,14 +106,22 @@ impl Cache {
 /// path (and every [Request]) small: that path already allocates for its
 /// iovec scratch, so the box adds no allocation to an allocation-free path.
 enum WriteBuffers {
-    Single { buf: IoBuf },
+    /// Allocation-free cursor over one contiguous buffer.
+    Single {
+        /// Remaining bytes.
+        buf: IoBuf,
+    },
+    /// Cursor over multiple chunks with reusable kernel-facing scratch.
     Vectored(Box<VectoredBuffers>),
 }
 
 /// Buffers and iovec scratch for a vectored write.
 struct VectoredBuffers {
+    /// Remaining caller-provided chunks.
     bufs: IoBufs,
+    /// Reusable descriptors rebuilt from the current chunk cursor.
     iovecs: Box<[libc::iovec]>,
+    /// Stable socket message header pointing into `iovecs` when refreshed.
     message: libc::msghdr,
 }
 
@@ -400,9 +413,11 @@ impl Request {
 
     /// Evaluate a CQE result against this request's progress and state.
     ///
-    /// Returns the terminal [RequestOutput] when the request completed (buffers move
-    /// out of the request, leaving an empty shell for the caller to drop in
-    /// place), or `None` when another SQE is needed.
+    /// Returns the terminal [RequestOutput] when the request completed or
+    /// `None` when another SQE is needed. Recv and positioned-read buffers
+    /// move into the output. Accept transfers the accepted descriptor and
+    /// decoded address. Other request kinds retire their remaining state when
+    /// the caller drops the completed request shell.
     pub fn on_cqe(&mut self, state: WaiterState, result: i32) -> Option<RequestOutput> {
         match self {
             Self::Send(s) => s
@@ -456,9 +471,12 @@ impl Request {
         }
     }
 
-    /// Resolve a request the loop is retiring before completion (a deadline
-    /// expiry surfaces [Error::Timeout], a shutdown [Error::Closed]), moving
-    /// any owned buffer out of the request.
+    /// Resolve a request before kernel completion or admission, moving any
+    /// owned result buffer out of the request.
+    ///
+    /// This covers deadline expiry, shutdown, pre-admission timeout, and
+    /// retirement from the capacity backlog. Callers supply the error that
+    /// describes the transition.
     pub fn interrupt(&mut self, error: Error) -> RequestOutput {
         match self {
             Self::Send(_) => RequestOutput::Send(Err(Box::new(error))),
@@ -490,14 +508,16 @@ impl Request {
 ///
 /// This helper intentionally does not assign request-specific meaning beyond
 /// that normalization. For example, [`CqeResult::Zero`] means EOF for reads
-/// and recvs, but success for fsync.
+/// and recvs, but success for a data sync. Individual request state machines
+/// may still reinterpret an otherwise unclassified error, such as cache
+/// fallback on `EOPNOTSUPP` or connect retry on `EALREADY`.
 enum CqeResult {
     /// Transient kernel result that may be retried with another SQE.
     Retry,
     /// `ECANCELED` for an operation whose waiter had already requested async
     /// cancellation, carrying why (deadline expiry or runtime shutdown).
     Cancelled(CancelReason),
-    /// Non-retryable negative CQE result code.
+    /// Otherwise unclassified negative CQE result code.
     Error(i32),
     /// Successful CQE with zero progress.
     Zero,
@@ -575,9 +595,9 @@ impl SendRequest {
                 if self.write.is_complete() {
                     Some(Ok(()))
                 } else if let WaiterState::CancelRequested { reason } = state {
-                    // Any send error after partial progress means some prefix
-                    // of the frame may already be on the wire. Callers must
-                    // drop the connection rather than retrying on this sink.
+                    // Cancellation after partial progress is still a partial
+                    // send. Some prefix may already be on the wire, so callers
+                    // must drop the connection rather than retry on this sink.
                     Some(Err(reason.into_error()))
                 } else {
                     None
@@ -774,7 +794,8 @@ impl WriteAtRequest {
         self.cache.rw_flag()
     }
 
-    /// Build the next positioned write SQE for the remaining bytes.
+    /// Build the next positioned write SQE, or the trailing data-sync SQE once
+    /// all bytes have been written.
     fn build_sqe(&mut self) -> SqueueEntry {
         if self.state == WriteAtState::Syncing {
             return build_datasync_sqe(&self.file);
@@ -802,8 +823,8 @@ impl WriteAtRequest {
         }
     }
 
-    /// Classify one write CQE and return the terminal result, or `None` when
-    /// another SQE is needed.
+    /// Classify one write or data-sync CQE and return the terminal result, or
+    /// `None` when another SQE is needed.
     fn on_cqe(&mut self, state: WaiterState, result: i32) -> Option<Result<(), Error>> {
         if self.state == WriteAtState::Syncing {
             return on_sync_cqe(state, result);
@@ -929,15 +950,11 @@ impl ConnectRequest {
                 WaiterState::CancelRequested { reason } => Some(Err(reason.into_error())),
                 WaiterState::Active { .. } => None,
             },
-            // A reissued connect may observe the previous attempt still in
-            // progress or already established. Neither is terminal failure.
-            // A connect reissued after a retry-classified completion (e.g.
-            // EINTR) can find the socket already in SYN_SENT. Requeueing
-            // retries immediately, which can spin the loop at full speed for
-            // up to an RTT: EALREADY completes without waiting. The spin is
-            // bounded by the connect deadline, and needs a prior retry to
-            // arise at all. Retrying via a writability poll instead is
-            // deliberate future work.
+            // A connect reissued after a retryable completion can find the
+            // socket still in progress or already connected. EALREADY requeues
+            // immediately and can spin the loop until connection or deadline.
+            // This path requires a prior retryable completion. EISCONN instead
+            // completes the request.
             CqeResult::Error(code) if code == -libc::EALREADY => None,
             CqeResult::Error(code) if code == -libc::EISCONN => Some(Ok(())),
             CqeResult::Cancelled(reason) => Some(Err(reason.into_error())),
@@ -947,20 +964,20 @@ impl ConnectRequest {
     }
 }
 
-/// Logical fsync request and its in-loop state.
+/// Logical data-sync request and its in-loop state.
 pub(super) struct SyncRequest {
     /// File descriptor to sync.
     file: Arc<File>,
 }
 
 impl SyncRequest {
-    /// Build the fsync SQE for this request.
+    /// Build the data-only fsync SQE for this request.
     fn build_sqe(&self) -> SqueueEntry {
         build_datasync_sqe(&self.file)
     }
 
-    /// Classify one fsync CQE and return the terminal result, or `None` when
-    /// another SQE is needed.
+    /// Classify one data-sync CQE and return the terminal result, or `None`
+    /// when another SQE is needed.
     fn on_cqe(&mut self, state: WaiterState, result: i32) -> Option<Result<(), Error>> {
         on_sync_cqe(state, result)
     }

@@ -125,8 +125,7 @@ pub struct Config {
     ///
     /// When unset, Tokio uses its default behavior for the multi-thread
     /// scheduler. Smaller values reduce the delay before tasks woken from
-    /// outside a worker, such as io_uring completion notifications, are polled
-    /// from the global queue again.
+    /// outside a worker are polled from the global queue again.
     global_queue_interval: Option<u32>,
 
     /// Maximum number of threads to use for blocking tasks.

@@ -6,8 +6,8 @@ use std::{
 
 #[test]
 fn test_raw_socket_addr_round_trip() {
-    // Kernel-written lengths shorter than the address family must not
-    // decode from truncated storage.
+    // Kernel-written lengths shorter than the family-specific sockaddr must
+    // not decode from truncated storage.
     let v4: SocketAddr = "127.0.0.1:8080".parse().unwrap();
     let mut raw = RawSocketAddr::from_socket_addr(&v4);
     assert_eq!(raw.to_socket_addr(), Some(v4));

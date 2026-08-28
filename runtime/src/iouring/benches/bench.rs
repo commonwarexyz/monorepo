@@ -4,9 +4,10 @@
 //! parked wakes, ready task spawn and join, fixed-total timer cancellation,
 //! and timer consumer latency under a self-waking ready load.
 //!
-//! Each throughput sample reports one root-level workload interval. The interval
-//! starts after runtime construction and root entry, spans all self-wake or
-//! spawn-and-join iterations, and ends before runtime teardown.
+//! Self-wake, foreign-wake, and spawn-and-join throughput samples each report
+//! one root-level workload interval. The interval starts after runtime
+//! construction and root entry, spans the workload iterations, and ends before
+//! runtime teardown.
 //!
 //! Foreign-wake rows start a helper thread and wait for it before entering the
 //! runtime root. The timed interval covers bounded-channel wake handoffs and

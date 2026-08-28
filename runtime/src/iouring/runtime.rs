@@ -21,16 +21,19 @@
 //!                               ready work ----------+-- no work --> park
 //! ```
 //!
-//! Driver completions and due sleepers enter the event FIFO. Other wakes enter
-//! the normal FIFO. Each turn admits at most [`READY_TASKS_PER_TURN`] task
-//! tokens, with at most [`EVENT_READY_TASKS_PER_TURN`] of the initial snapshot
-//! reserved for event work. Either lane may use capacity the other lane leaves
-//! idle, and the root and driver still receive a service point after the batch.
+//! A first owner-thread wake that publishes a spawned task during driver or
+//! sleeper delivery uses the event FIFO. Initial polls, deferred self-wakes,
+//! and foreign-thread wakes use the normal FIFO. Coalesced wakes retain their
+//! existing lane, and the root uses a separate readiness latch. Each turn
+//! admits at most [`READY_TASKS_PER_TURN`] task tokens, with at most
+//! [`EVENT_READY_TASKS_PER_TURN`] of the initial snapshot reserved for event
+//! work. Either lane may use capacity the other lane leaves idle, and the root
+//! and driver still receive a service point after the batch.
 //!
 //! ## Panic flow
 //!
-//! Task wrappers catch panics raised while polling. Dedicated worker wrappers
-//! also catch the spawn closure. With [`Config::with_catch_panics`] enabled,
+//! Spawned-task wrappers catch panics raised while polling. Dedicated worker
+//! wrappers also catch the spawn closure. With [`Config::with_catch_panics`] enabled,
 //! `Panicker` absorbs a panic that reaches either wrapper and the task handle
 //! reports [`Error::Exited`]. Otherwise `Panicker` delivers the payload to the
 //! root interrupt. When root completion wins the same poll, the interrupt
@@ -52,28 +55,30 @@
 //! ```
 //!
 //! Worker teardown isolates cleanup callbacks, closes and drains the ring, and
-//! resumes only after quiescence. A panic inside [`Driver::shutdown`] aborts
-//! instead of unwinding ring state. [`crate::Runner::start`] joins every worker
-//! before resuming a retained payload. Exact ordering between concurrently
-//! observed failures is not guaranteed. Panic-capable output drops are
-//! isolated, and secondary payloads are forgotten when dropping them could
-//! interrupt the mandatory ring drain.
+//! resumes only after quiescence. A panic from admission-close callbacks is
+//! retained and resumed after a successful drain. A panic during the mandatory
+//! drain aborts because unwinding could release state still referenced by the
+//! kernel. [`crate::Runner::start`] joins every worker before resuming a retained
+//! payload. Exact ordering between concurrently observed failures is not
+//! guaranteed. Panic-capable output drops are isolated, and secondary payloads
+//! are forgotten when dropping them could interrupt the mandatory ring drain.
 //!
 //! Ordinary tasks run inline on the executor thread. Tasks spawned with
 //! [crate::Spawner::dedicated] or [crate::Spawner::shared] with
 //! `blocking == true` run as the root of a [Worker] on their own thread with
 //! its own ring, so blocking work cannot starve the executor thread and the
 //! task's context still submits IO thread-locally. Blocking shared tasks
-//! currently run as dedicated workers, and a shared blocking pool may
-//! replace this.
+//! use the same isolated-worker path as dedicated tasks.
 //! Resources created on one worker (blobs, sockets, listeners) are bound to
 //! that worker's thread and must not be driven from another. Cross-thread
 //! interactions that do not submit ring operations (waking a task from a
 //! helper thread, registering a sleeper alarm, spawning a task through a
 //! moved context, delivering a stop signal) remain supported through each
-//! loop's latched wake state. A context refers to its origin worker: once
-//! that worker has torn down, using the context from elsewhere fails loudly
-//! instead of submitting work nothing will run.
+//! loop's latched wake state. A context refers weakly to its origin worker and
+//! does not keep it alive. After teardown, spawning returns [`Error::Closed`],
+//! pending sleeps and executor-backed capabilities fail loudly, and new
+//! ring-backed work sees the closed driver. Pure data access and synchronous
+//! storage metadata operations do not share that executor dependency.
 
 use super::{
     RingConfig,
@@ -133,6 +138,7 @@ cfg_if::cfg_if! {
         // under parallel test load due to mlock/resource limits.
         const DEFAULT_RING_SIZE: u32 = 128;
     } else {
+        /// Default ring size outside tests.
         const DEFAULT_RING_SIZE: u32 = 1024;
     }
 }
@@ -159,7 +165,7 @@ const EVENT_READY_TASKS_PER_TURN: usize = READY_TASKS_PER_TURN / 2;
 /// Type-erased payload retained while teardown completes.
 type PanicPayload = Box<dyn std::any::Any + Send>;
 
-/// Retain the earliest panic while teardown is still in progress.
+/// Retain the first supplied panic while teardown is still in progress.
 fn retain_first_panic(first_panic: &mut Option<PanicPayload>, payload: PanicPayload) {
     if first_panic.is_none() {
         *first_panic = Some(payload);
@@ -177,13 +183,17 @@ fn capture_cleanup_panic(first_panic: &mut Option<PanicPayload>, cleanup: impl F
     }
 }
 
+/// Runtime-wide spawned-task metrics shared by every worker.
 #[derive(Debug)]
 struct Metrics {
+    /// Total spawned tasks, partitioned by execution mode.
     tasks_spawned: CounterFamily<Label>,
+    /// Currently running tasks, partitioned by execution mode.
     tasks_running: GaugeFamily<Label>,
 }
 
 impl Metrics {
+    /// Register the spawned-task metric families.
     pub fn init(registry: &mut impl Register) -> Self {
         Self {
             tasks_spawned: registry.register(
@@ -340,17 +350,18 @@ impl Config {
     /// Sets whether `TCP_NODELAY` is explicitly enabled or disabled on
     /// created sockets.
     ///
-    /// `None` keeps the system default. Defaults to `Some(true)`.
+    /// `None` keeps the system default. Option failures are logged and do not
+    /// fail connection setup. Defaults to `Some(true)`.
     pub const fn with_tcp_nodelay(mut self, n: Option<bool>) -> Self {
         self.network_cfg.tcp_nodelay = n;
         self
     }
-    /// Sets whether `SO_LINGER` is zeroed on created sockets, causing an
-    /// immediate RST on close and skipping `TIME_WAIT`.
+    /// Sets whether zero-duration `SO_LINGER` is requested on connected sockets.
     ///
-    /// Useful in adversarial environments to reclaim socket resources
-    /// immediately when closing connections to misbehaving peers. Defaults
-    /// to true.
+    /// When honored, final descriptor close is abortive and may reset a
+    /// connection with queued data. Exact reset and `TIME_WAIT` behavior is
+    /// operating-system dependent. Option failures are logged and do not fail
+    /// connection setup. Defaults to true.
     pub const fn with_zero_linger(mut self, l: bool) -> Self {
         self.network_cfg.zero_linger = l;
         self
@@ -467,23 +478,31 @@ impl Default for Config {
 struct Shared {
     /// Configuration template used to construct workers.
     cfg: Config,
+    /// Runtime-wide metric registry.
     registry: Registry,
+    /// Spawned-task metric families.
     metrics: Metrics,
+    /// Runtime-wide shutdown signal.
     shutdown: Mutex<Stopper>,
+    /// Spawned-task panic policy and root interrupt sender.
     panicker: Panicker,
+    /// Buffer pool shared by worker-local network adapters.
     network_buffer_pool: BufferPool,
+    /// Buffer pool shared by worker-local storage adapters.
     storage_buffer_pool: BufferPool,
     /// Serializes filesystem-shape storage operations (open, remove, scan)
     /// across all workers sharing the runtime's storage directory.
     metadata_lock: Arc<Mutex<()>>,
-    /// Threads running dedicated workers, joined when the root worker exits.
+    /// Open registry of dedicated and blocking shared worker threads.
     ///
-    /// `None` once the root has joined every worker: a dedicated spawn racing
-    /// final teardown from a non-worker thread must not create a thread
-    /// nobody joins.
+    /// `Some` accepts new worker handles. `None` means final root teardown
+    /// closed registration and captured the complete handle batch for joining.
+    /// Those joins may still be in progress.
     workers: Mutex<Option<Vec<std::thread::JoinHandle<()>>>>,
-    /// Panic payload from a worker joined by an opportunistic reap, resumed
-    /// when the runtime shuts down (reaps must not swallow worker panics).
+    /// Earliest fallback panic retained for final Runner arbitration.
+    ///
+    /// Sources are opportunistically reaped worker unwinds and spawned-task
+    /// payloads that could not reach the already-closed root interrupt.
     worker_panic: Mutex<Option<Box<dyn std::any::Any + Send>>>,
 }
 
@@ -531,6 +550,7 @@ impl Shared {
 /// the queue lock across a slot take and its tombstone accounting keeps
 /// `cancelled` exact relative to draining and compaction.
 struct Sleeping {
+    /// Deadline-ordered live alarms and cancellation tombstones.
     alarms: BinaryHeap<Arc<Alarm>>,
     /// Alarms in the heap whose waker slot was emptied by cancellation.
     /// Tombstones hold no task resources and are dropped at their deadline
@@ -552,10 +572,16 @@ impl Sleeping {
     }
 }
 
-/// Runtime state shared by every [Context] on one worker thread.
+/// State of one origin worker, referenceable by contexts on other threads.
+///
+/// Only the owner thread polls `tasks` and submits ring work. Cross-thread
+/// contexts use synchronized task, alarm, and wake paths to reach that owner.
 pub struct Executor {
+    /// State shared by every worker in this runtime instance.
     shared: Arc<Shared>,
+    /// This worker's task arena, ready queues, and wake source.
     tasks: Arc<Tasks>,
+    /// This worker's sleeper queue, or `None` after teardown.
     sleeping: Mutex<Option<Sleeping>>,
 }
 
@@ -710,9 +736,13 @@ impl Executor {
 /// its own thread. All op state a worker's tasks submit IO through is local
 /// to its thread, so the driver's thread-affinity invariants hold per worker.
 struct Worker {
+    /// Executor and cross-thread coordination state for this worker.
     executor: Arc<Executor>,
+    /// Ring owner and event loop driven by this worker.
     driver: Driver,
+    /// Worker-local storage facade backed by `driver`.
     storage: Storage,
+    /// Worker-local network facade backed by `driver`.
     network: Network,
 }
 
@@ -723,7 +753,7 @@ impl Worker {
     /// Every worker registers its metric families under the same names, so
     /// worker metrics aggregate into the runtime-wide families.
     ///
-    /// Panics if the ring cannot be created.
+    /// Panics if the driver cannot be constructed.
     fn new(shared: Arc<Shared>) -> Self {
         let mut registry = shared.registry.clone();
         let mut runtime_registry = registry.sub_registry(METRICS_PREFIX);
@@ -971,6 +1001,7 @@ impl Worker {
 /// from another: see the [worker affinity](crate::iouring#worker-affinity)
 /// rules before spawning dedicated or blocking tasks.
 pub struct Runner {
+    /// Configuration template applied when constructing every worker.
     cfg: Config,
 }
 
@@ -1127,21 +1158,39 @@ impl crate::Runner for Runner {
     }
 }
 
+/// Metered facade over the io_uring storage adapter.
 type Storage = MeteredStorage<IoUringStorage>;
+/// Metered facade over the io_uring network adapter.
 type Network = MeteredNetwork<IoUringNetwork>;
 
-/// Implementation of [crate::Spawner], [crate::Clock],
-/// [crate::Network], and [crate::Storage] for the `iouring`
-/// runtime.
+/// Movable capability bundle associated with one origin worker.
+///
+/// The weak executor reference does not keep the worker or its ring alive.
+/// Moving a context lets synchronized capabilities such as spawning, sleeping,
+/// and stopping route back to the live origin, but does not rebind its storage
+/// or network adapters to another worker. Ring-backed methods remain
+/// origin-worker-affine. After teardown, spawning returns [`Error::Closed`].
+/// Other executor-backed operations may panic when the weak reference cannot
+/// be upgraded, while pure data access and synchronous storage metadata have
+/// no executor dependency.
 pub struct Context {
+    /// Hierarchical context name used for task and metric labels.
     name: String,
+    /// Metric attributes inherited by registered metrics.
     attributes: Vec<(String, String)>,
+    /// Weak reference to the origin worker's executor.
     executor: Weak<Executor>,
+    /// Storage capabilities bound to the origin worker's driver.
     storage: Storage,
+    /// Network capabilities bound to the origin worker's driver.
     network: Network,
+    /// Network buffer pool shared across this runtime instance.
     network_buffer_pool: BufferPool,
+    /// Storage buffer pool shared across this runtime instance.
     storage_buffer_pool: BufferPool,
+    /// Supervision node owned by this context.
     tree: Arc<Tree>,
+    /// One-shot execution mode consumed by the next spawn.
     execution: Execution,
 }
 
@@ -1153,11 +1202,11 @@ impl Context {
 
     /// Run `f` as the root task of a worker on its own thread.
     ///
-    /// The handle is assembled from parts on the caller: the wrapper that
-    /// owns the result sender only exists once the worker thread has built
-    /// its ring. Panics on the worker thread outside the task itself (e.g.
-    /// ring creation failure) resolve the handle with [Error::Closed] and
-    /// are resumed when the runtime joins its workers at teardown.
+    /// The caller creates the handle, abort pair, and [Publisher] before
+    /// starting the OS thread. A worker failure before publication drops the
+    /// publisher and closes the returned handle. A failure after publication
+    /// leaves that result intact and is resumed by [Runner] after worker joins.
+    /// Failure to create the OS thread panics before a handle is returned.
     ///
     /// Mandatory supervision holds on every exit path: the [Publisher] guard
     /// aborts the consumed context's node before the handle can resolve, so
@@ -1480,14 +1529,22 @@ impl crate::Metrics for Context {
 /// [Clock::sleep_until]) are converted once at creation, so a system clock
 /// step can neither strand a sleeper nor fire it early.
 struct Sleeper {
+    /// Weak reference to the worker that owns the alarm heap.
     executor: Weak<Executor>,
+    /// Monotonic deadline.
     time: Instant,
     /// Alarm shared with the heap, allocated on the first pending poll
     /// (an unpolled or immediately-ready sleep registers nothing).
     alarm: Option<Arc<Alarm>>,
 }
 
+/// Heap entry shared by a pending [Sleeper] and its worker.
+///
+/// Cancellation empties the waker slot and leaves a counted tombstone in the
+/// heap. Firing or teardown detaches the waker under the [Sleeping] lock and
+/// invokes or drops it only after releasing that lock.
 struct Alarm {
+    /// Immutable monotonic deadline used for heap ordering.
     time: Instant,
     /// The waker of the task most recently seen polling the sleeper.
     ///

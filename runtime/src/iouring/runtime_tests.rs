@@ -240,12 +240,6 @@ fn test_config_rejects_excessive_read_write_timeout() {
         .validate();
 }
 
-/// Property: every public Config builder round-trips through its getter
-/// (including the new connect_timeout getter and the buffer-pool
-/// configs), so builder regressions are immediately diagnosable.
-/// Setup: set every builder to a nondefault value. Action: read every
-/// getter. Expected: each returns the value that was set, with no
-/// runtime constructed.
 #[test]
 fn test_config_builder_getter_round_trip() {
     let ring = RingConfig {
@@ -1928,8 +1922,8 @@ fn test_sleep_on_dead_worker_fails() {
 
 #[test]
 fn test_network_echo() {
-    // Exercise bind, accept, dial, send, and recv end-to-end on the
-    // runtime's own ring (all connection setup goes through io_uring).
+    // Socket setup is synchronous. Connect, accept, send, and recv exercise
+    // the runtime's ring-backed network path end to end.
     let executor = Runner::default();
     executor.start(|context| async move {
         let mut listener = context

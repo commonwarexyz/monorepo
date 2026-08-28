@@ -6,10 +6,12 @@
 //! parking: if new work arrives during the spin, the park is avoided
 //! entirely.
 //!
-//! The spin budget (in iteration counts) adapts based on outcomes:
-//! - Hit (work arrived during spin): budget grows (+25%).
-//! - Miss (spin expired, had to park): budget shrinks (-12.5%).
-//! - Quick wake (parked but woke fast): budget grows aggressively (+50%).
+//! The spin budget (in iteration counts) adapts based on outcomes. With `b`
+//! as the current budget, integer division rounds each adjustment down:
+//!
+//! - Hit: `b + b / 4`, capped at the configured maximum.
+//! - Miss: `b - b / 8`, clamped to the effective minimum.
+//! - Quick wake: `b + b / 2`, capped at the configured maximum.
 //!
 //! A quick wake indicates the loop committed to parking just before work
 //! arrived. The observed park duration is roughly how much longer it should
@@ -21,9 +23,10 @@
 //! so it doesn't stay pinned after a workload shift.
 //!
 //! A one-time calibration at construction converts user-facing microsecond
-//! configuration into iteration counts. The caller provides a probe function
-//! with the same cost profile as the real spin condition so calibration
-//! accounts for per-iteration condition overhead.
+//! configuration into iteration counts. Disabled spinning skips calibration
+//! entirely. Otherwise the caller provides a probe function with the same cost
+//! profile as the real spin condition so calibration accounts for
+//! per-iteration condition overhead.
 
 use std::time::{Duration, Instant};
 
@@ -40,9 +43,9 @@ pub struct Config {
     /// Maximum spin budget in microseconds. The controller never exceeds
     /// this regardless of adaptation.
     pub max_budget_us: usize,
-    /// Quick-wake threshold in microseconds. If the loop parks and wakes
-    /// with real work in less than this duration, the controller grows the
-    /// budget aggressively (the loop should have spun longer).
+    /// Quick-wake threshold in microseconds. If the loop parks and wakes with
+    /// real work within this duration, including exactly at the threshold,
+    /// the controller grows the budget aggressively.
     pub quick_wake_us: usize,
 }
 
@@ -88,7 +91,7 @@ pub struct Spinner {
     /// config values into iteration counts and to convert quick-wake park
     /// durations back into iteration counts for the near-miss floor.
     iters_per_us: usize,
-    /// Quick-wake threshold. Parks shorter than this grow the budget.
+    /// Quick-wake threshold. Parks at or below this duration grow the budget.
     quick_wake: Duration,
 }
 
@@ -165,9 +168,10 @@ impl Spinner {
         self.budget = self.budget.saturating_sub(self.budget / 8).max(floor);
     }
 
-    /// Called after a futex park that actually slept. If the park was
-    /// shorter than the quick-wake threshold, grows the budget by 50% (we
-    /// should have spun longer) and updates the near-miss floor.
+    /// Record a futex park that actually slept.
+    ///
+    /// A park at or below the quick-wake threshold grows the budget by
+    /// `budget / 2` and updates the near-miss floor.
     #[inline]
     pub fn on_wake(&mut self, park_duration: Duration) {
         if park_duration <= self.quick_wake {
@@ -194,6 +198,7 @@ fn calibrate(probe: impl Fn() -> bool) -> usize {
     calibrated_iterations_per_us(elapsed_us)
 }
 
+/// Convert calibration elapsed time into a nonzero iteration rate.
 fn calibrated_iterations_per_us(elapsed_us: usize) -> usize {
     // A zero rate would silently disable every nonzero spin budget.
     (CALIBRATION_ITERATIONS / elapsed_us.max(1)).max(1)

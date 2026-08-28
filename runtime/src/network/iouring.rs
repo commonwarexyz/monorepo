@@ -4,6 +4,19 @@
 //! accept, and non-empty sends use the ring. A recv reaches the ring only when
 //! cached bytes cannot satisfy it. See [crate::iouring] for runtime requirements
 //! and worker-affinity rules.
+//!
+//! ```text
+//! bind: socket -> bind -> listen -> getsockname -> Listener       (synchronous)
+//! dial: socket -> Arc<fd> -> options -> Connect waiter -> Sink + Stream
+//! accept: retained Accept ticket -> Arc<fd> -> options -> Sink + Stream
+//! send or uncached recv: front-end state -> waiter -> SQE/CQE -> front-end state
+//! ```
+//!
+//! A connection's [`Sink`] and [`Stream`] share one descriptor. Dropping or
+//! closing the sink performs a best-effort `SHUT_WR` only. The descriptor stays
+//! open while the stream or an admitted operation still owns it. Configured
+//! `TCP_NODELAY` and `SO_LINGER` changes are also best effort and failures are
+//! logged rather than surfaced through `dial` or `accept`.
 
 use crate::{
     Buf, BufferPool, Error, IoBufMut, IoBufs,
@@ -31,15 +44,16 @@ const LISTEN_BACKLOG: libc::c_int = 1024;
 /// Configuration for the io_uring network backend.
 #[derive(Clone, Debug)]
 pub struct Config {
-    /// If Some, explicitly sets TCP_NODELAY on the socket.
-    /// Otherwise uses system default.
-    pub tcp_nodelay: Option<bool>,
-    /// Whether to set `SO_LINGER` to zero on the socket.
+    /// If `Some`, requests this `TCP_NODELAY` value on each connected socket.
     ///
-    /// When enabled, causes an immediate RST on close, avoiding
-    /// `TIME_WAIT` state. This is useful in adversarial environments to
-    /// reclaim socket resources immediately when closing connections to
-    /// misbehaving peers.
+    /// Failure is logged and the socket keeps its system default.
+    pub tcp_nodelay: Option<bool>,
+    /// Whether to request zero-duration `SO_LINGER` on connected sockets.
+    ///
+    /// When the kernel honors this option, final descriptor close is abortive
+    /// and may reset a connection with queued data. Exact reset and `TIME_WAIT`
+    /// behavior remains operating-system dependent. Failure is logged and the
+    /// socket keeps its system default.
     pub zero_linger: bool,
     /// Timeout for establishing an outbound TCP connection.
     ///
@@ -155,21 +169,23 @@ fn configure_socket(fd: &OwnedFd, cfg: &Config) {
     }
 }
 
-/// [crate::Network] implementation that uses io_uring to do async I/O.
+/// [crate::Network] front-end for one worker's io_uring driver.
 #[derive(Clone)]
 pub struct Network {
+    /// Socket policy and operation timeouts.
     cfg: Config,
+    /// Affine driver used by connect, accept, send, and recv operations.
     driver_handle: iouring::DriverHandle,
+    /// Pool used for connection receive buffers and returned payloads.
     pool: BufferPool,
 }
 
 impl Network {
-    /// Returns a new [Network] instance that submits operations through `driver_handle`.
+    /// Return a network front-end that submits operations through `driver_handle`.
     ///
-    /// The caller should take special care to ensure the ring backing `driver_handle` is
-    /// large enough, given the number of connections that will be maintained.
-    /// Each in-flight send/recv to/from each connection consumes a ring slot, as
-    /// does each in-flight accept and connect.
+    /// Each admitted send, recv, accept, or connect consumes one waiter slot.
+    /// When no unreserved slot remains, later operations wait in FIFO admission
+    /// order rather than entering the ring immediately.
     pub(crate) const fn new(cfg: Config, driver_handle: iouring::DriverHandle, pool: BufferPool) -> Self {
         Self { cfg, driver_handle, pool }
     }
@@ -239,11 +255,15 @@ impl crate::Network for Network {
 
 /// Implementation of [crate::Listener] for an io-uring [Network].
 pub struct Listener {
+    /// Socket policy inherited by accepted connections.
     cfg: Config,
     /// Listening socket descriptor, shared with in-flight accept requests.
     fd: Arc<OwnedFd>,
+    /// Address reported after binding, including a kernel-selected port.
     local_addr: SocketAddr,
+    /// Affine driver used by retained accept tickets.
     driver_handle: iouring::DriverHandle,
+    /// Pool inherited by streams created from accepted connections.
     pool: BufferPool,
     /// In-flight accept, retained so a cancelled accept future resumes the
     /// same request instead of losing an accepted connection.
@@ -290,11 +310,11 @@ impl crate::Listener for Listener {
                         ),
                     ));
                 }
-                // The deadline exists so an abandoned accept cannot occupy a
-                // ring slot forever, and an expired accept is simply reissued.
+                // The deadline bounds how long an unpolled accept can occupy a
+                // waiter slot. An expired accept is simply reissued.
                 Err(Error::Timeout) => continue,
                 // Match the tokio backend's contract: every accept failure
-                // surfaces as [Error::Closed], so portable callers observe
+                // surfaces as `Error::Closed`, so portable callers observe
                 // the same error regardless of runtime.
                 Err(_) => return Err(Error::Closed),
             }
@@ -307,24 +327,33 @@ impl crate::Listener for Listener {
     }
 }
 
-/// Implementation of [crate::Sink] for an io-uring [Network].
+/// Write half of an io_uring TCP connection.
+///
+/// Shares its descriptor with the peer [`Stream`]. Drop closes only the write
+/// direction through a best-effort `SHUT_WR`.
 pub struct Sink {
     /// Shared socket descriptor backing this sink half.
     fd: Arc<OwnedFd>,
+    /// Affine driver used by non-empty sends.
     driver_handle: iouring::DriverHandle,
     /// Timeout budget for a top-level send call.
     timeout: Duration,
+    /// Cancellation-sensitive send lifecycle.
     state: SinkState,
 }
 
 /// Lifecycle state for the write-half of a connection.
 enum SinkState {
+    /// Ready to begin a send.
     Open,
+    /// A send future is in progress. Dropping it makes the sink unusable.
     Sending,
+    /// No further sends are permitted.
     Closed,
 }
 
 impl Sink {
+    /// Construct an open sink for one shared socket descriptor.
     const fn new(fd: Arc<OwnedFd>, driver_handle: iouring::DriverHandle, timeout: Duration) -> Self {
         Self {
             fd,
@@ -334,6 +363,7 @@ impl Sink {
         }
     }
 
+    /// Mark the sink closed and request write-half shutdown once.
     fn close(&mut self) {
         if matches!(self.state, SinkState::Closed) {
             return;
@@ -400,18 +430,24 @@ impl crate::Sink for Sink {
 pub struct Stream {
     /// Shared socket descriptor backing this stream half.
     fd: Arc<OwnedFd>,
+    /// Affine driver used when buffered bytes cannot satisfy a recv.
     driver_handle: iouring::DriverHandle,
     /// Timeout budget for a top-level recv call.
     timeout: Duration,
     /// Tracks whether a previous recv failure has made this stream unusable.
     poisoned: bool,
+    /// Reusable read-ahead buffer.
     buffer: IoBufMut,
+    /// Next unread byte in `buffer`.
     buffer_pos: usize,
+    /// End of initialized data in `buffer`.
     buffer_len: usize,
+    /// Pool used for returned recv payloads and temporary coalescing buffers.
     pool: BufferPool,
 }
 
 impl Stream {
+    /// Construct an empty stream buffer for one shared socket descriptor.
     fn new(
         fd: Arc<OwnedFd>,
         driver_handle: iouring::DriverHandle,

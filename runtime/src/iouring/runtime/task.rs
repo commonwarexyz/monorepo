@@ -14,8 +14,13 @@
 //! and timer consumers without starving the normal backlog. Completed slots
 //! are recycled for later spawns, and futures stay pinned to the worker
 //! thread that polls them ([Affine]) while registration and wakes may arrive
-//! from any thread. Teardown clears the arena and both lanes, and rejects
-//! racing registrations instead of leaking tasks nothing will ever poll.
+//! from any thread. Teardown closes registration, detaches the arena and the
+//! current contents of both lanes, and clears every admitted task. A
+//! registration that inserted its cell before closure may append a still-queued
+//! token to the newly empty normal lane after its previous contents were
+//! detached. That token is harmless because the worker never polls either lane
+//! after entering teardown, and clearing the captured cell still completes the
+//! task.
 
 // In scope for the intra-doc links in this module's documentation.
 #[allow(unused_imports)]
@@ -87,11 +92,15 @@ where
     future: Affine<RefCell<Option<F>>>,
 }
 
-/// Task scheduling states stored in [TaskState].
+/// Task is dormant and has no ready token.
 const TASK_IDLE: u8 = 0;
+/// One ready token owns the right to poll the task.
 const TASK_QUEUED: u8 = 1;
+/// The owner worker is currently polling the task.
 const TASK_RUNNING: u8 = 2;
+/// A wake arrived while the owner worker was polling the task.
 const TASK_NOTIFIED: u8 = 3;
+/// The future completed or teardown cleared it.
 const TASK_COMPLETE: u8 = 4;
 
 /// Atomic scheduling state for one task.
@@ -332,6 +341,7 @@ where
 /// A waker for the root task, which lives on the runtime thread's stack (so
 /// its typed output is captured un-erased) rather than in the arena.
 struct RootWaker {
+    /// Weak ownership prevents an escaped root waker from retaining the worker.
     tasks: Weak<Tasks>,
 }
 

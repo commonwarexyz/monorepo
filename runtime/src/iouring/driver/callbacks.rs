@@ -1,3 +1,10 @@
+//! Deferred RawWaker callbacks for driver state transitions.
+//!
+//! Cloning, dropping, or waking a `Waker` invokes externally supplied code.
+//! Driver transitions therefore reserve action storage before mutation,
+//! commit owner state while it is borrowed, then execute every detached
+//! callback after releasing that borrow.
+
 use std::{
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     task::Waker,
@@ -78,11 +85,13 @@ impl IntoIterator for DeferredWakerActions {
     }
 }
 
-/// Run every detached waker action, then propagate the first callback panic.
+/// Run every detached waker action and retain the first callback panic.
 ///
 /// Owner state is committed before this function runs. Continuing the batch
 /// ensures a panicking callback cannot strand later waiters whose state has
-/// already advanced. Secondary payloads are leaked because their destructors
+/// already advanced. Outside an existing unwind, the first payload is resumed
+/// after the batch. During an existing unwind it is leaked to avoid a second
+/// panic abort. Secondary payloads are always leaked because their destructors
 /// may panic while the first payload is retained.
 pub(super) fn run_waker_actions(actions: impl IntoIterator<Item = WakerAction>) {
     let already_panicking = std::thread::panicking();

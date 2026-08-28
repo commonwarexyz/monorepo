@@ -1,3 +1,27 @@
+//! Owner-thread event loop for one io_uring worker.
+//!
+//! Front-end futures publish requests through [`DriverHandle`]. A normal turn
+//! makes progress in this order:
+//!
+//! ```text
+//! foreign drops -> existing CQEs -> capacity deadlines -> request deadlines
+//!       -> wake rearm -> cancel SQEs -> request SQEs
+//!       -> release Ops -> Waker drop/wake callbacks -> submit or nonblocking reap
+//! ```
+//!
+//! Existing operation CQEs run before deadline expiry, so a request that
+//! completed at the boundary observes its operation result. Cancel SQEs are
+//! staged before ordinary requests. RawWaker callbacks run outside [`Ops`]
+//! because both `drop` and `wake` can execute arbitrary code and reenter the
+//! driver. Callback effects can require another progress pass.
+//!
+//! Parking has two forms. A worker with no progressing request or deadline
+//! arms the shared futex state and need not submit a ring wake poll. Otherwise
+//! the eventfd path enters the ring, flushing any staged wake rearm before it
+//! blocks. Shutdown closes admission, drains every request the kernel may
+//! still reference, retains userspace-only ready ticket outputs, and destroys
+//! the ring only after quiescence.
+
 use super::{
     DriverHandle,
     callbacks::{WakerAction, run_waker_actions},
@@ -62,12 +86,14 @@ pub(super) type UserData = u64;
 /// last report, which sums correctly across workers.
 #[derive(Debug)]
 struct PendingOperations {
+    /// Runtime-wide gauge receiving this driver's deltas.
     gauge: Gauge,
     /// The count this driver last folded into the shared gauge.
     reported: GaugeValue,
 }
 
 impl PendingOperations {
+    /// Register the shared gauge and start this driver's contribution at zero.
     fn new(registry: &mut impl Register) -> Self {
         Self {
             gauge: registry.register(
@@ -159,8 +185,8 @@ struct DriverState {
     /// `false` before eventfd-backed blocking. The fully idle futex path does
     /// not require the poll to be armed.
     wake_rearm_needed: bool,
-    /// Scratch list of state panics, task-waker drops, and callbacks collected
-    /// under the [`Ops`] borrow and handled after it is released.
+    /// Scratch list of task-waker drops and wakes collected under the [`Ops`]
+    /// borrow and handled after it is released. Their callbacks may panic.
     ///
     /// Empty at each outer turn or drain iteration boundary. Draining invokes
     /// no callback under the affinity borrow and retains the batch capacity.
@@ -179,10 +205,10 @@ struct DriverState {
 }
 
 impl DriverState {
-    /// Invoke every collected task waker.
+    /// Run every collected `Waker::drop` or `Waker::wake` callback.
     ///
-    /// Must be called outside any borrow of the driver state: wakers reenter
-    /// executor scheduling but never the loop state itself.
+    /// Must be called outside any borrow of [`Ops`]. RawWaker callbacks are
+    /// arbitrary code and may synchronously poll another driver operation.
     fn flush_wakers(&mut self) {
         run_waker_actions(self.pending_waker_actions.drain(..));
     }
@@ -218,13 +244,14 @@ impl DriverState {
         }
     }
 
-    /// Make progress on the ring without blocking.
+    /// Make one or more nonblocking progress passes.
     ///
-    /// Drains available CQEs (parking or requeuing their requests), advances
-    /// userspace deadlines, stages as much admitted work as capacity allows,
-    /// and flushes staged SQEs to the kernel. Never blocks: the runtime
-    /// executor calls this between task-poll batches so completions wake tasks
-    /// promptly while submissions reach the kernel before the executor parks.
+    /// Each pass processes foreign drops and available CQEs, advances capacity
+    /// and admitted-request deadlines, stages wake, cancel, and request SQEs,
+    /// then runs deferred callbacks outside [`Ops`]. It submits immediately
+    /// when staging filled the SQ, or performs a zero-timeout reap while
+    /// waiter-backed work remains. It never waits for a future event, although
+    /// arbitrary RawWaker callbacks may themselves block.
     pub(crate) fn turn(&mut self, ring: &mut IoUring) {
         let handle = self.handle.clone();
         loop {
@@ -283,10 +310,8 @@ impl DriverState {
                 return;
             }
 
-            // Flush staged SQEs and reap completions without blocking. With
-            // `DEFER_TASKRUN`, completions are only posted during an
-            // `io_uring_enter` that requests events, so a zero-timeout wait
-            // doubles as the reap.
+            // Flush staged SQEs and drive deferred task work without blocking.
+            // A zero-timeout wait requests events and doubles as the reap.
             self.submit_and_wait(ring, 1, Some(Duration::ZERO))
                 .expect("unable to submit to ring");
 
@@ -299,10 +324,12 @@ impl DriverState {
     /// Park the calling thread until progress is possible or the earliest
     /// deadline elapses.
     ///
-    /// `limit` bounds the wait in addition to the loop's own timeout wheel (the
-    /// runtime executor passes the delay until its next sleeper alarm). Callers
-    /// must invoke [Self::turn] immediately before parking so the wake poll is
-    /// armed and staged work has been flushed.
+    /// `limit` bounds the wait in addition to capacity and admitted-request
+    /// deadlines. The runtime executor passes its next sleeper-alarm delay as
+    /// this bound. Callers must invoke [Self::turn] immediately before parking
+    /// so request work is staged and a missing wake poll is prepared. The
+    /// eventfd path flushes that poll before blocking. The fully idle futex path
+    /// does not require a live ring poll.
     ///
     /// Wakes on CQE arrival or on an out-of-band wake (e.g. a task woken from
     /// another thread).
@@ -514,8 +541,9 @@ impl DriverState {
 
     /// Handle a single CQE from the ring.
     ///
-    /// Internal wake CQEs are handled in-place. All other CQEs are forwarded to
-    /// the request state machine for progress evaluation.
+    /// Internal wake CQEs are handled in place. Other CQEs first enter the
+    /// waiter table. Cancel CQEs are acknowledgement-only, while operation CQEs
+    /// retire the in-flight SQE and drive the request state machine.
     fn handle_cqe(&mut self, ops: &mut Ops, cqe: CqueueEntry) {
         let user_data = cqe.user_data();
         if user_data == WAKE_USER_DATA {
@@ -604,10 +632,11 @@ impl DriverState {
         self.notify_capacity(ops);
     }
 
-    /// Advance the timeout wheel and enqueue cancellations for newly expired requests.
+    /// Expire capacity registrations and advance admitted-request deadlines.
     ///
-    /// This is a no-op when no active deadlines exist. Expired stale wheel
-    /// entries are ignored when waiter generation no longer matches.
+    /// Capacity expiry always runs. Active wheel entries then request local
+    /// backlog timeout or enqueue cancellation for in-flight operations.
+    /// Generation-stale wheel entries are ignored.
     fn advance_timeouts(&mut self, ops: &mut Ops) {
         self.advance_timeouts_at(ops, Instant::now());
     }
@@ -628,7 +657,7 @@ impl DriverState {
             self.timeout_wheel.remove(tick);
         }
 
-        // Fast path: no active deadlines means no clock read and no wheel scan.
+        // Fast path: no active admitted deadlines means no wheel scan.
         if self.timeout_wheel.next_deadline().is_none() {
             return;
         }
@@ -860,9 +889,9 @@ impl DriverState {
 /// Build and configure an `io_uring` instance.
 pub(crate) fn new_ring(size: u32) -> Result<IoUring, std::io::Error> {
     // Every ring is created and submitted by one worker thread. SINGLE_ISSUER
-    // records that invariant for the kernel, while DEFER_TASKRUN processes
-    // completions only during io_uring_enter calls with GETEVENTS. Every turn,
-    // including the wake fast path, eventually makes such a call.
+    // records that invariant for the kernel. DEFER_TASKRUN lets progress paths
+    // drive deferred work when they enter with GETEVENTS. A fully idle worker
+    // may instead futex-park without entering the ring.
     //
     // DEFER_TASKRUN requires SINGLE_ISSUER and both flags require Linux 6.1.
     IoUring::builder()
@@ -879,7 +908,9 @@ pub(crate) fn new_ring(size: u32) -> Result<IoUring, std::io::Error> {
 /// are reaped. The ring and loop state live in separate fields so the
 /// delegating methods below can borrow them disjointly.
 pub(crate) struct Driver {
+    /// io_uring instance owned and submitted by this worker.
     ring: IoUring,
+    /// Event-loop policy and reusable state around `ring`.
     state: DriverState,
 }
 
@@ -926,8 +957,10 @@ impl Driver {
         self.state.waker.clone()
     }
 
-    /// Service the ring: build and submit staged SQEs, then reap CQEs and
-    /// wake the tasks whose results parked.
+    /// Run the driver's nonblocking progress loop.
+    ///
+    /// Existing CQEs and deadlines are processed before new SQEs are staged.
+    /// Deferred callbacks run after releasing shared op state.
     pub(crate) fn turn(&mut self) {
         self.state.turn(&mut self.ring);
     }

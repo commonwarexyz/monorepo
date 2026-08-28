@@ -24,9 +24,11 @@
 //!       +-- detach: remain active until terminal ----------------+
 //! WaiterState::CancelRequested                                  |
 //!   +-- idle: complete locally ----------------------------------+
-//!   +-- in flight: cancel SQE, then operation CQE                |
-//!       +-- terminal ---------------------------------------------+
-//!       +-- nonterminal --> backlog --> complete locally --------+
+//!   +-- in flight: queue cancel SQE                              |
+//!       +-- op CQE before staging: elide queued cancel           |
+//!       +-- cancel staged: cancel and op CQEs, either order       |
+//!       +-- op terminal ------------------------------------------+
+//!       +-- op nonterminal --> backlog --> complete locally -----+
 //!                                                                   v
 //! terminal retention follows Observer
 //!   +-- Observer::Op --> Lifecycle::Ready(RequestOutput) --> op poll --> recycle waiter
@@ -42,10 +44,12 @@
 //!
 //! [`Lifecycle::Pending`] owns every request resource throughout this flow.
 //! While `in_flight` is true, the kernel may still reference those resources.
-//! A cancel CQE only acknowledges cancellation. Kernel referenceability ends
-//! with operation CQE delivery, or with local completion when no SQE is in
-//! flight. Terminal output is retained only by its selected owner: in the
-//! waiter for an op, or in [`TicketArena`] for a ticket.
+//! A queued cancel is discarded if the operation CQE retires the SQE before
+//! cancellation is staged. Once submitted, cancel and operation CQEs are
+//! independently ordered. A cancel CQE only acknowledges cancellation. Kernel
+//! referenceability ends with operation CQE delivery, or with local completion
+//! when no SQE is in flight. Terminal output is retained only by its selected
+//! owner: in the waiter for an op, or in [`TicketArena`] for a ticket.
 
 use super::{
     Tick, UserData,
@@ -56,11 +60,14 @@ use io_uring::squeue::Entry as SqueueEntry;
 use std::task::Waker;
 use tracing::warn;
 
-/// Install an already-cloned observer waker and detach the superseded clone.
+/// Install an already-cloned observer waker and return the redundant clone.
 ///
 /// The caller owns `incoming` outside the driver-state borrow. This helper
 /// only moves wakers, so RawWaker clone and drop callbacks remain outside the
-/// waiter and ticket arenas.
+/// waiter and ticket arenas. When the stored waker already wakes the incoming
+/// task, the stored clone remains installed and the incoming clone is returned.
+/// Otherwise the incoming clone is installed and the old stored clone is
+/// returned.
 fn replace_waker(stored: &mut Option<Waker>, incoming: &mut Option<Waker>) -> Waker {
     let next = incoming.as_ref().expect("poll missing incoming waker");
     let current = stored.as_ref().expect("pending observer missing waker");
@@ -277,10 +284,15 @@ enum Observer {
 /// Non-orphaned terminal output after its waiter state is committed.
 enum FinishedOutput {
     /// Request output parked in an ordinary op waiter.
-    Op { waker: Option<Waker> },
+    Op {
+        /// Stored observer waker detached for invocation after the state commit.
+        waker: Option<Waker>,
+    },
     /// Request output leaving the waiter for a detached ticket entry.
     Ticket {
+        /// Ticket entry that will receive the output.
         ticket_id: TicketId,
+        /// Terminal output transferred out of the waiter.
         output: RequestOutput,
     },
 }
@@ -372,8 +384,11 @@ pub enum DropOutcome {
     Freed,
     /// The request was transitioned to cancellation.
     Cancel {
-        /// Whether an async-cancel SQE must be staged because an operation
-        /// SQE is in flight.
+        /// Whether this transition newly owes an async-cancel SQE.
+        ///
+        /// This is not an in-flight predicate. A waiter already in
+        /// `CancelRequested` can still have an operation SQE in flight while
+        /// returning `false` because its cancel was already enqueued.
         needs_sqe: bool,
         /// Scheduled deadline tick leaving active timeout tracking, if any.
         target_tick: Option<Tick>,
@@ -547,6 +562,8 @@ impl TicketArena {
     /// Ready output is removed immediately. Pending state only compares waker
     /// identity, allowing the caller to avoid a clone when the stored waker is
     /// already current.
+    ///
+    /// Panics if `ticket_id` is untracked.
     pub fn poll_state(&mut self, ticket_id: TicketId, waker: &Waker) -> PollState {
         let entry = self.entry_mut(ticket_id, "poll_state");
         match entry {
@@ -806,12 +823,11 @@ impl Waiters {
         self.insert_prepared(id, request, Observer::Ticket(ticket_id))
     }
 
-    /// Insert a pending request with the observer that will own its output.
+    /// Validate and return the next generation-stamped free slot.
     ///
-    /// The next generation-stamped free slot starts active, without an SQE in
-    /// flight, and with a pending request lifecycle. This shared helper also
-    /// updates the tracked and progressing counts used by capacity and drain
-    /// accounting.
+    /// This phase does not mutate the free list, entries, or accounting. It
+    /// runs before taking an externally controlled waker so invariant panics
+    /// cannot trigger its destructor while driver state is borrowed.
     ///
     /// Panics if no free slot is available.
     fn prepare_insert(&self) -> WaiterId {
@@ -828,6 +844,10 @@ impl Waiters {
     }
 
     /// Commit a waiter after [Self::prepare_insert] validated its slot.
+    ///
+    /// Removes the prepared ID from the free list, installs an active pending
+    /// request with no SQE in flight, and increments progressing-request
+    /// accounting.
     fn insert_prepared(&mut self, id: WaiterId, request: Request, observer: Observer) -> WaiterId {
         let popped = self.free.pop().expect("prepared waiter slot disappeared");
         debug_assert_eq!(popped, id);
@@ -1207,6 +1227,8 @@ impl Waiters {
     /// Ready output is removed immediately. Pending state only compares waker
     /// identity, allowing the caller to clone after releasing Ops when an
     /// update is actually required.
+    ///
+    /// Panics if `waiter_id` is untracked or stale, or belongs to a ticket.
     #[inline]
     pub fn poll_state(&mut self, waiter_id: WaiterId, waker: &Waker) -> PollState {
         let index = waiter_id.index() as usize;
@@ -1260,6 +1282,9 @@ impl Waiters {
     }
 
     /// Recycle a terminal ticket waiter after its output is published.
+    ///
+    /// Panics if the waiter is untracked or stale, has not reached ticket
+    /// completion, belongs to an ordinary op, or links to a different ticket.
     pub fn finish_ticket(&mut self, waiter_id: WaiterId, ticket_id: TicketId) {
         let index = waiter_id.index() as usize;
         let slot = self
@@ -1377,7 +1402,10 @@ impl Waiters {
         waker
     }
 
-    /// Return whether a waiter currently has an operation SQE in flight.
+    /// Return whether a matching waiter currently has an operation SQE in flight.
+    ///
+    /// Returns `false` for a missing slot or stale generation. Completion code
+    /// uses this to ignore cancellation work that became stale after recycling.
     pub fn is_in_flight(&self, waiter_id: WaiterId) -> bool {
         let index = waiter_id.index() as usize;
         self.entries

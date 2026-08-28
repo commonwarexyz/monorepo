@@ -1,16 +1,40 @@
-//! io_uring implementation of [crate::Storage]. See [crate::iouring] for
-//! runtime requirements and worker-affinity rules.
+//! io_uring implementation of [crate::Storage].
+//!
+//! Each worker receives a storage front-end tied to that worker's driver. The
+//! front-ends created by one runner share the metadata lock and filesystem
+//! root, while each opened [`Blob`] retains the driver of the worker that
+//! opened it.
+//!
+//! ```text
+//! Storage
+//!   |-- open_versioned, remove, scan --> shared metadata lock --> std::fs
+//!   |
+//!   +-- Blob
+//!         |-- non-empty read/write, sync --> worker driver --> io_uring
+//!         |-- empty read/write -----------> local completion
+//!         +-- resize ----------------------> synchronous File::set_len
+//! ```
+//!
+//! Blob method calls remain worker-affine, including local and synchronous
+//! paths. Blob clones and drops may cross workers. The type does not maintain
+//! an automatic poison bit after mutation failure. An error from `write_at`,
+//! `resize`, `sync`, or the handle returned by `start_sync` can reflect partial
+//! mutation or uncertain durability. Higher-level storage code must therefore
+//! treat such a failure as fatal to that database instance and stop using the
+//! blob and its clones. See [crate::iouring] for the general runtime and
+//! affinity contract.
 //!
 //! ## Blocking Metadata Operations
 //!
-//! `open`, `remove`, and `scan` execute synchronous filesystem calls (including
-//! fsyncs) on the calling worker's thread, serialized across all workers by a
-//! runtime-wide lock. A slow metadata operation therefore stalls the calling
-//! worker's event loop, and other workers entering a metadata operation block on
-//! the same lock until it completes. [crate::Blob::resize] (tracked by #831) is
-//! likewise a synchronous `set_len` on the worker, though it touches only the open
-//! file and takes no lock. Keep these off hot paths. Data-path reads, writes, and
-//! syncs go through the ring and do not block.
+//! `open`, `remove`, and `scan` execute synchronous filesystem calls on the
+//! calling thread. Mutation paths include synchronous file or directory syncs.
+//! One runner's worker-local storage front-ends serialize these methods through
+//! a shared lock. A slow metadata operation therefore stalls its calling event
+//! loop, and another worker entering a metadata operation blocks on the same
+//! lock. [crate::Blob::resize] is likewise a synchronous `set_len` on its
+//! worker, though it touches only the open file and takes no metadata lock.
+//! Keep these methods off hot paths. Non-empty reads, writes, and data syncs go
+//! through the ring and do not block the event-loop thread.
 //!
 
 use super::Header;
@@ -66,23 +90,26 @@ fn sync_dir(path: &Path) -> Result<(), Error> {
 /// Its `open_versioned` method is associated with the worker whose ring
 /// services it, and blobs it opens must be used on that worker (see the
 /// [worker affinity](crate::iouring#worker-affinity) rules). Metadata operations
-/// (`open`, `remove`, `scan`) run synchronously on the calling worker under a
-/// runtime-wide lock and therefore block its event loop (see the [module docs](self)
-/// for the blocking rules and lifecycle).
+/// (`open`, `remove`, `scan`) run synchronously on the calling thread under one
+/// runner's shared lock and can therefore block an event loop (see the
+/// [module docs](self) for the blocking rules and lifecycle).
 #[derive(Clone)]
 pub struct Storage {
+    /// Lock shared by one runner's storage front-ends for namespace changes.
     metadata_lock: Arc<Mutex<()>>,
+    /// Root containing every storage partition.
     storage_directory: PathBuf,
+    /// Driver that opened blobs use for ring-backed operations.
     driver_handle: iouring::DriverHandle,
+    /// Pool inherited by blobs for read and coalescing buffers.
     pool: BufferPool,
 }
 
 impl Storage {
     /// Returns a new `Storage` instance that submits I/O through the driver.
     ///
-    /// `metadata_lock` serializes filesystem-shape operations (open, remove, scan).
-    /// Every instance sharing a storage directory must share the same lock,
-    /// so the runtime passes one lock to all of its workers.
+    /// `metadata_lock` serializes namespace operations across the worker-local
+    /// storage front-ends created by one runner.
     pub(crate) const fn new(
         storage_directory: PathBuf,
         driver_handle: iouring::DriverHandle,
@@ -237,10 +264,15 @@ impl crate::Storage for Storage {
 /// rules and lifecycle).
 #[derive(Clone)]
 pub struct Blob {
+    /// Partition name used to construct mutation errors.
     partition: String,
+    /// Binary blob name used to construct mutation errors.
     name: Vec<u8>,
+    /// Open file shared by clones and in-flight requests.
     file: Arc<File>,
+    /// Driver of the worker that opened this blob.
     driver_handle: iouring::DriverHandle,
+    /// Pool used for read results and temporary contiguous buffers.
     pool: BufferPool,
     /// Physical offset where logical offset 0 begins (the size of the header region).
     data_offset: u64,
@@ -250,6 +282,7 @@ pub struct Blob {
 }
 
 impl Blob {
+    /// Construct a worker-affine blob around an opened and resolved file.
     fn new(
         partition: String,
         name: &[u8],
@@ -357,7 +390,6 @@ impl crate::Blob for Blob {
             .await
     }
 
-    // TODO: Make this async. See https://github.com/commonwarexyz/monorepo/issues/831
     async fn resize(&self, len: u64) -> Result<(), Error> {
         self.driver_handle.assert_owner();
         let len = len

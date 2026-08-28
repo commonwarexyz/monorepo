@@ -832,7 +832,7 @@ fn test_multi_submission_sync_write_finishes_with_datasync() {
 fn test_active_sync_paths() {
     // Verify sync state handling across retry, error conversion, and success.
 
-    // Retryable CQEs should requeue the fsync request.
+    // Retryable CQEs should requeue the data-sync request.
     let mut request = Request::Sync(SyncRequest {
         file: make_file_fd(),
     });

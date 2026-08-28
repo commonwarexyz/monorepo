@@ -19,31 +19,34 @@
 //! async-cancelled eagerly, while storage writes and syncs detach and keep
 //! running for durability parity with the tokio backend. Dropping an admitted
 //! op future or a [Ticket] (including one held inside a front-end object such
-//! as a listener) on a foreign thread cannot touch the table directly (drop
-//! must not panic, so the affinity check cannot reject it), so it is routed
-//! through the [OrphanMailbox] and wound down by the loop on its next turn.
-//! Ring-bound resources may therefore be dropped from any thread, even
+//! as a listener) on a foreign thread cannot touch the table directly, so it
+//! is routed through the [OrphanMailbox] and wound down by the loop on its next
+//! turn. This avoids an affinity panic during drop. Detached waker callbacks
+//! run only after the state transition and may still propagate their own
+//! panic. Ring-bound resources may therefore be dropped from any thread, even
 //! though they must only be used on their owning worker.
 //!
 //! Capacity and terminal ownership move through these states:
 //!
 //! ```text
-//! full waiter table
+//! no unreserved waiter slot
 //!       |
 //!       v
-//! Queued CapacityId --slot freed--> Granted CapacityId --owner repolls--> waiter owns request
-//!       |                                  |                                      |
-//!       | deadline, drop, or close         | deadline, drop, or close             |
-//!       v                                  v                                      |
-//!      Free <------------------------------+                  +-------------------+-------------------+
-//!                                                             |                                       |
-//!                                                          Op Ready                           Ticket Pending
-//!                                                             |                                       |
-//!                                                             v                                       v
-//!                                                      recycle waiter                 publish Ticket Ready
-//!                                                                                                     |
-//!                                                                                                     v
-//!                                                                                              recycle waiter
+//! Queued CapacityId --slot freed--> Granted CapacityId --owner repolls--+
+//!       |                                  |                            |
+//!       | deadline, drop, or close         | deadline, drop, or close   v
+//!       +-------------------------------> Free                  waiter owns request
+//!                                                                    |
+//!                                                   +----------------+----------------+
+//!                                                   |                                 |
+//!                                              ordinary Op                     detached Ticket
+//!                                                   |                                 |
+//!                                                   v                                 v
+//!                                            waiter stores output          ticket stores output
+//!                                                   |                       and waiter recycles
+//!                                                   v                                 |
+//!                                            owner consumes it                       v
+//!                                            and waiter recycles             owner consumes it
 //! ```
 //!
 //! Every state transition completes while [Ops] is borrowed. Stored waker
@@ -98,7 +101,9 @@ pub(crate) fn current_thread_id() -> ThreadId {
 /// The affinity assert makes the cell shareable (`Sync`) without any lock:
 /// cross-thread access fails loudly instead of racing.
 pub(crate) struct Affine<T> {
+    /// Thread permitted to access `cell`.
     owner: ThreadId,
+    /// Value protected by the runtime affinity check.
     cell: T,
 }
 
@@ -137,7 +142,7 @@ impl<T> Affine<T> {
 
     /// Access the contents if the calling thread is the owner.
     ///
-    /// Returns `None` off-thread. Used on drop paths, which must not panic.
+    /// Returns `None` off-thread so drop paths can avoid an affinity panic.
     fn try_with<R>(&self, f: impl FnOnce(&T) -> R) -> Option<R> {
         (current_thread_id() == self.owner).then(|| f(&self.cell))
     }
@@ -233,6 +238,7 @@ impl Drop for CapacityRegistration<'_> {
 /// that cell.
 #[derive(Clone)]
 pub(crate) struct DriverHandle {
+    /// Driver state shared by front-end handles and the event loop.
     inner: Arc<HandleInner>,
 }
 
@@ -247,19 +253,18 @@ struct HandleInner {
 /// Wind-down work dropped on a foreign thread, where the thread-affine op
 /// table is unreachable.
 ///
-/// Drop is the one op interaction that can legally arrive off-thread (drop
-/// must not panic, so the affinity check cannot reject it). Entries pushed
-/// here are wound down by the loop on its next turn exactly as an on-thread
-/// drop would have been, so foreign drops release their state instead of
-/// leaking it until shutdown.
+/// Drop is the one op interaction that can legally arrive off-thread. Entries
+/// pushed here are wound down by the loop on its next turn exactly as an
+/// on-thread drop would have been, so foreign drops avoid an affinity panic
+/// and release their state instead of leaking it until shutdown.
 pub(super) enum Orphan {
-    /// An admitted waiter whose future or ticket was dropped.
+    /// Waiter whose ordinary operation future was dropped.
     Waiter(WaiterId),
-    /// A detached ticket dropped after admission. The ticket entry owns
-    /// the waiter link while Pending and identifies foreign drops.
+    /// Detached ticket dropped after admission. Its ticket entry owns the
+    /// waiter link while pending.
     Ticket(TicketId),
     /// A capacity registration whose admission attempt was dropped while
-    /// parked on a full waiter table (before any waiter existed).
+    /// parked before any waiter existed.
     Capacity(CapacityId),
 }
 
@@ -268,12 +273,14 @@ struct OrphanMailbox {
     /// Fast-path gate so the loop's per-turn drain skips the lock when the
     /// mailbox is empty (the common case).
     pending: AtomicBool,
+    /// Foreign-thread wind-down work protected independently of op state.
     orphans: Mutex<Vec<Orphan>>,
     /// Wakes the loop so a parked runtime winds the orphan down promptly.
     waker: RingWaker,
 }
 
 impl OrphanMailbox {
+    /// Enqueue one foreign-thread drop and notify the owning event loop.
     fn push(&self, orphan: Orphan) {
         self.orphans.lock().push(orphan);
         self.pending.store(true, Ordering::Release);
@@ -457,16 +464,18 @@ impl DriverHandle {
         }
     }
 
-    /// Submit a logical fsync request and wait for its completion.
+    /// Submit a logical data-sync request and wait for its completion.
     pub(crate) async fn sync(&self, file: Arc<File>) -> Result<(), Error> {
         self.start_sync(file).await.await
     }
 
-    /// Begin a logical fsync request, returning the completion ticket without
+    /// Begin a logical data-sync request, returning its completion ticket without
     /// waiting.
     ///
     /// Admission applies the same backpressure as every other request. The
-    /// returned ticket resolves once the fsync completes.
+    /// returned ticket resolves once the data sync completes. Dropping a
+    /// pending ticket detaches observation, but the admitted sync keeps
+    /// running.
     pub(crate) async fn start_sync(&self, file: Arc<File>) -> SyncTicket {
         let request = Request::sync(file);
         SyncTicket(Ticket::admit(self, request).await)
@@ -476,12 +485,14 @@ impl DriverHandle {
 /// Poll one admission attempt for `request`, using `admit` to bind its observer.
 ///
 /// On a closed driver the request resolves immediately to its kind-specific
-/// failure (returned as `Err`). On a full waiter table the task parks on the capacity
-/// wait list through `registration` (one slot per attempt, refreshed on
-/// re-polls and released here once the attempt resolves). Otherwise the
-/// observer-specific state and waiter are published under one op-state borrow,
-/// then the waiter id is pushed onto the backlog. The generic closure is
-/// monomorphized for ordinary ops and detached tickets.
+/// failure (returned as `Err`). A request whose deadline already passed also
+/// resolves locally without entering the waiter table. When no unreserved
+/// waiter slot is available, the task parks on the capacity wait list through
+/// `registration` (one slot per attempt, refreshed on re-polls and released
+/// here once the attempt resolves). Otherwise the observer-specific state and
+/// waiter are published under one op-state borrow, then the waiter id is
+/// pushed onto the backlog. The generic closure is monomorphized for ordinary
+/// ops and detached tickets.
 fn poll_admission<T>(
     handle: &DriverHandle,
     request: &mut Option<Request>,
@@ -719,10 +730,9 @@ pub(super) fn wind_down_ticket(ops: &mut Ops, id: TicketId, actions: &mut impl W
 
 /// Wind down an admitted request whose future or ticket is being dropped.
 ///
-/// Drop must not panic, so a foreign-thread drop cannot touch the
-/// thread-affine table directly: it hands the id to the loop through the
-/// orphan mailbox instead, and the loop applies the same wind-down on its
-/// next turn.
+/// A foreign-thread drop cannot touch the thread-affine table directly. It
+/// hands the id to the loop through the orphan mailbox instead, and the loop
+/// applies the same wind-down on its next turn without an affinity panic.
 fn orphan_waiter(handle: &DriverHandle, id: WaiterId) {
     let Some(actions) = handle.try_with(|ops| {
         let mut actions = DeferredWakerActions::new();
@@ -750,9 +760,13 @@ fn orphan_ticket(handle: &DriverHandle, id: TicketId) {
 
 /// Outcome of one admission attempt.
 enum Admission<T> {
+    /// The request and its observer were published in the waiter table.
     Admitted(T),
+    /// The attempt is queued or holds a reserved capacity grant.
     Full,
+    /// The driver closed before this request entered the waiter table.
     Closed,
+    /// The request deadline passed before admission.
     Expired,
 }
 
@@ -781,10 +795,12 @@ enum OpState {
 /// (see the module docs for the wind-down rules).
 #[must_use]
 struct Op<'a> {
+    /// Driver that owns the request and its waiter after admission.
     handle: &'a DriverHandle,
+    /// Current ownership and progress state.
     state: OpState,
-    /// Capacity wait-list registration while queued on a full waiter table, released
-    /// on admission or by drop (via its RAII guard).
+    /// Capacity wait-list registration while no unreserved waiter slot is
+    /// available, released on admission or by drop through its RAII guard.
     registration: CapacityRegistration<'a>,
 }
 
@@ -829,7 +845,7 @@ impl Future for Op<'_> {
                         run_waker_actions(actions);
                         Poll::Ready(output)
                     }
-                    // A full waiter table leaves the request in place: no bytes move.
+                    // Capacity backpressure leaves the request in place.
                     Poll::Pending => {
                         run_waker_actions(actions);
                         Poll::Pending
@@ -864,27 +880,30 @@ impl Drop for Op<'_> {
 
 /// State of a detached ticket.
 ///
-/// Unlike [OpState] this never holds a [Request]: tickets are only built
-/// after admission, which keeps them `Sync` (requests own iovec scratch
-/// pointers) so the front-ends that retain them stay `Sync`.
+/// Unlike [OpState] this never holds a [Request]. A waiting ticket is built
+/// only after admission, which keeps it `Sync` (requests own iovec scratch
+/// pointers) so the front-ends that retain tickets stay `Sync`. Pre-admission
+/// failures hold only their terminal output.
 enum TicketState {
     /// Admitted: the ticket entry links to the waiter while Pending and
     /// owns the output after it becomes Ready.
     Waiting(TicketId),
-    /// Admission failed on a closed driver: the failure output is parked
-    /// locally for the next poll.
+    /// Admission failed locally because the driver closed or the deadline
+    /// expired. The failure output is parked for the next poll.
     Failed(RequestOutput),
     /// The output was delivered.
     Done,
 }
 
-/// Detached ticket for an admitted request.
+/// Detached completion handle for an admitted or locally failed request.
 ///
 /// Owns a driver clone so it can outlive its front-end call. Poll and drop use
 /// only the ticket ID. A Pending drop winds down the linked waiter, while
 /// a Ready drop never addresses the already recycled waiter.
 struct Ticket {
+    /// Driver owning the ticket arena and any linked waiter.
     handle: DriverHandle,
+    /// Ticket-arena link or locally parked terminal output.
     state: TicketState,
 }
 
@@ -984,7 +1003,10 @@ impl Future for AcceptTicket {
     }
 }
 
-/// Detached ticket for an admitted fsync.
+/// Detached ticket for an admitted data sync.
+///
+/// Dropping this ticket does not cancel an admitted sync. The request remains
+/// detached and continues until its kernel work completes.
 #[must_use]
 pub(crate) struct SyncTicket(Ticket);
 

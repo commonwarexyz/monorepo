@@ -1,3 +1,12 @@
+//! FIFO admission control for the driver's waiter table.
+//!
+//! A task that cannot claim an unreserved waiter slot registers here without
+//! transferring its request to the waiter table. Grants are FIFO and reserve
+//! real waiter capacity until consumed or cancelled, so a fresh task cannot
+//! barge ahead. Generation-stamped nodes make late cancellation and deadline
+//! entries harmless after slot reuse. Waker callbacks are deferred until the
+//! surrounding driver-state borrow is released.
+
 use super::callbacks::{WakerActionSink, WakerAction};
 use std::{
     cmp::Reverse,
@@ -205,10 +214,12 @@ impl CapacityWaiters {
             .map(|entry| entry.0.deadline.saturating_duration_since(now))
     }
 
-    /// Expire every queued registration whose deadline is at or before `now`.
+    /// Expire every queued or granted registration due at or before `now`.
     ///
     /// Each expired node is recycled after leaving the FIFO or releasing its
-    /// grant. Its waker runs only after the surrounding [`super::handle::Ops`] borrow is released.
+    /// grant. A granted expiry returns its reservation before capacity is
+    /// reconciled. Any waker runs only after the surrounding
+    /// [`super::handle::Ops`] borrow is released.
     pub(super) fn expire(
         &mut self,
         now: Instant,
@@ -457,6 +468,9 @@ impl CapacityWaiters {
         incoming_waker: &mut Option<Waker>,
         deadline: Option<Instant>,
     ) -> CapacityId {
+        // Reserve every allocation that may be needed before consuming the
+        // incoming waker or mutating the free list and FIFO links. Allocation
+        // failure therefore leaves all ownership and intrusive state intact.
         if self.free.is_none() {
             self.nodes.reserve(1);
         }
