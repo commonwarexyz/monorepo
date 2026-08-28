@@ -2166,11 +2166,7 @@ fn test_parallel_strategy_spawn_completes() {
         assert_eq!(strategy.parallelism(), 2);
 
         let output = strategy
-            .spawn(
-                |strategy: commonware_parallel::Manual<commonware_parallel::Rayon>| {
-                    strategy.map_collect_vec(0..2, |i| i + 1)
-                },
-            )
+            .spawn(2, |strategy| strategy.map_collect_vec(0..2, |i| i + 1))
             .await;
 
         assert_eq!(output, vec![1, 2]);
