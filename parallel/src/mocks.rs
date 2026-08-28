@@ -57,4 +57,10 @@ mod tests {
 
         assert!(strategy.spawn(1, |_| 7).now_or_never().is_none());
     }
+
+    #[test]
+    #[should_panic(expected = "pending requires a multi-worker pool")]
+    fn pending_rejects_single_worker() {
+        pending(NonZeroUsize::MIN);
+    }
 }

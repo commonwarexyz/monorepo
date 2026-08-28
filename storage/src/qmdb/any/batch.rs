@@ -1118,6 +1118,13 @@ where
                         }
                     };
 
+                    // One resolved operation per read candidate: the zip below would silently
+                    // drop a surplus.
+                    assert_eq!(
+                        read_candidates.len(),
+                        resolved.iter().map(Vec::len).sum::<usize>()
+                    );
+
                     // Classify each candidate against the pre-raise state, in candidate
                     // order.
                     let outcomes: Vec<FloorOutcome<F>> = strategy.map_collect_vec(
@@ -1216,8 +1223,8 @@ where
         let leaves = self.base_state.size + ops.len() as u64;
         let inactive_peaks = db.inactive_peaks(leaves, floor);
 
-        // Leaf and node hashing dominate merkleization, so run them as one job on the
-        // strategy instead of occupying the calling task (see `Journal::merkleize`).
+        // Leaf and node hashing dominate merkleization, so run them as one job through the
+        // strategy (see `Journal::merkleize`).
         let (journal, root) = db
             .log
             .merkleize(self.journal_batch, ops, inactive_peaks)

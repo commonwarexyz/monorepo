@@ -329,8 +329,7 @@ where
     /// The job hashes against an immutable snapshot of the committed Merkle state, so a parallel
     /// strategy can host the batch's dominant CPU phase on its own pool instead of occupying the
     /// calling task. If the job's caller is cancelled, the job still runs to completion
-    /// against its snapshot and the result is discarded (a panic inside the job is caught by
-    /// [`Strategy::spawn`] and only propagates to a caller that awaits it).
+    /// against its snapshot and the result is discarded.
     pub(crate) async fn merkleize(
         &self,
         batch: UnmerkleizedBatch<F, H, C::Item, S>,

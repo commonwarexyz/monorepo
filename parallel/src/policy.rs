@@ -198,12 +198,17 @@ impl Policy {
         }
         let key = Key::new(caller, len, len, parallelism);
         let mut entry = self.spawn_entries.entry(key).or_default();
-        estimate(&mut entry).record(nanos(sample));
+        estimate(&mut entry).record(u64::try_from(sample.as_nanos()).unwrap_or(u64::MAX));
     }
 
     #[cfg(test)]
     pub(super) fn len(&self) -> usize {
         self.run_entries.len()
+    }
+
+    #[cfg(test)]
+    pub(super) fn spawn_len(&self) -> usize {
+        self.spawn_entries.len()
     }
 
     /// Whether the spawn entry for this call site has recorded at least one sample
@@ -417,7 +422,7 @@ impl RunEntry {
     }
 
     fn record(&mut self, execution: RunExecution, elapsed: Duration) {
-        let elapsed_ns = nanos(elapsed);
+        let elapsed_ns = u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX);
         match execution {
             RunExecution::Serial => self.serial_ns.record(elapsed_ns),
             RunExecution::Parallel => self.parallel_ns.record(elapsed_ns),
@@ -488,11 +493,6 @@ impl SpawnEntry {
         self.cadence
             .arbitrate(preferred, loser, winner_ns, loser_ns, probe_allowed)
     }
-}
-
-// Saturating nanosecond conversion for timing samples.
-fn nanos(duration: Duration) -> u64 {
-    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
 }
 
 fn update_ewma(current: u64, next: u64) -> u64 {
@@ -1133,6 +1133,18 @@ mod tests {
             entry.choose(SPAWN_INLINE_BUDGET_NS),
             (SpawnExecution::Offload, _)
         ));
+    }
+
+    #[test]
+    fn spawn_entries_bucket_by_len() {
+        let policy = Policy::default();
+        let location = Location::caller();
+
+        let _ = policy.choose_spawn(location, 1, PARALLELISM);
+        let _ = policy.choose_spawn(location, 2, PARALLELISM);
+        let _ = policy.choose_spawn(location, 3, PARALLELISM);
+
+        assert_eq!(policy.spawn_len(), 2);
     }
 
     #[test]

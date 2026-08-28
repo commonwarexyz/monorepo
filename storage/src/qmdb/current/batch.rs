@@ -872,9 +872,9 @@ where
     });
 
     // Prefetch each chunk's covering ops-tree node, then run graft hashing and the grafted
-    // MMR build/merkleize as one job on the strategy (against a snapshot of the committed
-    // grafted tree) instead of occupying the calling task. An empty graft set hashes
-    // nothing, so it merkleizes inline rather than paying for a job handoff.
+    // MMR build/merkleize as one job through the strategy (against a snapshot of the
+    // committed grafted tree). An empty graft set hashes nothing, so it merkleizes without
+    // submitting a job.
     let graft_inputs = read_graft_inputs::<F, _, N>(&ops_tree_adapter, chunks_to_update).await?;
     let grafted_batch = if graft_inputs.is_empty() {
         let grafted_hasher = grafting::hasher::<F, H>(grafting_height);

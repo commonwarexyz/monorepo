@@ -272,8 +272,8 @@ where
         let total_size = base + ops.len() as u64;
         let inactive_peaks = F::inactive_peaks(total_size, inactivity_floor);
 
-        // Leaf and node hashing dominate merkleization, so run them as one job on the
-        // strategy instead of occupying the calling task (see `Journal::merkleize`).
+        // Leaf and node hashing dominate merkleization, so run them as one job through the
+        // strategy (see `Journal::merkleize`).
         let (journal, root) = db
             .journal
             .merkleize(self.journal_batch, ops, inactive_peaks)

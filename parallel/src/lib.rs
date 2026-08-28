@@ -1610,6 +1610,21 @@ mod test {
         assert_eq!(policy_len(&strategy), 2);
     }
 
+    /// `manual()` forces the hand-off on a multi-worker pool: the job runs on the pool no matter
+    /// what the adaptive policy would have decided for this call site.
+    #[test]
+    fn manual_spawn_always_hands_off() {
+        let strategy = parallel_strategy();
+        let manual = strategy.manual();
+
+        for _ in 0..10 {
+            let on_pool = futures::executor::block_on(
+                manual.spawn(1, |_| rayon::current_thread_index().is_some()),
+            );
+            assert!(on_pool, "manual spawn ran on the calling task");
+        }
+    }
+
     #[test]
     fn manual_strategy_does_not_use_adaptive_policy() {
         let strategy = parallel_strategy();
@@ -1679,6 +1694,8 @@ mod test {
         }));
 
         assert_eq!(result, 7);
+
+        // Spawn trains only the spawn-side policy: no run entries are created.
         assert_eq!(policy_len(&strategy), 0);
     }
 
