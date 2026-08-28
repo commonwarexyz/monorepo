@@ -105,6 +105,7 @@ use tracing::debug;
 const MAX_CHANNEL_DRAIN_PER_TICK: usize = 32;
 
 pub mod any;
+pub mod compact;
 pub mod current;
 pub mod immutable;
 pub mod keyless;
