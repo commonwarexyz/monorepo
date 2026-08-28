@@ -1223,9 +1223,10 @@ impl<E: Context, A: CodecFixedShared> std::fmt::Debug for Journal<E, A> {
 impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// Initialize a new `Journal` instance.
     ///
-    /// All backing blobs are opened during initialization. Recovery scans the two newest blobs to
-    /// establish their contiguous valid-page prefixes without decoding journal items. The
-    /// `replay` method can be used to iterate over all items in the `Journal`.
+    /// All backing blobs are opened during initialization. Recovery scans the two newest blobs,
+    /// skipping blobs and pages the checkpoint watermark already acknowledges, to establish
+    /// their contiguous valid-page prefixes without decoding journal items. The `replay` method
+    /// can be used to iterate over all items in the `Journal`.
     pub async fn init(context: E, cfg: Config) -> Result<Self, Error> {
         Ok(Self(Box::new(Inner::init(context, cfg).await?)))
     }
@@ -4208,6 +4209,7 @@ mod tests {
             let journal = Journal::<_, Digest>::init(context.child("second"), cfg)
                 .await
                 .unwrap();
+
             // Two `Writer::new` tail reads, the dual-copy checkpoint reads, and one batched
             // scan of the floor blob. Scanning the fully acknowledged older blob as well
             // would add another read.
@@ -4287,6 +4289,7 @@ mod tests {
             for i in 0..15u64 {
                 (journal, _) = journal.append(&test_digest(i)).await.unwrap();
             }
+
             // The watermark (15) acknowledges 160 bytes of blob 1, ending inside page 3.
             journal.sync().await.unwrap();
 

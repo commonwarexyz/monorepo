@@ -58,8 +58,9 @@
 //! re-reading the records they mark (a damaged marked record surfaces at [Ordinal::get]). Records in
 //! sections listed with no bitmap are instead validated using their CRC32. Stored sections omitted
 //! from `bits` are removed, and stored records whose bits are unset are cleared before replay.
-//! Records missing from stored sections fail initialization. Passing `Some(BTreeMap::new())` or
-//! `None` removes all stored sections and starts empty.
+//! Records missing from stored sections, and CRC-invalid records in sections listed with no
+//! bitmap, fail initialization. Passing `Some(BTreeMap::new())` or `None` removes all stored
+//! sections and starts empty.
 //!
 //! # Example
 //!

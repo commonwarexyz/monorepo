@@ -25,9 +25,9 @@
 //! # Checksums
 //!
 //! Each physical page ends in a two-slot CRC record. The slots let a partial page be rewritten
-//! without clobbering its previously committed contents, so an interrupted write loses at most
-//! the bytes it was writing. [Writer::new] backs up over any trailing bytes not covered by a
-//! valid checksum, treating them as an incomplete write.
+//! without clobbering its last durable contents, so an interrupted write loses at most unsynced
+//! bytes. [Writer::new] backs up over any trailing bytes not covered by a valid checksum,
+//! treating them as an incomplete write.
 //!
 //! # Raw [Blob] handles
 //!
@@ -404,8 +404,8 @@ impl<B: Blob> Writer<B> {
     /// If `write_partial_page` is true, the partial page will be written to the blob as well along
     /// with a CRC record.
     ///
-    /// A flush emits one write covering whole physical pages. A previously committed partial page
-    /// is rewritten in full, preserving its committed bytes and protected checksum slot.
+    /// A flush emits one write covering whole physical pages. A previously written partial page
+    /// is rewritten in full, preserving its durable bytes and protected checksum slot.
     ///
     /// If `sync` is true, the emitted write is made durable immediately. When an earlier mutation
     /// is pending, the write is followed by a blob sync instead of relying on per-write durability.

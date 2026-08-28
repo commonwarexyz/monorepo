@@ -916,7 +916,8 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
     /// exhausted.
     ///
     /// An error ends the section that produced it, and iteration continues with the
-    /// next section.
+    /// next section. Errors while mutating storage to repair a section, and
+    /// [Error::ReplayInterrupted], end the replay.
     pub async fn next(&mut self) -> Option<Result<(u64, u64, A), Error>> {
         // A cancelled repair leaves the section's writer unusable.
         if self.repairing {

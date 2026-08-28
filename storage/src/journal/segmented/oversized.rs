@@ -1146,7 +1146,8 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Replay<E, I, V> {
     /// exhausted.
     ///
     /// An error ends the section that produced it, and iteration continues with the
-    /// next section.
+    /// next section. Errors while mutating storage to repair a section, and
+    /// [Error::ReplayInterrupted], end the replay.
     pub async fn next(&mut self) -> Option<Result<(u64, u64, I), Error>> {
         loop {
             let result = self.index.next().await?;
