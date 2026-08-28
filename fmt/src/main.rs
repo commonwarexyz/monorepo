@@ -143,11 +143,7 @@ fn run_files(paths: &[PathBuf], check: bool) -> Outcome {
 fn replace(path: &Path, source: &str) -> io::Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let metadata = fs::metadata(path)?;
-    if has_multiple_hard_links(&metadata) {
-        return Err(io::Error::other(
-            "refusing to replace a file with multiple hard links",
-        ));
-    }
+    ensure_replaceable(&metadata)?;
 
     let mut temporary = NamedTempFile::new_in(parent)?;
     temporary.write_all(source.as_bytes())?;
@@ -160,15 +156,23 @@ fn replace(path: &Path, source: &str) -> io::Result<()> {
 }
 
 #[cfg(unix)]
-fn has_multiple_hard_links(metadata: &fs::Metadata) -> bool {
+fn ensure_replaceable(metadata: &fs::Metadata) -> io::Result<()> {
     use std::os::unix::fs::MetadataExt as _;
 
-    metadata.nlink() > 1
+    if metadata.nlink() > 1 {
+        Err(io::Error::other(
+            "refusing to replace a file with multiple hard links",
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(not(unix))]
-fn has_multiple_hard_links(_metadata: &fs::Metadata) -> bool {
-    false
+fn ensure_replaceable(_metadata: &fs::Metadata) -> io::Result<()> {
+    Err(io::Error::other(
+        "replacing files is unsupported on this platform",
+    ))
 }
 
 fn collect_files(paths: &[PathBuf], errors: &mut Vec<String>) -> Vec<Input> {
