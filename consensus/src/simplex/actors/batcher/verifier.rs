@@ -19,10 +19,6 @@ use tracing::{Instrument as _, Span, info_span};
 
 /// Runs a CPU-bound job through [Strategy::spawn], entering `span` on the worker thread and
 /// instrumenting the returned future so the offloaded work stays attributed to the caller's trace.
-///
-/// `#[track_caller]` forwards each call site's location into [Strategy::spawn], so the adaptive
-/// policy keys its decisions per call site instead of sharing one entry across all of them.
-#[track_caller]
 fn offload<P, F, T>(len: usize, span: Span, strategy: &P, job: F) -> impl Future<Output = T> + Send
 where
     P: Strategy,
