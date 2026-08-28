@@ -150,7 +150,12 @@ pub(crate) async fn run<E: Network>(
             KeyCode::Char('p') => {
                 let recipient = agent.recipient_name(state.recipient);
                 match agent
-                    .pay(network, settlement, operator, &[(state.recipient, state.amount)])
+                    .pay(
+                        network,
+                        settlement,
+                        operator,
+                        &[(state.recipient, state.amount)],
+                    )
                     .await
                 {
                     Ok(payment) => state.log(format!(
@@ -183,7 +188,10 @@ pub(crate) async fn run<E: Network>(
                 if state.staged.is_empty() {
                     state.log("no staged entries; press a to stage the selected payment");
                 } else {
-                    match agent.pay(network, settlement, operator, &state.staged).await {
+                    match agent
+                        .pay(network, settlement, operator, &state.staged)
+                        .await
+                    {
                         Ok(payment) => {
                             state.log(format!(
                                 "epoch {} batch #{} paid {} across {} recipients",
@@ -210,17 +218,16 @@ pub(crate) async fn run<E: Network>(
                 .deposit(network, settlement, operator, state.amount)
                 .await
             {
-                Ok(DepositOutcome::Applied { epoch, event }) => state.log(format!(
-                    "epoch {} deposit credited: {}",
-                    epoch, event.amount
-                )),
-                Ok(DepositOutcome::Recorded {
-                    event,
-                    error,
-                }) => state.log(format!(
-                    "settlement custody recorded for {}; operator credit unknown; retry uses the same deposit: {error:#}",
-                    event.amount
-                )),
+                Ok(DepositOutcome::Applied { epoch, event }) => {
+                    let amount = event.amount;
+                    state.log(format!("epoch {epoch} deposit credited: {amount}"));
+                }
+                Ok(DepositOutcome::Recorded { event, error }) => {
+                    let amount = event.amount;
+                    state.log(format!(
+                        "settlement custody recorded for {amount}; operator credit unknown; retry uses the same deposit: {error:#}"
+                    ));
+                }
                 Err(error) => state.log(format!("deposit not confirmed: {error:#}")),
             },
             KeyCode::Char('w') | KeyCode::Char('f') => {
@@ -234,21 +241,21 @@ pub(crate) async fn run<E: Network>(
                 match agent.withdraw(network, settlement, operator, action).await {
                     Ok(WithdrawalOutcome::Applied { epoch, request }) => match request.body().action() {
                         WithdrawalAction::Amount(amount) => state.log(format!(
-                            "epoch {} withdrawal carried by operator: {}",
-                            epoch, amount
+                            "epoch {epoch} withdrawal carried by operator: {amount}"
                         )),
                         WithdrawalAction::Close => state.log(format!(
-                            "epoch {} Close carried by operator; payout is finalized at epoch close",
-                            epoch
+                            "epoch {epoch} Close carried by operator; payout is finalized at epoch close"
                         )),
                     },
                     Ok(WithdrawalOutcome::Signed {
                         request,
                         error,
-                    }) => state.log(format!(
-                        "withdrawal signed through deadline {}; operator carriage unknown; retry uses the same signed request: {error:#}",
-                        request.body().deadline()
-                    )),
+                    }) => {
+                        let deadline = request.body().deadline();
+                        state.log(format!(
+                            "withdrawal signed through deadline {deadline}; operator carriage unknown; retry uses the same signed request: {error:#}"
+                        ));
+                    }
                     Err(error) => state.log(format!("withdrawal not confirmed: {error:#}")),
                 }
             }

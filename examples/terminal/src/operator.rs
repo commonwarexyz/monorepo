@@ -76,6 +76,17 @@ pub(crate) struct WithdrawalOpening {
     pub(crate) opening: StateOpening<Key, Digest>,
 }
 
+/// The commitment status of one send, resolved independent of the operating fence.
+pub(crate) enum PaymentResolution {
+    /// The send committed in an epoch. The batch is authoritative even while the operator is
+    /// fenced.
+    Committed(Box<AcceptedBatch>),
+    /// The send committed in no epoch. This is positive proof of non-commitment.
+    Absent,
+    /// A storage fault prevents a trustworthy read. Retry after the operator restarts.
+    Unavailable,
+}
+
 #[derive(Clone)]
 pub(crate) struct SettlementRegistration {
     pub(crate) epoch: u64,
@@ -308,6 +319,30 @@ impl Operator {
             root: predecessor.root(),
             opening: payer_opening,
         })
+    }
+
+    /// Resolves whether a specific send already committed, independent of the operating fence.
+    ///
+    /// A committed batch is authoritative even while the operator is fenced from admitting new
+    /// state (a failed predecessor close), so this reads the durable committed rows ahead of the
+    /// `ensure_operating` gate. A genuine storage fault is different: the project treats a failed
+    /// mutable operation as fatal and requires a restart before the instance is trusted again, so
+    /// this refuses to read past `store_fault` and reports the resolution as unavailable. Both an
+    /// unavailable resolution and an absent one are honest: unavailable means retry later (perhaps
+    /// after a restart), while absent is positive proof the send committed in no epoch.
+    pub(crate) fn resolve_payment(
+        &self,
+        send: &SignedSend<Key, Digest>,
+    ) -> Result<PaymentResolution> {
+        if self.store_fault.is_some() {
+            return Ok(PaymentResolution::Unavailable);
+        }
+        Ok(self
+            .store
+            .accepted_batch(send)?
+            .map_or(PaymentResolution::Absent, |batch| {
+                PaymentResolution::Committed(Box::new(batch))
+            }))
     }
 
     pub(crate) fn accept_send(&mut self, send: SignedSend<Key, Digest>) -> Result<AcceptedBatch> {
@@ -1694,6 +1729,61 @@ mod tests {
                 .balance,
             75
         );
+    }
+
+    #[test]
+    fn resolve_payment_is_authoritative_across_the_operating_fence() {
+        let mut operator = operator();
+        let payer = operator.wallets[0].public_key();
+        let quote = operator.payment_quote(&payer).unwrap();
+        let send = SignedSend::sign_next(
+            &quote.context,
+            operator.wallets[0].signer(),
+            operator.wallets[1].public_key(),
+            25,
+            quote.state.cumulative_debit,
+        )
+        .unwrap();
+        let committed = operator.accept_send(send.clone()).unwrap();
+
+        // Sign a second send that is never accepted, before any fence blocks quoting.
+        let quote = operator
+            .payment_quote(&operator.wallets[3].public_key())
+            .unwrap();
+        let uncommitted = SignedSend::sign_next(
+            &quote.context,
+            operator.wallets[3].signer(),
+            operator.wallets[2].public_key(),
+            1,
+            quote.state.cumulative_debit,
+        )
+        .unwrap();
+
+        // A close fence blocks admitting new state but leaves the committed rows readable, so a
+        // committed send still resolves authoritatively and an uncommitted one resolves as absent.
+        operator.close_fault = Some("fenced after a failed predecessor close".to_string());
+        assert!(operator.accept_send(send.clone()).is_err());
+        let PaymentResolution::Committed(resolved) = operator.resolve_payment(&send).unwrap()
+        else {
+            panic!("a fenced operator failed to resolve a committed send");
+        };
+        assert_eq!(resolved.acceptance, committed.acceptance);
+        assert!(matches!(
+            operator.resolve_payment(&uncommitted).unwrap(),
+            PaymentResolution::Absent
+        ));
+
+        // A storage fault is fatal to the instance until it restarts, so resolution refuses to
+        // read past it and reports the availability signal instead of a false absence.
+        operator.store_fault = Some("the SQLite connection is unusable".to_string());
+        assert!(matches!(
+            operator.resolve_payment(&send).unwrap(),
+            PaymentResolution::Unavailable
+        ));
+        assert!(matches!(
+            operator.resolve_payment(&uncommitted).unwrap(),
+            PaymentResolution::Unavailable
+        ));
     }
 
     #[test]

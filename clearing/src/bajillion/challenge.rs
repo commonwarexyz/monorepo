@@ -448,10 +448,7 @@ where
     opening
         .proof
         .verify::<H>(VectorKind::Change, root, guard.encode().as_ref())?;
-    Ok(AccountChange::from_value(
-        account.clone(),
-        opening.value.clone(),
-    ))
+    Ok(AccountChange::from_value(account.clone(), opening.value))
 }
 
 /// Compact changed-account membership or ordered absence.
@@ -2677,7 +2674,7 @@ mod tests {
         let proof = fixture.change_tree.opening(position as u32).unwrap();
         let shard = fixture.shards[position].lookup::<Sha256>(0).unwrap();
         let old = ChangeLookup::<VerifyingKey, ShaDigest>::Present(Box::new(ChangeOpening {
-            value: value.clone(),
+            value,
             proof: proof.clone(),
         }));
         let composed = HigherShardTipLookup::Present {

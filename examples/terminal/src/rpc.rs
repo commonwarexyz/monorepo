@@ -20,6 +20,9 @@ pub(crate) const MAX_FRAME_SIZE: u32 = 4 * 1024 * 1024;
 /// frame while leaving the bound independent of the exact varint width.
 pub(crate) const MAX_BODY_SIZE: usize = MAX_FRAME_SIZE as usize - 16;
 
+/// Maximum bytes retained from a human-readable RPC error message.
+pub(crate) const MAX_ERROR_BYTES: usize = 1_024;
+
 /// Truncates a UTF-8 message to `maximum` bytes on a character boundary.
 pub(crate) fn bounded_utf8(mut value: String, maximum: usize) -> Bytes {
     if value.len() > maximum {
@@ -30,6 +33,13 @@ pub(crate) fn bounded_utf8(mut value: String, maximum: usize) -> Bytes {
         value.truncate(end);
     }
     Bytes::from(value)
+}
+
+/// Builds a bounded error response from a human-readable message.
+pub(crate) fn error_response(message: String) -> Response {
+    Response::Error {
+        error: bounded_utf8(message, MAX_ERROR_BYTES),
+    }
 }
 
 /// A single request sent over a native clearing connection.
@@ -324,5 +334,15 @@ mod tests {
                 Err(Error::UnableToDecode(CodecError::EndOfBuffer))
             ));
         });
+    }
+
+    #[test]
+    fn errors_are_utf8_and_truncated_on_a_character_boundary() {
+        let response = error_response("é".repeat(MAX_ERROR_BYTES));
+        let Response::Error { error } = response else {
+            unreachable!();
+        };
+        assert_eq!(error.len(), MAX_ERROR_BYTES);
+        assert!(core::str::from_utf8(&error).is_ok());
     }
 }

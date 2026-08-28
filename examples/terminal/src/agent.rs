@@ -15,11 +15,11 @@ use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
 use commonware_clearing::bajillion::{
     boundary::{SignedWithdrawal, WithdrawalAction},
-    commitment::VectorKind,
+    commitment::{VectorKind, VectorRoot},
     payment::{Entry, PaymentContext, SignedSend},
 };
 use commonware_codec::Encode as _;
-use commonware_cryptography::{Hasher, Sha256};
+use commonware_cryptography::{Hasher, Sha256, sha256::Digest};
 use commonware_runtime::Network;
 #[cfg(not(test))]
 use rand::RngExt as _;
@@ -43,10 +43,10 @@ pub(crate) enum DepositOutcome {
 pub(crate) enum WithdrawalOutcome {
     Applied {
         epoch: u64,
-        request: SignedWithdrawal<Key, commonware_cryptography::sha256::Digest>,
+        request: SignedWithdrawal<Key, Digest>,
     },
     Signed {
-        request: SignedWithdrawal<Key, commonware_cryptography::sha256::Digest>,
+        request: SignedWithdrawal<Key, Digest>,
         error: anyhow::Error,
     },
 }
@@ -59,7 +59,7 @@ pub(crate) struct Agent {
     deposit_nonce: u64,
     pending_payment: Option<PendingPayment>,
     pending_deposit: Option<DepositEvent>,
-    pending_withdrawal: Option<SignedWithdrawal<Key, commonware_cryptography::sha256::Digest>>,
+    pending_withdrawal: Option<SignedWithdrawal<Key, Digest>>,
     pending_withdrawal_claim: Option<PendingWithdrawalClaim>,
     pending_payout_claim: Option<PendingPayoutClaim>,
     pending_close_epoch: Option<u64>,
@@ -79,6 +79,23 @@ const fn initial_deposit_nonce() -> u64 {
 #[cfg(not(test))]
 fn initial_deposit_nonce() -> u64 {
     rand::rng().random()
+}
+
+/// One send resolved and ready for the shared accept, verify, and commit tail.
+struct StagedSend {
+    context: PaymentContext<Key, Digest>,
+    send: SignedSend<Key, Digest>,
+    predecessor_state_root: VectorRoot<Digest>,
+}
+
+/// How the wallet resolved an already-staged pending send before submission.
+enum PendingOutcome {
+    /// The staged context is still live, so resubmit the exact bytes.
+    Live(Box<StagedSend>),
+    /// The send committed in its cut epoch and was finished locally.
+    Committed(Box<operator_rpc::AcceptedBatchResponse>),
+    /// The send provably never committed and was discarded, so a fresh one must be staged.
+    Abandoned,
 }
 
 impl Agent {
@@ -223,6 +240,36 @@ impl Agent {
         operator: SocketAddr,
         entries: &[(usize, u64)],
     ) -> Result<operator_rpc::AcceptedBatchResponse> {
+        let (requested, total) = self.payment_entries(entries)?;
+        let staged = match self
+            .pending_payment
+            .as_ref()
+            .map(|pending| (pending.send.clone(), pending.recovery_root))
+        {
+            Some((pending_send, recovery_root)) => {
+                match self
+                    .resolve_pending(network, operator, &pending_send, recovery_root, &requested)
+                    .await?
+                {
+                    PendingOutcome::Live(staged) => *staged,
+                    PendingOutcome::Committed(accepted) => return Ok(*accepted),
+                    PendingOutcome::Abandoned => {
+                        self.quote_and_stage(network, settlement, operator, &requested, total)
+                            .await?
+                    }
+                }
+            }
+            None => {
+                self.quote_and_stage(network, settlement, operator, &requested, total)
+                    .await?
+            }
+        };
+        self.submit_and_commit(network, settlement, operator, staged)
+            .await
+    }
+
+    /// Validates and canonically orders the requested batch entries with their checked total.
+    fn payment_entries(&self, entries: &[(usize, u64)]) -> Result<(Vec<Entry<Key>>, u64)> {
         let mut requested = Vec::with_capacity(entries.len());
         let mut total = 0_u64;
         for (recipient, amount) in entries {
@@ -239,178 +286,200 @@ impl Agent {
             requested.push(Entry::new(recipient, *amount).context("stage payment entry")?);
         }
         requested.sort_unstable_by(|left, right| left.recipient().cmp(right.recipient()));
-        let (context, send, predecessor_state_root) = loop {
-            if let Some((pending_send, recovery_root)) = self
-                .pending_payment
-                .as_ref()
-                .map(|pending| (pending.send.clone(), pending.recovery_root))
-            {
-                ensure!(
-                    pending_send.body().entries() == requested,
-                    "another payment retry is pending"
-                );
+        Ok((requested, total))
+    }
 
-                // Re-quote to learn whether the staged epoch is still the operator's live context.
-                let quote = operator_rpc::payment_quote(
-                    network,
-                    operator,
-                    operator_rpc::PaymentQuoteRequest {
-                        account: self.account(),
-                    },
-                )
-                .await
-                .context("read payer state")?;
-                ensure!(
-                    quote.context.operator() == &operator_key(),
-                    "payment context has an unexpected operator"
-                );
-                let context = PaymentContext::new(
-                    *pending_send.body().anchor(),
-                    pending_send.body().epoch(),
-                    operator_key(),
-                );
-                if quote.context.epoch() == context.epoch()
-                    && quote.context.anchor() == context.anchor()
-                {
-                    // The staged context is still live: resubmit the exact bytes unchanged.
-                    self.store
-                        .recovery_opening(&recovery_root)?
-                        .context("pending payment recovery opening is missing")?;
-                    break (context, pending_send, recovery_root);
-                }
+    /// Resolves a staged pending send before it is submitted.
+    ///
+    /// A live staged context is resubmitted unchanged (a lost-response retry). A cut context can
+    /// never be accepted again, so the operator returns a structured commitment verdict:
+    /// `Committed` is finished locally, `Absent` is positive proof of non-commitment and is
+    /// abandoned, and `Unavailable` is an availability signal that must be retried, never abandoned.
+    async fn resolve_pending<E: Network>(
+        &mut self,
+        network: &E,
+        operator: SocketAddr,
+        pending_send: &SignedSend<Key, Digest>,
+        recovery_root: VectorRoot<Digest>,
+        requested: &[Entry<Key>],
+    ) -> Result<PendingOutcome> {
+        ensure!(
+            pending_send.body().entries() == requested,
+            "another payment retry is pending"
+        );
 
-                // The staged epoch was cut, so the exact bytes can never be accepted again. Probe
-                // the operator for a definitive verdict: accept_send is idempotent and resolves a
-                // committed batch by transaction id across every epoch, so an inner Ok proves the
-                // send committed and an inner Err proves it never did.
-                match operator_rpc::try_accept_send(
-                    network,
-                    operator,
-                    operator_rpc::AcceptSendRequest {
-                        send: pending_send.clone(),
-                    },
-                )
-                .await
-                .context("probe staged payment")?
-                {
-                    Ok(accepted) => {
-                        // It committed in its original, now-finalized epoch. The operator opens a
-                        // successor context only after its predecessor finalizes, so the epoch is
-                        // settled and a live-registration confirmation no longer applies. Commit
-                        // the verified receipts locally.
-                        let total = pending_send
-                            .body()
-                            .total()
-                            .context("staged payment total is checked")?;
-                        ensure!(
-                            accepted.epoch == context.epoch()
-                                && accepted.total == total
-                                && accepted.acceptance.send == pending_send,
-                            "operator returned another payment"
-                        );
-                        accepted
-                            .acceptance
-                            .verify(&context)
-                            .context("verify operator receipts")?;
-                        let receipt_count = self
-                            .store
-                            .commit_payment(
-                                &accepted.acceptance,
-                                self.cumulative_debit,
-                                self.receipt_count,
-                            )
-                            .context("commit accepted receipts")?;
-                        self.cumulative_debit = pending_send.body().cumulative_debit();
-                        self.pending_payment = None;
-                        self.receipt_count = receipt_count;
-                        return Ok(accepted);
-                    }
-                    Err(_rejection) => {
-                        // A definitive rejection under a stale context proves the send never
-                        // committed in any epoch, so abandoning it cannot drop or double count a
-                        // transfer. Discard the staged bytes and re-stage against the live context.
-                        self.store
-                            .discard_pending_payment(&pending_send)
-                            .context("discard stale staged payment")?;
-                        self.pending_payment = None;
-                        continue;
-                    }
-                }
+        // Re-quote to learn whether the staged epoch is still the operator's live context.
+        let quote = operator_rpc::payment_quote(
+            network,
+            operator,
+            operator_rpc::PaymentQuoteRequest {
+                account: self.account(),
+            },
+        )
+        .await
+        .context("read payer state")?;
+        ensure!(
+            quote.context.operator() == &operator_key(),
+            "payment context has an unexpected operator"
+        );
+        let context = PaymentContext::new(
+            *pending_send.body().anchor(),
+            pending_send.body().epoch(),
+            operator_key(),
+        );
+        if quote.context.epoch() == context.epoch() && quote.context.anchor() == context.anchor() {
+            // The staged context is still live: resubmit the exact bytes unchanged.
+            self.store
+                .recovery_opening(&recovery_root)?
+                .context("pending payment recovery opening is missing")?;
+            return Ok(PendingOutcome::Live(Box::new(StagedSend {
+                context,
+                send: pending_send.clone(),
+                predecessor_state_root: recovery_root,
+            })));
+        }
+
+        // The staged epoch was cut, so the exact bytes can never be accepted again. Ask the
+        // operator for a structured commitment verdict. This resolution is authoritative even while
+        // the operator is fenced from admitting new state, and it never abandons on a mere
+        // availability signal.
+        match operator_rpc::resolve_payment(
+            network,
+            operator,
+            operator_rpc::AcceptSendRequest {
+                send: pending_send.clone(),
+            },
+        )
+        .await
+        .context("resolve staged payment")?
+        {
+            operator_rpc::PaymentResolutionResponse::Committed(accepted) => {
+                // The send committed in its original, now-cut epoch. The receipts are operator
+                // signed and independently verified here, and a cut epoch is no longer
+                // registerable, so the live-registration confirmation the fresh path performs does
+                // not apply. Commit the verified receipts locally.
+                let accepted = *accepted;
+                Self::verify_accepted(&accepted, pending_send, &context)?;
+                Ok(PendingOutcome::Committed(Box::new(
+                    self.record_payment(accepted, pending_send)?,
+                )))
             }
-
-            {
-                let quote = operator_rpc::payment_quote(
-                    network,
-                    operator,
-                    operator_rpc::PaymentQuoteRequest {
-                        account: self.account(),
-                    },
-                )
-                .await
-                .context("read payer state")?;
-                ensure!(
-                    quote.context.operator() == &operator_key(),
-                    "payment context has an unexpected operator"
-                );
-                let settlement_status = settlement_rpc::status(network, settlement)
-                    .await
-                    .context("read settlement payment head")?;
-                ensure!(
-                    settlement_status.deployment == deployment(),
-                    "settlement status has an unexpected deployment"
-                );
-                ensure!(
-                    !settlement_status.hard_faulted,
-                    "settlement is permanently hard-faulted"
-                );
-                ensure!(
-                    settlement_status.state_root == quote.root,
-                    "payer opening is not the exact settlement head"
-                );
-                ensure!(
-                    quote.opening.leaf.account == self.account(),
-                    "payer opening belongs to another account"
-                );
-                ensure!(
-                    quote.opening.leaf.state.active && quote.opening.leaf.state.balance > 0,
-                    "payer opening is not live"
-                );
-
-                // Mid-epoch credits only grow the payer balance and debits are serialized here,
-                // so affordability at the quote holds at acceptance.
-                ensure!(
-                    quote.state.balance >= total,
-                    "payer has insufficient available balance"
-                );
-                quote
-                    .opening
-                    .proof
-                    .verify::<Sha256>(
-                        VectorKind::State,
-                        &quote.root,
-                        quote.opening.leaf.encode().as_ref(),
-                    )
-                    .context("verify payer state opening")?;
+            operator_rpc::PaymentResolutionResponse::Absent => {
+                // Positive proof the send committed in no epoch. Only now is abandoning safe: it
+                // cannot drop or double count a real transfer. Discard the staged bytes so a fresh
+                // send can be staged against the live context.
                 self.store
-                    .retain_recovery_opening(&quote.root, &quote.opening)
-                    .context("durably retain payer state opening")?;
-                let send = SignedSend::sign_next_batch(
-                    &quote.context,
-                    self.wallet.signer(),
-                    requested.clone(),
-                    self.cumulative_debit,
-                )
-                .context("sign payment")?;
-                self.store
-                    .stage_payment(&send, &quote.root, self.cumulative_debit)
-                    .context("durably stage payment")?;
-                self.pending_payment = Some(PendingPayment {
-                    send: send.clone(),
-                    recovery_root: quote.root,
-                });
-                break (quote.context, send, quote.root);
+                    .discard_pending_payment(pending_send)
+                    .context("discard stale staged payment")?;
+                self.pending_payment = None;
+                Ok(PendingOutcome::Abandoned)
             }
-        };
+            operator_rpc::PaymentResolutionResponse::Unavailable => {
+                // A storage fault blocks a trustworthy verdict. This is an availability signal, not
+                // proof of non-commitment, so retry later without abandoning.
+                anyhow::bail!("operator cannot resolve the staged payment until it restarts")
+            }
+        }
+    }
+
+    /// Quotes the payer head, verifies affordability, and durably stages a fresh send.
+    async fn quote_and_stage<E: Network>(
+        &mut self,
+        network: &E,
+        settlement: SocketAddr,
+        operator: SocketAddr,
+        requested: &[Entry<Key>],
+        total: u64,
+    ) -> Result<StagedSend> {
+        let quote = operator_rpc::payment_quote(
+            network,
+            operator,
+            operator_rpc::PaymentQuoteRequest {
+                account: self.account(),
+            },
+        )
+        .await
+        .context("read payer state")?;
+        ensure!(
+            quote.context.operator() == &operator_key(),
+            "payment context has an unexpected operator"
+        );
+        let settlement_status = settlement_rpc::status(network, settlement)
+            .await
+            .context("read settlement payment head")?;
+        ensure!(
+            settlement_status.deployment == deployment(),
+            "settlement status has an unexpected deployment"
+        );
+        ensure!(
+            !settlement_status.hard_faulted,
+            "settlement is permanently hard-faulted"
+        );
+        ensure!(
+            settlement_status.state_root == quote.root,
+            "payer opening is not the exact settlement head"
+        );
+        ensure!(
+            quote.opening.leaf.account == self.account(),
+            "payer opening belongs to another account"
+        );
+        ensure!(
+            quote.opening.leaf.state.active && quote.opening.leaf.state.balance > 0,
+            "payer opening is not live"
+        );
+
+        // Mid-epoch credits only grow the payer balance and debits are serialized here, so
+        // affordability at the quote holds at acceptance.
+        ensure!(
+            quote.state.balance >= total,
+            "payer has insufficient available balance"
+        );
+        quote
+            .opening
+            .proof
+            .verify::<Sha256>(
+                VectorKind::State,
+                &quote.root,
+                quote.opening.leaf.encode().as_ref(),
+            )
+            .context("verify payer state opening")?;
+        self.store
+            .retain_recovery_opening(&quote.root, &quote.opening)
+            .context("durably retain payer state opening")?;
+        let send = SignedSend::sign_next_batch(
+            &quote.context,
+            self.wallet.signer(),
+            requested.to_vec(),
+            self.cumulative_debit,
+        )
+        .context("sign payment")?;
+        self.store
+            .stage_payment(&send, &quote.root, self.cumulative_debit)
+            .context("durably stage payment")?;
+        self.pending_payment = Some(PendingPayment {
+            send: send.clone(),
+            recovery_root: quote.root,
+        });
+        Ok(StagedSend {
+            context: quote.context,
+            send,
+            predecessor_state_root: quote.root,
+        })
+    }
+
+    /// Submits the staged send, confirms its live registration, and commits its receipts.
+    async fn submit_and_commit<E: Network>(
+        &mut self,
+        network: &E,
+        settlement: SocketAddr,
+        operator: SocketAddr,
+        staged: StagedSend,
+    ) -> Result<operator_rpc::AcceptedBatchResponse> {
+        let StagedSend {
+            context,
+            send,
+            predecessor_state_root,
+        } = staged;
         let accepted = operator_rpc::accept_send(
             network,
             operator,
@@ -418,20 +487,7 @@ impl Agent {
         )
         .await
         .context("submit payment")?;
-        let total = send
-            .body()
-            .total()
-            .context("staged payment total is checked")?;
-        ensure!(
-            accepted.epoch == context.epoch()
-                && accepted.total == total
-                && accepted.acceptance.send == send,
-            "operator returned another payment"
-        );
-        accepted
-            .acceptance
-            .verify(&context)
-            .context("verify operator receipts")?;
+        Self::verify_accepted(&accepted, &send, &context)?;
         settlement_rpc::confirm_registration(
             network,
             settlement,
@@ -443,6 +499,37 @@ impl Agent {
         )
         .await
         .context("confirm payment registration")?;
+        self.record_payment(accepted, &send)
+    }
+
+    /// Confirms an operator acceptance is the exact staged send with valid receipts.
+    fn verify_accepted(
+        accepted: &operator_rpc::AcceptedBatchResponse,
+        send: &SignedSend<Key, Digest>,
+        context: &PaymentContext<Key, Digest>,
+    ) -> Result<()> {
+        let total = send
+            .body()
+            .total()
+            .context("staged payment total is checked")?;
+        ensure!(
+            accepted.epoch == context.epoch()
+                && accepted.total == total
+                && accepted.acceptance.send == *send,
+            "operator returned another payment"
+        );
+        accepted
+            .acceptance
+            .verify(context)
+            .context("verify operator receipts")
+    }
+
+    /// Durably commits a verified acceptance and advances the wallet-local debit endpoint.
+    fn record_payment(
+        &mut self,
+        accepted: operator_rpc::AcceptedBatchResponse,
+        send: &SignedSend<Key, Digest>,
+    ) -> Result<operator_rpc::AcceptedBatchResponse> {
         let receipt_count = self
             .store
             .commit_payment(
@@ -966,7 +1053,7 @@ mod tests {
 
     async fn respond_registration<L: commonware_runtime::Listener>(
         listener: &mut L,
-        context: &PaymentContext<Key, commonware_cryptography::sha256::Digest>,
+        context: &PaymentContext<Key, Digest>,
     ) {
         respond_rpc(listener, |request| {
             assert_eq!(request.method, settlement_rpc::METHOD_CONFIRM_REGISTRATION);
@@ -984,7 +1071,7 @@ mod tests {
     }
 
     fn payment_quote_response(
-        context: PaymentContext<Key, commonware_cryptography::sha256::Digest>,
+        context: PaymentContext<Key, Digest>,
         state: AccountState,
     ) -> operator_rpc::PaymentQuoteResponse {
         let account = wallets()[0].public_key();
@@ -1393,14 +1480,14 @@ mod tests {
                     }
                 })
                 .await;
-                // The probe of the stale bytes is definitively rejected, proving non-commitment.
+                // The probe resolves the stale bytes as absent, positive proof of non-commitment.
                 respond(&mut listener, |request| {
                     assert!(matches!(
                         request,
-                        operator_rpc::OperatorRequest::AcceptSend(_)
+                        operator_rpc::OperatorRequest::ResolvePayment(_)
                     ));
-                    rpc::Response::Error {
-                        error: Bytes::from_static(b"payment context is stale"),
+                    rpc::Response::Success {
+                        body: operator_rpc::PaymentResolutionResponse::Absent.encode(),
                     }
                 })
                 .await;
@@ -1593,15 +1680,18 @@ mod tests {
                     }
                 })
                 .await;
-                // Probing the stale bytes returns the original commitment idempotently, so the
-                // wallet finishes it locally rather than double spending in the successor.
+                // Probing the stale bytes resolves the original commitment, so the wallet finishes
+                // it locally rather than double spending in the successor.
                 respond(&mut listener, |request| {
-                    let operator_rpc::OperatorRequest::AcceptSend(request) = request else {
-                        panic!("the probe did not resubmit the exact staged bytes");
+                    let operator_rpc::OperatorRequest::ResolvePayment(request) = request else {
+                        panic!("the probe did not resolve the exact staged bytes");
                     };
                     assert_eq!(request.send, recorded.acceptance.send);
                     rpc::Response::Success {
-                        body: recorded.encode(),
+                        body: operator_rpc::PaymentResolutionResponse::Committed(Box::new(
+                            recorded,
+                        ))
+                        .encode(),
                     }
                 })
                 .await;
@@ -1627,6 +1717,119 @@ mod tests {
             assert_eq!(agent.cumulative_debit, 7);
             assert_eq!(agent.receipt_count(), 1);
             assert!(agent.pending_payment.is_none());
+            operator_server.await.unwrap();
+        });
+    }
+
+    #[test]
+    fn stale_payment_probe_retries_and_keeps_pending_when_operator_is_unavailable() {
+        deterministic::Runner::default().start(|context| async move {
+            let operator = Wallet::from_seed("operator", 1);
+            let cut = PaymentContext::new(
+                Sha256::hash(&[b"unavailable-probe-0"]),
+                0,
+                operator.public_key(),
+            );
+            let live = PaymentContext::new(
+                Sha256::hash(&[b"unavailable-probe-1"]),
+                1,
+                operator.public_key(),
+            );
+            let mut listener = context
+                .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+                .await
+                .unwrap();
+            let operator_address = listener.local_addr().unwrap();
+            let cut_context = cut.clone();
+            let live_context = live.clone();
+            let operator_server = context.child("operator").spawn(move |_| async move {
+                respond(&mut listener, |request| {
+                    assert!(matches!(
+                        request,
+                        operator_rpc::OperatorRequest::PaymentQuote(_)
+                    ));
+                    rpc::Response::Success {
+                        body: payment_quote_response(
+                            cut_context.clone(),
+                            AccountState {
+                                balance: 100,
+                                ..AccountState::default()
+                            },
+                        )
+                        .encode(),
+                    }
+                })
+                .await;
+                respond(&mut listener, |request| {
+                    assert!(matches!(request, operator_rpc::OperatorRequest::Status));
+                    rpc::Response::Success {
+                        body: settlement_status_response().encode(),
+                    }
+                })
+                .await;
+                // The first accept response is lost, so the send stays staged and uncommitted.
+                {
+                    let (_, _sink, mut stream) = listener.accept().await.unwrap();
+                    let request = rpc::recv_request(&mut stream).await.unwrap();
+                    assert!(matches!(
+                        operator_rpc::decode_request(request).unwrap(),
+                        operator_rpc::OperatorRequest::AcceptSend(_)
+                    ));
+                }
+                // The retry re-quotes and learns the staged epoch was cut.
+                respond(&mut listener, |request| {
+                    assert!(matches!(
+                        request,
+                        operator_rpc::OperatorRequest::PaymentQuote(_)
+                    ));
+                    rpc::Response::Success {
+                        body: payment_quote_response(
+                            live_context.clone(),
+                            AccountState {
+                                balance: 100,
+                                ..AccountState::default()
+                            },
+                        )
+                        .encode(),
+                    }
+                })
+                .await;
+                // A fenced operator cannot resolve commitment. This is an availability signal, not
+                // proof of non-commitment.
+                respond(&mut listener, |request| {
+                    assert!(matches!(
+                        request,
+                        operator_rpc::OperatorRequest::ResolvePayment(_)
+                    ));
+                    rpc::Response::Success {
+                        body: operator_rpc::PaymentResolutionResponse::Unavailable.encode(),
+                    }
+                })
+                .await;
+            });
+
+            let mut agent = Agent::new(0).unwrap();
+            let error = agent
+                .pay(&context, operator_address, operator_address, &[(1, 7)])
+                .await
+                .unwrap_err();
+            assert!(format!("{error:#}").contains("submit payment"));
+            let staged = agent.pending_payment.as_ref().unwrap().send.clone();
+            assert_eq!(staged.body().epoch(), cut.epoch());
+
+            // The unavailable resolution must retry, never abandon: the exact staged send stays
+            // pending and the debit endpoint does not advance.
+            let error = agent
+                .pay(&context, operator_address, operator_address, &[(1, 7)])
+                .await
+                .unwrap_err();
+            assert!(format!("{error:#}").contains("until it restarts"));
+            assert_eq!(
+                agent.pending_payment.as_ref().unwrap().send.encode(),
+                staged.encode()
+            );
+            assert_eq!(agent.cumulative_debit, 0);
+            assert_eq!(agent.receipt_count(), 0);
             operator_server.await.unwrap();
         });
     }

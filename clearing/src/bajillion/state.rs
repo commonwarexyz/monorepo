@@ -315,7 +315,7 @@ pub struct AccountChange<P: PublicKey, D: Digest> {
 }
 
 /// Account-relative value for a compact change membership opening.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ChangeValue<D: Digest> {
     core: ChangeValueCore<D>,
     credit_tip_root: VectorRoot<D>,
@@ -410,7 +410,7 @@ impl<P: PublicKey, D: Digest> AccountChange<P, D> {
         self.output
     }
 
-    /// Projects the leaf value whose account is supplied by a membership lookup target.
+    /// Returns this leaf's compact change value, paired elsewhere with a membership lookup target.
     #[must_use]
     pub const fn value(&self) -> ChangeValue<D> {
         ChangeValue {

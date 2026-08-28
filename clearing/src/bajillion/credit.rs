@@ -488,7 +488,7 @@ impl<D: Digest> CreditTipLookup<D> {
     pub fn resolve<H: Hasher<Digest = D>>(
         &self,
         root: &VectorRoot<D>,
-        shard: u64,
+        shard: Shard,
     ) -> Result<Option<CreditTip>, Error> {
         let (reconstructed, tip) = self.reconstruct::<H>(shard)?;
         if reconstructed != *root {

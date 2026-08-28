@@ -11,7 +11,9 @@ use crate::bajillion::{
     commitment::{self, Tree, VectorKind, VectorRoot},
     credit::{self, ShardHead, ShardSet},
     payment::{PaymentContext, PaymentError},
-    state::{AccountChange, AccountRow, ChangeGuard, Prefix, SettlementOutput, StateLeaf},
+    state::{
+        AccountChange, AccountRow, AccountState, ChangeGuard, Prefix, SettlementOutput, StateLeaf,
+    },
 };
 use alloc::{boxed::Box, collections::BTreeSet, vec::Vec};
 use bytes::{Buf, BufMut, Bytes};
@@ -1011,7 +1013,7 @@ type WithdrawalOutputMaterial<D> = (Vec<WithdrawalOutput>, Tree<D>);
 impl<P: PublicKey, D: Digest> PreparedClose<P, D> {
     pub(super) fn slice_bits(&self) -> u8 {
         let slice_count = self.coverage_boundaries.len() - 1;
-        debug_assert!(slice_count.is_power_of_two());
+        assert!(slice_count.is_power_of_two());
         u8::try_from(slice_count.ilog2()).expect("prepared slice count fits the supported width")
     }
 
@@ -1328,12 +1330,7 @@ impl<P: PublicKey, D: Digest> StateCache<P, D> {
             previous_prefix = Some(prefix);
         }
 
-        let mut liability = 0_u64;
-        for leaf in &leaves {
-            liability = liability
-                .checked_add(leaf.state.balance)
-                .ok_or(TransitionError::LiabilityOverflow)?;
-        }
+        let liability = state_liability(&leaves)?;
         let tree = state_tree_with_strategy::<H, P, D>(&leaves, strategy)?;
         Ok(Self {
             leaves,
@@ -1419,7 +1416,7 @@ impl<P: PublicKey, D: Digest> StateCache<P, D> {
     }
 }
 
-const fn is_live_state(state: &crate::bajillion::state::AccountState) -> bool {
+const fn is_live_state(state: &AccountState) -> bool {
     state.active && state.balance > 0
 }
 
@@ -1473,7 +1470,7 @@ fn derive_unchanged<P: PublicKey, D: Digest>(
                 }
                 state += 1;
             }
-            _ if row.predecessor == crate::bajillion::state::AccountState::default() => {}
+            _ if row.predecessor == AccountState::default() => {}
             _ => return Err(TransitionError::PredecessorLinkage),
         }
     }
@@ -1488,7 +1485,7 @@ fn validate_row_state_sides<P: PublicKey, D: Digest>(
         if row.predecessor.balance == 0 {
             return Err(TransitionError::InactiveBalance);
         }
-    } else if row.predecessor != crate::bajillion::state::AccountState::default() {
+    } else if row.predecessor != AccountState::default() {
         return Err(TransitionError::NonCanonicalPredecessorAbsence);
     }
     if row.successor.active != (row.successor.balance > 0) {
@@ -1628,10 +1625,9 @@ fn validate_sealed_boundaries<P: PublicKey, D: Digest>(
     }
 
     for account in accounts {
-        let predecessor = cache.locate(account).map_or_else(
-            crate::bajillion::state::AccountState::default,
-            |(_, leaf)| leaf.state,
-        );
+        let predecessor = cache
+            .locate(account)
+            .map_or_else(AccountState::default, |(_, leaf)| leaf.state);
         let deposit = deposits.amount_for(account);
         let Some(withdrawal) = withdrawals.request_for(account) else {
             continue;

@@ -46,7 +46,6 @@ pub(crate) const METHOD_CONFIRM_REGISTRATION: u8 = 13;
 const MAX_BATCH_ITEMS: usize = 1_024;
 const MAX_STATE_OPENINGS: usize = 5;
 const CERTIFICATE_PARTICIPANTS: usize = 4;
-const MAX_ERROR_BYTES: usize = 1_024;
 const MAX_CHALLENGE_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, thiserror::Error)]
@@ -1211,16 +1210,10 @@ fn dispatch(settlement: &mut Settlement, request: rpc::Request) -> anyhow::Resul
     }
 }
 
-fn error_response(error: String) -> rpc::Response {
-    rpc::Response::Error {
-        error: rpc::bounded_utf8(error, MAX_ERROR_BYTES),
-    }
-}
-
 pub(crate) fn handle(settlement: &mut Settlement, request: rpc::Request) -> rpc::Response {
     match dispatch(settlement, request) {
         Ok(body) => rpc::Response::Success { body },
-        Err(error) => error_response(format!("{error:#}")),
+        Err(error) => rpc::error_response(format!("{error:#}")),
     }
 }
 
@@ -2124,15 +2117,5 @@ mod tests {
             request(METHOD_REGISTER_EPOCH, registration.encode()),
         ));
         assert!(error.contains("authenticate settlement boundary"));
-    }
-
-    #[test]
-    fn errors_are_utf8_and_truncated_on_a_character_boundary() {
-        let response = error_response("é".repeat(MAX_ERROR_BYTES));
-        let rpc::Response::Error { error } = response else {
-            unreachable!();
-        };
-        assert_eq!(error.len(), MAX_ERROR_BYTES);
-        assert!(core::str::from_utf8(&error).is_ok());
     }
 }

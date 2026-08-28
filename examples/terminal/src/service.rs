@@ -7,8 +7,6 @@ use anyhow::{Context, Result, ensure};
 use commonware_runtime::{Listener, Network, Runner as _, tokio};
 use std::{net::SocketAddr, num::NonZeroUsize, path::PathBuf, time::Duration};
 
-const MAX_ERROR_BYTES: usize = 1_024;
-
 fn runtime() -> tokio::Runner {
     tokio::Runner::new(
         tokio::Config::new()
@@ -16,12 +14,6 @@ fn runtime() -> tokio::Runner {
             .with_connect_timeout(Duration::from_secs(5))
             .with_read_write_timeout(Duration::from_secs(5)),
     )
-}
-
-fn error_response(error: anyhow::Error) -> rpc::Response {
-    rpc::Response::Error {
-        error: rpc::bounded_utf8(format!("{error:#}"), MAX_ERROR_BYTES),
-    }
 }
 
 pub(crate) fn run_settlement(bind: SocketAddr) -> Result<()> {
@@ -59,10 +51,10 @@ pub(crate) fn run_operator(
                     {
                         Ok(Some(response)) => response,
                         Ok(None) => operator_rpc::handle_decoded(&mut operator, request),
-                        Err(error) => error_response(error),
+                        Err(error) => rpc::error_response(format!("{error:#}")),
                     }
                 }
-                Err(error) => error_response(error),
+                Err(error) => rpc::error_response(format!("{error:#}")),
             };
             let _ = rpc::send_response(&mut sink, &response).await;
         }

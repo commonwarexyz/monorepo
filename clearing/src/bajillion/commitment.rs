@@ -331,7 +331,7 @@ impl<H: Hasher> Builder<H> {
         let position = self.added;
         let digest = leaf_digest::<H>(self.kind, self.len, position, encoded)?;
         let bmt_position = self.inner.add(&digest);
-        debug_assert_eq!(position, bmt_position);
+        assert_eq!(position, bmt_position);
         self.added += 1;
         Ok(position)
     }
@@ -360,7 +360,7 @@ impl<H: Hasher> Builder<H> {
                 let offset = u32::try_from(pair_index)
                     .expect("validated value count fits in u32")
                     .checked_mul(2)
-                    .expect("validated value count fits in u32");
+                    .expect("validated pair offset fits in u32");
                 let first_position = start
                     .checked_add(offset)
                     .expect("validated builder range fits in u32");

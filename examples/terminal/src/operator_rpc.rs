@@ -1,7 +1,7 @@
 //! Bounded operator RPC bodies and synchronous dispatch.
 
 use crate::{
-    operator::{CloseEvent, Operator},
+    operator::{CloseEvent, Operator, PaymentResolution},
     protocol::{Acceptance, DepositEvent, Key, MAX_ACCOUNTS},
     rpc,
     store::MAX_DESTINATION_BYTES,
@@ -37,10 +37,10 @@ pub(crate) const METHOD_WITHDRAWAL_EVIDENCE: u8 = 8;
 pub(crate) const METHOD_ACKNOWLEDGE_WITHDRAWAL: u8 = 9;
 pub(crate) const METHOD_EXTERNAL_PAYOUT_EVIDENCE: u8 = 10;
 pub(crate) const METHOD_ACKNOWLEDGE_EXTERNAL_PAYOUT: u8 = 11;
+pub(crate) const METHOD_RESOLVE_PAYMENT: u8 = 12;
 
 const MAX_CLOSE_HEADER_BYTES: usize = 64;
 const MAX_CLOSE_ERROR_BYTES: usize = 1_024;
-const MAX_ERROR_BYTES: usize = 1_024;
 const WITHDRAWAL_ACK_NAMESPACE: &[u8] = b"_COMMONWARE_EXAMPLES_TERMINAL_APPLIED_WITHDRAWAL_REQUEST";
 
 macro_rules! empty_request {
@@ -353,6 +353,50 @@ impl Read for AcceptedBatchResponse {
             total: u64::read(buf)?,
             acceptance: Acceptance::read(buf)?,
         })
+    }
+}
+
+/// The commitment status of one probed send, carried out of band from the transport error
+/// channel so the wallet can act on a definitive verdict without stringly matching a message.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum PaymentResolutionResponse {
+    Committed(Box<AcceptedBatchResponse>),
+    Absent,
+    Unavailable,
+}
+
+impl Write for PaymentResolutionResponse {
+    fn write(&self, buf: &mut impl BufMut) {
+        match self {
+            Self::Committed(batch) => {
+                0u8.write(buf);
+                batch.write(buf);
+            }
+            Self::Absent => 1u8.write(buf),
+            Self::Unavailable => 2u8.write(buf),
+        }
+    }
+}
+
+impl EncodeSize for PaymentResolutionResponse {
+    fn encode_size(&self) -> usize {
+        1 + match self {
+            Self::Committed(batch) => batch.encode_size(),
+            Self::Absent | Self::Unavailable => 0,
+        }
+    }
+}
+
+impl Read for PaymentResolutionResponse {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+        match u8::read(buf)? {
+            0 => Ok(Self::Committed(Box::new(AcceptedBatchResponse::read(buf)?))),
+            1 => Ok(Self::Absent),
+            2 => Ok(Self::Unavailable),
+            tag => Err(CodecError::InvalidEnum(tag)),
+        }
     }
 }
 
@@ -717,6 +761,7 @@ pub(crate) enum OperatorRequest {
     Status,
     PaymentQuote(PaymentQuoteRequest),
     AcceptSend(AcceptSendRequest),
+    ResolvePayment(AcceptSendRequest),
     ApplyDeposit(ApplyDepositRequest),
     WithdrawalOpening(WithdrawalOpeningRequest),
     ApplyWithdrawal(ApplyWithdrawalRequest),
@@ -740,6 +785,9 @@ pub(crate) fn decode_request(request: rpc::Request) -> Result<OperatorRequest> {
         METHOD_ACCEPT_SEND => AcceptSendRequest::decode(body)
             .map(OperatorRequest::AcceptSend)
             .context("decode accept-send request"),
+        METHOD_RESOLVE_PAYMENT => AcceptSendRequest::decode(body)
+            .map(OperatorRequest::ResolvePayment)
+            .context("decode resolve-payment request"),
         METHOD_APPLY_DEPOSIT => ApplyDepositRequest::decode(body)
             .map(OperatorRequest::ApplyDeposit)
             .context("decode apply-deposit request"),
@@ -797,6 +845,25 @@ fn dispatch(operator: &mut Operator, request: OperatorRequest) -> Result<Bytes> 
                 sequence: accepted.sequence,
                 total: accepted.total,
                 acceptance: accepted.acceptance,
+            }
+            .encode())
+        }
+        OperatorRequest::ResolvePayment(request) => {
+            let resolution = operator
+                .resolve_payment(&request.send)
+                .context("resolve payment commitment")?;
+            Ok(match resolution {
+                PaymentResolution::Committed(batch) => {
+                    let batch = *batch;
+                    PaymentResolutionResponse::Committed(Box::new(AcceptedBatchResponse {
+                        epoch: batch.epoch,
+                        sequence: batch.sequence,
+                        total: batch.total,
+                        acceptance: batch.acceptance,
+                    }))
+                }
+                PaymentResolution::Absent => PaymentResolutionResponse::Absent,
+                PaymentResolution::Unavailable => PaymentResolutionResponse::Unavailable,
             }
             .encode())
         }
@@ -880,25 +947,19 @@ fn dispatch(operator: &mut Operator, request: OperatorRequest) -> Result<Bytes> 
     }
 }
 
-fn error_response(error: String) -> rpc::Response {
-    rpc::Response::Error {
-        error: rpc::bounded_utf8(error, MAX_ERROR_BYTES),
-    }
-}
-
 #[cfg(test)]
 pub(crate) fn handle(operator: &mut Operator, request: rpc::Request) -> rpc::Response {
     let request = decode_request(request);
     match request.and_then(|request| dispatch(operator, request)) {
         Ok(body) => rpc::Response::Success { body },
-        Err(error) => error_response(format!("{error:#}")),
+        Err(error) => rpc::error_response(format!("{error:#}")),
     }
 }
 
 pub(crate) fn handle_decoded(operator: &mut Operator, request: OperatorRequest) -> rpc::Response {
     match dispatch(operator, request) {
         Ok(body) => rpc::Response::Success { body },
-        Err(error) => error_response(format!("{error:#}")),
+        Err(error) => rpc::error_response(format!("{error:#}")),
     }
 }
 
@@ -911,7 +972,7 @@ pub(crate) fn acknowledge_withdrawal_confirmed(
         .context("acknowledge withdrawal claim")
     {
         Ok(()) => rpc::Response::Success { body: Bytes::new() },
-        Err(error) => error_response(format!("{error:#}")),
+        Err(error) => rpc::error_response(format!("{error:#}")),
     }
 }
 
@@ -924,7 +985,7 @@ pub(crate) fn acknowledge_external_payout_confirmed(
         .context("acknowledge external payout claim")
     {
         Ok(()) => rpc::Response::Success { body: Bytes::new() },
-        Err(error) => error_response(format!("{error:#}")),
+        Err(error) => rpc::error_response(format!("{error:#}")),
     }
 }
 
@@ -975,33 +1036,22 @@ pub(crate) async fn accept_send<E: Network>(
     .context("decode accepted payment")
 }
 
-/// Submits a send while separating a transport failure from a definitive operator verdict.
+/// Resolves whether a specific send already committed, independent of the operating fence.
 ///
-/// The outer `Err` is a transport outcome: the acceptance is unknown and the caller must retry
-/// later without ever abandoning the staged send. The inner `Ok` is a committed acceptance. The
-/// inner `Err` is a deterministic operator rejection, which proves the send is absent from every
-/// epoch because the operator resolves an accepted batch by transaction id across epochs.
-pub(crate) async fn try_accept_send<E: Network>(
+/// The operator answers with a structured verdict rather than an error message: `Committed` is
+/// authoritative even while the operator is fenced from admitting new state, `Absent` is positive
+/// proof the send committed in no epoch, and `Unavailable` means a storage fault blocks a
+/// trustworthy read and the caller must retry later. A transport failure surfaces as `Err` and is
+/// likewise retryable.
+pub(crate) async fn resolve_payment<E: Network>(
     network: &E,
     address: SocketAddr,
     request: AcceptSendRequest,
-) -> Result<std::result::Result<AcceptedBatchResponse, String>> {
-    let response = rpc::call(
-        network,
-        address,
-        &rpc::Request {
-            method: METHOD_ACCEPT_SEND,
-            body: request.encode(),
-        },
+) -> Result<PaymentResolutionResponse> {
+    PaymentResolutionResponse::decode(
+        invoke(network, address, METHOD_RESOLVE_PAYMENT, request.encode()).await?,
     )
-    .await
-    .context("call operator")?;
-    match response {
-        rpc::Response::Success { body } => Ok(Ok(
-            AcceptedBatchResponse::decode(body).context("decode accepted payment")?
-        )),
-        rpc::Response::Error { error } => Ok(Err(String::from_utf8_lossy(&error).into_owned())),
-    }
+    .context("decode payment resolution")
 }
 
 pub(crate) async fn apply_deposit<E: Network>(
@@ -1592,12 +1642,57 @@ mod tests {
     }
 
     #[test]
-    fn errors_are_utf8_and_truncated_on_a_character_boundary() {
-        let response = error_response("é".repeat(MAX_ERROR_BYTES));
-        let rpc::Response::Error { error } = response else {
-            unreachable!();
-        };
-        assert_eq!(error.len(), MAX_ERROR_BYTES);
-        assert!(core::str::from_utf8(&error).is_ok());
+    fn payment_resolution_response_round_trips_every_variant() {
+        let mut operator = operator();
+        let mut wallets = wallets();
+        let payer = wallets.remove(0);
+        let quote = PaymentQuoteResponse::decode(success_body(handle(
+            &mut operator,
+            request(
+                METHOD_PAYMENT_QUOTE,
+                PaymentQuoteRequest {
+                    account: payer.public_key(),
+                }
+                .encode(),
+            ),
+        )))
+        .unwrap();
+        let send = SignedSend::sign_next(
+            &quote.context,
+            payer.signer(),
+            wallets[0].public_key(),
+            5,
+            quote.state.cumulative_debit,
+        )
+        .unwrap();
+        let accepted = AcceptedBatchResponse::decode(success_body(handle(
+            &mut operator,
+            request(METHOD_ACCEPT_SEND, AcceptSendRequest { send }.encode()),
+        )))
+        .unwrap();
+
+        for response in [
+            PaymentResolutionResponse::Committed(Box::new(accepted)),
+            PaymentResolutionResponse::Absent,
+            PaymentResolutionResponse::Unavailable,
+        ] {
+            let encoded = response.encode();
+            assert_eq!(
+                PaymentResolutionResponse::decode(encoded).unwrap(),
+                response
+            );
+        }
+
+        assert!(matches!(
+            PaymentResolutionResponse::decode(Bytes::from_static(&[3])),
+            Err(CodecError::InvalidEnum(3))
+        ));
+
+        let mut trailing = PaymentResolutionResponse::Absent.encode().to_vec();
+        trailing.push(0xff);
+        assert!(matches!(
+            PaymentResolutionResponse::decode(Bytes::from(trailing)),
+            Err(CodecError::ExtraData(1))
+        ));
     }
 }

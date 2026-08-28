@@ -1444,7 +1444,7 @@ impl RefinementDriver {
         if let (Some(actual), Some(expected)) = (&chain.registered, &self.registered) {
             assert_eq!(actual.context, expected.context);
             assert_eq!(actual.deposits, expected.deposits);
-            assert_eq!(actual.withdrawals, expected.withdrawals.requests());
+            assert_eq!(actual.withdrawals, expected.withdrawals);
         }
         assert_eq!(chain.pipeline.len(), self.state.pipeline.len());
         for (actual, expected) in chain.pipeline.iter().zip(&self.state.pipeline) {

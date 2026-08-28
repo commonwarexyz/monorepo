@@ -140,10 +140,7 @@ impl<P: PublicKey> DepositBatch<P> {
 
     /// Returns one account's deposit, or zero when the account is absent.
     pub fn amount_for(&self, account: &P) -> u64 {
-        self.records
-            .binary_search_by(|record| record.account.cmp(account))
-            .ok()
-            .map_or(0, |index| self.records[index].amount)
+        self.record_for(account).map_or(0, |record| record.amount)
     }
 
     /// Returns the record for an account, if present.

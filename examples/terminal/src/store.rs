@@ -1149,6 +1149,19 @@ impl Store {
         Ok(true)
     }
 
+    /// Reads any committed batch for one send by transaction id across every epoch.
+    ///
+    /// This is a durable, side-effect-free read of committed payment rows. It authoritatively
+    /// answers whether a specific send committed, which is exactly what resolves a client's
+    /// commitment uncertainty independent of whether the operator is fenced from admitting new
+    /// state.
+    pub(crate) fn accepted_batch(
+        &self,
+        send: &SignedSend<Key, Digest>,
+    ) -> Result<Option<AcceptedBatch>> {
+        find_accepted_batch(&self.connection, send)
+    }
+
     pub(crate) fn stage_deposit(
         &mut self,
         identity: &AccountIdentity,

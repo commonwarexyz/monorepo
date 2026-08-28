@@ -284,7 +284,7 @@ struct PendingDeposit {
 struct RegisteredClose<P: PublicKey, D: Digest> {
     context: CloseContext<P, D>,
     deposits: DepositBatch<P>,
-    withdrawals: Vec<SignedWithdrawal<P, D>>,
+    withdrawals: WithdrawalBatch<P, D>,
     withdrawal_deadline: Option<(u64, P)>,
 }
 
@@ -1205,7 +1205,7 @@ where
         self.registered = Some(RegisteredClose {
             context,
             deposits,
-            withdrawals: withdrawals.requests().to_vec(),
+            withdrawals,
             withdrawal_deadline,
         });
         Ok(())
@@ -1232,12 +1232,10 @@ where
         if !self.certificate_scheme.verify_exact(&header, &certificate) {
             return Err(SettlementError::InvalidCertificate);
         }
-        let batch = WithdrawalBatch::new(registered.withdrawals.clone())
-            .expect("registered requests came from one canonical batch");
         let totals = verify_terminal_proof_after_header::<H, P, H::Digest>(
             &registered.context,
             &registered.deposits,
-            &batch,
+            &registered.withdrawals,
             &roots,
             &terminal_proof,
         )?;
@@ -1272,7 +1270,7 @@ where
         }
         // Operator-carried requests consume their replay ids at admission.
         // Chain-queued ids are already consumed, so re-inserting is a no-op.
-        for request in &registered.withdrawals {
+        for request in registered.withdrawals.requests() {
             let request_id = request.id::<H>();
             self.withdrawal_replay_expiries
                 .insert((request.body().deadline(), request_id));
@@ -1282,7 +1280,7 @@ where
             context: registered.context,
             deposit_total: registered.deposits.total(),
             deposits: PackedDeposits::new(&registered.deposits),
-            withdrawals: PackedWithdrawals::new(&registered.withdrawals),
+            withdrawals: PackedWithdrawals::new(registered.withdrawals.requests()),
             withdrawal_total,
             withdrawal_deadline: registered.withdrawal_deadline,
             payout_total,
@@ -1506,7 +1504,7 @@ where
                     payout_remaining: payout_total,
                 },
             );
-            debug_assert!(replaced.is_none());
+            assert!(replaced.is_none());
         }
         self.expected_epoch = next_epoch;
         Ok(finalized)
@@ -1547,7 +1545,7 @@ where
                 .get_mut(&batch_id)
                 .expect("the claimable batch was checked above");
             let inserted = batch.claimed_payouts.insert(claim.position());
-            debug_assert!(inserted);
+            assert!(inserted);
             batch.payout_remaining -= payout.amount;
             batch.payout_remaining == 0 && batch.withdrawal_remaining == 0
         };
@@ -1595,7 +1593,7 @@ where
                 .get_mut(&batch_id)
                 .expect("the claimable batch was checked above");
             let inserted = batch.claimed_withdrawals.insert(position);
-            debug_assert!(inserted);
+            assert!(inserted);
             batch.withdrawal_remaining -= output.amount();
             batch.payout_remaining == 0 && batch.withdrawal_remaining == 0
         };
@@ -1892,7 +1890,7 @@ where
             .as_mut()
             .expect("terminal claims were checked above");
         let inserted = claims.claimed_positions.insert(opening.proof.position);
-        debug_assert!(inserted);
+        assert!(inserted);
         claims.pending_withdrawals.remove(&account);
         claims.remaining_state_liability = remaining_state_liability;
         self.custody_balance = custody_balance;
@@ -1907,8 +1905,8 @@ where
         if claims.remaining_state_liability != 0 || claims.remaining_deposit_total != 0 {
             return;
         }
-        debug_assert!(claims.deposits.is_empty());
-        debug_assert_eq!(self.custody_balance, 0);
+        assert!(claims.deposits.is_empty());
+        assert_eq!(self.custody_balance, 0);
 
         self.current_state_root = commitment::empty_root::<H>(commitment::VectorKind::State);
         self.current_liability = 0;
@@ -2068,8 +2066,9 @@ pub enum SettlementError {
     /// Safety openings do not cover the finalized root and every admitted root exactly.
     #[error("withdrawal openings do not cover all safety roots exactly")]
     WithdrawalOpeningCount,
-    /// The signed deadline does not provide the configured notice.
-    #[error("withdrawal deadline does not provide the minimum notice")]
+    /// The signed deadline is too soon: it falls short of the queue's minimum notice or, for an
+    /// operator-carried request, does not clear the close's earliest finalizing tick.
+    #[error("withdrawal deadline is too soon to finalize safely")]
     WithdrawalDeadlineTooSoon,
     /// The signed deadline exceeds the deployment's replay-retention horizon.
     #[error("withdrawal deadline exceeds the maximum notice")]
