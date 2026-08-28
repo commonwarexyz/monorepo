@@ -521,7 +521,7 @@ fn fuzz(input: FuzzInput) {
                     "section {section} lost entries covered by a completed sync"
                 );
             }
-            if recovery_input.retention % 101 == 100 && recovery_input.final_op % 3 == 0 {
+            if recovery_input.retention % 101 == 100 && recovery_input.final_op.is_multiple_of(3) {
                 for (section, ids) in &recovery_appended {
                     let retained: Vec<u64> = expected
                         .get(section)

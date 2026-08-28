@@ -620,7 +620,9 @@ fn fuzz(input: FuzzInput) {
             }
             // Only the abandoned-request arm flushes every buffered byte before the crash:
             // an interrupted sync or prune legitimately strands unwritten appends.
-            if recovery_input.retention % 101 == 100 && !pruned && recovery_input.final_op % 3 == 0
+            if recovery_input.retention % 101 == 100
+                && !pruned
+                && recovery_input.final_op.is_multiple_of(3)
             {
                 assert_eq!(
                     expected.len(),
