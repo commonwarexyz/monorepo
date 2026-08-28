@@ -27,7 +27,7 @@ use commonware_consensus::{
     },
     simplex::{
         self,
-        config::ForwardingPolicy,
+        config::{ForwardPolicy, SkipPolicy},
         elector::RoundRobin,
         mocks::scheme::{self as scheme_mocks, Scheme as MockScheme},
         types::Context,
@@ -598,9 +598,12 @@ impl EngineDefinition for SingleDbEngine {
             certification_timeout: Duration::from_secs(2),
             timeout_retry: Duration::from_millis(500),
             view_retention: ViewDelta::new(10),
-            skip_timeout: Duration::from_secs(5),
+            skip: SkipPolicy::Enabled {
+                timeout: Duration::from_secs(5),
+                budget: simplex::SkipBudget::Participants,
+            },
             fetch_timeout: Duration::from_secs(2),
-            forwarding: ForwardingPolicy::Disabled,
+            forward: ForwardPolicy::Disabled,
             track_historical_votes: false,
         };
 

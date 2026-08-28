@@ -28,7 +28,7 @@ let (certificate_sender, certificate_receiver) = oracle
 oracle.add_link(pk1, pk2, Link {
     latency: Duration::from_millis(10),
     jitter: Duration::from_millis(3),
-    success_rate: commonware_utils::Probability!(0.95),
+    success_rate: commonware_utils::probability!(0.95),
 }).await.unwrap();
 ```
 

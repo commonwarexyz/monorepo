@@ -5,7 +5,8 @@ use crate::{
     types::{
         self, BACKFILL_CHANNEL, BLOCKS_PER_EPOCH, BROADCAST_CHANNEL, CERTIFICATE_CHANNEL,
         DKG_CHANNEL, FileSecretStore, MAILBOX_SIZE, MAX_MESSAGE_SIZE, MAX_SUPPORTED_MODE,
-        MESSAGE_RATE, NAMESPACE, Participants, RESOLVER_CHANNEL, SHARING_MODE, VOTE_CHANNEL,
+        MESSAGE_RATE, NAMESPACE, Participants, RESOLVER_CHANNEL, REVEAL, SHARING_MODE,
+        VOTE_CHANNEL,
     },
 };
 use clap::Args;
@@ -78,6 +79,7 @@ pub async fn run(context: tokio::Context, args: Dkg) {
             strategy,
             namespace: NAMESPACE,
             sharing_mode: SHARING_MODE,
+            reveal: REVEAL,
             max_supported_mode: MAX_SUPPORTED_MODE,
             partition_prefix: "bootstrap".to_string(),
             participants: participants.get(Epoch::zero()),

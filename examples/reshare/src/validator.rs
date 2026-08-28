@@ -8,7 +8,7 @@ use crate::{
         DKG_CHANNEL, DKG_PROBE_CHANNEL, DynamicProvider, FileSecretStore, IO_BUFFER_SIZE,
         LogReporter, MAILBOX_SIZE, MAX_MESSAGE_SIZE, MAX_PARTICIPANTS, MAX_SUPPORTED_MODE,
         MESSAGE_RATE, NAMESPACE, PAGE_CACHE_SIZE, PAGE_SIZE, Participants, QMDB_CHANNEL,
-        RESOLVER_CHANNEL, Registrar, SHARING_MODE, Scheme, VOTE_CHANNEL,
+        RESOLVER_CHANNEL, REVEAL, Registrar, SHARING_MODE, Scheme, VOTE_CHANNEL,
     },
 };
 use clap::Args;
@@ -18,7 +18,11 @@ use commonware_consensus::{
     marshal::{
         self, core::Actor as MarshalActor, resolver::p2p as marshal_resolver, standard::Deferred,
     },
-    simplex::{config::ForwardingPolicy, elector::RoundRobin},
+    simplex::{
+        SkipBudget,
+        config::{ForwardPolicy, SkipPolicy},
+        elector::RoundRobin,
+    },
     types::{Epoch, FixedEpocher, ViewDelta},
 };
 use commonware_cryptography::{ed25519, sha256::Sha256};
@@ -288,6 +292,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
             fence,
             namespace: NAMESPACE,
             sharing_mode: SHARING_MODE,
+            reveal: REVEAL,
             mailbox_size: MAILBOX_SIZE,
             partition_prefix: format!("{partition_prefix}-reshare"),
             max_participants: MAX_PARTICIPANTS,
@@ -344,8 +349,11 @@ pub async fn run(context: tokio::Context, args: Validator) {
                 timeout_retry: Duration::from_millis(500),
                 fetch_timeout: Duration::from_secs(2),
                 view_retention: ViewDelta::new(10),
-                skip_timeout: Duration::from_secs(5),
-                forwarding: ForwardingPolicy::Disabled,
+                skip: SkipPolicy::Enabled {
+                    timeout: Duration::from_secs(5),
+                    budget: SkipBudget::Participants,
+                },
+                forward: ForwardPolicy::Disabled,
                 track_historical_votes: false,
             },
             gate,

@@ -378,7 +378,7 @@ mod tests {
     use commonware_actor::mailbox::Policy;
     use commonware_cryptography::{certificate::mocks::Fixture, sha256::Digest as Sha256Digest};
     use commonware_parallel::Sequential;
-    use commonware_utils::test_rng;
+    use commonware_utils::{non_empty, test_rng};
     use std::collections::VecDeque;
 
     type TestScheme = ed25519::Scheme;
@@ -408,7 +408,8 @@ mod tests {
             .map(|scheme| Nullify::sign::<Sha256Digest>(scheme, round).expect("nullify"))
             .collect();
         Certificate::Nullification(
-            Nullification::from_nullifies(&verifier, &votes, &Sequential).expect("nullification"),
+            Nullification::from_nullifies(&verifier, non_empty![@&votes], &Sequential)
+                .expect("nullification"),
         )
     }
 
@@ -420,7 +421,8 @@ mod tests {
             .map(|scheme| Finalize::sign(scheme, proposal.clone()).expect("finalize"))
             .collect();
         Certificate::Finalization(
-            Finalization::from_finalizes(&verifier, &votes, &Sequential).expect("finalization"),
+            Finalization::from_finalizes(&verifier, non_empty![@&votes], &Sequential)
+                .expect("finalization"),
         )
     }
 
