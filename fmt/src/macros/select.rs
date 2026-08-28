@@ -1167,6 +1167,17 @@ mod tests {
     }
 
     #[test]
+    fn preserves_labelled_multiline_block_body() {
+        let source = "value = receive() => 'body: {\n        break 'body value\n    }";
+        let formatted = select(source, OPTIONS).expect("select should format");
+
+        assert_eq!(
+            formatted.text(),
+            "\n    value = receive() => 'body: {\n        break 'body value;\n    },\n"
+        );
+    }
+
+    #[test]
     fn keeps_arrow_attached_to_a_short_multiline_body() {
         let options = Options {
             indentation: 16,

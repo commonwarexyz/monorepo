@@ -322,11 +322,11 @@ impl Formatter {
         source: &str,
         indentation: usize,
     ) -> Result<String, Error> {
-        if !indentation.is_multiple_of(INDENT) {
+        if indentation < INDENT || !indentation.is_multiple_of(INDENT) {
             return Err(Error::UnsupportedIndentation(indentation));
         }
         let prefix = crate::marker::unique_prefix(source, "rustfmt_block");
-        let module_depth = indentation / INDENT;
+        let module_depth = indentation / INDENT - 1;
         let wrapper = multiline_block_wrapper(source, indentation, module_depth, &prefix);
         let formatted = self.run(&wrapper)?;
         let file = syn::parse_file(&formatted).map_err(Error::Reparse)?;
@@ -337,7 +337,13 @@ impl Formatter {
         if item.sig.ident != format!("{prefix}item") {
             return Err(Error::WrapperShape);
         }
-        extract_span(&formatted, item.block.span(), None, indentation)
+        let [syn::Stmt::Expr(expression, Some(_))] = item.block.stmts.as_slice() else {
+            return Err(Error::WrapperShape);
+        };
+        if !matches!(expression, Expr::Block(_)) {
+            return Err(Error::WrapperShape);
+        }
+        extract_span(&formatted, expression.span(), None, indentation)
     }
 
     fn run(&self, source: &str) -> Result<String, Error> {
@@ -485,12 +491,14 @@ fn multiline_block_wrapper(
     prefix: &str,
 ) -> String {
     let mut output = module_prefix(module_depth, prefix);
-    output.push_str(&" ".repeat(indentation));
+    output.push_str(&" ".repeat(indentation - INDENT));
     output.push_str("fn ");
     output.push_str(prefix);
-    output.push_str("item() ");
-    output.push_str(&indent_inline_source(source, indentation));
-    output.push('\n');
+    output.push_str("item() {\n");
+    output.push_str(&indent_source(source, indentation));
+    output.push_str(";\n");
+    output.push_str(&" ".repeat(indentation - INDENT));
+    output.push_str("}\n");
     close_modules(&mut output, module_depth);
     output
 }
