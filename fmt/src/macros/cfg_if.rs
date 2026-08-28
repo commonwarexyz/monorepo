@@ -556,6 +556,33 @@ mod tests {
     }
 
     #[test]
+    fn formats_nested_macros_in_item_and_statement_bodies() {
+        let cases = [
+            (
+                "if #[cfg(test)] { fn run() { select! { value=receive()=>value } } }",
+                true,
+            ),
+            (
+                "if #[cfg(test)] { let value=select! { item=receive()=>item }; value }",
+                false,
+            ),
+        ];
+
+        for (source, is_item_body) in cases {
+            let parsed = syn::parse_str::<CfgIfInput>(source).expect("cfg_if should parse");
+            assert_eq!(
+                matches!(parsed.branches[0].body, Body::Items(_)),
+                is_item_body
+            );
+            let output = fixed_point(source);
+            assert!(
+                output.contains("item = receive() => item,")
+                    || output.contains("value = receive() => value,")
+            );
+        }
+    }
+
+    #[test]
     fn rejects_macro_template_body() {
         let source = "if #[cfg(test)] { Some(unsafe { arch::$kernel($($arg),+) }) } else { None }";
         assert!(matches!(cfg_if(source, OPTIONS, 0), Err(Error::Parse(_))));

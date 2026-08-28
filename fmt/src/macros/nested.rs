@@ -26,11 +26,36 @@ enum Style {
     BlockExpressionPreservingBlankLines,
 }
 
+impl Style {
+    fn format(self, expression: &Expr, source: &str) -> Result<ProtectedFragment, pretty::Error> {
+        match self {
+            Self::Expression => pretty::expression(expression, source),
+            Self::ExpressionPreservingBlankLines => {
+                pretty::expression_preserving_blank_lines(expression, source)
+            }
+            Self::BlockExpression => pretty::block_expression(expression, source),
+            Self::BlockExpressionPreservingBlankLines => {
+                pretty::block_expression_preserving_blank_lines(expression, source)
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum RestoreStyle {
     Expression,
     Items,
     Statements,
+}
+
+struct CollectionRestore<'a> {
+    fragment_source: &'a str,
+    shielded_source: &'a str,
+    marker_prefix: &'a str,
+    nested: &'a [NestedMacro],
+    depth: usize,
+    style: RestoreStyle,
+    had_skip: bool,
 }
 
 struct NestedMacro {
@@ -561,68 +586,19 @@ pub(super) fn items(
     }
 
     let shielded_source = shield_source(fragment_source, fragment_start, &shield.nested)?;
-    if shield.had_skip {
-        let Some(restored) = restore(
-            &shielded_source,
-            &marker_prefix,
-            &shield.nested,
+    finish_collection(
+        CollectionRestore {
+            fragment_source,
+            shielded_source: &shielded_source,
+            marker_prefix: &marker_prefix,
+            nested: &shield.nested,
             depth,
-            RestoreStyle::Items,
-            true,
-        )?
-        else {
-            return Ok(ProtectedFragment::preserved(fragment_source));
-        };
-        syn::parse_file(&restored).map_err(Error::Output)?;
-        return Ok(ProtectedFragment::preserved_with_nested_formatting(
-            restored,
-        ));
-    }
-    let formatted = pretty::items(&shielded, &shielded_source)?;
-    if formatted.disposition() == Disposition::PreservedForTrivia {
-        let Some(restored) = restore(
-            &shielded_source,
-            &marker_prefix,
-            &shield.nested,
-            depth,
-            RestoreStyle::Items,
-            true,
-        )?
-        else {
-            return Ok(ProtectedFragment::preserved(fragment_source));
-        };
-        syn::parse_file(&restored).map_err(Error::Output)?;
-        return Ok(ProtectedFragment::preserved_with_nested_formatting(
-            restored,
-        ));
-    }
-    let Some(restored) = restore(
-        formatted.text(),
-        &marker_prefix,
-        &shield.nested,
-        depth,
-        RestoreStyle::Items,
-        false,
-    )?
-    else {
-        let Some(restored) = restore(
-            &shielded_source,
-            &marker_prefix,
-            &shield.nested,
-            depth,
-            RestoreStyle::Items,
-            true,
-        )?
-        else {
-            return Ok(ProtectedFragment::preserved(fragment_source));
-        };
-        syn::parse_file(&restored).map_err(Error::Output)?;
-        return Ok(ProtectedFragment::preserved_with_nested_formatting(
-            restored,
-        ));
-    };
-    syn::parse_file(&restored).map_err(Error::Output)?;
-    Ok(ProtectedFragment::formatted(restored))
+            style: RestoreStyle::Items,
+            had_skip: shield.had_skip,
+        },
+        || pretty::items(&shielded, &shielded_source),
+        |restored| syn::parse_file(restored).map(|_| ()),
+    )
 }
 
 pub(super) fn statements(
@@ -658,68 +634,58 @@ pub(super) fn statements(
     }
 
     let shielded_source = shield_source(fragment_source, fragment_start, &shield.nested)?;
-    if shield.had_skip {
-        let Some(restored) = restore(
-            &shielded_source,
-            &marker_prefix,
-            &shield.nested,
+    finish_collection(
+        CollectionRestore {
+            fragment_source,
+            shielded_source: &shielded_source,
+            marker_prefix: &marker_prefix,
+            nested: &shield.nested,
             depth,
-            RestoreStyle::Statements,
-            true,
-        )?
-        else {
-            return Ok(ProtectedFragment::preserved(fragment_source));
-        };
-        parse_statements(&restored).map_err(Error::Output)?;
-        return Ok(ProtectedFragment::preserved_with_nested_formatting(
-            restored,
-        ));
+            style: RestoreStyle::Statements,
+            had_skip: shield.had_skip,
+        },
+        || pretty::statements(&shielded, &shielded_source),
+        |restored| parse_statements(restored).map(|_| ()),
+    )
+}
+
+fn finish_collection(
+    context: CollectionRestore<'_>,
+    format: impl FnOnce() -> Result<ProtectedFragment, pretty::Error>,
+    validate: impl Fn(&str) -> Result<(), syn::Error>,
+) -> Result<ProtectedFragment, Error> {
+    if !context.had_skip {
+        let formatted = format()?;
+        if formatted.disposition() != Disposition::PreservedForTrivia
+            && let Some(restored) = restore(
+                formatted.text(),
+                context.marker_prefix,
+                context.nested,
+                context.depth,
+                context.style,
+                false,
+            )?
+        {
+            validate(&restored).map_err(Error::Output)?;
+            return Ok(ProtectedFragment::formatted(restored));
+        }
     }
-    let formatted = pretty::statements(&shielded, &shielded_source)?;
-    if formatted.disposition() == Disposition::PreservedForTrivia {
-        let Some(restored) = restore(
-            &shielded_source,
-            &marker_prefix,
-            &shield.nested,
-            depth,
-            RestoreStyle::Statements,
-            true,
-        )?
-        else {
-            return Ok(ProtectedFragment::preserved(fragment_source));
-        };
-        parse_statements(&restored).map_err(Error::Output)?;
-        return Ok(ProtectedFragment::preserved_with_nested_formatting(
-            restored,
-        ));
-    }
+
     let Some(restored) = restore(
-        formatted.text(),
-        &marker_prefix,
-        &shield.nested,
-        depth,
-        RestoreStyle::Statements,
-        false,
+        context.shielded_source,
+        context.marker_prefix,
+        context.nested,
+        context.depth,
+        context.style,
+        true,
     )?
     else {
-        let Some(restored) = restore(
-            &shielded_source,
-            &marker_prefix,
-            &shield.nested,
-            depth,
-            RestoreStyle::Statements,
-            true,
-        )?
-        else {
-            return Ok(ProtectedFragment::preserved(fragment_source));
-        };
-        parse_statements(&restored).map_err(Error::Output)?;
-        return Ok(ProtectedFragment::preserved_with_nested_formatting(
-            restored,
-        ));
+        return Ok(ProtectedFragment::preserved(context.fragment_source));
     };
-    parse_statements(&restored).map_err(Error::Output)?;
-    Ok(ProtectedFragment::formatted(restored))
+    validate(&restored).map_err(Error::Output)?;
+    Ok(ProtectedFragment::preserved_with_nested_formatting(
+        restored,
+    ))
 }
 
 fn format_expression(
@@ -736,17 +702,9 @@ fn format_expression(
         if preflight.had_skip {
             return Ok(ProtectedFragment::preserved(fragment_source));
         }
-        return match style {
-            Style::Expression => pretty::expression(expression, fragment_source),
-            Style::ExpressionPreservingBlankLines => {
-                pretty::expression_preserving_blank_lines(expression, fragment_source)
-            }
-            Style::BlockExpression => pretty::block_expression(expression, fragment_source),
-            Style::BlockExpressionPreservingBlankLines => {
-                pretty::block_expression_preserving_blank_lines(expression, fragment_source)
-            }
-        }
-        .map_err(Error::from);
+        return style
+            .format(expression, fragment_source)
+            .map_err(Error::from);
     }
 
     let marker_prefix = crate::marker::unique_prefix(source, "nested");
@@ -766,17 +724,9 @@ fn format_expression(
         if shield.had_skip {
             return Ok(ProtectedFragment::preserved(fragment_source));
         }
-        return match style {
-            Style::Expression => pretty::expression(expression, fragment_source),
-            Style::ExpressionPreservingBlankLines => {
-                pretty::expression_preserving_blank_lines(expression, fragment_source)
-            }
-            Style::BlockExpression => pretty::block_expression(expression, fragment_source),
-            Style::BlockExpressionPreservingBlankLines => {
-                pretty::block_expression_preserving_blank_lines(expression, fragment_source)
-            }
-        }
-        .map_err(Error::from);
+        return style
+            .format(expression, fragment_source)
+            .map_err(Error::from);
     }
     if depth >= RECURSION_LIMIT && has_supported(&shield.nested) {
         return Err(Error::RecursionLimit);
@@ -806,16 +756,7 @@ fn format_expression(
         ));
     }
 
-    let formatted = match style {
-        Style::Expression => pretty::expression(&shielded, &shielded_source)?,
-        Style::ExpressionPreservingBlankLines => {
-            pretty::expression_preserving_blank_lines(&shielded, &shielded_source)?
-        }
-        Style::BlockExpression => pretty::block_expression(&shielded, &shielded_source)?,
-        Style::BlockExpressionPreservingBlankLines => {
-            pretty::block_expression_preserving_blank_lines(&shielded, &shielded_source)?
-        }
-    };
+    let formatted = style.format(&shielded, &shielded_source)?;
     if formatted.disposition() == Disposition::PreservedForTrivia {
         let Some(restored) = restore(
             &shielded_source,
