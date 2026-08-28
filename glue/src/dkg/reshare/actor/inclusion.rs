@@ -716,8 +716,7 @@ where
                 let ControlFlow::Continue(completed) = Verification::join(completed) else {
                     return ControlFlow::Break(());
                 };
-                self.complete_verification(epoch, store, &mut work, completed)
-                    .await;
+                self.complete_verification(epoch, store, &mut work, completed).await;
                 advance = Some(std::future::ready(())).into();
             },
             Some(message) = self.mailbox.recv() else {
@@ -866,26 +865,13 @@ where
                 let request = scan
                     .take_request()
                     .expect("completed artifact scan must own a request");
-                self.complete_artifact_scan(
-                    epoch,
-                    info,
-                    store,
-                    request,
-                    pending,
-                    &mut work,
-                )
-                .await;
+                self.complete_artifact_scan(epoch, info, store, request, pending, &mut work)
+                    .await;
                 advance = Some(std::future::ready(())).into();
             },
             _ = &mut advance => {
                 advance = None.into();
-                self.advance_artifact_requests(
-                    epoch,
-                    info,
-                    finalized_tip,
-                    &mut scan,
-                    &mut work,
-                );
+                self.advance_artifact_requests(epoch, info, finalized_tip, &mut scan, &mut work);
             },
         };
 

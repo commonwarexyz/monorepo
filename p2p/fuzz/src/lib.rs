@@ -597,7 +597,8 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
                                     );
                                 }
                             },
-                            _ = context.sleep(Duration::from_millis(MAX_SLEEP_DURATION_MS)) => {
+                            _ = context
+                                .sleep(Duration::from_millis(MAX_SLEEP_DURATION_MS)) => {
                                 continue; // Timeout - message may not have arrived yet
                             },
                         }

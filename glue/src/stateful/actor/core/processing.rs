@@ -257,12 +257,18 @@ where
                     return;
                 }
                 if pending_prune.is_none()
-                    && !start_sync::<E, A, S, V>(
-                        &self.context,
-                        &mut durability,
-                        &mut verifications,
-                        self.processor.databases(),
-                    ).await
+                    && !start_sync::<
+                        E,
+                        A,
+                        S,
+                        V,
+                    >(
+                            &self.context,
+                            &mut durability,
+                            &mut verifications,
+                            self.processor.databases(),
+                        )
+                        .await
                 {
                     return;
                 }
@@ -288,29 +294,31 @@ where
                 // A prune remains idle work unless it owns the next dirty-suffix mutation boundary.
                 let next = match message {
                     Ok(message) => Either::Left(ready(Some(Step::Message(message)))),
-                    Err(TryRecvError::Empty) => match pending_prune.take() {
-                        Some(prune) => Either::Left(ready(Some(Step::Prune(prune)))),
-                        None => {
-                            let mailbox = &mut self.mailbox;
-                            let sync = &mut durability.sync;
-                            let verifications = &mut verifications;
-                            Either::Right(async move {
-                                loop {
-                                    select! {
-                                        message = mailbox.recv() => {
-                                            break message.map(Step::Message);
-                                        },
-                                        completion = sync_completion(sync) => {
-                                            break Some(Step::Sync(completion));
-                                        },
-                                        _ = verifications.next_completed() => {
-                                            continue;
-                                        },
+                    Err(TryRecvError::Empty) => {
+                        match pending_prune.take() {
+                            Some(prune) => Either::Left(ready(Some(Step::Prune(prune)))),
+                            None => {
+                                let mailbox = &mut self.mailbox;
+                                let sync = &mut durability.sync;
+                                let verifications = &mut verifications;
+                                Either::Right(async move {
+                                    loop {
+                                        select! {
+                                            message = mailbox.recv() => {
+                                                break message.map(Step::Message);
+                                            },
+                                            completion = sync_completion(sync) => {
+                                                break Some(Step::Sync(completion));
+                                            },
+                                            _ = verifications.next_completed() => {
+                                                continue;
+                                            },
+                                        }
                                     }
-                                }
-                            })
+                                })
+                            }
                         }
-                    },
+                    }
                     Err(TryRecvError::Disconnected) => {
                         debug!("mailbox closed, stopping processing");
                         return;
@@ -323,210 +331,207 @@ where
             Some(step) = next else {
                 debug!("mailbox closed, stopping processing");
                 break;
-            } => match step {
-                Step::Message(Message::Propose {
-                    span,
-                    context,
-                    ancestry,
-                    upstream,
-                    response,
-                }) => {
-                    let process = info_span!(parent: &span, "stateful.actor.propose");
-                    let input = Input {
-                        upstream,
-                        provider: self.provider.clone(),
-                    };
-                    let verifier = self.processor.verifier();
-                    let actor_context = self.context.as_present();
-                    let marshal = self.marshal.clone();
-                    let proposal = self
-                        .processor
-                        .propose(
-                            actor_context,
-                            marshal.clone(),
-                            context,
-                            ancestry,
-                            input,
-                            response,
-                        )
-                        .instrument(process);
-                    futures::pin_mut!(proposal);
-                    let mut receive_messages = true;
-                    loop {
-                        if receive_messages {
+            } => {
+                match step {
+                    Step::Message(
+                        Message::Propose { span, context, ancestry, upstream, response },
+                    ) => {
+                        let process = info_span!(parent: &span, "stateful.actor.propose");
+                        let input = Input {
+                            upstream,
+                            provider: self.provider.clone(),
+                        };
+                        let verifier = self.processor.verifier();
+                        let actor_context = self.context.as_present();
+                        let marshal = self.marshal.clone();
+                        let proposal = self
+                            .processor
+                            .propose(
+                                actor_context,
+                                marshal.clone(),
+                                context,
+                                ancestry,
+                                input,
+                                response,
+                            )
+                            .instrument(process);
+                        futures::pin_mut!(proposal);
+                        let mut receive_messages = true;
+                        loop {
+                            if receive_messages {
+                                select! {
+                                    _ = &mut proposal => break,
+                                    message = self.mailbox.recv() => {
+                                        match message {
+                                            Some(Message::Verify { span, context, ancestry, verification }) => {
+                                                verifications
+                                                    .schedule(
+                                                        verifier.clone(),
+                                                        VerificationRequest {
+                                                            span,
+                                                            context,
+                                                            ancestry,
+                                                            verification,
+                                                        },
+                                                    )
+                                            }
+                                            Some(message) => {
+                                                // Only verification may overtake an active proposal. The
+                                                // first other message becomes a FIFO barrier for later
+                                                // mailbox work.
+                                                deferred_message = Some(message);
+                                                receive_messages = false;
+                                            }
+                                            None => receive_messages = false,
+                                        }
+                                    },
+                                    _ = verifications.next_completed() => {},
+                                }
+                            } else {
+                                select! {
+                                    _ = &mut proposal => break,
+                                    _ = verifications.next_completed() => {},
+                                }
+                            }
+                        }
+                    }
+                    Step::Message(Message::Verify { span, context, ancestry, verification }) => {
+                        verifications
+                            .schedule(
+                                self.processor.verifier(),
+                                VerificationRequest {
+                                    span,
+                                    context,
+                                    ancestry,
+                                    verification,
+                                },
+                            );
+                    }
+                    Step::Message(
+                        Message::Finalized { span, block, acknowledgement, retry_mailbox },
+                    ) => {
+                        let process = info_span!(parent: &span, "stateful.actor.finalized");
+                        if skip_finalized_block(&mut self.skip_finalized_until, block.height()) {
+                            async {
+                                verifications
+                                    .drive(
+                                        self
+                                            .processor
+                                            .notify_finalized(self.context.as_present(), block.as_ref()),
+                                    )
+                                    .await;
+                                acknowledgement.acknowledge();
+                            }
+                                .instrument(process)
+                                .await;
+                        } else {
+                            let boundary = self.processor.finalization_boundary(block.as_ref());
+                            let (retry, reject) = verifications
+                                .quiesce_where(|progress| boundary.disposition(progress))
+                                .await;
+                            drop(boundary);
+                            async {
+                                let should_start_sync = durability.sync.is_none();
+                                let applied = verifications
+                                    .drive(
+                                        self
+                                            .processor
+                                            .finalize(&self.context, block.as_ref(), should_start_sync),
+                                    )
+                                    .await;
+                                let Some(Applied { barrier, prune }) = applied else {
+                                    // Duplicate report: marshal redelivers a processed
+                                    // height only after a restart, where startup aligned
+                                    // the databases to durable state.
+                                    acknowledgement.acknowledge();
+                                    return;
+                                };
+                                debug!(
+                                    height = block.height().get(),
+                                    "applied finalized database batch"
+                                );
+
+                                // Retain marshal acknowledgements until a barrier makes their database
+                                // prefix durable. This keeps marshal's processed floor within
+                                // recoverable database state while later work proceeds. The
+                                // acknowledgement window bounds the queue; a barrier that returns false
+                                // leaves the suffix unacknowledged for restart replay.
+                                let height = block.height();
+                                durability.applied(height, acknowledgement);
+                                if let Some(barrier) = barrier {
+                                    durability.started(height, barrier);
+                                }
+
+                                // Defer pruning to the loop so it can settle durability and quiesce
+                                // verification readers at one database mutation boundary.
+                                if let Some(prune) = prune {
+                                    pending_prune = Some((prune, retry_mailbox.clone()));
+                                }
+                            }
+                                .instrument(process)
+                                .await;
+                            for verification in reject {
+                                verification.respond(false);
+                            }
+                            requeue_verifications(retry_mailbox.as_ref(), retry);
+                        }
+                    }
+                    Step::Message(Message::SubscribeDatabases { response }) => {
+                        response.send_lossy(self.processor.databases().clone());
+                    }
+                    Step::Prune((prune, retry_mailbox)) => {
+                        // Pruning owns a strict database mutation boundary. Observe an existing sync
+                        // before quiescing readers, then run storage maintenance with no sync active.
+                        while durability.sync.is_some() {
                             select! {
-                                _ = &mut proposal => break,
-                                message = self.mailbox.recv() => {
-                                    match message {
-                                        Some(Message::Verify { span, context, ancestry, verification }) => {
-                                            verifications
-                                                .schedule(
-                                                    verifier.clone(),
-                                                    VerificationRequest {
-                                                        span,
-                                                        context,
-                                                        ancestry,
-                                                        verification,
-                                                    },
-                                                )
-                                        }
-                                        Some(message) => {
-                                            // Only verification may overtake an active proposal. The
-                                            // first other message becomes a FIFO barrier for later
-                                            // mailbox work.
-                                            deferred_message = Some(message);
-                                            receive_messages = false;
-                                        }
-                                        None => receive_messages = false,
+                                completion = sync_completion(&mut durability.sync) => {
+                                    if !durability.complete(completion) {
+                                        return;
                                     }
                                 },
                                 _ = verifications.next_completed() => {},
                             }
-                        } else {
-                            select! {
-                                _ = &mut proposal => break,
-                                _ = verifications.next_completed() => {},
-                            }
                         }
-                    }
-                }
-                Step::Message(Message::Verify {
-                    span,
-                    context,
-                    ancestry,
-                    verification,
-                }) => {
-                    verifications.schedule(
-                        self.processor.verifier(),
-                        VerificationRequest {
-                            span,
-                            context,
-                            ancestry,
-                            verification,
-                        },
-                    );
-                }
-                Step::Message(Message::Finalized {
-                    span,
-                    block,
-                    acknowledgement,
-                    retry_mailbox,
-                }) => {
-                    let process = info_span!(parent: &span, "stateful.actor.finalized");
-                    if skip_finalized_block(&mut self.skip_finalized_until, block.height()) {
-                        async {
-                            verifications
-                                .drive(self.processor.notify_finalized(
-                                    self.context.as_present(),
-                                    block.as_ref(),
-                                ))
-                                .await;
-                            acknowledgement.acknowledge();
-                        }
-                        .instrument(process)
-                        .await;
-                    } else {
-                        let boundary = self.processor.finalization_boundary(block.as_ref());
-                        let (retry, reject) = verifications
-                            .quiesce_where(|progress| boundary.disposition(progress))
-                            .await;
-                        drop(boundary);
-                        async {
-                            let should_start_sync = durability.sync.is_none();
-                            let applied = verifications
-                                .drive(self.processor.finalize(
-                                    &self.context,
-                                    block.as_ref(),
-                                    should_start_sync,
-                                ))
-                                .await;
-                            let Some(Applied { barrier, prune }) = applied else {
-                                // Duplicate report: marshal redelivers a processed
-                                // height only after a restart, where startup aligned
-                                // the databases to durable state.
-                                acknowledgement.acknowledge();
-                                return;
-                            };
-                            debug!(
-                                height = block.height().get(),
-                                "applied finalized database batch"
+                        let retry = verifications.quiesce().await;
+                        assert!(
+                            self.processor.replays_idle(),
+                            "verification replay remained active after quiescence"
+                        );
+
+                        // A prune target applied behind an earlier sync may still need durability.
+                        if !durability.covers(prune.barrier_height) {
+                            assert!(
+                                durability.needs_sync(),
+                                "uncovered prune target must have unapplied durability",
                             );
-
-                            // Retain marshal acknowledgements until a barrier makes their database
-                            // prefix durable. This keeps marshal's processed floor within
-                            // recoverable database state while later work proceeds. The
-                            // acknowledgement window bounds the queue; a barrier that returns false
-                            // leaves the suffix unacknowledged for restart replay.
-                            let height = block.height();
-                            durability.applied(height, acknowledgement);
-                            if let Some(barrier) = barrier {
-                                durability.started(height, barrier);
+                            if !start_sync::<
+                                E,
+                                A,
+                                S,
+                                V,
+                            >(
+                                    &self.context,
+                                    &mut durability,
+                                    &mut verifications,
+                                    self.processor.databases(),
+                                )
+                                .await
+                            {
+                                return;
                             }
-
-                            // Defer pruning to the loop so it can settle durability and quiesce
-                            // verification readers at one database mutation boundary.
-                            if let Some(prune) = prune {
-                                pending_prune = Some((prune, retry_mailbox.clone()));
+                            let completion = sync_completion(&mut durability.sync).await;
+                            if !durability.complete(completion) {
+                                return;
                             }
+                            assert!(durability.covers(prune.barrier_height));
                         }
-                        .instrument(process)
-                        .await;
-                        for verification in reject {
-                            verification.respond(false);
-                        }
+                        prune.run(self.processor.databases(), &self.marshal).await;
                         requeue_verifications(retry_mailbox.as_ref(), retry);
                     }
-                }
-                Step::Message(Message::SubscribeDatabases { response }) => {
-                    response.send_lossy(self.processor.databases().clone());
-                }
-                Step::Prune((prune, retry_mailbox)) => {
-                    // Pruning owns a strict database mutation boundary. Observe an existing sync
-                    // before quiescing readers, then run storage maintenance with no sync active.
-                    while durability.sync.is_some() {
-                        select! {
-                            completion = sync_completion(&mut durability.sync) => {
-                                if !durability.complete(completion) {
-                                    return;
-                                }
-                            },
-                            _ = verifications.next_completed() => {},
-                        }
-                    }
-                    let retry = verifications.quiesce().await;
-                    assert!(
-                        self.processor.replays_idle(),
-                        "verification replay remained active after quiescence"
-                    );
-
-                    // A prune target applied behind an earlier sync may still need durability.
-                    if !durability.covers(prune.barrier_height) {
-                        assert!(
-                            durability.needs_sync(),
-                            "uncovered prune target must have unapplied durability",
-                        );
-                        if !start_sync::<E, A, S, V>(
-                            &self.context,
-                            &mut durability,
-                            &mut verifications,
-                            self.processor.databases(),
-                        ).await {
-                            return;
-                        }
-                        let completion = sync_completion(&mut durability.sync).await;
+                    Step::Sync(completion) => {
                         if !durability.complete(completion) {
                             return;
                         }
-                        assert!(durability.covers(prune.barrier_height));
-                    }
-                    prune
-                        .run(self.processor.databases(), &self.marshal)
-                        .await;
-                    requeue_verifications(retry_mailbox.as_ref(), retry);
-                }
-                Step::Sync(completion) => {
-                    if !durability.complete(completion) {
-                        return;
                     }
                 }
             },

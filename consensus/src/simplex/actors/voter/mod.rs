@@ -8693,10 +8693,7 @@ mod tests {
             // Sanity check: canceled certification should not have advanced this view yet.
             let advanced_before_restart = select! {
                 msg = batcher_receiver.recv() => {
-                    if let batcher::Message::Update {
-                        current, ..
-                    } = msg.unwrap()
-                    {
+                    if let batcher::Message::Update { current, .. } = msg.unwrap() {
 
                         current > target_view
                     } else {
@@ -8789,9 +8786,9 @@ mod tests {
                     },
                     msg = batcher_receiver.recv() => {
                         match msg.unwrap() {
-                            batcher::Message::Constructed(Vote::Nullify(nullify))
-                                if nullify.view() == target_view =>
-                            {
+                            batcher::Message::Constructed(
+                                Vote::Nullify(nullify),
+                            ) if nullify.view() == target_view => {
                                 panic!("unexpected immediate nullify for view {target_view} after restart");
                             }
                             batcher::Message::Update { .. } => {

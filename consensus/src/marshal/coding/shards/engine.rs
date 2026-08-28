@@ -594,10 +594,11 @@ where
             self.context,
             on_start => {
                 // Clean up closed subscriptions.
-                self.block_subscriptions.retain(|_, subscribers| {
-                    subscribers.retain(|tx| !tx.is_closed());
-                    !subscribers.is_empty()
-                });
+                self.block_subscriptions
+                    .retain(|_, subscribers| {
+                        subscribers.retain(|tx| !tx.is_closed());
+                        !subscribers.is_empty()
+                    });
                 self.assigned_shard_verified_subscriptions
                     .retain(|_, subscribers| {
                         subscribers.retain(|tx| !tx.is_closed());
@@ -627,20 +628,13 @@ where
                     Message::Proposed { block, round } => {
                         self.broadcast_shards(&mut sender, round, block);
                     }
-                    Message::Discovered {
-                        commitment,
-                        leader,
-                        round,
-                    } => {
+                    Message::Discovered { commitment, leader, round } => {
                         self.handle_external_proposal(&mut sender, commitment, leader, round);
                     }
                     Message::Notarized { commitment, round } => {
                         self.handle_notarized_commitment(&mut sender, commitment, round);
                     }
-                    Message::GetByCommitment {
-                        commitment,
-                        response,
-                    } => {
+                    Message::GetByCommitment { commitment, response } => {
                         let block = self
                             .records
                             .get(&commitment)
@@ -649,22 +643,19 @@ where
                         response.send_lossy(block);
                     }
                     Message::GetByDigest { digest, response } => {
-                        let block = self.records.values().find_map(|record| {
-                            let block = record.block()?;
-                            (block.digest() == digest).then(|| Arc::clone(block))
-                        });
+                        let block = self
+                            .records
+                            .values()
+                            .find_map(|record| {
+                                let block = record.block()?;
+                                (block.digest() == digest).then(|| Arc::clone(block))
+                            });
                         response.send_lossy(block);
                     }
-                    Message::SubscribeAssignedShardVerified {
-                        commitment,
-                        response,
-                    } => {
+                    Message::SubscribeAssignedShardVerified { commitment, response } => {
                         self.handle_assigned_shard_verified_subscription(commitment, response);
                     }
-                    Message::SubscribeByCommitment {
-                        commitment,
-                        response,
-                    } => {
+                    Message::SubscribeByCommitment { commitment, response } => {
                         self.handle_block_subscription(
                             BlockSubscriptionKey::Commitment(commitment),
                             response,

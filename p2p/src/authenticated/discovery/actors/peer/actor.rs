@@ -229,10 +229,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                             &rate_limits,
                             &self.sent_messages,
                         )?;
-                        conn_sender
-                            .send_many(batch.drain(..))
-                            .await
-                            .map_err(Error::SendFailed)?;
+                        conn_sender.send_many(batch.drain(..)).await.map_err(Error::SendFailed)?;
                     },
                 }
 
