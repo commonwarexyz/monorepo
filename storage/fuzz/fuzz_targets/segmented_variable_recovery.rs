@@ -25,7 +25,7 @@ use std::{collections::BTreeMap, num::NonZeroU16};
 type Journal = variable::Journal<DelayedSyncContext<deterministic::Context>, Vec<u8>>;
 
 const PAGE_SIZE: usize = 128;
-const PAGE_CHECKSUM_RECORD_SIZE: usize = 12;
+const PAGE_CHECKSUM_RECORD_SIZE: usize = commonware_runtime::buffer::paged::CHECKSUM_SIZE as usize;
 const MAX_ITEM_LEN: usize = 48;
 
 #[derive(Arbitrary, Clone, Debug)]
@@ -299,8 +299,9 @@ fn fuzz(input: FuzzInput) {
             pending: pending.clone(),
         };
 
-        // Sections retained from the previous execution reject appends until replayed.
-        if let Some((&section, _)) = expected.iter().find(|(_, (size, _))| *size > 0) {
+        // Every section retained from the previous execution rejects appends until replayed.
+        // Each probe consumes its journal (append takes self and returns it only on success).
+        for (&section, _) in expected.iter().filter(|(_, (size, _))| *size > 0) {
             let journal = Journal::init(context.child("gate"), config(&context))
                 .await
                 .expect("gate init failed");

@@ -778,6 +778,50 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_recovered_mirror_supports_shrinking_rewrite() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test".into(),
+                codec_config: ((0..).into(), ()),
+            };
+            let mut metadata =
+                Metadata::<_, U64, Vec<u8>>::init(context.child("first"), cfg.clone())
+                    .await
+                    .unwrap();
+            let key = U64::new(42);
+            let hello = b"hello".to_vec();
+            metadata.put(key.clone(), hello.clone());
+            metadata = metadata.sync().await.unwrap();
+            metadata.put(key.clone(), b"world".to_vec());
+            metadata.put(U64::new(43), b"foo".to_vec());
+            metadata.sync().await.unwrap();
+
+            // Corrupt the newer copy so the next initialization must repair it.
+            let (blob, _) = context.open("test", b"left").await.unwrap();
+            blob.write_at(0, b"corrupted".to_vec(), WriteOptions::SYNC)
+                .await
+                .unwrap();
+
+            // The repaired copy must support a shrinking rewrite: a stale tail left behind by
+            // recovery would survive the smaller write and poison the next reopen.
+            let mut metadata =
+                Metadata::<_, U64, Vec<u8>>::init(context.child("second"), cfg.clone())
+                    .await
+                    .unwrap();
+            assert_eq!(metadata.get(&key).unwrap(), &hello);
+            metadata.clear();
+            metadata.sync().await.unwrap();
+
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("third"), cfg)
+                .await
+                .unwrap();
+            assert!(metadata.get(&key).is_none());
+            metadata.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
     fn test_recover_corrupted_both() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();

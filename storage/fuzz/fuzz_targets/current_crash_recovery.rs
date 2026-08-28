@@ -6,7 +6,7 @@
 //! injected write/sync failures, then "crashes". Phase 2 recovers from the
 //! checkpoint and verifies that `init()` succeeds and the DB is usable.
 
-use arbitrary::{Arbitrary, Result, Unstructured};
+use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
@@ -20,7 +20,10 @@ use commonware_storage::{
     qmdb::current::{VariableConfig, unordered::variable::Db as Current},
     translator::TwoCap,
 };
-use commonware_utils::{NZU64, NZUsize, Probability, probability, sequence::FixedBytes};
+use commonware_storage_fuzz::{
+    bounded_buffer, bounded_items, bounded_nonzero_rate, bounded_page_cache_size, bounded_page_size,
+};
+use commonware_utils::{NZU64, NZUsize, Probability, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::{BTreeSet, HashMap},
@@ -32,31 +35,7 @@ type Value = FixedBytes<32>;
 type RawKey = [u8; 32];
 type RawValue = [u8; 32];
 
-/// Maximum write buffer size.
-const MAX_WRITE_BUF: usize = 2048;
-
 type Db<F> = Current<F, deterministic::Context, Key, Value, Sha256, TwoCap, 32, Sequential>;
-
-fn bounded_page_size(u: &mut Unstructured<'_>) -> Result<u16> {
-    u.int_in_range(1..=256)
-}
-
-fn bounded_page_cache_size(u: &mut Unstructured<'_>) -> Result<usize> {
-    u.int_in_range(1..=16)
-}
-
-fn bounded_items_per_blob(u: &mut Unstructured<'_>) -> Result<u64> {
-    u.int_in_range(1..=64)
-}
-
-fn bounded_write_buffer(u: &mut Unstructured<'_>) -> Result<usize> {
-    u.int_in_range(1..=MAX_WRITE_BUF)
-}
-
-fn bounded_nonzero_rate(u: &mut Unstructured<'_>) -> Result<Probability> {
-    let percent: u8 = u.int_in_range(1..=100)?;
-    Ok(probability!(u64::from(percent), 100))
-}
 
 /// State-changing operations that exercise disk writes.
 #[derive(Arbitrary, Debug, Clone)]
@@ -75,27 +54,43 @@ struct FuzzInput {
     page_size: u16,
     #[arbitrary(with = bounded_page_cache_size)]
     page_cache_size: usize,
-    #[arbitrary(with = bounded_items_per_blob)]
+    #[arbitrary(with = bounded_items)]
     merkle_items_per_blob: u64,
-    #[arbitrary(with = bounded_items_per_blob)]
+    #[arbitrary(with = bounded_items)]
     log_items_per_blob: u64,
-    #[arbitrary(with = bounded_write_buffer)]
+    #[arbitrary(with = bounded_buffer)]
     write_buffer: usize,
+    #[arbitrary(with = bounded_buffer)]
+    replay_buffer: usize,
     #[arbitrary(with = bounded_nonzero_rate)]
     sync_failure_rate: Probability,
     write_config: deterministic::WriteConfig,
     operations: Vec<CurrentOperation>,
 }
 
-fn make_config(
-    ctx: &Context,
-    suffix: &str,
+#[derive(Clone, Copy)]
+struct ConfigParams {
     page_size: NonZeroU16,
     page_cache_size: NonZeroUsize,
     merkle_items_per_blob: u64,
     log_items_per_blob: u64,
     write_buffer: NonZeroUsize,
+    replay_buffer: NonZeroUsize,
+}
+
+fn make_config(
+    ctx: &Context,
+    suffix: &str,
+    params: ConfigParams,
 ) -> VariableConfig<TwoCap, ((), ()), Sequential> {
+    let ConfigParams {
+        page_size,
+        page_cache_size,
+        merkle_items_per_blob,
+        log_items_per_blob,
+        write_buffer,
+        replay_buffer,
+    } = params;
     let page_cache = CacheRef::from_pooler(ctx, page_size, page_cache_size);
     VariableConfig {
         merkle_config: MerkleConfig {
@@ -103,7 +98,7 @@ fn make_config(
             metadata_partition: format!("crash-merkle-metadata-{suffix}"),
             items_per_blob: NZU64!(merkle_items_per_blob),
             write_buffer,
-            replay_buffer: write_buffer,
+            replay_buffer,
             strategy: Sequential,
             page_cache: page_cache.clone(),
         },
@@ -111,7 +106,7 @@ fn make_config(
             partition: format!("crash-log-{suffix}"),
             items_per_section: NZU64!(log_items_per_blob),
             write_buffer,
-            replay_buffer: write_buffer,
+            replay_buffer,
             compression: None,
             codec_config: ((), ()),
             page_cache,
@@ -190,11 +185,14 @@ async fn commit_pending<F: Graftable>(
 }
 
 fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
-    let page_size = NonZeroU16::new(input.page_size).unwrap();
-    let page_cache_size = NonZeroUsize::new(input.page_cache_size).unwrap();
-    let merkle_items_per_blob = input.merkle_items_per_blob;
-    let log_items_per_blob = input.log_items_per_blob;
-    let write_buffer = NonZeroUsize::new(input.write_buffer).unwrap();
+    let params = ConfigParams {
+        page_size: NonZeroU16::new(input.page_size).unwrap(),
+        page_cache_size: NonZeroUsize::new(input.page_cache_size).unwrap(),
+        merkle_items_per_blob: input.merkle_items_per_blob,
+        log_items_per_blob: input.log_items_per_blob,
+        write_buffer: NonZeroUsize::new(input.write_buffer).unwrap(),
+        replay_buffer: NonZeroUsize::new(input.replay_buffer).unwrap(),
+    };
     let sync_failure_rate = input.sync_failure_rate;
     let write_config = input.write_config;
     let operations = input.operations.clone();
@@ -209,20 +207,9 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
         let suffix = suffix.clone();
         let operations = operations.clone();
         async move {
-            let mut db: Db<F> = Db::init(
-                ctx.child("db"),
-                make_config(
-                    &ctx,
-                    &suffix,
-                    page_size,
-                    page_cache_size,
-                    merkle_items_per_blob,
-                    log_items_per_blob,
-                    write_buffer,
-                ),
-            )
-            .await
-            .unwrap();
+            let mut db: Db<F> = Db::init(ctx.child("db"), make_config(&ctx, &suffix, params))
+                .await
+                .unwrap();
 
             let fault_cfg = ctx.storage_fault_config();
             *fault_cfg.write() = deterministic::FaultConfig {
@@ -305,20 +292,9 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
         async move {
             *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
 
-            let db: Db<F> = Db::init(
-                ctx.child("recovered"),
-                make_config(
-                    &ctx,
-                    &suffix,
-                    page_size,
-                    page_cache_size,
-                    merkle_items_per_blob,
-                    log_items_per_blob,
-                    write_buffer,
-                ),
-            )
-            .await
-            .expect("recovery must succeed");
+            let db: Db<F> = Db::init(ctx.child("recovered"), make_config(&ctx, &suffix, params))
+                .await
+                .expect("recovery must succeed");
 
             // Read every observed key in one batch so the result must match one atomic snapshot.
             let keys = known_keys.iter().copied().map(Key::new).collect::<Vec<_>>();

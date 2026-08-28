@@ -1,8 +1,7 @@
 use commonware_runtime::{
-    Blob as _, ReadOptions, Runner as _, Storage as _, WriteOptions, deterministic,
+    Blob as _, ReadOptions, Runner as _, Storage as _, WriteOptions, buffer::paged::CHECKSUM_SIZE,
+    deterministic,
 };
-
-const CHECKSUM_RECORD_SIZE: u64 = 12;
 
 /// Flip one byte inside physical page `page` of `blob`, leaving every other page valid. Models
 /// a torn interior page: a crash during an in-flight fsync can lose an interior page while later
@@ -15,7 +14,7 @@ pub(crate) async fn corrupt_page(
     logical_page_size: u64,
 ) {
     // Every valid checksum slot covers byte zero, including a shorter fallback slot.
-    let physical_page_size = logical_page_size + CHECKSUM_RECORD_SIZE;
+    let physical_page_size = logical_page_size + CHECKSUM_SIZE;
     let offset = page * physical_page_size;
     let (blob, size) = context.open(partition, &blob.to_be_bytes()).await.unwrap();
     assert!(

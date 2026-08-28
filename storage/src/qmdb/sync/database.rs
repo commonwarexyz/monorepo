@@ -220,7 +220,7 @@ mod tests {
                 items_per_blob: config.items_per_blob,
                 page_cache: config.page_cache.clone(),
                 write_buffer: config.write_buffer,
-                replay_buffer: config.write_buffer,
+                replay_buffer: config.replay_buffer,
             };
             let journal = fixed::Journal::<_, Digest>::init(
                 context.child("interrupted_reset"),

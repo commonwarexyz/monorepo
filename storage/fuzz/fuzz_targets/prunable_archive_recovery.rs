@@ -37,7 +37,7 @@ type Value = FixedBytes<32>;
 type TestArchive = prunable::Archive<EightCap, deterministic::Context, Key, Value>;
 
 const INDEX_PAGE_SIZE: usize = 128;
-const PAGE_CHECKSUM_RECORD_SIZE: usize = 12;
+const PAGE_CHECKSUM_RECORD_SIZE: usize = commonware_runtime::buffer::paged::CHECKSUM_SIZE as usize;
 const VALUE_CHECKSUM_SIZE: usize = 4;
 
 #[derive(Arbitrary, Clone, Debug)]
@@ -510,16 +510,25 @@ fn fuzz(input: FuzzInput) {
                         archive = drive_pending_syncs(&pending, archive.prune(min))
                             .await
                             .expect("prune failed");
-                        pruned = true;
-                        exempt_below = exempt_below.max(min);
+
+                        // The archive rounds prune requests down to a section boundary, so only
+                        // indices below that boundary can actually disappear.
+                        let floor = (min / items_per_section) * items_per_section.get();
+                        pruned |= floor > 0;
+                        exempt_below = exempt_below.max(floor);
                     }
                     _ => {}
                 }
             }
 
-            // The final request must not block on earlier parked fsyncs, and their bytes
-            // precede the fault window regardless.
+            // Settle every pipelined sync before the fault window opens: an abandoned lazy
+            // handle never runs its underlying fsync, which would silently discard flushed
+            // bytes at the crash and fail the full-retention assertion on legal behavior.
             release_pending_syncs(&pending);
+            for (covered, handle) in held.drain(..) {
+                handle.await.expect("pipelined sync failed");
+                durable = durable.max(covered);
+            }
 
             // Hold both durability barriers open after their buffered writes have reached storage.
             // The crash image can then retain independent byte subsets from the index and value
@@ -557,12 +566,17 @@ fn fuzz(input: FuzzInput) {
                     drop(sync);
                 }
                 2 => {
-                    // Interrupt a prune mid-flight: markers must be removed durably before any
-                    // section storage disappears, so every cut point must recover.
-                    exempt_below = exempt_below.max(u64::from(first_phase_input.final_op >> 2));
-                    pruned = true;
-                    let mut prune =
-                        Box::pin(archive.prune(u64::from(first_phase_input.final_op >> 2)));
+                    // Interrupt a prune mid-flight: the armed gate parks it at its internal
+                    // durability barriers, starting with the marker-removal metadata sync, so the
+                    // crash lands between marker removal and section deletion. Markers must be
+                    // removed durably before any section storage disappears, so every cut point
+                    // must recover. Only indices below the section-rounded floor can disappear.
+                    let min = u64::from(first_phase_input.final_op >> 2);
+                    let floor = (min / items_per_section) * items_per_section.get();
+                    pruned |= floor > 0;
+                    exempt_below = exempt_below.max(floor);
+                    pending.arm();
+                    let mut prune = Box::pin(archive.prune(min));
                     for _ in 0..usize::from(first_phase_input.final_op >> 5) % 8 + 1 {
                         if futures::future::poll_immediate(prune.as_mut())
                             .await
@@ -604,7 +618,10 @@ fn fuzz(input: FuzzInput) {
                     "a value from a completed sync was lost",
                 );
             }
-            if recovery_input.retention % 101 == 100 && !pruned {
+            // Only the abandoned-request arm flushes every buffered byte before the crash:
+            // an interrupted sync or prune legitimately strands unwritten appends.
+            if recovery_input.retention % 101 == 100 && !pruned && recovery_input.final_op % 3 == 0
+            {
                 assert_eq!(
                     expected.len(),
                     recovery_intended.len(),

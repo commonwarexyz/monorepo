@@ -21,6 +21,9 @@ libfuzzer-sys.workspace = true
 rand.workspace = true
 rand_core.workspace = true
 
+[lib]
+bench = false
+
 [[bin]]
 name = "qmdb_unordered_operations"
 path = "fuzz_targets/qmdb_unordered_operations.rs"

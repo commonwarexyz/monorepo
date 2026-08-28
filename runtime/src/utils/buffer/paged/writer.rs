@@ -962,26 +962,6 @@ impl<B: Blob> Writer<B> {
         Ok(recoverable)
     }
 
-    /// Physical bytes occupied by the pages covering `logical_len` logical prefix bytes.
-    ///
-    /// Returns [Error::OffsetOverflow] when the page count or physical length overflows.
-    pub fn physical_len_for_logical_prefix(
-        logical_len: u64,
-        logical_page_size: NonZeroU16,
-    ) -> Result<u64, Error> {
-        if logical_len == 0 {
-            return Ok(0);
-        }
-        let logical_page_size = u64::from(logical_page_size.get());
-        let physical_page_size = logical_page_size
-            .checked_add(CHECKSUM_SIZE)
-            .ok_or(Error::OffsetOverflow)?;
-        logical_len
-            .div_ceil(logical_page_size)
-            .checked_mul(physical_page_size)
-            .ok_or(Error::OffsetOverflow)
-    }
-
     /// Read a logical range directly from a raw paged blob, validating every page it spans.
     ///
     /// Returns [Error::BlobInsufficientLength] when valid page contents do not cover the whole

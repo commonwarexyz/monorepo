@@ -239,6 +239,7 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
                         return Err(Error::MissingRecord(index));
                     }
 
+                    // A committed record that is missing or invalid cannot be recovered
                     if let Some(replay_blob) = replay_blob.as_mut() {
                         replay_blob.seek_to(offset)?;
                         let record_buf = replay_blob.read(Record::<V>::SIZE).await?.coalesce();

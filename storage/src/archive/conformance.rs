@@ -16,6 +16,7 @@ use core::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 use rand::RngExt as _;
 
 const WRITE_BUFFER: NonZeroUsize = NZUsize!(1024);
+const REPLAY_BUFFER: NonZeroUsize = NZUsize!(1024);
 const ITEMS_PER_SECTION: NonZeroU64 = NZU64!(1024);
 const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
@@ -40,7 +41,7 @@ impl StorageWorkload for ArchivePrunableWorkload {
             items_per_section: ITEMS_PER_SECTION,
             key_write_buffer: WRITE_BUFFER,
             value_write_buffer: WRITE_BUFFER,
-            replay_buffer: WRITE_BUFFER,
+            replay_buffer: REPLAY_BUFFER,
         };
         let mut archive =
             prunable::Archive::<_, _, FixedBytes<64>, i32>::init(context.child("archive"), config)
@@ -84,7 +85,7 @@ impl StorageWorkload for ArchiveImmutableWorkload {
             freezer_key_write_buffer: WRITE_BUFFER,
             freezer_value_write_buffer: WRITE_BUFFER,
             ordinal_write_buffer: WRITE_BUFFER,
-            replay_buffer: WRITE_BUFFER,
+            replay_buffer: REPLAY_BUFFER,
             codec_config: (),
         };
         let mut archive =

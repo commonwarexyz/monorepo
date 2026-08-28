@@ -75,7 +75,11 @@ enum PreflightMode {
     /// Preserve each durable validation floor while replay repairs its suffix.
     Floors(BTreeMap<u64, u64>),
     /// Restore one checkpoint section and discard every later section.
-    Restore { section: u64, size: u64 },
+    Restore {
+        /// The checkpoint section remains explicit because an empty checkpoint has no floor.
+        section: u64,
+        floors: BTreeMap<u64, u64>,
+    },
 }
 
 /// Non-mutating recovery evidence and authorized work bound to the storage that produced it.
@@ -210,6 +214,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
 
         let page_size = Self::page_size(&cfg);
         let mut boundaries = BTreeMap::new();
+        let mut floors = BTreeMap::new();
 
         for (&candidate, name) in stored.range(..=section) {
             // Earlier sections end at their retained terminal page. The checkpoint supplies the
@@ -228,6 +233,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
                     )
                     .await
                     .map_err(|err| Self::boundary_error(section, size, err))?;
+                    floors.insert(section, size);
                     Some(A::decode(entry.coalesce()).map_err(Error::Codec)?)
                 }
             } else if physical_size == 0 {
@@ -247,6 +253,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
                         "section {candidate} is not a complete checkpoint-covered index"
                     )));
                 }
+                floors.insert(candidate, logical_size);
                 Some(A::decode(entry.coalesce()).map_err(Error::Codec)?)
             };
             boundaries.insert(candidate, entry);
@@ -256,7 +263,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
             context,
             cfg,
             boundaries,
-            mode: PreflightMode::Restore { section, size },
+            mode: PreflightMode::Restore { section, floors },
         })
     }
 
@@ -275,8 +282,9 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         let (floors, restore) = match mode {
             None => (BTreeMap::new(), None),
             Some(PreflightMode::Floors(floors)) => (floors, None),
-            Some(PreflightMode::Restore { section, size }) => {
-                (BTreeMap::new(), Some((section, size)))
+            Some(PreflightMode::Restore { section, floors }) => {
+                let size = floors.get(&section).copied().unwrap_or(0);
+                (floors, Some((section, size)))
             }
         };
 
@@ -1366,6 +1374,105 @@ mod tests {
                 .destroy()
                 .await
                 .expect("failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_segmented_fixed_restore_retains_empty_checkpoint_section() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = lazy_recovery_cfg(&context, "segmented-fixed-empty-restore");
+            let mut journal = Journal::init(context.child("seed"), cfg.clone())
+                .await
+                .expect("failed to init");
+            for section in 0..=2 {
+                (journal, _) = journal
+                    .append(section, &section)
+                    .await
+                    .expect("failed to append");
+            }
+            journal = journal.sync_all().await.expect("failed to sync");
+            journal = journal
+                .rewind_section(1, 0)
+                .await
+                .expect("failed to empty checkpoint section");
+            journal = journal.sync(1).await.expect("failed to sync empty section");
+            drop(journal);
+
+            let journal = Journal::<_, u64>::preflight_restore(context.child("restore"), cfg, 1, 0)
+                .await
+                .expect("failed to preflight")
+                .finish()
+                .await
+                .expect("failed to finish preflight");
+
+            assert_eq!(journal.sections().collect::<Vec<_>>(), vec![0, 1]);
+            assert_eq!(journal.size(1).expect("missing checkpoint section"), 0);
+            journal.destroy().await.expect("failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_segmented_fixed_restore_floors_block_below_checkpoint_repair() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = lazy_recovery_cfg(&context, "segmented-fixed-restore-floors");
+            let mut journal = Journal::init(context.child("seed"), cfg.clone())
+                .await
+                .expect("failed to init");
+            for section in 0..=1 {
+                for value in 0..16u64 {
+                    (journal, _) = journal
+                        .append(section, &value)
+                        .await
+                        .expect("failed to append");
+                }
+            }
+            journal = journal.sync_all().await.expect("failed to sync");
+            drop(journal);
+
+            // Tear an interior page below the checkpoint boundary. The preflight reads only the
+            // terminal boundary page, so restore succeeds and must arm the proven floor.
+            corrupt_page(&context, &cfg.partition, 1, 2, 16).await;
+            let size = 16 * u64::SIZE as u64;
+            let journal = Journal::<_, u64>::preflight_restore(
+                context.child("restore"),
+                cfg.clone(),
+                1,
+                size,
+            )
+            .await
+            .expect("failed to preflight")
+            .finish()
+            .await
+            .expect("failed to finish preflight");
+
+            // Replay repair may not truncate checkpoint-proven bytes: the torn page sits below
+            // the restore floor, so recovery fails loud instead of mutating.
+            let mut replay = journal
+                .replay(0, 0, NZUsize!(1024), ReadOptions::default())
+                .await
+                .expect("failed to start replay");
+            let mut outcome = None;
+            while let Some(item) = replay.next().await {
+                if let Err(err) = item {
+                    outcome = Some(err);
+                    break;
+                }
+            }
+            assert!(matches!(
+                outcome,
+                Some(Error::Corruption(ref message))
+                    if message.contains("below its 128-byte validation floor")
+            ));
+            drop(replay);
+
+            // The checkpoint-proven bytes stay untouched: eight 28-byte physical pages.
+            let (_, blob_size) = context
+                .open(&cfg.partition, &1u64.to_be_bytes())
+                .await
+                .expect("failed to open");
+            assert_eq!(blob_size, 8 * 28);
         });
     }
 

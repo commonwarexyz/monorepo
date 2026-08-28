@@ -51,6 +51,7 @@ pub const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(512);
 pub const DELETE_FREQUENCY: u32 = 10;
 pub const VARIABLE_VALUE_MAX_LEN: usize = 256;
 pub const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(2 * 1024 * 1024);
+pub const REPLAY_BUFFER_SIZE: NonZeroUsize = NZUsize!(2 * 1024 * 1024);
 pub const INIT_CACHE_SIZE: Option<NonZeroUsize> = Some(NZUsize!(1 << 18));
 
 // -- Fixed value (Digest), fixed storage layout --
@@ -122,7 +123,7 @@ fn merkle_cfg(
         metadata_partition: format!("metadata-{suffix}"),
         items_per_blob,
         write_buffer: WRITE_BUFFER_SIZE,
-        replay_buffer: WRITE_BUFFER_SIZE,
+        replay_buffer: REPLAY_BUFFER_SIZE,
         strategy: ctx.strategy(THREADS),
         page_cache,
     }
@@ -134,7 +135,7 @@ fn fix_log_cfg(suffix: &str, page_cache: CacheRef, items_per_blob: NonZeroU64) -
         items_per_blob,
         page_cache,
         write_buffer: WRITE_BUFFER_SIZE,
-        replay_buffer: WRITE_BUFFER_SIZE,
+        replay_buffer: REPLAY_BUFFER_SIZE,
     }
 }
 
@@ -151,7 +152,7 @@ fn var_log_cfg<C>(
         codec_config,
         page_cache,
         write_buffer: WRITE_BUFFER_SIZE,
-        replay_buffer: WRITE_BUFFER_SIZE,
+        replay_buffer: REPLAY_BUFFER_SIZE,
     }
 }
 

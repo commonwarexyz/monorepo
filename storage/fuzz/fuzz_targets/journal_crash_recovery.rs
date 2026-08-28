@@ -52,6 +52,9 @@ use commonware_storage::journal::{
         variable::{Config as VariableConfig, Journal as VariableJournal},
     },
 };
+use commonware_storage_fuzz::{
+    bounded_buffer, bounded_items, bounded_page_cache_size, bounded_page_size,
+};
 use commonware_utils::{NZU64, NZUsize, Probability, probability, sequence::FixedBytes};
 use futures::StreamExt;
 use libfuzzer_sys::fuzz_target;
@@ -67,37 +70,11 @@ const ITEM_SIZE: usize = 32;
 /// The journal item type.
 type Item = FixedBytes<ITEM_SIZE>;
 
-/// Maximum replay buffer size.
-const MAX_REPLAY_BUF: usize = 2048;
-
-/// Maximum write buffer size.
-const MAX_WRITE_BUF: usize = 2048;
-
 /// Buffer size used for internal verification replays.
 const VERIFY_REPLAY_BUF: usize = 1024;
 
 /// Maximum number of operations per fuzz input.
 const MAX_OPERATIONS: usize = 128;
-
-fn bounded_non_zero(u: &mut Unstructured<'_>) -> arbitrary::Result<usize> {
-    u.int_in_range(1..=MAX_REPLAY_BUF)
-}
-
-fn bounded_page_size(u: &mut Unstructured<'_>) -> arbitrary::Result<u16> {
-    u.int_in_range(1..=256)
-}
-
-fn bounded_page_cache_size(u: &mut Unstructured<'_>) -> arbitrary::Result<usize> {
-    u.int_in_range(1..=16)
-}
-
-fn bounded_items_per_section(u: &mut Unstructured<'_>) -> arbitrary::Result<u64> {
-    u.int_in_range(1..=64)
-}
-
-fn bounded_write_buffer(u: &mut Unstructured<'_>) -> arbitrary::Result<usize> {
-    u.int_in_range(1..=MAX_WRITE_BUF)
-}
 
 /// A fault rate in [0.0, 1.0]. Allows 0 so the fuzzer can disable individual fault types.
 fn bounded_rate(u: &mut Unstructured<'_>) -> arbitrary::Result<Probability> {
@@ -139,7 +116,7 @@ enum JournalOperation {
     Prune { min_pos: u64 },
     /// Replay items from the journal.
     Replay {
-        #[arbitrary(with = bounded_non_zero)]
+        #[arbitrary(with = bounded_buffer)]
         buffer: usize,
         start_pos: u64,
     },
@@ -161,11 +138,14 @@ struct FuzzInput {
     #[arbitrary(with = bounded_page_cache_size)]
     page_cache_size: usize,
     /// Items per section/blob.
-    #[arbitrary(with = bounded_items_per_section)]
+    #[arbitrary(with = bounded_items)]
     items_per_section: u64,
     /// Write buffer size.
-    #[arbitrary(with = bounded_write_buffer)]
+    #[arbitrary(with = bounded_buffer)]
     write_buffer: usize,
+    /// Replay buffer size.
+    #[arbitrary(with = bounded_buffer)]
+    replay_buffer: usize,
     /// Failure and byte-retention configuration for write operations.
     write_config: deterministic::WriteConfig,
     /// Failure rate for sync operations.
@@ -189,6 +169,7 @@ struct Params {
     page_cache_size: NonZeroUsize,
     items_per_section: u64,
     write_buffer: NonZeroUsize,
+    replay_buffer: NonZeroUsize,
     write_config: deterministic::WriteConfig,
     sync_rate: Probability,
     resize_rate: Probability,
@@ -335,7 +316,7 @@ impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
                 params.page_cache_size,
             ),
             write_buffer: params.write_buffer,
-            replay_buffer: params.write_buffer,
+            replay_buffer: params.replay_buffer,
         }
     }
 
@@ -409,7 +390,7 @@ impl FuzzJournal for VariableJournal<deterministic::Context, Item> {
                 params.page_cache_size,
             ),
             write_buffer: params.write_buffer,
-            replay_buffer: params.write_buffer,
+            replay_buffer: params.replay_buffer,
         }
     }
 
@@ -844,6 +825,7 @@ where
         page_cache_size: NonZeroUsize::new(input.page_cache_size).unwrap(),
         items_per_section: input.items_per_section,
         write_buffer: NonZeroUsize::new(input.write_buffer).unwrap(),
+        replay_buffer: NonZeroUsize::new(input.replay_buffer).unwrap(),
         write_config: input.write_config,
         sync_rate: input.sync_failure_rate,
         resize_rate: input.resize_failure_rate,

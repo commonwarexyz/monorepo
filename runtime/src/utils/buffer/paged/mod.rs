@@ -58,8 +58,8 @@ pub use sealed::Sealed;
 use tracing::{debug, error};
 pub use writer::Writer;
 
-// A checksum record contains two slots. Each slot stores one u16 length and one CRC.
-const CHECKSUM_SIZE: u64 = Checksum::SIZE as u64;
+/// Size in bytes of the checksum record appended to each logical page.
+pub const CHECKSUM_SIZE: u64 = Checksum::SIZE as u64;
 
 /// The storage-page granularity physical pages should align to (see the module docs).
 pub(crate) const STORAGE_PAGE_SIZE: u64 = 4096;

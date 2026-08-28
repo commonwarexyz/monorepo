@@ -3,7 +3,7 @@
 //! Fuzz test for Merkle Merkle crash recovery with fault injection.
 //! Tests both MMR and MMB families.
 
-use arbitrary::{Arbitrary, Result, Unstructured};
+use arbitrary::Arbitrary;
 use commonware_cryptography::{Sha256, sha256::Digest};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
@@ -13,39 +13,18 @@ use commonware_storage::merkle::{
     Bagging::ForwardFold, Family as MerkleFamily, Location, Position, full::Config,
     hasher::Standard as StandardHasher, mem::Mem, mmb, mmr,
 };
-use commonware_utils::{NZU64, Probability, probability};
+use commonware_storage_fuzz::{
+    bounded_buffer, bounded_items, bounded_nonzero_rate, bounded_page_cache_size, bounded_page_size,
+};
+use commonware_utils::{NZU64, Probability};
 use libfuzzer_sys::fuzz_target;
 use std::num::{NonZeroU16, NonZeroUsize};
 
 /// Data size for leaves.
 const DATA_SIZE: usize = 32;
 
-/// Maximum write buffer size.
-const MAX_WRITE_BUF: usize = 2048;
-
 type Merkle<F> =
     commonware_storage::merkle::full::Merkle<F, deterministic::Context, Digest, Sequential>;
-
-fn bounded_page_size(u: &mut Unstructured<'_>) -> Result<u16> {
-    u.int_in_range(1..=256)
-}
-
-fn bounded_page_cache_size(u: &mut Unstructured<'_>) -> Result<usize> {
-    u.int_in_range(1..=16)
-}
-
-fn bounded_items_per_blob(u: &mut Unstructured<'_>) -> Result<u64> {
-    u.int_in_range(1..=64)
-}
-
-fn bounded_write_buffer(u: &mut Unstructured<'_>) -> Result<usize> {
-    u.int_in_range(1..=MAX_WRITE_BUF)
-}
-
-fn bounded_nonzero_rate(u: &mut Unstructured<'_>) -> Result<Probability> {
-    let percent: u8 = u.int_in_range(1..=100)?;
-    Ok(probability!(u64::from(percent), 100))
-}
 
 /// Operations that can be performed on the Merkle structure.
 #[derive(Arbitrary, Debug, Clone)]
@@ -72,11 +51,14 @@ struct FuzzInput {
     #[arbitrary(with = bounded_page_cache_size)]
     page_cache_size: usize,
     /// Items per blob.
-    #[arbitrary(with = bounded_items_per_blob)]
+    #[arbitrary(with = bounded_items)]
     items_per_blob: u64,
     /// Write buffer size.
-    #[arbitrary(with = bounded_write_buffer)]
+    #[arbitrary(with = bounded_buffer)]
     write_buffer: usize,
+    /// Replay buffer size.
+    #[arbitrary(with = bounded_buffer)]
+    replay_buffer: usize,
     /// Failure rate for sync operations (0, 1].
     #[arbitrary(with = bounded_nonzero_rate)]
     sync_failure_rate: Probability,
@@ -93,13 +75,14 @@ fn merkle_config(
     page_cache_size: NonZeroUsize,
     items_per_blob: u64,
     write_buffer: NonZeroUsize,
+    replay_buffer: NonZeroUsize,
 ) -> Config<Sequential> {
     Config {
         journal_partition: format!("journal-{partition_suffix}"),
         metadata_partition: format!("metadata-{partition_suffix}"),
         items_per_blob: NZU64!(items_per_blob),
         write_buffer,
-        replay_buffer: write_buffer,
+        replay_buffer,
         strategy: Sequential,
         page_cache: CacheRef::from_pooler(pooler, page_size, page_cache_size),
     }
@@ -236,6 +219,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
     let page_cache_size = NonZeroUsize::new(input.page_cache_size).unwrap();
     let items_per_blob = input.items_per_blob;
     let write_buffer = NonZeroUsize::new(input.write_buffer).unwrap();
+    let replay_buffer = NonZeroUsize::new(input.replay_buffer).unwrap();
     let cfg = deterministic::Config::default().with_seed(input.seed);
     let partition_suffix = format!("crash-{suffix}-{}", input.seed);
     let runner = deterministic::Runner::new(cfg);
@@ -259,6 +243,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                     page_cache_size,
                     items_per_blob,
                     write_buffer,
+                    replay_buffer,
                 ),
             )
             .await
@@ -291,6 +276,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                 page_cache_size,
                 items_per_blob,
                 write_buffer,
+                replay_buffer,
             ),
         )
         .await

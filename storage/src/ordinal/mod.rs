@@ -2047,7 +2047,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_init_corrupted_records() {
+    fn test_marked_record_damage_surfaces_at_get() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {

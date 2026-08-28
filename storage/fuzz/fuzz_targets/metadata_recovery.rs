@@ -185,8 +185,16 @@ fn run(input: &FuzzInput, mode: PartialWriteMode) {
         }
 
         // Prove the repaired store remains writable and that the selected state survives a clean
-        // sync and reopen.
+        // sync and reopen. Shrink first: a stale tail left behind by an unrepaired mirror would
+        // survive the larger sentinel rewrite, so the first write must be smaller than any
+        // reachable crash image.
         let mut expected = recovered;
+        metadata.remove(&U64::new(0));
+        expected.remove(&0);
+        metadata = metadata
+            .sync()
+            .await
+            .expect("post-recovery shrink sync failed");
         let sentinel = vec![0xEF; 32];
         metadata.put(U64::new(SENTINEL_KEY), sentinel.clone());
         expected.insert(SENTINEL_KEY, sentinel);

@@ -2944,7 +2944,7 @@ mod tests {
             items_per_blob: cfg.items_per_blob,
             page_cache: cfg.page_cache.clone(),
             write_buffer: cfg.write_buffer,
-            replay_buffer: cfg.write_buffer,
+            replay_buffer: cfg.replay_buffer,
         };
         let journal = Journal::<_, Digest>::init(context.child("interrupted_reset"), journal_cfg)
             .await
