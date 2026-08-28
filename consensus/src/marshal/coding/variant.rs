@@ -25,14 +25,14 @@ use std::{future::Future, sync::Arc};
 #[derive(Default)]
 pub struct Coding<B, C, H, P>(std::marker::PhantomData<(B, C, H, P)>)
 where
-    B: CertifiableBlock<Context = Context<Commitment, P>>,
+    B: CertifiableBlock<Context = Context<Commitment<B, C, H>, P>>,
     C: CodingScheme,
     H: Hasher,
     P: PublicKey;
 
 impl<B, C, H, P> Clone for Coding<B, C, H, P>
 where
-    B: CertifiableBlock<Context = Context<Commitment, P>>,
+    B: CertifiableBlock<Context = Context<Commitment<B, C, H>, P>>,
     C: CodingScheme,
     H: Hasher,
     P: PublicKey,
@@ -44,7 +44,7 @@ where
 
 impl<B, C, H, P> Copy for Coding<B, C, H, P>
 where
-    B: CertifiableBlock<Context = Context<Commitment, P>>,
+    B: CertifiableBlock<Context = Context<Commitment<B, C, H>, P>>,
     C: CodingScheme,
     H: Hasher,
     P: PublicKey,
@@ -53,7 +53,7 @@ where
 
 impl<B, C, H, P> Variant for Coding<B, C, H, P>
 where
-    B: CertifiableBlock<Context = Context<Commitment, P>>,
+    B: CertifiableBlock<Context = Context<Commitment<B, C, H>, P>>,
     C: CodingScheme,
     H: Hasher,
     P: PublicKey,
@@ -61,7 +61,7 @@ where
     type ApplicationBlock = B;
     type Block = CodedBlock<B, C, H>;
     type StoredBlock = StoredCodedBlock<B, C, H>;
-    type Commitment = Commitment;
+    type Commitment = Commitment<B, C, H>;
 
     fn commitment(block: &Self::Block) -> Self::Commitment {
         // Commitment is deterministic from the coded block contents.
@@ -123,7 +123,7 @@ where
 
 impl<B, C, H, P> Buffer<Coding<B, C, H, P>> for shards::Mailbox<B, C, H, P>
 where
-    B: CertifiableBlock<Context = Context<Commitment, P>>,
+    B: CertifiableBlock<Context = Context<Commitment<B, C, H>, P>>,
     C: CodingScheme,
     H: Hasher,
     P: PublicKey,
@@ -137,7 +137,10 @@ where
         self.get_by_digest(digest).await
     }
 
-    async fn find_by_commitment(&self, commitment: Commitment) -> Option<Arc<CodedBlock<B, C, H>>> {
+    async fn find_by_commitment(
+        &self,
+        commitment: Commitment<B, C, H>,
+    ) -> Option<Arc<CodedBlock<B, C, H>>> {
         self.get(commitment).await
     }
 
@@ -150,12 +153,12 @@ where
 
     fn subscribe_by_commitment(
         &self,
-        commitment: Commitment,
+        commitment: Commitment<B, C, H>,
     ) -> Option<oneshot::Receiver<Arc<CodedBlock<B, C, H>>>> {
         Some(self.subscribe(commitment))
     }
 
-    fn retire(&self, update: Retirement<Commitment>) {
+    fn retire(&self, update: Retirement<Commitment<B, C, H>>) {
         Self::retire(self, update);
     }
 
@@ -168,7 +171,7 @@ where
 impl<S, B, C, H, P> BlockProvider for Mailbox<S, Coding<B, C, H, P>>
 where
     S: Scheme,
-    B: CertifiableBlock<Context = Context<Commitment, P>>,
+    B: CertifiableBlock<Context = Context<Commitment<B, C, H>, P>>,
     C: CodingScheme,
     H: Hasher,
     P: PublicKey,
@@ -210,7 +213,8 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_utils::{NZU16, test_rng};
 
-    type TestContext = Context<Commitment, PublicKey>;
+    type TestCommitment = Commitment<NoCloneBlock, ReedSolomon<Sha256>, Sha256>;
+    type TestContext = Context<TestCommitment, PublicKey>;
     type InnerBlock = Block<Sha256Digest, TestContext>;
 
     struct NoCloneBlock {
@@ -276,7 +280,7 @@ mod tests {
     fn no_clone_block(config: CodingConfig) -> NoCloneBlock {
         let mut rng = test_rng();
         let leader = PrivateKey::random(&mut rng).public_key();
-        let parent_commitment = Commitment::from((
+        let parent_commitment = TestCommitment::from((
             Sha256Digest::EMPTY,
             Sha256Digest::EMPTY,
             Sha256Digest::EMPTY,

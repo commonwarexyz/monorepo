@@ -24,8 +24,7 @@
 //! align, regardless of the page size chosen.
 //!
 //! Alignment is a performance property, not a correctness requirement: any page size works, but
-//! physical pages that straddle storage-page boundaries amplify cold random reads, so
-//! [CacheRef::new] logs a warning when configured with one.
+//! physical pages that straddle storage-page boundaries amplify cold random reads.
 //!
 //! Two checksums are stored so that re-writing a partial page cannot destroy the valid checksum
 //! for its last durable contents. Each rewrite covers the whole physical page: the new checksum
