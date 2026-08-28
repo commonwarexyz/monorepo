@@ -1,7 +1,9 @@
-//! Keyless compact adapter: batches append values.
+//! Compact [`ManagedDb`](crate::stateful::db::ManagedDb) support for QMDB
+//! [`keyless`](commonware_storage::qmdb::keyless) databases.
 //!
-//! See [`crate::stateful::db::compact`] for the shared
-//! [`ManagedDb`](crate::stateful::db::ManagedDb) implementation.
+//! These compact databases retain only the current Merkle peaks, so the adapter exposes append
+//! and merkleization operations but no historical reads. The shared implementation lives in
+//! [`crate::stateful::db::compact`].
 
 use crate::stateful::db::compact::CompactUnmerkleized;
 use commonware_codec::CodecShared;

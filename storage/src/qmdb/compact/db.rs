@@ -28,11 +28,10 @@
 //! # Inactivity floor
 //!
 //! Commits carry the inactivity floor so the compact db's commit leaves and root match the full
-//! db's: the root is computed over the peaks the floor leaves active. The floor drives no pruning
-//! or retention here.
+//! db's: the root is computed over the peaks the floor leaves active.
 
 use super::{
-    Config, Variant, batch as compact_batch,
+    Config, Operation, batch as compact_batch,
     witness::{self, Rebuilt, VerifiedWitness, Witness},
 };
 use crate::{
@@ -69,14 +68,11 @@ enum TipState {
 
 /// A compact authenticated db that discards historical operations, retaining only a witness
 /// for each applied batch.
-///
-/// Use [`crate::qmdb::keyless::CompactDb`] or [`crate::qmdb::immutable::CompactDb`] rather than
-/// naming this type directly.
 pub struct Db<F, E, O, H, S: Strategy>
 where
     F: Family,
     E: Context,
-    O: Variant<F>,
+    O: Operation<F>,
     H: Hasher,
 {
     /// The peak-only Merkle the witnesses describe.
@@ -85,7 +81,7 @@ where
     /// The journal of witnesses, one per applied batch.
     journal: witness::Journal<E, F, H::Digest, O>,
 
-    /// The verified tip witness; `tip_state` says whether it is in the journal.
+    /// The verified tip witness.
     tip: VerifiedWitness<F, H::Digest, O>,
 
     /// Whether the tip is journaled and durable.
@@ -100,7 +96,7 @@ impl<F, E, O, H, S: Strategy> std::fmt::Debug for Db<F, E, O, H, S>
 where
     F: Family,
     E: Context,
-    O: Variant<F>,
+    O: Operation<F>,
     H: Hasher,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -115,7 +111,7 @@ impl<F, E, O, H, S> Db<F, E, O, H, S>
 where
     F: Family,
     E: Context,
-    O: Variant<F>,
+    O: Operation<F>,
     H: Hasher,
     S: Strategy,
 {
@@ -242,9 +238,6 @@ where
 
     /// Check that `batch` can be applied to the database in its current state, without
     /// applying it.
-    ///
-    /// [`Self::apply_batch`] runs the same validation but consumes the database when it
-    /// fails; callers that want to reject a bad batch and keep the handle can check first.
     pub fn validate_batch(
         &self,
         batch: &MerkleizedBatch<F, H::Digest, O, S>,
@@ -273,7 +266,7 @@ where
         name = "qmdb.compact.db.apply_batch",
         level = "info",
         skip_all,
-        fields(variant = O::NAME)
+        fields(kind = O::NAME)
     )]
     pub async fn apply_batch(
         mut self,
@@ -340,7 +333,7 @@ where
         name = "qmdb.compact.db.start_sync",
         level = "info",
         skip_all,
-        fields(variant = O::NAME)
+        fields(kind = O::NAME)
     )]
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error<F>> {
         // Match the deferred-failure convention used by the journal: return a prior completion's
@@ -373,7 +366,7 @@ where
         name = "qmdb.compact.db.commit",
         level = "info",
         skip_all,
-        fields(variant = O::NAME)
+        fields(kind = O::NAME)
     )]
     pub async fn commit(mut self) -> Result<Self, Error<F>> {
         self.wait_for_sync().await?;
@@ -393,7 +386,7 @@ where
         name = "qmdb.compact.db.sync",
         level = "info",
         skip_all,
-        fields(variant = O::NAME)
+        fields(kind = O::NAME)
     )]
     pub async fn sync(mut self) -> Result<Self, Error<F>> {
         self = self.flush_import().await?;
@@ -440,7 +433,7 @@ where
         name = "qmdb.compact.db.rewind",
         level = "info",
         skip_all,
-        fields(variant = O::NAME)
+        fields(kind = O::NAME)
     )]
     pub async fn rewind(mut self, target: Location<F>) -> Result<Self, Error<F>> {
         if self.tip.size() == target && self.tip_state == TipState::Committed {
@@ -479,7 +472,7 @@ where
         name = "qmdb.compact.db.prune",
         level = "info",
         skip_all,
-        fields(variant = O::NAME)
+        fields(kind = O::NAME)
     )]
     pub async fn prune(mut self, pruning_boundary: Location<F>) -> Result<Self, Error<F>> {
         self.check_import_applied()?;
@@ -581,7 +574,7 @@ pub struct UnmerkleizedBatch<F, H, O, S: Strategy>
 where
     F: Family,
     H: Hasher,
-    O: Variant<F>,
+    O: Operation<F>,
 {
     merkle_batch: compact_merkle::UnmerkleizedBatch<F, H::Digest, S>,
     pub(in crate::qmdb) mutations: O::Mutations,
@@ -593,7 +586,7 @@ impl<F, H, O, S> UnmerkleizedBatch<F, H, O, S>
 where
     F: Family,
     H: Hasher,
-    O: Variant<F>,
+    O: Operation<F>,
     S: Strategy,
 {
     fn new<E>(db: &Db<F, E, O, H, S>, base: Commitment<F, H::Digest>) -> Self
@@ -626,7 +619,7 @@ where
         name = "qmdb.compact.batch.merkleize",
         level = "info",
         skip_all,
-        fields(variant = O::NAME)
+        fields(kind = O::NAME)
     )]
     pub async fn merkleize<E>(
         self,
@@ -685,14 +678,14 @@ where
 
 /// A speculative batch whose root digest has been computed.
 #[derive(Clone)]
-pub struct MerkleizedBatch<F: Family, D: Digest, O: Variant<F>, S: Strategy> {
+pub struct MerkleizedBatch<F: Family, D: Digest, O: Operation<F>, S: Strategy> {
     merkle_batch: Arc<batch::MerkleizedBatch<F, D, S>>,
     commit: O,
     parent: Option<Weak<Self>>,
     bounds: Bounds<F, D>,
 }
 
-impl<F: Family, D: Digest, O: Variant<F>, S: Strategy> MerkleizedBatch<F, D, O, S> {
+impl<F: Family, D: Digest, O: Operation<F>, S: Strategy> MerkleizedBatch<F, D, O, S> {
     fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> + use<F, D, O, S> {
         batch_chain::ancestors(self.parent.clone(), |batch| batch.parent.as_ref())
     }
@@ -732,7 +725,7 @@ impl<F: Family, D: Digest, O: Variant<F>, S: Strategy> MerkleizedBatch<F, D, O, 
 pub fn initial_root<F, O, H>() -> H::Digest
 where
     F: Family,
-    O: Variant<F>,
+    O: Operation<F>,
     H: Hasher,
 {
     qmdb::single_operation_root::<F, H>(&O::commit(None, Location::new(0)))
@@ -742,7 +735,7 @@ impl<F, E, O, H, S> Source for Db<F, E, O, H, S>
 where
     F: Family,
     E: Context,
-    O: Variant<F>,
+    O: Operation<F>,
     H: Hasher,
     S: Strategy,
 {
@@ -778,9 +771,9 @@ pub(crate) mod tests {
     use core::future::Future;
     use std::num::{NonZeroU16, NonZeroUsize};
 
-    /// A compact db variant under test: its values and mutations derive from a seed.
-    pub(crate) trait TestVariant:
-        Variant<mmr::Family, Metadata: PartialEq + std::fmt::Debug, Cfg = ()>
+    /// An operation type under test: its values and mutations derive from a seed.
+    pub(crate) trait TestOperation:
+        Operation<mmr::Family, Metadata: PartialEq + std::fmt::Debug, Cfg = ()>
     {
         /// The value (and commit metadata) for `seed`.
         fn value(seed: u64) -> Self::Metadata;
@@ -792,12 +785,12 @@ pub(crate) mod tests {
     pub(crate) type TestDb<O> = Db<mmr::Family, deterministic::Context, O, Sha256, Sequential>;
     pub(crate) type TestBatch<O> = UnmerkleizedBatch<mmr::Family, Sha256, O, Sequential>;
 
-    /// Lets tests write `batch.mutate(seed)` for any variant.
+    /// Lets tests write `batch.mutate(seed)` for any operation type.
     trait Mutate {
         fn mutate(self, seed: u64) -> Self;
     }
 
-    impl<O: TestVariant> Mutate for TestBatch<O> {
+    impl<O: TestOperation> Mutate for TestBatch<O> {
         fn mutate(self, seed: u64) -> Self {
             O::mutate(self, seed)
         }
@@ -817,7 +810,7 @@ pub(crate) mod tests {
         }
     }
 
-    pub(crate) async fn open_db<O: TestVariant>(
+    pub(crate) async fn open_db<O: TestOperation>(
         context: deterministic::Context,
         partition: &str,
     ) -> TestDb<O> {
@@ -826,7 +819,7 @@ pub(crate) mod tests {
     }
 
     /// Open the witness journal for `partition`; `open_db` and the tip-corrupting tests share it.
-    async fn open_witness_journal<O: TestVariant>(
+    async fn open_witness_journal<O: TestOperation>(
         context: deterministic::Context,
         partition: &str,
     ) -> witness::Journal<deterministic::Context, mmr::Family, Digest, O> {
@@ -836,7 +829,7 @@ pub(crate) mod tests {
 
     /// The witness serves only the request matching its single committed state. Each mismatch
     /// reports the same error a pruned operation log would.
-    pub(crate) fn test_serve_refuses_requests_outside_witness<O: TestVariant>() {
+    pub(crate) fn test_serve_refuses_requests_outside_witness<O: TestOperation>() {
         deterministic::Runner::default().start(|context| async move {
             let db = open_db::<O>(context.child("db"), "compact-serve-refusal").await;
             let floor = db.inactivity_floor_loc();
@@ -909,7 +902,7 @@ pub(crate) mod tests {
     ///
     /// Init durably persists the bootstrap witness, so while syncs park the returned future
     /// must be driven with [drive_pending_syncs] (or the mock unblocked first).
-    fn open_delayed_db<O: TestVariant>(
+    fn open_delayed_db<O: TestOperation>(
         context: &deterministic::Context,
         label: &'static str,
         partition: &str,
@@ -927,7 +920,7 @@ pub(crate) mod tests {
     }
 
     /// Apply a batch holding the one mutation for `seed`, with `seed`'s value as metadata.
-    async fn apply<O: TestVariant>(db: DelayedDb<O>, seed: u64) -> DelayedDb<O> {
+    async fn apply<O: TestOperation>(db: DelayedDb<O>, seed: u64) -> DelayedDb<O> {
         let floor = db.inactivity_floor_loc();
         let batch = db
             .new_batch()
@@ -939,7 +932,7 @@ pub(crate) mod tests {
     }
 
     /// Leave a failed recovery-watermark sync retained after dropping its public handle.
-    async fn fail_dropped_watermark_sync<O: TestVariant>(
+    async fn fail_dropped_watermark_sync<O: TestOperation>(
         mut db: DelayedDb<O>,
         pending: &PendingSyncs,
     ) -> DelayedDb<O> {
@@ -961,7 +954,7 @@ pub(crate) mod tests {
     }
 
     /// Applying a successor does not wait for the witness sync already in flight.
-    pub(crate) fn test_compact_apply_overlaps_start_sync<O: TestVariant>() {
+    pub(crate) fn test_compact_apply_overlaps_start_sync<O: TestOperation>() {
         deterministic::Runner::default().start(|ctx| async move {
             let partition = "compact-start-sync-overlap";
             let pending = PendingSyncs::default();
@@ -1016,7 +1009,7 @@ pub(crate) mod tests {
     }
 
     /// State persisted via an awaited start_sync handle is recovered on reopen.
-    pub(crate) fn test_compact_start_sync_recovery<O: TestVariant>() {
+    pub(crate) fn test_compact_start_sync_recovery<O: TestOperation>() {
         deterministic::Runner::default().start(|ctx| async move {
             let partition = "compact-start-sync-recovery";
             let pending = PendingSyncs::default();
@@ -1044,7 +1037,7 @@ pub(crate) mod tests {
     /// A sync begun by `start_sync` that fails in flight surfaces the error through both the
     /// returned handle and the next durability operation, even when that operation has nothing
     /// new to persist.
-    pub(crate) fn test_compact_start_sync_failure_propagates<O: TestVariant>() {
+    pub(crate) fn test_compact_start_sync_failure_propagates<O: TestOperation>() {
         deterministic::Runner::default().start(|ctx| async move {
             let pending = PendingSyncs::default();
             pending.unblock();
@@ -1080,7 +1073,7 @@ pub(crate) mod tests {
 
     /// A `sync` with nothing new to persist still drains (and proves) the sync started by a
     /// prior `start_sync`.
-    pub(crate) fn test_compact_start_sync_then_noop_sync_drains<O: TestVariant>() {
+    pub(crate) fn test_compact_start_sync_then_noop_sync_drains<O: TestOperation>() {
         deterministic::Runner::default().start(|ctx| async move {
             let partition = "compact-start-sync-noop-drain";
             let pending = PendingSyncs::default();
@@ -1118,7 +1111,9 @@ pub(crate) mod tests {
     }
 
     /// A no-op `sync` returns a retained metadata failure before starting new journal work.
-    pub(crate) fn test_compact_start_sync_then_noop_sync_fails_without_new_work<O: TestVariant>() {
+    pub(crate) fn test_compact_start_sync_then_noop_sync_fails_without_new_work<
+        O: TestOperation,
+    >() {
         deterministic::Runner::default().start(|ctx| async move {
             let pending = PendingSyncs::default();
             let open = open_delayed_db::<O>(
@@ -1147,7 +1142,7 @@ pub(crate) mod tests {
     /// A `commit` with nothing new to persist still waits for the sync started by a prior
     /// `start_sync` before reporting the tip durable, and starts no journal work when that
     /// sync succeeds.
-    pub(crate) fn test_compact_start_sync_then_noop_commit_waits<O: TestVariant>() {
+    pub(crate) fn test_compact_start_sync_then_noop_commit_waits<O: TestOperation>() {
         deterministic::Runner::default().start(|ctx| async move {
             let pending = PendingSyncs::default();
             let open =
@@ -1180,7 +1175,7 @@ pub(crate) mod tests {
 
     /// A `start_sync` with nothing new to persist returns a working handle and appends no
     /// duplicate witness entry.
-    pub(crate) fn test_compact_start_sync_noop_second_call<O: TestVariant>() {
+    pub(crate) fn test_compact_start_sync_noop_second_call<O: TestOperation>() {
         deterministic::Runner::default().start(|ctx| async move {
             let partition = "compact-start-sync-noop-second";
             let pending = PendingSyncs::default();
@@ -1216,7 +1211,7 @@ pub(crate) mod tests {
 
     /// A rewind to the current size waits for the in-flight sync and adopts its proof of
     /// durability instead of starting new journal work.
-    pub(crate) fn test_compact_start_sync_rewind_fast_path_drains<O: TestVariant>() {
+    pub(crate) fn test_compact_start_sync_rewind_fast_path_drains<O: TestOperation>() {
         deterministic::Runner::default().start(|ctx| async move {
             let partition = "compact-start-sync-rewind-drain";
             let pending = PendingSyncs::default();
@@ -1259,7 +1254,7 @@ pub(crate) mod tests {
 
     /// A rewind to the current size fails when the sync started for the tip witness has
     /// already failed, rather than reporting the unproven tip as durable.
-    pub(crate) fn test_compact_start_sync_rewind_fast_path_fails<O: TestVariant>() {
+    pub(crate) fn test_compact_start_sync_rewind_fast_path_fails<O: TestOperation>() {
         deterministic::Runner::default().start(|ctx| async move {
             let pending = PendingSyncs::default();
             pending.unblock();
@@ -1283,7 +1278,9 @@ pub(crate) mod tests {
 
     /// A metadata sync failure from `start_sync` resurfaces on the next `commit`, even when
     /// that commit has new state to persist.
-    pub(crate) fn test_compact_start_sync_metadata_failure_resurfaces_on_commit<O: TestVariant>() {
+    pub(crate) fn test_compact_start_sync_metadata_failure_resurfaces_on_commit<
+        O: TestOperation,
+    >() {
         deterministic::Runner::default().start(|ctx| async move {
             let pending = PendingSyncs::default();
             let open =
@@ -1332,7 +1329,7 @@ pub(crate) mod tests {
     }
 
     /// A later `start_sync` cannot replace an unobserved failure from the prior handle.
-    pub(crate) fn test_compact_start_sync_retains_dropped_metadata_failure<O: TestVariant>() {
+    pub(crate) fn test_compact_start_sync_retains_dropped_metadata_failure<O: TestOperation>() {
         deterministic::Runner::default().start(|ctx| async move {
             let pending = PendingSyncs::default();
             let open = open_delayed_db::<O>(
@@ -1360,7 +1357,7 @@ pub(crate) mod tests {
 
     /// Once a start_sync handle completes successfully, a commit and a rewind to the current
     /// size have nothing left to prove and touch no storage.
-    pub(crate) fn test_compact_start_sync_proven_skips_journal<O: TestVariant>() {
+    pub(crate) fn test_compact_start_sync_proven_skips_journal<O: TestOperation>() {
         deterministic::Runner::default().start(|ctx| async move {
             let pending = PendingSyncs::default();
             pending.unblock();
@@ -1389,7 +1386,7 @@ pub(crate) mod tests {
 
     /// The first persist after a compact-sync import can be pipelined: awaiting the handle
     /// makes the imported witness durable.
-    pub(crate) fn test_compact_start_sync_persists_import<O: TestVariant>() {
+    pub(crate) fn test_compact_start_sync_persists_import<O: TestOperation>() {
         deterministic::Runner::default().start(|context| async move {
             let dst = "compact-import-start-sync-dst";
             let src = "compact-import-start-sync-src";
@@ -1452,7 +1449,7 @@ pub(crate) mod tests {
         });
     }
 
-    pub(crate) fn test_compact_stale_batch_rejected<O: TestVariant>() {
+    pub(crate) fn test_compact_stale_batch_rejected<O: TestOperation>() {
         deterministic::Runner::default().start(|context| async move {
             let db = open_db::<O>(context.child("db"), "compact-stale").await;
             let floor = db.inactivity_floor_loc();
@@ -1478,7 +1475,7 @@ pub(crate) mod tests {
         });
     }
 
-    pub(crate) fn test_compact_delayed_merkleize_after_ancestor_apply<O: TestVariant>() {
+    pub(crate) fn test_compact_delayed_merkleize_after_ancestor_apply<O: TestOperation>() {
         deterministic::Runner::default().start(|context| async move {
             let db = open_db::<O>(context.child("db"), "compact-delayed-child").await;
             let floor = db.inactivity_floor_loc();
@@ -1501,7 +1498,7 @@ pub(crate) mod tests {
     }
 
     /// `to_batch()` reflects the current applied state before it becomes durable.
-    pub(crate) fn test_compact_to_batch_reflects_live_state<O: TestVariant>() {
+    pub(crate) fn test_compact_to_batch_reflects_live_state<O: TestOperation>() {
         deterministic::Runner::default().start(|context| async move {
             let db = open_db::<O>(context.child("db"), "compact-to-batch-live").await;
             let floor = db.inactivity_floor_loc();
@@ -1539,7 +1536,7 @@ pub(crate) mod tests {
         });
     }
 
-    pub(crate) fn test_compact_stale_batch_chained<O: TestVariant>() {
+    pub(crate) fn test_compact_stale_batch_chained<O: TestOperation>() {
         deterministic::Runner::default().start(|context| async move {
             let db = open_db::<O>(context.child("db"), "compact-chained-stale").await;
             let floor = db.inactivity_floor_loc();
@@ -1590,7 +1587,7 @@ pub(crate) mod tests {
         });
     }
 
-    pub(crate) fn test_compact_stale_parent_after_child_applied<O: TestVariant>() {
+    pub(crate) fn test_compact_stale_parent_after_child_applied<O: TestOperation>() {
         deterministic::Runner::default().start(|context| async move {
             let db = open_db::<O>(context.child("db"), "compact-child-before-parent").await;
             let floor = db.inactivity_floor_loc();
@@ -1614,7 +1611,7 @@ pub(crate) mod tests {
         });
     }
 
-    pub(crate) fn test_compact_sequential_commit_parent_then_child<O: TestVariant>() {
+    pub(crate) fn test_compact_sequential_commit_parent_then_child<O: TestOperation>() {
         deterministic::Runner::default().start(|context| async move {
             let db = open_db::<O>(context.child("db"), "compact-parent-child").await;
             let floor = db.inactivity_floor_loc();
@@ -1641,7 +1638,7 @@ pub(crate) mod tests {
         });
     }
 
-    pub(crate) fn test_compact_floor_regressed<O: TestVariant>() {
+    pub(crate) fn test_compact_floor_regressed<O: TestOperation>() {
         deterministic::Runner::default().start(|context| async move {
             let db = open_db::<O>(context.child("db"), "compact-floor-regressed").await;
 
@@ -1672,7 +1669,7 @@ pub(crate) mod tests {
     /// A chained batch whose tip floor is below its parent's floor must be rejected:
     /// the parent's Commit participates in the per-commit monotonicity invariant even
     /// before it is applied.
-    pub(crate) fn test_compact_ancestor_floor_regressed<O: TestVariant>() {
+    pub(crate) fn test_compact_ancestor_floor_regressed<O: TestOperation>() {
         deterministic::Runner::default().start(|context| async move {
             let db = open_db::<O>(context.child("db"), "compact-ancestor-floor-regressed").await;
 
@@ -1703,7 +1700,7 @@ pub(crate) mod tests {
         });
     }
 
-    pub(crate) fn test_compact_rewind_restores_commit_metadata_and_floor<O: TestVariant>() {
+    pub(crate) fn test_compact_rewind_restores_commit_metadata_and_floor<O: TestOperation>() {
         deterministic::Runner::default().start(|context| async move {
             let db = open_db::<O>(context.child("db"), "compact-rewind-meta").await;
 
@@ -1740,7 +1737,7 @@ pub(crate) mod tests {
         });
     }
 
-    pub(crate) fn test_compact_rewind_persists_across_reopen<O: TestVariant>() {
+    pub(crate) fn test_compact_rewind_persists_across_reopen<O: TestOperation>() {
         deterministic::Runner::default().start(|context| async move {
             let partition = "compact-rewind-reopen";
             let meta1 = O::value(11);
@@ -1781,7 +1778,7 @@ pub(crate) mod tests {
         });
     }
 
-    pub(crate) fn test_compact_commit_persists_across_reopen<O: TestVariant>() {
+    pub(crate) fn test_compact_commit_persists_across_reopen<O: TestOperation>() {
         deterministic::Runner::default().start(|context| async move {
             let partition = "compact-commit-reopen";
             let meta1 = O::value(11);
@@ -1816,7 +1813,7 @@ pub(crate) mod tests {
         });
     }
 
-    pub(crate) fn test_compact_rewind_to_committed_entry_after_reopen<O: TestVariant>() {
+    pub(crate) fn test_compact_rewind_to_committed_entry_after_reopen<O: TestOperation>() {
         deterministic::Runner::default().start(|context| async move {
             let partition = "compact-commit-rewind-reopen";
             let meta1 = O::value(11);
@@ -1854,7 +1851,7 @@ pub(crate) mod tests {
         });
     }
 
-    pub(crate) fn test_compact_sync_after_commit<O: TestVariant>() {
+    pub(crate) fn test_compact_sync_after_commit<O: TestOperation>() {
         deterministic::Runner::default().start(|context| async move {
             let partition = "compact-sync-after-commit";
             let meta = O::value(11);
@@ -1880,7 +1877,7 @@ pub(crate) mod tests {
         });
     }
 
-    pub(crate) fn test_compact_import_persists_with_commit<O: TestVariant>() {
+    pub(crate) fn test_compact_import_persists_with_commit<O: TestOperation>() {
         deterministic::Runner::default().start(|context| async move {
             let dst = "compact-import-commit-dst";
             let src = "compact-import-commit-src";
@@ -1952,7 +1949,7 @@ pub(crate) mod tests {
 
     /// Applying a batch to an import-pending db journals the imported witness in place of the
     /// partition's previous contents before appending the new one.
-    pub(crate) fn test_compact_import_then_apply_persists<O: TestVariant>() {
+    pub(crate) fn test_compact_import_then_apply_persists<O: TestOperation>() {
         deterministic::Runner::default().start(|context| async move {
             let dst = "compact-import-apply-dst";
             let src = "compact-import-apply-src";
@@ -2037,7 +2034,7 @@ pub(crate) mod tests {
         });
     }
 
-    pub(crate) fn test_compact_reopen_rejects_tampered_witness<O: TestVariant>() {
+    pub(crate) fn test_compact_reopen_rejects_tampered_witness<O: TestOperation>() {
         deterministic::Runner::default().start(|context| async move {
             let partition = "compact-witness-tamper";
             let db = open_db::<O>(context.child("db"), partition).await;
@@ -2063,7 +2060,7 @@ pub(crate) mod tests {
         });
     }
 
-    pub(crate) fn test_compact_rewind_rejects_corrupt_target_entry<O: TestVariant>() {
+    pub(crate) fn test_compact_rewind_rejects_corrupt_target_entry<O: TestOperation>() {
         deterministic::Runner::default().start(|context| async move {
             let partition = "compact-corrupt-rewind-target";
             let db = open_db::<O>(context.child("db"), partition).await;
@@ -2116,7 +2113,7 @@ pub(crate) mod tests {
         });
     }
 
-    pub(crate) fn test_compact_reopen_rejects_interrupted_import<O: TestVariant>() {
+    pub(crate) fn test_compact_reopen_rejects_interrupted_import<O: TestOperation>() {
         deterministic::Runner::default().start(|context| async move {
             let partition = "compact-interrupted-import";
             let db = open_db::<O>(context.child("db"), partition).await;
@@ -2144,7 +2141,7 @@ pub(crate) mod tests {
         });
     }
 
-    pub(crate) fn test_compact_reopen_rejects_commit_floor_beyond_tip<O: TestVariant>() {
+    pub(crate) fn test_compact_reopen_rejects_commit_floor_beyond_tip<O: TestOperation>() {
         deterministic::Runner::default().start(|context| async move {
             let partition = "compact-invalid-persisted-floor";
             let db = open_db::<O>(context.child("db"), partition).await;
@@ -2174,7 +2171,7 @@ pub(crate) mod tests {
         });
     }
 
-    pub(crate) fn test_compact_reopen_rejects_non_commit_tip<O: TestVariant>() {
+    pub(crate) fn test_compact_reopen_rejects_non_commit_tip<O: TestOperation>() {
         deterministic::Runner::default().start(|context| async move {
             let partition = "compact-non-commit-tip";
             let db = open_db::<O>(context.child("db"), partition).await;
@@ -2210,7 +2207,7 @@ pub(crate) mod tests {
         });
     }
 
-    pub(crate) fn test_compact_reopen_rejects_tampered_pinned_nodes<O: TestVariant>() {
+    pub(crate) fn test_compact_reopen_rejects_tampered_pinned_nodes<O: TestOperation>() {
         deterministic::Runner::default().start(|context| async move {
             let partition = "compact-pinned-nodes-tamper";
             let db = open_db::<O>(context.child("db"), partition).await;
@@ -2242,7 +2239,7 @@ pub(crate) mod tests {
         });
     }
 
-    pub(crate) fn test_compact_rewind_to_current_is_noop<O: TestVariant>() {
+    pub(crate) fn test_compact_rewind_to_current_is_noop<O: TestOperation>() {
         deterministic::Runner::default().start(|context| async move {
             let db = open_db::<O>(context.child("db"), "compact-rewind-noop").await;
             let batch = db
@@ -2262,7 +2259,7 @@ pub(crate) mod tests {
         });
     }
 
-    pub(crate) fn test_compact_prune_past_tip_keeps_tip<O: TestVariant>() {
+    pub(crate) fn test_compact_prune_past_tip_keeps_tip<O: TestOperation>() {
         deterministic::Runner::default().start(|context| async move {
             let partition = "compact-prune-past-tip";
             let db = open_db::<O>(context.child("db"), partition).await;
@@ -2287,7 +2284,7 @@ pub(crate) mod tests {
         });
     }
 
-    pub(crate) fn test_compact_rewind_beyond_history<O: TestVariant>() {
+    pub(crate) fn test_compact_rewind_beyond_history<O: TestOperation>() {
         deterministic::Runner::default().start(|context| async move {
             let db = open_db::<O>(context.child("db"), "compact-rewind-beyond").await;
             // The bootstrap commit is the oldest retained state (one leaf); no commit with zero
@@ -2307,7 +2304,7 @@ pub(crate) mod tests {
         });
     }
 
-    pub(crate) fn test_compact_rewind_between_commits<O: TestVariant>() {
+    pub(crate) fn test_compact_rewind_between_commits<O: TestOperation>() {
         deterministic::Runner::default().start(|context| async move {
             let db = open_db::<O>(context.child("db"), "compact-rewind-between").await;
             let floor = db.inactivity_floor_loc();
@@ -2361,7 +2358,7 @@ pub(crate) mod tests {
 
     /// A witness entry appended but not synced (a commit interrupted before its journal sync)
     /// must be dropped on reopen, recovering the last synced commit.
-    pub(crate) fn test_compact_reopen_drops_unsynced_witness<O: TestVariant>() {
+    pub(crate) fn test_compact_reopen_drops_unsynced_witness<O: TestOperation>() {
         deterministic::Runner::default().start(|context| async move {
             let partition = "compact-witness-unsynced";
             let db = open_db::<O>(context.child("db"), partition).await;
@@ -2391,7 +2388,7 @@ pub(crate) mod tests {
         });
     }
 
-    pub(crate) fn test_compact_rewind_multiple_commits<O: TestVariant>() {
+    pub(crate) fn test_compact_rewind_multiple_commits<O: TestOperation>() {
         deterministic::Runner::default().start(|context| async move {
             let partition = "compact-rewind-multi";
             let db = open_db::<O>(context.child("db"), partition).await;
@@ -2436,7 +2433,7 @@ pub(crate) mod tests {
         });
     }
 
-    pub(crate) fn test_compact_prune_then_rewind<O: TestVariant>() {
+    pub(crate) fn test_compact_prune_then_rewind<O: TestOperation>() {
         deterministic::Runner::default().start(|context| async move {
             // One entry per section so pruning takes effect at entry granularity (pruning is
             // section-aligned and never drops a partial section).
@@ -2483,7 +2480,7 @@ pub(crate) mod tests {
         });
     }
 
-    pub(crate) fn test_compact_rewind_preserves_pre_advance_batch<O: TestVariant>() {
+    pub(crate) fn test_compact_rewind_preserves_pre_advance_batch<O: TestOperation>() {
         deterministic::Runner::default().start(|context| async move {
             let db =
                 open_db::<O>(context.child("db"), "compact-rewind-preserves-pre-advance").await;
@@ -2522,7 +2519,7 @@ pub(crate) mod tests {
         });
     }
 
-    pub(crate) fn test_compact_noop_sync_after_sync<O: TestVariant>() {
+    pub(crate) fn test_compact_noop_sync_after_sync<O: TestOperation>() {
         deterministic::Runner::default().start(|context| async move {
             let db = open_db::<O>(context.child("db"), "compact-noop-after-commit").await;
 
@@ -2545,7 +2542,7 @@ pub(crate) mod tests {
         });
     }
 
-    pub(crate) fn test_compact_noop_sync_after_reopen<O: TestVariant>() {
+    pub(crate) fn test_compact_noop_sync_after_reopen<O: TestOperation>() {
         deterministic::Runner::default().start(|context| async move {
             let partition = "compact-noop-after-reopen";
 
@@ -2576,7 +2573,7 @@ pub(crate) mod tests {
         });
     }
 
-    pub(crate) fn test_compact_noop_sync_after_rewind<O: TestVariant>() {
+    pub(crate) fn test_compact_noop_sync_after_rewind<O: TestOperation>() {
         deterministic::Runner::default().start(|context| async move {
             let db = open_db::<O>(context.child("db"), "compact-noop-after-rewind").await;
 
@@ -2610,7 +2607,7 @@ pub(crate) mod tests {
         });
     }
 
-    pub(crate) fn test_compact_rewind_makes_post_advance_batch_stale<O: TestVariant>() {
+    pub(crate) fn test_compact_rewind_makes_post_advance_batch_stale<O: TestOperation>() {
         deterministic::Runner::default().start(|context| async move {
             let db = open_db::<O>(context.child("db"), "compact-rewind-makes-stale").await;
 
@@ -2646,7 +2643,7 @@ pub(crate) mod tests {
         });
     }
 
-    pub(crate) fn test_compact_floor_beyond_size<O: TestVariant>() {
+    pub(crate) fn test_compact_floor_beyond_size<O: TestOperation>() {
         deterministic::Runner::default().start(|context| async move {
             let db = open_db::<O>(context.child("db"), "compact-floor-beyond").await;
 
@@ -2662,7 +2659,7 @@ pub(crate) mod tests {
 
     /// A chained batch whose ancestor's floor exceeds that ancestor's own commit location
     /// must be rejected, identifying the ancestor's bound rather than the tip's.
-    pub(crate) fn test_compact_ancestor_floor_beyond_size<O: TestVariant>() {
+    pub(crate) fn test_compact_ancestor_floor_beyond_size<O: TestOperation>() {
         deterministic::Runner::default().start(|context| async move {
             let db = open_db::<O>(context.child("db"), "compact-ancestor-floor-beyond").await;
 
@@ -2687,10 +2684,10 @@ pub(crate) mod tests {
         });
     }
 
-    /// Emits every compact db test against `$variant`.
+    /// Emits every compact db test against `$operation`.
     macro_rules! compact_db_tests {
-        ($variant:ty) => {
-            $crate::qmdb::compact::db::tests::compact_db_tests!(@each $variant;
+        ($operation:ty) => {
+            $crate::qmdb::compact::db::tests::compact_db_tests!(@each $operation;
                 test_serve_refuses_requests_outside_witness,
                 test_compact_apply_overlaps_start_sync,
                 test_compact_start_sync_recovery,
@@ -2742,11 +2739,11 @@ pub(crate) mod tests {
                 test_compact_ancestor_floor_beyond_size
             );
         };
-        (@each $variant:ty; $($name:ident),* $(,)?) => {
+        (@each $operation:ty; $($name:ident),* $(,)?) => {
             $(
                 #[commonware_macros::test_traced("INFO")]
                 fn $name() {
-                    $crate::qmdb::compact::db::tests::$name::<$variant>();
+                    $crate::qmdb::compact::db::tests::$name::<$operation>();
                 }
             )*
         };

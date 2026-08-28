@@ -1,6 +1,6 @@
 //! [`crate::qmdb::sync::Database`] for the compact db.
 
-use super::{Config, Db, Variant};
+use super::{Config, Db, Operation};
 use crate::{
     Context,
     journal::contiguous::variable,
@@ -20,7 +20,7 @@ impl<F, E, O, H, S> sync::Database for Db<F, E, O, H, S>
 where
     F: Family,
     E: Context,
-    O: Variant<F>,
+    O: Operation<F>,
     H: Hasher,
     S: Strategy,
 {
@@ -33,7 +33,7 @@ where
     type Hasher = H;
 
     /// Build a compact db from the synced log, which must hold exactly the commit operation at
-    /// the start of `range`. `apply_batch_size` is unused: there is nothing to replay.
+    /// the start of `range`.
     async fn from_sync_result(
         context: Self::Context,
         config: Self::Config,

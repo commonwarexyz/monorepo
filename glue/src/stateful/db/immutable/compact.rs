@@ -1,7 +1,9 @@
-//! Immutable compact adapter: batches set keys.
+//! Compact [`ManagedDb`](crate::stateful::db::ManagedDb) support for QMDB
+//! [`immutable`](commonware_storage::qmdb::immutable) databases.
 //!
-//! See [`crate::stateful::db::compact`] for the shared
-//! [`ManagedDb`](crate::stateful::db::ManagedDb) implementation.
+//! These compact databases retain only the current Merkle peaks, so the adapter exposes set and
+//! merkleization operations but no historical reads. The shared implementation lives in
+//! [`crate::stateful::db::compact`].
 
 use crate::stateful::db::compact::CompactUnmerkleized;
 use commonware_codec::CodecShared;

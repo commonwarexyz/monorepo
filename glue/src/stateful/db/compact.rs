@@ -13,7 +13,7 @@ use commonware_storage::{
     merkle::{Family, Location},
     qmdb::{
         Error,
-        compact::{Config, Db, MerkleizedBatch, UnmerkleizedBatch, Variant, initial_root},
+        compact::{Config, Db, MerkleizedBatch, Operation, UnmerkleizedBatch, initial_root},
         sync,
     },
 };
@@ -25,7 +25,7 @@ pub struct CompactUnmerkleized<F, E, O, H, S>
 where
     F: Family,
     E: Context,
-    O: Variant<F>,
+    O: Operation<F>,
     H: Hasher,
     S: Strategy,
 {
@@ -39,7 +39,7 @@ impl<F, E, O, H, S> Deref for CompactUnmerkleized<F, E, O, H, S>
 where
     F: Family,
     E: Context,
-    O: Variant<F>,
+    O: Operation<F>,
     H: Hasher,
     S: Strategy,
 {
@@ -54,7 +54,7 @@ impl<F, E, O, H, S> CompactUnmerkleized<F, E, O, H, S>
 where
     F: Family,
     E: Context,
-    O: Variant<F>,
+    O: Operation<F>,
     H: Hasher,
     S: Strategy,
 {
@@ -75,7 +75,7 @@ impl<F, E, O, H, S> UnmerkleizedTrait for CompactUnmerkleized<F, E, O, H, S>
 where
     F: Family,
     E: Context,
-    O: Variant<F>,
+    O: Operation<F>,
     H: Hasher,
     S: Strategy,
 {
@@ -104,7 +104,7 @@ pub struct CompactMerkleized<F, E, O, H, S>
 where
     F: Family,
     E: Context,
-    O: Variant<F>,
+    O: Operation<F>,
     H: Hasher,
     S: Strategy,
 {
@@ -116,7 +116,7 @@ impl<F, E, O, H, S> Clone for CompactMerkleized<F, E, O, H, S>
 where
     F: Family,
     E: Context,
-    O: Variant<F>,
+    O: Operation<F>,
     H: Hasher,
     S: Strategy,
 {
@@ -132,7 +132,7 @@ impl<F, E, O, H, S> Deref for CompactMerkleized<F, E, O, H, S>
 where
     F: Family,
     E: Context,
-    O: Variant<F>,
+    O: Operation<F>,
     H: Hasher,
     S: Strategy,
 {
@@ -147,7 +147,7 @@ impl<F, E, O, H, S> MerkleizedTrait for CompactMerkleized<F, E, O, H, S>
 where
     F: Family,
     E: Context,
-    O: Variant<F>,
+    O: Operation<F>,
     H: Hasher,
     S: Strategy,
 {
@@ -172,7 +172,7 @@ impl<F, E, O, H, S> ManagedDb<E> for Db<F, E, O, H, S>
 where
     F: Family,
     E: Context,
-    O: Variant<F>,
+    O: Operation<F>,
     H: Hasher,
     S: Strategy,
 {
@@ -240,7 +240,7 @@ impl<F, E, O, H, S, R> StateSyncDb<E, R> for Db<F, E, O, H, S>
 where
     F: Family,
     E: Context + Spawner,
-    O: Variant<F>,
+    O: Operation<F>,
     H: Hasher,
     S: Strategy,
     R: sync::SourceFor<Self>,

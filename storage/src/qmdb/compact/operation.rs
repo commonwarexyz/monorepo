@@ -11,14 +11,16 @@ pub(in crate::qmdb) mod sealed {
 }
 
 /// The operation type a compact db is built over.
-pub trait Variant<F: Family>: sealed::Sealed + Floored<F> + CodecShared + Clone + 'static {
+pub trait Operation<F: Family>:
+    sealed::Sealed + Floored<F> + CodecShared + Clone + 'static
+{
     /// The commit metadata type.
     type Metadata: Clone + Send + Sync + 'static;
 
     /// The mutations a batch accumulates before merkleization, in application order.
     type Mutations: Default + Send + IntoIterator<IntoIter: ExactSizeIterator + Send>;
 
-    /// The variant's name, recorded on tracing spans.
+    /// The name recorded on tracing spans.
     const NAME: &'static str;
 
     /// Build a commit operation.

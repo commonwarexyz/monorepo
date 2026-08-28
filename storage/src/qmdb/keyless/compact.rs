@@ -14,7 +14,7 @@ use commonware_parallel::Strategy;
 
 impl<F: Family, V: ValueEncoding> compact::sealed::Sealed for Operation<F, V> {}
 
-impl<F: Family, V: ValueEncoding> compact::Variant<F> for Operation<F, V>
+impl<F: Family, V: ValueEncoding> compact::Operation<F> for Operation<F, V>
 where
     Self: CodecShared,
 {
@@ -69,16 +69,16 @@ mod tests {
         merkle::{Location, mmr},
         qmdb::{
             any::value::FixedEncoding,
-            compact::db::tests::{TestBatch, TestVariant, compact_db_tests, open_db},
+            compact::db::tests::{TestBatch, TestOperation, compact_db_tests, open_db},
         },
     };
     use commonware_macros::test_traced;
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
     use commonware_utils::sequence::U64;
 
-    type TestOperation = Operation<mmr::Family, FixedEncoding<U64>>;
+    type TestOp = Operation<mmr::Family, FixedEncoding<U64>>;
 
-    impl TestVariant for TestOperation {
+    impl TestOperation for TestOp {
         fn value(seed: u64) -> U64 {
             U64::new(seed)
         }
@@ -88,14 +88,14 @@ mod tests {
         }
     }
 
-    compact_db_tests!(TestOperation);
+    compact_db_tests!(TestOp);
 
     /// Appends are ordered: the same values in a different order give a different root.
     #[test_traced("INFO")]
     fn test_compact_append_order_is_significant() {
         deterministic::Runner::default().start(|context| async move {
             let forward =
-                open_db::<TestOperation>(context.child("forward"), "compact-append-forward").await;
+                open_db::<TestOp>(context.child("forward"), "compact-append-forward").await;
             let floor = forward.inactivity_floor_loc();
             let batch = forward
                 .new_batch()
@@ -107,7 +107,7 @@ mod tests {
             assert_eq!(range, Location::new(1)..Location::new(4));
 
             let reverse =
-                open_db::<TestOperation>(context.child("reverse"), "compact-append-reverse").await;
+                open_db::<TestOp>(context.child("reverse"), "compact-append-reverse").await;
             let batch = reverse
                 .new_batch()
                 .append(U64::new(2))

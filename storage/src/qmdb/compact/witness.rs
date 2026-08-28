@@ -5,7 +5,7 @@
 //! rebuilds the Merkle by appending the commit operation to the pinned nodes and derives the root
 //! and proof from it; a structurally invalid entry fails with [`Error::DataCorrupted`].
 
-use super::variant::Variant;
+use super::operation::Operation;
 use crate::{
     journal::contiguous::variable,
     merkle::{Family, Location, MAX_PINNED_NODES, Proof, compact},
@@ -17,7 +17,7 @@ use commonware_parallel::Strategy;
 
 /// An applied state persisted by the witness journal.
 #[derive(Clone)]
-pub(crate) struct Witness<F: Family, D: Digest, O: Variant<F>> {
+pub(crate) struct Witness<F: Family, D: Digest, O: Operation<F>> {
     /// The last commit operation, at `size - 1`.
     pub(crate) commit: O,
     /// The committed database size.
@@ -27,13 +27,13 @@ pub(crate) struct Witness<F: Family, D: Digest, O: Variant<F>> {
     pub(crate) pinned_nodes: Vec<D>,
 }
 
-impl<F: Family, D: Digest, O: Variant<F>> EncodeSize for Witness<F, D, O> {
+impl<F: Family, D: Digest, O: Operation<F>> EncodeSize for Witness<F, D, O> {
     fn encode_size(&self) -> usize {
         self.commit.encode_size() + self.size.encode_size() + self.pinned_nodes.encode_size()
     }
 }
 
-impl<F: Family, D: Digest, O: Variant<F>> Write for Witness<F, D, O> {
+impl<F: Family, D: Digest, O: Operation<F>> Write for Witness<F, D, O> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         self.commit.write(buf);
         self.size.write(buf);
@@ -41,7 +41,7 @@ impl<F: Family, D: Digest, O: Variant<F>> Write for Witness<F, D, O> {
     }
 }
 
-impl<F: Family, D: Digest, O: Variant<F>> Read for Witness<F, D, O> {
+impl<F: Family, D: Digest, O: Operation<F>> Read for Witness<F, D, O> {
     type Cfg = O::Cfg;
 
     fn read_cfg(buf: &mut impl bytes::Buf, cfg: &O::Cfg) -> Result<Self, commonware_codec::Error> {
@@ -60,7 +60,7 @@ impl<F: Family, D: Digest, O: Variant<F>> Read for Witness<F, D, O> {
 impl<F: Family, D: Digest, O> arbitrary::Arbitrary<'_> for Witness<F, D, O>
 where
     D: for<'a> arbitrary::Arbitrary<'a>,
-    O: Variant<F> + for<'a> arbitrary::Arbitrary<'a>,
+    O: Operation<F> + for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
@@ -73,7 +73,7 @@ where
 
 /// A witness whose commit has been checked and whose root and commit proof are derived from it.
 #[derive(Clone)]
-pub(super) struct VerifiedWitness<F: Family, D: Digest, O: Variant<F>> {
+pub(super) struct VerifiedWitness<F: Family, D: Digest, O: Operation<F>> {
     pub(super) witness: Witness<F, D, O>,
     /// Inactivity floor declared by the commit.
     pub(super) inactivity_floor_loc: Location<F>,
@@ -84,7 +84,7 @@ pub(super) struct VerifiedWitness<F: Family, D: Digest, O: Variant<F>> {
     pub(super) proof: Proof<F, D>,
 }
 
-impl<F: Family, D: Digest, O: Variant<F>> VerifiedWitness<F, D, O> {
+impl<F: Family, D: Digest, O: Operation<F>> VerifiedWitness<F, D, O> {
     /// The committed size, which also identifies the last commit's location.
     pub(super) const fn size(&self) -> Location<F> {
         self.witness.size
@@ -108,7 +108,7 @@ impl<F: Family, D: Digest, O: Variant<F>> VerifiedWitness<F, D, O> {
 pub(crate) type Journal<E, F, D, O> = variable::Journal<E, Witness<F, D, O>>;
 
 /// A Merkle materialized from a witness, with the witness verified against it.
-pub(super) struct Rebuilt<F: Family, D: Digest, O: Variant<F>, S: Strategy> {
+pub(super) struct Rebuilt<F: Family, D: Digest, O: Operation<F>, S: Strategy> {
     pub(super) merkle: compact::Merkle<F, D, S>,
     pub(super) tip: VerifiedWitness<F, D, O>,
 }
@@ -124,7 +124,7 @@ pub(super) fn build_witness<F, O, H, S>(
 ) -> Result<VerifiedWitness<F, H::Digest, O>, Error<F>>
 where
     F: Family,
-    O: Variant<F>,
+    O: Operation<F>,
     H: Hasher,
     S: Strategy,
 {
@@ -175,7 +175,7 @@ pub(super) fn restore<F, O, H, S>(
 ) -> Result<Rebuilt<F, H::Digest, O, S>, Error<F>>
 where
     F: Family,
-    O: Variant<F>,
+    O: Operation<F>,
     H: Hasher,
     S: Strategy,
 {
@@ -202,7 +202,7 @@ pub(super) fn rebuild<F, O, H, S>(
 ) -> Result<Rebuilt<F, H::Digest, O, S>, Error<F>>
 where
     F: Family,
-    O: Variant<F>,
+    O: Operation<F>,
     H: Hasher,
     S: Strategy,
 {
@@ -255,7 +255,7 @@ pub(crate) mod tests {
         E: Context,
         F: Family,
         D: Digest,
-        O: Variant<F>,
+        O: Operation<F>,
     {
         let mut entries = Vec::new();
         {
@@ -277,7 +277,7 @@ pub(crate) mod tests {
         E: Context,
         F: Family,
         D: Digest,
-        O: Variant<F>,
+        O: Operation<F>,
     {
         let size = journal.size();
         let entry = journal.read(size - 1).await.unwrap();
@@ -295,7 +295,7 @@ pub(crate) mod tests {
         E: Context,
         F: Family,
         D: Digest,
-        O: Variant<F>,
+        O: Operation<F>,
     {
         let (journal, _) = journal
             .append(&Witness {
@@ -319,7 +319,7 @@ pub(crate) mod tests {
         E: Context,
         F: Family,
         D: Digest,
-        O: Variant<F>,
+        O: Operation<F>,
     {
         let entries = journal.size();
         let journal = journal.rewind(entries - 1).await.unwrap();

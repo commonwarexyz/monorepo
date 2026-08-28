@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 
 impl<F: Family, K: Key, V: ValueEncoding> compact::sealed::Sealed for Operation<F, K, V> {}
 
-impl<F: Family, K: Key, V: ValueEncoding> compact::Variant<F> for Operation<F, K, V>
+impl<F: Family, K: Key, V: ValueEncoding> compact::Operation<F> for Operation<F, K, V>
 where
     Self: CodecShared,
 {
@@ -71,16 +71,16 @@ mod tests {
         merkle::{Location, mmr},
         qmdb::{
             any::value::FixedEncoding,
-            compact::db::tests::{TestBatch, TestVariant, compact_db_tests, open_db},
+            compact::db::tests::{TestBatch, TestOperation, compact_db_tests, open_db},
         },
     };
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::test_traced;
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
 
-    type TestOperation = Operation<mmr::Family, Digest, FixedEncoding<Digest>>;
+    type TestOp = Operation<mmr::Family, Digest, FixedEncoding<Digest>>;
 
-    impl TestVariant for TestOperation {
+    impl TestOperation for TestOp {
         fn value(seed: u64) -> Digest {
             Sha256::hash(&[&seed.to_le_bytes()])
         }
@@ -90,7 +90,7 @@ mod tests {
         }
     }
 
-    compact_db_tests!(TestOperation);
+    compact_db_tests!(TestOp);
 
     /// Setting a key twice in one batch keeps the later value and emits one operation.
     #[test_traced("INFO")]
@@ -99,7 +99,7 @@ mod tests {
             let key = Sha256::hash(&[b"key"]);
             let (first, last) = (Sha256::fill(1), Sha256::fill(2));
 
-            let twice = open_db::<TestOperation>(context.child("twice"), "compact-set-twice").await;
+            let twice = open_db::<TestOp>(context.child("twice"), "compact-set-twice").await;
             let floor = twice.inactivity_floor_loc();
             let batch = twice
                 .new_batch()
@@ -110,7 +110,7 @@ mod tests {
             let (twice, range) = twice.apply_batch(batch).await.unwrap();
             assert_eq!(range, Location::new(1)..Location::new(3));
 
-            let once = open_db::<TestOperation>(context.child("once"), "compact-set-once").await;
+            let once = open_db::<TestOp>(context.child("once"), "compact-set-once").await;
             let batch = once
                 .new_batch()
                 .set(key, last)
@@ -128,8 +128,7 @@ mod tests {
             let (k1, k2) = (Sha256::hash(&[b"k1"]), Sha256::hash(&[b"k2"]));
             let (v1, v2) = (Sha256::fill(1), Sha256::fill(2));
 
-            let forward =
-                open_db::<TestOperation>(context.child("forward"), "compact-set-forward").await;
+            let forward = open_db::<TestOp>(context.child("forward"), "compact-set-forward").await;
             let floor = forward.inactivity_floor_loc();
             let batch = forward
                 .new_batch()
@@ -139,8 +138,7 @@ mod tests {
                 .await;
             let (forward, _) = forward.apply_batch(batch).await.unwrap();
 
-            let reverse =
-                open_db::<TestOperation>(context.child("reverse"), "compact-set-reverse").await;
+            let reverse = open_db::<TestOp>(context.child("reverse"), "compact-set-reverse").await;
             let batch = reverse
                 .new_batch()
                 .set(k2, v2)
