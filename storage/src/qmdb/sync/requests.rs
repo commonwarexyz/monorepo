@@ -29,7 +29,7 @@ struct TrackedRequest<F: Family> {
 /// Manages outstanding fetch requests.
 pub(super) struct Requests<F: Family, Op, D: Digest, E> {
     /// Futures that will resolve to fetch results.
-    futures: AbortablePool<IndexedFetchResult<F, Op, D, E>>,
+    futures: AbortablePool<'static, IndexedFetchResult<F, Op, D, E>>,
 
     /// Counter for assigning unique request IDs.
     next_id: u64,

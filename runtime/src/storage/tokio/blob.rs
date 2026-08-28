@@ -1,4 +1,4 @@
-use crate::{Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut, WriteOptions};
+use crate::{Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut, ReadOptions, WriteOptions};
 use cfg_if::cfg_if;
 use commonware_formatting::hex;
 use commonware_utils::channel::oneshot;
@@ -17,7 +17,7 @@ use tokio::task;
 // span as few submissions as possible.
 const IOVEC_BATCH_SIZE: usize = 1024;
 
-/// Page-cache policy for one write request.
+/// Page-cache policy for one positioned I/O request.
 enum Cache {
     /// Use the operating system's normal page-cache behavior.
     Enabled,
@@ -54,7 +54,7 @@ pub struct Blob {
     /// Physical offset where logical offset 0 begins (the size of the header region).
     data_offset: u64,
     /// Whether the kernel and filesystem may support `RWF_DONTCACHE`.
-    /// Cleared on the first EOPNOTSUPP to avoid probing on every hinted write.
+    /// Cleared on the first EOPNOTSUPP to avoid probing on every hinted I/O operation.
     dont_cache_supported: Arc<AtomicBool>,
 }
 
@@ -88,6 +88,65 @@ impl Blob {
             }
         }
         result.map_err(|e| Error::BlobSyncFailed(partition.to_string(), hex(name), e.into()))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn read_exact_at(
+        mut cache: Cache,
+        file: &File,
+        mut buf: &mut [u8],
+        mut offset: u64,
+    ) -> Result<(), Error> {
+        if !cache.is_disabled() {
+            file.read_exact_at(buf, offset)?;
+            return Ok(());
+        }
+
+        while !buf.is_empty() {
+            let iovec = libc::iovec {
+                iov_base: buf.as_mut_ptr().cast(),
+                iov_len: buf.len(),
+            };
+            // SAFETY: `file` owns a valid fd for this call. `iovec` describes the exclusive
+            // writable slice borrowed for the duration of the syscall.
+            let ret = unsafe {
+                libc::preadv2(
+                    file.as_raw_fd(),
+                    &iovec,
+                    1,
+                    offset.try_into().map_err(|_| Error::OffsetOverflow)?,
+                    libc::RWF_DONTCACHE,
+                )
+            };
+            if ret < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                if cache.retry_cached(&err, true) {
+                    file.read_exact_at(buf, offset)?;
+                    return Ok(());
+                }
+                return Err(err.into());
+            }
+
+            let bytes_read = ret as usize;
+            if bytes_read == 0 {
+                return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into());
+            }
+            let (_, unread) = buf.split_at_mut(bytes_read);
+            buf = unread;
+            offset = offset
+                .checked_add(bytes_read as u64)
+                .ok_or(Error::OffsetOverflow)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn read_exact_at(_: Cache, file: &File, buf: &mut [u8], offset: u64) -> Result<(), Error> {
+        file.read_exact_at(buf, offset)?;
+        Ok(())
     }
 
     fn write_single_at(file: &File, offset: u64, buf: &[u8]) -> Result<(), Error> {
@@ -183,8 +242,14 @@ impl Blob {
 }
 
 impl crate::Blob for Blob {
-    async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
-        self.read_at_buf(offset, len, self.pool.alloc(len)).await
+    async fn read_at(
+        &self,
+        offset: u64,
+        len: usize,
+        options: ReadOptions,
+    ) -> Result<IoBufsMut, Error> {
+        self.read_at_buf(offset, len, self.pool.alloc(len), options)
+            .await
     }
 
     async fn read_at_buf(
@@ -192,24 +257,33 @@ impl crate::Blob for Blob {
         offset: u64,
         len: usize,
         bufs: impl Into<IoBufsMut> + Send,
+        options: ReadOptions,
     ) -> Result<IoBufsMut, Error> {
         let mut bufs = bufs.into();
         // SAFETY: `len` bytes are filled via read_exact below.
         unsafe { bufs.set_len(len) };
-        let file = self.file.clone();
-        let pool = self.pool.clone();
         let offset = offset
             .checked_add(self.data_offset)
             .ok_or(Error::OffsetOverflow)?;
+        if len == 0 {
+            return Ok(bufs);
+        }
+        let file = self.file.clone();
+        let pool = self.pool.clone();
+        let cache = if options.contains(ReadOptions::DONT_CACHE) {
+            Cache::Disabled(self.dont_cache_supported.clone())
+        } else {
+            Cache::Enabled
+        };
         task::spawn_blocking(move || {
             if let Some(buf) = bufs.as_single_mut() {
                 // Read directly into the single buffer (zero-copy).
-                file.read_exact_at(buf.as_mut(), offset)?;
+                Self::read_exact_at(cache, &file, buf.as_mut(), offset)?;
             } else {
                 // Read into a temporary contiguous buffer and copy back to preserve structure.
                 // SAFETY: `len` bytes are filled via read_exact_at below.
                 let mut temp = unsafe { pool.alloc_len(len) };
-                file.read_exact_at(temp.as_mut(), offset)?;
+                Self::read_exact_at(cache, &file, temp.as_mut(), offset)?;
                 bufs.copy_from_slice(temp.as_ref());
             }
             Ok(bufs)

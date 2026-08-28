@@ -2,7 +2,7 @@
 //! physical page format used by the blob, which is left to the blob implementation.
 
 use super::{CHECKSUM_SIZE, STORAGE_PAGE_SIZE, get_page_from_blob};
-use crate::{Blob, BufferPool, BufferPooler, Error, IoBuf, IoBufMut};
+use crate::{Blob, BufferPool, BufferPooler, Error, IoBuf, IoBufMut, ReadOptions};
 use ahash::AHashMap;
 use commonware_utils::{cache::Clock, sync::RwLock};
 use futures::{FutureExt, future::Shared};
@@ -16,7 +16,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
     },
 };
-use tracing::{error, trace, warn};
+use tracing::{debug, error, trace};
 
 /// Shared future for one logical page fetch. The output uses `Arc<Error>` because `Shared`
 /// requires cloneable results. The `IoBuf` contains only the logical, validated page bytes.
@@ -165,21 +165,18 @@ impl CacheRef {
     /// [Self::page_size] for how this relates to a page's physical size on disk).
     /// Initialization eagerly allocates and zeroes all cache slots from `pool`.
     ///
-    /// Any `page_size` is accepted, but one whose physical pages do not align with storage
-    /// pages (see the module docs) logs a warning: behavior stays correct, at the cost of
-    /// amplified cold random reads. Use [super::page_size] to pick an aligned value.
+    /// Any `page_size` is accepted, but physical pages that do not align with storage pages (see
+    /// the module docs) amplify cold random reads. Use [super::page_size] to pick an aligned value.
+    /// Cache misses request [ReadOptions::DONT_CACHE] because the fetched page is retained here.
     pub fn new(pool: BufferPool, page_size: NonZeroU16, capacity: NonZeroUsize) -> Self {
         let page_size_u64 = page_size.get() as u64;
         let physical_page_size = page_size_u64 + CHECKSUM_SIZE;
         if !physical_page_size.is_multiple_of(STORAGE_PAGE_SIZE)
             && !STORAGE_PAGE_SIZE.is_multiple_of(physical_page_size)
         {
-            warn!(
+            debug!(
                 page_size = page_size.get(),
-                physical_page_size,
-                "page size produces physical pages that do not align with storage pages; pick a \
-                 page size via paged::page_size to avoid amplifying cold random reads (changing \
-                 an existing store's page size is a destructive format migration)"
+                physical_page_size, "physical pages do not align with storage pages"
             );
         }
 
@@ -192,7 +189,7 @@ impl CacheRef {
     }
 
     /// Create a shared page-cache handle, extracting the storage [BufferPool] from a
-    /// [BufferPooler].
+    /// [BufferPooler]. Cache misses request [ReadOptions::DONT_CACHE].
     pub fn from_pooler(
         pooler: &impl BufferPooler,
         page_size: NonZeroU16,
@@ -578,7 +575,8 @@ async fn fetch_cacheable_page(
     page_num: u64,
     page_size: u64,
 ) -> Result<IoBuf, Arc<Error>> {
-    let page = get_page_from_blob(blob, page_num, page_size)
+    // CacheRef retains the page, so the source page need not remain in the OS page cache.
+    let page = get_page_from_blob(blob, page_num, page_size, ReadOptions::DONT_CACHE)
         .await
         .map_err(Arc::new)?;
 
@@ -645,8 +643,13 @@ mod tests {
     }
 
     impl Blob for BlockingBlob {
-        async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
-            self.read_at_buf(offset, len, IoBufMut::with_capacity(len))
+        async fn read_at(
+            &self,
+            offset: u64,
+            len: usize,
+            options: ReadOptions,
+        ) -> Result<IoBufsMut, Error> {
+            self.read_at_buf(offset, len, IoBufMut::with_capacity(len), options)
                 .await
         }
 
@@ -655,6 +658,7 @@ mod tests {
             _offset: u64,
             _len: usize,
             _bufs: impl Into<IoBufsMut> + Send,
+            _options: ReadOptions,
         ) -> Result<IoBufsMut, Error> {
             let sender = self
                 .started
@@ -704,8 +708,13 @@ mod tests {
     }
 
     impl Blob for ControlledBlob {
-        async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
-            self.read_at_buf(offset, len, IoBufMut::with_capacity(len))
+        async fn read_at(
+            &self,
+            offset: u64,
+            len: usize,
+            options: ReadOptions,
+        ) -> Result<IoBufsMut, Error> {
+            self.read_at_buf(offset, len, IoBufMut::with_capacity(len), options)
                 .await
         }
 
@@ -714,6 +723,7 @@ mod tests {
             _offset: u64,
             _len: usize,
             _bufs: impl Into<IoBufsMut> + Send,
+            _options: ReadOptions,
         ) -> Result<IoBufsMut, Error> {
             if self.reads.fetch_add(1, Ordering::Relaxed) == 0 {
                 let sender = self
@@ -910,16 +920,23 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_cache_clear_forces_blob_read() {
+    fn test_cache_clear_forces_uncached_blob_read() {
         #[derive(Clone)]
         struct CountingBlob {
             reads: Arc<AtomicUsize>,
+            read_options: Arc<Mutex<Vec<ReadOptions>>>,
             page: Arc<Vec<u8>>,
         }
 
         impl Blob for CountingBlob {
-            async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
-                self.read_at_buf(offset, len, IoBufsMut::default()).await
+            async fn read_at(
+                &self,
+                offset: u64,
+                len: usize,
+                options: ReadOptions,
+            ) -> Result<IoBufsMut, Error> {
+                self.read_at_buf(offset, len, IoBufsMut::default(), options)
+                    .await
             }
 
             async fn read_at_buf(
@@ -927,8 +944,10 @@ mod tests {
                 _offset: u64,
                 _len: usize,
                 _bufs: impl Into<IoBufsMut> + Send,
+                options: ReadOptions,
             ) -> Result<IoBufsMut, Error> {
                 self.reads.fetch_add(1, Ordering::Relaxed);
+                self.read_options.lock().push(options);
                 Ok(IoBufsMut::from(self.page.as_ref().clone()))
             }
 
@@ -961,9 +980,11 @@ mod tests {
             let record = Checksum::new(PAGE_SIZE.get(), crc);
             let mut physical_page = page.clone();
             physical_page.extend_from_slice(&record.to_bytes());
+            let physical_page = Arc::new(physical_page);
             let blob = CountingBlob {
                 reads: Arc::new(AtomicUsize::new(0)),
-                page: Arc::new(physical_page),
+                read_options: Arc::new(Mutex::new(Vec::new())),
+                page: physical_page,
             };
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2));
 
@@ -983,6 +1004,10 @@ mod tests {
             cache_ref.read(&blob, 0, &mut buf, 0).await.unwrap();
             assert_eq!(buf, page);
             assert_eq!(blob.reads.load(Ordering::Relaxed), 2);
+            assert_eq!(
+                *blob.read_options.lock(),
+                vec![ReadOptions::DONT_CACHE, ReadOptions::DONT_CACHE]
+            );
         });
     }
 

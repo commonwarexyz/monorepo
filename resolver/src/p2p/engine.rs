@@ -78,7 +78,7 @@ where
     /// Once the future is resolved, the data (or an error) is sent to the peer.
     /// Has unbounded size; the number of concurrent requests should be limited
     /// by the `Producer` which may drop requests.
-    serves: FuturesPool<Serve<P>>,
+    serves: FuturesPool<'static, Serve<P>>,
 
     /// Whether responses are sent with priority over other network messages
     priority_responses: bool,

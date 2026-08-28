@@ -190,8 +190,8 @@ pub enum Annotation {
     ///
     /// The expected height is local pruning metadata and should only be
     /// supplied when the caller has a validated height bound. It must not make
-    /// a commitment-matching response invalid, and certified storage uses the
-    /// fetched block's decoded height.
+    /// a commitment-matching response invalid. A matching block above this
+    /// bound is delivered but not cached.
     Certified { height: Height },
     /// A block requested by commitment for the finalized chain.
     Finalized(Finalized),

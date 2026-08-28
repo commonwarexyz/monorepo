@@ -8,7 +8,7 @@ use crate::storage::iouring::{Config as IoUringConfig, Storage as IoUringStorage
 use crate::storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage};
 use crate::{
     BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, METRICS_PREFIX, Name, SinkOf,
-    Spawner as _, StreamOf, Supervisor as _, child_label,
+    StreamOf, child_label,
     network::metered::Network as MeteredNetwork,
     prefixed_name,
     process::metered::Metrics as MeteredProcess,
@@ -39,11 +39,15 @@ use std::{
     future::Future,
     net::{IpAddr, SocketAddr},
     num::NonZeroUsize,
+    panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     path::PathBuf,
     sync::Arc,
     time::{Duration, SystemTime},
 };
-use tokio::runtime::{Builder, Runtime};
+use tokio::{
+    runtime::{Builder, Handle as RuntimeHandle},
+    sync::Notify,
+};
 
 #[cfg(feature = "iouring-network")]
 cfg_if::cfg_if! {
@@ -338,10 +342,63 @@ impl Default for Config {
 pub struct Executor {
     registry: Registry,
     metrics: Arc<Metrics>,
-    runtime: Runtime,
+    runtime: RuntimeHandle,
+    tasks: Arc<TaskTracker>,
     shutdown: Mutex<Stopper>,
     panicker: Panicker,
     thread_stack_size: usize,
+}
+
+/// Closes task admission and tracks wrappers through user-future drop and descendant cleanup.
+#[derive(Default)]
+struct TaskTracker {
+    state: Mutex<TaskTrackerState>,
+    idle: Notify,
+}
+
+#[derive(Default)]
+struct TaskTrackerState {
+    active: usize,
+    closed: bool,
+}
+
+impl TaskTracker {
+    fn admit(self: &Arc<Self>) -> Option<TaskGuard> {
+        let mut state = self.state.lock();
+        if state.closed {
+            return None;
+        }
+        state.active = state.active.checked_add(1).expect("active task overflow");
+        Some(TaskGuard(Arc::clone(self)))
+    }
+
+    fn close(&self) {
+        self.state.lock().closed = true;
+    }
+
+    async fn wait(&self) {
+        loop {
+            // Subscribe before checking so the final task cannot notify between the check and wait.
+            let idle = self.idle.notified();
+            if self.state.lock().active == 0 {
+                return;
+            }
+            idle.await;
+        }
+    }
+}
+
+struct TaskGuard(Arc<TaskTracker>);
+
+impl Drop for TaskGuard {
+    fn drop(&mut self) {
+        let mut state = self.0.state.lock();
+        state.active = state.active.checked_sub(1).expect("active task underflow");
+        if state.active == 0 {
+            drop(state);
+            self.0.idle.notify_one();
+        }
+    }
 }
 
 /// Implementation of [crate::Runner] for the `tokio` runtime.
@@ -492,7 +549,8 @@ impl crate::Runner for Runner {
         let executor = Arc::new(Executor {
             registry,
             metrics,
-            runtime,
+            runtime: runtime.handle().clone(),
+            tasks: Arc::new(TaskTracker::default()),
             shutdown: Mutex::new(Stopper::default()),
             panicker,
             thread_stack_size: self.cfg.thread_stack_size,
@@ -504,6 +562,7 @@ impl crate::Runner for Runner {
         let gauge = executor.metrics.tasks_running.get_or_create(&label).clone();
 
         // Run the future
+        let tree = Tree::root();
         let context = Context {
             storage,
             name: label.name(),
@@ -512,13 +571,21 @@ impl crate::Runner for Runner {
             network,
             network_buffer_pool,
             storage_buffer_pool,
-            tree: Tree::root(),
+            tree: Arc::clone(&tree),
             execution: Execution::default(),
         };
-        let output = executor.runtime.block_on(panicked.interrupt(f(context)));
+        let output = catch_unwind(AssertUnwindSafe(|| {
+            runtime.block_on(panicked.interrupt(f(context)))
+        }));
+        executor.tasks.close();
+        tree.abort();
+        runtime.block_on(executor.tasks.wait());
         gauge.dec();
 
-        output
+        match output {
+            Ok(output) => output,
+            Err(panic) => resume_unwind(panic),
+        }
     }
 }
 
@@ -592,6 +659,9 @@ impl crate::Spawner for Context {
 
         // Spawn the task
         let executor = self.executor.clone();
+        let Some(task_guard) = executor.tasks.admit() else {
+            return Handle::closed(metric);
+        };
         let future = f(self);
         let (f, handle) = Handle::init(
             future,
@@ -599,11 +669,15 @@ impl crate::Spawner for Context {
             executor.panicker.clone(),
             Arc::clone(&parent),
         );
+        let f = async move {
+            let _task_guard = task_guard;
+            f.await;
+        };
 
         if matches!(past, Execution::Dedicated) {
             utils::thread::spawn(executor.thread_stack_size, {
                 // Ensure the task can access the tokio runtime
-                let handle = executor.runtime.handle().clone();
+                let handle = executor.runtime.clone();
                 move || {
                     handle.block_on(f);
                 }
@@ -611,7 +685,7 @@ impl crate::Spawner for Context {
         } else if matches!(past, Execution::Shared(true)) {
             executor.runtime.spawn_blocking({
                 // Ensure the task can access the tokio runtime
-                let handle = executor.runtime.handle().clone();
+                let handle = executor.runtime.clone();
                 move || {
                     handle.block_on(f);
                 }
@@ -658,14 +732,7 @@ impl crate::Strategizer for Context {
     fn strategy(&self, parallelism: NonZeroUsize) -> Rayon {
         let pool = ThreadPoolBuilder::new()
             .num_threads(parallelism.get())
-            .spawn_handler(move |thread| {
-                // Tasks spawned in a thread pool are expected to run longer than any single
-                // task and thus should be provisioned as a dedicated thread.
-                self.child("rayon_thread")
-                    .dedicated()
-                    .spawn(move |_| async move { thread.run() });
-                Ok(())
-            })
+            .stack_size(self.executor.thread_stack_size)
             .build()
             .expect("failed to create Tokio Rayon thread pool");
         Rayon::with_pool(Arc::new(pool))
@@ -849,10 +916,11 @@ impl crate::BufferPooler for Context {
 mod tests {
     use super::*;
     use crate::{
-        Metrics, Network, Resolver, Runner as _, Sink, Stream, telemetry::metrics::raw::Counter,
-        tokio::telemetry,
+        Metrics, Network, Resolver, Runner as _, Sink, Spawner as _, Strategizer as _, Stream,
+        Supervisor as _, telemetry::metrics::raw::Counter, tokio::telemetry,
     };
     use bytes::Bytes;
+    use commonware_parallel::Strategy as _;
     use std::{
         self,
         collections::HashMap,
@@ -860,6 +928,127 @@ mod tests {
         str::FromStr,
     };
     use tracing::{Level, error};
+
+    struct TaskDropGate {
+        entered: std::sync::mpsc::Sender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    }
+
+    impl Drop for TaskDropGate {
+        fn drop(&mut self) {
+            let _ = self.entered.send(());
+            let _ = self.release.recv();
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum RootExit {
+        Return,
+        FuturePanic,
+        ConstructorPanic,
+    }
+
+    fn spawn_drop_gated_task(
+        context: Context,
+        execution: Execution,
+        drop_gate: TaskDropGate,
+        ready: Option<commonware_utils::channel::oneshot::Sender<()>>,
+    ) {
+        let child = match execution {
+            Execution::Dedicated => context.dedicated(),
+            Execution::Shared(blocking) => context.shared(blocking),
+        };
+        child.spawn(move |context| async move {
+            let _context = context;
+            let _drop_gate = drop_gate;
+            if let Some(ready) = ready {
+                ready.send(()).unwrap();
+            }
+            futures::future::pending::<()>().await;
+        });
+    }
+
+    fn assert_runner_drains_spawned_task(execution: Execution, root_exit: RootExit) {
+        let cfg = Config::new();
+        let storage_directory = cfg.storage_directory().clone();
+        let (ready_tx, ready_rx) = commonware_utils::channel::oneshot::channel();
+        let (drop_entered_tx, drop_entered_rx) = std::sync::mpsc::channel();
+        let (drop_release_tx, drop_release_rx) = std::sync::mpsc::channel();
+        let (runner_done_tx, runner_done_rx) = std::sync::mpsc::channel();
+        let runner = std::thread::spawn(move || {
+            let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                let drop_gate = TaskDropGate {
+                    entered: drop_entered_tx,
+                    release: drop_release_rx,
+                };
+                match root_exit {
+                    RootExit::ConstructorPanic => {
+                        Runner::new(cfg).start(move |context| -> futures::future::Pending<()> {
+                            spawn_drop_gated_task(context, execution, drop_gate, None);
+                            panic!("root constructor panic after spawning child");
+                        })
+                    }
+                    RootExit::Return | RootExit::FuturePanic => {
+                        Runner::new(cfg).start(move |context| async move {
+                            spawn_drop_gated_task(context, execution, drop_gate, Some(ready_tx));
+                            ready_rx.await.unwrap();
+                            assert!(
+                                matches!(root_exit, RootExit::Return),
+                                "root future panic after spawning child"
+                            );
+                        })
+                    }
+                }
+            }));
+            runner_done_tx.send(result.is_err()).unwrap();
+        });
+
+        drop_entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("spawned task was not canceled after the root returned");
+        let early = runner_done_rx.recv_timeout(Duration::from_millis(250));
+        let returned_before_cleanup = match early {
+            Ok(panicked) => Some(panicked),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("Runner::start exited without reporting its result")
+            }
+        };
+        drop_release_tx.send(()).unwrap();
+        let panicked = returned_before_cleanup.unwrap_or_else(|| {
+            runner_done_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("Runner::start did not return after task cleanup completed")
+        });
+        runner.join().unwrap();
+        let _ = std::fs::remove_dir_all(storage_directory);
+        assert!(
+            returned_before_cleanup.is_none(),
+            "Runner::start returned before {execution:?} task cleanup completed"
+        );
+        assert_eq!(panicked, !matches!(root_exit, RootExit::Return));
+    }
+
+    fn run_with_returned_strategy(retain: bool) -> Option<Rayon> {
+        let cfg = Config::new();
+        let storage_directory = cfg.storage_directory().clone();
+        let (strategy_tx, strategy_rx) = std::sync::mpsc::channel();
+        let runner = std::thread::spawn(move || {
+            let strategy = Runner::new(cfg).start(move |context| async move {
+                let strategy = context.strategy(NZUsize!(2));
+                strategy.spawn(1, |_| ()).await;
+                retain.then_some(strategy)
+            });
+            strategy_tx.send(strategy).unwrap();
+        });
+
+        let strategy = strategy_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("Runner::start did not return after the strategy completed work");
+        runner.join().unwrap();
+        let _ = std::fs::remove_dir_all(storage_directory);
+        strategy
+    }
 
     #[test]
     fn test_worker_threads_updates_default_buffer_pool_parallelism() {
@@ -888,6 +1077,114 @@ mod tests {
             cfg.thread_stack_size(),
             utils::thread::system_thread_stack_size()
         );
+    }
+
+    #[test]
+    fn test_runner_waits_for_spawned_task_cancellation() {
+        for execution in [
+            Execution::Shared(false),
+            Execution::Shared(true),
+            Execution::Dedicated,
+        ] {
+            for root_exit in [
+                RootExit::Return,
+                RootExit::FuturePanic,
+                RootExit::ConstructorPanic,
+            ] {
+                assert_runner_drains_spawned_task(execution, root_exit);
+            }
+        }
+    }
+
+    #[test]
+    fn test_runner_owns_runtime_when_context_escapes() {
+        let cfg = Config::new();
+        let storage_directory = cfg.storage_directory().clone();
+        let (ready_tx, ready_rx) = commonware_utils::channel::oneshot::channel();
+        let (drop_entered_tx, drop_entered_rx) = std::sync::mpsc::channel();
+        let (drop_release_tx, drop_release_rx) = std::sync::mpsc::channel();
+        let (runner_returned_tx, runner_returned_rx) = std::sync::mpsc::channel();
+        let (context_release_tx, context_release_rx) = std::sync::mpsc::channel();
+        let runner = std::thread::spawn(move || {
+            let context = Runner::new(cfg).start(move |context| async move {
+                context.executor.runtime.spawn(async move {
+                    let _drop_gate = TaskDropGate {
+                        entered: drop_entered_tx,
+                        release: drop_release_rx,
+                    };
+                    ready_tx.send(()).unwrap();
+                    futures::future::pending::<()>().await;
+                });
+                ready_rx.await.unwrap();
+                context
+            });
+            runner_returned_tx.send(()).unwrap();
+            context_release_rx.recv().unwrap();
+            drop(context);
+        });
+
+        let returned_early = runner_returned_rx
+            .recv_timeout(Duration::from_millis(500))
+            .is_ok();
+        if returned_early {
+            drop_release_tx.send(()).unwrap();
+            context_release_tx.send(()).unwrap();
+            drop_entered_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("escaped Context did not retain the raw runtime task");
+        } else {
+            drop_entered_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("Runner did not cancel its raw runtime task");
+            drop_release_tx.send(()).unwrap();
+            runner_returned_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("Runner did not return after raw task cleanup");
+            context_release_tx.send(()).unwrap();
+        }
+        runner.join().unwrap();
+        let _ = std::fs::remove_dir_all(storage_directory);
+        assert!(
+            !returned_early,
+            "a returned Context kept the Tokio runtime alive after Runner::start"
+        );
+    }
+
+    #[test]
+    fn test_runner_returns_strategy_after_pool_work() {
+        assert!(run_with_returned_strategy(false).is_none());
+
+        let strategy = run_with_returned_strategy(true).unwrap();
+        assert_eq!(futures::executor::block_on(strategy.spawn(1, |_| 42)), 42);
+    }
+
+    #[test]
+    fn test_runner_resumes_strategy_panic_payload_after_pool_work() {
+        let cfg = Config::new();
+        let storage_directory = cfg.storage_directory().clone();
+        let (strategy_tx, strategy_rx) = std::sync::mpsc::channel();
+        let runner = std::thread::spawn(move || {
+            let result: std::thread::Result<()> =
+                std::panic::catch_unwind(AssertUnwindSafe(|| {
+                    Runner::new(cfg).start(move |context| async move {
+                        let strategy = context.strategy(NZUsize!(2));
+                        strategy.spawn(1, |_| ()).await;
+                        std::panic::panic_any(strategy);
+                    });
+                }));
+            let strategy = result
+                .expect_err("Runner::start did not resume the root panic")
+                .downcast::<Rayon>()
+                .expect("Runner::start changed the root panic payload");
+            strategy_tx.send(*strategy).unwrap();
+        });
+
+        let strategy = strategy_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("Runner::start did not resume the strategy panic payload");
+        runner.join().unwrap();
+        let _ = std::fs::remove_dir_all(storage_directory);
+        assert_eq!(futures::executor::block_on(strategy.spawn(1, |_| 42)), 42);
     }
 
     #[test]

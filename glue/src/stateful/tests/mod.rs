@@ -43,7 +43,10 @@ use commonware_macros::{select, test_group, test_traced};
 use commonware_p2p::simulated::Link;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    Clock as _, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
+    Clock as _, Runner as _, Spawner as _, Supervisor as _,
+    buffer::paged::CacheRef,
+    deterministic,
+    mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs, release_pending_syncs},
 };
 use commonware_storage::{
     archive::prunable,
@@ -56,7 +59,7 @@ use commonware_storage::{
 };
 use commonware_utils::{
     Acknowledgement as _, NZU64, NZUsize, acknowledgement::Exact, channel::oneshot,
-    non_empty_range, sync::Mutex,
+    non_empty_range, probability, sync::Mutex,
 };
 use properties::{
     BlockAgreementAtHeight, CrashDuringStateSyncRecovery, LateJoinerStateSyncHandoff,
@@ -156,7 +159,7 @@ fn state_sync_lossy_network() {
     let link = Link {
         latency: Duration::from_millis(200),
         jitter: Duration::from_millis(150),
-        success_rate: 0.7,
+        success_rate: probability!(0.7),
     };
     run_state_sync_lossy(
         SingleDbEngine::new(NUM_VALIDATORS).with_state_sync(),
@@ -171,7 +174,7 @@ fn lossy_network() {
     let link = Link {
         latency: Duration::from_millis(200),
         jitter: Duration::from_millis(150),
-        success_rate: 0.7,
+        success_rate: probability!(0.7),
     };
     run_lossy(SingleDbEngine::new(NUM_VALIDATORS), link.clone());
     run_lossy(MultiDbEngine::new(NUM_VALIDATORS), link);
@@ -290,7 +293,7 @@ where
 }
 
 fn storage_fault_config() -> deterministic::FaultConfig {
-    deterministic::FaultConfig::default().sync(0.01)
+    deterministic::FaultConfig::default().sync(probability!(0.01))
 }
 
 fn default_storage_fault_schedule<P>(restart_order: impl IntoIterator<Item = P>) -> Schedule<P>
@@ -493,7 +496,7 @@ where
     let dead_link = Link {
         latency: Duration::from_secs(1),
         jitter: Duration::ZERO,
-        success_rate: 0.0,
+        success_rate: probability!(0.0),
     };
 
     let mut schedule = Schedule::new();
@@ -598,7 +601,7 @@ where
         .link(Link {
             latency: Duration::from_millis(100),
             jitter: Duration::from_millis(5),
-            success_rate: 1.0,
+            success_rate: probability!(1.0),
         })
         .crash(Crash::Random {
             // A full-cluster crash discards all in-flight votes, and a
@@ -796,12 +799,12 @@ where
     let good_link = Link {
         latency: Duration::from_millis(10),
         jitter: Duration::from_millis(5),
-        success_rate: 1.0,
+        success_rate: probability!(1.0),
     };
     let dead_link = Link {
         latency: Duration::from_secs(1),
         jitter: Duration::ZERO,
-        success_rate: 0.0,
+        success_rate: probability!(0.0),
     };
 
     // Build a schedule that kills all links to/from the isolated node at
@@ -840,6 +843,8 @@ where
 #[derive(Clone)]
 struct NoopQmdbResolver;
 
+type DelayedContext = DelayedSyncContext<deterministic::Context>;
+
 impl QmdbSource for NoopQmdbResolver {
     type Family = mmr::Family;
     type Digest = sha256::Digest;
@@ -859,6 +864,10 @@ impl QmdbSource for NoopQmdbResolver {
 
 impl AttachableResolver<Qmdb<deterministic::Context>> for NoopQmdbResolver {
     async fn attach_database(&self, _db: Shared<Qmdb<deterministic::Context>>) {}
+}
+
+impl AttachableResolver<Qmdb<DelayedContext>> for NoopQmdbResolver {
+    async fn attach_database(&self, _db: Shared<Qmdb<DelayedContext>>) {}
 }
 
 #[derive(Clone)]
@@ -1246,6 +1255,206 @@ fn out_of_order_certifications_complete_on_qmdb() {
             },
         }
 
+        stateful_actor.abort();
+        marshal_actor.abort();
+        let _ = stateful_actor.await;
+        let _ = marshal_actor.await;
+    });
+}
+
+#[test]
+fn stable_leader_finalizations_outpace_slow_qmdb_sync() {
+    deterministic::Runner::timed(Duration::from_secs(20)).start(|context| async move {
+        const BLOCKS: u64 = 32;
+        const BLOCK_INTERVAL: Duration = Duration::from_millis(10);
+
+        let (genesis, blocks) = build_chain(&context, BLOCKS).await;
+        let leader = blocks[0].context.leader.clone();
+        assert!(
+            blocks.iter().all(|block| block.context.leader == leader),
+            "test chain must model one stable leader",
+        );
+
+        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let mut signing_context = context.child("signing");
+        let fixture = scheme_mocks::fixture(
+            &mut signing_context,
+            b"_COMMONWARE_GLUE_QMDB_STABLE_LEADER",
+            1,
+        );
+        let provider = ConstantProvider::new(fixture.schemes[0].clone());
+        let finalizations_by_height = prunable::Archive::init(
+            context.child("finalizations_by_height"),
+            archive_config(
+                "stable-leader-qmdb-marshal",
+                "finalizations",
+                page_cache.clone(),
+                (),
+            ),
+        )
+        .await
+        .expect("failed to initialize finalizations archive");
+        let finalized_blocks = prunable::Archive::init(
+            context.child("finalized_blocks"),
+            archive_config(
+                "stable-leader-qmdb-marshal",
+                "blocks",
+                page_cache.clone(),
+                (),
+            ),
+        )
+        .await
+        .expect("failed to initialize blocks archive");
+        let (marshal_actor, marshal, floor) =
+            MarshalActor::<_, Standard<Block>, _, _, _, _, _>::init(
+                context.child("marshal"),
+                finalizations_by_height,
+                finalized_blocks,
+                marshal::Config {
+                    provider,
+                    epocher: FixedEpocher::new(EPOCH_LENGTH),
+                    start: marshal::Start::Genesis(genesis.clone()),
+                    partition_prefix: "stable-leader-qmdb-marshal".to_string(),
+                    mailbox_size: NZUsize!(64),
+                    view_retention: ViewDelta::new(BLOCKS),
+                    prunable_items_per_section: NZU64!(64),
+                    page_cache: page_cache.clone(),
+                    replay_buffer: IO_BUFFER_SIZE,
+                    key_write_buffer: IO_BUFFER_SIZE,
+                    value_write_buffer: IO_BUFFER_SIZE,
+                    block_codec_config: (),
+                    max_repair: NZUsize!(64),
+                    max_pending_acks: NZUsize!(64),
+                    strategy: Sequential,
+                },
+            )
+            .await;
+        let (resolver_receiver, _resolver_handler) =
+            handler::init(context.child("marshal_resolver"), NZUsize!(8));
+        let marshal_actor = marshal_actor.start_unbuffered(
+            NoopMarshalApplication,
+            (resolver_receiver, fixtures::IgnoreResolver),
+        );
+
+        let pending = PendingSyncs::default();
+        let delayed = DelayedContext {
+            inner: context.child("delayed"),
+            pending: pending.clone(),
+        };
+        let plan = drive_pending_syncs(
+            &pending,
+            SyncPlan::<
+                DelayedContext,
+                scheme_mocks::Scheme<ed25519::PublicKey>,
+                Standard<Block>,
+            >::init(&delayed, "stable-leader-qmdb-stateful"),
+        )
+        .await;
+        let mut db_config = qmdb_config("stable-leader-qmdb-stateful", page_cache);
+        db_config.journal_config.items_per_blob = NZU64!(1024);
+        db_config.merkle_config.items_per_blob = NZU64!(1024);
+        let (stateful, mut stateful_mailbox) = StatefulActor::init(
+            delayed.child("stateful"),
+            StatefulConfig {
+                application: App::new(genesis),
+                db_config,
+                provider: (),
+                marshal: (marshal, floor),
+                mailbox_size: NZUsize!(64),
+                plan,
+                resolvers: NoopQmdbResolver,
+                sync_config: SyncEngineConfig {
+                    fetch_batch_size: NZU64!(1),
+                    apply_batch_size: NZU64!(1),
+                    max_outstanding_requests: 1,
+                    update_channel_size: NZUsize!(1),
+                    max_retained_roots: 1,
+                },
+                prune_config: None,
+            },
+        );
+        let stateful_actor = stateful.start();
+        let databases = drive_pending_syncs(&pending, stateful_mailbox.subscribe_databases()).await;
+        drive_pending_syncs(&pending, async {
+            while pending.starts() != pending.completions() || !pending.lock().is_empty() {
+                context.sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await;
+
+        // Model storage that is slower than the 10 ms block pace but continues making progress.
+        // Every 50 ms, all currently issued low-level syncs are allowed to finish.
+        const SYNC_INTERVAL: Duration = Duration::from_millis(50);
+        pending.arm();
+        let pending_for_flusher = pending.clone();
+        let flusher = context.child("slow_qmdb_sync").spawn(move |task_context| async move {
+            loop {
+                task_context.sleep(SYNC_INTERVAL).await;
+                release_pending_syncs(&pending_for_flusher);
+            }
+        });
+
+        let mut waiters = Vec::with_capacity(BLOCKS as usize);
+        for block in &blocks {
+            let (acknowledgement, waiter) = Exact::handle();
+            let _ = stateful_mailbox.report(marshal::Update::Block(
+                Arc::new(block.clone()),
+                acknowledgement,
+            ));
+            waiters.push(waiter);
+            context.sleep(BLOCK_INTERVAL).await;
+        }
+
+        let expected = <App as Application<DelayedContext>>::sync_targets(
+            blocks.last().expect("stable-leader chain is non-empty"),
+        );
+        select! {
+            _ = async {
+                loop {
+                    let committed = <SingleDatabaseSet<DelayedContext> as DatabaseSet<
+                        DelayedContext,
+                    >>::committed_targets(&databases).await;
+                    if committed == expected {
+                        break;
+                    }
+                    context.sleep(Duration::from_millis(1)).await;
+                }
+            } => {},
+            _ = context.sleep(Duration::from_millis(500)) => {
+                panic!(
+                    "stable-leader finalization stalled behind QMDB sync (calls={}, starts={}, entered={}, completions={})",
+                    pending.calls(),
+                    pending.starts(),
+                    pending.entered(),
+                    pending.completions(),
+                );
+            },
+        }
+        let calls_at_tip = pending.calls();
+        assert!(calls_at_tip > 0, "stable-leader run did not start QMDB syncs");
+        assert!(
+            calls_at_tip < BLOCKS as usize,
+            "QMDB durability work was not coalesced (calls={calls_at_tip}, blocks={BLOCKS})",
+        );
+
+        select! {
+            results = futures::future::join_all(waiters) => {
+                for result in results {
+                    result.expect("stable-leader finalization should become durable");
+                }
+            },
+            _ = context.sleep(Duration::from_secs(1)) => {
+                panic!("stable-leader QMDB durability did not catch up");
+            },
+        }
+        let committed = <SingleDatabaseSet<DelayedContext> as DatabaseSet<DelayedContext>>::committed_targets(
+            &databases,
+        )
+        .await;
+        assert_eq!(committed, expected, "stable-leader QMDB target diverged");
+
+        flusher.abort();
+        pending.unblock();
         stateful_actor.abort();
         marshal_actor.abort();
         let _ = stateful_actor.await;

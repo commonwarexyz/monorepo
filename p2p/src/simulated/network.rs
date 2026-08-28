@@ -26,13 +26,13 @@ use commonware_runtime::{
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_utils::{
-    NZUsize, TryCollect,
+    NZUsize, Probability, TryCollect,
     channel::{fallible::FallibleExt, mpsc, oneshot, ring},
     ordered::Set,
 };
 use either::Either;
 use futures::{Sink, future};
-use rand::{Rng, RngExt as _};
+use rand::Rng;
 use rand_distr::{Distribution, Normal};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
@@ -813,7 +813,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             let latency = Duration::from_millis(link.sampler.sample(self.context.as_mut()) as u64);
 
             // Determine if the message should be delivered
-            let should_deliver = self.context.random_bool(link.success_rate);
+            let should_deliver = link.success_rate.sample(self.context.as_mut());
 
             // Enqueue message for delivery
             let completions = self.transmitter.enqueue(
@@ -1428,7 +1428,7 @@ impl<P: PublicKey> Peer<P> {
 // Messages can be sent over the link with a given latency, jitter, and success rate.
 struct Link {
     sampler: Normal<f64>,
-    success_rate: f64,
+    success_rate: Probability,
     // Messages with their receive time for ordered delivery
     inbox: mpsc::UnboundedSender<(Channel, IoBuf, SystemTime)>,
 }
@@ -1442,7 +1442,7 @@ impl Link {
         receiver: P,
         socket: SocketAddr,
         sampler: Normal<f64>,
-        success_rate: f64,
+        success_rate: Probability,
         max_frame_size: u32,
         received_messages: CounterFamily<metrics::Message>,
     ) -> Self {
@@ -1507,7 +1507,7 @@ mod tests {
     };
     use commonware_cryptography::{Signer as _, ed25519};
     use commonware_runtime::{Quota, Runner as _, Supervisor as _, deterministic};
-    use commonware_utils::{NZUsize, ordered::Set};
+    use commonware_utils::{NZUsize, ordered::Set, probability};
     use futures::FutureExt;
     use std::num::NonZeroU32;
 
@@ -1569,7 +1569,7 @@ mod tests {
             let link = ingress::Link {
                 latency: Duration::from_millis(2),
                 jitter: Duration::from_millis(1),
-                success_rate: 0.9,
+                success_rate: probability!(0.9),
             };
             oracle
                 .add_link(pk1.clone(), pk2.clone(), link.clone())
@@ -1646,7 +1646,7 @@ mod tests {
                     ingress::Link {
                         latency: Duration::ZERO,
                         jitter: Duration::ZERO,
-                        success_rate: 1.0,
+                        success_rate: probability!(1.0),
                     },
                 )
                 .await
@@ -1918,7 +1918,7 @@ mod tests {
             let link = ingress::Link {
                 latency: Duration::from_millis(0),
                 jitter: Duration::from_millis(0),
-                success_rate: 1.0,
+                success_rate: probability!(1.0),
             };
             oracle
                 .add_link(peer_a.clone(), twin.clone(), link.clone())
@@ -2005,7 +2005,7 @@ mod tests {
             let link = ingress::Link {
                 latency: Duration::from_millis(0),
                 jitter: Duration::from_millis(0),
-                success_rate: 1.0,
+                success_rate: probability!(1.0),
             };
             oracle
                 .add_link(peer_c.clone(), twin.clone(), link.clone())
@@ -2075,7 +2075,7 @@ mod tests {
             let link = ingress::Link {
                 latency: Duration::from_millis(0),
                 jitter: Duration::from_millis(0),
-                success_rate: 1.0,
+                success_rate: probability!(1.0),
             };
             oracle
                 .add_link(peer_c.clone(), twin.clone(), link.clone())
@@ -2306,7 +2306,7 @@ mod tests {
                     ingress::Link {
                         latency: Duration::from_millis(0),
                         jitter: Duration::from_millis(0),
-                        success_rate: 1.0,
+                        success_rate: probability!(1.0),
                     },
                 )
                 .await
@@ -2392,7 +2392,7 @@ mod tests {
             let link = ingress::Link {
                 latency: Duration::from_millis(0),
                 jitter: Duration::from_millis(0),
-                success_rate: 1.0,
+                success_rate: probability!(1.0),
             };
             oracle
                 .add_link(sender_pk.clone(), recipient_a.clone(), link.clone())
@@ -2480,7 +2480,7 @@ mod tests {
             let link = ingress::Link {
                 latency: Duration::from_millis(1),
                 jitter: Duration::ZERO,
-                success_rate: 1.0,
+                success_rate: probability!(1.0),
             };
             for (a, b) in [(&pk1, &pk2), (&pk1, &pk3), (&pk2, &pk3)] {
                 oracle
@@ -2631,7 +2631,7 @@ mod tests {
             let link = ingress::Link {
                 latency: Duration::from_millis(1),
                 jitter: Duration::ZERO,
-                success_rate: 1.0,
+                success_rate: probability!(1.0),
             };
             oracle
                 .add_link(primary_1.clone(), secondary_0.clone(), link.clone())

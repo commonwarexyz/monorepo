@@ -26,7 +26,7 @@ use ahash::{AHashMap, AHashSet};
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
-use commonware_utils::bitmap;
+use commonware_utils::{bitmap, iter::zip_eq};
 use core::{cmp::Ordering, ops::Range};
 use std::{
     collections::{BTreeMap, hash_map},
@@ -40,9 +40,6 @@ type DiffSlice<K, F, V> = [(K, DiffEntry<F, V>)];
 
 /// Sorted locations at the retained batch chain's committed boundary.
 type AncestorBaseLocs<K, F> = Vec<(K, Option<Location<F>>)>;
-
-/// One contiguous chunk of floor-raise candidates paired with their resolved operations.
-type CandidateChunk<'a, F, U> = (&'a [Location<F>], &'a [Operation<F, U>]);
 
 /// Floor-raise candidates prefetched from the committed prefix of the raise's candidate
 /// source, with their resolved operations. The candidate sequence depends only on the base
@@ -974,7 +971,7 @@ where
         let mut diff_sort = None;
         if !diff.is_empty() {
             let unsorted = mem::take(&mut diff);
-            diff_sort = Some(db.strategy().spawn(move |strategy| {
+            diff_sort = Some(db.strategy().spawn(unsorted.len(), move |strategy| {
                 let mut diff = unsorted;
                 strategy.sort_by(&mut diff, |a, b| a.0.cmp(&b.0));
                 diff
@@ -1059,100 +1056,80 @@ where
                         read_candidates.push(*candidate);
                     }
                 }
-                let (resolved, outcomes): (_, Vec<Vec<FloorOutcome<F>>>) =
-                    if read_candidates.is_empty() {
-                        (Vec::new(), Vec::new())
-                    } else {
-                        // Batch-read candidates: page-cache hits are served by one batched read,
-                        // disk misses are fetched concurrently. Prefetched shards enter as the
-                        // reader probed them, ahead of the live suffix's read.
-                        let live = &read_candidates[pf_count..];
-                        let mut resolved = pf_shards;
-                        if !live.is_empty() {
-                            resolved.extend(self.read_ops_sharded(live, &ops, &db.log).await?);
-                        }
+                let (resolved, outcomes): (_, Vec<FloorOutcome<F>>) = if read_candidates.is_empty()
+                {
+                    (Vec::new(), Vec::new())
+                } else {
+                    // Batch-read candidates: page-cache hits are served by one batched read,
+                    // disk misses are fetched concurrently. Prefetched shards enter as the
+                    // reader probed them, ahead of the live suffix's read.
+                    let live = &read_candidates[pf_count..];
+                    let mut resolved = pf_shards;
+                    if !live.is_empty() {
+                        resolved.extend(self.read_ops_sharded(live, &ops, &db.log).await?);
+                    }
 
-                        // Classification is the first consumer of the sorted diff. By now the
-                        // sort has overlapped the fill and read above.
-                        if let Some(job) = diff_sort.take() {
-                            diff = job.await;
-                        }
+                    // Classification is the first consumer of the sorted diff. By now the
+                    // sort has overlapped the fill and read above.
+                    if let Some(job) = diff_sort.take() {
+                        diff = job.await;
+                    }
 
-                        // Classify read candidates against the pre-raise state (see
-                        // [`FloorOutcome`]). Revalidation is required even for candidates whose
-                        // committed bitmap bit is set: an uncommitted ancestor diff may supersede
-                        // the committed location, and that is not reflected in the bitmap.
-                        let classify = |candidate: Location<F>, op: &Operation<F, U>| {
-                            let Some(key) = op.key() else {
-                                return FloorOutcome::Inactive; // CommitFloor and other non-keyed ops
-                            };
-                            match diff.binary_search_by(|(k, _)| k.cmp(key)) {
-                                Ok(idx) => {
-                                    let entry = &diff[idx].1;
+                    // Classify read candidates against the pre-raise state (see
+                    // [`FloorOutcome`]). Revalidation is required even for candidates whose
+                    // committed bitmap bit is set: an uncommitted ancestor diff may supersede
+                    // the committed location, and that is not reflected in the bitmap.
+                    let classify = |candidate: Location<F>, op: &Operation<F, U>| {
+                        let Some(key) = op.key() else {
+                            return FloorOutcome::Inactive; // CommitFloor and other non-keyed ops
+                        };
+                        match diff.binary_search_by(|(k, _)| k.cmp(key)) {
+                            Ok(idx) => {
+                                let entry = &diff[idx].1;
+                                if entry.loc() == Some(candidate) {
+                                    FloorOutcome::MoveExisting {
+                                        idx,
+                                        base_old_loc: entry.base_old_loc(),
+                                    }
+                                } else {
+                                    FloorOutcome::Inactive
+                                }
+                            }
+                            Err(_) => resolve_in_ancestors(&self.ancestors, key).map_or_else(
+                                || {
+                                    if db.snapshot.get(key).any(|&l| l == candidate) {
+                                        FloorOutcome::MoveNew {
+                                            base_old_loc: Some(candidate),
+                                        }
+                                    } else {
+                                        FloorOutcome::Inactive
+                                    }
+                                },
+                                |entry| {
                                     if entry.loc() == Some(candidate) {
-                                        FloorOutcome::MoveExisting {
-                                            idx,
+                                        FloorOutcome::MoveNew {
                                             base_old_loc: entry.base_old_loc(),
                                         }
                                     } else {
                                         FloorOutcome::Inactive
                                     }
-                                }
-                                Err(_) => resolve_in_ancestors(&self.ancestors, key).map_or_else(
-                                    || {
-                                        if db.snapshot.get(key).any(|&l| l == candidate) {
-                                            FloorOutcome::MoveNew {
-                                                base_old_loc: Some(candidate),
-                                            }
-                                        } else {
-                                            FloorOutcome::Inactive
-                                        }
-                                    },
-                                    |entry| {
-                                        if entry.loc() == Some(candidate) {
-                                            FloorOutcome::MoveNew {
-                                                base_old_loc: entry.base_old_loc(),
-                                            }
-                                        } else {
-                                            FloorOutcome::Inactive
-                                        }
-                                    },
-                                ),
-                            }
-                        };
-
-                        // Classification is already partitioned by candidate chunk, so use
-                        // manual strategy execution and keep each location aligned with the
-                        // operation resolved for the same filtered candidate. Chunks are
-                        // subdivided past the pool parallelism because the snapshot probes
-                        // that dominate classification have variable latency, so finer
-                        // chunks balance the tail.
-                        let manual = strategy.manual();
-                        let target = read_candidates
-                            .len()
-                            .div_ceil(manual.parallelism() * 4)
-                            .max(1);
-                        let mut chunks: Vec<CandidateChunk<'_, F, U>> = Vec::new();
-                        let mut offset = 0;
-                        for chunk in &resolved {
-                            let locs = &read_candidates[offset..offset + chunk.len()];
-                            offset += chunk.len();
-                            chunks.extend(locs.chunks(target).zip(chunk.chunks(target)));
+                                },
+                            ),
                         }
-                        let outcomes = manual.map_collect_vec(chunks, |(chunk_locs, chunk_ops)| {
-                            chunk_locs
-                                .iter()
-                                .zip(chunk_ops)
-                                .map(|(loc, op)| classify(*loc, op))
-                                .collect()
-                        });
-                        (resolved, outcomes)
                     };
+
+                    // Classify each candidate against the pre-raise state, in candidate order.
+                    let outcomes: Vec<FloorOutcome<F>> = strategy.map_collect_vec(
+                        zip_eq(read_candidates.iter(), resolved.iter().flatten()),
+                        |(loc, op)| classify(*loc, op),
+                    );
+                    (resolved, outcomes)
+                };
 
                 // Apply in candidate order, moving active ops to the tip. `read_candidates`
                 // preserves candidate order, so a candidate that does not match the next
                 // pending read was superseded and only advances the floor.
-                let mut outcomes = outcomes.into_iter().flatten();
+                let mut outcomes = outcomes.into_iter();
                 let mut reads = resolved.into_iter().flatten();
                 let mut pending = read_candidates.iter().peekable();
                 for candidate in candidates {
@@ -1215,7 +1192,8 @@ where
         // never revisits it), so the merge inputs are disjoint.
         let mut diff_merge = None;
         if !floor_diff.is_empty() {
-            diff_merge = Some(db.strategy().spawn(move |strategy| {
+            let merge_len = floor_diff.len() + diff.len();
+            diff_merge = Some(db.strategy().spawn(merge_len, move |strategy| {
                 let mut floor_diff = floor_diff;
                 strategy.sort_by(&mut floor_diff, |a, b| a.0.cmp(&b.0));
                 let diff = merge_sorted_diffs(diff, floor_diff);
@@ -1237,8 +1215,8 @@ where
         let leaves = self.base_state.size + ops.len() as u64;
         let inactive_peaks = db.inactive_peaks(leaves, floor);
 
-        // Leaf and node hashing dominate merkleization, so run them as one job on the
-        // strategy instead of occupying the calling task (see `Journal::merkleize`).
+        // Leaf and node hashing dominate merkleization, so run them as one job through the
+        // strategy (see `Journal::merkleize`).
         let (journal, root) = db
             .log
             .merkleize(self.journal_batch, ops, inactive_peaks)
@@ -1621,9 +1599,10 @@ where
         // source, and the step bound, none of which depend on the resolution. The batch
         // moves into the job, so its floor is captured first.
         let scan_from = self.batch.base.inactivity_floor_loc();
-        let resolve = db
-            .strategy()
-            .spawn(move |strategy| self.resolve_updates(updates, upserts, &strategy));
+        let resolve_len = updates.len() + upserts.len();
+        let resolve = db.strategy().spawn(resolve_len, move |strategy| {
+            self.resolve_updates(updates, upserts, &strategy)
+        });
 
         // Gather the committed-prefix candidates and read their operations, sharded, while
         // the resolution job runs.
@@ -2746,9 +2725,9 @@ where
     /// different fork returns [`crate::qmdb::Error::StaleBatch`] (see
     /// [`crate::qmdb::batch_chain`] for more details).
     ///
-    /// This publishes the batch to the in-memory database state and appends it to the journal,
-    /// but does not durably persist it. Call [`Db::commit`] or [`Db::sync`], or await the handle
-    /// returned by [`Db::start_sync`], to guarantee durability.
+    /// This publishes the batch to the in-memory database state and appends it to the journal.
+    /// Call [`Db::commit`] or [`Db::sync`], or await the handle returned by [`Db::start_sync`], to
+    /// make the applied state durable.
     #[tracing::instrument(
         name = "qmdb.any.db.apply_batch",
         level = "info",

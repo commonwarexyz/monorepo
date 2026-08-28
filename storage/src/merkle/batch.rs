@@ -261,7 +261,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
 
     /// Add a run of pre-computed leaf digests, in order.
     #[cfg(feature = "std")]
-    pub(crate) fn add_leaf_digests(mut self, digests: impl IntoIterator<Item = D>) -> Self {
+    pub fn add_leaf_digests(mut self, digests: impl IntoIterator<Item = D>) -> Self {
         // Each leaf also appends its parent placeholders, so reserve for the full node count.
         let digests = digests.into_iter();
         let n = digests.size_hint().0 as u64;
@@ -423,8 +423,8 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         height: u32,
         output: &mut Vec<(Position<F>, D)>,
     ) {
-        let mut pairs = positions.chunks_exact(2);
-        for pair in &mut pairs {
+        let (pairs, remainder) = positions.as_chunks::<2>();
+        for pair in pairs {
             let (left, right) = (pair[0], pair[1]);
             let (ll, lr) = self.child_digests(base, left, height);
             let (rl, rr) = self.child_digests(base, right, height);
@@ -433,7 +433,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
             output.push((left, left_digest));
             output.push((right, right_digest));
         }
-        if let [pos] = pairs.remainder() {
+        if let [pos] = remainder {
             let (left, right) = self.child_digests(base, *pos, height);
             output.push((*pos, hasher.node_digest(*pos, &left, &right)));
         }

@@ -134,6 +134,7 @@ mod tests {
         },
         non_empty_vec,
         ordered::Set,
+        probability,
         sync::Mutex,
     };
     use std::{
@@ -151,12 +152,12 @@ mod tests {
     const LINK: Link = Link {
         latency: Duration::from_millis(10),
         jitter: Duration::from_millis(1),
-        success_rate: 1.0,
+        success_rate: probability!(1.0),
     };
     const LINK_UNRELIABLE: Link = Link {
         latency: Duration::from_millis(10),
         jitter: Duration::from_millis(1),
-        success_rate: 0.5,
+        success_rate: probability!(0.5),
     };
 
     fn status_metric_total(metrics: &str, name: &str, status: &str) -> u64 {

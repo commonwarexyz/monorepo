@@ -168,7 +168,7 @@ pub(crate) mod test {
         Runner as _, Supervisor as _,
         deterministic::{self, Context},
     };
-    use commonware_utils::{NZU64, NZUsize, TestRng, sequence::FixedBytes};
+    use commonware_utils::{NZU64, NZUsize, TestRng, probability, sequence::FixedBytes};
     use futures::StreamExt as _;
     use rand::{Rng, seq::IteratorRandom};
     use std::{
@@ -790,7 +790,7 @@ pub(crate) mod test {
             // across configs, never cached pages), so replay's first item forces a storage read,
             // and with far fewer ops than the routing batch size no batch reaches a worker, so
             // workers never read the log themselves.
-            context.storage_fault_config().write().read_rate = Some(1.0);
+            context.storage_fault_config().write().read_rate = Some(probability!(1.0));
             let result = index
                 .build_snapshot(
                     context.child("build"),
