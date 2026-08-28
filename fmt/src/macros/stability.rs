@@ -1,4 +1,9 @@
-//! Formatters for Commonware stability macro bodies.
+//! Formats Commonware stability module declarations and item scopes.
+//!
+//! Stability levels and visibility are range-validated before canonical
+//! reconstruction. Predicates and item bodies are recovered from exact source.
+//! Structural comments or preserved multiline fragments keep the original shell
+//! so their placement remains intact.
 
 use super::{Error, Options, nested};
 use crate::{
@@ -13,6 +18,7 @@ use quote::ToTokens;
 use std::ops::Range;
 use syn::{Visibility, spanned::Spanned};
 
+/// Formats the delimiter contents of a `stability_mod!` invocation.
 pub(super) fn stability_mod(source: &str) -> Result<ProtectedFragment, Error> {
     let input = syn::parse_str::<StabilityModInput>(source).map_err(Error::Parse)?;
     let source_map = SourceMap::new(source);
@@ -24,6 +30,8 @@ pub(super) fn stability_mod(source: &str) -> Result<ProtectedFragment, Error> {
         source_map.span_range(input.name.span())?,
     ];
     ranges.extend(visibility_range.clone());
+    // Reconstruction owns only whitespace between mapped fields. Any other bytes
+    // may be comments or opaque syntax whose placement must remain unchanged.
     if !has_only_whitespace_gaps(source, ranges) {
         return Ok(ProtectedFragment::preserved(source));
     }
@@ -42,6 +50,7 @@ pub(super) fn stability_mod(source: &str) -> Result<ProtectedFragment, Error> {
     Ok(ProtectedFragment::formatted(output))
 }
 
+/// Formats a `stability_scope!` body with the default Rust fragment formatter.
 #[cfg(test)]
 pub(super) fn stability_scope(
     source: &str,
@@ -56,6 +65,7 @@ pub(super) fn stability_scope(
     )
 }
 
+/// Formats a `stability_scope!` body using the configured Rust fragment formatter.
 pub(super) fn stability_scope_with(
     formatter: &crate::rustfmt::Formatter,
     source: &str,
@@ -66,6 +76,8 @@ pub(super) fn stability_scope_with(
     let source_map = SourceMap::new(source);
     let open = source_map.span_range(input.brace_token.span.open())?;
     let close = source_map.span_range(input.brace_token.span.close())?;
+    // The item range is later used as a splice boundary, so delimiter bytes and
+    // ordering must be proven rather than inferred from spans alone.
     if source_map.slice(open.clone())? != "{"
         || source_map.slice(close.clone())? != "}"
         || open.end > close.start
@@ -84,6 +96,8 @@ pub(super) fn stability_scope_with(
             source_map.span_range(cfg.paren_token.span.close())?,
         ]);
     }
+    // The item body is an owned field. Only gaps around shell tokens must be free
+    // of structural trivia before canonical rendering.
     structural.push(items_range.clone());
     if !has_only_whitespace_gaps(source, structural) {
         return Ok(ProtectedFragment::preserved(source));
@@ -102,6 +116,8 @@ pub(super) fn stability_scope_with(
     if items.disposition() != Disposition::Formatted
         && (items.text().contains('\n') || items.text().contains('\r'))
     {
+        // Preserved multiline items cannot be reindented safely. Keep the shell and
+        // splice in only nested formatting that retained the original body layout.
         return preserve_scope_items(source, items_range, items_source, &items);
     }
 
@@ -111,6 +127,7 @@ pub(super) fn stability_scope_with(
         let predicate = if crate::fragment::source_requires_preservation(predicate_source) {
             ProtectedFragment::preserved(predicate_source)
         } else {
+            // Rustfmt needs the absolute predicate column after `<level>, cfg(`.
             formatter
                 .meta(
                     predicate_source,
@@ -121,6 +138,8 @@ pub(super) fn stability_scope_with(
         if predicate.disposition() != Disposition::Formatted
             && (predicate.text().contains('\n') || predicate.text().contains('\r'))
         {
+            // Moving preserved continuation lines would change their relationship
+            // to the original shell.
             return preserve_scope_items(source, items_range, items_source, &items);
         }
         Some(predicate.into_string())
@@ -133,6 +152,7 @@ pub(super) fn stability_scope_with(
     Ok(ProtectedFragment::formatted(output))
 }
 
+/// Preserves a stability shell while retaining any nested formatting in its items.
 fn preserve_scope_items(
     source: &str,
     items_range: Range<usize>,
@@ -142,12 +162,15 @@ fn preserve_scope_items(
     if items.text() == items_source {
         return Ok(ProtectedFragment::preserved(source));
     }
+    // The replacement range comes from the original source map. Reparse after the
+    // splice to ensure nested formatting did not invalidate the preserved shell.
     let mut output = source.to_owned();
     output.replace_range(items_range, items.text());
     syn::parse_str::<StabilityScopeInput>(&output).map_err(Error::Output)?;
     Ok(ProtectedFragment::preserved_with_nested_formatting(output))
 }
 
+/// Renders a canonical stability scope from formatted component text.
 fn render_scope(level: &str, predicate: Option<&str>, items: &str, options: Options) -> String {
     let mut writer = Writer::new_inline(options.indentation, options.line_ending.as_str());
     writer.push(level);
@@ -164,6 +187,7 @@ fn render_scope(level: &str, predicate: Option<&str>, items: &str, options: Opti
     writer.push(" {");
     writer.newline();
     writer.indented(|writer| writer.push(items));
+    // Add a line break only when the formatted item fragment did not supply one.
     if !items.ends_with('\n') {
         writer.newline();
     }
@@ -171,6 +195,7 @@ fn render_scope(level: &str, predicate: Option<&str>, items: &str, options: Opti
     writer.finish()
 }
 
+/// Maps the selected stability-level syntax to its exact source range.
 fn level_range(source_map: &SourceMap<'_>, level: &StabilityLevel) -> Result<Range<usize>, Error> {
     let span = match level.syntax() {
         StabilityLevelSyntax::Literal(literal) => literal.span(),
@@ -179,6 +204,7 @@ fn level_range(source_map: &SourceMap<'_>, level: &StabilityLevel) -> Result<Ran
     source_map.span_range(span).map_err(Error::from)
 }
 
+/// Returns token text for the parsed stability-level syntax.
 fn level_text(level: &StabilityLevel) -> String {
     match level.syntax() {
         StabilityLevelSyntax::Literal(literal) => literal.to_string(),
@@ -186,6 +212,7 @@ fn level_text(level: &StabilityLevel) -> String {
     }
 }
 
+/// Maps an explicit visibility to source, or returns `None` for inherited visibility.
 fn visibility_range(
     source_map: &SourceMap<'_>,
     visibility: &Visibility,
@@ -199,10 +226,13 @@ fn visibility_range(
         .map_err(Error::from)
 }
 
+/// Returns canonical source text for a parsed visibility.
 fn visibility_text(visibility: &Visibility) -> String {
     match visibility {
         Visibility::Public(_) => "pub ".to_owned(),
         Visibility::Restricted(restricted) => {
+            // Token rendering inserts spaces around path separators. Remove them so
+            // the reconstructed visibility uses ordinary Rust path spelling.
             let path = restricted
                 .path
                 .to_token_stream()
@@ -218,11 +248,14 @@ fn visibility_text(visibility: &Visibility) -> String {
     }
 }
 
+/// Checks that mapped fields are ordered and all uncovered source is whitespace.
 fn has_only_whitespace_gaps(source: &str, ranges: impl IntoIterator<Item = Range<usize>>) -> bool {
     let mut ranges = ranges.into_iter().collect::<Vec<_>>();
     ranges.sort_unstable_by_key(|range| (range.start, range.end));
     let mut cursor = 0;
     for range in ranges {
+        // Invalid or overlapping spans cannot prove that uncovered bytes are trivia
+        // owned by the shell.
         if range.start < cursor
             || range.end > source.len()
             || source[cursor..range.start]

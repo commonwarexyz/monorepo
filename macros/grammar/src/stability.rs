@@ -1,4 +1,7 @@
 //! Input grammars for the stability macros.
+//!
+//! Parsed values retain their source spelling and punctuation so macro
+//! expansion and source formatting share one accepted grammar.
 
 use syn::{
     Error, Ident, Item, LitInt, Meta, Token, Visibility, braced, parenthesized,
@@ -18,7 +21,9 @@ pub enum StabilityLevelSyntax {
 /// Stability level accepted by Commonware macros.
 #[derive(Clone)]
 pub struct StabilityLevel {
+    /// Canonical numeric level from zero through four.
     value: u8,
+    /// Original literal or named source representation.
     syntax: StabilityLevelSyntax,
 }
 
@@ -133,6 +138,8 @@ pub struct StabilityScopeInput {
 impl Parse for StabilityScopeInput {
     fn parse(input: ParseStream<'_>) -> Result<Self> {
         let level = input.parse()?;
+        // The item body starts with braces, so a comma unambiguously introduces
+        // the optional cfg clause.
         let cfg = if input.peek(Token![,]) {
             let comma_token = input.parse()?;
             let cfg_ident: Ident = input.parse()?;

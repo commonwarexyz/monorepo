@@ -1,4 +1,8 @@
 //! Formatter for Commonware macro invocations.
+//!
+//! The crate locates supported macro bodies in Rust source, formats their ordinary
+//! Rust fragments with `rustfmt`, and renders macro-specific shells. Unsupported
+//! or unsafe-to-rewrite source is preserved.
 
 #![doc(hidden)]
 #![doc(

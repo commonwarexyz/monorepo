@@ -1,4 +1,10 @@
 //! Complete-file collection and replacement of supported macro bodies.
+//!
+//! The formatter parses a Rust file, locates the outermost supported macro
+//! invocations, and replaces only their bodies. All surrounding source remains
+//! byte-for-byte unchanged. Formatting runs to a bounded fixed point because a
+//! nested fragment can settle only after an outer shell changes its destination
+//! indentation.
 
 use crate::{
     fragment::{Disposition, ProtectedFragment},
@@ -13,6 +19,11 @@ use syn::{
 };
 use thiserror::Error;
 
+/// Defensive convergence budget for destination-sensitive formatting.
+///
+/// The first pass establishes shell placement. Three follow-up passes allow
+/// nested fragments to settle without permitting an oscillating formatter to
+/// run indefinitely.
 const MAX_FORMAT_PASSES: usize = 4;
 
 /// Configured formatter for complete Rust source files.
@@ -66,12 +77,12 @@ impl Output {
         self.text
     }
 
-    /// Returns the number of supported macro shells formatted on the first pass.
+    /// Returns the number of outermost supported macro shells formatted on the first pass.
     pub const fn formatted_macros(&self) -> usize {
         self.formatted_macros
     }
 
-    /// Returns the number of supported macro shells preserved on the first pass.
+    /// Returns the number of outermost supported macro shells preserved on the first pass.
     pub const fn preserved_macros(&self) -> usize {
         self.preserved_macros
     }
@@ -80,7 +91,7 @@ impl Output {
 /// An error produced while formatting a complete Rust source file.
 #[derive(Debug, Error)]
 pub enum Error {
-    /// The input exceeded the nesting accepted by the syntax parser.
+    /// The input exceeded the formatter's delimiter nesting safety bound.
     #[error("Rust source exceeded the supported delimiter nesting limit")]
     NestingLimit,
     /// The input or candidate output was not valid Rust syntax.
@@ -92,8 +103,8 @@ pub enum Error {
     /// A source span could not be mapped to a byte range.
     #[error("failed to locate macro source: {0}")]
     Source(#[from] crate::source::Error),
-    /// A selected macro did not retain exact brace delimiters.
-    #[error("supported macro did not have valid brace delimiters")]
+    /// A selected macro did not retain its expected delimiter pair.
+    #[error("supported macro did not have valid delimiters")]
     Delimiter,
     /// Selected macro body replacements overlapped.
     #[error("supported macro replacements overlapped")]
@@ -103,6 +114,7 @@ pub enum Error {
     NotFixedPoint,
 }
 
+/// Collects outermost supported macros outside `rustfmt::skip` scopes.
 struct Collector<'ast> {
     macros: Vec<&'ast Macro>,
 }
@@ -152,6 +164,8 @@ impl<'ast> Visit<'ast> for Collector<'ast> {
 
     fn visit_macro(&mut self, node: &'ast Macro) {
         if macro_kind(&node.path, &node.delimiter).is_some() {
+            // The selected formatter owns its full body, including any nested
+            // supported macros, so descending would create overlapping tasks.
             self.macros.push(node);
             return;
         }
@@ -159,17 +173,20 @@ impl<'ast> Visit<'ast> for Collector<'ast> {
     }
 }
 
+/// One non-overlapping macro body replacement in complete-file coordinates.
 struct Replacement {
     range: Range<usize>,
     text: String,
 }
 
+/// Candidate complete-file output and first-level macro counts for one pass.
 struct Pass {
     text: String,
     formatted_macros: usize,
     preserved_macros: usize,
 }
 
+/// A macro body plus the destination layout needed to format it in isolation.
 struct FormatTask<'a> {
     kind: MacroKind,
     body_range: Range<usize>,
@@ -182,6 +199,7 @@ pub fn format(source: &str) -> Result<Output, Error> {
     Formatter::default().format(source)
 }
 
+/// Formats all outermost supported macro bodies in a single complete-file pass.
 fn format_once(formatter: &crate::rustfmt::Formatter, source: &str) -> Result<Pass, Error> {
     ensure_nesting_limit(source)?;
     let file = syn::parse_file(source).map_err(Error::Parse)?;
@@ -199,6 +217,8 @@ fn format_once(formatter: &crate::rustfmt::Formatter, source: &str) -> Result<Pa
         let close = source_map.span_range(delimiter.close())?;
         let (expected_open, expected_close) =
             delimiter_text(&invocation.delimiter).ok_or(Error::Delimiter)?;
+        // Span locations identify source coordinates, but the exact delimiter
+        // bytes are validated before they become replacement boundaries.
         if source_map.slice(open.clone())? != expected_open
             || source_map.slice(close.clone())? != expected_close
             || open.end > close.start
@@ -208,6 +228,8 @@ fn format_once(formatter: &crate::rustfmt::Formatter, source: &str) -> Result<Pa
         let body_range = open.end..close.start;
         let body_source = source_map.slice(body_range.clone())?;
         let path_start = source_map.byte_offset(invocation.path.span().start())?;
+        // Shell indentation follows the invocation line's leading whitespace. The
+        // body column tracks the actual opening delimiter, including qualified paths.
         let options = Options {
             indentation: line_indentation(source, path_start),
             body_column: line_column(source, open.end),
@@ -248,9 +270,12 @@ fn format_once(formatter: &crate::rustfmt::Formatter, source: &str) -> Result<Pa
         return Err(Error::Overlap);
     }
     let mut output = source.to_owned();
+    // Applying from the end keeps every earlier source range valid.
     for replacement in replacements.into_iter().rev() {
         output.replace_range(replacement.range, &replacement.text);
     }
+    // Fragment parsers cannot prove that the replacements compose into a valid
+    // file, so validate the final candidate before exposing it.
     syn::parse_file(&output).map_err(Error::Parse)?;
     Ok(Pass {
         text: output,
@@ -259,6 +284,7 @@ fn format_once(formatter: &crate::rustfmt::Formatter, source: &str) -> Result<Pa
     })
 }
 
+/// Formats independent macro bodies in parallel and returns source-order results.
 fn format_tasks(
     formatter: &crate::rustfmt::Formatter,
     tasks: &[FormatTask<'_>],
@@ -274,6 +300,8 @@ fn format_tasks(
     }
 
     let mut indexed = thread::scope(|scope| {
+        // Round-robin assignment avoids shared queues while distributing large
+        // and small bodies across the available workers.
         let handles = (0..workers)
             .map(|worker| {
                 scope.spawn(move || {
@@ -305,12 +333,17 @@ fn format_tasks(
     indexed.into_iter().map(|(_, result)| result).collect()
 }
 
+/// Maximum token-group depth inspected before parsing the full syntax tree.
 const MAX_DELIMITER_DEPTH: usize = 256;
 
+/// Rejects excessive token-group nesting without recursive parser traversal.
 fn ensure_nesting_limit(source: &str) -> Result<(), Error> {
     let Ok(stream) = source.parse::<TokenStream>() else {
+        // The full syntax parser reports malformed Rust after this guard. This
+        // pass is solely a stack-safety check for otherwise tokenizable input.
         return Ok(());
     };
+    // An explicit iterator stack bounds call-stack use for adversarial nesting.
     let mut iterators = vec![stream.into_iter()];
     while let Some(iterator) = iterators.last_mut() {
         match iterator.next() {
@@ -329,6 +362,7 @@ fn ensure_nesting_limit(source: &str) -> Result<(), Error> {
     Ok(())
 }
 
+/// Chooses the majority line ending, preferring LF when the counts tie.
 fn dominant_line_ending(source: &str) -> LineEnding {
     let crlf = source.match_indices("\r\n").count();
     let lf = source.bytes().filter(|byte| *byte == b'\n').count();
@@ -339,6 +373,7 @@ fn dominant_line_ending(source: &str) -> LineEnding {
     }
 }
 
+/// Returns the leading indentation width at `offset` in four-column tab stops.
 fn line_indentation(source: &str, offset: usize) -> usize {
     let line_start = source[..offset]
         .rfind('\n')
@@ -353,6 +388,7 @@ fn line_indentation(source: &str, offset: usize) -> usize {
         })
 }
 
+/// Returns the character column at `offset` using four-column tab stops.
 fn line_column(source: &str, offset: usize) -> usize {
     let line_start = source[..offset]
         .rfind('\n')

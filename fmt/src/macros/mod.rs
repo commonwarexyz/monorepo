@@ -1,4 +1,8 @@
-//! Formatters for supported Commonware macro bodies.
+//! Identifies supported Commonware macro invocations and dispatches their delimiter
+//! contents to syntax-aware formatters.
+//!
+//! Each formatter returns a protected fragment so callers can distinguish a fully
+//! formatted body from source that had to be preserved for comments or opaque syntax.
 
 mod cfg_if;
 mod nested;
@@ -9,19 +13,28 @@ pub use select::{select, select_loop};
 use syn::{MacroDelimiter, Path, ext::IdentExt as _};
 use thiserror::Error;
 
+/// Grammar implemented for a recognized macro invocation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum MacroKind {
+    /// A `cfg_if!` conditional chain.
     CfgIf,
+    /// A single-pass `select!` expression.
     Select,
+    /// A repeating `select_loop!` expression.
     SelectLoop,
+    /// A `stability_mod!` module declaration.
     StabilityMod,
+    /// A `stability_scope!` item group.
     StabilityScope,
 }
 
+/// Classifies a supported macro from its exact path and required delimiter.
 pub(crate) fn macro_kind(path: &Path, delimiter: &MacroDelimiter) -> Option<MacroKind> {
     if path.leading_colon.is_some() {
         return None;
     }
+    // Raw identifiers name the same macros, while absolute and unrelated qualified
+    // paths must remain outside this formatter's ownership.
     let segments = path
         .segments
         .iter()
@@ -82,6 +95,7 @@ pub(crate) fn macro_kind(path: &Path, delimiter: &MacroDelimiter) -> Option<Macr
     }
 }
 
+/// Returns the source spelling of a macro delimiter pair.
 pub(crate) const fn delimiter_text(
     delimiter: &MacroDelimiter,
 ) -> Option<(&'static str, &'static str)> {
@@ -92,6 +106,10 @@ pub(crate) const fn delimiter_text(
     }
 }
 
+/// Formats a supported macro body at its current nesting depth.
+///
+/// At the outermost depth, multiline literals are shielded before formatting and
+/// restored only when every placeholder can be matched exactly.
 pub(crate) fn format_at_depth(
     formatter: &crate::rustfmt::Formatter,
     kind: MacroKind,
@@ -102,15 +120,20 @@ pub(crate) fn format_at_depth(
     if depth == 0
         && let Some(literals) = crate::fragment::MultilineLiterals::prepare(source)
     {
+        // Shield only once so recursive formatters operate on the same placeholder
+        // coordinates rather than nesting independent replacement schemes.
         let formatted = format_shielded_at_depth(formatter, kind, literals.text(), options, depth)?;
         if let Some(restored) = literals.restore(formatted) {
             return Ok(restored);
         }
+        // Restoration is all-or-nothing. Formatting the original source is safer
+        // than returning a fragment with missing or duplicated literal text.
         return format_shielded_at_depth(formatter, kind, source, options, depth);
     }
     format_shielded_at_depth(formatter, kind, source, options, depth)
 }
 
+/// Dispatches a body whose multiline literals have already been shielded if needed.
 fn format_shielded_at_depth(
     formatter: &crate::rustfmt::Formatter,
     kind: MacroKind,
@@ -140,6 +163,7 @@ pub enum LineEnding {
 }
 
 impl LineEnding {
+    /// Returns the exact line ending sequence emitted by writers.
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Lf => "\n",
@@ -151,7 +175,7 @@ impl LineEnding {
 /// Placement options for a formatted macro body.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Options {
-    /// Number of spaces before the containing macro invocation.
+    /// Rendered shell indentation derived from the invocation line's leading whitespace.
     pub indentation: usize,
     /// Absolute column immediately after the macro's opening delimiter.
     pub body_column: usize,
@@ -183,8 +207,8 @@ pub enum Error {
     /// A nested marker could not be restored exactly once in source order.
     #[error("nested macro marker mismatch")]
     MarkerMismatch,
-    /// A supported nested macro did not retain brace delimiters.
-    #[error("nested supported macro did not have valid brace delimiters")]
+    /// A nested macro did not retain its expected delimiter pair.
+    #[error("nested macro did not have valid delimiters")]
     MarkerDelimiter,
 }
 

@@ -1,4 +1,7 @@
 //! Input grammars for the selection macros.
+//!
+//! Parsed values retain punctuation tokens and source spans so procedural macro
+//! expansion and source formatting consume the same syntax.
 
 use syn::{
     Error, Expr, Ident, Pat, Token,
@@ -50,6 +53,8 @@ impl Parse for SelectInput {
                 comma_token,
             });
 
+            // A branch without a comma must be final. Stop here so the outer
+            // parser can reject any unconsumed trailing tokens.
             if branches
                 .last()
                 .is_some_and(|branch| branch.comma_token.is_none())
@@ -153,6 +158,8 @@ impl Parse for SelectLoopInput {
         let on_stopped = parse_lifecycle(input, "on_stopped", true)?;
 
         let mut branches = Vec::new();
+        // `on_end` begins with an identifier like many patterns, so recognize
+        // the lifecycle keyword before attempting to parse another branch.
         while !input.is_empty() && !peek_keyword(input, "on_end")? {
             let pattern = Pat::parse_single(input)?;
             let eq_token = input.parse()?;
@@ -179,6 +186,8 @@ impl Parse for SelectLoopInput {
                 comma_token,
             });
 
+            // A branch without a comma must be final. Stop here so `on_end` or
+            // any other trailing input is handled by the enclosing grammar.
             if branches
                 .last()
                 .is_some_and(|branch| branch.comma_token.is_none())
@@ -204,6 +213,7 @@ impl Parse for SelectLoopInput {
     }
 }
 
+/// Checks for an identifier keyword without advancing the input stream.
 fn peek_keyword(input: ParseStream<'_>, expected: &str) -> Result<bool> {
     if !input.peek(Ident) {
         return Ok(false);
@@ -213,6 +223,10 @@ fn peek_keyword(input: ParseStream<'_>, expected: &str) -> Result<bool> {
     Ok(ident == expected)
 }
 
+/// Parses one named lifecycle entry and its punctuation.
+///
+/// A comma is required when another entry may follow. The final `on_end` entry
+/// may omit it.
 fn parse_lifecycle(
     input: ParseStream<'_>,
     expected: &str,
@@ -242,7 +256,10 @@ fn parse_lifecycle(
     })
 }
 
+/// Conservatively reports whether a pattern is guaranteed to match.
 fn is_irrefutable(pattern: &Pat) -> bool {
+    // Irrefutability composes only through these structural pattern forms.
+    // Treat every unsupported form as refutable.
     match pattern {
         Pat::Wild(_) | Pat::Rest(_) => true,
         Pat::Ident(ident) => ident

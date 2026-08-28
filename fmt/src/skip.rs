@@ -1,7 +1,11 @@
 //! Recognition of scoped `#[rustfmt::skip]` attributes.
+//!
+//! Only an unqualified, argument-free `rustfmt::skip` path suppresses formatting.
+//! Lookalike attributes and syntax without an exposed attribute list do not.
 
 use syn::{Attribute, Expr, ForeignItem, ImplItem, Item, Meta, PathArguments, Stmt, TraitItem};
 
+/// Returns whether `item` carries an exact `#[rustfmt::skip]` attribute.
 pub(crate) fn item(item: &Item) -> bool {
     match item {
         Item::Const(item) => attributes(&item.attrs),
@@ -24,6 +28,7 @@ pub(crate) fn item(item: &Item) -> bool {
     }
 }
 
+/// Returns whether an implementation item carries an exact skip attribute.
 pub(crate) fn impl_item(item: &ImplItem) -> bool {
     match item {
         ImplItem::Const(item) => attributes(&item.attrs),
@@ -35,6 +40,7 @@ pub(crate) fn impl_item(item: &ImplItem) -> bool {
     }
 }
 
+/// Returns whether a trait item carries an exact skip attribute.
 pub(crate) fn trait_item(item: &TraitItem) -> bool {
     match item {
         TraitItem::Const(item) => attributes(&item.attrs),
@@ -46,6 +52,7 @@ pub(crate) fn trait_item(item: &TraitItem) -> bool {
     }
 }
 
+/// Returns whether a foreign item carries an exact skip attribute.
 pub(crate) fn foreign_item(item: &ForeignItem) -> bool {
     match item {
         ForeignItem::Fn(item) => attributes(&item.attrs),
@@ -57,6 +64,7 @@ pub(crate) fn foreign_item(item: &ForeignItem) -> bool {
     }
 }
 
+/// Returns whether a statement or its directly represented node is skipped.
 pub(crate) fn statement(statement: &Stmt) -> bool {
     match statement {
         Stmt::Local(local) => attributes(&local.attrs),
@@ -66,6 +74,7 @@ pub(crate) fn statement(statement: &Stmt) -> bool {
     }
 }
 
+/// Returns whether `expression` carries an exact skip attribute.
 pub(crate) fn expression(expression: &Expr) -> bool {
     match expression {
         Expr::Array(node) => attributes(&node.attrs),
@@ -112,11 +121,15 @@ pub(crate) fn expression(expression: &Expr) -> bool {
     }
 }
 
+/// Returns whether an attribute list contains the exact supported skip path.
 fn attributes(attributes: &[Attribute]) -> bool {
     attributes.iter().any(|attribute| {
+        // List and name-value metadata are not part of the skip contract.
         let Meta::Path(path) = &attribute.meta else {
             return false;
         };
+        // Require two plain, unqualified segments so namespaced and generic
+        // lookalikes cannot suppress formatting.
         if path.leading_colon.is_some() || path.segments.len() != 2 {
             return false;
         }

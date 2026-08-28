@@ -1,4 +1,9 @@
 //! Protected Rust fragments and source-fidelity helpers.
+//!
+//! Fragment formatting must not silently lose source trivia that token streams
+//! omit or rewrite. This module detects those cases, shields physical multiline
+//! literals with uniquely identifiable placeholders, and restores exact source
+//! bytes only after validating each replacement.
 
 use crate::source::SourceMap;
 use proc_macro2::{Delimiter, TokenStream, TokenTree};
@@ -8,7 +13,7 @@ use syn::Lit;
 /// How a protected fragment was produced.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Disposition {
-    /// The fragment was formatted with rustfmt.
+    /// The fragment was fully formatted or safely reconstructed.
     Formatted,
     /// Exact source was retained because formatting could lose trivia.
     PreservedForTrivia,
@@ -22,6 +27,7 @@ pub struct ProtectedFragment {
     disposition: Disposition,
 }
 
+/// Exact source and placeholder metadata for one protected literal token.
 struct ShieldedLiteral {
     range: Range<usize>,
     marker: String,
@@ -29,6 +35,7 @@ struct ShieldedLiteral {
     source: String,
 }
 
+/// A fragment whose physical multiline literals have safe placeholder tokens.
 pub(crate) struct MultilineLiterals {
     shielded: String,
     marker_prefix: String,
@@ -36,6 +43,10 @@ pub(crate) struct MultilineLiterals {
 }
 
 impl MultilineLiterals {
+    /// Shields every physical multiline string, byte string, or C string.
+    ///
+    /// Returns `None` when no literal needs shielding or coordinates cannot be
+    /// mapped safely.
     pub(crate) fn prepare(source: &str) -> Option<Self> {
         let stream = source.parse::<TokenStream>().ok()?;
         let source_map = SourceMap::new(source);
@@ -63,6 +74,10 @@ impl MultilineLiterals {
                 .count();
             let indentation = &source[line_start..line_start + indentation_length];
             let marker = format!("{marker_prefix}{index}_");
+            // Known formatting contexts retain a physical newline in the
+            // placeholder so their surrounding layout sees multiline pressure.
+            // Opaque macro contents use a single-line placeholder because their
+            // internal token layout must not influence the enclosing formatter.
             literals.push(ShieldedLiteral {
                 range,
                 placeholder: literal_placeholder(
@@ -77,6 +92,7 @@ impl MultilineLiterals {
         }
 
         let mut shielded = source.to_owned();
+        // Reverse replacement preserves the byte ranges recorded in the source.
         for literal in literals.iter().rev() {
             shielded.replace_range(literal.range.clone(), &literal.placeholder);
         }
@@ -87,10 +103,16 @@ impl MultilineLiterals {
         })
     }
 
+    /// Returns the fragment containing literal placeholders.
     pub(crate) fn text(&self) -> &str {
         &self.shielded
     }
 
+    /// Restores every literal exactly once in a formatted fragment.
+    ///
+    /// Restoration fails if placeholders are missing, ambiguous, overlapping,
+    /// or leave invalid tokens. The caller can then use its conservative source
+    /// fallback.
     pub(crate) fn restore(self, fragment: ProtectedFragment) -> Option<ProtectedFragment> {
         let ProtectedFragment { text, disposition } = fragment;
         let stream = text.parse::<TokenStream>().ok()?;
@@ -111,6 +133,8 @@ impl MultilineLiterals {
             let Some(index) = indexes.next() else {
                 continue;
             };
+            // A literal must identify one source token and each source token
+            // must identify one literal. Any ambiguity makes restoration unsafe.
             if indexes.next().is_some() {
                 return None;
             }
@@ -134,6 +158,7 @@ impl MultilineLiterals {
         }
 
         let mut restored = text;
+        // Reverse replacement preserves ranges in the formatted placeholder text.
         for (range, source) in replacements.into_iter().rev() {
             restored.replace_range(range, &source);
         }
@@ -148,6 +173,7 @@ impl MultilineLiterals {
 }
 
 impl ProtectedFragment {
+    /// Wraps text produced by the formatter.
     pub(crate) const fn formatted(text: String) -> Self {
         Self {
             text,
@@ -155,6 +181,7 @@ impl ProtectedFragment {
         }
     }
 
+    /// Retains exact source because formatting could lose trivia.
     pub(crate) fn preserved(source: &str) -> Self {
         Self {
             text: source.to_owned(),
@@ -162,6 +189,7 @@ impl ProtectedFragment {
         }
     }
 
+    /// Wraps preserved outer source after safe nested macro formatting.
     pub(crate) const fn preserved_with_nested_formatting(text: String) -> Self {
         Self {
             text,
@@ -185,6 +213,10 @@ impl ProtectedFragment {
     }
 }
 
+/// Returns whether token-based formatting could lose source-spelled trivia.
+///
+/// Invalid token streams and unmappable spans conservatively require
+/// preservation.
 pub(crate) fn source_requires_preservation(source: &str) -> bool {
     let Ok(stream) = source.parse::<TokenStream>() else {
         return true;
@@ -208,6 +240,8 @@ pub(crate) fn source_requires_preservation(source: &str) -> bool {
         return true;
     }
 
+    // proc_macro2 omits ordinary comments. Any non-whitespace gap between its
+    // token spans therefore represents source text that formatting could lose.
     ranges.sort_unstable_by_key(|range| (range.start, range.end));
     let mut cursor = 0;
     for range in ranges {
@@ -221,6 +255,9 @@ pub(crate) fn source_requires_preservation(source: &str) -> bool {
         .any(|character| !character.is_whitespace())
 }
 
+/// Returns whether source contains a physical multiline literal.
+///
+/// Invalid token streams and unmappable spans conservatively return `true`.
 pub(crate) fn source_has_multiline_literal(source: &str) -> bool {
     let Ok(stream) = source.parse::<TokenStream>() else {
         return true;
@@ -240,6 +277,7 @@ pub(crate) fn source_has_multiline_literal(source: &str) -> bool {
         || has_multiline_literal
 }
 
+/// Returns whether a blank line separates two nonblank regions.
 pub(crate) fn source_has_internal_blank_line(source: &str) -> bool {
     let mut saw_content = false;
     let mut saw_blank_after_content = false;
@@ -256,6 +294,7 @@ pub(crate) fn source_has_internal_blank_line(source: &str) -> bool {
     false
 }
 
+/// Collects source ranges for all tokens and records literal-specific metadata.
 fn collect_token_ranges(
     stream: TokenStream,
     source: &SourceMap<'_>,
@@ -292,6 +331,7 @@ fn collect_token_ranges(
     Ok(())
 }
 
+/// Collects source ranges for literal tokens at every delimiter depth.
 fn collect_literal_ranges(
     stream: TokenStream,
     source: &SourceMap<'_>,
@@ -309,6 +349,12 @@ fn collect_literal_ranges(
     Some(())
 }
 
+/// Collects literals and whether their placeholder should remain multiline.
+///
+/// A formatter-transparent macro allows multiline placeholder shape until an
+/// opaque macro boundary is crossed. Opaque context remains sticky for all
+/// descendants because the formatter cannot safely interpret their token
+/// grammar.
 fn collect_literal_ranges_for_shielding(
     stream: TokenStream,
     source: &SourceMap<'_>,
@@ -348,12 +394,14 @@ fn collect_literal_ranges_for_shielding(
     Some(())
 }
 
+/// Macro path and delimiter recovered immediately before a token group.
 struct MacroInvocation {
     path: Vec<String>,
     leading_colon: bool,
     delimiter: Delimiter,
 }
 
+/// Recovers a macro invocation whose body is the group at `group`.
 fn macro_invocation_before_group(
     tokens: &[TokenTree],
     group: usize,
@@ -365,6 +413,7 @@ fn macro_invocation_before_group(
     }
     let mut cursor = group - 2;
     let mut path = Vec::new();
+    // Walk backward over `ident :: ident` segments, then restore source order.
     loop {
         let TokenTree::Ident(ident) = &tokens[cursor] else {
             return None;
@@ -391,6 +440,7 @@ fn macro_invocation_before_group(
     })
 }
 
+/// Returns whether the formatter understands literals inside this macro body.
 fn literal_macro_is_transparent(invocation: &MacroInvocation) -> bool {
     if invocation
         .path
@@ -400,6 +450,8 @@ fn literal_macro_is_transparent(invocation: &MacroInvocation) -> bool {
         return true;
     }
     if invocation.leading_colon {
+        // Absolute paths cannot be assumed to resolve to the workspace macros
+        // recognized by their unqualified or explicitly qualified spellings.
         return false;
     }
     match (invocation.path.as_slice(), invocation.delimiter) {
@@ -430,6 +482,7 @@ fn literal_macro_is_transparent(invocation: &MacroInvocation) -> bool {
     }
 }
 
+/// Returns whether rustfmt has built-in formatting for a macro's final name.
 pub(crate) fn rustfmt_formats_macro_name(name: &str) -> bool {
     matches!(
         name,
@@ -468,6 +521,7 @@ pub(crate) fn rustfmt_formats_macro_name(name: &str) -> bool {
     )
 }
 
+/// Builds a valid literal placeholder with comparable first-line width.
 fn literal_placeholder(
     source: &str,
     marker: &str,
@@ -491,12 +545,16 @@ fn literal_placeholder(
     if !multiline {
         return Some(placeholder);
     }
+    // The newline before the closing quote keeps the token physically multiline.
+    // A literal suffix moves to the second line with the quote, so suffixed
+    // placeholders exert less first-line pressure by the suffix width.
     let closing_quote = placeholder.len().checked_sub(suffix.len() + 1)?;
     let mut placeholder = placeholder;
     placeholder.insert_str(closing_quote, &format!("_\n{indentation}"));
     Some(placeholder)
 }
 
+/// Pads a quoted marker literal toward `width` without truncating its identity.
 fn padded_literal(prefix: &str, marker: &str, suffix: &str, width: usize) -> String {
     let base_width = prefix.chars().count() + marker.chars().count() + suffix.chars().count() + 2;
     format!(
@@ -505,6 +563,7 @@ fn padded_literal(prefix: &str, marker: &str, suffix: &str, width: usize) -> Str
     )
 }
 
+/// Detects physical doc comment syntax outside literal tokens.
 fn has_source_spelled_doc_comment(source: &str, literal_ranges: &[Range<usize>]) -> bool {
     let mut literal_ranges = literal_ranges.to_vec();
     literal_ranges.sort_unstable_by_key(|range| (range.start, range.end));
@@ -525,6 +584,7 @@ fn has_source_spelled_doc_comment(source: &str, literal_ranges: &[Range<usize>])
         if let Some(literal) = literals.peek()
             && literal.start <= offset
         {
+            // Comment-like bytes inside a literal do not represent source trivia.
             offset = literal.end;
             literals.next();
             continue;

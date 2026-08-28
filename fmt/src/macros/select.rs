@@ -1,4 +1,8 @@
 //! Formatters for `select!` and `select_loop!` bodies.
+//!
+//! Each formatter reconstructs the macro shell around separately formatted Rust
+//! expressions. When comments or blank lines cannot be placed losslessly, the
+//! shell is preserved while supported nested macros remain eligible for formatting.
 
 use super::{Error, MacroKind, Options, nested};
 use crate::{
@@ -14,6 +18,7 @@ use proc_macro2::Span;
 use std::ops::Range;
 use syn::{Expr, spanned::Spanned};
 
+/// A formatted branch split into the components needed for width-aware rendering.
 struct BranchLayout {
     pattern: String,
     future: String,
@@ -23,22 +28,26 @@ struct BranchLayout {
     body_is_block: bool,
 }
 
+/// A formatted `select_loop!` lifecycle entry.
 struct LifecycleLayout {
     keyword: String,
     expression: String,
     expression_is_block: bool,
 }
 
+/// Comments assigned to the boundaries before, between, and after shell entries.
 struct ShellTrivia {
     boundaries: Vec<Vec<ShellComment>>,
 }
 
+/// The prefix state formatted before the remaining `select_loop!` entries.
 struct SelectLoopPrefix {
     context: String,
     on_start: Option<LifecycleLayout>,
     shell_trivia: ShellTrivia,
 }
 
+/// Shared source and placement state for formatting a branch.
 #[derive(Clone, Copy)]
 struct FormatContext<'formatter, 'map, 'source> {
     formatter: &'formatter crate::rustfmt::Formatter,
@@ -49,6 +58,8 @@ struct FormatContext<'formatter, 'map, 'source> {
 }
 
 /// Formats the delimiter contents of a `select!` invocation.
+///
+/// Preserves shells whose comments or blank lines cannot be reconstructed losslessly.
 pub fn select(source: &str, options: Options) -> Result<ProtectedFragment, Error> {
     super::format_at_depth(
         &crate::rustfmt::Formatter::default(),
@@ -59,6 +70,7 @@ pub fn select(source: &str, options: Options) -> Result<ProtectedFragment, Error
     )
 }
 
+/// Formats a `select!` body with the supplied formatter and nesting depth.
 pub(super) fn select_at_depth(
     formatter: &crate::rustfmt::Formatter,
     source: &str,
@@ -72,6 +84,8 @@ pub(super) fn select_at_depth(
         expression_ranges.push(source_map.span_range(branch.future.span())?);
         expression_ranges.push(source_map.span_range(branch.body.span())?);
     }
+    // Shell-owned blank lines have no AST representation and cannot be restored
+    // after reconstruction.
     if !internal_blank_lines_are_within(source, &expression_ranges) {
         return preserve_select(formatter, source, &source_map, &input, options, depth);
     }
@@ -101,11 +115,14 @@ pub(super) fn select_at_depth(
             write_boundary(writer, true, &shell_trivia.boundaries[index + 1]);
         }
     });
+    // Reject any reconstruction that no longer satisfies the macro grammar.
     syn::parse_str::<SelectInput>(&output).map_err(Error::Output)?;
     Ok(ProtectedFragment::formatted(output))
 }
 
 /// Formats the delimiter contents of a `select_loop!` invocation.
+///
+/// Preserves shells whose comments or blank lines cannot be reconstructed losslessly.
 pub fn select_loop(source: &str, options: Options) -> Result<ProtectedFragment, Error> {
     super::format_at_depth(
         &crate::rustfmt::Formatter::default(),
@@ -116,6 +133,7 @@ pub fn select_loop(source: &str, options: Options) -> Result<ProtectedFragment, 
     )
 }
 
+/// Formats a `select_loop!` body with the supplied formatter and nesting depth.
 pub(super) fn select_loop_at_depth(
     formatter: &crate::rustfmt::Formatter,
     source: &str,
@@ -142,6 +160,8 @@ pub(super) fn select_loop_at_depth(
     if let Some(on_end) = &input.on_end {
         expression_ranges.push(source_map.span_range(on_end.expression.span())?);
     }
+    // The expression formatters own blank lines inside their spans. Blank lines in
+    // the shell must remain in their original source instead.
     if !internal_blank_lines_are_within(source, &expression_ranges) {
         return preserve_select_loop(formatter, source, &source_map, &input, options, depth);
     }
@@ -199,6 +219,7 @@ pub(super) fn select_loop_at_depth(
     )
 }
 
+/// Formats the remaining lifecycle entries and branches, then renders the loop shell.
 fn render_select_loop(
     formatter: &crate::rustfmt::Formatter,
     source: &str,
@@ -227,6 +248,8 @@ fn render_select_loop(
         return preserve_select_loop(formatter, source, source_map, input, options, depth);
     };
     let mut branches = Vec::with_capacity(input.branches.len());
+    // Boundaries precede the context, optional start hook, stopped hook, branches,
+    // and optional end hook in exactly that order.
     let first_following_boundary = 3 + usize::from(input.on_start.is_some());
     for (index, branch) in input.branches.iter().enumerate() {
         let following_comments = &prefix.shell_trivia.boundaries[first_following_boundary + index];
@@ -303,6 +326,7 @@ fn render_select_loop(
     Ok(ProtectedFragment::formatted(output))
 }
 
+/// Formats a `select!` branch, or requests shell preservation when it cannot move.
 fn format_select_branch(
     context: FormatContext<'_, '_, '_>,
     branch: &SelectBranch,
@@ -318,6 +342,7 @@ fn format_select_branch(
     )
 }
 
+/// Formats a `select_loop!` branch, including its optional divergence expression.
 fn format_select_loop_branch(
     context: FormatContext<'_, '_, '_>,
     branch: &SelectLoopBranch,
@@ -336,6 +361,10 @@ fn format_select_loop_branch(
     )
 }
 
+/// Formats one branch into components that can be rearranged by the shell writer.
+///
+/// Returns `None` when a component cannot be relocated safely, including preserved
+/// multiline source and a continued future containing a supported nested macro.
 fn format_branch(
     context: FormatContext<'_, '_, '_>,
     pattern: &syn::Pat,
@@ -357,6 +386,8 @@ fn format_branch(
     let pattern = formatter
         .pattern(pattern_source, options.indentation + 4)
         .map_err(Error::from)?;
+    // Block-like futures account for their own body indentation. Other futures need
+    // the continuation column used after the branch pattern and equals sign.
     let inline_indentation = options.indentation + if future_opens_block(future) { 4 } else { 8 };
     let future_probe = nested::relocate_expression(formatter, future_source, inline_indentation)?;
     let body_is_block = matches!(body_expression, Expr::Block(_));
@@ -418,6 +449,8 @@ fn format_branch(
         inline_indentation
     };
     if future_probe.had_supported {
+        // Moving a future that contains a supported macro would invalidate the
+        // placement used by the probe. Preserve the outer shell in that case.
         if future_is_continued {
             return Ok(None);
         }
@@ -447,6 +480,7 @@ fn format_branch(
     Ok(Some(layout))
 }
 
+/// Returns whether an expression introduces a block-like formatting boundary.
 fn future_opens_block(expression: &Expr) -> bool {
     match expression {
         Expr::Async(_)
@@ -466,6 +500,7 @@ fn future_opens_block(expression: &Expr) -> bool {
     }
 }
 
+/// Returns whether every internal blank line belongs entirely to a formatted span.
 fn internal_blank_lines_are_within(source: &str, ranges: &[Range<usize>]) -> bool {
     if !fragment::source_has_internal_blank_line(source) {
         return true;
@@ -499,6 +534,7 @@ fn internal_blank_lines_are_within(source: &str, ranges: &[Range<usize>]) -> boo
         })
 }
 
+/// Formats a lifecycle entry, or returns `None` when its expression cannot move.
 fn format_lifecycle(
     formatter: &crate::rustfmt::Formatter,
     source: &str,
@@ -540,6 +576,7 @@ fn format_lifecycle(
     }))
 }
 
+/// Formats a movable expression and extracts its rendered text.
 fn format_expression(
     formatter: &crate::rustfmt::Formatter,
     source: &str,
@@ -564,11 +601,13 @@ fn format_expression(
     Ok(Some(expression.into_string()))
 }
 
+/// Extracts the exact source covered by a syntax node's span.
 fn spanned_source<'a>(source_map: &SourceMap<'a>, value: &impl Spanned) -> Result<&'a str, Error> {
     let range = source_map.span_range(value.span())?;
     source_map.slice(range).map_err(Error::from)
 }
 
+/// Formats an expression while recursively handling supported nested macros.
 fn format_nested_expression(
     formatter: &crate::rustfmt::Formatter,
     expression: &Expr,
@@ -589,6 +628,7 @@ fn format_nested_expression(
     )
 }
 
+/// Formats a branch body using the adapter's match-arm placement rules.
 fn format_nested_match_arm_body(
     formatter: &crate::rustfmt::Formatter,
     expression: &Expr,
@@ -609,6 +649,7 @@ fn format_nested_match_arm_body(
     )
 }
 
+/// Formats a block expression at its destination indentation.
 fn format_nested_block_expression(
     formatter: &crate::rustfmt::Formatter,
     expression: &Expr,
@@ -629,11 +670,13 @@ fn format_nested_block_expression(
     )
 }
 
+/// Returns whether a preserved multiline fragment cannot be safely relocated.
 fn is_immovable(fragment: &ProtectedFragment) -> bool {
     fragment.disposition() != Disposition::Formatted
         && (fragment.text().contains('\n') || fragment.text().contains('\r'))
 }
 
+/// Preserves a `select!` shell while formatting supported macros inside expressions.
 fn preserve_select(
     formatter: &crate::rustfmt::Formatter,
     source: &str,
@@ -650,6 +693,7 @@ fn preserve_select(
     nested::preserve_with_nested(formatter, source, source_map, &expressions, options, depth)
 }
 
+/// Preserves a `select_loop!` shell while formatting supported nested macros.
 fn preserve_select_loop(
     formatter: &crate::rustfmt::Formatter,
     source: &str,
@@ -675,6 +719,7 @@ fn preserve_select_loop(
     nested::preserve_with_nested(formatter, source, source_map, &expressions, options, depth)
 }
 
+/// Assigns comments outside `select!` branch syntax to shell boundaries.
 fn select_shell_trivia(
     source: &str,
     source_map: &SourceMap<'_>,
@@ -700,6 +745,7 @@ fn select_shell_trivia(
     shell_trivia(source, source_map, spans, entries)
 }
 
+/// Assigns comments outside `select_loop!` entry syntax to shell boundaries.
 fn select_loop_shell_trivia(
     source: &str,
     source_map: &SourceMap<'_>,
@@ -741,6 +787,7 @@ fn select_loop_shell_trivia(
     shell_trivia(source, source_map, spans, entries)
 }
 
+/// Adds every syntax span owned by a lifecycle entry.
 fn push_lifecycle_spans(spans: &mut Vec<Span>, lifecycle: &SelectLoopLifecycle) {
     spans.extend([
         lifecycle.keyword.span(),
@@ -750,6 +797,7 @@ fn push_lifecycle_spans(spans: &mut Vec<Span>, lifecycle: &SelectLoopLifecycle) 
     spans.extend(lifecycle.comma_token.as_ref().map(Spanned::span));
 }
 
+/// Returns the source range occupied by a complete lifecycle entry.
 fn lifecycle_range(
     source_map: &SourceMap<'_>,
     lifecycle: &SelectLoopLifecycle,
@@ -761,12 +809,17 @@ fn lifecycle_range(
     entry_range(source_map, lifecycle.keyword.span(), end)
 }
 
+/// Builds an entry range from the start of one span through the end of another.
 fn entry_range(source_map: &SourceMap<'_>, start: Span, end: Span) -> Result<Range<usize>, Error> {
     let start = source_map.span_range(start)?.start;
     let end = source_map.span_range(end)?.end;
     Ok(start..end)
 }
 
+/// Parses shell comments into one boundary before and after every entry.
+///
+/// Returns `None` when source between syntax spans cannot be assigned to a shell
+/// boundary without changing its structural attachment.
 fn shell_trivia(
     source: &str,
     source_map: &SourceMap<'_>,
@@ -794,6 +847,8 @@ fn shell_trivia(
     let mut cursor = 0;
     for range in ranges {
         let gap = cursor..range.start;
+        // Non-whitespace between tokens is safe only when the whole gap belongs to
+        // a boundary that the renderer knows how to reproduce.
         if gap.start < gap.end
             && !source[gap.clone()].chars().all(char::is_whitespace)
             && !boundaries
@@ -824,6 +879,7 @@ fn shell_trivia(
     Ok(Some(ShellTrivia { boundaries: parsed }))
 }
 
+/// Writes the comments at one shell boundary with their source attachment intact.
 fn write_boundary(writer: &mut Writer<'_>, has_previous: bool, comments: &[ShellComment]) {
     if comments.is_empty() {
         if has_previous {
@@ -849,6 +905,7 @@ fn write_boundary(writer: &mut Writer<'_>, has_previous: bool, comments: &[Shell
     }
 }
 
+/// Renders a macro body with the requested indentation and line ending.
 fn render(options: Options, write: impl FnOnce(&mut Writer<'_>)) -> String {
     let mut writer = Writer::new(options.indentation, options.line_ending.as_str());
     writer.newline();
@@ -857,6 +914,7 @@ fn render(options: Options, write: impl FnOnce(&mut Writer<'_>)) -> String {
     writer.finish()
 }
 
+/// Writes a branch using the narrowest layout that fits its components and trivia.
 fn write_branch(
     writer: &mut Writer<'_>,
     branch: &BranchLayout,
@@ -889,6 +947,7 @@ fn write_branch(
     write_unwrapped_body(writer, &branch.body, trailing_comment);
 }
 
+/// Constructs the single-line representation of a branch.
 fn inline_branch(branch: &BranchLayout) -> String {
     let mut output = format!("{} = {}", branch.pattern, branch.future);
     if let Some(divergence) = &branch.divergence {
@@ -901,6 +960,7 @@ fn inline_branch(branch: &BranchLayout) -> String {
     output
 }
 
+/// Writes a branch through its future and optional divergence expression.
 fn write_branch_head(writer: &mut Writer<'_>, branch: &BranchLayout) {
     writer.push(&branch.pattern);
     writer.push(" =");
@@ -938,6 +998,7 @@ fn write_branch_head(writer: &mut Writer<'_>, branch: &BranchLayout) {
     }
 }
 
+/// Returns the shortest suffix that must fit after a future's first line.
 fn branch_head_reserve(
     writer: &Writer<'_>,
     branch: &BranchLayout,
@@ -956,6 +1017,8 @@ fn branch_head_reserve(
     if branch.body_is_block {
         reserve.push_str(" => {");
     } else if !branch.body.contains('\n') {
+        // The brace is only a conservative width reservation for a body that must
+        // move off the head line. It is not emitted for an unwrapped body.
         let mut direct_body = format!("=> {},", branch.body);
         if let Some(comment) = trailing_comment {
             direct_body.push(' ');
@@ -975,12 +1038,15 @@ fn branch_head_reserve(
         && !branch.future.contains('\n')
         && !writer.fits_on_new_line(&format!("    {}{reserve}", branch.future))
     {
+        // Once the body itself needs another line, only the arrow must be reserved
+        // beside a future that has already moved to its continuation line.
         reserve.truncate(body_start);
         reserve.push_str(" =>");
     }
     reserve
 }
 
+/// Returns whether the future must begin on a continuation line after `=`.
 fn future_is_continued(
     options: Options,
     branch: &BranchLayout,
@@ -1012,6 +1078,7 @@ fn future_is_continued(
     continued
 }
 
+/// Returns the comment attached to the end of the preceding shell entry.
 fn trailing_comment(comments: &[ShellComment]) -> Option<&str> {
     comments
         .first()
@@ -1019,6 +1086,7 @@ fn trailing_comment(comments: &[ShellComment]) -> Option<&str> {
         .map(|comment| comment.text.as_str())
 }
 
+/// Writes a block body while keeping its opening brace with the arrow when possible.
 fn write_block_body(writer: &mut Writer<'_>, body: &str, trailing_comment: Option<&str>) {
     let first_line = body.lines().next().unwrap_or(body);
     let prefix = format!(" => {first_line}");
@@ -1033,6 +1101,8 @@ fn write_block_body(writer: &mut Writer<'_>, body: &str, trailing_comment: Optio
         .strip_prefix("{ ")
         .and_then(|body| body.strip_suffix(" }"))
     {
+        // Expand a compact block rather than moving an over-width block unchanged.
+        // The inner expression remains the value of the block.
         if writer.fits_with_overflow(" => {") {
             writer.push(" => {");
         } else {
@@ -1052,6 +1122,7 @@ fn write_block_body(writer: &mut Writer<'_>, body: &str, trailing_comment: Optio
     writer.push(",");
 }
 
+/// Writes a non-block body without introducing a synthetic wrapper block.
 fn write_unwrapped_body(writer: &mut Writer<'_>, body: &str, trailing_comment: Option<&str>) {
     let first_line = body.lines().next().unwrap_or(body);
     let body_fits = if body.contains('\n') {
@@ -1077,6 +1148,7 @@ fn write_unwrapped_body(writer: &mut Writer<'_>, body: &str, trailing_comment: O
     writer.push(",");
 }
 
+/// Writes a `select_loop!` context or lifecycle entry.
 fn write_expression_entry(
     writer: &mut Writer<'_>,
     keyword: Option<&str>,
@@ -1110,6 +1182,7 @@ fn write_expression_entry(
     }
 }
 
+/// Checks whether text and its trailing comment fit within the preferred width.
 fn fits_with_trailing_comment(
     writer: &Writer<'_>,
     text: &str,
@@ -1121,6 +1194,7 @@ fn fits_with_trailing_comment(
     )
 }
 
+/// Checks whether text and its trailing comment fit within the overflow allowance.
 fn fits_with_trailing_comment_overflow(
     writer: &Writer<'_>,
     text: &str,

@@ -1,4 +1,10 @@
 //! Stock rustfmt adapter for ordinary Rust fragments.
+//!
+//! Each fragment is embedded in synthetic Rust whose nesting reproduces the
+//! destination indentation before rustfmt makes width decisions. The adapter
+//! validates the formatted wrapper before extracting the fragment. Multiline
+//! literals and internal blank lines are protected, with source-preserving fallback
+//! when blank-line markers cannot be restored safely.
 
 use crate::fragment::{MultilineLiterals, ProtectedFragment};
 use proc_macro2::Span;
@@ -11,15 +17,21 @@ use std::{
 use syn::{Expr, Item, Meta, parse::Parse as _, spanned::Spanned as _};
 use thiserror::Error;
 
+/// Indentation width represented by each synthetic nesting level.
 const INDENT: usize = 4;
 
+/// Placeholder state for restoring internal blank lines after rustfmt runs.
 struct BlankLines {
+    /// Source with each protected blank line replaced by an ordered marker.
     marked: String,
+    /// Collision-free prefix shared by all markers in this fragment.
     marker_prefix: String,
+    /// Number of markers that restoration must recover.
     count: usize,
 }
 
 impl BlankLines {
+    /// Replaces internal blank lines with ordered line-comment markers.
     fn prepare(source: &str) -> Option<Self> {
         if !crate::fragment::source_has_internal_blank_line(source) {
             return None;
@@ -31,6 +43,8 @@ impl BlankLines {
         let mut marked = String::with_capacity(source.len());
         let mut count = 0;
         for (index, line) in lines.into_iter().enumerate() {
+            // Leading and trailing blank lines are normalized separately. Only
+            // separators between content need to survive rustfmt.
             if first_content < index && index < last_content && line.trim().is_empty() {
                 marked.push_str("// ");
                 marked.push_str(&marker_prefix);
@@ -52,10 +66,12 @@ impl BlankLines {
         })
     }
 
+    /// Returns the marked source passed to rustfmt.
     fn text(&self) -> &str {
         &self.marked
     }
 
+    /// Restores every marker to a blank line if the marker sequence is intact.
     fn restore(self, formatted: &str) -> Option<String> {
         let marker_start = format!("// {}", self.marker_prefix);
         let mut next = 0;
@@ -74,12 +90,16 @@ impl BlankLines {
                 .strip_prefix(&marker_start)
                 .and_then(|index| index.parse::<usize>().ok())
             {
+                // Markers must remain unique and in source order. A moved,
+                // duplicated, or rewritten marker makes restoration ambiguous.
                 if index != next || index >= self.count {
                     return None;
                 }
                 next += 1;
                 output.push_str(line_ending);
             } else {
+                // Any other occurrence means rustfmt changed a marker into a
+                // shape that cannot be identified safely.
                 if content.contains(&self.marker_prefix) {
                     return None;
                 }
@@ -90,12 +110,16 @@ impl BlankLines {
     }
 }
 
-/// Configuration for the rustfmt subprocess used to format fragments.
+/// Configuration for formatting protected fragments with a rustfmt subprocess.
 #[derive(Clone, Debug)]
 pub struct Formatter {
+    /// rustfmt executable or compatible command.
     program: OsString,
+    /// Optional rustup-style toolchain argument passed before rustfmt options.
     toolchain: Option<OsString>,
+    /// Rust edition used to parse synthetic wrappers.
     edition: String,
+    /// Optional path used by rustfmt for configuration discovery.
     config_path: Option<PathBuf>,
 }
 
@@ -137,6 +161,7 @@ impl Formatter {
         self
     }
 
+    /// Formats an item list at its destination indentation.
     pub(crate) fn items(
         &self,
         source: &str,
@@ -145,6 +170,7 @@ impl Formatter {
         self.format_protected(source, indentation, WrapperKind::Items)
     }
 
+    /// Formats a statement list at its destination indentation.
     pub(crate) fn statements(
         &self,
         source: &str,
@@ -153,6 +179,7 @@ impl Formatter {
         self.format_protected(source, indentation, WrapperKind::Statements)
     }
 
+    /// Formats an expression at its destination indentation.
     pub(crate) fn expression(
         &self,
         source: &str,
@@ -162,6 +189,8 @@ impl Formatter {
         if syn::parse_str::<Expr>(formatted.text()).is_ok() {
             return Ok(formatted);
         }
+        // A control-flow expression can acquire the wrapper statement's
+        // semicolon. Remove it only after the extracted text fails to reparse.
         let mut text = formatted.into_string();
         if text.ends_with(';') {
             text.pop();
@@ -170,6 +199,7 @@ impl Formatter {
         Ok(ProtectedFragment::formatted(text))
     }
 
+    /// Formats a block expression while retaining multiline block layout.
     pub(crate) fn block_expression(
         &self,
         source: &str,
@@ -183,6 +213,7 @@ impl Formatter {
         })
     }
 
+    /// Formats a pattern at its destination indentation.
     pub(crate) fn pattern(
         &self,
         source: &str,
@@ -193,6 +224,7 @@ impl Formatter {
         })
     }
 
+    /// Formats an expression in match-arm body context.
     pub(crate) fn match_arm_body(
         &self,
         source: &str,
@@ -203,10 +235,12 @@ impl Formatter {
         })
     }
 
+    /// Formats attribute metadata beginning at the destination column.
     pub(crate) fn meta(&self, source: &str, column: usize) -> Result<ProtectedFragment, Error> {
         self.format_with_protection(source, |source| self.format_meta_raw(source, column))
     }
 
+    /// Formats a fragment through the marker-delimited wrapper for `kind`.
     fn format_protected(
         &self,
         source: &str,
@@ -216,12 +250,15 @@ impl Formatter {
         self.format_with_protection(source, |source| self.format_raw(source, indentation, kind))
     }
 
+    /// Protects source-sensitive trivia around one raw formatting operation.
     fn format_with_protection(
         &self,
         source: &str,
         format: impl FnOnce(&str) -> Result<String, Error>,
     ) -> Result<ProtectedFragment, Error> {
         if let Some(literals) = MultilineLiterals::prepare(source) {
+            // Shield literals before marking blank lines so literal contents
+            // cannot participate in the blank-line placeholder protocol.
             let normalized = normalize_source(literals.text());
             let formatted = format_with_blank_lines(&normalized, format)?;
             return literals.restore(formatted).ok_or(Error::LiteralRestoration);
@@ -230,6 +267,7 @@ impl Formatter {
         format_with_blank_lines(&source, format)
     }
 
+    /// Formats a marker-delimited fragment and extracts it from its wrapper.
     fn format_raw(
         &self,
         source: &str,
@@ -245,11 +283,14 @@ impl Formatter {
         let prefix = crate::marker::unique_prefix(source, "rustfmt");
         let start = format!("{prefix}start");
         let end = format!("{prefix}end");
+        // Collision-free boundary comments identify list fragments whose
+        // contents do not have one enclosing syntax span.
         let wrapper = wrapper(source, indentation, kind, &prefix, &start, &end);
         let formatted = self.run(&wrapper)?;
         extract(&formatted, indentation, &start, &end)
     }
 
+    /// Formats a pattern inside a synthetic one-arm match.
     fn format_pattern_raw(&self, source: &str, indentation: usize) -> Result<String, Error> {
         if indentation < INDENT || !indentation.is_multiple_of(INDENT) {
             return Err(Error::UnsupportedIndentation(indentation));
@@ -258,6 +299,8 @@ impl Formatter {
         let module_depth = indentation / INDENT - 1;
         let wrapper = pattern_wrapper(source, indentation, module_depth, &prefix);
         let formatted = self.run(&wrapper)?;
+        // Reparse the wrapper and verify its complete synthetic shape before
+        // trusting the pattern span returned by syn.
         let file = syn::parse_file(&formatted).map_err(Error::Reparse)?;
         let item = nested_item(&file.items, module_depth, &prefix)?;
         let Item::Const(item) = item else {
@@ -272,6 +315,7 @@ impl Formatter {
         extract_span(&formatted, arm.pat.span(), Some(indentation), indentation)
     }
 
+    /// Formats metadata inside a synthetic attribute at `column`.
     fn format_meta_raw(&self, source: &str, column: usize) -> Result<String, Error> {
         let (attribute_indentation, attribute_name) = meta_wrapper_placement(column)?;
         let prefix = crate::marker::unique_prefix(source, "rustfmt_meta");
@@ -295,11 +339,14 @@ impl Formatter {
         extract_span(&formatted, meta.span(), Some(column), attribute_indentation)
     }
 
+    /// Formats an expression inside a synthetic match arm.
     fn format_match_arm_body_raw(&self, source: &str, indentation: usize) -> Result<String, Error> {
         if indentation < INDENT || !indentation.is_multiple_of(INDENT) {
             return Err(Error::UnsupportedIndentation(indentation));
         }
         let prefix = crate::marker::unique_prefix(source, "rustfmt_match_arm");
+        // Indentation four can be represented by an item-level match. Deeper
+        // destinations use a function so rustfmt sees ordinary body context.
         let module_depth = if indentation == INDENT {
             0
         } else {
@@ -335,6 +382,7 @@ impl Formatter {
         extract_span(&formatted, arm.body.span(), None, indentation)
     }
 
+    /// Formats a multiline block in a synthetic statement position.
     fn format_multiline_block_raw(
         &self,
         source: &str,
@@ -364,6 +412,7 @@ impl Formatter {
         extract_span(&formatted, expression.span(), None, indentation)
     }
 
+    /// Runs rustfmt on a complete synthetic Rust file.
     fn run(&self, source: &str) -> Result<String, Error> {
         let mut command = Command::new(&self.program);
         if let Some(toolchain) = &self.toolchain {
@@ -405,6 +454,7 @@ impl Formatter {
     }
 }
 
+/// Formats source while preserving internal blank-line topology when safe.
 fn format_with_blank_lines(
     source: &str,
     format: impl FnOnce(&str) -> Result<String, Error>,
@@ -413,19 +463,26 @@ fn format_with_blank_lines(
         return format(source).map(ProtectedFragment::formatted);
     };
     let formatted = format(blank_lines.text())?;
+    // Exact source is safer than formatted text when any marker was lost,
+    // duplicated, moved, or rewritten.
     Ok(blank_lines.restore(&formatted).map_or_else(
         || ProtectedFragment::preserved(source),
         ProtectedFragment::formatted,
     ))
 }
 
+/// Synthetic syntax used to place a fragment at its destination indentation.
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum WrapperKind {
+    /// A list of items nested directly in modules.
     Items,
+    /// A statement list nested in a function body.
     Statements,
+    /// An expression nested in a function body.
     Expression,
 }
 
+/// Builds a marker-delimited wrapper for an item, statement, or expression fragment.
 fn wrapper(
     source: &str,
     indentation: usize,
@@ -439,6 +496,8 @@ fn wrapper(
         WrapperKind::Statements | WrapperKind::Expression => indentation / INDENT - 1,
     };
     let mut output = String::new();
+    // Each synthetic scope contributes one rustfmt indentation level, causing
+    // width decisions to match the fragment's destination.
     for depth in 0..module_depth {
         output.push_str("mod ");
         output.push_str(prefix);
@@ -471,6 +530,7 @@ fn wrapper(
     output
 }
 
+/// Builds a one-arm match whose pattern begins at `indentation`.
 fn pattern_wrapper(source: &str, indentation: usize, module_depth: usize, prefix: &str) -> String {
     let mut output = module_prefix(module_depth, prefix);
     output.push_str(&" ".repeat(indentation - INDENT));
@@ -483,6 +543,7 @@ fn pattern_wrapper(source: &str, indentation: usize, module_depth: usize, prefix
     output
 }
 
+/// Builds a match wrapper whose arm and body continuations use `indentation`.
 fn match_arm_wrapper(
     source: &str,
     indentation: usize,
@@ -491,6 +552,9 @@ fn match_arm_wrapper(
 ) -> String {
     let mut output = module_prefix(module_depth, prefix);
     if indentation >= INDENT * 2 {
+        // A function supplies one body level at deeper destinations. At the
+        // minimum indentation, an item-level match is required to avoid an
+        // extra level before the arm body.
         output.push_str(&" ".repeat(indentation - INDENT * 2));
         output.push_str("fn ");
         output.push_str(prefix);
@@ -520,6 +584,7 @@ fn match_arm_wrapper(
     output
 }
 
+/// Builds a function wrapper that forces a block into statement position.
 fn multiline_block_wrapper(
     source: &str,
     indentation: usize,
@@ -539,6 +604,7 @@ fn multiline_block_wrapper(
     output
 }
 
+/// Builds an attribute wrapper whose metadata begins at `column`.
 fn meta_wrapper(
     source: &str,
     column: usize,
@@ -562,8 +628,11 @@ fn meta_wrapper(
     output
 }
 
+/// Finds an attribute indentation and name width that place metadata at `column`.
 fn meta_wrapper_placement(column: usize) -> Result<(usize, String), Error> {
     for name_length in 1..=INDENT {
+        // `#[`, the attribute name, and `(` precede the metadata. Varying the
+        // synthetic name aligns that prefix with a four-column nesting level.
         let prefix_width = name_length + 3;
         if column >= prefix_width && (column - prefix_width).is_multiple_of(INDENT) {
             return Ok((column - prefix_width, "a".repeat(name_length)));
@@ -572,6 +641,7 @@ fn meta_wrapper_placement(column: usize) -> Result<(usize, String), Error> {
     Err(Error::UnsupportedColumn(column))
 }
 
+/// Opens `module_depth` uniquely named modules at rustfmt indentation.
 fn module_prefix(module_depth: usize, prefix: &str) -> String {
     let mut output = String::new();
     for depth in 0..module_depth {
@@ -585,6 +655,7 @@ fn module_prefix(module_depth: usize, prefix: &str) -> String {
     output
 }
 
+/// Closes modules opened by [`module_prefix`].
 fn close_modules(output: &mut String, module_depth: usize) {
     for depth in (0..module_depth).rev() {
         output.push_str(&" ".repeat(depth * INDENT));
@@ -592,6 +663,7 @@ fn close_modules(output: &mut String, module_depth: usize) {
     }
 }
 
+/// Validates a synthetic module chain and returns its sole nested item.
 fn nested_item<'a>(
     items: &'a [Item],
     module_depth: usize,
@@ -599,6 +671,8 @@ fn nested_item<'a>(
 ) -> Result<&'a Item, Error> {
     let mut items = items;
     for depth in 0..module_depth {
+        // Accept only the exact recursive shape that the wrapper generated.
+        // This prevents extraction from unrelated syntax after rustfmt output.
         let [Item::Mod(module)] = items else {
             return Err(Error::WrapperShape);
         };
@@ -616,6 +690,7 @@ fn nested_item<'a>(
     Ok(item)
 }
 
+/// Indents continuation lines while leaving an inline first line in place.
 fn indent_inline_source(source: &str, column: usize) -> String {
     let prefix = " ".repeat(column);
     let mut output = String::with_capacity(source.len() + prefix.len());
@@ -628,6 +703,7 @@ fn indent_inline_source(source: &str, column: usize) -> String {
     output
 }
 
+/// Extracts a syntax span and removes validated wrapper indentation.
 fn extract_span(
     formatted: &str,
     span: Span,
@@ -636,6 +712,8 @@ fn extract_span(
 ) -> Result<String, Error> {
     let source_map = crate::source::SourceMap::new(formatted);
     let range = source_map.span_range(span)?;
+    // The span identifies tokens, not their leading whitespace. Recover the
+    // containing line prefix to verify the actual destination column.
     let line_start = formatted[..range.start]
         .rfind('\n')
         .map_or(0, |newline| newline + 1);
@@ -662,6 +740,8 @@ fn extract_span(
             output.push_str(line);
             continue;
         }
+        // Continuation lines still include the synthetic scope indentation.
+        // Strip exactly the prefix whose width was validated above.
         let content = line
             .strip_prefix(prefix)
             .ok_or(Error::UnexpectedIndentation)?;
@@ -670,6 +750,7 @@ fn extract_span(
     Ok(output)
 }
 
+/// Removes surrounding line endings and source indentation before wrapping a fragment.
 fn normalize_source(source: &str) -> String {
     let source = source.trim_matches(['\n', '\r']);
     let lines = source.split_inclusive('\n').collect::<Vec<_>>();
@@ -679,6 +760,8 @@ fn normalize_source(source: &str) -> String {
     let first_indentation = leading_whitespace(lines[first_content]);
     let first_is_inline = first_indentation.is_empty();
     let indentation = if first_indentation.is_empty() {
+        // Inline fragments already start at their logical origin. Infer the
+        // baseline from later content that may still carry absolute indentation.
         lines
             .iter()
             .skip(first_content + 1)
@@ -694,6 +777,8 @@ fn normalize_source(source: &str) -> String {
         let content = if line.trim().is_empty() || index == first_content && first_is_inline {
             line
         } else {
+            // Lines outside the common baseline can occur in preserved macro
+            // continuations. Leave them intact instead of deleting whitespace.
             line.strip_prefix(indentation).unwrap_or(line)
         };
         output.push_str(content);
@@ -701,6 +786,7 @@ fn normalize_source(source: &str) -> String {
     output
 }
 
+/// Returns the leading spaces and tabs from one source line.
 fn leading_whitespace(line: &str) -> &str {
     &line[..line
         .as_bytes()
@@ -709,6 +795,7 @@ fn leading_whitespace(line: &str) -> &str {
         .count()]
 }
 
+/// Adds destination indentation to every represented source line.
 fn indent_source(source: &str, indentation: usize) -> String {
     let prefix = " ".repeat(indentation);
     let mut output = String::with_capacity(source.len() + prefix.len());
@@ -721,6 +808,7 @@ fn indent_source(source: &str, indentation: usize) -> String {
     output
 }
 
+/// Extracts text between unique boundary markers and removes their indentation.
 fn extract(formatted: &str, indentation: usize, start: &str, end: &str) -> Result<String, Error> {
     let start_offset = unique_offset(formatted, start)?;
     let end_offset = unique_offset(formatted, end)?;
@@ -743,6 +831,8 @@ fn extract(formatted: &str, indentation: usize, start: &str, end: &str) -> Resul
         .split_once("//")
         .map(|(prefix, _)| prefix)
         .ok_or(Error::MarkerMismatch)?;
+    // Matching prefixes establish identical requested indentation for both
+    // marker lines. `dedent` validates the same prefix on enclosed lines.
     if start_prefix != end_prefix || visual_width(start_prefix) != indentation {
         return Err(Error::UnexpectedIndentation);
     }
@@ -754,6 +844,7 @@ fn extract(formatted: &str, indentation: usize, start: &str, end: &str) -> Resul
     dedent(body, start_prefix)
 }
 
+/// Returns the byte offset of a marker only when it occurs exactly once.
 fn unique_offset(source: &str, marker: &str) -> Result<usize, Error> {
     let mut offsets = source.match_indices(marker).map(|(offset, _)| offset);
     let offset = offsets.next().ok_or(Error::MarkerMismatch)?;
@@ -763,6 +854,7 @@ fn unique_offset(source: &str, marker: &str) -> Result<usize, Error> {
     Ok(offset)
 }
 
+/// Returns the byte range of the complete line containing `offset`.
 fn line_range(source: &str, offset: usize) -> std::ops::Range<usize> {
     let start = source[..offset]
         .rfind('\n')
@@ -773,6 +865,7 @@ fn line_range(source: &str, offset: usize) -> std::ops::Range<usize> {
     start..end
 }
 
+/// Measures an ASCII wrapper prefix with tabs advancing to four-column stops.
 fn visual_width(source: &str) -> usize {
     source.bytes().fold(0, |column, byte| match byte {
         b'\t' => (column / INDENT + 1) * INDENT,
@@ -780,11 +873,14 @@ fn visual_width(source: &str) -> usize {
     })
 }
 
+/// Removes an exact indentation prefix from each nonblank line.
 fn dedent(source: &str, prefix: &str) -> Result<String, Error> {
     let mut output = String::with_capacity(source.len());
     for line in source.split_inclusive('\n') {
         let content = line.strip_suffix('\n').unwrap_or(line);
         if content.trim().is_empty() {
+            // Whitespace-only lines carry no destination indentation once the
+            // fragment leaves its wrapper.
             output.push('\n');
             continue;
         }
@@ -797,6 +893,8 @@ fn dedent(source: &str, prefix: &str) -> Result<String, Error> {
         }
     }
     if output.ends_with('\n') {
+        // Marker lines delimit the body by line, so extraction contributes one
+        // terminal newline that was not part of the fragment.
         output.pop();
     }
     Ok(output)
@@ -808,7 +906,9 @@ pub enum Error {
     /// The rustfmt process could not be started.
     #[error("failed to start `{}`: {source}", program.to_string_lossy())]
     Spawn {
+        /// Executable that could not be started.
         program: OsString,
+        /// Operating system error returned while starting the process.
         #[source]
         source: std::io::Error,
     },
@@ -823,7 +923,12 @@ pub enum Error {
     Wait(#[source] std::io::Error),
     /// Rustfmt rejected a synthetic wrapper.
     #[error("rustfmt exited with code {code:?}: {stderr}")]
-    Exit { code: Option<i32>, stderr: String },
+    Exit {
+        /// Process exit code, or `None` when the process ended by signal.
+        code: Option<i32>,
+        /// Diagnostic text written by rustfmt.
+        stderr: String,
+    },
     /// Rustfmt wrote a warning while formatting a synthetic wrapper.
     #[error("rustfmt emitted a warning: {0}")]
     Warning(String),
@@ -848,7 +953,7 @@ pub enum Error {
     /// A formatted source span could not be mapped back to bytes.
     #[error("failed to locate formatted rustfmt fragment: {0}")]
     Source(#[from] crate::source::Error),
-    /// Rustfmt moved or duplicated a synthetic wrapper marker.
+    /// Rustfmt did not retain synthetic wrapper markers exactly once in source order.
     #[error("rustfmt wrapper marker mismatch")]
     MarkerMismatch,
     /// Rustfmt did not retain the requested destination indentation.

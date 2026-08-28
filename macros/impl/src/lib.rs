@@ -388,6 +388,8 @@ pub fn select(input: TokenStream) -> TokenStream {
 #[proc_macro]
 pub fn select_loop(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as SelectLoopInput);
+    // Parsing preserves source syntax for formatters. Expansion also requires
+    // the shared semantic check before patterns are lowered into select arms.
     if let Err(error) = input.validate() {
         return error.to_compile_error().into();
     }

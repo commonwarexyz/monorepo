@@ -1,4 +1,9 @@
 //! Checked conversion between source coordinates and byte ranges.
+//!
+//! `proc_macro2` spans use one-based lines and zero-based UTF-8 character
+//! columns. This module maps those coordinates back to byte offsets while
+//! accounting for a leading byte order mark, CRLF endings, and multibyte code
+//! points.
 
 use proc_macro2::{LineColumn, Span};
 use std::ops::Range;
@@ -52,11 +57,14 @@ pub enum Error {
 }
 
 /// A checked line and column index over a UTF-8 source string.
+///
+/// Line terminators and a leading byte order mark are not addressable columns.
 pub struct SourceMap<'a> {
     source: &'a str,
     lines: Vec<Line>,
 }
 
+/// Byte bounds and optional character-to-byte offsets for one logical line.
 struct Line {
     start: usize,
     end: usize,
@@ -64,12 +72,14 @@ struct Line {
 }
 
 impl Line {
+    /// Returns the number of addressable UTF-8 character columns.
     fn column_count(&self) -> usize {
         self.non_ascii_columns
             .as_ref()
             .map_or(self.end - self.start, |columns| columns.len() - 1)
     }
 
+    /// Converts a validated character column to an absolute byte offset.
     fn byte_offset(&self, column: usize) -> usize {
         self.start
             + self
@@ -81,8 +91,12 @@ impl Line {
 
 impl<'a> SourceMap<'a> {
     /// Builds an index over `source`.
+    ///
+    /// Empty source still has an addressable origin at line 1, column 0.
     pub fn new(source: &'a str) -> Self {
         let mut line_starts = Vec::new();
+        // proc_macro2 reports the first token after a UTF-8 byte order mark at
+        // column zero, so the first logical line begins after the mark.
         line_starts.push(if source.starts_with('\u{feff}') { 3 } else { 0 });
         line_starts.extend(
             source
@@ -95,6 +109,8 @@ impl<'a> SourceMap<'a> {
             .enumerate()
             .map(|(index, &start)| {
                 let mut end = line_starts.get(index + 1).copied().unwrap_or(source.len());
+                // Span columns exclude both bytes of CRLF and the single byte
+                // of LF, while the next logical line still starts after them.
                 if end > start && source.as_bytes().get(end - 1) == Some(&b'\n') {
                     end -= 1;
                     if end > start && source.as_bytes().get(end - 1) == Some(&b'\r') {
@@ -102,6 +118,8 @@ impl<'a> SourceMap<'a> {
                     }
                 }
                 let text = &source[start..end];
+                // ASCII columns equal byte offsets. Non-ASCII lines pay for an
+                // index that maps proc_macro2 character columns exactly.
                 let non_ascii_columns = (!text.is_ascii()).then(|| {
                     text.char_indices()
                         .map(|(offset, _)| offset)
@@ -118,6 +136,7 @@ impl<'a> SourceMap<'a> {
         Self { source, lines }
     }
 
+    /// Builds a line error using the map's addressable line count.
     const fn invalid_line(&self, line: usize) -> Error {
         Error::InvalidLine {
             line,
@@ -125,7 +144,7 @@ impl<'a> SourceMap<'a> {
         }
     }
 
-    /// Converts a one-based line and character column to a byte offset.
+    /// Converts a one-based line and zero-based character column to a byte offset.
     pub fn byte_offset(&self, location: LineColumn) -> Result<usize, Error> {
         let Some(index) = location.line.checked_sub(1) else {
             return Err(self.invalid_line(location.line));
@@ -158,6 +177,7 @@ impl<'a> SourceMap<'a> {
         Ok(&self.source[range])
     }
 
+    /// Validates ordering, bounds, and UTF-8 boundaries for a byte range.
     fn validate_range(&self, range: Range<usize>) -> Result<(), Error> {
         if range.start > range.end {
             return Err(Error::ReversedRange {

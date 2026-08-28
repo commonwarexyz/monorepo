@@ -1,4 +1,9 @@
-//! Formatter for `cfg_if!` bodies.
+//! Parses and formats the conditional branches inside `cfg_if!` invocations.
+//!
+//! Predicates and Rust bodies are formatted independently before the macro shell is
+//! rebuilt. When reconstruction could move structural trivia, the original shell is
+//! retained. Nested supported macros are still formatted when exact body splice
+//! boundaries remain available.
 
 use super::{Error, Options, nested};
 use crate::{
@@ -15,11 +20,18 @@ use syn::{
     token,
 };
 
+/// Predicate column after the shell indentation and `if #[cfg(` prefix.
+const FIRST_PREDICATE_OFFSET: usize = 13;
+/// Conservative shell width preceding each predicate after the first.
+const FOLLOWING_PREDICATE_OFFSET: usize = 20;
+
+/// Parsed conditional chain with an optional terminal `else` branch.
 struct CfgIfInput {
     branches: Vec<ConditionalBranch>,
     else_branch: Option<ElseBranch>,
 }
 
+/// Parsed `if` or `else if` branch with tokens retained for source mapping.
 struct ConditionalBranch {
     else_token: Option<Token![else]>,
     if_token: Token![if],
@@ -32,27 +44,34 @@ struct ConditionalBranch {
     body: Body,
 }
 
+/// Parsed terminal `else` branch.
 struct ElseBranch {
     else_token: Token![else],
     brace_token: token::Brace,
     body: Body,
 }
 
+/// Branch contents classified by the Rust grammar used to parse them.
 enum Body {
+    /// A complete sequence of Rust items.
     Items(Vec<Item>),
+    /// Statements and an optional trailing expression.
     Statements(Vec<Stmt>),
 }
 
+/// Formatted predicate and body ready for shell rendering.
 struct ConditionalLayout {
     predicate: String,
     body: String,
 }
 
+/// Formatted contents of an entire conditional chain.
 struct Layout {
     branches: Vec<ConditionalLayout>,
     else_body: Option<String>,
 }
 
+/// Exact byte ranges for a brace pair and its enclosed source.
 struct BodyRanges {
     open: Range<usize>,
     body: Range<usize>,
@@ -90,6 +109,7 @@ impl Parse for CfgIfInput {
 }
 
 impl ConditionalBranch {
+    /// Parses one branch, including the supplied `else` token for chained branches.
     fn parse(input: ParseStream<'_>, else_token: Option<Token![else]>) -> ParseResult<Self> {
         let if_token = input.parse()?;
         let pound_token = input.parse()?;
@@ -126,7 +146,10 @@ impl ConditionalBranch {
     }
 }
 
+/// Parses a branch body as items when the entire body permits that interpretation.
 fn parse_body(input: ParseStream<'_>) -> ParseResult<Body> {
+    // Item and statement grammars overlap. Parse items on a fork so the real stream
+    // advances only when every token belongs to a complete item sequence.
     let items = input.fork();
     let mut parsed = Vec::new();
     let items_result = (|| {
@@ -158,6 +181,9 @@ pub(super) fn cfg_if(
     )
 }
 
+/// Formats a `cfg_if!` body using the configured Rust fragment formatter.
+///
+/// Structural trivia that cannot be safely moved causes the shell to be preserved.
 pub(super) fn cfg_if_with(
     formatter: &crate::rustfmt::Formatter,
     source: &str,
@@ -167,14 +193,17 @@ pub(super) fn cfg_if_with(
     let input = syn::parse_str::<CfgIfInput>(source).map_err(Error::Parse)?;
     let source_map = SourceMap::new(source);
     let Some(ranges) = source_ranges(&source_map, &input)? else {
+        // Unreliable brace spans leave no safe boundary for body replacement.
         return Ok(ProtectedFragment::preserved(source));
     };
     if !has_only_whitespace_gaps(source, ranges) {
+        // Non-whitespace between mapped fields is structural trivia that a canonical
+        // shell would discard.
         return preserve_cfg_if(formatter, source, &source_map, &input, options, depth);
     }
 
     let mut branches = Vec::with_capacity(input.branches.len());
-    let mut predicate_column = options.indentation + 13;
+    let mut predicate_column = options.indentation + FIRST_PREDICATE_OFFSET;
     for branch in &input.branches {
         let Some(body) = format_body(
             &source_map,
@@ -192,10 +221,14 @@ pub(super) fn cfg_if_with(
         else {
             return preserve_cfg_if(formatter, source, &source_map, &input, options, depth);
         };
+        // Rustfmt needs the absolute column of each predicate. The following offset
+        // covers `)] {} else if #[cfg(` after an empty body and conservatively
+        // reserves the multiline `} else if #[cfg(` form after a non-empty body.
         predicate_column = if body.is_empty() {
-            rendered_end_column(&predicate, predicate_column, options.indentation + 4) + 20
+            rendered_end_column(&predicate, predicate_column, options.indentation + 4)
+                + FOLLOWING_PREDICATE_OFFSET
         } else {
-            options.indentation + 20
+            options.indentation + FOLLOWING_PREDICATE_OFFSET
         };
         branches.push(ConditionalLayout { predicate, body });
     }
@@ -228,6 +261,7 @@ pub(super) fn cfg_if_with(
     Ok(ProtectedFragment::formatted(output))
 }
 
+/// Returns the absolute character column after the rendered source.
 fn rendered_end_column(source: &str, first_column: usize, indentation: usize) -> usize {
     source.rsplit_once('\n').map_or_else(
         || first_column + source.chars().count(),
@@ -235,6 +269,7 @@ fn rendered_end_column(source: &str, first_column: usize, indentation: usize) ->
     )
 }
 
+/// Preserves the conditional shell while applying safe nested formatting in bodies.
 fn preserve_cfg_if(
     formatter: &crate::rustfmt::Formatter,
     source: &str,
@@ -267,6 +302,9 @@ fn preserve_cfg_if(
     )
 }
 
+/// Collects ranges that own every reconstructable field in the conditional shell.
+///
+/// Returns `None` when a branch's brace spans do not identify exact source braces.
 fn source_ranges(
     source_map: &SourceMap<'_>,
     input: &CfgIfInput,
@@ -306,12 +344,15 @@ fn source_ranges(
     Ok(Some(ranges))
 }
 
+/// Maps a parsed brace pair to its opening, body, and closing byte ranges.
 fn body_ranges(
     source_map: &SourceMap<'_>,
     brace: &token::Brace,
 ) -> Result<Option<BodyRanges>, Error> {
     let open = source_map.span_range(brace.span.open())?;
     let close = source_map.span_range(brace.span.close())?;
+    // Span conversion alone does not prove that the mapped bytes are an ordered
+    // brace pair, so verify the delimiters before using them as splice boundaries.
     if source_map.slice(open.clone())? != "{"
         || source_map.slice(close.clone())? != "}"
         || open.end > close.start
@@ -322,6 +363,10 @@ fn body_ranges(
     Ok(Some(BodyRanges { open, body, close }))
 }
 
+/// Formats a predicate when its syntax and trivia permit relocation.
+///
+/// Returns `None` for preserved multiline source because canonical rendering would
+/// move its continuation lines.
 fn format_predicate(
     formatter: &crate::rustfmt::Formatter,
     source_map: &SourceMap<'_>,
@@ -342,6 +387,10 @@ fn format_predicate(
     Ok(movable(predicate))
 }
 
+/// Formats a branch body according to its parsed item or statement grammar.
+///
+/// Returns `None` when the body boundaries or preserved multiline layout cannot be
+/// moved into the canonical shell.
 fn format_body(
     source_map: &SourceMap<'_>,
     brace: &token::Brace,
@@ -378,6 +427,7 @@ fn format_body(
     Ok(movable(body))
 }
 
+/// Extracts text only when moving the fragment cannot disturb preserved line layout.
 fn movable(fragment: ProtectedFragment) -> Option<String> {
     if fragment.disposition() != Disposition::Formatted
         && (fragment.text().contains('\n') || fragment.text().contains('\r'))
@@ -387,11 +437,14 @@ fn movable(fragment: ProtectedFragment) -> Option<String> {
     Some(fragment.into_string())
 }
 
+/// Checks that mapped fields are ordered and all uncovered source is whitespace.
 fn has_only_whitespace_gaps(source: &str, ranges: impl IntoIterator<Item = Range<usize>>) -> bool {
     let mut ranges = ranges.into_iter().collect::<Vec<_>>();
     ranges.sort_unstable_by_key(|range| (range.start, range.end));
     let mut cursor = 0;
     for range in ranges {
+        // Overlap and out-of-bounds ranges mean source mapping cannot establish
+        // exclusive ownership of the intervening bytes.
         if range.start < cursor
             || range.end > source.len()
             || source[cursor..range.start]
@@ -407,6 +460,7 @@ fn has_only_whitespace_gaps(source: &str, ranges: impl IntoIterator<Item = Range
         .all(|character| character.is_whitespace())
 }
 
+/// Renders a canonical `cfg_if!` body from formatted branch contents.
 fn render(layout: &Layout, options: Options) -> String {
     let mut writer = Writer::new(options.indentation, options.line_ending.as_str());
     writer.newline();
@@ -430,6 +484,7 @@ fn render(layout: &Layout, options: Options) -> String {
     writer.finish()
 }
 
+/// Writes one canonical braced body at the writer's current indentation.
 fn write_body(writer: &mut Writer<'_>, body: &str) {
     writer.push("{");
     if body.is_empty() {
@@ -438,6 +493,8 @@ fn write_body(writer: &mut Writer<'_>, body: &str) {
     }
     writer.newline();
     writer.indented(|writer| writer.push(body));
+    // The closing brace needs exactly one preceding line break regardless of
+    // whether the fragment formatter supplied a trailing newline.
     if !body.ends_with('\n') {
         writer.newline();
     }

@@ -14,6 +14,7 @@ use tempfile::NamedTempFile;
 #[derive(Parser)]
 #[command(name = "commonware-fmt")]
 #[command(about = "Format Commonware macro invocations")]
+/// Command-line options controlling input, checking, and rustfmt invocation.
 struct Args {
     /// Check whether files are formatted without writing them.
     #[arg(long)]
@@ -45,22 +46,30 @@ struct Args {
 }
 
 #[derive(Default)]
+/// Results accumulated while processing a set of files.
 struct Outcome {
+    /// Files that needed formatting or were rewritten successfully.
     changed: Vec<PathBuf>,
+    /// Diagnostics for inputs that could not be processed.
     errors: Vec<String>,
 }
 
+/// A source file's diagnostic path and canonical I/O path.
 struct Input {
+    /// Stable path used in diagnostics and change reports.
     display: PathBuf,
+    /// Canonical path used to read and replace the file.
     resolved: PathBuf,
 }
 
 impl Outcome {
+    /// Returns whether accumulated results require a failing exit status.
     const fn failed(&self, check: bool) -> bool {
         !self.errors.is_empty() || (check && !self.changed.is_empty())
     }
 }
 
+/// Runs the formatter in stdin, check, or in-place mode.
 fn main() -> ExitCode {
     let args = Args::parse();
     let formatter = formatter(&args);
@@ -90,6 +99,7 @@ fn main() -> ExitCode {
     }
 }
 
+/// Builds a source formatter from the rustfmt-related command-line options.
 fn formatter(args: &Args) -> commonware_fmt::file::Formatter {
     let mut rustfmt = commonware_fmt::rustfmt::Formatter::new(args.rustfmt.as_os_str().to_owned());
     if let Some(toolchain) = &args.rustfmt_toolchain {
@@ -101,6 +111,7 @@ fn formatter(args: &Args) -> commonware_fmt::file::Formatter {
     commonware_fmt::file::Formatter::new(rustfmt)
 }
 
+/// Formats one UTF-8 Rust source file from stdin and writes it to stdout.
 fn run_stdin(formatter: &commonware_fmt::file::Formatter) -> Result<(), String> {
     let mut source = String::new();
     io::stdin()
@@ -113,6 +124,7 @@ fn run_stdin(formatter: &commonware_fmt::file::Formatter) -> Result<(), String> 
     write_output(io::stdout().lock(), output.text())
 }
 
+/// Writes formatted source and reports both write and buffered flush failures.
 fn write_output(mut writer: impl io::Write, output: &str) -> Result<(), String> {
     writer
         .write_all(output.as_bytes())
@@ -122,6 +134,10 @@ fn write_output(mut writer: impl io::Write, output: &str) -> Result<(), String> 
         .map_err(|error| format!("failed to flush stdout: {error}"))
 }
 
+/// Processes valid inputs in deterministic order without stopping after errors.
+///
+/// Check mode records files that differ. In-place mode records only files that
+/// were replaced successfully.
 fn run_files(
     formatter: &commonware_fmt::file::Formatter,
     paths: &[PathBuf],
@@ -169,11 +185,13 @@ fn run_files(
     outcome
 }
 
+/// Atomically replaces a source file while retaining its permissions.
 fn replace(path: &Path, source: &str) -> io::Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let metadata = fs::metadata(path)?;
     ensure_replaceable(&metadata)?;
 
+    // A temporary file in the same directory keeps the final rename on one filesystem.
     let mut temporary = NamedTempFile::new_in(parent)?;
     temporary.write_all(source.as_bytes())?;
     temporary.flush()?;
@@ -185,6 +203,7 @@ fn replace(path: &Path, source: &str) -> io::Result<()> {
 }
 
 #[cfg(unix)]
+/// Rejects files whose hard-linked aliases would diverge after replacement.
 fn ensure_replaceable(metadata: &fs::Metadata) -> io::Result<()> {
     use std::os::unix::fs::MetadataExt as _;
 
@@ -198,12 +217,14 @@ fn ensure_replaceable(metadata: &fs::Metadata) -> io::Result<()> {
 }
 
 #[cfg(not(unix))]
+/// Rejects replacement where hard-link safety cannot be verified portably.
 fn ensure_replaceable(_metadata: &fs::Metadata) -> io::Result<()> {
     Err(io::Error::other(
         "replacing files is unsupported on this platform",
     ))
 }
 
+/// Validates, canonicalizes, deduplicates, and orders Rust source paths.
 fn collect_files(paths: &[PathBuf], errors: &mut Vec<String>) -> Vec<Input> {
     let mut files = BTreeMap::new();
     for path in paths {
@@ -229,6 +250,8 @@ fn collect_files(paths: &[PathBuf], errors: &mut Vec<String>) -> Vec<Input> {
                 continue;
             }
         };
+        // Canonical paths collapse aliases. Keeping the least display path makes
+        // diagnostics independent of argument order.
         files
             .entry(resolved.clone())
             .and_modify(|input: &mut Input| {
