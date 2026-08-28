@@ -172,13 +172,7 @@ where
     }
 }
 
-/// Overflow handling for shard engine messages.
-///
-/// Retained messages drain in the order this policy receives them, matching
-/// ready-queue delivery. Callers rely on that order only for causally sequenced
-/// enqueues. Certification enqueues `Notarized` before the marshal hint's later
-/// `GetByCommitment`. Coalescing any message class here changes its observable
-/// ordering and requires sweeping the callers that sequence on it.
+/// Retains overflowed messages in FIFO order.
 impl<B, C, H, P> Policy for Message<B, C, H, P>
 where
     B: CertifiableBlock,
@@ -375,9 +369,7 @@ mod tests {
     type C = ReedSolomon<H>;
     type TestMessage = Message<B, C, H, ed25519::PublicKey>;
 
-    /// Retained messages must drain in policy receive order. Certification
-    /// causally sequences `Notarized` before the marshal hint's
-    /// `GetByCommitment`.
+    /// `Notarized` must drain before the marshal hint's `GetByCommitment`.
     #[test]
     fn policy_drains_messages_in_enqueue_order() {
         let block = CodedBlock::<B, C, H>::new(

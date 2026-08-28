@@ -4176,13 +4176,10 @@ mod tests {
                 }
                 context.sleep(config.link.latency * 2).await;
 
-                for (block, should_reconstruct) in [
-                    (&pressure_blocks[0], false),
-                    (
-                        pressure_blocks.last().expect("pressure block missing"),
-                        true,
-                    ),
-                ] {
+                let [evicted_block, retained_block] = &pressure_blocks;
+                for (block, should_reconstruct) in
+                    [(evicted_block, false), (retained_block, true)]
+                {
                     for sender_idx in [2usize, 4, 5] {
                         let shard = block
                             .shard(peers[sender_idx].index.get() as u16)

@@ -2723,8 +2723,8 @@ mod tests {
                 let digest = case.block.digest();
                 case.buffer.insert_transient(case.block.clone());
 
-                // The next lookup clones the block and immediately evicts the
-                // buffer's reference, modeling same-peer cache pressure.
+                // The next lookup returns ownership while removing the buffer entry, modeling
+                // same-peer cache pressure.
                 let block_context = case.block_context.clone();
                 let verify_rx = case.wrapper.verify(block_context, digest).await;
                 let certify_rx = case.wrapper.certify(round, digest).await;

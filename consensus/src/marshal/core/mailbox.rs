@@ -573,18 +573,8 @@ impl<S: Scheme, V: Variant> Overflow<Message<S, V>> for Pending<S, V> {
     }
 }
 
-/// Overflow handling for marshal messages.
-///
-/// `HintFinalized`, `SetFloor`, and `Prune` coalesce and may drain out of the
-/// order in which this policy receives them. Retained ordinary messages stay
-/// in receive order, matching ready-queue delivery. Callers rely on that order
-/// only for causally sequenced enqueues. Standard verification publishes its
-/// certification gate after enqueueing a `Wait` block subscription. A
-/// certification path takes that gate before enqueueing `hint_notarized`.
-/// Barriers such as `get_processed_height` likewise observe every earlier
-/// retained ordinary message. Moving a message into a coalesced class changes
-/// its observable ordering and requires sweeping the callers that sequence on
-/// it.
+/// Coalesces `HintFinalized`, `SetFloor`, and `Prune`. Other overflowed messages
+/// retain FIFO order.
 impl<S: Scheme, V: Variant> Policy for Message<S, V> {
     type Overflow = Pending<S, V>;
 
@@ -610,7 +600,6 @@ impl<S: Scheme, V: Variant> Policy for Message<S, V> {
             Self::Prune { span, height } => {
                 overflow.prune(span, height);
             }
-            // Retain useful ordinary messages in the order this policy receives them.
             message => {
                 if message.stale(overflow.height()) {
                     return;
@@ -1514,11 +1503,8 @@ mod tests {
         assert!(targets.contains(&second));
     }
 
-    /// Retained messages outside the coalesced classes must drain in policy
-    /// receive order. Standard verification publishes its certification gate
-    /// after enqueueing a `Wait` block subscription. A certification path takes
-    /// that gate before enqueueing `hint_notarized`. Barriers such as
-    /// `get_processed_height` observe every earlier retained ordinary message.
+    /// A `Wait` subscription, `HintNotarized`, and a later mailbox barrier must
+    /// retain their enqueue order.
     #[test]
     fn policy_drains_ordinary_messages_in_enqueue_order() {
         let mut overflow = pending();
