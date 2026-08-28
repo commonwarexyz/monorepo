@@ -17,6 +17,7 @@ use crate::{
 use commonware_codec::EncodeShared;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
+use commonware_utils::iter::zip_eq;
 use std::{
     collections::BTreeMap,
     sync::{Arc, Weak},
@@ -241,7 +242,7 @@ where
 
         if !db_keys.is_empty() {
             let db_results = db.get_many(&db_keys).await?;
-            for (slot, value) in db_indices.into_iter().zip(db_results) {
+            for (slot, value) in zip_eq(db_indices, db_results) {
                 results[slot] = value;
             }
         }
@@ -295,8 +296,8 @@ where
         let total_size = base + ops.len() as u64;
         let inactive_peaks = F::inactive_peaks(total_size, inactivity_floor);
 
-        // Leaf and node hashing dominate merkleization, so run them as one job on the
-        // strategy instead of occupying the calling task (see `Journal::merkleize`).
+        // Leaf and node hashing dominate merkleization, so run them as one job through the
+        // strategy (see `Journal::merkleize`).
         let (journal, root) = db
             .journal
             .merkleize(self.journal_batch, ops, inactive_peaks)
@@ -432,7 +433,7 @@ where
 
         if !db_keys.is_empty() {
             let db_results = db.get_many(&db_keys).await?;
-            for (slot, value) in db_indices.into_iter().zip(db_results) {
+            for (slot, value) in zip_eq(db_indices, db_results) {
                 results[slot] = value;
             }
         }

@@ -43,7 +43,7 @@ use commonware_consensus::{
     },
     simplex::{
         self,
-        config::ForwardingPolicy,
+        config::{ForwardPolicy, SkipPolicy},
         elector::RoundRobin,
         types::{Context, Finalization},
     },
@@ -52,7 +52,7 @@ use commonware_consensus::{
 use commonware_cryptography::{
     Digest as _, Digestible, Hasher, Sha256, Signer as _,
     bls12381::{
-        dkg::feldman_desmedt::deal,
+        dkg::feldman_desmedt::{Reveal, deal},
         primitives::{group::Share, sharing::Mode, variant::MinPk},
     },
     certificate::{ConstantProvider, Provider as CertificateProvider, Scoped},
@@ -1087,6 +1087,7 @@ impl EngineDefinition for ReshareEngine {
                 fence,
                 namespace: NAMESPACE,
                 sharing_mode: self.sharing_mode,
+                reveal: Reveal::V1,
                 mailbox_size: NZUsize!(100),
                 partition_prefix: format!("{partition_prefix}-reshare"),
                 max_participants: MAX_PARTICIPANTS,
@@ -1159,8 +1160,11 @@ impl EngineDefinition for ReshareEngine {
                     timeout_retry: Duration::from_millis(500),
                     fetch_timeout: Duration::from_secs(2),
                     view_retention: ViewDelta::new(10),
-                    skip_timeout: Duration::from_secs(5),
-                    forwarding: ForwardingPolicy::Disabled,
+                    skip: SkipPolicy::Enabled {
+                        timeout: Duration::from_secs(5),
+                        budget: simplex::SkipBudget::Participants,
+                    },
+                    forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 },
                 gate,

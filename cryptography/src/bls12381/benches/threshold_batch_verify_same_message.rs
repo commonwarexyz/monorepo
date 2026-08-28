@@ -7,7 +7,7 @@ use commonware_cryptography::{
     ed25519::PrivateKey,
 };
 use commonware_parallel::{Rayon, Sequential};
-use commonware_utils::{Faults, N3f1, NZUsize, TryCollect, test_rng};
+use commonware_utils::{Faults, N3f1, NZUsize, TryCollect, non_empty, test_rng};
 use criterion::{BatchSize, Criterion, criterion_group};
 use rand::seq::SliceRandom;
 use std::hint::black_box;
@@ -77,7 +77,7 @@ fn bench_threshold_batch_verify_same_message(c: &mut Criterion) {
                                                 &polynomial,
                                                 namespace,
                                                 msg,
-                                                &signatures,
+                                                non_empty![@signatures.iter()],
                                                 &strategy,
                                             ),
                                         )
@@ -92,7 +92,7 @@ fn bench_threshold_batch_verify_same_message(c: &mut Criterion) {
                                                 &polynomial,
                                                 namespace,
                                                 msg,
-                                                &signatures,
+                                                non_empty![@signatures.iter()],
                                                 &Sequential,
                                             ),
                                         )

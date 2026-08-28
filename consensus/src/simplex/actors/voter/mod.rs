@@ -42,6 +42,7 @@ pub struct Config<
     pub leader_timeout: Duration,
     pub certification_timeout: Duration,
     pub timeout_retry: Duration,
+    pub skip_budget: u64,
     pub view_retention: ViewDelta,
     pub replay_buffer: NonZeroUsize,
     pub write_buffer: NonZeroUsize,
@@ -58,7 +59,7 @@ mod tests {
                 batcher,
                 resolver::{self, MailboxMessage},
             },
-            elector::{self, Config as _, Random, RoundRobin, RoundRobinElector},
+            elector::{self, Config as _, Random, RandomVersion, RoundRobin, RoundRobinElector},
             metrics::TimeoutReason,
             mocks, quorum,
             scheme::{
@@ -95,7 +96,7 @@ mod tests {
         telemetry::traces::collector::{RecordedEvents, TraceStorage},
     };
     use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
-    use commonware_utils::{NZU16, NZU32, NZUsize, Probability, sync::Mutex};
+    use commonware_utils::{NZU16, NZU32, NZUsize, non_empty, probability, sync::Mutex};
     use futures::FutureExt;
     use rand_core::CryptoRng;
     use std::{
@@ -146,8 +147,9 @@ mod tests {
             .take(count as usize)
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
-        let certificate = Notarization::from_notarizes(&schemes[0], &votes, &Sequential)
-            .expect("notarization requires a quorum of votes");
+        let certificate =
+            Notarization::from_notarizes(&schemes[0], non_empty![@&votes], &Sequential)
+                .expect("notarization requires a quorum of votes");
         (votes, certificate)
     }
 
@@ -164,8 +166,9 @@ mod tests {
             .take(count as usize)
             .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
             .collect();
-        let certificate = Finalization::from_finalizes(&schemes[0], &votes, &Sequential)
-            .expect("finalization requires a quorum of votes");
+        let certificate =
+            Finalization::from_finalizes(&schemes[0], non_empty![@&votes], &Sequential)
+                .expect("finalization requires a quorum of votes");
         (votes, certificate)
     }
 
@@ -179,8 +182,9 @@ mod tests {
             .take(count as usize)
             .map(|scheme| Nullify::sign::<Sha256Digest>(scheme, round).unwrap())
             .collect();
-        let certificate = Nullification::from_nullifies(&schemes[0], &votes, &Sequential)
-            .expect("nullification requires a quorum of votes");
+        let certificate =
+            Nullification::from_nullifies(&schemes[0], non_empty![@&votes], &Sequential)
+                .expect("nullification requires a quorum of votes");
         (votes, certificate)
     }
 
@@ -301,6 +305,7 @@ mod tests {
             leader_timeout: options.leader_timeout,
             certification_timeout: options.certification_timeout,
             timeout_retry: options.timeout_retry,
+            skip_budget: u64::MAX,
             view_retention: ViewDelta::new(10),
             replay_buffer: NZUsize!(10240),
             write_buffer: NZUsize!(10240),
@@ -437,6 +442,7 @@ mod tests {
         partition: String,
         epoch: Epoch,
         floor: Floor<S, Sha256Digest>,
+        skip_budget: u64,
         page_cache: CacheRef,
     }
 
@@ -464,6 +470,7 @@ mod tests {
             partition,
             epoch,
             floor,
+            skip_budget,
             page_cache,
         } = start;
         let me = participants[0].clone();
@@ -501,6 +508,7 @@ mod tests {
             leader_timeout: Duration::from_secs(5),
             certification_timeout: Duration::from_secs(6),
             timeout_retry: Duration::from_mins(60),
+            skip_budget,
             view_retention: ViewDelta::new(10),
             replay_buffer: NZUsize!(1024 * 1024),
             write_buffer: NZUsize!(1024 * 1024),
@@ -638,6 +646,7 @@ mod tests {
                         partition,
                         epoch,
                         floor: Floor::Finalized(floor_finalization),
+                        skip_budget: u64::MAX,
                         page_cache,
                     },
                 )
@@ -718,6 +727,7 @@ mod tests {
                         partition,
                         epoch,
                         floor: Floor::Finalized(floor_finalization),
+                        skip_budget: u64::MAX,
                         page_cache,
                     },
                 )
@@ -806,6 +816,7 @@ mod tests {
                         partition,
                         epoch,
                         floor: Floor::Finalized(floor_finalization),
+                        skip_budget: u64::MAX,
                         page_cache,
                     },
                 )
@@ -869,7 +880,7 @@ mod tests {
     /// 1. Send a finalization for view 100.
     /// 2. Send a notarization from resolver for view 50 (should be ignored).
     /// 3. Send a finalization for view 300 (should be processed).
-    fn stale_backfill<S, F, L>(mut fixture: F)
+    fn stale_backfill<S, F, L>(mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -897,7 +908,6 @@ mod tests {
 
             // Initialize voter actor
             let me = participants[0].clone();
-            let elector = L::default();
             let reporter_config = mocks::reporter::Config {
                 participants: participants.clone().try_into().unwrap(),
                 scheme: schemes[0].clone(),
@@ -932,6 +942,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
+                skip_budget: u64::MAX,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NonZeroUsize::new(1024 * 1024).unwrap(),
                 write_buffer: NonZeroUsize::new(1024 * 1024).unwrap(),
@@ -1083,12 +1094,24 @@ mod tests {
 
     #[test_traced]
     fn test_stale_backfill() {
-        stale_backfill::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
-        stale_backfill::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinSig, _>);
-        stale_backfill::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
-        stale_backfill::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
-        stale_backfill::<_, _, RoundRobin>(ed25519::fixture);
-        stale_backfill::<_, _, RoundRobin>(secp256r1::fixture);
+        stale_backfill::<_, _, Random>(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+            Random::new(RandomVersion::V1),
+        );
+        stale_backfill::<_, _, Random>(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+            Random::new(RandomVersion::V1),
+        );
+        stale_backfill::<_, _, RoundRobin>(
+            bls12381_multisig::fixture::<MinPk, _>,
+            RoundRobin::default(),
+        );
+        stale_backfill::<_, _, RoundRobin>(
+            bls12381_multisig::fixture::<MinSig, _>,
+            RoundRobin::default(),
+        );
+        stale_backfill::<_, _, RoundRobin>(ed25519::fixture, RoundRobin::default());
+        stale_backfill::<_, _, RoundRobin>(secp256r1::fixture, RoundRobin::default());
     }
 
     /// Process an interesting view below the oldest tracked view:
@@ -1100,7 +1123,7 @@ mod tests {
     /// 3. Let prune_views run, setting the journal floor to V_A.
     /// 4. Inject a message for V_B such that V_B < V_A but V_B is still "interesting"
     ///    relative to the current last_finalized.
-    fn append_old_interesting_view<S, F, L>(mut fixture: F)
+    fn append_old_interesting_view<S, F, L>(mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -1127,7 +1150,6 @@ mod tests {
             // Setup the target Voter actor (validator 0)
             let signing = schemes[0].clone();
             let me = participants[0].clone();
-            let elector = L::default();
             let reporter_config = mocks::reporter::Config {
                 participants: participants.clone().try_into().unwrap(),
                 scheme: signing.clone(),
@@ -1162,6 +1184,7 @@ mod tests {
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_millis(1000),
                 timeout_retry: Duration::from_millis(1000),
+                skip_budget: u64::MAX,
                 view_retention,
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
@@ -1367,16 +1390,28 @@ mod tests {
 
     #[test_traced]
     fn test_append_old_interesting_view() {
-        append_old_interesting_view::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
-        append_old_interesting_view::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinSig, _>);
-        append_old_interesting_view::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
-        append_old_interesting_view::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
-        append_old_interesting_view::<_, _, RoundRobin>(ed25519::fixture);
-        append_old_interesting_view::<_, _, RoundRobin>(secp256r1::fixture);
+        append_old_interesting_view::<_, _, Random>(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+            Random::new(RandomVersion::V1),
+        );
+        append_old_interesting_view::<_, _, Random>(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+            Random::new(RandomVersion::V1),
+        );
+        append_old_interesting_view::<_, _, RoundRobin>(
+            bls12381_multisig::fixture::<MinPk, _>,
+            RoundRobin::default(),
+        );
+        append_old_interesting_view::<_, _, RoundRobin>(
+            bls12381_multisig::fixture::<MinSig, _>,
+            RoundRobin::default(),
+        );
+        append_old_interesting_view::<_, _, RoundRobin>(ed25519::fixture, RoundRobin::default());
+        append_old_interesting_view::<_, _, RoundRobin>(secp256r1::fixture, RoundRobin::default());
     }
 
     /// Test that voter can process finalization from batcher without notarization.
-    fn finalization_without_notarization_certificate<S, F, L>(mut fixture: F)
+    fn finalization_without_notarization_certificate<S, F, L>(mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -1400,7 +1435,6 @@ mod tests {
                     .await;
 
             // Setup application mock and voter
-            let elector = L::default();
             let (mut mailbox, mut batcher_receiver, mut resolver_receiver, _, reporter) =
                 setup_voter(
                     &context,
@@ -1480,21 +1514,31 @@ mod tests {
     fn test_finalization_without_notarization_certificate() {
         finalization_without_notarization_certificate::<_, _, Random>(
             bls12381_threshold_vrf::fixture::<MinPk, _>,
+            Random::new(RandomVersion::V1),
         );
         finalization_without_notarization_certificate::<_, _, Random>(
             bls12381_threshold_vrf::fixture::<MinSig, _>,
+            Random::new(RandomVersion::V1),
         );
         finalization_without_notarization_certificate::<_, _, RoundRobin>(
             bls12381_multisig::fixture::<MinPk, _>,
+            RoundRobin::default(),
         );
         finalization_without_notarization_certificate::<_, _, RoundRobin>(
             bls12381_multisig::fixture::<MinSig, _>,
+            RoundRobin::default(),
         );
-        finalization_without_notarization_certificate::<_, _, RoundRobin>(ed25519::fixture);
-        finalization_without_notarization_certificate::<_, _, RoundRobin>(secp256r1::fixture);
+        finalization_without_notarization_certificate::<_, _, RoundRobin>(
+            ed25519::fixture,
+            RoundRobin::default(),
+        );
+        finalization_without_notarization_certificate::<_, _, RoundRobin>(
+            secp256r1::fixture,
+            RoundRobin::default(),
+        );
     }
 
-    fn certificate_conflicts_proposal<S, F, L>(mut fixture: F)
+    fn certificate_conflicts_proposal<S, F, L>(mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -1518,7 +1562,6 @@ mod tests {
                     .await;
 
             // Setup application mock and voter
-            let elector = L::default();
             let (mut mailbox, mut batcher_receiver, mut resolver_receiver, _, reporter) =
                 setup_voter(
                     &context,
@@ -1616,17 +1659,30 @@ mod tests {
 
     #[test_traced]
     fn test_certificate_conflicts_proposal() {
-        certificate_conflicts_proposal::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        certificate_conflicts_proposal::<_, _, Random>(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+            Random::new(RandomVersion::V1),
+        );
         certificate_conflicts_proposal::<_, _, Random>(
             bls12381_threshold_vrf::fixture::<MinSig, _>,
+            Random::new(RandomVersion::V1),
         );
-        certificate_conflicts_proposal::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
-        certificate_conflicts_proposal::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
-        certificate_conflicts_proposal::<_, _, RoundRobin>(ed25519::fixture);
-        certificate_conflicts_proposal::<_, _, RoundRobin>(secp256r1::fixture);
+        certificate_conflicts_proposal::<_, _, RoundRobin>(
+            bls12381_multisig::fixture::<MinPk, _>,
+            RoundRobin::default(),
+        );
+        certificate_conflicts_proposal::<_, _, RoundRobin>(
+            bls12381_multisig::fixture::<MinSig, _>,
+            RoundRobin::default(),
+        );
+        certificate_conflicts_proposal::<_, _, RoundRobin>(ed25519::fixture, RoundRobin::default());
+        certificate_conflicts_proposal::<_, _, RoundRobin>(
+            secp256r1::fixture,
+            RoundRobin::default(),
+        );
     }
 
-    fn proposal_conflicts_certificate<S, F, L>(mut fixture: F)
+    fn proposal_conflicts_certificate<S, F, L>(mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -1649,7 +1705,6 @@ mod tests {
                     .await;
 
             // Setup application mock and voter
-            let elector = L::default();
             let (mut mailbox, mut batcher_receiver, mut resolver_receiver, _, reporter) =
                 setup_voter(
                     &context,
@@ -1736,17 +1791,30 @@ mod tests {
 
     #[test_traced]
     fn test_proposal_conflicts_certificate() {
-        proposal_conflicts_certificate::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        proposal_conflicts_certificate::<_, _, Random>(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+            Random::new(RandomVersion::V1),
+        );
         proposal_conflicts_certificate::<_, _, Random>(
             bls12381_threshold_vrf::fixture::<MinSig, _>,
+            Random::new(RandomVersion::V1),
         );
-        proposal_conflicts_certificate::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
-        proposal_conflicts_certificate::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
-        proposal_conflicts_certificate::<_, _, RoundRobin>(ed25519::fixture);
-        proposal_conflicts_certificate::<_, _, RoundRobin>(secp256r1::fixture);
+        proposal_conflicts_certificate::<_, _, RoundRobin>(
+            bls12381_multisig::fixture::<MinPk, _>,
+            RoundRobin::default(),
+        );
+        proposal_conflicts_certificate::<_, _, RoundRobin>(
+            bls12381_multisig::fixture::<MinSig, _>,
+            RoundRobin::default(),
+        );
+        proposal_conflicts_certificate::<_, _, RoundRobin>(ed25519::fixture, RoundRobin::default());
+        proposal_conflicts_certificate::<_, _, RoundRobin>(
+            secp256r1::fixture,
+            RoundRobin::default(),
+        );
     }
 
-    fn certificate_verifies_proposal<S, F, L>(mut fixture: F)
+    fn certificate_verifies_proposal<S, F, L>(mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -1768,7 +1836,6 @@ mod tests {
                 start_test_network_with_peers(context.child("network"), participants.clone(), true)
                     .await;
 
-            let elector = L::default();
             let reporter_cfg = mocks::reporter::Config {
                 participants: participants.clone().try_into().unwrap(),
                 scheme: schemes[0].clone(),
@@ -1802,6 +1869,7 @@ mod tests {
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
+                skip_budget: u64::MAX,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -1902,12 +1970,27 @@ mod tests {
 
     #[test_traced]
     fn test_certificate_verifies_proposal() {
-        certificate_verifies_proposal::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
-        certificate_verifies_proposal::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinSig, _>);
-        certificate_verifies_proposal::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
-        certificate_verifies_proposal::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
-        certificate_verifies_proposal::<_, _, RoundRobin>(ed25519::fixture);
-        certificate_verifies_proposal::<_, _, RoundRobin>(secp256r1::fixture);
+        certificate_verifies_proposal::<_, _, Random>(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+            Random::new(RandomVersion::V1),
+        );
+        certificate_verifies_proposal::<_, _, Random>(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+            Random::new(RandomVersion::V1),
+        );
+        certificate_verifies_proposal::<_, _, RoundRobin>(
+            bls12381_multisig::fixture::<MinPk, _>,
+            RoundRobin::default(),
+        );
+        certificate_verifies_proposal::<_, _, RoundRobin>(
+            bls12381_multisig::fixture::<MinSig, _>,
+            RoundRobin::default(),
+        );
+        certificate_verifies_proposal::<_, _, RoundRobin>(ed25519::fixture, RoundRobin::default());
+        certificate_verifies_proposal::<_, _, RoundRobin>(
+            secp256r1::fixture,
+            RoundRobin::default(),
+        );
     }
 
     /// Test that our proposal is dropped when it conflicts with a peer's notarize vote.
@@ -1988,6 +2071,7 @@ mod tests {
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
+                skip_budget: u64::MAX,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -2124,7 +2208,7 @@ mod tests {
         drop_our_proposal_on_conflict(secp256r1::fixture);
     }
 
-    fn populate_resolver_on_restart<S, F, L>(mut fixture: F)
+    fn populate_resolver_on_restart<S, F, L>(mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -2148,7 +2232,6 @@ mod tests {
                     .await;
 
             // Setup application mock
-            let elector = L::default();
             let reporter_cfg = mocks::reporter::Config {
                 participants: participants.clone().try_into().unwrap(),
                 scheme: schemes[0].clone(),
@@ -2183,6 +2266,7 @@ mod tests {
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
+                skip_budget: u64::MAX,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -2276,6 +2360,7 @@ mod tests {
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
+                skip_budget: u64::MAX,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -2343,12 +2428,24 @@ mod tests {
 
     #[test_traced]
     fn test_populate_resolver_on_restart() {
-        populate_resolver_on_restart::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
-        populate_resolver_on_restart::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinSig, _>);
-        populate_resolver_on_restart::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
-        populate_resolver_on_restart::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
-        populate_resolver_on_restart::<_, _, RoundRobin>(ed25519::fixture);
-        populate_resolver_on_restart::<_, _, RoundRobin>(secp256r1::fixture);
+        populate_resolver_on_restart::<_, _, Random>(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+            Random::new(RandomVersion::V1),
+        );
+        populate_resolver_on_restart::<_, _, Random>(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+            Random::new(RandomVersion::V1),
+        );
+        populate_resolver_on_restart::<_, _, RoundRobin>(
+            bls12381_multisig::fixture::<MinPk, _>,
+            RoundRobin::default(),
+        );
+        populate_resolver_on_restart::<_, _, RoundRobin>(
+            bls12381_multisig::fixture::<MinSig, _>,
+            RoundRobin::default(),
+        );
+        populate_resolver_on_restart::<_, _, RoundRobin>(ed25519::fixture, RoundRobin::default());
+        populate_resolver_on_restart::<_, _, RoundRobin>(secp256r1::fixture, RoundRobin::default());
     }
 
     /// Regression: startup must consume timeout hints returned by initial batcher update.
@@ -2420,6 +2517,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(10),
                 certification_timeout: Duration::from_secs(10),
                 timeout_retry: Duration::from_mins(60),
+                skip_budget: u64::MAX,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -2543,6 +2641,127 @@ mod tests {
         startup_update_timeout_hint_nullifies_recovered_view::<_, _>(secp256r1::fixture);
     }
 
+    /// Skip eligibility after replay is derived from durable finalization and
+    /// term progress. Restarting must not restore budget consumed by an unfinalized
+    /// term, while a later finalization must make a pending timeout eligible.
+    #[test_traced("WARN")]
+    fn test_replay_preserves_exhausted_skip_budget() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(20));
+        runner.start(|mut context| async move {
+            let n = 5;
+            let quorum = quorum(n);
+            let epoch = Epoch::new(333);
+            let namespace = b"voter_replay_skip_budget".to_vec();
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(&mut context, &namespace, n);
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
+            let partition = "voter_replay_skip_budget".to_string();
+            let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+
+            // Persist the artifacts produced when view 1 is skipped. Replaying the
+            // nullification enters view 2 without advancing the finalized floor.
+            let skipped_view = View::new(1);
+            let skipped_round = Round::new(epoch, skipped_view);
+            let (mut nullifies, nullification) =
+                build_nullification(&schemes, skipped_round, quorum);
+            let local_nullify = nullifies.remove(0);
+            seed_voter_journal_artifacts(
+                context.child("seed_journal"),
+                partition.clone(),
+                page_cache.clone(),
+                &schemes[0],
+                skipped_view,
+                vec![
+                    Artifact::Nullify(local_nullify),
+                    Artifact::Nullification(nullification),
+                ],
+            )
+            .await;
+
+            let (mut mailbox, mut batcher_receiver, _resolver_receiver, _relay, _reporter, _handle) =
+                start_voter_with_floor(
+                    &mut context,
+                    &oracle,
+                    &participants,
+                    &schemes,
+                    RoundRobin::<Sha256>::default(),
+                    VoterFloorStart {
+                        partition,
+                        epoch,
+                        floor: Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
+                        skip_budget: 1,
+                        page_cache,
+                    },
+                )
+                .await;
+
+            let recovered_view = View::new(2);
+            loop {
+                match batcher_receiver.recv().await.unwrap() {
+                    batcher::Message::Update {
+                        current, finalized, ..
+                    } => {
+                        assert_eq!(current, recovered_view);
+                        assert_eq!(finalized, View::zero());
+                        break;
+                    }
+                    batcher::Message::Constructed(_) => {}
+                }
+            }
+
+            // The replayed term has exhausted budget 1, so this one-shot hint must remain pending
+            // rather than trigger a skip before the five-second leader deadline.
+            mailbox.timeout(
+                Round::new(epoch, recovered_view),
+                TimeoutReason::LeaderNullify,
+            );
+            let no_skip_deadline = context.current() + Duration::from_secs(1);
+            loop {
+                select! {
+                    _ = context.sleep_until(no_skip_deadline) => break,
+                    msg = batcher_receiver.recv() => {
+                        if let batcher::Message::Constructed(Vote::Nullify(nullify)) = msg.unwrap()
+                            && nullify.view() == recovered_view
+                        {
+                            panic!("replay restored skip budget for {recovered_view}");
+                        }
+                    },
+                }
+            }
+
+            // Finalizing view 1 moves the first unfinalized term to view 2. The
+            // retained hint is now eligible and must fire before the ordinary deadline.
+            let proposal = Proposal::new(
+                skipped_round,
+                View::zero(),
+                Sha256::hash(&[b"restore-skip-budget"]),
+            );
+            let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
+            mailbox.resolved(Certificate::Finalization(finalization));
+
+            let restored_deadline = context.current() + Duration::from_secs(1);
+            loop {
+                select! {
+                    _ = context.sleep_until(restored_deadline) => {
+                        panic!("finalization did not restore skip budget for {recovered_view}");
+                    },
+                    msg = batcher_receiver.recv() => {
+                        if let batcher::Message::Constructed(Vote::Nullify(nullify)) = msg.unwrap()
+                            && nullify.view() == recovered_view
+                        {
+                            break;
+                        }
+                    },
+                }
+            }
+        });
+    }
+
     #[test_traced]
     fn test_nullification_notification_omits_floor_but_retry_broadcasts_entry() {
         let n = 5;
@@ -2572,7 +2791,7 @@ mod tests {
                     Link {
                         latency: Duration::ZERO,
                         jitter: Duration::ZERO,
-                        success_rate: Probability!(1.0),
+                        success_rate: probability!(1.0),
                     },
                 )
                 .await
@@ -3185,8 +3404,9 @@ mod tests {
                     }
                 }
             };
-            let nullification = Nullification::from_nullifies(&schemes[0], &[nullify], &Sequential)
-                .expect("one signer forms quorum");
+            let nullification =
+                Nullification::from_nullifies(&schemes[0], non_empty![&nullify], &Sequential)
+                    .expect("one signer forms quorum");
 
             // The nullification exits view 1. A mid-term view requires its
             // immediate parent, so view 2 can never propose. The voter skips to
@@ -3528,7 +3748,7 @@ mod tests {
         });
     }
 
-    fn finalization_from_resolver<S, F, L>(mut fixture: F)
+    fn finalization_from_resolver<S, F, L>(mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -3554,7 +3774,6 @@ mod tests {
                     .await;
 
             // Setup application mock and voter
-            let elector = L::default();
             let (mut mailbox, mut batcher_receiver, _, _, reporter) = setup_voter(
                 &context,
                 &oracle,
@@ -3610,12 +3829,24 @@ mod tests {
 
     #[test_traced]
     fn test_finalization_from_resolver() {
-        finalization_from_resolver::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
-        finalization_from_resolver::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinSig, _>);
-        finalization_from_resolver::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
-        finalization_from_resolver::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
-        finalization_from_resolver::<_, _, RoundRobin>(ed25519::fixture);
-        finalization_from_resolver::<_, _, RoundRobin>(secp256r1::fixture);
+        finalization_from_resolver::<_, _, Random>(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+            Random::new(RandomVersion::V1),
+        );
+        finalization_from_resolver::<_, _, Random>(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+            Random::new(RandomVersion::V1),
+        );
+        finalization_from_resolver::<_, _, RoundRobin>(
+            bls12381_multisig::fixture::<MinPk, _>,
+            RoundRobin::default(),
+        );
+        finalization_from_resolver::<_, _, RoundRobin>(
+            bls12381_multisig::fixture::<MinSig, _>,
+            RoundRobin::default(),
+        );
+        finalization_from_resolver::<_, _, RoundRobin>(ed25519::fixture, RoundRobin::default());
+        finalization_from_resolver::<_, _, RoundRobin>(secp256r1::fixture, RoundRobin::default());
     }
 
     /// Test that certificates received from the resolver are not sent back to it.
@@ -3624,7 +3855,7 @@ mod tests {
     /// 1. Resolver sends a certificate to the voter
     /// 2. Voter processes it and constructs the same certificate
     /// 3. Voter sends it back to resolver (unnecessary)
-    fn no_resolver_boomerang<S, F, L>(mut fixture: F)
+    fn no_resolver_boomerang<S, F, L>(mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -3648,7 +3879,6 @@ mod tests {
                     .await;
 
             // Setup application mock and voter
-            let elector = L::default();
             let (mut mailbox, mut batcher_receiver, mut resolver_receiver, _, reporter) =
                 setup_voter(
                     &context,
@@ -3715,12 +3945,24 @@ mod tests {
 
     #[test_traced]
     fn test_no_resolver_boomerang() {
-        no_resolver_boomerang::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
-        no_resolver_boomerang::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinSig, _>);
-        no_resolver_boomerang::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
-        no_resolver_boomerang::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
-        no_resolver_boomerang::<_, _, RoundRobin>(ed25519::fixture);
-        no_resolver_boomerang::<_, _, RoundRobin>(secp256r1::fixture);
+        no_resolver_boomerang::<_, _, Random>(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+            Random::new(RandomVersion::V1),
+        );
+        no_resolver_boomerang::<_, _, Random>(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+            Random::new(RandomVersion::V1),
+        );
+        no_resolver_boomerang::<_, _, RoundRobin>(
+            bls12381_multisig::fixture::<MinPk, _>,
+            RoundRobin::default(),
+        );
+        no_resolver_boomerang::<_, _, RoundRobin>(
+            bls12381_multisig::fixture::<MinSig, _>,
+            RoundRobin::default(),
+        );
+        no_resolver_boomerang::<_, _, RoundRobin>(ed25519::fixture, RoundRobin::default());
+        no_resolver_boomerang::<_, _, RoundRobin>(secp256r1::fixture, RoundRobin::default());
     }
 
     /// Regression: a voter that misses one mid-term notarization must request
@@ -3839,7 +4081,7 @@ mod tests {
 
     /// Tests that when proposal verification fails, the voter emits a nullify vote
     /// immediately rather than waiting for the timeout.
-    fn verification_failure_emits_nullify_immediately<S, F, L>(mut fixture: F)
+    fn verification_failure_emits_nullify_immediately<S, F, L>(mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -3866,7 +4108,6 @@ mod tests {
             // Use participant[0] as the voter
             let signing = schemes[0].clone();
             let me = participants[0].clone();
-            let elector = L::default();
             let reporter_cfg = mocks::reporter::Config {
                 participants: participants.clone().try_into().unwrap(),
                 scheme: signing.clone(),
@@ -3905,6 +4146,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(10),
                 certification_timeout: Duration::from_secs(10),
                 timeout_retry: Duration::from_mins(60),
+                skip_budget: u64::MAX,
                 view_retention,
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
@@ -4037,22 +4279,32 @@ mod tests {
     fn test_verification_failure_emits_nullify_immediately() {
         verification_failure_emits_nullify_immediately::<_, _, Random>(
             bls12381_threshold_vrf::fixture::<MinPk, _>,
+            Random::new(RandomVersion::V1),
         );
         verification_failure_emits_nullify_immediately::<_, _, Random>(
             bls12381_threshold_vrf::fixture::<MinSig, _>,
+            Random::new(RandomVersion::V1),
         );
         verification_failure_emits_nullify_immediately::<_, _, RoundRobin>(
             bls12381_multisig::fixture::<MinPk, _>,
+            RoundRobin::default(),
         );
         verification_failure_emits_nullify_immediately::<_, _, RoundRobin>(
             bls12381_multisig::fixture::<MinSig, _>,
+            RoundRobin::default(),
         );
-        verification_failure_emits_nullify_immediately::<_, _, RoundRobin>(ed25519::fixture);
-        verification_failure_emits_nullify_immediately::<_, _, RoundRobin>(secp256r1::fixture);
+        verification_failure_emits_nullify_immediately::<_, _, RoundRobin>(
+            ed25519::fixture,
+            RoundRobin::default(),
+        );
+        verification_failure_emits_nullify_immediately::<_, _, RoundRobin>(
+            secp256r1::fixture,
+            RoundRobin::default(),
+        );
     }
 
     /// Tests that a leader-nullify timeout hint fast-paths local nullify construction.
-    fn leader_nullify_timeout_hint_fast_paths_nullify<S, F, L>(mut fixture: F)
+    fn leader_nullify_timeout_hint_fast_paths_nullify<S, F, L>(mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -4078,7 +4330,6 @@ mod tests {
             let me = participants[0].clone();
             let me_idx = Participant::new(0);
             let signing = schemes[0].clone();
-            let elector = L::default();
             let reporter_cfg = mocks::reporter::Config {
                 participants: participants.clone().try_into().unwrap(),
                 scheme: signing.clone(),
@@ -4114,6 +4365,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(10),
                 certification_timeout: Duration::from_secs(10),
                 timeout_retry: Duration::from_mins(60),
+                skip_budget: u64::MAX,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
@@ -4234,18 +4486,28 @@ mod tests {
     fn test_leader_nullify_timeout_hint_fast_paths_nullify() {
         leader_nullify_timeout_hint_fast_paths_nullify::<_, _, Random>(
             bls12381_threshold_vrf::fixture::<MinPk, _>,
+            Random::new(RandomVersion::V1),
         );
         leader_nullify_timeout_hint_fast_paths_nullify::<_, _, Random>(
             bls12381_threshold_vrf::fixture::<MinSig, _>,
+            Random::new(RandomVersion::V1),
         );
         leader_nullify_timeout_hint_fast_paths_nullify::<_, _, RoundRobin>(
             bls12381_multisig::fixture::<MinPk, _>,
+            RoundRobin::default(),
         );
         leader_nullify_timeout_hint_fast_paths_nullify::<_, _, RoundRobin>(
             bls12381_multisig::fixture::<MinSig, _>,
+            RoundRobin::default(),
         );
-        leader_nullify_timeout_hint_fast_paths_nullify::<_, _, RoundRobin>(ed25519::fixture);
-        leader_nullify_timeout_hint_fast_paths_nullify::<_, _, RoundRobin>(secp256r1::fixture);
+        leader_nullify_timeout_hint_fast_paths_nullify::<_, _, RoundRobin>(
+            ed25519::fixture,
+            RoundRobin::default(),
+        );
+        leader_nullify_timeout_hint_fast_paths_nullify::<_, _, RoundRobin>(
+            secp256r1::fixture,
+            RoundRobin::default(),
+        );
     }
 
     /// Tests that if the application drops proposal requests, the leader emits `nullify`
@@ -4312,6 +4574,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(10),
                 certification_timeout: Duration::from_secs(10),
                 timeout_retry: Duration::from_mins(60),
+                skip_budget: u64::MAX,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
@@ -4414,7 +4677,7 @@ mod tests {
 
     /// Tests that if the application drops verification requests, the voter emits `nullify`
     /// immediately instead of waiting for timeout.
-    fn dropped_verify_emits_nullify_immediately<S, F, L>(mut fixture: F)
+    fn dropped_verify_emits_nullify_immediately<S, F, L>(mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -4439,7 +4702,6 @@ mod tests {
 
             let me = participants[0].clone();
             let signing = schemes[0].clone();
-            let elector = L::default();
             let reporter_cfg = mocks::reporter::Config {
                 participants: participants.clone().try_into().unwrap(),
                 scheme: signing.clone(),
@@ -4476,6 +4738,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(10),
                 certification_timeout: Duration::from_secs(10),
                 timeout_retry: Duration::from_mins(60),
+                skip_budget: u64::MAX,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
@@ -4601,18 +4864,28 @@ mod tests {
     fn test_dropped_verify_emits_nullify_immediately() {
         dropped_verify_emits_nullify_immediately::<_, _, Random>(
             bls12381_threshold_vrf::fixture::<MinPk, _>,
+            Random::new(RandomVersion::V1),
         );
         dropped_verify_emits_nullify_immediately::<_, _, Random>(
             bls12381_threshold_vrf::fixture::<MinSig, _>,
+            Random::new(RandomVersion::V1),
         );
         dropped_verify_emits_nullify_immediately::<_, _, RoundRobin>(
             bls12381_multisig::fixture::<MinPk, _>,
+            RoundRobin::default(),
         );
         dropped_verify_emits_nullify_immediately::<_, _, RoundRobin>(
             bls12381_multisig::fixture::<MinSig, _>,
+            RoundRobin::default(),
         );
-        dropped_verify_emits_nullify_immediately::<_, _, RoundRobin>(ed25519::fixture);
-        dropped_verify_emits_nullify_immediately::<_, _, RoundRobin>(secp256r1::fixture);
+        dropped_verify_emits_nullify_immediately::<_, _, RoundRobin>(
+            ed25519::fixture,
+            RoundRobin::default(),
+        );
+        dropped_verify_emits_nullify_immediately::<_, _, RoundRobin>(
+            secp256r1::fixture,
+            RoundRobin::default(),
+        );
     }
 
     /// A view-exiting certificate cancels an in-flight verification before
@@ -4711,11 +4984,11 @@ mod tests {
 
     /// Tests that permanently invalid proposal ancestry fast-paths `nullify`
     /// instead of waiting for the local timeout.
-    fn invalid_ancestry_emits_nullify_immediately<S, F, L>(mut fixture: F)
+    fn invalid_ancestry_emits_nullify_immediately<S, F, L>(mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S> + Default,
+        L: elector::Config<S>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -4739,7 +5012,7 @@ mod tests {
                 &oracle,
                 &participants,
                 &schemes,
-                L::default(),
+                elector,
                 VoterOptions {
                     leader_timeout: Duration::from_secs(10),
                     certification_timeout: Duration::from_secs(10),
@@ -4835,18 +5108,28 @@ mod tests {
     fn test_invalid_ancestry_emits_nullify_immediately() {
         invalid_ancestry_emits_nullify_immediately::<_, _, Random>(
             bls12381_threshold_vrf::fixture::<MinPk, _>,
+            Random::new(RandomVersion::V1),
         );
         invalid_ancestry_emits_nullify_immediately::<_, _, Random>(
             bls12381_threshold_vrf::fixture::<MinSig, _>,
+            Random::new(RandomVersion::V1),
         );
         invalid_ancestry_emits_nullify_immediately::<_, _, RoundRobin>(
             bls12381_multisig::fixture::<MinPk, _>,
+            RoundRobin::default(),
         );
         invalid_ancestry_emits_nullify_immediately::<_, _, RoundRobin>(
             bls12381_multisig::fixture::<MinSig, _>,
+            RoundRobin::default(),
         );
-        invalid_ancestry_emits_nullify_immediately::<_, _, RoundRobin>(ed25519::fixture);
-        invalid_ancestry_emits_nullify_immediately::<_, _, RoundRobin>(secp256r1::fixture);
+        invalid_ancestry_emits_nullify_immediately::<_, _, RoundRobin>(
+            ed25519::fixture,
+            RoundRobin::default(),
+        );
+        invalid_ancestry_emits_nullify_immediately::<_, _, RoundRobin>(
+            secp256r1::fixture,
+            RoundRobin::default(),
+        );
     }
 
     /// Tests that a later dropped verification still yields network voting after
@@ -4912,6 +5195,7 @@ mod tests {
                 leader_timeout: Duration::from_millis(250),
                 certification_timeout: Duration::from_millis(250),
                 timeout_retry: Duration::from_mins(60),
+                skip_budget: u64::MAX,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
@@ -4949,7 +5233,7 @@ mod tests {
                     Link {
                         latency: Duration::from_millis(0),
                         jitter: Duration::from_millis(0),
-                        success_rate: Probability!(1.0),
+                        success_rate: probability!(1.0),
                     },
                 )
                 .await
@@ -5127,7 +5411,7 @@ mod tests {
     /// 2. Notarization at view 3 with certification (certify called once)
     ///
     /// After restart, certify should not be called for either view.
-    fn no_recertification_after_replay<S, F, L>(mut fixture: F)
+    fn no_recertification_after_replay<S, F, L>(mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -5153,7 +5437,6 @@ mod tests {
             let certify_calls: Arc<Mutex<Vec<Sha256Digest>>> = Arc::new(Mutex::new(Vec::new()));
             let tracker = certify_calls.clone();
 
-            let elector = L::default();
             let reporter_cfg = mocks::reporter::Config {
                 participants: participants.clone().try_into().unwrap(),
                 scheme: schemes[0].clone(),
@@ -5193,6 +5476,7 @@ mod tests {
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
+                skip_budget: u64::MAX,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -5316,6 +5600,7 @@ mod tests {
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
+                skip_budget: u64::MAX,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -5363,16 +5648,28 @@ mod tests {
     fn test_no_recertification_after_replay() {
         no_recertification_after_replay::<_, _, Random>(
             bls12381_threshold_vrf::fixture::<MinPk, _>,
+            Random::new(RandomVersion::V1),
         );
         no_recertification_after_replay::<_, _, Random>(
             bls12381_threshold_vrf::fixture::<MinSig, _>,
+            Random::new(RandomVersion::V1),
         );
-        no_recertification_after_replay::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
+        no_recertification_after_replay::<_, _, RoundRobin>(
+            bls12381_multisig::fixture::<MinPk, _>,
+            RoundRobin::default(),
+        );
         no_recertification_after_replay::<_, _, RoundRobin>(
             bls12381_multisig::fixture::<MinSig, _>,
+            RoundRobin::default(),
         );
-        no_recertification_after_replay::<_, _, RoundRobin>(ed25519::fixture);
-        no_recertification_after_replay::<_, _, RoundRobin>(secp256r1::fixture);
+        no_recertification_after_replay::<_, _, RoundRobin>(
+            ed25519::fixture,
+            RoundRobin::default(),
+        );
+        no_recertification_after_replay::<_, _, RoundRobin>(
+            secp256r1::fixture,
+            RoundRobin::default(),
+        );
     }
 
     /// When the voter is the leader of a view and builds its own proposal, it
@@ -5454,6 +5751,7 @@ mod tests {
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_secs(1),
+                skip_budget: u64::MAX,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -5613,6 +5911,7 @@ mod tests {
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_secs(1),
+                skip_budget: u64::MAX,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -5713,6 +6012,7 @@ mod tests {
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_secs(1),
+                skip_budget: u64::MAX,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -5882,6 +6182,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(600),
                 certification_timeout: Duration::from_secs(600),
                 timeout_retry: Duration::from_secs(600),
+                skip_budget: u64::MAX,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -5993,6 +6294,7 @@ mod tests {
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(600),
                 timeout_retry: Duration::from_secs(600),
+                skip_budget: u64::MAX,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -6159,6 +6461,7 @@ mod tests {
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_secs(1),
+                skip_budget: u64::MAX,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -6272,6 +6575,7 @@ mod tests {
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_secs(1),
+                skip_budget: u64::MAX,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -6438,6 +6742,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
+                skip_budget: u64::MAX,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -6611,6 +6916,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
+                skip_budget: u64::MAX,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -6710,6 +7016,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
+                skip_budget: u64::MAX,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -6885,6 +7192,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(600),
                 certification_timeout: Duration::from_secs(600),
                 timeout_retry: Duration::from_secs(600),
+                skip_budget: u64::MAX,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -7004,7 +7312,7 @@ mod tests {
     /// 2. Send a notarization to trigger certification.
     /// 3. Send a finalization for the same view before certification completes.
     /// 4. Verify that no Certified message is sent to the resolver.
-    fn certification_cancelled_on_finalization<S, F, L>(mut fixture: F)
+    fn certification_cancelled_on_finalization<S, F, L>(mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -7027,7 +7335,6 @@ mod tests {
                     .await;
 
             let me = participants[0].clone();
-            let elector = L::default();
             let reporter_config = mocks::reporter::Config {
                 participants: participants.clone().try_into().unwrap(),
                 scheme: schemes[0].clone(),
@@ -7064,6 +7371,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
+                skip_budget: u64::MAX,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -7171,18 +7479,28 @@ mod tests {
     fn test_certification_cancelled_on_finalization() {
         certification_cancelled_on_finalization::<_, _, Random>(
             bls12381_threshold_vrf::fixture::<MinPk, _>,
+            Random::new(RandomVersion::V1),
         );
         certification_cancelled_on_finalization::<_, _, Random>(
             bls12381_threshold_vrf::fixture::<MinSig, _>,
+            Random::new(RandomVersion::V1),
         );
         certification_cancelled_on_finalization::<_, _, RoundRobin>(
             bls12381_multisig::fixture::<MinPk, _>,
+            RoundRobin::default(),
         );
         certification_cancelled_on_finalization::<_, _, RoundRobin>(
             bls12381_multisig::fixture::<MinSig, _>,
+            RoundRobin::default(),
         );
-        certification_cancelled_on_finalization::<_, _, RoundRobin>(ed25519::fixture);
-        certification_cancelled_on_finalization::<_, _, RoundRobin>(secp256r1::fixture);
+        certification_cancelled_on_finalization::<_, _, RoundRobin>(
+            ed25519::fixture,
+            RoundRobin::default(),
+        );
+        certification_cancelled_on_finalization::<_, _, RoundRobin>(
+            secp256r1::fixture,
+            RoundRobin::default(),
+        );
     }
 
     #[test_traced]
@@ -7285,8 +7603,10 @@ mod tests {
     /// 2. Send notarization to trigger certification.
     /// 3. Send nullification for the same view before certification completes.
     /// 4. Verify that a Certified message is still sent to resolver when certification completes.
-    fn certification_still_reports_to_resolver_after_nullification<S, F, L>(mut fixture: F)
-    where
+    fn certification_still_reports_to_resolver_after_nullification<S, F, L>(
+        mut fixture: F,
+        elector: L,
+    ) where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: elector::Config<S>,
@@ -7308,7 +7628,6 @@ mod tests {
                     .await;
 
             let me = participants[0].clone();
-            let elector = L::default();
             let reporter_config = mocks::reporter::Config {
                 participants: participants.clone().try_into().unwrap(),
                 scheme: schemes[0].clone(),
@@ -7345,6 +7664,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
+                skip_budget: u64::MAX,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -7433,21 +7753,27 @@ mod tests {
     fn test_certification_still_reports_to_resolver_after_nullification() {
         certification_still_reports_to_resolver_after_nullification::<_, _, Random>(
             bls12381_threshold_vrf::fixture::<MinPk, _>,
+            Random::new(RandomVersion::V1),
         );
         certification_still_reports_to_resolver_after_nullification::<_, _, Random>(
             bls12381_threshold_vrf::fixture::<MinSig, _>,
+            Random::new(RandomVersion::V1),
         );
         certification_still_reports_to_resolver_after_nullification::<_, _, RoundRobin>(
             bls12381_multisig::fixture::<MinPk, _>,
+            RoundRobin::default(),
         );
         certification_still_reports_to_resolver_after_nullification::<_, _, RoundRobin>(
             bls12381_multisig::fixture::<MinSig, _>,
+            RoundRobin::default(),
         );
         certification_still_reports_to_resolver_after_nullification::<_, _, RoundRobin>(
             ed25519::fixture,
+            RoundRobin::default(),
         );
         certification_still_reports_to_resolver_after_nullification::<_, _, RoundRobin>(
             secp256r1::fixture,
+            RoundRobin::default(),
         );
     }
 
@@ -8310,6 +8636,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
+                skip_budget: u64::MAX,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -8422,6 +8749,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
+                skip_budget: u64::MAX,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -9442,7 +9770,7 @@ mod tests {
     /// 2. The voter emits `notarize(1)`.
     /// 3. After successful certification, the voter emits `finalize(1)` before
     ///    advancing to view 2.
-    fn first_view_progress_without_timeout<S, F, L>(mut fixture: F)
+    fn first_view_progress_without_timeout<S, F, L>(mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -9464,7 +9792,6 @@ mod tests {
                 start_test_network_with_peers(context.child("network"), participants.clone(), true)
                     .await;
 
-            let elector = L::default();
             let first_round = Round::new(Epoch::new(333), View::new(1));
             let leader_idx = elector
                 .clone()
@@ -9597,18 +9924,28 @@ mod tests {
     fn test_first_view_progress_without_timeout() {
         first_view_progress_without_timeout::<_, _, Random>(
             bls12381_threshold_vrf::fixture::<MinPk, _>,
+            Random::new(RandomVersion::V1),
         );
         first_view_progress_without_timeout::<_, _, Random>(
             bls12381_threshold_vrf::fixture::<MinSig, _>,
+            Random::new(RandomVersion::V1),
         );
         first_view_progress_without_timeout::<_, _, RoundRobin>(
             bls12381_multisig::fixture::<MinPk, _>,
+            RoundRobin::default(),
         );
         first_view_progress_without_timeout::<_, _, RoundRobin>(
             bls12381_multisig::fixture::<MinSig, _>,
+            RoundRobin::default(),
         );
-        first_view_progress_without_timeout::<_, _, RoundRobin>(ed25519::fixture);
-        first_view_progress_without_timeout::<_, _, RoundRobin>(secp256r1::fixture);
+        first_view_progress_without_timeout::<_, _, RoundRobin>(
+            ed25519::fixture,
+            RoundRobin::default(),
+        );
+        first_view_progress_without_timeout::<_, _, RoundRobin>(
+            secp256r1::fixture,
+            RoundRobin::default(),
+        );
     }
 
     /// Certification and the finalize vote share one durable section sync.
@@ -9688,6 +10025,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
+                skip_budget: u64::MAX,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -9725,7 +10063,7 @@ mod tests {
                     Link {
                         latency: Duration::ZERO,
                         jitter: Duration::ZERO,
-                        success_rate: Probability!(1.0),
+                        success_rate: probability!(1.0),
                     },
                 )
                 .await
@@ -9954,6 +10292,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
+                skip_budget: u64::MAX,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -10102,6 +10441,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
+                skip_budget: u64::MAX,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -10214,6 +10554,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
+                skip_budget: u64::MAX,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -10361,6 +10702,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(100),
                 certification_timeout: Duration::from_secs(100),
                 timeout_retry: Duration::from_mins(60),
+                skip_budget: u64::MAX,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -10502,6 +10844,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_mins(60),
+                skip_budget: u64::MAX,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -10640,6 +10983,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(100),
                 certification_timeout: Duration::from_secs(100),
                 timeout_retry: Duration::from_mins(60),
+                skip_budget: u64::MAX,
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
