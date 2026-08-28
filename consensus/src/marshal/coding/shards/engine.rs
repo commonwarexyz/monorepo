@@ -594,11 +594,10 @@ where
             self.context,
             on_start => {
                 // Clean up closed subscriptions.
-                self.block_subscriptions
-                    .retain(|_, subscribers| {
-                        subscribers.retain(|tx| !tx.is_closed());
-                        !subscribers.is_empty()
-                    });
+                self.block_subscriptions.retain(|_, subscribers| {
+                    subscribers.retain(|tx| !tx.is_closed());
+                    !subscribers.is_empty()
+                });
                 self.assigned_shard_verified_subscriptions
                     .retain(|_, subscribers| {
                         subscribers.retain(|tx| !tx.is_closed());
@@ -628,13 +627,20 @@ where
                     Message::Proposed { block, round } => {
                         self.broadcast_shards(&mut sender, round, block);
                     }
-                    Message::Discovered { commitment, leader, round } => {
+                    Message::Discovered {
+                        commitment,
+                        leader,
+                        round,
+                    } => {
                         self.handle_external_proposal(&mut sender, commitment, leader, round);
                     }
                     Message::Notarized { commitment, round } => {
                         self.handle_notarized_commitment(&mut sender, commitment, round);
                     }
-                    Message::GetByCommitment { commitment, response } => {
+                    Message::GetByCommitment {
+                        commitment,
+                        response,
+                    } => {
                         let block = self
                             .records
                             .get(&commitment)
@@ -643,19 +649,22 @@ where
                         response.send_lossy(block);
                     }
                     Message::GetByDigest { digest, response } => {
-                        let block = self
-                            .records
-                            .values()
-                            .find_map(|record| {
-                                let block = record.block()?;
-                                (block.digest() == digest).then(|| Arc::clone(block))
-                            });
+                        let block = self.records.values().find_map(|record| {
+                            let block = record.block()?;
+                            (block.digest() == digest).then(|| Arc::clone(block))
+                        });
                         response.send_lossy(block);
                     }
-                    Message::SubscribeAssignedShardVerified { commitment, response } => {
+                    Message::SubscribeAssignedShardVerified {
+                        commitment,
+                        response,
+                    } => {
                         self.handle_assigned_shard_verified_subscription(commitment, response);
                     }
-                    Message::SubscribeByCommitment { commitment, response } => {
+                    Message::SubscribeByCommitment {
+                        commitment,
+                        response,
+                    } => {
                         self.handle_block_subscription(
                             BlockSubscriptionKey::Commitment(commitment),
                             response,
@@ -2433,22 +2442,23 @@ mod tests {
             }
 
             let block_by_commitment = select! {
-                result = commitment_sub => {
-                    result.expect("block subscription by commitment should resolve")
-                },
+                result = commitment_sub =>
+                    result.expect("block subscription by commitment should resolve"),
                 _ = context.sleep(Duration::from_secs(5)) => {
-                    panic!("block subscription by commitment did not resolve after local proposal cache");
+                    panic!(
+                        "block subscription by commitment did not resolve after local proposal cache"
+                    );
                 },
             };
             assert_eq!(block_by_commitment.commitment(), commitment);
             assert_eq!(block_by_commitment.height(), coded_block.height());
 
             let block_by_digest = select! {
-                result = digest_sub => {
-                    result.expect("block subscription by digest should resolve")
-                },
+                result = digest_sub => result.expect("block subscription by digest should resolve"),
                 _ = context.sleep(Duration::from_secs(5)) => {
-                    panic!("block subscription by digest did not resolve after local proposal cache");
+                    panic!(
+                        "block subscription by digest did not resolve after local proposal cache"
+                    );
                 },
             };
             assert_eq!(block_by_digest.commitment(), commitment);
@@ -3573,8 +3583,8 @@ mod tests {
 
                 select! {
                     result = live_sub => {
-                        let reconstructed = result
-                            .expect("later-round reconstruction should remain live");
+                        let reconstructed =
+                            result.expect("later-round reconstruction should remain live");
                         assert_eq!(reconstructed.commitment(), live_commitment);
                     },
                     _ = context.sleep(config.link.latency * 10) => {
@@ -3659,11 +3669,9 @@ mod tests {
                 peers[receivers[0]]
                     .mailbox
                     .notarized(live_commitment, later_round);
-                peers[receivers[1]].mailbox.discovered(
-                    live_commitment,
-                    leader,
-                    later_round,
-                );
+                peers[receivers[1]]
+                    .mailbox
+                    .discovered(live_commitment, leader, later_round);
                 context.sleep(Duration::from_millis(10)).await;
 
                 let prune_round = Round::new(Epoch::zero(), View::new(3));
@@ -3707,7 +3715,9 @@ mod tests {
 
                 select! {
                     result = notarized_sub => {
-                        result.expect("notarized reconstruction state should accept the leader shard");
+                        result.expect(
+                            "notarized reconstruction state should accept the leader shard",
+                        );
                     },
                     _ = context.sleep(config.link.latency * 10) => {
                         panic!("notarized reconstruction state did not accept the leader shard");
@@ -3715,7 +3725,9 @@ mod tests {
                 }
                 select! {
                     result = discovered_sub => {
-                        result.expect("discovered reconstruction state should accept the leader shard");
+                        result.expect(
+                            "discovered reconstruction state should accept the leader shard",
+                        );
                     },
                     _ = context.sleep(config.link.latency * 10) => {
                         panic!("discovered reconstruction state did not accept the leader shard");
@@ -4017,7 +4029,9 @@ mod tests {
                 select! {
                     _ = block_sub => {},
                     _ = context.sleep(Duration::from_secs(5)) => {
-                        panic!("block subscription did not resolve after notarized reconstruction interest");
+                        panic!(
+                            "block subscription did not resolve after notarized reconstruction interest"
+                        );
                     },
                 }
 
@@ -4053,7 +4067,9 @@ mod tests {
                 select! {
                     _ = assigned => {},
                     _ = context.sleep(Duration::from_secs(5)) => {
-                        panic!("assigned shard subscription did not resolve after leader discovery");
+                        panic!(
+                            "assigned shard subscription did not resolve after leader discovery"
+                        );
                     },
                 }
 
@@ -5312,12 +5328,14 @@ mod tests {
 
                 select! {
                     result = certifiable_sub => {
-                        let reconstructed_b = result
-                            .expect("certifiable commitment should remain recoverable");
+                        let reconstructed_b =
+                            result.expect("certifiable commitment should remain recoverable");
                         assert_eq!(reconstructed_b.commitment(), commitment_b);
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
-                        panic!("certifiable commitment was not recoverable after same-round equivocation");
+                        panic!(
+                            "certifiable commitment was not recoverable after same-round equivocation"
+                        );
                     },
                 }
 

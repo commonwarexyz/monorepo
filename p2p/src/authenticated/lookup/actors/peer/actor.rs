@@ -131,10 +131,12 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
         select! {
             msg =
                 control.next() => msg.map_or(Prioritized::Closed, Prioritized::Control),
-            msg = high.recv() => msg
-                .map_or(Prioritized::Closed, |msg| Prioritized::Data(msg.into_inner())),
-            msg = low.recv() => msg
-                .map_or(Prioritized::Closed, |msg| Prioritized::Data(msg.into_inner())),
+            msg = high.recv() => msg.map_or(Prioritized::Closed, |msg| {
+                Prioritized::Data(msg.into_inner())
+            }),
+            msg = low.recv() => msg.map_or(Prioritized::Closed, |msg| {
+                Prioritized::Data(msg.into_inner())
+            }),
         }
     }
 
@@ -200,7 +202,10 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                             &rate_limits,
                             &self.sent_messages,
                         )?;
-                        conn_sender.send_many(batch.drain(..)).await.map_err(Error::SendFailed)?;
+                        conn_sender
+                            .send_many(batch.drain(..))
+                            .await
+                            .map_err(Error::SendFailed)?;
                         deadline = context.current() + self.ping_frequency;
                     },
                     // Await any outbound message (control, high, or low), then
@@ -209,14 +214,18 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                     msg = Self::recv_prioritized(control, high, low) => {
                         match msg {
                             Prioritized::Closed => return Err(Error::PeerDisconnected),
-                            Prioritized::Control(msg) => {
-                                match msg {
-                                    Message::Kill => return Err(Error::PeerKilled(peer.to_string())),
-                                }
-                            }
+                            Prioritized::Control(msg) => match msg {
+                                Message::Kill => return Err(Error::PeerKilled(peer.to_string())),
+                            },
                             Prioritized::Data(encoded) => {
-                                let (metric, payload) = Self::prepare_data(&peer, encoded, &rate_limits);
-                                Self::push_batched(&self.sent_messages, &mut batch, metric, payload);
+                                let (metric, payload) =
+                                    Self::prepare_data(&peer, encoded, &rate_limits);
+                                Self::push_batched(
+                                    &self.sent_messages,
+                                    &mut batch,
+                                    metric,
+                                    payload,
+                                );
                             }
                         }
                         Self::extend_send_many(
@@ -229,7 +238,10 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                             &rate_limits,
                             &self.sent_messages,
                         )?;
-                        conn_sender.send_many(batch.drain(..)).await.map_err(Error::SendFailed)?;
+                        conn_sender
+                            .send_many(batch.drain(..))
+                            .await
+                            .map_err(Error::SendFailed)?;
                     },
                 }
 

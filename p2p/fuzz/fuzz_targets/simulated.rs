@@ -259,12 +259,15 @@ fn fuzz(input: FuzzInput) {
                                 } else {
                                     panic!(
                                         "Unexpected message from sender {} to receiver {} on channel {}. Message len: {}",
-                                        sender_pk, to_idx, channel_id, message.len()
+                                        sender_pk,
+                                        to_idx,
+                                        channel_id,
+                                        message.len()
                                     );
                                 }
                             },
-                            _ = context
-                                .sleep(Duration::from_millis(MAX_SLEEP_DURATION_MS)) => {
+                            _ =
+                                context.sleep(Duration::from_millis(MAX_SLEEP_DURATION_MS)) => {
                                 continue; // Timeout - message may not have arrived yet
                             },
                         }

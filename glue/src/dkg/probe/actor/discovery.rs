@@ -131,7 +131,8 @@ where
         select_loop! {
             self.context,
             on_start => {
-                self.subscribers.retain(|subscriber| !subscriber.is_closed());
+                self.subscribers
+                    .retain(|subscriber| !subscriber.is_closed());
                 if marshal.is_some() && self.subscribers.is_empty() {
                     break;
                 }
@@ -150,27 +151,25 @@ where
             Some(message) = self.mailbox.recv() else {
                 debug!("mailbox closed, shutting down");
                 return;
-            } => {
-                match message {
-                    Message::Subscribe { response } => {
-                        match self.subscribe(response, &mut boundary_sender) {
-                            Ok(true) => {
-                                deadline = self.context.current() + self.retry_timeout.get();
-                            }
-                            Ok(false) => {}
-                            Err(error) => {
-                                warn!(
-                                    epoch = %self.sample.minimum_epoch(),
-                                    %error,
-                                    "failed to activate bootstrap peer set, shutting down",
-                                );
-                                return;
-                            }
+            } => match message {
+                Message::Subscribe { response } => {
+                    match self.subscribe(response, &mut boundary_sender) {
+                        Ok(true) => {
+                            deadline = self.context.current() + self.retry_timeout.get();
+                        }
+                        Ok(false) => {}
+                        Err(error) => {
+                            warn!(
+                                epoch = %self.sample.minimum_epoch(),
+                                %error,
+                                "failed to activate bootstrap peer set, shutting down",
+                            );
+                            return;
                         }
                     }
-                    Message::Attach { marshal: attached } => {
-                        marshal = Some(attached);
-                    }
+                }
+                Message::Attach { marshal: attached } => {
+                    marshal = Some(attached);
                 }
             },
             Ok((peer, message)) = boundary_receiver.recv() else {
@@ -185,7 +184,10 @@ where
                 if self.pending.is_some() {
                     self.retry_boundary(&mut boundary_sender);
                 } else if self.sample.floor().is_none() {
-                    debug!(reason = "deadline elapsed", "re-soliciting latest finalizations");
+                    debug!(
+                        reason = "deadline elapsed",
+                        "re-soliciting latest finalizations"
+                    );
                     self.request_latest(&mut boundary_sender);
                 }
                 deadline = self.context.current() + self.retry_timeout.get();

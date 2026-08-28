@@ -488,9 +488,7 @@ pub(super) fn run_activation_failure_completes_empty() {
         );
 
         let completion = select! {
-            result = completion => {
-                result.expect("activation failure should report DKG completion")
-            },
+            result = completion => result.expect("activation failure should report DKG completion"),
             _ = context.sleep(Duration::from_secs(1)) => {
                 panic!("activation failure did not report DKG completion");
             },

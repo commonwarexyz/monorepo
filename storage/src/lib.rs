@@ -20,9 +20,7 @@ commonware_macros::stability_scope!(ALPHA {
 commonware_macros::stability_scope!(ALPHA, cfg(feature = "std") {
     mod bitmap;
     pub mod qmdb;
-    pub use crate::bitmap::{
-        BitMap as AuthenticatedBitMap, MerkleizedBitMap, UnmerkleizedBitMap,
-    };
+    pub use crate::bitmap::{BitMap as AuthenticatedBitMap, MerkleizedBitMap, UnmerkleizedBitMap};
     pub mod cache;
     pub mod queue;
     #[cfg(any(test, feature = "test-utils"))]

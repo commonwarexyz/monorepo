@@ -84,7 +84,9 @@ stability_scope!(BETA {
                 } => crate::Error::BlobCorrupt(
                     partition.into(),
                     hex(name),
-                    format!("truncated header: required length {required_len}, raw length {raw_len}"),
+                    format!(
+                        "truncated header: required length {required_len}, raw length {raw_len}"
+                    ),
                 ),
             }
         }
@@ -168,7 +170,9 @@ stability_scope!(BETA {
                         });
                     }
                     let crc = u32::from_be_bytes(
-                        raw[Header::PRELUDE_SIZE..Header::PARSE_LEN].try_into().unwrap(),
+                        raw[Header::PRELUDE_SIZE..Header::PARSE_LEN]
+                            .try_into()
+                            .unwrap(),
                     );
                     if Crc32::checksum(&raw[..Header::PRELUDE_SIZE]) != crc {
                         return Err(HeaderError::InvalidChecksum);
@@ -228,7 +232,10 @@ stability_scope!(BETA {
 
                     // The written prefix ends after the last nonzero byte (trailing zeros
                     // are indistinguishable from unwritten bytes).
-                    let written = head.iter().rposition(|&byte| byte != 0).map_or(0, |i| i + 1);
+                    let written = head
+                        .iter()
+                        .rposition(|&byte| byte != 0)
+                        .map_or(0, |i| i + 1);
 
                     let mut canonical = [0u8; Header::PARSE_LEN];
                     canonical[..4].copy_from_slice(&self.magic());

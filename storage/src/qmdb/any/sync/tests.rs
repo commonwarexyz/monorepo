@@ -940,8 +940,7 @@ where
                 panic!("sync completed before explicit finish signal");
             },
             reached = reached_receiver.recv() => {
-                let reached = reached
-                    .expect("engine should report reached-target before finish");
+                let reached = reached.expect("engine should report reached-target before finish");
                 assert_eq!(reached, initial_target);
             },
         }
@@ -960,8 +959,7 @@ where
                 panic!("sync completed before explicit finish signal for updated target");
             },
             reached = reached_receiver.recv() => {
-                let reached = reached
-                    .expect("engine should report updated target before finish");
+                let reached = reached.expect("engine should report updated target before finish");
                 assert_eq!(reached, updated_target);
             },
         }
@@ -1072,10 +1070,7 @@ where
             _ = sync_handle.as_mut() => {
                 panic!("sync completed before explicit finish signal");
             },
-            _ = wait_for_reached_progress(
-                context.child("storage"),
-                &initial_target,
-            ) => {},
+            _ = wait_for_reached_progress(context.child("storage"), &initial_target) => {},
         }
         assert!(
             sync_handle.as_mut().now_or_never().is_none(),
@@ -1090,10 +1085,7 @@ where
             _ = sync_handle.as_mut() => {
                 panic!("sync completed before explicit finish signal after first update");
             },
-            _ = wait_for_reached_progress(
-                context.child("storage"),
-                &first_update,
-            ) => {},
+            _ = wait_for_reached_progress(context.child("storage"), &first_update) => {},
         }
         assert!(
             sync_handle.as_mut().now_or_never().is_none(),
@@ -1108,10 +1100,7 @@ where
             _ = sync_handle.as_mut() => {
                 panic!("sync completed before explicit finish signal after second update");
             },
-            _ = wait_for_reached_progress(
-                context.child("storage"),
-                &second_update,
-            ) => {},
+            _ = wait_for_reached_progress(context.child("storage"), &second_update) => {},
         }
         assert!(
             sync_handle.as_mut().now_or_never().is_none(),

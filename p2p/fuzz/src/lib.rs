@@ -583,7 +583,8 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
                                     // Clean up empty queue and update pending tracking
                                     if queue.is_empty() {
                                         expected_msgs.remove(&expected_msgs_key);
-                                        if let Some(senders) = pending_by_receiver.get_mut(&to_idx) {
+                                        if let Some(senders) = pending_by_receiver.get_mut(&to_idx)
+                                        {
                                             senders.remove(&from_idx);
                                             if senders.is_empty() {
                                                 pending_by_receiver.remove(&to_idx);
@@ -593,12 +594,14 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
                                 } else {
                                     panic!(
                                         "Unexpected message from sender {} to receiver {}. Message len: {}",
-                                        from_idx, to_idx, message.len()
+                                        from_idx,
+                                        to_idx,
+                                        message.len()
                                     );
                                 }
                             },
-                            _ = context
-                                .sleep(Duration::from_millis(MAX_SLEEP_DURATION_MS)) => {
+                            _ =
+                                context.sleep(Duration::from_millis(MAX_SLEEP_DURATION_MS)) => {
                                 continue; // Timeout - message may not have arrived yet
                             },
                         }

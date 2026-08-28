@@ -3964,9 +3964,8 @@ pub fn commitment_fetch_height_hint_mismatch_wakes_subscriber<H: TestHarness>() 
         setup_network_links(&mut oracle, &peers, LINK).await;
 
         let received = select! {
-            result = subscription => {
-                result.expect("commitment subscription should receive the fetched block")
-            },
+            result = subscription =>
+                result.expect("commitment subscription should receive the fetched block"),
             _ = context.sleep(Duration::from_secs(5)) => {
                 panic!("commitment subscription was not woken by height-hint-mismatched block");
             },
@@ -4007,9 +4006,8 @@ pub fn commitment_fetch_height_hint_mismatch_wakes_subscriber<H: TestHarness>() 
             },
         );
         let received = select! {
-            result = subscription => {
-                result.expect("commitment subscription should receive the block above its hint")
-            },
+            result = subscription =>
+                result.expect("commitment subscription should receive the block above its hint"),
             _ = context.sleep(Duration::from_secs(5)) => {
                 panic!("commitment subscription was not woken by block above height hint");
             },

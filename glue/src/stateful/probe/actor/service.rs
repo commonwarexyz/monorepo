@@ -92,12 +92,11 @@ where
                 let Some(finalization) = sample::latest_finalization(&self.marshal).await else {
                     continue;
                 };
-                sender
-                    .send(
-                        Recipients::One(peer),
-                        wire::Message::<S, V>::Response(finalization).encode(),
-                        false,
-                    );
+                sender.send(
+                    Recipients::One(peer),
+                    wire::Message::<S, V>::Response(finalization).encode(),
+                    false,
+                );
             },
         }
     }

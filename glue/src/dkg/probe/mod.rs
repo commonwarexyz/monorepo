@@ -1179,9 +1179,8 @@ mod tests {
             );
 
             select! {
-                epoch = Harness::next_block_request(
-                    &mut harness.backup_boundary_receiver,
-                ) => {
+                epoch =
+                    Harness::next_block_request(&mut harness.backup_boundary_receiver) => {
                     assert_eq!(epoch, Epoch::new(1));
                 },
                 _ = context.sleep(Duration::from_millis(100)) => {

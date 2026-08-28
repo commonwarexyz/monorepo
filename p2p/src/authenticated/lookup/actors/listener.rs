@@ -275,28 +275,20 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metrics, C: Signe
                 };
 
                 // Spawn a new handshaker to upgrade connection
-                self.context
-                    .child("handshaker")
-                    .spawn({
-                        let stream_cfg = self.stream_cfg.clone();
-                        let tracker = tracker.clone();
-                        let supervisor = supervisor.clone();
-                        move |context| async move {
-                            Self::handshake(
-                                    context,
-                                    address,
-                                    stream_cfg,
-                                    sink,
-                                    stream,
-                                    tracker,
-                                    supervisor,
-                                )
-                                .await;
+                self.context.child("handshaker").spawn({
+                    let stream_cfg = self.stream_cfg.clone();
+                    let tracker = tracker.clone();
+                    let supervisor = supervisor.clone();
+                    move |context| async move {
+                        Self::handshake(
+                            context, address, stream_cfg, sink, stream, tracker, supervisor,
+                        )
+                        .await;
 
-                            // Once the handshake attempt is complete, release the reservation
-                            drop(reservation);
-                        }
-                    });
+                        // Once the handshake attempt is complete, release the reservation
+                        drop(reservation);
+                    }
+                });
             },
         }
     }

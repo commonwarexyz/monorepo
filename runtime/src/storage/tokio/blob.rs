@@ -193,7 +193,11 @@ impl Blob {
                             io_slices_len as i32,
                             offset.try_into().map_err(|_| Error::OffsetOverflow)?,
                             flags.unwrap_or(0)
-                                | if attempted_dont_cache { libc::RWF_DONTCACHE } else { 0 },
+                                | if attempted_dont_cache {
+                                    libc::RWF_DONTCACHE
+                                } else {
+                                    0
+                                },
                         )
                     };
                 } else {
@@ -341,14 +345,13 @@ impl crate::Blob for Blob {
                         fused.then_some(libc::RWF_DSYNC),
                     )?;
                     if sync && !fused {
-                        file.sync_data()
-                            .map_err(|e| {
-                                Error::BlobSyncFailed(
-                                    partition.expect("sync write has a partition"),
-                                    hex(name.as_deref().expect("sync write has a name")),
-                                    e.into(),
-                                )
-                            })?;
+                        file.sync_data().map_err(|e| {
+                            Error::BlobSyncFailed(
+                                partition.expect("sync write has a partition"),
+                                hex(name.as_deref().expect("sync write has a name")),
+                                e.into(),
+                            )
+                        })?;
                     }
                 } else {
                     Self::write_vectored_at(cache, &file, offset, bufs, None)?;

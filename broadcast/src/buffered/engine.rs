@@ -185,7 +185,10 @@ where
                 error!("mailbox receiver failed");
                 break;
             } => match msg {
-                Message::Broadcast { recipients, message } => {
+                Message::Broadcast {
+                    recipients,
+                    message,
+                } => {
                     trace!("mailbox: broadcast");
                     self.handle_broadcast(&mut sender, recipients, message);
                 }

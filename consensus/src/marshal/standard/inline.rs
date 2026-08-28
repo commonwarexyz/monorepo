@@ -991,7 +991,9 @@ mod tests {
                     );
                 },
                 _ = context.sleep(Duration::from_secs(5)) => {
-                    panic!("certify should not depend on marshal after verify cached a re-proposal");
+                    panic!(
+                        "certify should not depend on marshal after verify cached a re-proposal"
+                    );
                 },
             }
         });

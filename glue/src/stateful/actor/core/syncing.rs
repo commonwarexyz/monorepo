@@ -118,7 +118,8 @@ where
             on_start => {
                 self.deferred_verifications
                     .retain(|request| !request.verification.is_cancelled());
-                self.database_subscribers.retain(|subscriber| !subscriber.is_closed());
+                self.database_subscribers
+                    .retain(|subscriber| !subscriber.is_closed());
             },
             on_stopped => {
                 debug!("processor received shutdown signal");
@@ -136,50 +137,62 @@ where
             Some(message) = self.mailbox.recv() else {
                 debug!("mailbox closed, shutting down processor");
                 break;
-            } => {
-                match message {
-                    Message::Propose { span, context: (_, context), response, .. } => {
-                        span.in_scope(|| {
+            } => match message {
+                Message::Propose {
+                    span,
+                    context: (_, context),
+                    response,
+                    ..
+                } => {
+                    span.in_scope(|| {
                             debug!(epoch = %context.epoch(), view = %context.view(), "proposal rejected: state sync in progress");
                             response.send_lossy(None);
                         });
+                }
+                Message::Verify {
+                    span,
+                    context,
+                    ancestry,
+                    verification,
+                } => {
+                    let process = info_span!(parent: &span, "stateful.actor.verify.defer");
+                    self.deferred_verifications
+                        .retain(|request| !request.verification.is_cancelled());
+                    self.deferred_verifications.push(VerificationRequest {
+                        span,
+                        context,
+                        ancestry,
+                        verification,
+                    });
+                    process.in_scope(|| {
+                        debug!(
+                            deferred_verifications = self.deferred_verifications.len(),
+                            "verification deferred: state sync in progress"
+                        );
+                    });
+                }
+                Message::Finalized {
+                    span,
+                    block,
+                    acknowledgement,
+                    ..
+                } => {
+                    let process = info_span!(parent: &span, "stateful.actor.syncing_finalized");
+                    let handoffs;
+                    (self, handoffs) = self
+                        .process_finalized(block, acknowledgement)
+                        .instrument(process)
+                        .await;
+                    if let Some(handoffs) = handoffs {
+                        self.transition(handoffs).await;
+                        return;
                     }
-                    Message::Verify { span, context, ancestry, verification } => {
-                        let process = info_span!(parent: &span, "stateful.actor.verify.defer");
-                        self.deferred_verifications
-                            .retain(|request| !request.verification.is_cancelled());
-                        self.deferred_verifications
-                            .push(VerificationRequest {
-                                span,
-                                context,
-                                ancestry,
-                                verification,
-                            });
-                        process
-                            .in_scope(|| {
-                                debug!(
-                                    deferred_verifications = self.deferred_verifications.len(),
-                                    "verification deferred: state sync in progress"
-                                );
-                            });
-                    }
-                    Message::Finalized { span, block, acknowledgement, .. } => {
-                        let process = info_span!(parent: &span, "stateful.actor.syncing_finalized");
-                        let handoffs;
-                        (self, handoffs) = self
-                            .process_finalized(block, acknowledgement)
-                            .instrument(process)
-                            .await;
-                        if let Some(handoffs) = handoffs {
-                            self.transition(handoffs).await;
-                            return;
-                        }
-                    }
-                    Message::SubscribeDatabases { response } => {
-                        self.database_subscribers.retain(|subscriber| !subscriber.is_closed());
-                        if !response.is_closed() {
-                            self.database_subscribers.push(response);
-                        }
+                }
+                Message::SubscribeDatabases { response } => {
+                    self.database_subscribers
+                        .retain(|subscriber| !subscriber.is_closed());
+                    if !response.is_closed() {
+                        self.database_subscribers.push(response);
                     }
                 }
             },
@@ -237,11 +250,10 @@ where
     async fn update_target(mut self, block: &Arc<A::Block>) -> (Self, bool) {
         let artifact = select! {
             _ = self.context.stopped() => return (self, false),
-            artifact = self
-                .syncer
-                .update_targets(Anchor::from(block.as_ref()), A::sync_targets(block.as_ref())) => {
-                artifact
-            },
+            artifact = self.syncer.update_targets(
+                Anchor::from(block.as_ref()),
+                A::sync_targets(block.as_ref()),
+            ) => artifact,
         };
         if let Some(artifact) = artifact {
             self.artifact = Some(artifact);

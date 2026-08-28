@@ -489,9 +489,12 @@ commonware_macros::stability_scope!(BETA {
             F: Fn(I::Item) -> R + Send + Sync,
             R: Send,
         {
-            self.map_init_collect_vec_with_multiplier(iter, multiplier, || (), |_, item| {
-                map_op(item)
-            })
+            self.map_init_collect_vec_with_multiplier(
+                iter,
+                multiplier,
+                || (),
+                |_, item| map_op(item),
+            )
         }
 
         /// Maps each element, filtering out `None` results and tracking their keys.

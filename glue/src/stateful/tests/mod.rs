@@ -1411,10 +1411,10 @@ fn stable_leader_finalizations_outpace_slow_qmdb_sync() {
         select! {
             _ = async {
                 loop {
-                    let committed = <SingleDatabaseSet<
+                    let committed = <SingleDatabaseSet<DelayedContext> as DatabaseSet<
                         DelayedContext,
-                    > as DatabaseSet<DelayedContext>>::committed_targets(&databases)
-                        .await;
+                    >>::committed_targets(&databases)
+                    .await;
                     if committed == expected {
                         break;
                     }

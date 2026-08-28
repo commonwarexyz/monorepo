@@ -405,18 +405,27 @@ where
             },
             result = &mut active.handle => match result {
                 Ok(()) => {
-                    debug!(epoch = active.epoch.get(), "simplex engine stopped, shutting down orchestrator");
+                    debug!(
+                        epoch = active.epoch.get(),
+                        "simplex engine stopped, shutting down orchestrator"
+                    );
                     break;
                 }
                 Err(error) => {
-                    panic!("simplex engine for epoch {} stopped unexpectedly: {error}", active.epoch);
+                    panic!(
+                        "simplex engine for epoch {} stopped unexpectedly: {error}",
+                        active.epoch
+                    );
                 }
             },
             Some(message) = self.mailbox.recv() else {
                 debug!("mailbox closed, shutting down orchestrator");
                 break;
             } => match message {
-                Message::Finalized { block, acknowledgement } => {
+                Message::Finalized {
+                    block,
+                    acknowledgement,
+                } => {
                     let keep_running = self
                         .handle_finalized(
                             &epocher,

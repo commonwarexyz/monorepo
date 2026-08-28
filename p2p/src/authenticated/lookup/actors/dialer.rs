@@ -350,25 +350,25 @@ mod tests {
             let deadline = context.current() + dial_frequency * 3;
             loop {
                 select! {
-                    msg = tracker_rx.recv() => {
-                        match msg {
-                            Some(tracker::Message::Dialable { responder }) => {
-                                let _ = responder
-                                    .send(Dialable {
-                                        peers: peers.clone(),
-                                        next_query_at: Some(context.current()),
-                                    });
-                            }
-                            Some(tracker::Message::Dial { public_key, reservation }) => {
-                                dial_count += 1;
-                                let metadata = Metadata::Dialer(public_key);
-                                let res = tracker::Reservation::new(metadata, releaser.clone());
-                                let ingress: Ingress = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 8000)
-                                    .into();
-                                let _ = reservation.send(Some((res, ingress)));
-                            }
-                            _ => {}
+                    msg = tracker_rx.recv() => match msg {
+                        Some(tracker::Message::Dialable { responder }) => {
+                            let _ = responder.send(Dialable {
+                                peers: peers.clone(),
+                                next_query_at: Some(context.current()),
+                            });
                         }
+                        Some(tracker::Message::Dial {
+                            public_key,
+                            reservation,
+                        }) => {
+                            dial_count += 1;
+                            let metadata = Metadata::Dialer(public_key);
+                            let res = tracker::Reservation::new(metadata, releaser.clone());
+                            let ingress: Ingress =
+                                SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 8000).into();
+                            let _ = reservation.send(Some((res, ingress)));
+                        }
+                        _ => {}
                     },
                     _ = context.sleep_until(deadline) => break,
                 }
@@ -426,11 +426,10 @@ mod tests {
                     msg = tracker_rx.recv() => {
                         if let Some(tracker::Message::Dialable { responder }) = msg {
                             refresh_count += 1;
-                            let _ = responder
-                                .send(Dialable {
-                                    peers: Vec::new(),
-                                    next_query_at: Some(context.current() + Duration::from_millis(100)),
-                                });
+                            let _ = responder.send(Dialable {
+                                peers: Vec::new(),
+                                next_query_at: Some(context.current() + Duration::from_millis(100)),
+                            });
                         }
                     },
                     _ = context.sleep_until(deadline) => break,
@@ -492,25 +491,25 @@ mod tests {
             let deadline = context.current() + Duration::from_millis(250);
             loop {
                 select! {
-                    msg = tracker_rx.recv() => {
-                        match msg {
-                            Some(tracker::Message::Dialable { responder }) => {
-                                let _ = responder
-                                    .send(Dialable {
-                                        peers: peers.clone(),
-                                        next_query_at: None,
-                                    });
-                            }
-                            Some(tracker::Message::Dial { public_key, reservation }) => {
-                                dial_count += 1;
-                                let metadata = Metadata::Dialer(public_key);
-                                let res = tracker::Reservation::new(metadata, releaser.clone());
-                                let ingress: Ingress = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 8000)
-                                    .into();
-                                let _ = reservation.send(Some((res, ingress)));
-                            }
-                            _ => {}
+                    msg = tracker_rx.recv() => match msg {
+                        Some(tracker::Message::Dialable { responder }) => {
+                            let _ = responder.send(Dialable {
+                                peers: peers.clone(),
+                                next_query_at: None,
+                            });
                         }
+                        Some(tracker::Message::Dial {
+                            public_key,
+                            reservation,
+                        }) => {
+                            dial_count += 1;
+                            let metadata = Metadata::Dialer(public_key);
+                            let res = tracker::Reservation::new(metadata, releaser.clone());
+                            let ingress: Ingress =
+                                SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 8000).into();
+                            let _ = reservation.send(Some((res, ingress)));
+                        }
+                        _ => {}
                     },
                     _ = context.sleep_until(deadline) => break,
                 }
@@ -563,11 +562,10 @@ mod tests {
                     msg = tracker_rx.recv() => {
                         if let Some(tracker::Message::Dialable { responder }) = msg {
                             refresh_count += 1;
-                            let _ = responder
-                                .send(Dialable {
-                                    peers: Vec::new(),
-                                    next_query_at: None,
-                                });
+                            let _ = responder.send(Dialable {
+                                peers: Vec::new(),
+                                next_query_at: None,
+                            });
                         }
                     },
                     _ = context.sleep_until(deadline) => break,

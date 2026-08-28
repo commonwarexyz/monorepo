@@ -106,38 +106,31 @@ where
                         else {
                             continue;
                         };
-                        sender
-                            .send(
-                                Recipients::One(peer),
-                                wire::Message::<S, V>::LatestResponse(finalization).encode(),
-                                false,
-                            );
+                        sender.send(
+                            Recipients::One(peer),
+                            wire::Message::<S, V>::LatestResponse(finalization).encode(),
+                            false,
+                        );
                     }
                     wire::Request::Boundary(epoch) => {
                         let Some(finalization) = self.produce_finalization(epoch).await else {
                             continue;
                         };
-                        sender
-                            .send(
-                                Recipients::One(peer),
-                                wire::Message::<S, V>::BoundaryResponse(finalization).encode(),
-                                false,
-                            );
+                        sender.send(
+                            Recipients::One(peer),
+                            wire::Message::<S, V>::BoundaryResponse(finalization).encode(),
+                            false,
+                        );
                     }
                     wire::Request::Block(epoch) => {
                         let Some(block) = self.produce_block(epoch).await else {
                             continue;
                         };
-                        sender
-                            .send(
-                                Recipients::One(peer),
-                                wire::Message::<S, V>::BlockResponse {
-                                    epoch,
-                                    block,
-                                }
-                                    .encode(),
-                                false,
-                            );
+                        sender.send(
+                            Recipients::One(peer),
+                            wire::Message::<S, V>::BlockResponse { epoch, block }.encode(),
+                            false,
+                        );
                     }
                 }
             },

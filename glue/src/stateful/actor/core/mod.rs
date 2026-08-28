@@ -423,12 +423,11 @@ mod tests {
             let handle = stateful.start();
 
             select! {
-                result = mailbox
-                    .propose(
-                        (context.child("proposal"), TestBlock::new(1, 1).context()),
-                        ancestry::from_iter([]),
-                        (),
-                    ) => {
+                result = mailbox.propose(
+                    (context.child("proposal"), TestBlock::new(1, 1).context()),
+                    ancestry::from_iter([]),
+                    (),
+                ) => {
                     assert!(result.is_none());
                 },
                 _ = context.sleep(Duration::from_millis(100)) => {

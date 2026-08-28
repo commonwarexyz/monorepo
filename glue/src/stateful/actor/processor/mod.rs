@@ -3449,8 +3449,8 @@ mod tests {
                     result = &mut third => {
                         panic!("waiter completed before retry gate: {result:?}")
                     },
-                    result = retry_started => result
-                        .expect("live waiter should acquire replay ownership"),
+                    result = retry_started =>
+                        result.expect("live waiter should acquire replay ownership"),
                     result = &mut duplicate_started => {
                         result.expect("duplicate replay signal should remain available");
                         panic!("multiple waiters acquired replay ownership");

@@ -1233,7 +1233,9 @@ mod tests {
                             receiver = receiver => {
                                 panic!("receiver exited: {receiver:?}")
                             },
-                            sender = sender => { panic!("sender exited: {sender:?}") },
+                            sender = sender => {
+                                panic!("sender exited: {sender:?}")
+                            },
                         }
                     }
                 });
@@ -1447,7 +1449,9 @@ mod tests {
                             receiver = receiver => {
                                 panic!("receiver exited: {receiver:?}")
                             },
-                            sender = sender => { panic!("sender exited: {sender:?}") },
+                            sender = sender => {
+                                panic!("sender exited: {sender:?}")
+                            },
                         }
                     }
                 });

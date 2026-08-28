@@ -83,14 +83,16 @@ where
             } => {
                 match message {
                     MailboxMessage::NextLog { span, response, .. } => {
-                        let process = info_span!(parent: &span, "dkg.reshare.actor.dealing.next_log");
+                        let process =
+                            info_span!(parent: &span, "dkg.reshare.actor.dealing.next_log");
                         process.in_scope(|| {
                             let _ = response.send_lossy(None);
                         });
                     }
                     MailboxMessage::ReleaseLog { .. } => {}
                     MailboxMessage::EpochInfo { span, response, .. } => {
-                        let process = info_span!(parent: &span, "dkg.reshare.actor.dealing.epoch_info");
+                        let process =
+                            info_span!(parent: &span, "dkg.reshare.actor.dealing.epoch_info");
                         process.in_scope(|| {
                             let _ = response.send_lossy(EpochInfoResponse::Pending);
                         });
@@ -110,7 +112,11 @@ where
                                 .epocher
                                 .containing(block.height())
                                 .expect("epocher must know of block height");
-                            assert_eq!(bounds.epoch(), epoch, "dealing received future epoch block");
+                            assert_eq!(
+                                bounds.epoch(),
+                                epoch,
+                                "dealing received future epoch block"
+                            );
                             assert_eq!(
                                 bounds.phase(),
                                 EpochPhase::Early,
@@ -150,14 +156,14 @@ where
                 return ControlFlow::Break(());
             } => {
                 self.handle_message(
-                        epoch,
-                        store,
-                        dealer.as_deref_mut(),
-                        player.as_deref_mut(),
-                        &mut sender,
-                        message,
-                    )
-                    .await
+                    epoch,
+                    store,
+                    dealer.as_deref_mut(),
+                    player.as_deref_mut(),
+                    &mut sender,
+                    message,
+                )
+                .await
             },
         };
 
