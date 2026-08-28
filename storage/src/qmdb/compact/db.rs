@@ -14,13 +14,18 @@
 //!
 //! # Witness journal
 //!
-//! The witness journal holds a complete snapshot of every applied batch, so [`Db::rewind`] can
-//! restore any retained applied state (history is bounded only by [`Db::prune`]). Reopen and
-//! rewind restore the db's in-memory state from an entry by rebuilding the Merkle from its
-//! pinned nodes and commit operation. An entry whose commit or pinned nodes fail to decode fails
-//! the open with [`Error::Journal`]; one that decodes but cannot rebuild surfaces as
-//! [`Error::DataCorrupted`]. The witness is also what lets compact nodes serve compact sync
-//! without retaining historical operations.
+//! The witness journal is the single durable source of truth. Each entry is a complete witness
+//! of one applied state, so [`Db::rewind`] can restore any retained applied state
+//! (history is bounded only by [`Db::prune`]). Reopen and rewind rebuild the in-memory Merkle
+//! from an entry's pinned nodes and commit operation. An entry whose commit or pinned nodes fail
+//! to decode fails the open with [`Error::Journal`]; one that decodes but cannot rebuild
+//! surfaces as [`Error::DataCorrupted`]. The witness is also what lets compact nodes serve
+//! compact sync without retaining historical operations.
+//!
+//! Entries are strictly increasing in committed size, so a size uniquely identifies a rewind or
+//! prune target. An appended entry becomes durable when [`Db::commit`] or [`Db::sync`]
+//! completes, or, for [`Db::start_sync`], when the returned handle completes. Before that point
+//! recovery may fall back to the previous entry. The tip entry is never pruned.
 //!
 //! # Inactivity floor
 //!
@@ -30,11 +35,14 @@
 //! snapshot rebuilding here; all historical in-memory state is discarded whenever a batch is
 //! applied.
 
-use super::{Config, Variant, batch as compact_batch, witness};
+use super::{
+    Config, Variant, batch as compact_batch,
+    witness::{self, Rebuilt, VerifiedWitness, Witness},
+};
 use crate::{
-    Context,
-    journal::contiguous::variable,
-    merkle::{Family, Location, batch, compact as compact_merkle},
+    Context, SyncCompletion,
+    journal::contiguous::{Contiguous, variable},
+    merkle::{self, Family, Location, batch, compact as compact_merkle},
     qmdb::{
         self, Error,
         batch_chain::{self, Bounds, Commitment},
@@ -44,10 +52,25 @@ use crate::{
 use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
-use commonware_runtime::Handle;
+use commonware_runtime::{Error as RError, Handle};
+use core::cmp::Ordering;
+use futures::FutureExt as _;
 use std::sync::{Arc, Weak};
 
 type MerkleizedParent<F, H, O, S> = Arc<MerkleizedBatch<F, DigestOf<H>, O, S>>;
+
+/// The tip witness's relationship to the journal.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TipState {
+    /// Journaled and covered by a durability operation that has at least started.
+    Committed,
+    /// Journaled after the latest durability operation started.
+    Uncommitted,
+    /// From compact sync and not in the journal, which still holds the partition's previous
+    /// contents until the first application or durability operation journals the tip in their
+    /// place.
+    Imported,
+}
 
 /// A compact authenticated db that discards historical operations, retaining only a witness
 /// for each applied batch.
@@ -61,7 +84,21 @@ where
     O: Variant<F>,
     H: Hasher,
 {
-    store: witness::Store<F, E, O, H, S>,
+    /// The peak-only Merkle the witnesses describe.
+    merkle: compact_merkle::Merkle<F, H::Digest, S>,
+
+    /// The journal of witnesses, one per applied batch.
+    journal: witness::Journal<E, F, H::Digest, O>,
+
+    /// The verified tip witness; `tip_state` says whether it is in the journal.
+    tip: VerifiedWitness<F, H::Digest, O>,
+
+    /// The tip witness's relationship to the journal.
+    tip_state: TipState,
+
+    /// The sync pipelined by the last [`Self::start_sync`], cleared by the next full
+    /// journal sync.
+    pending_sync: Option<SyncCompletion>,
 }
 
 impl<F, E, O, H, S: Strategy> std::fmt::Debug for Db<F, E, O, H, S>
@@ -79,6 +116,472 @@ where
     }
 }
 
+impl<F, E, O, H, S> Db<F, E, O, H, S>
+where
+    F: Family,
+    E: Context,
+    O: Variant<F>,
+    H: Hasher,
+    S: Strategy,
+{
+    /// Returns a compact db initialized from `cfg`.
+    pub async fn init(context: E, cfg: Config<O::Cfg, S>) -> Result<Self, Error<F>> {
+        let journal = variable::Journal::init(context.child("witness"), cfg.witness).await?;
+        Self::init_from_journal(cfg.strategy, journal).await
+    }
+
+    /// Build a compact db from state fetched by the sync engine: `last_commit_op` must be a
+    /// commit whose floor is at or below `last_commit_loc`.
+    ///
+    /// The imported witness lives only in memory until the first [`Self::apply_batch`],
+    /// [`Self::commit`], [`Self::sync`], or [`Self::start_sync`], which replaces the journal's
+    /// contents with it. Until one of those succeeds, rewind and prune are rejected. A crash
+    /// during the replacement leaves a journal that fails to reopen, and re-syncing recovers it.
+    pub(crate) fn init_from_sync(
+        strategy: S,
+        journal: witness::Journal<E, F, H::Digest, O>,
+        last_commit_loc: Location<F>,
+        pinned_nodes: Vec<H::Digest>,
+        last_commit_op: O,
+    ) -> Result<Self, Error<F>> {
+        let Some(inactivity_floor_loc) = last_commit_op.has_floor() else {
+            return Err(Error::UnexpectedData(last_commit_loc));
+        };
+        witness::validate_inactivity_floor(inactivity_floor_loc, last_commit_loc)?;
+        let imported = Witness {
+            commit: last_commit_op,
+            size: last_commit_loc + 1,
+            pinned_nodes,
+        };
+        let Rebuilt { merkle, tip } =
+            witness::restore::<F, O, H, S>(strategy, imported, inactivity_floor_loc)?;
+        Ok(Self {
+            merkle,
+            journal,
+            tip,
+            tip_state: TipState::Imported,
+            pending_sync: None,
+        })
+    }
+
+    /// Open a compact db from its witness journal, rebuilding the Merkle from the tip witness.
+    ///
+    /// A new db starts with one committed operation, the initial `Commit(None, 0)`, persisted as
+    /// the first witness entry so every later reopen and rewind can assume the journal tip is a
+    /// complete witness.
+    #[boxed]
+    pub(crate) async fn init_from_journal(
+        strategy: S,
+        mut journal: witness::Journal<E, F, H::Digest, O>,
+    ) -> Result<Self, Error<F>> {
+        let entry = if journal.size() == 0 {
+            // Leaf 0 has nothing pinned below it, so the genesis witness needs no tree.
+            let genesis = Witness {
+                commit: O::commit_op(None, Location::new(0)),
+                size: Location::new(1),
+                pinned_nodes: Vec::new(),
+            };
+            (journal, _) = journal.append(&genesis).await?;
+            journal = journal.sync().await?;
+            genesis
+        } else {
+            journal.read(journal.size() - 1).await?
+        };
+        let Rebuilt { merkle, tip } = witness::rebuild::<F, O, H, S>(strategy, entry)?;
+        Ok(Self {
+            merkle,
+            journal,
+            tip,
+            tip_state: TipState::Committed,
+            pending_sync: None,
+        })
+    }
+
+    /// Return the root of the db.
+    pub const fn root(&self) -> H::Digest {
+        self.tip.root
+    }
+
+    /// Return the inactivity floor declared by the last committed batch.
+    pub const fn inactivity_floor_loc(&self) -> Location<F> {
+        self.tip.inactivity_floor_loc
+    }
+
+    /// Return the location of the next operation appended to this db.
+    pub const fn size(&self) -> Location<F> {
+        self.tip.size()
+    }
+
+    /// Get the metadata associated with the last commit.
+    pub fn get_metadata(&self) -> Option<O::Metadata> {
+        self.tip.metadata().cloned()
+    }
+
+    /// Return the compact-sync target described by the current witness.
+    ///
+    /// This reflects the most recently applied batch. The target remains non-durable until a
+    /// covering [`Self::commit`], [`Self::sync`], or [`Self::start_sync`] completes.
+    pub const fn target(&self) -> CompactTarget<F, H::Digest> {
+        self.tip.target()
+    }
+
+    /// The [`Commitment`] for the database's current state.
+    pub(crate) const fn commitment(&self) -> Commitment<F, H::Digest> {
+        Commitment::new(self.size(), self.root())
+    }
+
+    /// Create a new speculative batch of operations with this database as its parent.
+    pub fn new_batch(&self) -> UnmerkleizedBatch<F, H, O, S> {
+        UnmerkleizedBatch::new(self, self.commitment())
+    }
+
+    /// Create an owned merkleized batch representing the current applied state.
+    pub fn to_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, O, S>> {
+        Arc::new(MerkleizedBatch {
+            merkle_batch: self.merkle.to_batch(),
+            commit: self.tip.witness.commit.clone(),
+            parent: None,
+            bounds: Bounds::from_db(self.commitment(), self.inactivity_floor_loc()),
+        })
+    }
+
+    /// Check that `batch` can be applied to the database in its current state, without
+    /// applying it.
+    ///
+    /// [`Self::apply_batch`] runs the same validation but consumes the database when it
+    /// fails; callers that want to reject a bad batch and keep the handle can check first.
+    pub fn validate_batch(
+        &self,
+        batch: &MerkleizedBatch<F, H::Digest, O, S>,
+    ) -> Result<(), Error<F>> {
+        batch
+            .bounds
+            .validate_apply_to(self.commitment(), self.inactivity_floor_loc())
+    }
+
+    /// Apply a merkleized batch to the database, journaling a pending compact-sync import first.
+    ///
+    /// Returns the range of locations written. The state is updated in memory and appended to the
+    /// witness journal. Call [`Self::commit`] or [`Self::sync`], or await the handle returned by
+    /// [`Self::start_sync`], to make the applied state durable. A batch that adds no operations
+    /// only journals a pending compact-sync import.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::StaleBatch`] if the batch is detected as stale (see
+    ///   [`crate::qmdb::batch_chain`] for more details).
+    /// - [`Error::FloorRegressed`] if any commit in the chain declares a floor below the
+    ///   previous commit's floor.
+    /// - [`Error::FloorBeyondSize`] if any commit in the chain declares a floor beyond its own
+    ///   commit location.
+    #[tracing::instrument(
+        name = "qmdb.compact.db.apply_batch",
+        level = "info",
+        skip_all,
+        fields(variant = O::NAME)
+    )]
+    pub async fn apply_batch(
+        mut self,
+        batch: Arc<MerkleizedBatch<F, H::Digest, O, S>>,
+    ) -> Result<(Self, core::ops::Range<Location<F>>), Error<F>> {
+        self.validate_batch(&batch)?;
+
+        debug_assert_eq!(self.tip.size(), self.merkle.leaves());
+        let start_loc = self.size();
+        self.merkle.apply_batch(&batch.merkle_batch)?;
+        let tip = match self.tip.size().cmp(&self.merkle.leaves()) {
+            Ordering::Equal => None,
+            Ordering::Greater => {
+                return Err(Error::DataCorrupted("witness ahead of in-memory state"));
+            }
+            // Build before pruning because the commit proof needs the unpruned Merkle.
+            Ordering::Less => Some(witness::build_witness::<F, H, S, O>(
+                &self.merkle,
+                batch.commit.clone(),
+                batch.bounds.inactivity_floor,
+            )?),
+        };
+        // Journal the import before the new witness so every applied state has its own entry.
+        self = self.flush_import().await?;
+        if let Some(tip) = tip {
+            self.tip = tip;
+            self.merkle.prune_to_frontier();
+            self = self.journal_tip().await?;
+        }
+        debug_assert_eq!(self.commitment(), batch.bounds.tip);
+        Ok((self, start_loc..batch.bounds.tip.size))
+    }
+
+    /// Journal a pending compact-sync import, if any, in place of the partition's previous
+    /// contents.
+    ///
+    /// Clears to a nonzero size: if a crash interrupts the import, reopen sees an empty journal
+    /// at a nonzero size, whose tip position is below its pruning boundary, and fails instead of
+    /// mistaking it for a fresh db.
+    async fn flush_import(mut self) -> Result<Self, Error<F>> {
+        if self.tip_state != TipState::Imported {
+            return Ok(self);
+        }
+        let size = self.journal.size();
+        self.journal = self.journal.clear_to_size(size.max(1)).await?;
+        self.journal_tip().await
+    }
+
+    /// Append the tip's witness to the journal, leaving the tip outside the durable prefix.
+    async fn journal_tip(mut self) -> Result<Self, Error<F>> {
+        (self.journal, _) = self.journal.append(&self.tip.witness).await?;
+        self.tip_state = TipState::Uncommitted;
+        Ok(self)
+    }
+
+    /// Begin durably persisting the current db state to disk.
+    ///
+    /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit],
+    /// plus a best-effort attempt to bound the recovery needed on reopen. Use [Self::sync] to
+    /// guarantee none is needed. A new sync waits for the prior sync before starting. Failures
+    /// of the deferred durability work surface on the returned handle and the next durability
+    /// operation. When nothing new must be appended, the handle still proves the current tip
+    /// durable and resurfaces any retained sync failure.
+    #[tracing::instrument(
+        name = "qmdb.compact.db.start_sync",
+        level = "info",
+        skip_all,
+        fields(variant = O::NAME)
+    )]
+    pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error<F>> {
+        // Match the deferred-failure convention used by the journal: return a prior completion's
+        // error through a ready handle before a later completion can replace it. Errors while
+        // journaling an import or initiating this sync continue to use the outer result.
+        if let Err(err) = self.wait_for_sync().await {
+            return Ok((self, Handle::ready(Err(err))));
+        }
+
+        // Journal a pending import before starting the sync so the returned handle covers the
+        // current tip. A later apply remains uncommitted and requires a successor durability
+        // operation.
+        self = self.flush_import().await?;
+
+        // Share one completion between the caller and the db. Retaining a clone keeps a
+        // dropped handle's failure observable by the next durability operation.
+        let handle;
+        (self.journal, handle) = self.journal.start_sync().await?;
+        let completion: SyncCompletion = handle.boxed().shared();
+        self.tip_state = TipState::Committed;
+        self.pending_sync = Some(completion.clone());
+        Ok((self, Handle::from_future(completion)))
+    }
+
+    /// Durably persist the current db state to disk. This is faster than [`Self::sync`] but
+    /// reopen may need to replay the witness journal's tail to recover.
+    ///
+    /// First waits for any sync pipelined by [`Self::start_sync`], surfacing its failure.
+    #[tracing::instrument(
+        name = "qmdb.compact.db.commit",
+        level = "info",
+        skip_all,
+        fields(variant = O::NAME)
+    )]
+    pub async fn commit(mut self) -> Result<Self, Error<F>> {
+        self.wait_for_sync().await?;
+        self = self.flush_import().await?;
+        // A commit leaves `pending_sync` set so the next full sync still persists all metadata.
+        if self.tip_state == TipState::Uncommitted {
+            self.journal = self.journal.commit().await?;
+            self.tip_state = TipState::Committed;
+        }
+        Ok(self)
+    }
+
+    /// Durably persist the current db state to disk, also persisting journal metadata to
+    /// minimize recovery work on reopen. This also settles any sync pipelined by
+    /// [`Self::start_sync`].
+    #[tracing::instrument(
+        name = "qmdb.compact.db.sync",
+        level = "info",
+        skip_all,
+        fields(variant = O::NAME)
+    )]
+    pub async fn sync(mut self) -> Result<Self, Error<F>> {
+        self = self.flush_import().await?;
+        if self.tip_state == TipState::Uncommitted || self.pending_sync.is_some() {
+            return self.sync_journal().await;
+        }
+        Ok(self)
+    }
+
+    /// Sync the journal and all of its metadata, which covers the tip and settles any sync
+    /// pipelined by [`Self::start_sync`].
+    async fn sync_journal(mut self) -> Result<Self, Error<F>> {
+        self.journal = self.journal.sync().await?;
+        self.pending_sync = None;
+        self.tip_state = TipState::Committed;
+        Ok(self)
+    }
+
+    /// Wait for any sync pipelined by [`Self::start_sync`], surfacing its failure.
+    ///
+    /// A successful completion remains recorded until the next full journal sync, which must
+    /// still guarantee that all metadata is current.
+    async fn wait_for_sync(&self) -> Result<(), RError> {
+        let Some(pending) = self.pending_sync.clone() else {
+            return Ok(());
+        };
+        pending.await
+    }
+
+    /// Rewind the db to the applied state with exactly `target` operations, discarding any
+    /// uncommitted batches and any later states. The rewind is made durable before this
+    /// method returns.
+    ///
+    /// A committed tip already at `target` only settles its pipelined sync; an uncommitted tip
+    /// at `target` takes the regular path so the journal becomes durable before return. The
+    /// target entry is rebuilt before the journal is truncated, so a corrupt entry fails the
+    /// rewind with the journal intact.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::merkle::Error::RewindBeyondHistory`] (wrapped as [`Error::Merkle`]) if
+    /// no retained applied state has exactly `target` operations (never applied, or pruned).
+    #[tracing::instrument(
+        name = "qmdb.compact.db.rewind",
+        level = "info",
+        skip_all,
+        fields(variant = O::NAME)
+    )]
+    pub async fn rewind(mut self, target: Location<F>) -> Result<Self, Error<F>> {
+        if self.tip.size() == target && self.tip_state == TipState::Committed {
+            self.wait_for_sync().await?;
+            return Ok(self);
+        }
+        self.check_import_applied()?;
+
+        let pos = self.first_at_or_above(target).await?;
+        if pos >= self.journal.bounds().end {
+            return Err(merkle::Error::RewindBeyondHistory.into());
+        }
+        let entry = self.journal.read(pos).await?;
+        if entry.size != target {
+            return Err(merkle::Error::RewindBeyondHistory.into());
+        }
+        let Rebuilt { merkle, tip } =
+            witness::rebuild::<F, O, H, S>(self.merkle.strategy().clone(), entry)?;
+        self.journal = self.journal.rewind(pos + 1).await?;
+        self = self.sync_journal().await?;
+        self.merkle = merkle;
+        self.tip = tip;
+        Ok(self)
+    }
+
+    /// Drop witnesses for commits with fewer than `pruning_boundary` operations. Some witness
+    /// below the boundary may survive.
+    ///
+    /// Pruning bounds how far back [`Self::rewind`] can reach; the current commit's witness
+    /// always survives. The prune is made durable before this method returns.
+    ///
+    /// # Errors
+    ///
+    /// Fails if a compact-sync import has not yet been applied to the witness journal.
+    #[tracing::instrument(
+        name = "qmdb.compact.db.prune",
+        level = "info",
+        skip_all,
+        fields(variant = O::NAME)
+    )]
+    pub async fn prune(mut self, pruning_boundary: Location<F>) -> Result<Self, Error<F>> {
+        self.check_import_applied()?;
+
+        let bounds = self.journal.bounds();
+        if bounds.is_empty() {
+            return Ok(self);
+        }
+        // Clamp below the tip so the journal never empties: the tip is the current state.
+        let pos = self
+            .first_at_or_above(pruning_boundary)
+            .await?
+            .min(bounds.end - 1);
+        (self.journal, _) = self.journal.prune(pos).await?;
+        self.sync_journal().await
+    }
+
+    /// Reject operations on a journal whose contents an unapplied compact-sync import is
+    /// about to replace.
+    const fn check_import_applied(&self) -> Result<(), Error<F>> {
+        if matches!(self.tip_state, TipState::Imported) {
+            return Err(Error::DataCorrupted("compact-sync import not applied"));
+        }
+        Ok(())
+    }
+
+    /// Binary search for the first retained position whose entry commits at least `size`
+    /// leaves, or the end of the journal if none does.
+    async fn first_at_or_above(&self, size: Location<F>) -> Result<u64, Error<F>> {
+        let bounds = self.journal.bounds();
+        let (mut lo, mut hi) = (bounds.start, bounds.end);
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if self.journal.read(mid).await?.size < size {
+                // The entry at `mid` is below `size`, so the answer is after it.
+                lo = mid + 1;
+            } else {
+                // The entry at `mid` qualifies, so the answer is `mid` or before it.
+                hi = mid;
+            }
+        }
+        Ok(lo)
+    }
+
+    /// Destroy all persisted state associated with this database.
+    #[boxed]
+    pub async fn destroy(self) -> Result<(), Error<F>> {
+        self.journal.destroy().await?;
+        Ok(())
+    }
+
+    /// Serve `request` from the single committed state the tip witness retains: the final
+    /// commit operation and the pinned nodes one operation below it. Anything else is refused
+    /// with the same errors a pruned operation log reports.
+    #[tracing::instrument(
+        name = "qmdb.sync.serve",
+        level = "info",
+        skip_all,
+        fields(
+            size = *request.size(),
+            start = *request.start(),
+            max_ops = request.max_ops().get(),
+        ),
+    )]
+    fn compact_state(&self, request: Request<F>) -> Result<Response<F, O, H::Digest>, Error<F>> {
+        let size = self.tip.size();
+        let last_commit_loc = size - 1;
+        if request.size() > size || request.size() == 0 {
+            return Err(merkle::Error::RangeOutOfBounds(request.size()).into());
+        }
+        if request.size() < size {
+            return Err(crate::journal::Error::ItemPruned(*request.size() - 1).into());
+        }
+        if request.start() >= request.size() {
+            return Err(merkle::Error::RangeOutOfBounds(request.start()).into());
+        }
+        if request.start() < last_commit_loc {
+            return Err(crate::journal::Error::ItemPruned(*request.start()).into());
+        }
+        let op = self.tip.witness.commit.clone();
+        // After the checks above, `start == last_commit_loc`, so the stored pinned nodes are the
+        // pinned nodes for this request.
+        Ok(match request {
+            Request::Operations { .. } => Response::Operations {
+                proof: self.tip.proof.clone(),
+                operations: vec![op],
+            },
+            Request::Boundary { .. } => Response::Boundary {
+                proof: self.tip.proof.clone(),
+                op,
+                pinned_nodes: self.tip.witness.pinned_nodes.clone(),
+            },
+        })
+    }
+}
+
 /// A speculative batch for a compact db.
 pub struct UnmerkleizedBatch<F, H, O, S: Strategy>
 where
@@ -90,49 +593,6 @@ where
     pub(in crate::qmdb) mutations: O::Mutations,
     parent: Option<MerkleizedParent<F, H, O, S>>,
     base: Commitment<F, H::Digest>,
-}
-
-/// A speculative batch whose root digest has been computed.
-#[derive(Clone)]
-pub struct MerkleizedBatch<F: Family, D: Digest, O: Variant<F>, S: Strategy> {
-    merkle_batch: Arc<batch::MerkleizedBatch<F, D, S>>,
-    commit: O,
-    parent: Option<Weak<Self>>,
-    bounds: Bounds<F, D>,
-}
-
-impl<F: Family, D: Digest, O: Variant<F>, S: Strategy> MerkleizedBatch<F, D, O, S> {
-    fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> + use<F, D, O, S> {
-        batch_chain::ancestors(self.parent.clone(), |batch| batch.parent.as_ref())
-    }
-
-    /// The [`Commitment`] this batch commits to.
-    const fn commitment(&self) -> Commitment<F, D> {
-        self.bounds.tip
-    }
-
-    /// Return the root digest after this batch is applied.
-    pub const fn root(&self) -> D {
-        self.bounds.tip.root
-    }
-
-    /// Return the [`Bounds`] of the batch.
-    pub const fn bounds(&self) -> &Bounds<F, D> {
-        &self.bounds
-    }
-
-    /// Create a new speculative batch with this one as its parent.
-    pub fn new_batch<H>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, O, S>
-    where
-        H: Hasher<Digest = D>,
-    {
-        UnmerkleizedBatch {
-            merkle_batch: compact_merkle::UnmerkleizedBatch::wrap(self.merkle_batch.new_batch()),
-            mutations: O::Mutations::default(),
-            parent: Some(Arc::clone(self)),
-            base: self.commitment(),
-        }
-    }
 }
 
 impl<F, H, O, S> UnmerkleizedBatch<F, H, O, S>
@@ -147,7 +607,7 @@ where
         E: Context,
     {
         Self {
-            merkle_batch: db.store.merkle().new_batch(),
+            merkle_batch: db.merkle.new_batch(),
             mutations: O::Mutations::default(),
             parent: None,
             base,
@@ -202,7 +662,7 @@ where
         let total_size = self.base.size + ops.len() as u64;
         let inactive_peaks = F::inactive_peaks(total_size, inactivity_floor);
         let (merkle, root) = compact_batch::merkleize_ops::<F, H, S, _>(
-            db.store.merkle(),
+            &db.merkle,
             self.merkle_batch,
             ops,
             inactive_peaks,
@@ -231,246 +691,46 @@ where
     }
 }
 
-impl<F, E, O, H, S> Db<F, E, O, H, S>
-where
-    F: Family,
-    E: Context,
-    O: Variant<F>,
-    H: Hasher,
-    S: Strategy,
-{
-    /// Returns a compact db initialized from `cfg`.
-    pub async fn init(context: E, cfg: Config<O::Cfg, S>) -> Result<Self, Error<F>> {
-        let journal = variable::Journal::init(context.child("witness"), cfg.witness).await?;
-        Self::init_from_journal(cfg.strategy, journal).await
+/// A speculative batch whose root digest has been computed.
+#[derive(Clone)]
+pub struct MerkleizedBatch<F: Family, D: Digest, O: Variant<F>, S: Strategy> {
+    merkle_batch: Arc<batch::MerkleizedBatch<F, D, S>>,
+    commit: O,
+    parent: Option<Weak<Self>>,
+    bounds: Bounds<F, D>,
+}
+
+impl<F: Family, D: Digest, O: Variant<F>, S: Strategy> MerkleizedBatch<F, D, O, S> {
+    fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> + use<F, D, O, S> {
+        batch_chain::ancestors(self.parent.clone(), |batch| batch.parent.as_ref())
     }
 
-    /// Build a compact db from state fetched by the sync engine.
-    ///
-    /// The imported witness lives only in memory until the first [`Self::apply_batch`],
-    /// [`Self::commit`], [`Self::sync`], or [`Self::start_sync`], which journals it in place of
-    /// the partition's previous contents. Until one of those succeeds, rewind and prune are
-    /// rejected.
-    pub(crate) fn init_from_sync(
-        strategy: S,
-        journal: witness::Journal<E, F, H::Digest, O>,
-        last_commit_loc: Location<F>,
-        pinned_nodes: Vec<H::Digest>,
-        last_commit_op: O,
-    ) -> Result<Self, Error<F>> {
-        let store = witness::Store::from_import(
-            journal,
-            strategy,
-            last_commit_loc,
-            pinned_nodes,
-            last_commit_op,
-        )?;
-        Ok(Self { store })
+    /// The [`Commitment`] this batch commits to.
+    const fn commitment(&self) -> Commitment<F, D> {
+        self.bounds.tip
     }
 
-    /// Open a compact db from its witness journal, rebuilding the Merkle from the tip witness.
-    ///
-    /// On first open, this bootstraps the initial commit and its witness so every later reopen and
-    /// rewind can assume the journal tip is a complete compact witness.
-    #[boxed]
-    pub(crate) async fn init_from_journal(
-        strategy: S,
-        journal: witness::Journal<E, F, H::Digest, O>,
-    ) -> Result<Self, Error<F>> {
-        let store = witness::Store::init(journal, strategy).await?;
-        Ok(Self { store })
+    /// Return the root digest after this batch is applied.
+    pub const fn root(&self) -> D {
+        self.bounds.tip.root
     }
 
-    /// Return the root of the db.
-    pub const fn root(&self) -> H::Digest {
-        self.store.tip().root
+    /// Return the [`Bounds`] of the batch.
+    pub const fn bounds(&self) -> &Bounds<F, D> {
+        &self.bounds
     }
 
-    /// Return the inactivity floor declared by the last committed batch.
-    pub const fn inactivity_floor_loc(&self) -> Location<F> {
-        self.store.tip().inactivity_floor_loc
-    }
-
-    /// Return the location of the next operation appended to this db.
-    pub const fn size(&self) -> Location<F> {
-        self.store.tip().size()
-    }
-
-    /// Get the metadata associated with the last commit.
-    pub fn get_metadata(&self) -> Option<O::Metadata> {
-        self.store.tip().metadata().cloned()
-    }
-
-    /// Return the compact-sync target described by the current witness.
-    ///
-    /// This reflects the most recently applied batch. The target remains non-durable until a
-    /// covering [`Self::commit`], [`Self::sync`], or [`Self::start_sync`] completes.
-    pub const fn target(&self) -> CompactTarget<F, H::Digest> {
-        self.store.tip().target()
-    }
-
-    /// The [`Commitment`] for the database's current state.
-    pub(crate) const fn commitment(&self) -> Commitment<F, H::Digest> {
-        Commitment::new(self.size(), self.root())
-    }
-
-    /// Create a new speculative batch of operations with this database as its parent.
-    pub fn new_batch(&self) -> UnmerkleizedBatch<F, H, O, S> {
-        UnmerkleizedBatch::new(self, self.commitment())
-    }
-
-    /// Create an owned merkleized batch representing the current applied state.
-    pub fn to_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, O, S>> {
-        Arc::new(MerkleizedBatch {
-            merkle_batch: self.store.merkle().to_batch(),
-            commit: self.store.tip().witness.commit.clone(),
-            parent: None,
-            bounds: Bounds::from_db(self.commitment(), self.inactivity_floor_loc()),
-        })
-    }
-
-    /// Check that `batch` can be applied to the database in its current state, without
-    /// applying it.
-    ///
-    /// [`Self::apply_batch`] runs the same validation but consumes the database when it
-    /// fails; callers that want to reject a bad batch and keep the handle can check first.
-    pub fn validate_batch(
-        &self,
-        batch: &MerkleizedBatch<F, H::Digest, O, S>,
-    ) -> Result<(), Error<F>> {
-        batch
-            .bounds
-            .validate_apply_to(self.commitment(), self.inactivity_floor_loc())
-    }
-
-    /// Apply a merkleized batch to the database.
-    ///
-    /// Returns the range of locations written. The state is updated in memory and appended to the
-    /// witness journal. Call [`Self::commit`] or [`Self::sync`], or await the handle returned by
-    /// [`Self::start_sync`], to make the applied state durable.
-    ///
-    /// # Errors
-    ///
-    /// - [`Error::StaleBatch`] if the batch is detected as stale (see
-    ///   [`crate::qmdb::batch_chain`] for more details).
-    /// - [`Error::FloorRegressed`] if any commit in the chain declares a floor below the
-    ///   previous commit's floor.
-    /// - [`Error::FloorBeyondSize`] if any commit in the chain declares a floor beyond its own
-    ///   commit location.
-    #[tracing::instrument(
-        name = "qmdb.compact.db.apply_batch",
-        level = "info",
-        skip_all,
-        fields(variant = O::NAME)
-    )]
-    pub async fn apply_batch(
-        mut self,
-        batch: Arc<MerkleizedBatch<F, H::Digest, O, S>>,
-    ) -> Result<(Self, core::ops::Range<Location<F>>), Error<F>> {
-        self.validate_batch(&batch)?;
-
-        let start_loc = self.size();
-        self.store = self
-            .store
-            .apply(
-                &batch.merkle_batch,
-                batch.commit.clone(),
-                batch.bounds.inactivity_floor,
-            )
-            .await?;
-        debug_assert_eq!(self.commitment(), batch.bounds.tip);
-        Ok((self, start_loc..batch.bounds.tip.size))
-    }
-
-    /// Begin durably persisting the current db state to disk.
-    ///
-    /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit],
-    /// plus a best-effort attempt to bound the recovery needed on reopen. Use [Self::sync] to
-    /// guarantee none is needed. A new sync waits for the prior sync before starting. Failures
-    /// of the deferred durability work surface on the returned handle and the next durability
-    /// operation.
-    #[tracing::instrument(
-        name = "qmdb.compact.db.start_sync",
-        level = "info",
-        skip_all,
-        fields(variant = O::NAME)
-    )]
-    pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error<F>> {
-        let handle;
-        (self.store, handle) = self.store.start_sync().await?;
-        Ok((self, handle))
-    }
-
-    /// Durably persist the current db state to disk. This is faster than [`Self::sync`] but
-    /// reopen may need to replay the witness journal's tail to recover.
-    #[tracing::instrument(
-        name = "qmdb.compact.db.commit",
-        level = "info",
-        skip_all,
-        fields(variant = O::NAME)
-    )]
-    pub async fn commit(mut self) -> Result<Self, Error<F>> {
-        self.store = self.store.commit().await?;
-        Ok(self)
-    }
-
-    /// Durably persist the current db state to disk, also persisting journal metadata to
-    /// minimize recovery work on reopen.
-    #[tracing::instrument(
-        name = "qmdb.compact.db.sync",
-        level = "info",
-        skip_all,
-        fields(variant = O::NAME)
-    )]
-    pub async fn sync(mut self) -> Result<Self, Error<F>> {
-        self.store = self.store.sync().await?;
-        Ok(self)
-    }
-
-    /// Rewind the db to the applied state with exactly `target` operations, discarding any
-    /// uncommitted batches and any later states. The rewind is made durable before this
-    /// method returns.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`crate::merkle::Error::RewindBeyondHistory`] (wrapped as [`Error::Merkle`]) if
-    /// no retained applied state has exactly `target` operations (never applied, or pruned).
-    #[tracing::instrument(
-        name = "qmdb.compact.db.rewind",
-        level = "info",
-        skip_all,
-        fields(variant = O::NAME)
-    )]
-    pub async fn rewind(mut self, target: Location<F>) -> Result<Self, Error<F>> {
-        self.store = self.store.rewind(target).await?;
-        Ok(self)
-    }
-
-    /// Drop witnesses for commits with fewer than `pruning_boundary` operations. Some witness
-    /// below the boundary may survive.
-    ///
-    /// Pruning bounds how far back [`Self::rewind`] can reach; the current commit's witness
-    /// always survives. The prune is made durable before this method returns.
-    ///
-    /// # Errors
-    ///
-    /// Fails if a compact-sync import has not yet been applied to the witness journal.
-    #[tracing::instrument(
-        name = "qmdb.compact.db.prune",
-        level = "info",
-        skip_all,
-        fields(variant = O::NAME)
-    )]
-    pub async fn prune(mut self, pruning_boundary: Location<F>) -> Result<Self, Error<F>> {
-        self.store = self.store.prune(pruning_boundary).await?;
-        Ok(self)
-    }
-
-    /// Destroy all persisted state associated with this database.
-    #[boxed]
-    pub async fn destroy(self) -> Result<(), Error<F>> {
-        self.store.destroy().await?;
-        Ok(())
+    /// Create a new speculative batch with this one as its parent.
+    pub fn new_batch<H>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, O, S>
+    where
+        H: Hasher<Digest = D>,
+    {
+        UnmerkleizedBatch {
+            merkle_batch: compact_merkle::UnmerkleizedBatch::wrap(self.merkle_batch.new_batch()),
+            mutations: O::Mutations::default(),
+            parent: Some(Arc::clone(self)),
+            base: self.commitment(),
+        }
     }
 }
 
@@ -503,7 +763,7 @@ where
         &self,
         request: Request<F>,
     ) -> Result<(Response<F, Self::Op, H::Digest>, FeedbackTx), Self::Error> {
-        Ok((self.store.compact_state(request)?, None))
+        Ok((self.compact_state(request)?, None))
     }
 }
 
@@ -524,7 +784,6 @@ pub(crate) mod tests {
     };
     use commonware_utils::{NZU16, NZU64, NZUsize};
     use core::future::Future;
-    use futures::FutureExt as _;
     use std::num::{NonZeroU16, NonZeroUsize};
 
     /// A compact db variant under test: its values and mutations derive from a seed.
