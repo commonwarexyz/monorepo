@@ -1344,7 +1344,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         }
     }
 });
-commonware_macros::stability_scope!(ALPHA, cfg(feature = "test-utils") {
+commonware_macros::stability_scope!(ALPHA, cfg(any(feature = "test-utils", test)) {
     pub mod mocks;
 });
 

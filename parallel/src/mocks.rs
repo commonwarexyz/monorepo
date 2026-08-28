@@ -25,3 +25,27 @@ pub fn pending(workers: NonZeroUsize) -> Rayon {
     );
     Rayon::with_pool(pool)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Strategy;
+    use futures::FutureExt;
+
+    #[test]
+    fn inline_runs_spawned_jobs_at_submission() {
+        let strategy = inline(NonZeroUsize::new(4).unwrap());
+
+        assert_eq!(strategy.manual().parallelism(), 4);
+        assert_eq!(strategy.spawn(1, |_| 7).now_or_never(), Some(7));
+    }
+
+    /// Construction must return (rayon's `build` does not wait for workers to prime) and the
+    /// spawned job must stay queued forever.
+    #[test]
+    fn pending_never_completes_spawned_jobs() {
+        let strategy = pending(NonZeroUsize::new(2).unwrap());
+
+        assert!(strategy.spawn(1, |_| 7).now_or_never().is_none());
+    }
+}
