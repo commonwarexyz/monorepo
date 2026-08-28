@@ -3,8 +3,8 @@
 //!
 //! One implementation serves the keyless and immutable variants. The operation type implements
 //! [`Variant`]: how a batch accumulates mutations and how commit operations are built and
-//! read; [`crate::qmdb::keyless`] and [`crate::qmdb::immutable`] fix it through type aliases
-//! and add the variant-specific batch mutator (`append` / `set`).
+//! inspected; [`crate::qmdb::keyless`] and [`crate::qmdb::immutable`] fix it through type
+//! aliases and add the variant-specific batch mutator (`append` / `set`).
 //!
 //! Mirrors the API of the full dbs ([`crate::qmdb::keyless::Keyless`],
 //! [`crate::qmdb::immutable::Immutable`]): `new_batch -> merkleize -> apply_batch -> commit /
@@ -15,11 +15,12 @@
 //! # Witness journal
 //!
 //! The witness journal holds a complete snapshot of every applied batch, so [`Db::rewind`] can
-//! restore any retained applied state (history is bounded only by [`Db::prune`]). Reopen
-//! and rewind restore the db's in-memory state from an entry. The Merkle is rebuilt from the
-//! stored pinned nodes and operation, and the commit fields are decoded from the operation. An
-//! entry that cannot rebuild surfaces as [`Error::DataCorrupted`]. The witness is also what lets
-//! compact nodes serve compact sync without retaining historical operations.
+//! restore any retained applied state (history is bounded only by [`Db::prune`]). Reopen and
+//! rewind restore the db's in-memory state from an entry by rebuilding the Merkle from its
+//! pinned nodes and commit operation. An entry whose commit or pinned nodes fail to decode fails
+//! the open with [`Error::Journal`]; one that decodes but cannot rebuild surfaces as
+//! [`Error::DataCorrupted`]. The witness is also what lets compact nodes serve compact sync
+//! without retaining historical operations.
 //!
 //! # Inactivity floor
 //!
@@ -40,7 +41,6 @@ use crate::{
         sync::{CompactTarget, FeedbackTx, Request, Response, Source},
     },
 };
-use commonware_codec::{EncodeShared, Read};
 use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
@@ -54,25 +54,22 @@ type MerkleizedParent<F, H, O, S> = Arc<MerkleizedBatch<F, DigestOf<H>, O, S>>;
 ///
 /// Use [`crate::qmdb::keyless::CompactDb`] or [`crate::qmdb::immutable::CompactDb`] rather than
 /// naming this type directly.
-pub struct Db<F, E, O, H, C, S: Strategy>
+pub struct Db<F, E, O, H, S: Strategy>
 where
     F: Family,
     E: Context,
     O: Variant<F>,
     H: Hasher,
 {
-    commit_codec_config: C,
-    store: witness::Store<E, F, O, H, S>,
+    store: witness::Store<F, E, O, H, S>,
 }
 
-impl<F, E, O, H, C, S: Strategy> std::fmt::Debug for Db<F, E, O, H, C, S>
+impl<F, E, O, H, S: Strategy> std::fmt::Debug for Db<F, E, O, H, S>
 where
     F: Family,
     E: Context,
     O: Variant<F>,
     H: Hasher,
-    O: EncodeShared + Read<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Db")
@@ -99,7 +96,7 @@ where
 #[derive(Clone)]
 pub struct MerkleizedBatch<F: Family, D: Digest, O: Variant<F>, S: Strategy> {
     merkle_batch: Arc<batch::MerkleizedBatch<F, D, S>>,
-    commit_metadata: Option<O::Metadata>,
+    commit: O,
     parent: Option<Weak<Self>>,
     bounds: Bounds<F, D>,
 }
@@ -145,7 +142,7 @@ where
     O: Variant<F>,
     S: Strategy,
 {
-    fn new<E, C>(db: &Db<F, E, O, H, C, S>, base: Commitment<F, H::Digest>) -> Self
+    fn new<E>(db: &Db<F, E, O, H, S>, base: Commitment<F, H::Digest>) -> Self
     where
         E: Context,
     {
@@ -179,15 +176,14 @@ where
         skip_all,
         fields(variant = O::NAME)
     )]
-    pub async fn merkleize<E, C>(
+    pub async fn merkleize<E>(
         self,
-        db: &Db<F, E, O, H, C, S>,
+        db: &Db<F, E, O, H, S>,
         metadata: Option<O::Metadata>,
         inactivity_floor: Location<F>,
     ) -> Arc<MerkleizedBatch<F, H::Digest, O, S>>
     where
         E: Context,
-        O: EncodeShared,
     {
         let live_ancestors: Vec<_> =
             batch_chain::parent_and_ancestors(self.parent.as_ref(), |parent| parent.ancestors())
@@ -197,10 +193,11 @@ where
             live_ancestors.last().map(|oldest| oldest.bounds.base),
         );
 
+        let commit = O::commit_op(metadata, inactivity_floor);
         let mutations = O::into_ops(self.mutations);
         let mut ops = Vec::with_capacity(mutations.len() + 1);
         ops.extend(mutations);
-        ops.push(O::commit_op(metadata.clone(), inactivity_floor));
+        ops.push(commit.clone());
 
         let total_size = self.base.size + ops.len() as u64;
         let inactive_peaks = F::inactive_peaks(total_size, inactivity_floor);
@@ -221,7 +218,7 @@ where
 
         Arc::new(MerkleizedBatch {
             merkle_batch: merkle,
-            commit_metadata: metadata,
+            commit,
             parent: self.parent.as_ref().map(Arc::downgrade),
             bounds: Bounds {
                 base: self.base,
@@ -234,20 +231,18 @@ where
     }
 }
 
-impl<F, E, O, H, C, S> Db<F, E, O, H, C, S>
+impl<F, E, O, H, S> Db<F, E, O, H, S>
 where
     F: Family,
     E: Context,
     O: Variant<F>,
     H: Hasher,
     S: Strategy,
-    O: EncodeShared + Read<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
 {
     /// Returns a compact db initialized from `cfg`.
-    pub async fn init(context: E, cfg: Config<C, S>) -> Result<Self, Error<F>> {
+    pub async fn init(context: E, cfg: Config<O::Cfg, S>) -> Result<Self, Error<F>> {
         let journal = variable::Journal::init(context.child("witness"), cfg.witness).await?;
-        Self::init_from_journal(cfg.strategy, journal, cfg.commit_codec_config).await
+        Self::init_from_journal(cfg.strategy, journal).await
     }
 
     /// Build a compact db from state fetched by the sync engine.
@@ -258,8 +253,7 @@ where
     /// rejected.
     pub(crate) fn init_from_sync(
         strategy: S,
-        journal: witness::Journal<E, F, H::Digest>,
-        commit_codec_config: C,
+        journal: witness::Journal<E, F, H::Digest, O>,
         last_commit_loc: Location<F>,
         pinned_nodes: Vec<H::Digest>,
         last_commit_op: O,
@@ -271,10 +265,7 @@ where
             pinned_nodes,
             last_commit_op,
         )?;
-        Ok(Self {
-            commit_codec_config,
-            store,
-        })
+        Ok(Self { store })
     }
 
     /// Open a compact db from its witness journal, rebuilding the Merkle from the tip witness.
@@ -284,14 +275,10 @@ where
     #[boxed]
     pub(crate) async fn init_from_journal(
         strategy: S,
-        journal: witness::Journal<E, F, H::Digest>,
-        commit_codec_config: C,
+        journal: witness::Journal<E, F, H::Digest, O>,
     ) -> Result<Self, Error<F>> {
-        let store = witness::Store::init(journal, strategy, &commit_codec_config).await?;
-        Ok(Self {
-            commit_codec_config,
-            store,
-        })
+        let store = witness::Store::init(journal, strategy).await?;
+        Ok(Self { store })
     }
 
     /// Return the root of the db.
@@ -311,7 +298,7 @@ where
 
     /// Get the metadata associated with the last commit.
     pub fn get_metadata(&self) -> Option<O::Metadata> {
-        self.store.tip().metadata.clone()
+        self.store.tip().metadata().cloned()
     }
 
     /// Return the compact-sync target described by the current witness.
@@ -336,7 +323,7 @@ where
     pub fn to_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, O, S>> {
         Arc::new(MerkleizedBatch {
             merkle_batch: self.store.merkle().to_batch(),
-            commit_metadata: self.get_metadata(),
+            commit: self.store.tip().witness.commit.clone(),
             parent: None,
             bounds: Bounds::from_db(self.commitment(), self.inactivity_floor_loc()),
         })
@@ -387,7 +374,7 @@ where
             .store
             .apply(
                 &batch.merkle_batch,
-                batch.commit_metadata.clone(),
+                batch.commit.clone(),
                 batch.bounds.inactivity_floor,
             )
             .await?;
@@ -455,7 +442,7 @@ where
         fields(variant = O::NAME)
     )]
     pub async fn rewind(mut self, target: Location<F>) -> Result<Self, Error<F>> {
-        self.store = self.store.rewind(target, &self.commit_codec_config).await?;
+        self.store = self.store.rewind(target).await?;
         Ok(self)
     }
 
@@ -493,20 +480,18 @@ where
 pub fn initial_root<F, O, H>() -> H::Digest
 where
     F: Family,
-    O: Variant<F> + EncodeShared,
+    O: Variant<F>,
     H: Hasher,
 {
     qmdb::single_operation_root::<F, H>(&O::commit_op(None, Location::new(0)))
 }
 
-impl<F, E, O, H, C, S> Source for Db<F, E, O, H, C, S>
+impl<F, E, O, H, S> Source for Db<F, E, O, H, S>
 where
     F: Family,
     E: Context,
     O: Variant<F>,
     H: Hasher,
-    O: EncodeShared + Read<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
     S: Strategy,
 {
     type Family = F;
@@ -544,7 +529,7 @@ pub(crate) mod tests {
 
     /// A compact db variant under test: its values and mutations derive from a seed.
     pub(crate) trait TestVariant:
-        Variant<mmr::Family, Metadata: PartialEq + std::fmt::Debug> + EncodeShared + Read<Cfg = ()>
+        Variant<mmr::Family, Metadata: PartialEq + std::fmt::Debug, Cfg = ()>
     {
         /// The value (and commit metadata) for `seed`.
         fn value(seed: u64) -> Self::Metadata;
@@ -553,7 +538,7 @@ pub(crate) mod tests {
         fn mutate(batch: TestBatch<Self>, seed: u64) -> TestBatch<Self>;
     }
 
-    pub(crate) type TestDb<O> = Db<mmr::Family, deterministic::Context, O, Sha256, (), Sequential>;
+    pub(crate) type TestDb<O> = Db<mmr::Family, deterministic::Context, O, Sha256, Sequential>;
     pub(crate) type TestBatch<O> = UnmerkleizedBatch<mmr::Family, Sha256, O, Sequential>;
 
     /// Lets tests write `batch.mutate(seed)` for any variant.
@@ -585,17 +570,15 @@ pub(crate) mod tests {
         context: deterministic::Context,
         partition: &str,
     ) -> TestDb<O> {
-        let journal = open_witness_journal(context.child("witness"), partition).await;
-        Db::init_from_journal(Sequential, journal, ())
-            .await
-            .unwrap()
+        let journal = open_witness_journal::<O>(context.child("witness"), partition).await;
+        Db::init_from_journal(Sequential, journal).await.unwrap()
     }
 
     /// Open the witness journal for `partition`; `open_db` and the tip-corrupting tests share it.
-    async fn open_witness_journal(
+    async fn open_witness_journal<O: TestVariant>(
         context: deterministic::Context,
         partition: &str,
-    ) -> witness::Journal<deterministic::Context, mmr::Family, Digest> {
+    ) -> witness::Journal<deterministic::Context, mmr::Family, Digest, O> {
         let cfg = witness_config(partition, &context);
         witness::Journal::init(context, cfg).await.unwrap()
     }
@@ -669,7 +652,7 @@ pub(crate) mod tests {
 
     /// A compact db over a delayed-sync storage backend.
     type DelayedDb<O> =
-        Db<mmr::Family, DelayedSyncContext<deterministic::Context>, O, Sha256, (), Sequential>;
+        Db<mmr::Family, DelayedSyncContext<deterministic::Context>, O, Sha256, Sequential>;
 
     /// Open a [DelayedDb] whose blob syncs park on `pending`.
     ///
@@ -688,7 +671,7 @@ pub(crate) mod tests {
         };
         async move {
             let journal = witness::Journal::init(context.child("witness"), witness_cfg).await?;
-            DelayedDb::<O>::init_from_journal(Sequential, journal, ()).await
+            DelayedDb::<O>::init_from_journal(Sequential, journal).await
         }
     }
 
@@ -968,7 +951,7 @@ pub(crate) mod tests {
             drop(db);
 
             // The journal holds exactly the bootstrap entry and the one durable witness.
-            let journal = open_witness_journal(ctx.child("probe"), partition).await;
+            let journal = open_witness_journal::<O>(ctx.child("probe"), partition).await;
             assert_eq!(journal.size(), 2);
             drop(journal);
 
@@ -1175,7 +1158,7 @@ pub(crate) mod tests {
                 source.target()
             };
             let (_, size_b, pinned_b) = {
-                let journal = open_witness_journal(context.child("src_tip"), src).await;
+                let journal = open_witness_journal::<O>(context.child("src_tip"), src).await;
                 witness::tests::tip(&journal).await
             };
             assert_eq!(size_b, target_b.size);
@@ -1195,11 +1178,10 @@ pub(crate) mod tests {
 
             // Import state B over the destination and make it durable through a pipelined sync.
             {
-                let journal = open_witness_journal(context.child("import"), dst).await;
+                let journal = open_witness_journal::<O>(context.child("import"), dst).await;
                 let imported = TestDb::<O>::init_from_sync(
                     Sequential,
                     journal,
-                    (),
                     size_b - 1,
                     pinned_b,
                     O::commit_op(Some(meta_b.clone()), Location::new(0)),
@@ -1694,11 +1676,10 @@ pub(crate) mod tests {
 
             // Import state B over the destination and make it durable with commit (not sync).
             {
-                let journal = open_witness_journal(context.child("import"), dst).await;
+                let journal = open_witness_journal::<O>(context.child("import"), dst).await;
                 let imported = TestDb::<O>::init_from_sync(
                     Sequential,
                     journal,
-                    (),
                     target_b.size - 1,
                     pinned_b,
                     O::commit_op(Some(meta_b.clone()), Location::new(0)),
@@ -1770,11 +1751,10 @@ pub(crate) mod tests {
             // Import state B over the destination and apply a batch on top of it with no
             // durability operation in between.
             let target_c = {
-                let journal = open_witness_journal(context.child("import"), dst).await;
+                let journal = open_witness_journal::<O>(context.child("import"), dst).await;
                 let imported = TestDb::<O>::init_from_sync(
                     Sequential,
                     journal,
-                    (),
                     target_b.size - 1,
                     pinned_b,
                     O::commit_op(Some(meta_b.clone()), Location::new(0)),
@@ -1820,13 +1800,14 @@ pub(crate) mod tests {
             drop(db);
 
             // Corrupt the entry structurally. An extra pinned node cannot rebuild the Merkle.
-            let journal = open_witness_journal(context.child("tamper"), partition).await;
-            let (op_bytes, size, mut pinned_nodes) = witness::tests::tip(&journal).await;
+            let journal = open_witness_journal::<O>(context.child("tamper"), partition).await;
+            let (commit, size, mut pinned_nodes) = witness::tests::tip(&journal).await;
             pinned_nodes.push(Sha256::fill(0xff));
-            witness::tests::overwrite_tip(journal, op_bytes, size, pinned_nodes).await;
+            witness::tests::overwrite_tip(journal, commit, size, pinned_nodes).await;
 
-            let journal = open_witness_journal(context.child("reopen_witness"), partition).await;
-            let reopened = TestDb::<O>::init_from_journal(Sequential, journal, ()).await;
+            let journal =
+                open_witness_journal::<O>(context.child("reopen_witness"), partition).await;
+            let reopened = TestDb::<O>::init_from_journal(Sequential, journal).await;
             assert!(matches!(reopened, Err(Error::DataCorrupted(_))));
         });
     }
@@ -1854,7 +1835,7 @@ pub(crate) mod tests {
             drop(db);
 
             // Corrupt the rewind target's entry (the journal holds bootstrap, target, tip).
-            let mut journal = open_witness_journal(context.child("corrupt"), partition).await;
+            let mut journal = open_witness_journal::<O>(context.child("corrupt"), partition).await;
             journal = witness::tests::corrupt_entry(journal, 1, |entry| {
                 entry.pinned_nodes.push(Sha256::fill(0xff));
             })
@@ -1862,8 +1843,8 @@ pub(crate) mod tests {
             drop(journal);
 
             // The tip entry is intact, so reopen succeeds.
-            let journal = open_witness_journal(context.child("reopen"), partition).await;
-            let reopened = TestDb::<O>::init_from_journal(Sequential, journal, ())
+            let journal = open_witness_journal::<O>(context.child("reopen"), partition).await;
+            let reopened = TestDb::<O>::init_from_journal(Sequential, journal)
                 .await
                 .unwrap();
             assert_eq!(reopened.target(), tip_target);
@@ -1875,8 +1856,8 @@ pub(crate) mod tests {
             ));
 
             // The newer history survives: reopen still lands on the original tip.
-            let journal = open_witness_journal(context.child("reopen2"), partition).await;
-            let reopened = TestDb::<O>::init_from_journal(Sequential, journal, ())
+            let journal = open_witness_journal::<O>(context.child("reopen2"), partition).await;
+            let reopened = TestDb::<O>::init_from_journal(Sequential, journal)
                 .await
                 .unwrap();
             assert_eq!(reopened.target(), tip_target);
@@ -1899,14 +1880,15 @@ pub(crate) mod tests {
 
             // Simulate a crash between an import's journal clear and its entry append: the
             // journal is empty but its size is nonzero.
-            let journal = open_witness_journal(context.child("clear"), partition).await;
+            let journal = open_witness_journal::<O>(context.child("clear"), partition).await;
             let size = journal.size();
             let journal = journal.clear_to_size(size.max(1)).await.unwrap();
             drop(journal);
 
             // Reopen must fail rather than bootstrap a fresh db.
-            let journal = open_witness_journal(context.child("reopen_witness"), partition).await;
-            let reopened = TestDb::<O>::init_from_journal(Sequential, journal, ()).await;
+            let journal =
+                open_witness_journal::<O>(context.child("reopen_witness"), partition).await;
+            let reopened = TestDb::<O>::init_from_journal(Sequential, journal).await;
             assert!(matches!(reopened, Err(Error::Journal(_))));
         });
     }
@@ -1926,18 +1908,48 @@ pub(crate) mod tests {
             let oversized_floor = Location::new(10);
 
             // Overwrite the persisted commit op with a floor beyond its own commit location.
-            let journal = open_witness_journal(context.child("tamper"), partition).await;
+            let journal = open_witness_journal::<O>(context.child("tamper"), partition).await;
             let (_, size, pinned_nodes) = witness::tests::tip(&journal).await;
-            let bad_op = O::commit_op(Some(O::value(11)), oversized_floor)
-                .encode()
-                .to_vec();
+            let bad_op = O::commit_op(Some(O::value(11)), oversized_floor);
             witness::tests::overwrite_tip(journal, bad_op, size, pinned_nodes).await;
 
-            let journal = open_witness_journal(context.child("reopen_witness"), partition).await;
-            let reopened = TestDb::<O>::init_from_journal(Sequential, journal, ()).await;
+            let journal =
+                open_witness_journal::<O>(context.child("reopen_witness"), partition).await;
+            let reopened = TestDb::<O>::init_from_journal(Sequential, journal).await;
             assert!(matches!(
                 reopened,
                 Err(Error::DataCorrupted("invalid compact witness"))
+            ));
+        });
+    }
+
+    pub(crate) fn test_compact_reopen_rejects_non_commit_tip<O: TestVariant>() {
+        deterministic::Runner::default().start(|context| async move {
+            let partition = "compact-non-commit-tip";
+            let db = open_db::<O>(context.child("db"), partition).await;
+            let batch = db
+                .new_batch()
+                .mutate(7)
+                .merkleize(&db, Some(O::value(11)), Location::new(1))
+                .await;
+            let (db, _) = db.apply_batch(batch).await.unwrap();
+            let db = db.sync().await.unwrap();
+            let non_commit = O::into_ops(db.new_batch().mutate(7).mutations)
+                .next()
+                .unwrap();
+            drop(db);
+
+            // Overwrite the persisted commit op with a mutation.
+            let journal = open_witness_journal::<O>(context.child("tamper"), partition).await;
+            let (_, size, pinned_nodes) = witness::tests::tip(&journal).await;
+            witness::tests::overwrite_tip(journal, non_commit, size, pinned_nodes).await;
+
+            let journal =
+                open_witness_journal::<O>(context.child("reopen_witness"), partition).await;
+            let reopened = TestDb::<O>::init_from_journal(Sequential, journal).await;
+            assert!(matches!(
+                reopened,
+                Err(Error::DataCorrupted("last operation was not a commit"))
             ));
         });
     }
@@ -1959,13 +1971,14 @@ pub(crate) mod tests {
             // Flip one pinned-node digest. There is no stored proof to cross-check against, so the
             // rebuild succeeds and yields a different root, the same way a bit-flipped replay
             // journal reopens with a different root.
-            let journal = open_witness_journal(context.child("tamper"), partition).await;
-            let (op_bytes, size, mut pinned_nodes) = witness::tests::tip(&journal).await;
+            let journal = open_witness_journal::<O>(context.child("tamper"), partition).await;
+            let (commit, size, mut pinned_nodes) = witness::tests::tip(&journal).await;
             pinned_nodes[0] = Sha256::fill(0xff);
-            witness::tests::overwrite_tip(journal, op_bytes, size, pinned_nodes).await;
+            witness::tests::overwrite_tip(journal, commit, size, pinned_nodes).await;
 
-            let journal = open_witness_journal(context.child("reopen_witness"), partition).await;
-            let reopened = TestDb::<O>::init_from_journal(Sequential, journal, ())
+            let journal =
+                open_witness_journal::<O>(context.child("reopen_witness"), partition).await;
+            let reopened = TestDb::<O>::init_from_journal(Sequential, journal)
                 .await
                 .unwrap();
             assert_ne!(reopened.target(), tampered_target);
@@ -2110,10 +2123,10 @@ pub(crate) mod tests {
 
             // Simulate the crash window: append an entry ahead of the tip without syncing it,
             // then drop the journal. The unsynced tail must not survive reopen.
-            let journal = open_witness_journal(context.child("crash"), partition).await;
-            let (op_bytes, mut size, pinned_nodes) = witness::tests::tip(&journal).await;
+            let journal = open_witness_journal::<O>(context.child("crash"), partition).await;
+            let (commit, mut size, pinned_nodes) = witness::tests::tip(&journal).await;
             size += 2;
-            witness::tests::append_unsynced(journal, op_bytes, size, pinned_nodes).await;
+            witness::tests::append_unsynced(journal, commit, size, pinned_nodes).await;
 
             // Reopen must drop the unsynced entry and recover state A.
             let reopened = open_db::<O>(context.child("reopen"), partition).await;
@@ -2176,9 +2189,7 @@ pub(crate) mod tests {
             let journal = witness::Journal::init(context.child("witness"), witness_cfg.clone())
                 .await
                 .unwrap();
-            let mut db: TestDb<O> = Db::init_from_journal(Sequential, journal, ())
-                .await
-                .unwrap();
+            let mut db: TestDb<O> = Db::init_from_journal(Sequential, journal).await.unwrap();
 
             // Commit A, B, C.
             let mut sizes = Vec::new();
@@ -2207,9 +2218,7 @@ pub(crate) mod tests {
             )
             .await
             .unwrap();
-            let db: TestDb<O> = Db::init_from_journal(Sequential, journal, ())
-                .await
-                .unwrap();
+            let db: TestDb<O> = Db::init_from_journal(Sequential, journal).await.unwrap();
             let db = db.rewind(sizes[1]).await.unwrap();
             assert_eq!(db.size(), sizes[1]);
             assert_eq!(db.get_metadata(), Some(O::value(22)));
@@ -2459,6 +2468,7 @@ pub(crate) mod tests {
                 test_compact_rewind_rejects_corrupt_target_entry,
                 test_compact_reopen_rejects_interrupted_import,
                 test_compact_reopen_rejects_commit_floor_beyond_tip,
+                test_compact_reopen_rejects_non_commit_tip,
                 test_compact_reopen_rejects_tampered_pinned_nodes,
                 test_compact_rewind_to_current_is_noop,
                 test_compact_prune_past_tip_keeps_tip,

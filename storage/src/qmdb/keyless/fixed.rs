@@ -27,7 +27,7 @@ pub type Db<F, E, V, H, S> =
     super::Keyless<F, E, FixedEncoding<V>, fixed::Journal<E, Operation<F, V>>, H, S>;
 
 /// A compact keyless authenticated db for fixed-size data.
-pub type CompactDb<F, E, V, H, S> = super::CompactDb<F, E, FixedEncoding<V>, H, (), S>;
+pub type CompactDb<F, E, V, H, S> = super::CompactDb<F, E, FixedEncoding<V>, H, S>;
 
 type Journal<F, E, V, H, S> =
     authenticated::Journal<F, E, fixed::Journal<E, Operation<F, V>>, H, S>;
@@ -137,7 +137,6 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             },
-            commit_codec_config: (),
         };
         TestCompactDb::init(context, cfg).await.unwrap()
     }

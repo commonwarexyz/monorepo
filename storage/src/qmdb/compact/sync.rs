@@ -10,26 +10,24 @@ use crate::{
         sync::{self, journal::Memory},
     },
 };
-use commonware_codec::{EncodeShared, Read};
+use commonware_codec::Read;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use commonware_utils::range::NonEmptyRange;
 use core::num::NonZeroU64;
 
-impl<F, E, O, H, C, S> sync::Database for Db<F, E, O, H, C, S>
+impl<F, E, O, H, S> sync::Database for Db<F, E, O, H, S>
 where
     F: Family,
     E: Context,
     O: Variant<F>,
     H: Hasher,
     S: Strategy,
-    O: EncodeShared + Read<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
 {
     type Family = F;
     type Op = O;
     type Journal = Memory<F, E, O>;
-    type Config = Config<C, S>;
+    type Config = Config<<O as Read>::Cfg, S>;
     type Digest = H::Digest;
     type Context = E;
     type Hasher = H;
@@ -57,7 +55,6 @@ where
         Self::init_from_sync(
             config.strategy,
             journal,
-            config.commit_codec_config,
             last_commit_loc,
             // None only happens at genesis, where nothing is pinned.
             pinned_nodes.unwrap_or_default(),

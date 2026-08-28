@@ -9,7 +9,7 @@ use crate::stateful::db::{
     BatchContext, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb, SyncEngineConfig,
     Unmerkleized as UnmerkleizedTrait, sync_compact_db,
 };
-use commonware_codec::{EncodeShared, Read as CodecRead};
+use commonware_codec::Read as CodecRead;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use commonware_runtime::{Handle, Spawner};
@@ -26,27 +26,25 @@ use commonware_utils::channel::mpsc;
 use std::{ops::Deref, sync::Arc};
 
 /// Wraps a compact batch before merkleization.
-pub struct CompactUnmerkleized<F, E, O, H, C, S>
+pub struct CompactUnmerkleized<F, E, O, H, S>
 where
     F: Family,
     E: Context,
-    O: Variant<F> + EncodeShared + CodecRead<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
+    O: Variant<F>,
     H: Hasher,
     S: Strategy,
 {
     pub(super) batch: UnmerkleizedBatch<F, H, O, S>,
-    db: Shared<Db<F, E, O, H, C, S>>,
+    db: Shared<Db<F, E, O, H, S>>,
     metadata: Option<O::Metadata>,
     inactivity_floor: Option<Location<F>>,
 }
 
-impl<F, E, O, H, C, S> Deref for CompactUnmerkleized<F, E, O, H, C, S>
+impl<F, E, O, H, S> Deref for CompactUnmerkleized<F, E, O, H, S>
 where
     F: Family,
     E: Context,
-    O: Variant<F> + EncodeShared + CodecRead<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
+    O: Variant<F>,
     H: Hasher,
     S: Strategy,
 {
@@ -57,12 +55,11 @@ where
     }
 }
 
-impl<F, E, O, H, C, S> CompactUnmerkleized<F, E, O, H, C, S>
+impl<F, E, O, H, S> CompactUnmerkleized<F, E, O, H, S>
 where
     F: Family,
     E: Context,
-    O: Variant<F> + EncodeShared + CodecRead<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
+    O: Variant<F>,
     H: Hasher,
     S: Strategy,
 {
@@ -79,16 +76,15 @@ where
     }
 }
 
-impl<F, E, O, H, C, S> UnmerkleizedTrait for CompactUnmerkleized<F, E, O, H, C, S>
+impl<F, E, O, H, S> UnmerkleizedTrait for CompactUnmerkleized<F, E, O, H, S>
 where
     F: Family,
     E: Context,
-    O: Variant<F> + EncodeShared + CodecRead<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
+    O: Variant<F>,
     H: Hasher,
     S: Strategy,
 {
-    type Merkleized = CompactMerkleized<F, E, O, H, C, S>;
+    type Merkleized = CompactMerkleized<F, E, O, H, S>;
     type Error = Error<F>;
 
     async fn merkleize(self) -> Result<Self::Merkleized, Error<F>> {
@@ -109,25 +105,23 @@ where
 }
 
 /// Wraps a compact batch after merkleization.
-pub struct CompactMerkleized<F, E, O, H, C, S>
+pub struct CompactMerkleized<F, E, O, H, S>
 where
     F: Family,
     E: Context,
-    O: Variant<F> + EncodeShared + CodecRead<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
+    O: Variant<F>,
     H: Hasher,
     S: Strategy,
 {
     inner: Arc<MerkleizedBatch<F, H::Digest, O, S>>,
-    db: Shared<Db<F, E, O, H, C, S>>,
+    db: Shared<Db<F, E, O, H, S>>,
 }
 
-impl<F, E, O, H, C, S> Clone for CompactMerkleized<F, E, O, H, C, S>
+impl<F, E, O, H, S> Clone for CompactMerkleized<F, E, O, H, S>
 where
     F: Family,
     E: Context,
-    O: Variant<F> + EncodeShared + CodecRead<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
+    O: Variant<F>,
     H: Hasher,
     S: Strategy,
 {
@@ -139,12 +133,11 @@ where
     }
 }
 
-impl<F, E, O, H, C, S> Deref for CompactMerkleized<F, E, O, H, C, S>
+impl<F, E, O, H, S> Deref for CompactMerkleized<F, E, O, H, S>
 where
     F: Family,
     E: Context,
-    O: Variant<F> + EncodeShared + CodecRead<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
+    O: Variant<F>,
     H: Hasher,
     S: Strategy,
 {
@@ -155,17 +148,16 @@ where
     }
 }
 
-impl<F, E, O, H, C, S> MerkleizedTrait for CompactMerkleized<F, E, O, H, C, S>
+impl<F, E, O, H, S> MerkleizedTrait for CompactMerkleized<F, E, O, H, S>
 where
     F: Family,
     E: Context,
-    O: Variant<F> + EncodeShared + CodecRead<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
+    O: Variant<F>,
     H: Hasher,
     S: Strategy,
 {
     type Digest = H::Digest;
-    type Unmerkleized = CompactUnmerkleized<F, E, O, H, C, S>;
+    type Unmerkleized = CompactUnmerkleized<F, E, O, H, S>;
 
     fn root(&self) -> H::Digest {
         self.inner.root()
@@ -181,19 +173,18 @@ where
     }
 }
 
-impl<F, E, O, H, C, S> ManagedDb<E> for Db<F, E, O, H, C, S>
+impl<F, E, O, H, S> ManagedDb<E> for Db<F, E, O, H, S>
 where
     F: Family,
     E: Context,
-    O: Variant<F> + EncodeShared + CodecRead<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
+    O: Variant<F>,
     H: Hasher,
     S: Strategy,
 {
-    type Unmerkleized = CompactUnmerkleized<F, E, O, H, C, S>;
-    type Merkleized = CompactMerkleized<F, E, O, H, C, S>;
+    type Unmerkleized = CompactUnmerkleized<F, E, O, H, S>;
+    type Merkleized = CompactMerkleized<F, E, O, H, S>;
     type Error = Error<F>;
-    type Config = Config<C, S>;
+    type Config = Config<<O as CodecRead>::Cfg, S>;
     type SyncTarget = sync::CompactTarget<F, H::Digest>;
 
     async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
@@ -250,12 +241,11 @@ where
     }
 }
 
-impl<F, E, O, H, C, S, R> StateSyncDb<E, R> for Db<F, E, O, H, C, S>
+impl<F, E, O, H, S, R> StateSyncDb<E, R> for Db<F, E, O, H, S>
 where
     F: Family,
     E: Context + Spawner,
-    O: Variant<F> + EncodeShared + CodecRead<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
+    O: Variant<F>,
     H: Hasher,
     S: Strategy,
     R: sync::SourceFor<Self>,

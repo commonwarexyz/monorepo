@@ -29,7 +29,7 @@ pub type Db<F, E, K, V, H, T, S> =
     Immutable<F, E, K, VariableEncoding<V>, variable::Journal<E, Operation<F, K, V>>, H, T, S>;
 
 /// Type alias for the variable-size compact immutable db.
-pub type CompactDb<F, E, K, V, H, C, S> = super::CompactDb<F, E, K, VariableEncoding<V>, H, C, S>;
+pub type CompactDb<F, E, K, V, H, S> = super::CompactDb<F, E, K, VariableEncoding<V>, H, S>;
 
 type Journal<F, E, K, V, H, S> =
     authenticated::Journal<F, E, variable::Journal<E, Operation<F, K, V>>, H, S>;
@@ -124,18 +124,17 @@ mod tests {
 
     async fn open_compact<F: Family>(
         context: deterministic::Context,
-    ) -> CompactDb<F, deterministic::Context, Digest, Digest, Sha256, ((), ()), Sequential> {
+    ) -> CompactDb<F, deterministic::Context, Digest, Digest, Sha256, Sequential> {
         let cfg = CompactConfig {
             strategy: Sequential,
             witness: crate::journal::contiguous::variable::Config {
                 partition: "compact-immutable-variable-witness".into(),
                 items_per_section: NZU64!(64),
                 compression: None,
-                codec_config: (),
+                codec_config: ((), ()),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             },
-            commit_codec_config: ((), ()),
         };
         CompactDb::init(context, cfg).await.unwrap()
     }

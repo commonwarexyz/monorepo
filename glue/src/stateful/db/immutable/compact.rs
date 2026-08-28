@@ -4,7 +4,7 @@
 //! [`ManagedDb`](crate::stateful::db::ManagedDb) implementation.
 
 use crate::stateful::db::compact::CompactUnmerkleized;
-use commonware_codec::{EncodeShared, Read as CodecRead};
+use commonware_codec::CodecShared;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use commonware_storage::{
@@ -13,7 +13,7 @@ use commonware_storage::{
     qmdb::{any::value::ValueEncoding, immutable::Operation, operation::Key},
 };
 
-impl<F, E, K, V, H, C, S> CompactUnmerkleized<F, E, Operation<F, K, V>, H, C, S>
+impl<F, E, K, V, H, S> CompactUnmerkleized<F, E, Operation<F, K, V>, H, S>
 where
     F: Family,
     E: Context,
@@ -21,8 +21,7 @@ where
     V: ValueEncoding,
     H: Hasher,
     S: Strategy,
-    Operation<F, K, V>: EncodeShared + CodecRead<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
+    Operation<F, K, V>: CodecShared,
 {
     /// Set `key` to `value` in the speculative batch.
     pub fn set(mut self, key: K, value: V::Value) -> Self {
@@ -66,7 +65,6 @@ mod tests {
         Digest,
         Vec<u8>,
         Sha256,
-        ((), (commonware_codec::RangeCfg<usize>, ())),
         Sequential,
     >;
 
@@ -81,7 +79,6 @@ mod tests {
                 page_cache: CacheRef::from_pooler(context, NZU16!(101), NZUsize!(11)),
                 write_buffer: NZUsize!(1024),
             },
-            commit_codec_config: (),
         }
     }
 

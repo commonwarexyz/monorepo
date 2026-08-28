@@ -9,13 +9,17 @@ use crate::{
     merkle::{Family, Location},
     qmdb::{any::value::ValueEncoding, compact, operation::Key},
 };
+use commonware_codec::CodecShared;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use std::collections::BTreeMap;
 
 impl<F: Family, K: Key, V: ValueEncoding> compact::sealed::Sealed for Operation<F, K, V> {}
 
-impl<F: Family, K: Key, V: ValueEncoding> compact::Variant<F> for Operation<F, K, V> {
+impl<F: Family, K: Key, V: ValueEncoding> compact::Variant<F> for Operation<F, K, V>
+where
+    Self: CodecShared,
+{
     type Metadata = V::Value;
     type Mutations = BTreeMap<K, V::Value>;
     const NAME: &'static str = "immutable";
@@ -24,9 +28,9 @@ impl<F: Family, K: Key, V: ValueEncoding> compact::Variant<F> for Operation<F, K
         Self::Commit(metadata, inactivity_floor_loc)
     }
 
-    fn into_commit(self) -> Option<(Option<V::Value>, Location<F>)> {
+    fn metadata(&self) -> Option<&V::Value> {
         match self {
-            Self::Commit(metadata, inactivity_floor_loc) => Some((metadata, inactivity_floor_loc)),
+            Self::Commit(metadata, _) => metadata.as_ref(),
             Self::Set(..) => None,
         }
     }
@@ -39,7 +43,7 @@ impl<F: Family, K: Key, V: ValueEncoding> compact::Variant<F> for Operation<F, K
 }
 
 /// An immutable compact db.
-pub type Db<F, E, K, V, H, C, S> = compact::Db<F, E, Operation<F, K, V>, H, C, S>;
+pub type Db<F, E, K, V, H, S> = compact::Db<F, E, Operation<F, K, V>, H, S>;
 
 /// A speculative batch for an immutable compact db.
 pub type UnmerkleizedBatch<F, H, K, V, S> = compact::UnmerkleizedBatch<F, H, Operation<F, K, V>, S>;
@@ -54,6 +58,7 @@ where
     K: Key,
     V: ValueEncoding,
     S: Strategy,
+    Operation<F, K, V>: CodecShared,
 {
     /// Set `key` to `value`. A later `set` of the same key in this batch replaces it.
     pub fn set(mut self, key: K, value: V::Value) -> Self {

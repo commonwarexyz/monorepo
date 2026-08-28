@@ -13,15 +13,13 @@ pub use db::{Db, MerkleizedBatch, UnmerkleizedBatch, initial_root};
 pub use variant::Variant;
 pub(in crate::qmdb) use variant::sealed;
 
-/// Configuration for a compact authenticated db.
+/// Configuration for a compact authenticated db. `C` is the codec config of its operation type,
+/// which the witness journal uses to decode the persisted commit operation.
 #[derive(Clone)]
 pub struct Config<C, S: Strategy> {
     /// Strategy used to parallelize merkleization.
     pub strategy: S,
 
     /// Configuration for the journal that persists the witness.
-    pub witness: variable::Config<()>,
-
-    /// Codec config used to decode the persisted last commit operation on reopen.
-    pub commit_codec_config: C,
+    pub witness: variable::Config<C>,
 }

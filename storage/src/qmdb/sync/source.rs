@@ -823,7 +823,6 @@ pub(crate) mod tests {
             deterministic::Context,
             Vec<u8>,
             Sha256,
-            (commonware_codec::RangeCfg<usize>, ()),
             Rayon,
         >;
         type ImmutableFixedCompactDb = crate::qmdb::immutable::fixed::CompactDb<
@@ -840,7 +839,6 @@ pub(crate) mod tests {
             ShaDigest,
             Vec<u8>,
             Sha256,
-            ((), (commonware_codec::RangeCfg<usize>, ())),
             Rayon,
         >;
 

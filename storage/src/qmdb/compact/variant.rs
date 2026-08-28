@@ -4,17 +4,21 @@ use crate::{
     merkle::{Family, Location},
     qmdb::operation::Floored,
 };
+use commonware_codec::CodecShared;
 
 pub(in crate::qmdb) mod sealed {
     pub trait Sealed {}
 }
 
-/// An operation type a compact db is built over: how its commit operations are built and read,
+/// An operation type a compact db is built over: how its commit operations are built and
+/// inspected,
 /// and how a batch accumulates the operations before its commit.
 ///
-/// [`Db`](super::Db) only builds and reads commit operations and turns a batch's mutations
-/// into operations; everything else about the operation type is opaque to it.
-pub trait Variant<F: Family>: sealed::Sealed + Floored<F> + Clone + Send + Sync + 'static {
+/// [`Db`](super::Db) only builds and inspects commit operations and turns a batch's mutations
+/// into operations; everything else about the operation type is opaque to it. The codec is a
+/// supertrait because the witness journal persists the commit operation itself, decoding it
+/// with [`commonware_codec::Read::Cfg`].
+pub trait Variant<F: Family>: sealed::Sealed + Floored<F> + CodecShared + Clone + 'static {
     /// The commit metadata type.
     type Metadata: Clone + Send + Sync + 'static;
 
@@ -27,9 +31,8 @@ pub trait Variant<F: Family>: sealed::Sealed + Floored<F> + Clone + Send + Sync 
     /// Build a commit operation.
     fn commit_op(metadata: Option<Self::Metadata>, inactivity_floor_loc: Location<F>) -> Self;
 
-    /// Split a commit operation into its metadata and inactivity floor, or `None` for any
-    /// other operation.
-    fn into_commit(self) -> Option<(Option<Self::Metadata>, Location<F>)>;
+    /// The metadata carried by a commit operation; `None` for any other operation.
+    fn metadata(&self) -> Option<&Self::Metadata>;
 
     /// Turn a batch's mutations into operations, in application order.
     fn into_ops(mutations: Self::Mutations) -> impl ExactSizeIterator<Item = Self> + Send;

@@ -9,12 +9,16 @@ use crate::{
     merkle::{Family, Location},
     qmdb::{any::value::ValueEncoding, compact},
 };
+use commonware_codec::CodecShared;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 
 impl<F: Family, V: ValueEncoding> compact::sealed::Sealed for Operation<F, V> {}
 
-impl<F: Family, V: ValueEncoding> compact::Variant<F> for Operation<F, V> {
+impl<F: Family, V: ValueEncoding> compact::Variant<F> for Operation<F, V>
+where
+    Self: CodecShared,
+{
     type Metadata = V::Value;
     type Mutations = Vec<V::Value>;
     const NAME: &'static str = "keyless";
@@ -23,9 +27,9 @@ impl<F: Family, V: ValueEncoding> compact::Variant<F> for Operation<F, V> {
         Self::Commit(metadata, inactivity_floor_loc)
     }
 
-    fn into_commit(self) -> Option<(Option<V::Value>, Location<F>)> {
+    fn metadata(&self) -> Option<&V::Value> {
         match self {
-            Self::Commit(metadata, inactivity_floor_loc) => Some((metadata, inactivity_floor_loc)),
+            Self::Commit(metadata, _) => metadata.as_ref(),
             Self::Append(_) => None,
         }
     }
@@ -36,7 +40,7 @@ impl<F: Family, V: ValueEncoding> compact::Variant<F> for Operation<F, V> {
 }
 
 /// A keyless compact db.
-pub type Db<F, E, V, H, C, S> = compact::Db<F, E, Operation<F, V>, H, C, S>;
+pub type Db<F, E, V, H, S> = compact::Db<F, E, Operation<F, V>, H, S>;
 
 /// A speculative batch for a keyless compact db.
 pub type UnmerkleizedBatch<F, H, V, S> = compact::UnmerkleizedBatch<F, H, Operation<F, V>, S>;
@@ -50,6 +54,7 @@ where
     H: Hasher,
     V: ValueEncoding,
     S: Strategy,
+    Operation<F, V>: CodecShared,
 {
     /// Append `value`.
     pub fn append(mut self, value: V::Value) -> Self {

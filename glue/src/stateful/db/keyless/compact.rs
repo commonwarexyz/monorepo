@@ -4,7 +4,7 @@
 //! [`ManagedDb`](crate::stateful::db::ManagedDb) implementation.
 
 use crate::stateful::db::compact::CompactUnmerkleized;
-use commonware_codec::{EncodeShared, Read as CodecRead};
+use commonware_codec::CodecShared;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use commonware_storage::{
@@ -13,15 +13,14 @@ use commonware_storage::{
     qmdb::{any::value::ValueEncoding, keyless::Operation},
 };
 
-impl<F, E, V, H, C, S> CompactUnmerkleized<F, E, Operation<F, V>, H, C, S>
+impl<F, E, V, H, S> CompactUnmerkleized<F, E, Operation<F, V>, H, S>
 where
     F: Family,
     E: Context,
     V: ValueEncoding,
     H: Hasher,
     S: Strategy,
-    Operation<F, V>: EncodeShared + CodecRead<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
+    Operation<F, V>: CodecShared,
 {
     /// Append a value to the speculative batch.
     pub fn append(mut self, value: V::Value) -> Self {
@@ -57,14 +56,8 @@ mod tests {
     type FixedDb = fixed::CompactDb<mmr::Family, deterministic::Context, U64, Sha256, Sequential>;
     type FullFixedDb =
         storage_keyless::fixed::Db<mmr::Family, deterministic::Context, U64, Sha256, Sequential>;
-    type VariableDb = variable::CompactDb<
-        mmr::Family,
-        deterministic::Context,
-        Vec<u8>,
-        Sha256,
-        (commonware_codec::RangeCfg<usize>, ()),
-        Sequential,
-    >;
+    type VariableDb =
+        variable::CompactDb<mmr::Family, deterministic::Context, Vec<u8>, Sha256, Sequential>;
 
     #[derive(Clone)]
     struct SupersedingCompactSource {
@@ -109,7 +102,6 @@ mod tests {
                 page_cache: CacheRef::from_pooler(context, NZU16!(101), NZUsize!(11)),
                 write_buffer: NZUsize!(1024),
             },
-            commit_codec_config: (),
         }
     }
 

@@ -1,11 +1,11 @@
 //! Shared machinery for the compact-db witness journal.
 //!
 //! The witness journal is the single durable source of truth for a compact database. Each
-//! [`Witness`] is a complete snapshot of one applied state: the encoded commit operation, the
-//! committed size, and the pinned nodes one operation below it. The commit's inclusion proof is
-//! not stored. It is derived from the pinned nodes and the operation when an entry is loaded. On open
-//! and rewind, the in-memory Merkle is rebuilt by appending the commit operation to the pinned nodes,
-//! and a structurally invalid entry fails with [`Error::DataCorrupted`].
+//! [`Witness`] is a complete snapshot of one applied state: the commit operation, the committed
+//! size, and the pinned nodes one operation below it. The commit's inclusion proof is not
+//! stored. It is derived from the pinned nodes and the operation when an entry is loaded. On open
+//! and rewind, the in-memory Merkle is rebuilt by appending the commit operation to the pinned
+//! nodes, and a structurally invalid entry fails with [`Error::DataCorrupted`].
 //!
 //! Entries are strictly increasing in committed size, so a size uniquely identifies
 //! a rewind or prune target. An appended entry becomes durable when the journal `commit` or
@@ -24,7 +24,7 @@ use crate::{
         sync::{CompactTarget, Request, Response},
     },
 };
-use commonware_codec::{Decode as _, EncodeShared, EncodeSize, Read, Write};
+use commonware_codec::{EncodeSize, Read, Write};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_runtime::{Error as RError, Handle};
@@ -33,9 +33,9 @@ use futures::FutureExt as _;
 
 /// An applied state persisted by the witness journal.
 #[derive(Clone)]
-pub(crate) struct Witness<F: Family, D: Digest> {
-    /// The encoded last commit operation at `size - 1`.
-    pub(crate) op_bytes: Vec<u8>,
+pub(crate) struct Witness<F: Family, D: Digest, O> {
+    /// The last commit operation, at `size - 1`.
+    pub(crate) commit: O,
     /// The committed database size.
     pub(crate) size: Location<F>,
     /// Pinned nodes at the commit operation, in the order returned by
@@ -43,29 +43,29 @@ pub(crate) struct Witness<F: Family, D: Digest> {
     pub(crate) pinned_nodes: Vec<D>,
 }
 
-impl<F: Family, D: Digest> EncodeSize for Witness<F, D> {
+impl<F: Family, D: Digest, O: Variant<F>> EncodeSize for Witness<F, D, O> {
     fn encode_size(&self) -> usize {
-        self.op_bytes.encode_size() + self.size.encode_size() + self.pinned_nodes.encode_size()
+        self.commit.encode_size() + self.size.encode_size() + self.pinned_nodes.encode_size()
     }
 }
 
-impl<F: Family, D: Digest> Write for Witness<F, D> {
+impl<F: Family, D: Digest, O: Variant<F>> Write for Witness<F, D, O> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.op_bytes.write(buf);
+        self.commit.write(buf);
         self.size.write(buf);
         self.pinned_nodes.write(buf);
     }
 }
 
-impl<F: Family, D: Digest> Read for Witness<F, D> {
-    type Cfg = ();
+impl<F: Family, D: Digest, O: Variant<F>> Read for Witness<F, D, O> {
+    type Cfg = O::Cfg;
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &()) -> Result<Self, commonware_codec::Error> {
-        let op_bytes = Vec::<u8>::read_cfg(buf, &((..).into(), ()))?;
+    fn read_cfg(buf: &mut impl bytes::Buf, cfg: &O::Cfg) -> Result<Self, commonware_codec::Error> {
+        let commit = O::read_cfg(buf, cfg)?;
         let size = Location::<F>::read_cfg(buf, &())?;
         let pinned_nodes = Vec::<D>::read_cfg(buf, &((..=MAX_PINNED_NODES).into(), ()))?;
         Ok(Self {
-            op_bytes,
+            commit,
             size,
             pinned_nodes,
         })
@@ -73,25 +73,24 @@ impl<F: Family, D: Digest> Read for Witness<F, D> {
 }
 
 #[cfg(feature = "arbitrary")]
-impl<F: Family, D: Digest> arbitrary::Arbitrary<'_> for Witness<F, D>
+impl<F: Family, D: Digest, O> arbitrary::Arbitrary<'_> for Witness<F, D, O>
 where
     D: for<'a> arbitrary::Arbitrary<'a>,
+    O: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
-            op_bytes: u.arbitrary()?,
+            commit: u.arbitrary()?,
             size: Location::new(u.int_in_range(1..=*F::MAX_LEAVES)?),
             pinned_nodes: u.arbitrary()?,
         })
     }
 }
 
-/// A witness with its commit decoded and the root and commit proof derived from it.
+/// A witness whose commit has been checked and whose root and commit proof are derived from it.
 #[derive(Clone)]
-pub(crate) struct VerifiedWitness<F: Family, D: Digest, M> {
-    pub(crate) witness: Witness<F, D>,
-    /// Metadata carried by the commit.
-    pub(crate) metadata: Option<M>,
+pub(crate) struct VerifiedWitness<F: Family, D: Digest, O: Variant<F>> {
+    pub(crate) witness: Witness<F, D, O>,
     /// Inactivity floor declared by the commit. The root is computed over the peaks it leaves
     /// active.
     pub(crate) inactivity_floor_loc: Location<F>,
@@ -102,10 +101,15 @@ pub(crate) struct VerifiedWitness<F: Family, D: Digest, M> {
     pub(crate) proof: Proof<F, D>,
 }
 
-impl<F: Family, D: Digest, M> VerifiedWitness<F, D, M> {
+impl<F: Family, D: Digest, O: Variant<F>> VerifiedWitness<F, D, O> {
     /// The committed size, which also identifies the last commit's location.
     pub(crate) const fn size(&self) -> Location<F> {
         self.witness.size
+    }
+
+    /// The metadata carried by the commit.
+    pub(crate) fn metadata(&self) -> Option<&O::Metadata> {
+        self.witness.commit.metadata()
     }
 
     /// The compact-sync target (root and size) this witness can serve.
@@ -118,7 +122,7 @@ impl<F: Family, D: Digest, M> VerifiedWitness<F, D, M> {
 }
 
 /// The contiguous variable journal that backs a witness [`Store`].
-pub(crate) type Journal<E, F, D> = variable::Journal<E, Witness<F, D>>;
+pub(crate) type Journal<E, F, D, O> = variable::Journal<E, Witness<F, D, O>>;
 
 /// How a persisted witness entry is made durable.
 #[derive(Clone, Copy)]
@@ -145,15 +149,15 @@ enum TipState {
 
 /// The compact Merkle, the contiguous journal of its witnesses, and an in-memory cache of the
 /// tip witness.
-pub(crate) struct Store<E: Context, F: Family, O: Variant<F>, H: Hasher, S: Strategy> {
+pub(crate) struct Store<F: Family, E: Context, O: Variant<F>, H: Hasher, S: Strategy> {
     /// The peak-only Merkle the witnesses describe.
     merkle: compact::Merkle<F, H::Digest, S>,
 
     /// The journal of witnesses, one per applied batch.
-    journal: Journal<E, F, H::Digest>,
+    journal: Journal<E, F, H::Digest, O>,
 
     /// The verified witness at the journal tip.
-    tip_witness: VerifiedWitness<F, H::Digest, O::Metadata>,
+    tip_witness: VerifiedWitness<F, H::Digest, O>,
 
     /// The tip witness's relationship to the journal.
     tip_state: TipState,
@@ -163,24 +167,20 @@ pub(crate) struct Store<E: Context, F: Family, O: Variant<F>, H: Hasher, S: Stra
     pending_sync: Option<SyncCompletion>,
 }
 
-impl<E: Context, F: Family, O: Variant<F>, H: Hasher, S: Strategy> Store<E, F, O, H, S> {
+impl<F: Family, E: Context, O: Variant<F>, H: Hasher, S: Strategy> Store<F, E, O, H, S> {
     /// Open the store for an existing or new compact db.
     ///
     /// A new db starts with one committed operation, the initial `Commit(None, 0)`: it is
     /// inserted into the compact Merkle and persisted as the first witness entry, so reopen and
     /// rewind never see an empty journal. An existing db reloads and re-verifies its tip witness.
     pub(crate) async fn init(
-        mut journal: Journal<E, F, H::Digest>,
+        mut journal: Journal<E, F, H::Digest, O>,
         strategy: S,
-        commit_codec_config: &O::Cfg,
-    ) -> Result<Self, Error<F>>
-    where
-        O: EncodeShared + Read,
-    {
+    ) -> Result<Self, Error<F>> {
         if journal.size() == 0 {
             // Leaf 0 has nothing pinned below it, so the genesis witness needs no tree.
             let genesis = Witness {
-                op_bytes: encode_commit_op::<F, O>(None, Location::new(0)),
+                commit: O::commit_op(None, Location::new(0)),
                 size: Location::new(1),
                 pinned_nodes: Vec::new(),
             };
@@ -188,7 +188,7 @@ impl<E: Context, F: Family, O: Variant<F>, H: Hasher, S: Strategy> Store<E, F, O
             journal = journal.sync().await?;
         }
         let entry = journal.read(journal.size() - 1).await?;
-        let Rebuilt { merkle, tip } = rebuild::<F, O, H, S>(strategy, entry, commit_codec_config)?;
+        let Rebuilt { merkle, tip } = rebuild::<F, O, H, S>(strategy, entry)?;
         Ok(Self {
             merkle,
             journal,
@@ -204,26 +204,23 @@ impl<E: Context, F: Family, O: Variant<F>, H: Hasher, S: Strategy> Store<E, F, O
     /// crash during that replacement leaves a journal that fails to reopen, and re-syncing
     /// recovers it.
     pub(crate) fn from_import(
-        journal: Journal<E, F, H::Digest>,
+        journal: Journal<E, F, H::Digest, O>,
         strategy: S,
         last_commit_loc: Location<F>,
         pinned_nodes: Vec<H::Digest>,
         last_commit_op: O,
-    ) -> Result<Self, Error<F>>
-    where
-        O: EncodeShared,
-    {
-        let Some((metadata, inactivity_floor_loc)) = O::into_commit(last_commit_op) else {
+    ) -> Result<Self, Error<F>> {
+        let Some(inactivity_floor_loc) = last_commit_op.has_floor() else {
             return Err(Error::UnexpectedData(last_commit_loc));
         };
         validate_inactivity_floor(inactivity_floor_loc, last_commit_loc)?;
         let witness = Witness {
-            op_bytes: encode_commit_op::<F, O>(metadata.clone(), inactivity_floor_loc),
+            commit: last_commit_op,
             size: last_commit_loc + 1,
             pinned_nodes,
         };
         let Rebuilt { merkle, tip } =
-            restore::<F, O, H, S>(strategy, witness, metadata, inactivity_floor_loc)?;
+            restore::<F, O, H, S>(strategy, witness, inactivity_floor_loc)?;
         Ok(Self {
             merkle,
             journal,
@@ -234,7 +231,7 @@ impl<E: Context, F: Family, O: Variant<F>, H: Hasher, S: Strategy> Store<E, F, O
     }
 
     /// The cached tip witness.
-    pub(crate) const fn tip(&self) -> &VerifiedWitness<F, H::Digest, O::Metadata> {
+    pub(crate) const fn tip(&self) -> &VerifiedWitness<F, H::Digest, O> {
         &self.tip_witness
     }
 
@@ -276,10 +273,7 @@ impl<E: Context, F: Family, O: Variant<F>, H: Hasher, S: Strategy> Store<E, F, O
         if request.start() < last_commit_loc {
             return Err(crate::journal::Error::ItemPruned(*request.start()).into());
         }
-        let op = O::commit_op(
-            self.tip_witness.metadata.clone(),
-            self.tip_witness.inactivity_floor_loc,
-        );
+        let op = self.tip_witness.witness.commit.clone();
         // After the checks above, `start == last_commit_loc`, so the stored pinned nodes are the
         // pinned nodes for this request.
         Ok(match request {
@@ -295,17 +289,15 @@ impl<E: Context, F: Family, O: Variant<F>, H: Hasher, S: Strategy> Store<E, F, O
         })
     }
 
-    /// Apply `merkle_batch` to the Merkle and journal the witness for the new state, journaling
-    /// a pending compact-sync import first. A batch that adds no leaves leaves the tip unchanged.
+    /// Apply `merkle_batch` to the Merkle and journal the witness for the new state, whose last
+    /// operation is `commit` declaring `inactivity_floor_loc`. A pending compact-sync import is
+    /// journaled first; a batch that adds no leaves leaves the tip unchanged.
     pub(crate) async fn apply(
         mut self,
         merkle_batch: &batch::MerkleizedBatch<F, H::Digest, S>,
-        metadata: Option<O::Metadata>,
+        commit: O,
         inactivity_floor_loc: Location<F>,
-    ) -> Result<Self, Error<F>>
-    where
-        O: EncodeShared,
-    {
+    ) -> Result<Self, Error<F>> {
         debug_assert_eq!(self.tip_witness.size(), self.merkle.leaves());
         self.merkle.apply_batch(merkle_batch)?;
         let verified = match self.tip_witness.size().cmp(&self.merkle.leaves()) {
@@ -314,15 +306,11 @@ impl<E: Context, F: Family, O: Variant<F>, H: Hasher, S: Strategy> Store<E, F, O
                 return Err(Error::DataCorrupted("witness ahead of in-memory state"));
             }
             // Build before pruning because the commit proof needs the unpruned Merkle.
-            Ordering::Less => {
-                let op_bytes = encode_commit_op::<F, O>(metadata.clone(), inactivity_floor_loc);
-                Some(build_witness::<F, H, S, _>(
-                    &self.merkle,
-                    metadata,
-                    inactivity_floor_loc,
-                    op_bytes,
-                )?)
-            }
+            Ordering::Less => Some(build_witness::<F, H, S, O>(
+                &self.merkle,
+                commit,
+                inactivity_floor_loc,
+            )?),
         };
         // Journal the import before the new witness so every applied state has its own entry.
         self = self.flush_import().await?;
@@ -448,14 +436,7 @@ impl<E: Context, F: Family, O: Variant<F>, H: Hasher, S: Strategy> Store<E, F, O
     /// [`merkle::Error::RewindBeyondHistory`]. The target entry is derived before the journal
     /// is truncated, so a corrupt entry fails the rewind with the journal intact. The rewind is
     /// made durable before returning.
-    pub(crate) async fn rewind(
-        mut self,
-        target: Location<F>,
-        commit_codec_config: &O::Cfg,
-    ) -> Result<Self, Error<F>>
-    where
-        O: Read,
-    {
+    pub(crate) async fn rewind(mut self, target: Location<F>) -> Result<Self, Error<F>> {
         if self.tip_witness.size() == target && !self.has_uncommitted_state() {
             self.wait_for_sync().await?;
             return Ok(self);
@@ -466,8 +447,7 @@ impl<E: Context, F: Family, O: Variant<F>, H: Hasher, S: Strategy> Store<E, F, O
             .position_of(target)
             .await?
             .ok_or(Error::Merkle(merkle::Error::RewindBeyondHistory))?;
-        let Rebuilt { merkle, tip } =
-            rebuild::<F, O, H, S>(self.merkle.strategy().clone(), entry, commit_codec_config)?;
+        let Rebuilt { merkle, tip } = rebuild::<F, O, H, S>(self.merkle.strategy().clone(), entry)?;
         self.journal = self.journal.rewind(pos + 1).await?.sync().await?;
         self.merkle = merkle;
         self.pending_sync = None;
@@ -516,7 +496,7 @@ impl<E: Context, F: Family, O: Variant<F>, H: Hasher, S: Strategy> Store<E, F, O
     async fn position_of(
         &self,
         target: Location<F>,
-    ) -> Result<Option<(u64, Witness<F, H::Digest>)>, Error<F>> {
+    ) -> Result<Option<(u64, Witness<F, H::Digest, O>)>, Error<F>> {
         let pos = Self::first_at_or_above(&self.journal, target).await?;
         if pos >= self.journal.bounds().end {
             return Ok(None);
@@ -528,7 +508,7 @@ impl<E: Context, F: Family, O: Variant<F>, H: Hasher, S: Strategy> Store<E, F, O
     /// Binary search for the first retained position whose entry commits at least `size`
     /// leaves, or the end of the journal if none does.
     async fn first_at_or_above(
-        reader: &impl Contiguous<Item = Witness<F, H::Digest>>,
+        reader: &impl Contiguous<Item = Witness<F, H::Digest, O>>,
         size: Location<F>,
     ) -> Result<u64, Error<F>> {
         let bounds = reader.bounds();
@@ -553,20 +533,20 @@ impl<E: Context, F: Family, O: Variant<F>, H: Hasher, S: Strategy> Store<E, F, O
     }
 }
 
-/// Build a witness for the last commit.
+/// Build a witness for `commit`, the last operation in `merkle`.
 ///
 /// The tip operation's inclusion proof is only computable before the Merkle is pruned to its
 /// frontier.
-fn build_witness<F, H, S, M>(
+fn build_witness<F, H, S, O>(
     merkle: &compact::Merkle<F, H::Digest, S>,
-    metadata: Option<M>,
+    commit: O,
     inactivity_floor_loc: Location<F>,
-    last_commit_op_bytes: Vec<u8>,
-) -> Result<VerifiedWitness<F, H::Digest, M>, Error<F>>
+) -> Result<VerifiedWitness<F, H::Digest, O>, Error<F>>
 where
     F: Family,
     H: Hasher,
     S: Strategy,
+    O: Variant<F>,
 {
     let hasher = qmdb::hasher::<H>();
     let mem = merkle.mem();
@@ -580,25 +560,14 @@ where
     let proof = mem.proof(&hasher, last_commit_loc, inactive_peaks)?;
     Ok(VerifiedWitness {
         witness: Witness {
-            op_bytes: last_commit_op_bytes,
+            commit,
             size,
             pinned_nodes,
         },
-        metadata,
         inactivity_floor_loc,
         root,
         proof,
     })
-}
-
-/// Encode the commit operation carrying `metadata` and `inactivity_floor_loc`.
-fn encode_commit_op<F: Family, O: Variant<F> + EncodeShared>(
-    metadata: Option<O::Metadata>,
-    inactivity_floor_loc: Location<F>,
-) -> Vec<u8> {
-    O::commit_op(metadata, inactivity_floor_loc)
-        .encode()
-        .to_vec()
 }
 
 /// Validate that a decoded commit floor does not point past the commit it authenticates.
@@ -617,9 +586,9 @@ fn validate_inactivity_floor<F: Family>(
 }
 
 /// A Merkle materialized from a witness, with the witness verified against it.
-struct Rebuilt<F: Family, O: Variant<F>, H: Hasher, S: Strategy> {
-    merkle: compact::Merkle<F, H::Digest, S>,
-    tip: VerifiedWitness<F, H::Digest, O::Metadata>,
+struct Rebuilt<F: Family, D: Digest, O: Variant<F>, S: Strategy> {
+    merkle: compact::Merkle<F, D, S>,
+    tip: VerifiedWitness<F, D, O>,
 }
 
 /// Materialize the tree `witness` describes and derive its root and commit proof.
@@ -628,10 +597,9 @@ struct Rebuilt<F: Family, O: Variant<F>, H: Hasher, S: Strategy> {
 /// itself, then pruned back to its frontier. Merkle errors propagate unchanged.
 fn restore<F, O, H, S>(
     strategy: S,
-    witness: Witness<F, H::Digest>,
-    metadata: Option<O::Metadata>,
+    witness: Witness<F, H::Digest, O>,
     inactivity_floor_loc: Location<F>,
-) -> Result<Rebuilt<F, O, H, S>, Error<F>>
+) -> Result<Rebuilt<F, H::Digest, O, S>, Error<F>>
 where
     F: Family,
     O: Variant<F>,
@@ -639,7 +607,7 @@ where
     S: Strategy,
 {
     let Witness {
-        op_bytes,
+        commit,
         size,
         pinned_nodes,
     } = witness;
@@ -647,39 +615,34 @@ where
         return Err(Error::DataCorrupted("invalid compact witness"));
     };
     let mut merkle = compact::Merkle::from_compact_state(strategy, last_commit_loc, pinned_nodes)?;
-    merkle.append_leaf(&qmdb::hasher::<H>(), &op_bytes)?;
-    let tip = build_witness::<F, H, S, _>(&merkle, metadata, inactivity_floor_loc, op_bytes)?;
+    merkle.append_leaf(&qmdb::hasher::<H>(), &commit.encode())?;
+    let tip = build_witness::<F, H, S, O>(&merkle, commit, inactivity_floor_loc)?;
     merkle.prune_to_frontier();
     Ok(Rebuilt { merkle, tip })
 }
 
-/// Decode and validate a journaled witness, then restore it. Any failure is
-/// [`Error::DataCorrupted`]: the entry came from this db's own journal.
+/// Validate a journaled witness, then restore it. Any failure is [`Error::DataCorrupted`]: the
+/// entry came from this db's own journal.
 fn rebuild<F, O, H, S>(
     strategy: S,
-    witness: Witness<F, H::Digest>,
-    commit_codec_config: &O::Cfg,
-) -> Result<Rebuilt<F, O, H, S>, Error<F>>
+    witness: Witness<F, H::Digest, O>,
+) -> Result<Rebuilt<F, H::Digest, O, S>, Error<F>>
 where
     F: Family,
-    O: Variant<F> + Read,
+    O: Variant<F>,
     H: Hasher,
     S: Strategy,
 {
     let Some(last_commit_loc) = witness.size.checked_sub(1) else {
         return Err(Error::DataCorrupted("invalid compact witness"));
     };
-
-    // Decode the commit op for its metadata and inactivity floor. The floor determines the
-    // inactive peak boundary used for root computation.
-    let last_commit_op = O::decode_cfg(witness.op_bytes.as_ref(), commit_codec_config)
-        .map_err(|_| Error::DataCorrupted("invalid commit operation"))?;
-    let Some((metadata, inactivity_floor_loc)) = O::into_commit(last_commit_op) else {
+    // The floor determines the inactive peak boundary used for root computation.
+    let Some(inactivity_floor_loc) = witness.commit.has_floor() else {
         return Err(Error::DataCorrupted("last operation was not a commit"));
     };
     validate_inactivity_floor(inactivity_floor_loc, last_commit_loc)?;
 
-    restore::<F, O, H, S>(strategy, witness, metadata, inactivity_floor_loc)
+    restore::<F, O, H, S>(strategy, witness, inactivity_floor_loc)
         .map_err(|_| Error::DataCorrupted("invalid compact witness"))
 }
 
@@ -690,26 +653,35 @@ pub(crate) mod tests {
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
-        use crate::merkle::{mmb, mmr};
+        use crate::{
+            merkle::{mmb, mmr},
+            qmdb::{
+                any::value::{FixedEncoding, VariableEncoding},
+                keyless::Operation,
+            },
+        };
         use commonware_codec::conformance::CodecConformance;
         use commonware_cryptography::sha256;
+        use commonware_utils::sequence::U64;
 
         commonware_conformance::conformance_tests! {
-            CodecConformance<Witness<mmr::Family, sha256::Digest>>,
-            CodecConformance<Witness<mmb::Family, sha256::Digest>>,
+            CodecConformance<Witness<mmr::Family, sha256::Digest, Operation<mmr::Family, FixedEncoding<U64>>>>,
+            CodecConformance<Witness<mmb::Family, sha256::Digest, Operation<mmb::Family, FixedEncoding<U64>>>>,
+            CodecConformance<Witness<mmr::Family, sha256::Digest, Operation<mmr::Family, VariableEncoding<U64>>>>,
         }
     }
 
     /// Corrupt the entry at `pos` with `f`, preserving the entries above it.
-    pub(crate) async fn corrupt_entry<E, F, D>(
-        journal: Journal<E, F, D>,
+    pub(crate) async fn corrupt_entry<E, F, D, O>(
+        journal: Journal<E, F, D, O>,
         pos: u64,
-        f: impl FnOnce(&mut Witness<F, D>),
-    ) -> Journal<E, F, D>
+        f: impl FnOnce(&mut Witness<F, D, O>),
+    ) -> Journal<E, F, D, O>
     where
         E: Context,
         F: Family,
         D: Digest,
+        O: Variant<F>,
     {
         let mut entries = Vec::new();
         {
@@ -726,32 +698,34 @@ pub(crate) mod tests {
     }
 
     /// Read the tip witness entry's components.
-    pub(crate) async fn tip<E, F, D>(journal: &Journal<E, F, D>) -> (Vec<u8>, Location<F>, Vec<D>)
+    pub(crate) async fn tip<E, F, D, O>(journal: &Journal<E, F, D, O>) -> (O, Location<F>, Vec<D>)
     where
         E: Context,
         F: Family,
         D: Digest,
+        O: Variant<F>,
     {
         let size = journal.size();
         let entry = journal.read(size - 1).await.unwrap();
-        (entry.op_bytes, entry.size, entry.pinned_nodes)
+        (entry.commit, entry.size, entry.pinned_nodes)
     }
 
     /// Append a witness entry without syncing it.
-    pub(crate) async fn append_unsynced<E, F, D>(
-        journal: Journal<E, F, D>,
-        op_bytes: Vec<u8>,
+    pub(crate) async fn append_unsynced<E, F, D, O>(
+        journal: Journal<E, F, D, O>,
+        commit: O,
         size: Location<F>,
         pinned_nodes: Vec<D>,
-    ) -> Journal<E, F, D>
+    ) -> Journal<E, F, D, O>
     where
         E: Context,
         F: Family,
         D: Digest,
+        O: Variant<F>,
     {
         let (journal, _) = journal
             .append(&Witness {
-                op_bytes,
+                commit,
                 size,
                 pinned_nodes,
             })
@@ -761,22 +735,23 @@ pub(crate) mod tests {
     }
 
     /// Replace the tip witness entry.
-    pub(crate) async fn overwrite_tip<E, F, D>(
-        journal: Journal<E, F, D>,
-        op_bytes: Vec<u8>,
+    pub(crate) async fn overwrite_tip<E, F, D, O>(
+        journal: Journal<E, F, D, O>,
+        commit: O,
         size: Location<F>,
         pinned_nodes: Vec<D>,
-    ) -> Journal<E, F, D>
+    ) -> Journal<E, F, D, O>
     where
         E: Context,
         F: Family,
         D: Digest,
+        O: Variant<F>,
     {
         let entries = journal.size();
         let journal = journal.rewind(entries - 1).await.unwrap();
         let (journal, _) = journal
             .append(&Witness {
-                op_bytes,
+                commit,
                 size,
                 pinned_nodes,
             })

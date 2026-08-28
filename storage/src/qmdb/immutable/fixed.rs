@@ -28,7 +28,7 @@ pub type Db<F, E, K, V, H, T, S> =
     Immutable<F, E, K, FixedEncoding<V>, fixed::Journal<E, Operation<F, K, V>>, H, T, S>;
 
 /// Type alias for the fixed-size compact immutable db.
-pub type CompactDb<F, E, K, V, H, S> = super::CompactDb<F, E, K, FixedEncoding<V>, H, (), S>;
+pub type CompactDb<F, E, K, V, H, S> = super::CompactDb<F, E, K, FixedEncoding<V>, H, S>;
 
 type Journal<F, E, K, V, H, S> =
     authenticated::Journal<F, E, fixed::Journal<E, Operation<F, K, V>>, H, S>;
@@ -133,7 +133,6 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             },
-            commit_codec_config: (),
         };
         CompactDb::init(context, cfg).await.unwrap()
     }
