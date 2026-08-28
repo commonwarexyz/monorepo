@@ -250,8 +250,10 @@ async fn recover_expected(
         }
         logical.truncate(logical.len() - logical.len() % TestEntry::SIZE);
         let records: Vec<TestEntry> = logical
-            .chunks_exact(TestEntry::SIZE)
-            .map(|record| TestEntry::decode(record).expect("oracle index record failed"))
+            .as_chunks::<{ TestEntry::SIZE }>()
+            .0
+            .iter()
+            .map(|record| TestEntry::decode(&record[..]).expect("oracle index record failed"))
             .collect();
 
         // Recovery retains the prefix through the last record with a valid value frame.
