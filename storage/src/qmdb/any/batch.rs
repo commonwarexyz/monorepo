@@ -26,7 +26,7 @@ use ahash::{AHashMap, AHashSet};
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
-use commonware_utils::bitmap;
+use commonware_utils::{bitmap, iter::zip_eq};
 use core::{cmp::Ordering, ops::Range};
 use std::{
     collections::{BTreeMap, hash_map},
@@ -1118,17 +1118,9 @@ where
                         }
                     };
 
-                    // One resolved operation per read candidate: the zip below would silently
-                    // drop a surplus.
-                    assert_eq!(
-                        read_candidates.len(),
-                        resolved.iter().map(Vec::len).sum::<usize>()
-                    );
-
-                    // Classify each candidate against the pre-raise state, in candidate
-                    // order.
+                    // Classify each candidate against the pre-raise state, in candidate order.
                     let outcomes: Vec<FloorOutcome<F>> = strategy.map_collect_vec(
-                        read_candidates.iter().zip(resolved.iter().flatten()),
+                        zip_eq(read_candidates.iter(), resolved.iter().flatten()),
                         |(loc, op)| classify(*loc, op),
                     );
                     (resolved, outcomes)

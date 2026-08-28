@@ -17,6 +17,7 @@ use crate::{
 use commonware_codec::EncodeShared;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
+use commonware_utils::iter::zip_eq;
 use std::{
     collections::BTreeMap,
     sync::{Arc, Weak},
@@ -220,7 +221,7 @@ where
 
         if !db_keys.is_empty() {
             let db_results = db.get_many(&db_keys).await?;
-            for (slot, value) in db_indices.into_iter().zip(db_results) {
+            for (slot, value) in zip_eq(db_indices, db_results) {
                 results[slot] = value;
             }
         }
@@ -407,7 +408,7 @@ where
 
         if !db_keys.is_empty() {
             let db_results = db.get_many(&db_keys).await?;
-            for (slot, value) in db_indices.into_iter().zip(db_results) {
+            for (slot, value) in zip_eq(db_indices, db_results) {
                 results[slot] = value;
             }
         }
