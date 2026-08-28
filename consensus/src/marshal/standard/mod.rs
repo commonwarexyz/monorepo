@@ -2566,6 +2566,65 @@ mod tests {
         }
     }
 
+    struct CertificationCase {
+        wrapper: Wrapper,
+        marshal: Mailbox<S, Standard<B>>,
+        buffer: RecordingBuffer,
+        resolver: RecordingResolver,
+        schemes: Vec<S>,
+        block_context: Ctx,
+        block: B,
+    }
+
+    async fn certification_case(
+        context: &mut Runtime,
+        kind: WrapperKind,
+        partition_prefix: String,
+    ) -> CertificationCase {
+        let Fixture {
+            participants,
+            schemes,
+            ..
+        } = bls12381_threshold_vrf::fixture::<V, _>(context, NAMESPACE, NUM_VALIDATORS);
+        let me = participants[0].clone();
+
+        let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
+        let (marshal, buffer, resolver, _) = start_standard_actor(
+            context.child("validator"),
+            &partition_prefix,
+            ConstantProvider::new(schemes[0].clone()),
+            Application::<B>::manual_ack(),
+            Some(RecordingBuffer::default()),
+            Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+        )
+        .await;
+        let buffer = buffer.expect("buffer was provided");
+        let wrapper = Wrapper::new(
+            kind,
+            context.child("wrapper"),
+            MockVerifyingApp::new(),
+            marshal.clone(),
+        );
+
+        let round = Round::new(Epoch::zero(), View::new(1));
+        let block_context = Ctx {
+            round,
+            leader: me,
+            parent: (View::zero(), genesis.digest()),
+        };
+        let block = B::new::<Sha256>(block_context.clone(), genesis.digest(), Height::new(1), 100);
+
+        CertificationCase {
+            wrapper,
+            marshal,
+            buffer,
+            resolver,
+            schemes,
+            block_context,
+            block,
+        }
+    }
+
     /// Regression for certify's `hint_notarized` bump. When `verify` has an
     /// in-progress certification gate with the block still missing locally,
     /// `certify` must take that gate AND nudge a round-bound notarized fetch.
@@ -2577,57 +2636,34 @@ mod tests {
         for kind in wrapper_kinds() {
             let runner = deterministic::Runner::timed(Duration::from_secs(30));
             runner.start(|mut context| async move {
-                let Fixture {
-                    participants,
-                    schemes,
-                    ..
-                } = bls12381_threshold_vrf::fixture::<V, _>(
+                let mut case = certification_case(
                     &mut context,
-                    NAMESPACE,
-                    NUM_VALIDATORS,
-                );
-                let me = participants[0].clone();
-
-                let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
-                let (marshal, _buffer, resolver, _actor_handle) = start_standard_actor(
-                    context.child("validator"),
-                    &format!("certify-bumps-fetch-{kind:?}"),
-                    ConstantProvider::new(schemes[0].clone()),
-                    Application::<B>::manual_ack(),
-                    Some(RecordingBuffer::default()),
-                    Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                    kind,
+                    format!("certify-bumps-fetch-{kind:?}"),
                 )
                 .await;
-                let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
-                let mut wrapper =
-                    Wrapper::new(kind, context.child("wrapper"), mock_app, marshal.clone());
-
-                let round = Round::new(Epoch::zero(), View::new(1));
-                let block_context = Ctx {
-                    round,
-                    leader: me,
-                    parent: (View::zero(), genesis.digest()),
-                };
-                let block =
-                    B::new::<Sha256>(block_context.clone(), genesis.digest(), Height::new(1), 100);
-                let digest = block.digest();
+                let round = case.block_context.round;
+                let digest = case.block.digest();
 
                 // `verify` registers a pending certification gate whose `Wait`
                 // block subscription cannot pull from peers, so it stays parked
                 // until something delivers the block locally.
-                let verify_rx = wrapper.verify(block_context, digest).await;
+                let block_context = case.block_context.clone();
+                let verify_rx = case.wrapper.verify(block_context, digest).await;
 
                 // Stage the notarized response so the bump's fetch can resolve.
                 let proposal = Proposal::new(round, View::zero(), digest);
-                let notarization = StandardHarness::make_notarization(proposal, &schemes, QUORUM);
-                resolver.respond_to_next_fetch((notarization, block).encode());
+                let notarization =
+                    StandardHarness::make_notarization(proposal, &case.schemes, QUORUM);
+                case.resolver
+                    .respond_to_next_fetch((notarization, case.block.clone()).encode());
 
                 // `certify` takes the in-progress gate and calls `hint_notarized`,
                 // which issues a round-bound `Key::Notarized`. The recording
                 // resolver delivers, and the marshal stores the block and wakes
                 // verify's digest subscription, letting the pending verify task
                 // resolve the gate that certify awaits.
-                let certify_rx = wrapper.certify(round, digest).await;
+                let certify_rx = case.wrapper.certify(round, digest).await;
 
                 select! {
                     result = verify_rx => {
@@ -2655,7 +2691,7 @@ mod tests {
                 }
 
                 assert!(
-                    resolver.fetches().iter().any(|fetch| matches!(
+                    case.resolver.fetches().iter().any(|fetch| matches!(
                         (&fetch.key, &fetch.subscriber),
                         (
                             handler::Key::Notarized { round: request_round },
@@ -2664,6 +2700,68 @@ mod tests {
                     )),
                     "{kind:?}: certify must bump a notarized round fetch when verify is in progress"
                 );
+            });
+        }
+    }
+
+    /// Pending verification must own a transiently buffered block before
+    /// certification waits on its gate. Otherwise a cache hit can suppress the
+    /// round-bound fetch before the verifier installs its local subscription,
+    /// and eviction leaves both operations pending indefinitely.
+    #[test_traced("WARN")]
+    fn test_standard_certify_retains_transient_buffer_hit_through_eviction() {
+        for kind in wrapper_kinds() {
+            let runner = deterministic::Runner::timed(Duration::from_secs(30));
+            runner.start(|mut context| async move {
+                let mut case = certification_case(
+                    &mut context,
+                    kind,
+                    format!("certify-transient-buffer-{kind:?}"),
+                )
+                .await;
+                let round = case.block_context.round;
+                let digest = case.block.digest();
+                case.buffer.insert_transient(case.block.clone());
+
+                // The next lookup returns ownership while removing the buffer entry, modeling
+                // same-peer cache pressure.
+                let block_context = case.block_context.clone();
+                let verify_rx = case.wrapper.verify(block_context, digest).await;
+                let certify_rx = case.wrapper.certify(round, digest).await;
+
+                // This request is ordered after the verification subscription and
+                // certification hint in the marshal mailbox. Once it returns, the
+                // one-shot buffer hit and eviction have both occurred.
+                case.marshal.get_processed_height().await;
+                assert!(
+                    !case.buffer.contains(digest),
+                    "{kind:?}: the buffered block must be evicted before verification completes"
+                );
+
+                select! {
+                    result = verify_rx => {
+                        assert!(
+                            result.expect("verify resolves"),
+                            "{kind:?}: verify should retain and accept the transient block"
+                        );
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!(
+                            "{kind:?}: verify must survive transient buffer eviction"
+                        );
+                    },
+                }
+                select! {
+                    result = certify_rx => {
+                        assert!(
+                            result.expect("certify resolves"),
+                            "{kind:?}: certify should succeed via the shared verification gate"
+                        );
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("{kind:?}: certify must survive transient buffer eviction");
+                    },
+                }
             });
         }
     }
@@ -3763,6 +3861,7 @@ mod tests {
     #[derive(Clone, Default)]
     struct RecordingBuffer {
         blocks: Arc<Mutex<Vec<B>>>,
+        evict_on_next_hit: Arc<Mutex<bool>>,
         digest_subscriptions: Arc<Mutex<Vec<oneshot::Sender<Arc<B>>>>>,
         commitment_subscriptions: Arc<Mutex<Vec<oneshot::Sender<Arc<B>>>>>,
         sends: Arc<Mutex<Vec<BufferSend>>>,
@@ -3771,6 +3870,29 @@ mod tests {
     impl RecordingBuffer {
         fn insert(&self, block: B) {
             self.blocks.lock().push(block);
+        }
+
+        fn insert_transient(&self, block: B) {
+            self.insert(block);
+            *self.evict_on_next_hit.lock() = true;
+        }
+
+        fn contains(&self, digest: D) -> bool {
+            self.blocks
+                .lock()
+                .iter()
+                .any(|block| block.digest() == digest)
+        }
+
+        fn find(&self, digest: D) -> Option<Arc<B>> {
+            let mut blocks = self.blocks.lock();
+            let index = blocks.iter().position(|block| block.digest() == digest)?;
+            let block = if std::mem::take(&mut *self.evict_on_next_hit.lock()) {
+                blocks.remove(index)
+            } else {
+                blocks[index].clone()
+            };
+            Some(Arc::new(block))
         }
 
         fn sends(&self) -> Vec<BufferSend> {
@@ -3790,21 +3912,11 @@ mod tests {
         type PublicKey = PublicKey;
 
         async fn find_by_digest(&self, digest: D) -> Option<Arc<B>> {
-            self.blocks
-                .lock()
-                .iter()
-                .find(|block| block.digest() == digest)
-                .cloned()
-                .map(Arc::new)
+            self.find(digest)
         }
 
         async fn find_by_commitment(&self, commitment: D) -> Option<Arc<B>> {
-            self.blocks
-                .lock()
-                .iter()
-                .find(|block| block.digest() == commitment)
-                .cloned()
-                .map(Arc::new)
+            self.find(commitment)
         }
 
         fn subscribe_by_digest(&self, _digest: D) -> Option<oneshot::Receiver<Arc<B>>> {
