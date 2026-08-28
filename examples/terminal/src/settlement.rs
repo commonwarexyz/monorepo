@@ -153,6 +153,11 @@ pub(crate) struct Settlement {
     deposit_refund_replays: ReplayCache<Key, DepositRefund<Key>>,
 }
 
+/// The demo asset adapter admits any non-empty destination within the operator bound.
+const fn eligible(destination: &Bytes) -> bool {
+    !destination.is_empty() && destination.len() <= MAX_DESTINATION_BYTES
+}
+
 impl Settlement {
     pub(crate) fn new() -> Result<Self> {
         Self::with_config(settlement_config())
@@ -417,26 +422,6 @@ impl Settlement {
         Ok(())
     }
 
-    pub(crate) fn confirm_withdrawal(
-        &mut self,
-        request: &SignedWithdrawal<Key, Digest>,
-    ) -> Result<()> {
-        self.observe_time()?;
-        ensure!(
-            self.chain.hard_fault().is_none(),
-            "settlement deployment is permanently hard-faulted"
-        );
-        let pending = self.chain.pending_withdrawals();
-        let existing = pending
-            .request_for(request.account())
-            .context("withdrawal is not queued by settlement")?;
-        ensure!(
-            existing == request,
-            "account queued another settlement withdrawal"
-        );
-        Ok(())
-    }
-
     pub(crate) fn queue_withdrawal(
         &mut self,
         request: SignedWithdrawal<Key, Digest>,
@@ -468,9 +453,7 @@ impl Settlement {
             );
         }
         self.chain
-            .queue_withdrawal(self.now, request, &openings, |destination| {
-                !destination.is_empty() && destination.len() <= MAX_DESTINATION_BYTES
-            })
+            .queue_withdrawal(self.now, request, &openings, eligible)
             .context("queue settlement withdrawal")?;
         self.start_liveness_clock();
         Ok(())
@@ -482,6 +465,7 @@ impl Settlement {
         predecessor_liability: u64,
         deposits: DepositBatch<Key>,
         withdrawals: WithdrawalBatch<Key, Digest>,
+        openings: &[StateOpening<Key, Digest>],
     ) -> Result<()> {
         self.observe_time()?;
         if let Some(existing) = self
@@ -511,13 +495,41 @@ impl Settlement {
             self.chain.pending_deposits() == deposits,
             "operator deposit boundary differs from settlement"
         );
-        ensure!(
-            self.chain.pending_withdrawals() == withdrawals,
-            "operator withdrawal boundary differs from settlement"
-        );
+
+        // The submitted batch may carry operator-collected requests beyond the queued set,
+        // but every queued request must still appear verbatim.
+        let pending = self.chain.pending_withdrawals();
+        for queued in pending.requests() {
+            ensure!(
+                withdrawals.request_for(queued.account()) == Some(queued),
+                "operator withdrawal boundary omits a queued settlement withdrawal"
+            );
+        }
+
+        // A registration is an immutable admission obligation, so the chain proves every
+        // carried extra certifiable with one predecessor-root opening in batch order.
+        let extra_openings = withdrawals
+            .requests()
+            .iter()
+            .filter(|request| pending.request_for(request.account()).is_none())
+            .map(|request| {
+                openings
+                    .iter()
+                    .find(|opening| &opening.leaf.account == request.account())
+                    .cloned()
+                    .context("registration is missing an opening for a carried withdrawal")
+            })
+            .collect::<Result<Vec<_>>>()?;
         let context = epoch_context(epoch, &deposits, &withdrawals, predecessor_liability)?;
         self.chain
-            .register_epoch(self.now, context, deposits.clone(), withdrawals.clone())
+            .register_epoch(
+                self.now,
+                context,
+                deposits.clone(),
+                withdrawals.clone(),
+                &extra_openings,
+                eligible,
+            )
             .context("register exact payment context")?;
         self.registered = Some(RegisteredEpoch {
             epoch,
@@ -799,7 +811,7 @@ mod tests {
         let deposits =
             DepositBatch::new(vec![DepositRecord::new(account.clone(), 1).unwrap()]).unwrap();
         settlement
-            .register_epoch(0, 400, deposits.clone(), WithdrawalBatch::empty())
+            .register_epoch(0, 400, deposits.clone(), WithdrawalBatch::empty(), &[])
             .unwrap();
 
         let predecessor_state = predecessor[0].state;
@@ -836,87 +848,6 @@ mod tests {
         let result = protocol.complete(prepared, &mut TestRng::new(91)).unwrap();
         let submission = SettlementSubmission::from(&result);
         (settlement, submission, result, state, protocol, deposit)
-    }
-
-    fn expiring_withdrawal_fixture() -> (
-        Settlement,
-        SettlementSubmission,
-        SettlementResult,
-        StateCache<Key, Digest>,
-    ) {
-        let mut settlement = Settlement::new().unwrap();
-        let protocol = Protocol::new(NonZeroUsize::MIN).unwrap();
-        let mut predecessor = identities()
-            .into_iter()
-            .map(|identity| StateLeaf {
-                account: identity.key,
-                state: AccountState {
-                    balance: INITIAL_BALANCE,
-                    active: true,
-                    ..AccountState::default()
-                },
-            })
-            .collect::<Vec<_>>();
-        predecessor.sort_unstable_by(|left, right| left.account.cmp(&right.account));
-        let state = StateCache::new::<Sha256>(predecessor.clone()).unwrap();
-        let wallet = wallets().remove(0);
-        let account = wallet.public_key();
-        let request = SignedWithdrawal::sign(
-            deployment(),
-            state.root().digest,
-            Bytes::from_static(b"expiring-withdrawal"),
-            WithdrawalAction::Amount(NonZeroU64::new(7).unwrap()),
-            4,
-            wallet.signer(),
-        );
-        settlement
-            .queue_withdrawal(request, vec![state.opening(&account).unwrap()])
-            .unwrap();
-        let deposits = DepositBatch::empty();
-        let withdrawals = settlement.chain.pending_withdrawals();
-        settlement
-            .register_epoch(0, 400, deposits.clone(), withdrawals.clone())
-            .unwrap();
-
-        let position = predecessor
-            .binary_search_by(|leaf| leaf.account.cmp(&account))
-            .unwrap();
-        let predecessor_state = predecessor[position].state;
-        let successor_state = AccountState {
-            balance: predecessor_state.balance - 7,
-            ..predecessor_state
-        };
-        let row = AccountRow {
-            account: account.clone(),
-            predecessor: predecessor_state,
-            successor: successor_state,
-            outgoing: None,
-            output: SettlementOutput::Withdrawal(7),
-            prefix: Prefix {
-                withdrawal: 7,
-                withdrawal_count: 1,
-                ..Prefix::default()
-            },
-        };
-        let mut successor_leaves = predecessor;
-        successor_leaves[position].state = successor_state;
-        let successor = StateCache::new::<Sha256>(successor_leaves.clone()).unwrap();
-        let registration = protocol
-            .registration(0, deposits, withdrawals, 400)
-            .unwrap();
-        let prepared = protocol
-            .prepare(
-                registration,
-                Vec::new(),
-                state.leaves().to_vec(),
-                vec![row],
-                vec![ShardSet::empty(0, account)],
-                successor_leaves,
-            )
-            .unwrap();
-        let result = protocol.complete(prepared, &mut TestRng::new(92)).unwrap();
-        let submission = SettlementSubmission::from(&result);
-        (settlement, submission, result, successor)
     }
 
     fn receipt_fork(result: &SettlementResult, protocol: &Protocol) -> Challenge<Key, Digest> {
@@ -1005,53 +936,6 @@ mod tests {
             settlement.admit_submission(submission).unwrap(),
             AdmissionOutcome::Finalized(result.finalized)
         );
-    }
-
-    #[test]
-    fn expired_admitted_withdrawal_drains_its_clean_front_without_stranding_funds() {
-        let (mut settlement, submission, result, successor) = expiring_withdrawal_fixture();
-        let challenge_deadline = result.epoch_context.challenge_deadline();
-
-        assert_eq!(
-            settlement.admit_submission(submission).unwrap(),
-            AdmissionOutcome::Pending
-        );
-        assert_eq!(settlement.status().unwrap().now, 0);
-
-        settlement.advance_logical_time(4).unwrap();
-        let faulted = settlement.status().unwrap();
-        assert!(faulted.hard_faulted);
-        assert_eq!(faulted.state_root, result.predecessor_root);
-        assert!(
-            settlement
-                .challenge_encoded(result.finalized.batch_id, Bytes::from_static(&[u8::MAX]), 1,)
-                .is_err()
-        );
-        assert!(settlement.begin_hard_fault_settlement().is_err());
-
-        settlement
-            .advance_logical_time(challenge_deadline + 1)
-            .unwrap();
-        let finalized = settlement.status().unwrap();
-        assert!(finalized.hard_faulted);
-        assert_eq!(finalized.state_root, result.finalized.successor_root);
-        assert_eq!(finalized.claimable_balance, 7);
-
-        let terminal = settlement.begin_hard_fault_settlement().unwrap();
-        assert_eq!(terminal.frozen_state_root, successor.root());
-        assert_eq!(terminal.state_liability, 393);
-        let output = settlement
-            .claim_withdrawal(result.finalized.batch_id, &result.withdrawal_claims[0])
-            .unwrap();
-        assert_eq!(output.amount(), 7);
-        for leaf in successor.leaves() {
-            settlement
-                .claim_hard_fault(&successor.opening(&leaf.account).unwrap())
-                .unwrap();
-        }
-        let settled = settlement.status().unwrap();
-        assert_eq!(settled.custody_balance, 0);
-        assert_eq!(settled.claimable_balance, 0);
     }
 
     #[test]
@@ -1178,10 +1062,10 @@ mod tests {
     fn epoch_registration_is_idempotent_and_rejects_late_custody_events() {
         let mut settlement = Settlement::new().unwrap();
         settlement
-            .register_epoch(0, 400, DepositBatch::empty(), WithdrawalBatch::empty())
+            .register_epoch(0, 400, DepositBatch::empty(), WithdrawalBatch::empty(), &[])
             .unwrap();
         settlement
-            .register_epoch(0, 400, DepositBatch::empty(), WithdrawalBatch::empty())
+            .register_epoch(0, 400, DepositBatch::empty(), WithdrawalBatch::empty(), &[])
             .unwrap();
         let event = DepositEvent {
             id: Sha256::hash(&[b"late-deposit"]),
@@ -1201,7 +1085,7 @@ mod tests {
         let admission_deadline = context.admission_deadline();
 
         settlement
-            .register_epoch(0, 400, deposits, withdrawals)
+            .register_epoch(0, 400, deposits, withdrawals, &[])
             .unwrap();
 
         assert_eq!(
@@ -1232,7 +1116,7 @@ mod tests {
                 .is_err()
         );
         settlement
-            .register_epoch(0, 400, deposits, withdrawals)
+            .register_epoch(0, 400, deposits, withdrawals, &[])
             .unwrap();
         for _ in 0..2 {
             settlement
@@ -1331,7 +1215,7 @@ mod tests {
 
         let deposits = settlement.chain.pending_deposits();
         settlement
-            .register_epoch(0, 400, deposits, WithdrawalBatch::empty())
+            .register_epoch(0, 400, deposits, WithdrawalBatch::empty(), &[])
             .unwrap();
         assert_eq!(settlement.registered.as_ref().unwrap().epoch, 0);
     }
@@ -1372,9 +1256,85 @@ mod tests {
 
         let withdrawals = settlement.chain.pending_withdrawals();
         settlement
-            .register_epoch(0, 400, DepositBatch::empty(), withdrawals)
+            .register_epoch(0, 400, DepositBatch::empty(), withdrawals, &[])
             .unwrap();
         assert_eq!(settlement.registered.as_ref().unwrap().epoch, 0);
+    }
+
+    #[test]
+    fn register_epoch_carries_extras_but_requires_every_queued_withdrawal() {
+        let mut settlement = Settlement::new().unwrap();
+        let signers = wallets();
+        let mut leaves = identities()
+            .into_iter()
+            .map(|identity| StateLeaf {
+                account: identity.key,
+                state: AccountState {
+                    balance: INITIAL_BALANCE,
+                    active: true,
+                    ..AccountState::default()
+                },
+            })
+            .collect::<Vec<_>>();
+        leaves.sort_unstable_by(|left, right| left.account.cmp(&right.account));
+        let cache = StateCache::new::<Sha256>(leaves).unwrap();
+        let queued_account = signers[0].public_key();
+        let queued = SignedWithdrawal::sign(
+            deployment(),
+            cache.root().digest,
+            Bytes::from_static(b"queued-withdrawal"),
+            WithdrawalAction::Amount(NonZeroU64::new(7).unwrap()),
+            50,
+            signers[0].signer(),
+        );
+        let opening = cache.opening(&queued_account).unwrap();
+        settlement
+            .queue_withdrawal(queued.clone(), vec![opening])
+            .unwrap();
+
+        let error = settlement
+            .register_epoch(0, 400, DepositBatch::empty(), WithdrawalBatch::empty(), &[])
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("omits a queued settlement withdrawal"),
+            "unexpected error: {error:#}"
+        );
+
+        let carried_account = signers[1].public_key();
+        let carried = SignedWithdrawal::sign(
+            deployment(),
+            cache.root().digest,
+            Bytes::from_static(b"carried-withdrawal"),
+            WithdrawalAction::Amount(NonZeroU64::new(9).unwrap()),
+            50,
+            signers[1].signer(),
+        );
+        let withdrawals = WithdrawalBatch::new(vec![queued.clone(), carried]).unwrap();
+
+        // The carried extra registers only with a predecessor-root opening proving it
+        // certifiable. The queued request needs none.
+        let error = settlement
+            .register_epoch(0, 400, DepositBatch::empty(), withdrawals.clone(), &[])
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("missing an opening"),
+            "unexpected error: {error:#}"
+        );
+        settlement
+            .register_epoch(
+                0,
+                400,
+                DepositBatch::empty(),
+                withdrawals,
+                &[cache.opening(&carried_account).unwrap()],
+            )
+            .unwrap();
+        assert_eq!(settlement.registered.as_ref().unwrap().epoch, 0);
+
+        // Only the queued request occupies the chain's pending set. The carried extra was
+        // admitted at registration and never touches the queue.
+        let pending = settlement.chain.pending_withdrawals();
+        assert_eq!(pending.requests(), [queued]);
     }
 
     #[test]
@@ -1393,7 +1353,7 @@ mod tests {
             .unwrap()
             .admission_deadline();
         settlement
-            .register_epoch(0, 400, deposits, withdrawals)
+            .register_epoch(0, 400, deposits, withdrawals, &[])
             .unwrap();
 
         settlement.advance_logical_time(admission_deadline).unwrap();
@@ -1426,6 +1386,7 @@ mod tests {
                     successor_liability,
                     DepositBatch::empty(),
                     WithdrawalBatch::empty(),
+                    &[],
                 )
                 .is_err()
         );
@@ -1444,6 +1405,7 @@ mod tests {
                     successor_liability,
                     DepositBatch::empty(),
                     WithdrawalBatch::empty(),
+                    &[],
                 )
                 .is_err()
         );
@@ -1455,6 +1417,7 @@ mod tests {
                 successor_liability,
                 DepositBatch::empty(),
                 WithdrawalBatch::empty(),
+                &[],
             )
             .unwrap();
     }
@@ -1492,6 +1455,7 @@ mod tests {
                     400,
                     DepositBatch::empty(),
                     WithdrawalBatch::empty(),
+                    &[],
                 )
                 .is_err()
         );

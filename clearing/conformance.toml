@@ -1,271 +1,275 @@
-["conformance::CodecConformance<AccountLookup<VerifyingKey,Sha256Digest>>"]
-hash = "c0732f63520db29527f76e9dd9a2a1fde774966cd6e8421e24128a850752243f"
+["conformance::CodecConformance<AccountChange<VerifyingKey,Sha256Digest>>"]
 n_cases = 1024
+hash = "54f749474e6de577bb6922dd107ef74909e59b25c8881eafd2930282ef6ae6c1"
+
+["conformance::CodecConformance<AccountLookup<VerifyingKey,Sha256Digest>>"]
+n_cases = 1024
+hash = "c0732f63520db29527f76e9dd9a2a1fde774966cd6e8421e24128a850752243f"
 
 ["conformance::CodecConformance<AccountRow<VerifyingKey,Sha256Digest>>"]
-hash = "4f41c1aeb2465a87ea530548819c61b52b40327883167b2f96649eb6e29f972d"
 n_cases = 1024
+hash = "aab1fba301e4fd4e7658253161a6fa032902a7c564d861b9336a32e68803f1d8"
 
 ["conformance::CodecConformance<AccountState>"]
-hash = "942be3642ee576433c32b2b66d2a4da2a49092b77ab223986a99b5ebc4b0848b"
 n_cases = 65536
+hash = "942be3642ee576433c32b2b66d2a4da2a49092b77ab223986a99b5ebc4b0848b"
 
 ["conformance::CodecConformance<Assignment<Sha256Digest>>"]
-hash = "51eab16198763f7168636a0331d0f2f5cc31b41ff934de83755adbb4ea093ead"
 n_cases = 65536
+hash = "51eab16198763f7168636a0331d0f2f5cc31b41ff934de83755adbb4ea093ead"
 
 ["conformance::CodecConformance<BatchId<Sha256Digest>>"]
-hash = "d65ced18cacd65769e8f9732131a06216e6600d5a115c4ed7483a8530813ddcd"
 n_cases = 65536
+hash = "d65ced18cacd65769e8f9732131a06216e6600d5a115c4ed7483a8530813ddcd"
 
 ["conformance::CodecConformance<Certificate>"]
-hash = "09ae1221e6162627d2713dc751eda2f47a795ab236ec2fe8c7cc95cc5db6aa87"
 n_cases = 1024
+hash = "09ae1221e6162627d2713dc751eda2f47a795ab236ec2fe8c7cc95cc5db6aa87"
 
 ["conformance::CodecConformance<Challenge<VerifyingKey,Sha256Digest>>"]
-hash = "306c26f086f3c84b2fc10236d9f50a7e751bc36ace2f5086d6c59384a70238b5"
 n_cases = 1024
+hash = "3504c01ceb50c610b55e4fa71bd364f19809bdf2bb23f3a7869e0599136b3747"
 
 ["conformance::CodecConformance<ChangeAbsence<VerifyingKey,Sha256Digest>>"]
-hash = "de5177d5131aa67b34ab4b0744c0c85a3f45d8ad840aec44baeb98e29dbc542d"
 n_cases = 1024
+hash = "de5177d5131aa67b34ab4b0744c0c85a3f45d8ad840aec44baeb98e29dbc542d"
 
 ["conformance::CodecConformance<ChangeGuard<VerifyingKey,Sha256Digest>>"]
+n_cases = 1024
 hash = "afccf4ccba2f6ed5ae78d01dbf715536815801181fbb650bb36308c0d298db3e"
-n_cases = 1024
-
-["conformance::CodecConformance<AccountChange<VerifyingKey,Sha256Digest>>"]
-hash = "54f749474e6de577bb6922dd107ef74909e59b25c8881eafd2930282ef6ae6c1"
-n_cases = 1024
 
 ["conformance::CodecConformance<ChangeLookup<VerifyingKey,Sha256Digest>>"]
-hash = "bef389be31c326edd5d43aa9d377b1eaf2225bc0208ce840f1f892492ad9b3b9"
 n_cases = 1024
+hash = "bef389be31c326edd5d43aa9d377b1eaf2225bc0208ce840f1f892492ad9b3b9"
 
 ["conformance::CodecConformance<ChangeOpening<Sha256Digest>>"]
-hash = "65849d36c16061158532ef31d2131689d5166cf20c28e45eb00de6d3446546ad"
 n_cases = 1024
+hash = "65849d36c16061158532ef31d2131689d5166cf20c28e45eb00de6d3446546ad"
 
 ["conformance::CodecConformance<ChangeRange<VerifyingKey,Sha256Digest>>"]
-hash = "b8f0fee035cf7f186c9e2723544edacc3394b0bcf723aa511b3a8da178ce8b31"
 n_cases = 256
+hash = "b9bc88eeef5be87db5f60dc0eeaa70b41b9f63872769305ab4b408100725322e"
 
 ["conformance::CodecConformance<ChangeValue<Sha256Digest>>"]
-hash = "5027df76a519df200eec1f2f1715357badec06e188725cce480e32453db6c087"
 n_cases = 1024
+hash = "5027df76a519df200eec1f2f1715357badec06e188725cce480e32453db6c087"
 
 ["conformance::CodecConformance<ChangeValueCore<Sha256Digest>>"]
-hash = "1ef52bd272408832cea818f21bd5cb1404a51b3feea434b461932430712f9962"
 n_cases = 1024
+hash = "1ef52bd272408832cea818f21bd5cb1404a51b3feea434b461932430712f9962"
 
 ["conformance::CodecConformance<Close<VerifyingKey,Sha256Digest>>"]
-hash = "a642e51a7394a78da6aa9c0602ec16660b94381a0b79744a949a7dfe37785f9c"
 n_cases = 256
+hash = "32f4daf352de6011db9d19430a17d506bfd682f6d998d4e81a0fd8a191eecab7"
 
 ["conformance::CodecConformance<CloseLimits>"]
-hash = "8a29fc86a6ce23c970dbfb92c7ed92d98221305a9820c8a9f47d894d9be2e3c9"
 n_cases = 65536
+hash = "8a29fc86a6ce23c970dbfb92c7ed92d98221305a9820c8a9f47d894d9be2e3c9"
 
 ["conformance::CodecConformance<Committee>"]
-hash = "48a782e24e6890b99c546e6204e92389437def2c6219c3c1adbddabd968dd8b8"
 n_cases = 1024
+hash = "48a782e24e6890b99c546e6204e92389437def2c6219c3c1adbddabd968dd8b8"
 
 ["conformance::CodecConformance<CoverageRange<Sha256Digest>>"]
-hash = "0c30b3582177d6fc9202de91b9b64ca6b68ec8946e38eab16201cb7246b0fe21"
 n_cases = 1024
+hash = "0c30b3582177d6fc9202de91b9b64ca6b68ec8946e38eab16201cb7246b0fe21"
 
 ["conformance::CodecConformance<CreditTip>"]
-hash = "b0460d8ef04b017a76f78299396c55213d6abdb86213d112c02a6bb998af0aa2"
 n_cases = 65536
+hash = "b0460d8ef04b017a76f78299396c55213d6abdb86213d112c02a6bb998af0aa2"
 
 ["conformance::CodecConformance<CreditTipLookup<Sha256Digest>>"]
-hash = "b9c0b03ead1adebc6b76a0b19470c2fd78aa02a3868c10de4f9680a1ccd9b943"
 n_cases = 1024
+hash = "b9c0b03ead1adebc6b76a0b19470c2fd78aa02a3868c10de4f9680a1ccd9b943"
 
 ["conformance::CodecConformance<CreditTipValue>"]
-hash = "e70b1228abb8b55c2023e2fb38e37a5cd238cf3cc9c0d78a2e1e9453d96e76fb"
 n_cases = 65536
+hash = "e70b1228abb8b55c2023e2fb38e37a5cd238cf3cc9c0d78a2e1e9453d96e76fb"
 
 ["conformance::CodecConformance<DepositBatch<VerifyingKey>>"]
-hash = "8973626be91874610dfa69f992db96424f214992cd0a73a390cf201f11c295c6"
 n_cases = 1024
+hash = "8973626be91874610dfa69f992db96424f214992cd0a73a390cf201f11c295c6"
 
 ["conformance::CodecConformance<DepositRecord<VerifyingKey>>"]
-hash = "060003f12ed50968457d4afefd4cca693aa7aa0310ff1849e7bf4f0dde0e671a"
 n_cases = 1024
+hash = "060003f12ed50968457d4afefd4cca693aa7aa0310ff1849e7bf4f0dde0e671a"
+
+["conformance::CodecConformance<Entry<VerifyingKey>>"]
+n_cases = 65536
+hash = "fb7b2266a4fd1895f4046d88d99c2ddf5164f801dd4df24b4625b96e3c866b3e"
 
 ["conformance::CodecConformance<ExternalPayoutClaim<VerifyingKey,Sha256Digest>>"]
-hash = "c65e14e83e29b2a9008f4950608aa5fbf7e87ff68e80564f2d8c17ecbdeb524e"
 n_cases = 256
+hash = "c65e14e83e29b2a9008f4950608aa5fbf7e87ff68e80564f2d8c17ecbdeb524e"
 
 ["conformance::CodecConformance<Header<Sha256Digest>>"]
-hash = "d65ced18cacd65769e8f9732131a06216e6600d5a115c4ed7483a8530813ddcd"
 n_cases = 65536
+hash = "d65ced18cacd65769e8f9732131a06216e6600d5a115c4ed7483a8530813ddcd"
 
 ["conformance::CodecConformance<HigherShardTipLookup<VerifyingKey,Sha256Digest>>"]
-hash = "9f8825e88c4c09626285a7b2e9563bee90759e1955ea3faabc8df1a41ad9900e"
 n_cases = 1024
+hash = "9f8825e88c4c09626285a7b2e9563bee90759e1955ea3faabc8df1a41ad9900e"
 
 ["conformance::CodecConformance<MultiOpening<Sha256Digest>>"]
-hash = "c95f2404ec0cf89de917747d4275716b3e82ebbc52bc5b5f66455aeeac469c74"
 n_cases = 1024
+hash = "c95f2404ec0cf89de917747d4275716b3e82ebbc52bc5b5f66455aeeac469c74"
 
 ["conformance::CodecConformance<Opening<Sha256Digest>>"]
-hash = "3a4731633fdcded169f01b320d3d8791db38fbd5fddfc96ddc9620d20ffee04b"
 n_cases = 1024
+hash = "3a4731633fdcded169f01b320d3d8791db38fbd5fddfc96ddc9620d20ffee04b"
 
 ["conformance::CodecConformance<Payment<VerifyingKey,Sha256Digest>>"]
-hash = "bf6393ef9dd8ba5fb3972d76749ce3b25fe197d3f5b058999d4174fa6cee2f27"
 n_cases = 1024
+hash = "510cb950ad822ec0df22e40cc40a1317dcc774c707b3572130f5ae631530bef1"
 
 ["conformance::CodecConformance<PaymentContext<VerifyingKey,Sha256Digest>>"]
-hash = "f6e292e19650641dec26ffa3b96bec19a42e70460887f1264a6a4106a7fd468d"
 n_cases = 1024
+hash = "f6e292e19650641dec26ffa3b96bec19a42e70460887f1264a6a4106a7fd468d"
 
 ["conformance::CodecConformance<PaymentWitness<VerifyingKey>>"]
-hash = "696bc94a7c71968f2e3a98a88bdd3bf3dd369eb537aeaf23234793817e7d6ab8"
 n_cases = 1024
+hash = "22f657f635f13460e0ea8379a91e211064d4dca3f6e8e1f8ce64020e42340ee6"
 
 ["conformance::CodecConformance<Prefix>"]
-hash = "a3f55b2ab73dcfc49213e4530067477459fbadcedf7d40e3309566d3fb719d75"
 n_cases = 65536
+hash = "a3f55b2ab73dcfc49213e4530067477459fbadcedf7d40e3309566d3fb719d75"
 
 ["conformance::CodecConformance<ProofSlice<VerifyingKey,Sha256Digest>>"]
-hash = "68ba6b9b834600abd4d67da5752b52683291293f9e252579c197706cf6c39715"
 n_cases = 256
+hash = "cd04c9faf2f09340da9aa0e9bf1f899a41a3714f1b5787e50393bd4135e06f7a"
 
 ["conformance::CodecConformance<RangeLower<VerifyingKey>>"]
-hash = "69e97dbff08a2400976a7c9780155ec2a0be6287370bbe30401ef9a347b3f069"
 n_cases = 1024
+hash = "be708ff4b0dd843851527febcdcef2408002b0bb4bc9157a04effb07c4ea3fb0"
 
 ["conformance::CodecConformance<RangeOpening<Sha256Digest>>"]
-hash = "3a4731633fdcded169f01b320d3d8791db38fbd5fddfc96ddc9620d20ffee04b"
 n_cases = 1024
+hash = "3a4731633fdcded169f01b320d3d8791db38fbd5fddfc96ddc9620d20ffee04b"
 
 ["conformance::CodecConformance<ReceiptBody<VerifyingKey,Sha256Digest>>"]
-hash = "b1e3e679736db3163417f45419115200129309db16f469f1765dc81193fdbac7"
 n_cases = 1024
+hash = "b1e3e679736db3163417f45419115200129309db16f469f1765dc81193fdbac7"
 
 ["conformance::CodecConformance<ReceiptForkWitness<VerifyingKey>>"]
-hash = "4d84ac022713f43d875c35d8aace3b5adca3f523a4149ee717264731e2539c0d"
 n_cases = 1024
+hash = "cb50e48590ce591d106dca7784fdd7bfc5d0ecb28b377b4b0e8138cf48ebf4fc"
 
 ["conformance::CodecConformance<ReceiptWitness<VerifyingKey>>"]
-hash = "5927589060af46585144855b23c846fac0a52ef368bb1442961dd974538ad2fd"
 n_cases = 1024
+hash = "5927589060af46585144855b23c846fac0a52ef368bb1442961dd974538ad2fd"
 
 ["conformance::CodecConformance<RootBundle<Sha256Digest>>"]
-hash = "dfd0df10c020a6bb83979fc068e4d3a18c42d2c70b77ec6024850aca59607dc4"
 n_cases = 65536
+hash = "dfd0df10c020a6bb83979fc068e4d3a18c42d2c70b77ec6024850aca59607dc4"
 
 ["conformance::CodecConformance<SameIndexPaymentWitness<VerifyingKey>>"]
-hash = "25b67a8d490c5297ed472f5ff3de44a3ab709cec5fe9a2a4422b609957b3af0a"
 n_cases = 1024
+hash = "9875f62a2d6d1b53eadf4e41e41c8f022c0ab46ceb8738f234754b0258266ef6"
 
 ["conformance::CodecConformance<ScopedPaymentWitness<VerifyingKey>>"]
-hash = "64e6f8280d5f6cfec369eebf34a76815a53c7eeff14bd1712aa9d91d943dabf0"
 n_cases = 1024
+hash = "9a7959166c145beb5738f1dd5832b09c265aacf0c1cdddf49191ee21c0759c4e"
 
 ["conformance::CodecConformance<SendBody<VerifyingKey,Sha256Digest>>"]
-hash = "ce474ae56397d052c9516f991bf346f574a587550dbb494036e809ee80bc28cd"
 n_cases = 1024
+hash = "91aa4af84dbe8724da8ac23573ad0d587cbb52f4484721e1f8d27b12321698dc"
 
 ["conformance::CodecConformance<SettlementOutput>"]
-hash = "2d398eee206d7e4f9353ba1f57981b8f59c8c3cb5c321949e0d539af04b57a86"
 n_cases = 65536
+hash = "2d398eee206d7e4f9353ba1f57981b8f59c8c3cb5c321949e0d539af04b57a86"
 
 ["conformance::CodecConformance<ShardHead<VerifyingKey,Sha256Digest>>"]
-hash = "907bc52db7337b06ea2907d15aac6332f55566d98b0d69160d71c5633e1d635c"
 n_cases = 1024
+hash = "5c12ff5ab3974ef73d171611d8fa4399a8dbafeb793025889b79352d634dab0f"
 
 ["conformance::CodecConformance<ShardSet<VerifyingKey,Sha256Digest>>"]
-hash = "ea884b490f035efb9a9cec8f99a50ad295f43a02e8529216f1f06b15761aa150"
 n_cases = 1024
+hash = "6a73eac229f9d72d14c4c6a3f3d2e21371ef2b5e5be9ca87b835b8cac3f1a444"
 
 ["conformance::CodecConformance<SignedReceipt<VerifyingKey,Sha256Digest>>"]
-hash = "f8940495b5969098e7291b15e634605d916225f5550e7942664c0ea4951eda6a"
 n_cases = 1024
+hash = "f8940495b5969098e7291b15e634605d916225f5550e7942664c0ea4951eda6a"
 
 ["conformance::CodecConformance<SignedSend<VerifyingKey,Sha256Digest>>"]
-hash = "dbfdc280ffc416aaad3744bdb2e1c483e78bdbb10fee48036ffe32ff2cb85ba5"
 n_cases = 1024
+hash = "5c8a55b0e8d9294be633c3afc949203a24897a89bcb9e1b6e3e9021eb283d0da"
 
 ["conformance::CodecConformance<SignedWithdrawal<VerifyingKey,Sha256Digest>>"]
-hash = "6294b3d4f60f78baf9ca38f9fbf2a2a36628a81fb38be30dcd44547b8ac8a7fb"
 n_cases = 1024
+hash = "6294b3d4f60f78baf9ca38f9fbf2a2a36628a81fb38be30dcd44547b8ac8a7fb"
 
 ["conformance::CodecConformance<SliceBoundary>"]
-hash = "635dd9e20ee5ecfa6ad9ae9abab79aa97aad76e36a6129cc1a53324bfe601082"
 n_cases = 65536
+hash = "635dd9e20ee5ecfa6ad9ae9abab79aa97aad76e36a6129cc1a53324bfe601082"
 
 ["conformance::CodecConformance<StateAbsence<VerifyingKey,Sha256Digest>>"]
-hash = "91e41bf07e89dfaad11f85093ecd850cc0547d14694b72dc69bee7418d3f5396"
 n_cases = 1024
+hash = "91e41bf07e89dfaad11f85093ecd850cc0547d14694b72dc69bee7418d3f5396"
 
 ["conformance::CodecConformance<StateLeaf<VerifyingKey>>"]
-hash = "8f729df62afe6e28bbb32c573020976be2fc2d63b34670a696f59cc05f298503"
 n_cases = 1024
+hash = "8f729df62afe6e28bbb32c573020976be2fc2d63b34670a696f59cc05f298503"
 
 ["conformance::CodecConformance<StateLookup<VerifyingKey,Sha256Digest>>"]
-hash = "dc229d0b6155830d9d0537b5d4e1b79dbe85b83708cca8662e3c50aec415636a"
 n_cases = 1024
+hash = "dc229d0b6155830d9d0537b5d4e1b79dbe85b83708cca8662e3c50aec415636a"
 
 ["conformance::CodecConformance<StateOpening<VerifyingKey,Sha256Digest>>"]
-hash = "185e28b87c570ae9d7d879e5174529c197e6d38e280a6d4eb604184dff0c7a4a"
 n_cases = 1024
+hash = "185e28b87c570ae9d7d879e5174529c197e6d38e280a6d4eb604184dff0c7a4a"
 
 ["conformance::CodecConformance<StateRange<VerifyingKey,Sha256Digest>>"]
-hash = "91e41bf07e89dfaad11f85093ecd850cc0547d14694b72dc69bee7418d3f5396"
 n_cases = 1024
+hash = "91e41bf07e89dfaad11f85093ecd850cc0547d14694b72dc69bee7418d3f5396"
 
 ["conformance::CodecConformance<StateValueOpening<Sha256Digest>>"]
-hash = "a1c835c3f336367d6f5664ae4c79e440812aa9a5453da0f0e0f337d2f93711ca"
 n_cases = 1024
+hash = "a1c835c3f336367d6f5664ae4c79e440812aa9a5453da0f0e0f337d2f93711ca"
 
 ["conformance::CodecConformance<TerminalProof<Sha256Digest>>"]
-hash = "c574b1548b9ccf742da3054c93b143f2e8671e275a69e17d3609f713873e0a07"
 n_cases = 1024
+hash = "c574b1548b9ccf742da3054c93b143f2e8671e275a69e17d3609f713873e0a07"
 
 ["conformance::CodecConformance<TxId<Sha256Digest>>"]
-hash = "d65ced18cacd65769e8f9732131a06216e6600d5a115c4ed7483a8530813ddcd"
 n_cases = 65536
+hash = "d65ced18cacd65769e8f9732131a06216e6600d5a115c4ed7483a8530813ddcd"
 
 ["conformance::CodecConformance<VectorKind>"]
-hash = "55744821150c3639701aaea1d24972e4b8cce988130f9c4aa0ecc288033410e3"
 n_cases = 65536
+hash = "55744821150c3639701aaea1d24972e4b8cce988130f9c4aa0ecc288033410e3"
 
 ["conformance::CodecConformance<VectorRoot<Sha256Digest>>"]
-hash = "d65ced18cacd65769e8f9732131a06216e6600d5a115c4ed7483a8530813ddcd"
 n_cases = 65536
+hash = "d65ced18cacd65769e8f9732131a06216e6600d5a115c4ed7483a8530813ddcd"
 
 ["conformance::CodecConformance<Vote>"]
-hash = "5ad009ec6296cfe44e7481b48bd26b026b81f8783d9ad577ccda74acafa359ae"
 n_cases = 1024
+hash = "5ad009ec6296cfe44e7481b48bd26b026b81f8783d9ad577ccda74acafa359ae"
 
 ["conformance::CodecConformance<WithdrawalAction>"]
-hash = "7485eabcabb775b3bc3b963b2609ef20f49d8460073c1a36e5b9352ef302cc06"
 n_cases = 65536
+hash = "7485eabcabb775b3bc3b963b2609ef20f49d8460073c1a36e5b9352ef302cc06"
 
 ["conformance::CodecConformance<WithdrawalBatch<VerifyingKey,Sha256Digest>>"]
-hash = "9cb4c4acba806f9c009e0808c69d2844f2d8ebe574d107553b43bfcdc93437d9"
 n_cases = 1024
+hash = "9cb4c4acba806f9c009e0808c69d2844f2d8ebe574d107553b43bfcdc93437d9"
 
 ["conformance::CodecConformance<WithdrawalBody<Sha256Digest>>"]
-hash = "136732ac030f7dde36617d20babe64a1c39253481f1390eea9c1f52f905f8cf0"
 n_cases = 65536
+hash = "136732ac030f7dde36617d20babe64a1c39253481f1390eea9c1f52f905f8cf0"
 
 ["conformance::CodecConformance<WithdrawalClaim<Sha256Digest>>"]
-hash = "6bed6641dcafdf8b171fbfe8129356df3af64ef0f3e86b8e2f9a1e7352736134"
 n_cases = 256
+hash = "6bed6641dcafdf8b171fbfe8129356df3af64ef0f3e86b8e2f9a1e7352736134"
 
 ["conformance::CodecConformance<WithdrawalId<Sha256Digest>>"]
-hash = "d65ced18cacd65769e8f9732131a06216e6600d5a115c4ed7483a8530813ddcd"
 n_cases = 65536
+hash = "d65ced18cacd65769e8f9732131a06216e6600d5a115c4ed7483a8530813ddcd"
 
 ["conformance::CodecConformance<WithdrawalOutput>"]
-hash = "d3d87836ef1b57ca0b3ea316b8997757e9d4110d54508942a9ba0ad7a8d0da47"
 n_cases = 1024
+hash = "d3d87836ef1b57ca0b3ea316b8997757e9d4110d54508942a9ba0ad7a8d0da47"
 
 ["conformance::CodecConformance<WithdrawalOutputRange<Sha256Digest>>"]
-hash = "c7137ed0c6b1a19001cf302af8f7d06f2dba456dd68c7c1ea5d72093f464d27c"
 n_cases = 1024
+hash = "c7137ed0c6b1a19001cf302af8f7d06f2dba456dd68c7c1ea5d72093f464d27c"

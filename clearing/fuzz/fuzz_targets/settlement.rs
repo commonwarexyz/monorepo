@@ -1733,6 +1733,8 @@ impl Harness {
             context,
             prepared.deposits.clone(),
             prepared.withdrawals.clone(),
+            &[],
+            |_| true,
         );
         assert_eq!(OutcomeClass::of(&result), expected);
         self.apply_observation(now, &observation);

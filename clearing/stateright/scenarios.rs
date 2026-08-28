@@ -895,8 +895,8 @@ fn clean_claims_require_exact_positions_and_batch_scoped_routes() {
     rejected(model, &state, withdrawal_claim(Batch::B2));
     step(model, &mut state, withdrawal_claim(Batch::B3));
     step(model, &mut state, payout_claim(Batch::B1));
-    assert_eq!(state.withdrawal_reserve, [0; 5]);
-    assert_eq!(state.payout_reserve, [0; 5]);
+    assert_eq!(state.withdrawal_reserve, [0; 8]);
+    assert_eq!(state.payout_reserve, [0; 8]);
     assert_eq!(state.clean_claim_paid, 10);
 }
 
@@ -1030,6 +1030,186 @@ fn same_account_deposits_keep_the_earliest_deadline_and_refund_exactly() {
     );
     assert_eq!(state.refunded_deposits[Account::Bob as usize], 3);
     rejected(model, &state, SettlementAction::ClaimDeposit(Account::Bob));
+    drain_terminal(model, &mut state);
+    assert_eq!(state.released, state.total_in);
+}
+
+#[test]
+fn carried_withdrawal_clears_and_consumes_its_replay_id_at_admission() {
+    let model = SettlementModel::default();
+    let mut state = SettlementState::default();
+    step(
+        model,
+        &mut state,
+        SettlementAction::RecordDeposit(DepositId::BobTwo),
+    );
+    register_and_admit(model, &mut state, Batch::B0);
+    finalize_b0(model, &mut state);
+    assert_eq!(state.current_root, Root::R1);
+    step(
+        model,
+        &mut state,
+        SettlementAction::RecordDeposit(DepositId::BobOne),
+    );
+
+    // The carried request is never queued: registration accepts it as an
+    // operator-collected extra and admission consumes its replay id.
+    assert_eq!(state.pending_withdrawals, [None, None, None]);
+    step(
+        model,
+        &mut state,
+        SettlementAction::Register(RegistrationId::B1C),
+    );
+    assert_eq!(
+        state.withdrawal_replay_expiries[WithdrawalId::Carried.index()],
+        None
+    );
+    step(model, &mut state, admission(Batch::B1C));
+    assert_eq!(
+        state.withdrawal_replay_expiries[WithdrawalId::Carried.index()],
+        Some(11)
+    );
+    assert!(state.outstanding_withdrawals[Account::Bob as usize].is_some());
+
+    // The consumed id blocks a later queue of the same authorization.
+    let attempt = SettlementModel::withdrawal_attempt(&state, WithdrawalId::Carried);
+    rejected(model, &state, SettlementAction::QueueWithdrawal(attempt));
+
+    step(model, &mut state, SettlementAction::Observe(9));
+    step(model, &mut state, SettlementAction::Finalize);
+    assert_eq!(state.last, SettlementEdge::Finalize(Batch::B1C));
+    assert_eq!(state.outstanding_withdrawals, [None, None, None]);
+    assert_eq!(state.withdrawal_reserve[Batch::B1C.index()], 10);
+    step(model, &mut state, withdrawal_claim(Batch::B1C));
+    assert_eq!(state.claimed_withdrawals[Batch::B1C.index()], Some(0));
+    assert_eq!(state.withdrawal_reserve[Batch::B1C.index()], 0);
+    assert_eq!(state.clean_claim_paid, 10);
+    assert!(!state.current_state[Account::Bob as usize].active);
+}
+
+#[test]
+fn degraded_amount_finalizes_and_claims_a_zero_release() {
+    let model = SettlementModel::default();
+    let mut state = SettlementState::default();
+    step(
+        model,
+        &mut state,
+        SettlementAction::RecordDeposit(DepositId::BobTwo),
+    );
+    register_and_admit(model, &mut state, Batch::B0);
+    register_and_admit(model, &mut state, Batch::B1);
+    queue_withdrawal(model, &mut state, WithdrawalId::Amount);
+    step(
+        model,
+        &mut state,
+        SettlementAction::Register(RegistrationId::B2),
+    );
+
+    // Certification certified the degraded close: Bob spent below his queued
+    // amount, so the uncovered withdrawal releases nothing.
+    step(model, &mut state, admission(Batch::B2D));
+    step(model, &mut state, SettlementAction::Observe(5));
+    step(model, &mut state, SettlementAction::Finalize);
+    assert_eq!(state.last, SettlementEdge::Finalize(Batch::B0));
+    step(model, &mut state, SettlementAction::Observe(6));
+    step(model, &mut state, SettlementAction::Finalize);
+    step(model, &mut state, SettlementAction::Observe(7));
+    step(model, &mut state, SettlementAction::Finalize);
+    assert_eq!(state.last, SettlementEdge::Finalize(Batch::B2D));
+    assert_eq!(state.withdrawal_reserve[Batch::B2D.index()], 0);
+    assert_eq!(state.current_state[Account::Bob as usize].balance, 1);
+    assert_eq!(state.current_state[Account::Alice as usize].balance, 15);
+
+    // A fully degraded close finalizes no claimable value, so it owns no
+    // claim record and the zero output cannot be consumed.
+    rejected(model, &state, withdrawal_claim(Batch::B2D));
+    assert_eq!(state.claimed_withdrawals[Batch::B2D.index()], None);
+
+    // The request still consumed its slot and replay id through its deadline.
+    let attempt = SettlementModel::withdrawal_attempt(&state, WithdrawalId::Amount);
+    rejected(model, &state, SettlementAction::QueueWithdrawal(attempt));
+}
+
+#[test]
+fn uncovered_carried_amount_degrades_at_the_frozen_root() {
+    let model = SettlementModel::default();
+    let mut state = SettlementState::default();
+    step(
+        model,
+        &mut state,
+        SettlementAction::RecordDeposit(DepositId::BobTwo),
+    );
+    register_and_admit(model, &mut state, Batch::B0);
+    finalize_b0(model, &mut state);
+    step(
+        model,
+        &mut state,
+        SettlementAction::RecordDeposit(DepositId::BobOne),
+    );
+    step(
+        model,
+        &mut state,
+        SettlementAction::Register(RegistrationId::B1C),
+    );
+    step(model, &mut state, admission(Batch::B1C));
+
+    // A proven challenge freezes R1, where Bob's balance cannot cover the
+    // admitted carried amount, so the terminal split routes nothing to the
+    // destination and the whole balance stays residual.
+    step(
+        model,
+        &mut state,
+        proven_challenge(Batch::B1C, ChallengeKind::ReceiptFork(ForkRelation::Full)),
+    );
+    assert!(!state.fault.healthy());
+    drain_terminal(model, &mut state);
+    assert_eq!(state.terminal_withdrawals[Account::Bob as usize], 0);
+    assert_eq!(state.terminal_residuals[Account::Bob as usize], 9);
+    assert_eq!(state.terminal_residuals[Account::Alice as usize], 8);
+    assert_eq!(state.released, state.total_in);
+}
+
+#[test]
+fn carried_offset_defers_the_deposit() {
+    let model = SettlementModel::default();
+    let mut state = SettlementState::default();
+    step(
+        model,
+        &mut state,
+        SettlementAction::RecordDeposit(DepositId::BobTwo),
+    );
+    step(
+        model,
+        &mut state,
+        SettlementAction::Register(RegistrationId::OffsetC),
+    );
+    step(model, &mut state, admission(Batch::OffsetC));
+
+    // The deferred deposit stays staged with its deadline intact.
+    assert_eq!(state.pending_deposits, [0, 2, 0]);
+    assert_eq!(state.deposit_deadlines[Account::Bob as usize], Some(2));
+
+    // With no successor close admitted before its deadline, the deposit
+    // expires and refunds directly while the carried withdrawal still clears.
+    step(model, &mut state, SettlementAction::Observe(2));
+    assert_eq!(
+        state.fault,
+        Fault::ExpiredDeposit {
+            account: Account::Bob,
+            expired_at: 2,
+        }
+    );
+    step(model, &mut state, SettlementAction::Observe(4));
+    step(model, &mut state, SettlementAction::Finalize);
+    assert_eq!(state.last, SettlementEdge::Finalize(Batch::OffsetC));
+    step(model, &mut state, withdrawal_claim(Batch::OffsetC));
+    assert_eq!(state.clean_claim_paid, 2);
+    step(
+        model,
+        &mut state,
+        SettlementAction::ClaimDeposit(Account::Bob),
+    );
+    assert_eq!(state.refunded_deposits[Account::Bob as usize], 2);
     drain_terminal(model, &mut state);
     assert_eq!(state.released, state.total_in);
 }

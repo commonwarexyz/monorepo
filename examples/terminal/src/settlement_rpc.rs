@@ -22,8 +22,7 @@ use commonware_clearing::bajillion::{
     },
 };
 use commonware_codec::{
-    Decode as _, DecodeExt as _, Encode, EncodeSize, Error as CodecError, RangeCfg, Read,
-    ReadExt as _, Write,
+    DecodeExt as _, Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
 };
 use commonware_cryptography::sha256::Digest;
 use commonware_cryptography_curve25519::signing::Signature;
@@ -38,7 +37,6 @@ pub(crate) const METHOD_ADMIT: u8 = 4;
 pub(crate) const METHOD_CLAIM_WITHDRAWAL: u8 = 5;
 pub(crate) const METHOD_CLAIM_EXTERNAL_PAYOUT: u8 = 6;
 pub(crate) const METHOD_CONFIRM_DEPOSIT: u8 = 7;
-pub(crate) const METHOD_CONFIRM_WITHDRAWAL: u8 = 8;
 pub(crate) const METHOD_CHALLENGE: u8 = 9;
 pub(crate) const METHOD_BEGIN_HARD_FAULT_SETTLEMENT: u8 = 10;
 pub(crate) const METHOD_CLAIM_HARD_FAULT: u8 = 11;
@@ -266,6 +264,9 @@ pub(crate) struct RegisterEpochRequest {
     pub(crate) predecessor_liability: u64,
     pub(crate) deposits: DepositBatch<Key>,
     pub(crate) withdrawals: WithdrawalBatch<Key, Digest>,
+    /// One predecessor-root opening per withdrawal in batch order. Settlement selects the
+    /// ones proving its operator-carried extras certifiable.
+    pub(crate) openings: Vec<StateOpening<Key, Digest>>,
     pub(crate) signature: Signature,
 }
 
@@ -275,6 +276,7 @@ impl Write for RegisterEpochRequest {
         self.predecessor_liability.write(buf);
         self.deposits.write(buf);
         self.withdrawals.write(buf);
+        self.openings.write(buf);
         self.signature.write(buf);
     }
 }
@@ -285,6 +287,7 @@ impl EncodeSize for RegisterEpochRequest {
             + self.predecessor_liability.encode_size()
             + self.deposits.encode_size()
             + self.withdrawals.encode_size()
+            + self.openings.encode_size()
             + self.signature.encode_size()
     }
 }
@@ -303,6 +306,10 @@ impl Read for RegisterEpochRequest {
                     RangeCfg::new(0..=MAX_BATCH_ITEMS),
                     RangeCfg::new(0..=MAX_DESTINATION_BYTES),
                 ),
+            )?,
+            openings: Vec::<StateOpening<Key, Digest>>::read_cfg(
+                buf,
+                &(RangeCfg::new(0..=MAX_BATCH_ITEMS), ()),
             )?,
             signature: Signature::read(buf)?,
         })
@@ -1118,6 +1125,7 @@ fn dispatch(settlement: &mut Settlement, request: rpc::Request) -> anyhow::Resul
                     request.predecessor_liability,
                     request.deposits,
                     request.withdrawals,
+                    &request.openings,
                 )
                 .context("apply epoch-registration request")?;
             Ok(Bytes::new())
@@ -1157,17 +1165,6 @@ fn dispatch(settlement: &mut Settlement, request: rpc::Request) -> anyhow::Resul
             settlement
                 .confirm_deposit(&request)
                 .context("confirm settlement deposit")?;
-            Ok(Bytes::new())
-        }
-        METHOD_CONFIRM_WITHDRAWAL => {
-            let request = SignedWithdrawal::decode_cfg(
-                request.body,
-                &RangeCfg::new(0..=MAX_DESTINATION_BYTES),
-            )
-            .context("decode withdrawal-confirmation request")?;
-            settlement
-                .confirm_withdrawal(&request)
-                .context("confirm settlement withdrawal")?;
             Ok(Bytes::new())
         }
         METHOD_CONFIRM_REGISTRATION => {
@@ -1282,20 +1279,6 @@ pub(crate) async fn confirm_deposit<E: Network>(
     invoke_empty(network, address, METHOD_CONFIRM_DEPOSIT, request.encode()).await
 }
 
-pub(crate) async fn confirm_withdrawal<E: Network>(
-    network: &E,
-    address: SocketAddr,
-    request: &SignedWithdrawal<Key, Digest>,
-) -> Result<()> {
-    invoke_empty(
-        network,
-        address,
-        METHOD_CONFIRM_WITHDRAWAL,
-        request.encode(),
-    )
-    .await
-}
-
 pub(crate) async fn confirm_registration<E: Network>(
     network: &E,
     address: SocketAddr,
@@ -1310,6 +1293,11 @@ pub(crate) async fn confirm_registration<E: Network>(
     .await
 }
 
+/// Queues one signed withdrawal directly at settlement.
+///
+/// The demo agent hands withdrawals to the operator, which carries them into its next
+/// registered close. This client covers the censorship fallback in tests.
+#[cfg(test)]
 pub(crate) async fn queue_withdrawal<E: Network>(
     network: &E,
     address: SocketAddr,
@@ -1506,6 +1494,7 @@ mod tests {
             predecessor_liability,
             deposits,
             withdrawals,
+            openings: Vec::new(),
             signature,
         }
     }

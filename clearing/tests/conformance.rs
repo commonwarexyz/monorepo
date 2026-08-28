@@ -17,8 +17,8 @@ use commonware_clearing::bajillion::{
     commitment::{MultiOpening, Opening, RangeOpening, VectorKind, VectorRoot},
     credit::{CreditTip, CreditTipLookup, CreditTipValue, ShardHead, ShardSet},
     payment::{
-        Payment, PaymentContext, PaymentWitness, ReceiptBody, SendBody, SignedReceipt, SignedSend,
-        TxId,
+        Entry, Payment, PaymentContext, PaymentWitness, ReceiptBody, SendBody, SignedReceipt,
+        SignedSend, TxId,
     },
     state::{
         AccountChange, AccountRow, AccountState, ChangeGuard, ChangeValue, ChangeValueCore, Prefix,
@@ -73,6 +73,7 @@ commonware_conformance::conformance_tests! {
     CodecConformance<ShardSet<VerifyingKey, Sha256Digest>> => 1024,
     CodecConformance<PaymentContext<VerifyingKey, Sha256Digest>> => 1024,
     CodecConformance<TxId<Sha256Digest>>,
+    CodecConformance<Entry<VerifyingKey>>,
     CodecConformance<SendBody<VerifyingKey, Sha256Digest>> => 1024,
     CodecConformance<SignedSend<VerifyingKey, Sha256Digest>> => 1024,
     CodecConformance<ReceiptBody<VerifyingKey, Sha256Digest>> => 1024,

@@ -5,7 +5,7 @@ use super::{
 use stateright::{Checker, Model, Property};
 
 pub(crate) const ACCOUNT_COUNT: usize = 3;
-const BATCH_COUNT: usize = 5;
+const BATCH_COUNT: usize = 8;
 const TIME_HORIZON: u8 = 12;
 const MAX_ADMISSION_DELAY: u8 = 3;
 const MIN_CHALLENGE_DURATION: u8 = 2;
@@ -39,9 +39,12 @@ pub(crate) enum Root {
     R0,
     R1,
     R2,
+    R2C,
     R3,
+    R3D,
     R4,
     Offset,
+    OffsetC,
     Empty,
 }
 
@@ -66,7 +69,13 @@ const EMPTY_STATE: [AccountState; ACCOUNT_COUNT] = [ZERO_STATE; ACCOUNT_COUNT];
 const S0: [AccountState; ACCOUNT_COUNT] = [active(10), active(5), ZERO_STATE];
 const S1: [AccountState; ACCOUNT_COUNT] = [active(8), active(9), ZERO_STATE];
 const S2: [AccountState; ACCOUNT_COUNT] = [active(7), active(9), ZERO_STATE];
+// B1C's successor: Bob's carried withdrawal sweeps his balance plus the
+// staged deposit, removing the account.
+const S2C: [AccountState; ACCOUNT_COUNT] = [active(8), ZERO_STATE, ZERO_STATE];
 const S3: [AccountState; ACCOUNT_COUNT] = [active(7), active(7), ZERO_STATE];
+// B2D's successor: Bob spent below his queued amount, so the uncovered
+// withdrawal released nothing and his tail stays in the account.
+const S3D: [AccountState; ACCOUNT_COUNT] = [active(15), active(1), ZERO_STATE];
 const S4: [AccountState; ACCOUNT_COUNT] = [ZERO_STATE, active(7), ZERO_STATE];
 const S_OFFSET: [AccountState; ACCOUNT_COUNT] = [active(10), active(3), ZERO_STATE];
 
@@ -105,14 +114,18 @@ pub(crate) enum WithdrawalId {
     Close,
     CloseAfterFault,
     Offset,
+    Carried,
+    CarriedOffset,
 }
 
 impl WithdrawalId {
-    const ALL: [Self; 4] = [
+    const ALL: [Self; 6] = [
         Self::Amount,
         Self::Close,
         Self::CloseAfterFault,
         Self::Offset,
+        Self::Carried,
+        Self::CarriedOffset,
     ];
 
     pub(crate) const fn index(self) -> usize {
@@ -121,6 +134,8 @@ impl WithdrawalId {
             Self::Close => 1,
             Self::CloseAfterFault => 2,
             Self::Offset => 3,
+            Self::Carried => 4,
+            Self::CarriedOffset => 5,
         }
     }
 
@@ -160,6 +175,29 @@ impl WithdrawalId {
                 deadline: 2,
                 deployment: Deployment::Current,
                 context_root: Root::R0,
+                signature_valid: true,
+            },
+            // Operator-carried and exactly offsetting Bob's staged deposit,
+            // so the close defers the deposit instead of sealing a no-op row.
+            Self::CarriedOffset => WithdrawalRequest {
+                account: Account::Bob,
+                destination: Destination::Bob,
+                action: WithdrawalAction::Amount(2),
+                deadline: 5,
+                deployment: Deployment::Current,
+                context_root: Root::R0,
+                signature_valid: true,
+            },
+            // Operator-carried through B1C's registration without queueing.
+            // Covered by the staged deposit at the close but uncovered at the
+            // frozen root R1, so a hard fault exercises the terminal degrade.
+            Self::Carried => WithdrawalRequest {
+                account: Account::Bob,
+                destination: Destination::Bob,
+                action: WithdrawalAction::Amount(10),
+                deadline: 11,
+                deployment: Deployment::Current,
+                context_root: Root::R1,
                 signature_valid: true,
             },
         }
@@ -273,22 +311,34 @@ struct DepositEvent {
 pub(crate) enum Anchor {
     A0,
     A1,
+    A1C,
     A2,
     A3,
     Offset,
+    OffsetC,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum RegistrationId {
     B0,
     B1,
+    B1C,
     B2,
     B3,
     Offset,
+    OffsetC,
 }
 
 impl RegistrationId {
-    const ALL: [Self; BATCH_COUNT] = [Self::B0, Self::B1, Self::B2, Self::B3, Self::Offset];
+    const ALL: [Self; 7] = [
+        Self::B0,
+        Self::B1,
+        Self::B1C,
+        Self::B2,
+        Self::B3,
+        Self::Offset,
+        Self::OffsetC,
+    ];
 
     pub(crate) const fn registration(self) -> Registration {
         match self {
@@ -311,6 +361,19 @@ impl RegistrationId {
                 withdrawals: [None, None, None],
                 admission_deadline: 3,
                 challenge_deadline: 5,
+            },
+            // B1's epoch slot with an operator-carried request that was never
+            // chain-queued. Registerable only after B0 finalizes, since the
+            // carried request binds the finalized root R1.
+            Self::B1C => Registration {
+                epoch: 1,
+                predecessor: Root::R1,
+                anchor: Anchor::A1C,
+                predecessor_state: S1,
+                deposits: [0, 1, 0],
+                withdrawals: [None, Some(WithdrawalId::Carried.request()), None],
+                admission_deadline: 6,
+                challenge_deadline: 8,
             },
             Self::B2 => Registration {
                 epoch: 2,
@@ -342,6 +405,18 @@ impl RegistrationId {
                 admission_deadline: 1,
                 challenge_deadline: 3,
             },
+            // Offset's epoch slot with the offsetting request operator-carried
+            // instead of queued. The staged deposit defers identically.
+            Self::OffsetC => Registration {
+                epoch: 0,
+                predecessor: Root::R0,
+                anchor: Anchor::OffsetC,
+                predecessor_state: S0,
+                deposits: [0, 0, 0],
+                withdrawals: [None, Some(WithdrawalId::CarriedOffset.request()), None],
+                admission_deadline: 1,
+                challenge_deadline: 3,
+            },
         }
     }
 }
@@ -365,10 +440,22 @@ pub(crate) enum Batch {
     B2,
     B3,
     Offset,
+    B1C,
+    B2D,
+    OffsetC,
 }
 
 impl Batch {
-    const ALL: [Self; BATCH_COUNT] = [Self::B0, Self::B1, Self::B2, Self::B3, Self::Offset];
+    const ALL: [Self; BATCH_COUNT] = [
+        Self::B0,
+        Self::B1,
+        Self::B2,
+        Self::B3,
+        Self::Offset,
+        Self::B1C,
+        Self::B2D,
+        Self::OffsetC,
+    ];
 
     pub(crate) const fn index(self) -> usize {
         match self {
@@ -377,6 +464,9 @@ impl Batch {
             Self::B2 => 2,
             Self::B3 => 3,
             Self::Offset => 4,
+            Self::B1C => 5,
+            Self::B2D => 6,
+            Self::OffsetC => 7,
         }
     }
 
@@ -384,9 +474,11 @@ impl Batch {
         match self {
             Self::B0 => RegistrationId::B0,
             Self::B1 => RegistrationId::B1,
-            Self::B2 => RegistrationId::B2,
+            Self::B2 | Self::B2D => RegistrationId::B2,
             Self::B3 => RegistrationId::B3,
             Self::Offset => RegistrationId::Offset,
+            Self::B1C => RegistrationId::B1C,
+            Self::OffsetC => RegistrationId::OffsetC,
         }
     }
 
@@ -478,6 +570,68 @@ impl Batch {
                 successor_state: S_OFFSET,
                 deposits: [0, 0, 0],
                 withdrawals: [None, Some(WithdrawalId::Offset.request()), None],
+                admission_deadline: 1,
+                challenge_deadline: 3,
+                withdrawal_output: Some(Output {
+                    position: 0,
+                    destination: Destination::Bob,
+                    amount: 2,
+                }),
+                payout_output: None,
+            },
+            // A carried request clears at full value in a boundary close.
+            Self::B1C => Candidate {
+                registration: RegistrationId::B1C,
+                epoch: 1,
+                predecessor: Root::R1,
+                anchor: Anchor::A1C,
+                successor: Root::R2C,
+                predecessor_state: S1,
+                successor_state: S2C,
+                deposits: [0, 1, 0],
+                withdrawals: [None, Some(WithdrawalId::Carried.request()), None],
+                admission_deadline: 6,
+                challenge_deadline: 8,
+                withdrawal_output: Some(Output {
+                    position: 0,
+                    destination: Destination::Bob,
+                    amount: 10,
+                }),
+                payout_output: None,
+            },
+            // Certification's other legitimate outcome for B2's anchor: Bob
+            // spent below his queued amount, so coverage degraded the release
+            // to zero while the request still consumed its slot.
+            Self::B2D => Candidate {
+                registration: RegistrationId::B2,
+                epoch: 2,
+                predecessor: Root::R2,
+                anchor: Anchor::A2,
+                successor: Root::R3D,
+                predecessor_state: S2,
+                successor_state: S3D,
+                deposits: [0, 0, 0],
+                withdrawals: [None, Some(WithdrawalId::Amount.request()), None],
+                admission_deadline: 4,
+                challenge_deadline: 6,
+                withdrawal_output: Some(Output {
+                    position: 0,
+                    destination: Destination::Bob,
+                    amount: 0,
+                }),
+                payout_output: None,
+            },
+            // The carried offset clears while its staged deposit stays pending.
+            Self::OffsetC => Candidate {
+                registration: RegistrationId::OffsetC,
+                epoch: 0,
+                predecessor: Root::R0,
+                anchor: Anchor::OffsetC,
+                successor: Root::OffsetC,
+                predecessor_state: S0,
+                successor_state: S_OFFSET,
+                deposits: [0, 0, 0],
+                withdrawals: [None, Some(WithdrawalId::CarriedOffset.request()), None],
                 admission_deadline: 1,
                 challenge_deadline: 3,
                 withdrawal_output: Some(Output {
@@ -866,11 +1020,16 @@ impl SettlementModel {
             .map_or(state.expected_epoch, |batch| batch.candidate().epoch + 1)
     }
 
-    fn boundary_deposits(state: &SettlementState) -> [u16; ACCOUNT_COUNT] {
+    // Deferral keys off the sealed batch, so an operator-carried extra that
+    // exactly offsets its staged deposit defers it like a queued request does.
+    fn boundary_deposits(
+        state: &SettlementState,
+        registration: &Registration,
+    ) -> [u16; ACCOUNT_COUNT] {
         let mut deposits = state.pending_deposits;
         for account in Account::ALL {
             let index = account.index();
-            if let Some(withdrawal) = state.pending_withdrawals[index]
+            if let Some(withdrawal) = registration.withdrawals[index]
                 && let WithdrawalAction::Amount(amount) = withdrawal.action
                 && amount == deposits[index]
             {
@@ -897,8 +1056,8 @@ impl SettlementModel {
         registration.epoch == Self::next_admission_epoch(state)
             && registration.predecessor == Self::head_root(state)
             && registration.predecessor_state == Self::head_state(state)
-            && registration.deposits == Self::boundary_deposits(state)
-            && registration.withdrawals == state.pending_withdrawals
+            && registration.deposits == Self::boundary_deposits(state, &registration)
+            && Self::withdrawals_match(state, &registration)
             && state.now <= registration.admission_deadline
             && ordered_deadline
             && registration.admission_deadline <= base.saturating_add(MAX_ADMISSION_DELAY)
@@ -907,6 +1066,72 @@ impl SettlementModel {
             })
             && registration.admission_deadline < TIME_HORIZON
             && registration.challenge_deadline < TIME_HORIZON
+    }
+
+    // Every chain-queued request appears verbatim. This half is stable while
+    // the registration is live, so the registration_exact always-invariant can
+    // re-evaluate it. The carried-intake gates are registration-time checks
+    // and live in can_register instead.
+    fn withdrawals_match(state: &SettlementState, registration: &Registration) -> bool {
+        Account::ALL.into_iter().all(|account| {
+            let index = account.index();
+            state.pending_withdrawals[index]
+                .is_none_or(|pending| registration.withdrawals[index] == Some(pending))
+        })
+    }
+
+    // Operator-carried extras run the shared intake gates in place of the
+    // queue's safety openings, which coverage degrade makes safe to skip, and
+    // must outlive the admission window so an admitted close never carries an
+    // expired obligation.
+    fn carried_admitted(state: &SettlementState, registration: &Registration) -> bool {
+        Account::ALL.into_iter().all(|account| {
+            let index = account.index();
+            match (
+                state.pending_withdrawals[index],
+                registration.withdrawals[index],
+            ) {
+                (None, Some(request)) => Self::carried_admissible(state, registration, request),
+                _ => true,
+            }
+        })
+    }
+
+    // The fixture destinations are all adapter-eligible, so the queue's
+    // explicit eligibility bit has no registration-side twin here. Production
+    // proves the predecessor-state facts with one Merkle opening per extra,
+    // which the model reads directly from the registration fixture.
+    fn carried_admissible(
+        state: &SettlementState,
+        registration: &Registration,
+        request: WithdrawalRequest,
+    ) -> bool {
+        let earliest = state.now.saturating_add(MIN_WITHDRAWAL_NOTICE);
+        let latest = state.now.saturating_add(MAX_WITHDRAWAL_NOTICE);
+        let index = request.account.index();
+        let predecessor = registration.predecessor_state[index];
+        let deposit = registration.deposits[index];
+        // The registration's deposits are the deferred-aware boundary, so an
+        // exactly-offsetting extra sees a zero deposit and must be coverable
+        // from the balance alone.
+        let covered = match request.action {
+            WithdrawalAction::Amount(amount) => {
+                amount <= predecessor.balance.saturating_add(deposit)
+            }
+            WithdrawalAction::Close => true,
+        };
+        state.withdrawal_replay_expiries[request.replay_key().index()].is_none()
+            && state.outstanding_withdrawals[index].is_none()
+            && request.signature_valid
+            && request.deployment == Deployment::Current
+            && request.context_root == state.current_root
+            && request.destination.encoded_len() <= MAX_DESTINATION_BYTES
+            && request.deadline >= earliest
+            && request.deadline <= latest
+            && request.deadline <= TIME_HORIZON
+            && request.deadline > registration.challenge_deadline + 1
+            && predecessor.active
+            && covered
     }
 
     fn candidate_matches_registration(batch: Batch, id: RegistrationId) -> bool {
@@ -928,6 +1153,7 @@ impl SettlementModel {
             && state.registered.is_none()
             && state.pipeline.len() < self.max_pending
             && Self::registration_matches(state, id)
+            && Self::carried_admitted(state, &id.registration())
     }
 
     fn can_record_deposit(self, state: &SettlementState, id: DepositId) -> bool {
@@ -1105,6 +1331,17 @@ impl SettlementModel {
             state.pending_deposits[index] = old.checked_sub(included)?;
             if old == included {
                 state.deposit_deadlines[index] = None;
+            }
+        }
+        // Operator-carried requests consume their replay ids and join the
+        // deadline fence at admission. Chain-queued entries re-set the same
+        // values, so the loop is idempotent for them.
+        for account in Account::ALL {
+            let index = account.index();
+            if let Some(request) = candidate.withdrawals[index] {
+                state.withdrawal_replay_expiries[request.replay_key().index()] =
+                    Some(request.deadline);
+                state.outstanding_withdrawals[index] = Some(request);
             }
         }
         state.pending_withdrawals = [None; ACCOUNT_COUNT];
@@ -1297,11 +1534,15 @@ impl SettlementModel {
         source: Batch,
         position: u8,
     ) -> Option<()> {
-        let output = source.candidate().withdrawal_output?;
+        let candidate = source.candidate();
+        let output = candidate.withdrawal_output?;
         let bit = batch.bit();
+        // A batch that finalized nothing claimable owns no claim record, so a
+        // fully degraded close has nothing to consume.
         if source != batch
             || output.position != position
             || state.finalized_batches & bit == 0
+            || candidate.withdrawal_total() + candidate.payout_total() == 0
             || state.claimed_withdrawals[batch.index()].is_some()
             || output.amount > state.withdrawal_reserve[batch.index()]
         {
@@ -1446,18 +1687,16 @@ impl SettlementModel {
         Some(())
     }
 
-    fn terminal_split(
-        state: &SettlementState,
-        account: Account,
-        balance: u16,
-    ) -> Option<(u16, u16)> {
-        match state.outstanding_withdrawals[account.index()] {
-            None => Some((0, balance)),
-            Some(request) => match request.action {
-                WithdrawalAction::Amount(amount) => Some((amount, balance.checked_sub(amount)?)),
-                WithdrawalAction::Close => Some((balance, 0)),
-            },
-        }
+    fn terminal_split(state: &SettlementState, account: Account, balance: u16) -> (u16, u16) {
+        state.outstanding_withdrawals[account.index()].map_or((0, balance), |request| {
+            match request.action {
+                WithdrawalAction::Amount(amount) if amount <= balance => (amount, balance - amount),
+                // An uncovered carried amount routes nothing at the frozen
+                // root and the whole balance stays residual.
+                WithdrawalAction::Amount(_) => (0, balance),
+                WithdrawalAction::Close => (balance, 0),
+            }
+        })
     }
 
     fn claim_state(&self, state: &mut SettlementState, account: Account) -> Option<()> {
@@ -1478,7 +1717,7 @@ impl SettlementModel {
         {
             return None;
         }
-        let (withdrawal, residual) = Self::terminal_split(state, account, account_state.balance)?;
+        let (withdrawal, residual) = Self::terminal_split(state, account, account_state.balance);
         let remaining_state = remaining_state.checked_sub(account_state.balance)?;
         let finishes = remaining_state == 0 && remaining_deposits == 0;
         state.custody = state.custody.checked_sub(account_state.balance)?;
@@ -1505,6 +1744,20 @@ impl SettlementModel {
         }
         state.last = SettlementEdge::ClaimState(account);
         Some(())
+    }
+
+    // Certification releases each requested amount exactly or not at all, so
+    // every certified close the model can admit must respect the rule.
+    fn zero_or_exact(candidate: &Candidate) -> bool {
+        let requested = candidate.withdrawals.iter().find_map(|slot| *slot);
+        match (requested, candidate.withdrawal_output) {
+            (None, None) => true,
+            (Some(request), Some(output)) => match request.action {
+                WithdrawalAction::Amount(amount) => output.amount == 0 || output.amount == amount,
+                WithdrawalAction::Close => true,
+            },
+            _ => false,
+        }
     }
 
     const fn reserve_exact(state: &SettlementState, batch: Batch) -> bool {
@@ -1743,6 +1996,9 @@ impl SettlementModel {
         let reserves_exact = Batch::ALL
             .into_iter()
             .all(|batch| Self::reserve_exact(state, batch));
+        let releases_zero_or_exact = Batch::ALL
+            .into_iter()
+            .all(|batch| Self::zero_or_exact(&batch.candidate()));
         let finalized_disjoint = state.finalized_batches & state.invalidated_batches == 0;
         let claims_scoped = Batch::ALL.into_iter().all(|batch| {
             let candidate = batch.candidate();
@@ -1776,6 +2032,7 @@ impl SettlementModel {
             && finalized_disjoint
             && claims_scoped
             && reserves_exact
+            && releases_zero_or_exact
             && custody_conserved
             && Self::active_backing(state)
             && Self::recovery_exact(state)
@@ -1934,6 +2191,31 @@ fn close_claimed(_: &SettlementModel, state: &SettlementState) -> bool {
 
 fn payout_claimed(_: &SettlementModel, state: &SettlementState) -> bool {
     state.claimed_payouts[Batch::B1.index()] == Some(1)
+}
+
+fn carried_claimed(_: &SettlementModel, state: &SettlementState) -> bool {
+    state.claimed_withdrawals[Batch::B1C.index()] == Some(0)
+}
+
+fn degraded_zero_finalized(_: &SettlementModel, state: &SettlementState) -> bool {
+    state.status[Batch::B2D.index()] == BatchStatus::Finalized
+        && state.withdrawal_reserve[Batch::B2D.index()] == 0
+}
+
+// Reachable only through the uncovered carried request: B1C admitted, a fault
+// froze R1 where Bob's balance is 9, and his outstanding amount of 10 degraded
+// to a zero terminal release with the whole balance residual.
+fn carried_offset_deferred(_: &SettlementModel, state: &SettlementState) -> bool {
+    state.status[Batch::OffsetC.index()] == BatchStatus::Pending
+        && state.pending_deposits[Account::Bob.index()] == 2
+}
+
+const fn carried_terminal_degraded(_: &SettlementModel, state: &SettlementState) -> bool {
+    matches!(
+        state.status[Batch::B1C.index()],
+        BatchStatus::Challenged(_) | BatchStatus::Invalidated(_)
+    ) && state.terminal_withdrawals[Account::Bob.index()] == 0
+        && state.terminal_residuals[Account::Bob.index()] == 9
 }
 
 fn terminal_recovery_settles(_: &SettlementModel, state: &SettlementState) -> bool {
@@ -2159,6 +2441,19 @@ impl Model for SettlementModel {
             Property::sometimes("deposit expiry is reachable", deposit_fault),
             Property::sometimes("latest-send challenge is reachable", latest_fault),
             Property::sometimes("higher-tip challenge is reachable", higher_tip_fault),
+            Property::sometimes("a carried withdrawal clears at full value", carried_claimed),
+            Property::sometimes(
+                "a degraded amount finalizes with a zero reserve",
+                degraded_zero_finalized,
+            ),
+            Property::sometimes(
+                "an uncovered carried amount degrades at the frozen root",
+                carried_terminal_degraded,
+            ),
+            Property::sometimes(
+                "a carried offset defers its staged deposit",
+                carried_offset_deferred,
+            ),
             Property::sometimes("receipt-range challenge is reachable", range_fault),
             Property::sometimes("same-send fork challenge is reachable", same_send_fork),
             Property::sometimes("same-index fork challenge is reachable", same_index_fork),
@@ -2254,7 +2549,7 @@ fn settlement_checker_explores_the_complete_finite_graph() {
         .spawn_bfs()
         .join();
     assert!(checker.is_done());
-    assert_eq!(checker.unique_state_count(), 3_929_740);
+    assert_eq!(checker.unique_state_count(), 6_034_482);
     checker.assert_properties();
 }
 
@@ -2267,6 +2562,20 @@ fn settlement_invariants_have_negative_controls() {
     };
     assert!(!all_invariants(&model, &skipped));
     assert!(!fifo_without_skips(&model, &skipped));
+
+    // A partial release is neither the requested amount nor zero.
+    let mut partial = Batch::B2.candidate();
+    partial.withdrawal_output = Some(Output {
+        position: 0,
+        destination: Destination::Bob,
+        amount: 1,
+    });
+    assert!(!SettlementModel::zero_or_exact(&partial));
+    assert!(
+        Batch::ALL
+            .into_iter()
+            .all(|batch| SettlementModel::zero_or_exact(&batch.candidate()))
+    );
 
     let unbacked = SettlementState {
         custody: 14,

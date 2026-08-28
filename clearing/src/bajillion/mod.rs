@@ -106,7 +106,7 @@
 //!              v
 //! +-------------------------+                 +-----------------------------+
 //! | REGISTERED              |---------------->| CloseContext C = E + R      |
-//! | exact C, D, W           |                 | PaymentContext: anchor,e,op |
+//! | exact C, D; W superset  |                 | PaymentContext: anchor,e,op |
 //! | admission deadline A    |                 +--------------+--------------+
 //! +------+------------------+                                |
 //!        |                                                   | only now may the
@@ -454,12 +454,15 @@
 //!
 //! State roots contain only sorted, active, positive-balance leaves. Zero balances are omitted,
 //! not retained as tombstones. An [`boundary::WithdrawalAction::Amount`] authorizes one exact
-//! positive amount. [`boundary::WithdrawalAction::Close`] carries no amount, permits payment
-//! activity through the epoch, then sweeps the authenticated epoch-tail balance and removes the
-//! account. Credit to an absent account without a deposit remains outside live state and becomes
-//! an external payout. Validators derive each compact change value and withdrawal output while
-//! checking the full row and exact signed request. Amount and Close claims have the same shape:
-//! the certified destination and amount plus one withdrawal-output opening. An external payout
+//! positive amount and releases it exactly or not at all: an amount the epoch tail can no longer
+//! cover settles with a zero release, so a payer spending after authorizing a withdrawal cannot
+//! leave the operator without a buildable close. [`boundary::WithdrawalAction::Close`] carries no
+//! amount, permits payment activity through the epoch, then sweeps the authenticated epoch-tail
+//! balance and removes the account. Credit to an absent account without a deposit remains outside
+//! live state and becomes an external payout. Validators derive each compact change value and
+//! withdrawal output while checking the full row and exact signed request. Amount and Close
+//! claims have the same shape: the certified destination and amount plus one withdrawal-output
+//! opening. An external payout
 //! instead uses one compact change opening and never opens a neighboring row.
 //!
 //! ```text

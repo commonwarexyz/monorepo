@@ -515,8 +515,10 @@ impl<P: PublicKey, D: Digest> EpochContext<P, D> {
 
     /// Binds the root already owned by the settlement state machine.
     ///
-    /// Boundary affordability is established when deposits and withdrawals enter settlement
-    /// state. Callers outside that owner must use [`Self::bind`] with the complete state cache.
+    /// Settlement intake establishes each request's start affordability, through safety openings
+    /// when queueing and through one predecessor-root opening for operator-carried requests.
+    /// Later epoch spending can still lower the tail, which certification settles with a zero
+    /// release. Callers outside that owner must use [`Self::bind`] with the complete state cache.
     pub(crate) const fn bind_settlement_root(
         self,
         predecessor_root: VectorRoot<D>,
@@ -2223,10 +2225,10 @@ pub(crate) fn validate_terminal_prefix<P: PublicKey, D: Digest>(
 ) -> Result<(), TransitionError> {
     let withdrawal_count =
         u64::try_from(withdrawals.len()).map_err(|_| TransitionError::BoundaryTotals)?;
-    if totals.deposit != deposits.total()
-        || totals.withdrawal < withdrawals.total()
-        || totals.withdrawal_count != withdrawal_count
-    {
+    // The released withdrawal total is certified row-derived and may fall below
+    // the batch's requested sum because uncovered amounts release zero. Over-
+    // release fails the custody subtraction at admission.
+    if totals.deposit != deposits.total() || totals.withdrawal_count != withdrawal_count {
         return Err(TransitionError::BoundaryTotals);
     }
 
@@ -2331,17 +2333,26 @@ where
     let deposit = deposits.amount_for(&row.account);
     let withdrawal = withdrawals.request_for(&row.account);
     let withdrawal_amount = match withdrawal {
-        Some(request) => match request.body().action() {
-            WithdrawalAction::Amount(amount) => amount.get(),
-            WithdrawalAction::Close => {
-                let available =
-                    u128::from(row.predecessor.balance) + u128::from(deposit) + u128::from(credit);
-                let tail = available
-                    .checked_sub(u128::from(debit))
-                    .ok_or(TransitionError::BalanceEquation)?;
-                u64::try_from(tail).map_err(|_| TransitionError::PrefixOverflow)?
+        Some(request) => {
+            let available =
+                u128::from(row.predecessor.balance) + u128::from(deposit) + u128::from(credit);
+            let tail = available
+                .checked_sub(u128::from(debit))
+                .ok_or(TransitionError::BalanceEquation)?;
+            match request.body().action() {
+                // Coverage is all-or-nothing. An amount the account can no
+                // longer cover at the epoch tail settles with a zero release,
+                // so a payer spending after authorizing a withdrawal cannot
+                // leave the operator without a buildable close.
+                WithdrawalAction::Amount(amount) if u128::from(amount.get()) <= tail => {
+                    amount.get()
+                }
+                WithdrawalAction::Amount(_) => 0,
+                WithdrawalAction::Close => {
+                    u64::try_from(tail).map_err(|_| TransitionError::PrefixOverflow)?
+                }
             }
-        },
+        }
         None => 0,
     };
 
@@ -3054,13 +3065,16 @@ mod tests {
             let (debit, credit, _) = row.checked_deltas().unwrap();
             let deposit = deposits.amount_for(&row.account);
             let withdrawal = withdrawals.request_for(&row.account);
-            let amount = withdrawal.map_or(0, |request| match request.body().action() {
-                WithdrawalAction::Amount(amount) => amount.get(),
-                WithdrawalAction::Close => {
-                    let available = u128::from(row.predecessor.balance)
-                        + u128::from(deposit)
-                        + u128::from(credit);
-                    u64::try_from(available.checked_sub(u128::from(debit)).unwrap()).unwrap()
+            let amount = withdrawal.map_or(0, |request| {
+                let available =
+                    u128::from(row.predecessor.balance) + u128::from(deposit) + u128::from(credit);
+                let tail = available.checked_sub(u128::from(debit)).unwrap();
+                match request.body().action() {
+                    WithdrawalAction::Amount(amount) if u128::from(amount.get()) <= tail => {
+                        amount.get()
+                    }
+                    WithdrawalAction::Amount(_) => 0,
+                    WithdrawalAction::Close => u64::try_from(tail).unwrap(),
                 }
             });
             let payout = if row.predecessor.active || deposit != 0 {
@@ -3957,6 +3971,164 @@ mod tests {
         assert_eq!(successor[0].account, payer.public_key());
         assert_eq!(successor[0].state.balance, 80);
         validate_close::<Sha256, _, _>(&context, &deposits, &withdrawals, close).unwrap();
+    }
+
+    fn amount_withdrawal_close(
+        seed_base: u8,
+        spend: u64,
+        requested: u64,
+        released: u64,
+        residual: u64,
+    ) {
+        let operator = SigningKey::from_seed(u64::from(seed_base));
+        let mut accounts = [
+            SigningKey::from_seed(u64::from(seed_base) + 1),
+            SigningKey::from_seed(u64::from(seed_base) + 2),
+        ];
+        accounts.sort_by_key(SigningKey::public_key);
+        let payer = &accounts[0];
+        let recipient = &accounts[1];
+        let mut leaves = vec![
+            StateLeaf {
+                account: payer.public_key(),
+                state: state(100),
+            },
+            StateLeaf {
+                account: recipient.public_key(),
+                state: state(40),
+            },
+        ];
+        leaves.sort_unstable_by(|left, right| left.account.cmp(&right.account));
+        let cache = StateCache::new::<Sha256>(leaves).unwrap();
+        let deployment = Sha256::hash(&[b"amount-withdrawal-coverage"]);
+        let deposits = DepositBatch::empty();
+        let withdrawals = WithdrawalBatch::new(vec![SignedWithdrawal::sign(
+            deployment,
+            cache.root().digest,
+            Bytes::from_static(b"destination"),
+            amount(requested),
+            100,
+            payer,
+        )])
+        .unwrap();
+        let context = close_context::<Sha256, _, _>(
+            deployment,
+            4,
+            operator.public_key(),
+            &cache,
+            &deposits,
+            &withdrawals,
+            8,
+            9,
+            CloseLimits::protocol_maximum(),
+            assignment(0),
+        )
+        .unwrap();
+        let spent = payment(context.payment(), &operator, payer, recipient, spend);
+        let payer_shards = ShardSet::empty(context.payment().epoch(), payer.public_key());
+        let recipient_shards = ShardSet::new(
+            context.payment().epoch(),
+            recipient.public_key(),
+            vec![ShardHead::new(0, spent.clone())],
+        )
+        .unwrap();
+        let mut pairs = vec![
+            (
+                AccountRow {
+                    account: payer.public_key(),
+                    predecessor: state(100),
+                    successor: AccountState {
+                        balance: residual,
+                        active: residual > 0,
+                        cumulative_debit: spend,
+                        ..state(100)
+                    },
+                    outgoing: Some(spent),
+                    output: SettlementOutput::None,
+                    prefix: Prefix::default(),
+                },
+                payer_shards,
+            ),
+            (
+                AccountRow {
+                    account: recipient.public_key(),
+                    predecessor: state(40),
+                    successor: AccountState {
+                        balance: 40 + spend,
+                        cumulative_credit: spend,
+                        receipt_count: 1,
+                        ..state(40)
+                    },
+                    outgoing: None,
+                    output: SettlementOutput::None,
+                    prefix: Prefix::default(),
+                },
+                recipient_shards,
+            ),
+        ];
+        pairs.sort_unstable_by(|left, right| left.0.account.cmp(&right.0.account));
+        assign_prefixes(&mut pairs, &deposits, &withdrawals);
+        let (rows, shard_sets): (Vec<_>, Vec<_>) = pairs.into_iter().unzip();
+        let prepared = prepare_close_with_strategy::<Sha256, _, _>(
+            &cache,
+            &context,
+            &deposits,
+            &withdrawals,
+            rows,
+            shard_sets,
+            &Sequential,
+        )
+        .unwrap();
+        let close = prepared.close();
+        let position = close
+            .rows
+            .binary_search_by(|row| row.account.cmp(&payer.public_key()))
+            .unwrap();
+        assert_eq!(
+            close.rows[position].output,
+            SettlementOutput::Withdrawal(released)
+        );
+        assert_eq!(close.rows[position].successor.balance, residual);
+        let terminal = prepared
+            .terminal_proof()
+            .unwrap()
+            .verify::<Sha256, _>(
+                &context,
+                &deposits,
+                &withdrawals,
+                &close.header,
+                &close.roots,
+            )
+            .unwrap();
+        assert_eq!(terminal.withdrawal, released);
+        assert_eq!(
+            prepared
+                .withdrawal_claim::<Sha256>(&withdrawals, &payer.public_key())
+                .unwrap()
+                .verify::<Sha256>(&close.roots.withdrawal_outputs)
+                .unwrap(),
+            withdrawal_output(b"destination", released)
+        );
+        validate_close::<Sha256, _, _>(&context, &deposits, &withdrawals, close).unwrap();
+    }
+
+    #[test]
+    fn uncovered_amount_withdrawal_releases_nothing() {
+        // The payer spends its whole balance before the queued withdrawal
+        // reaches the close. The close must remain buildable: the uncovered
+        // request settles with a zero release instead of wedging the operator
+        // between an unbuildable balance equation and the withdrawal deadline.
+        amount_withdrawal_close(240, 100, 100, 0, 0);
+    }
+
+    #[test]
+    fn amount_withdrawal_coverage_is_all_or_nothing() {
+        // One unit of tail shortfall voids the whole release.
+        amount_withdrawal_close(244, 51, 50, 0, 49);
+        // An exactly covered request still releases the full amount.
+        amount_withdrawal_close(248, 50, 50, 50, 0);
+        // A covered request with residual balance releases the full amount.
+        amount_withdrawal_close(252, 40, 50, 50, 10);
     }
 
     #[test]

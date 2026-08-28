@@ -299,7 +299,7 @@ const fn other_batch(target: Batch) -> Batch {
         Batch::B1 => Batch::B2,
         Batch::B2 => Batch::B3,
         Batch::B3 => Batch::Offset,
-        Batch::Offset => Batch::B0,
+        Batch::Offset | Batch::B1C | Batch::B2D | Batch::OffsetC => Batch::B0,
     }
 }
 

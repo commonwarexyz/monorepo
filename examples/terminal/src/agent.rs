@@ -27,11 +27,6 @@ use std::{net::SocketAddr, path::Path};
 
 const DEPOSIT_ID_NAMESPACE: &[u8] = b"_COMMONWARE_EXAMPLES_TERMINAL_AGENT_DEPOSIT";
 
-struct PendingWithdrawal {
-    queue: settlement_rpc::QueueWithdrawalRequest,
-    queued: bool,
-}
-
 #[derive(Debug)]
 pub(crate) enum DepositOutcome {
     Applied {
@@ -50,7 +45,7 @@ pub(crate) enum WithdrawalOutcome {
         epoch: u64,
         request: SignedWithdrawal<Key, commonware_cryptography::sha256::Digest>,
     },
-    Queued {
+    Signed {
         request: SignedWithdrawal<Key, commonware_cryptography::sha256::Digest>,
         error: anyhow::Error,
     },
@@ -64,7 +59,7 @@ pub(crate) struct Agent {
     deposit_nonce: u64,
     pending_payment: Option<PendingPayment>,
     pending_deposit: Option<DepositEvent>,
-    pending_withdrawal: Option<PendingWithdrawal>,
+    pending_withdrawal: Option<SignedWithdrawal<Key, commonware_cryptography::sha256::Digest>>,
     pending_withdrawal_claim: Option<PendingWithdrawalClaim>,
     pending_payout_claim: Option<PendingPayoutClaim>,
     pending_close_epoch: Option<u64>,
@@ -529,13 +524,13 @@ impl Agent {
         operator: SocketAddr,
         action: WithdrawalAction,
     ) -> Result<WithdrawalOutcome> {
-        let (queue, queued) = match &self.pending_withdrawal {
+        let request = match &self.pending_withdrawal {
             Some(pending) => {
                 ensure!(
-                    pending.queue.request.body().action() == &action,
+                    pending.body().action() == &action,
                     "another withdrawal retry is pending"
                 );
-                (pending.queue.clone(), pending.queued)
+                pending.clone()
             }
             None => {
                 let settlement_status = settlement_rpc::status(network, settlement)
@@ -549,32 +544,32 @@ impl Agent {
                     !settlement_status.hard_faulted,
                     "settlement is permanently hard-faulted"
                 );
-                let opening = match self
+
+                // Retain a head opening before signing. It is not sent anywhere: if the
+                // deployment later hard-faults while frozen at this root, recovery needs it.
+                if self
                     .store
                     .recovery_opening(&settlement_status.state_root)
                     .context("read retained withdrawal opening")?
+                    .is_none()
                 {
-                    Some(opening) => opening,
-                    None => {
-                        let opening = operator_rpc::withdrawal_opening(
-                            network,
-                            operator,
-                            operator_rpc::WithdrawalOpeningRequest {
-                                account: self.account(),
-                            },
-                        )
-                        .await
-                        .context("read withdrawal opening")?;
-                        ensure!(
-                            settlement_status.state_root == opening.root,
-                            "operator opening is not the settlement head"
-                        );
-                        self.store
-                            .retain_recovery_opening(&opening.root, &opening.opening)
-                            .context("durably retain withdrawal opening")?;
-                        opening.opening
-                    }
-                };
+                    let opening = operator_rpc::withdrawal_opening(
+                        network,
+                        operator,
+                        operator_rpc::WithdrawalOpeningRequest {
+                            account: self.account(),
+                        },
+                    )
+                    .await
+                    .context("read withdrawal opening")?;
+                    ensure!(
+                        settlement_status.state_root == opening.root,
+                        "operator opening is not the settlement head"
+                    );
+                    self.store
+                        .retain_recovery_opening(&opening.root, &opening.opening)
+                        .context("durably retain withdrawal opening")?;
+                }
                 let deadline = withdrawal_deadline(settlement_status.now);
                 let request = SignedWithdrawal::sign(
                     settlement_status.deployment,
@@ -584,54 +579,38 @@ impl Agent {
                     deadline,
                     self.wallet.signer(),
                 );
-                let queue = settlement_rpc::QueueWithdrawalRequest {
-                    request,
-                    openings: vec![opening],
-                };
-                self.pending_withdrawal = Some(PendingWithdrawal {
-                    queue: queue.clone(),
-                    queued: false,
-                });
-                (queue, false)
+                self.pending_withdrawal = Some(request.clone());
+                request
             }
         };
-        if !queued {
-            settlement_rpc::queue_withdrawal(network, settlement, queue.clone())
-                .await
-                .context("queue settlement withdrawal")?;
-            self.pending_withdrawal
-                .as_mut()
-                .expect("the exact withdrawal retry was retained")
-                .queued = true;
-        }
-        let digest = operator_rpc::withdrawal_digest(&queue.request);
+        let digest = operator_rpc::withdrawal_digest(&request);
         let applied = match operator_rpc::apply_withdrawal(
             network,
             operator,
             operator_rpc::ApplyWithdrawalRequest {
-                request: queue.request.clone(),
+                request: request.clone(),
             },
         )
         .await
         {
             Ok(applied) => applied,
             Err(error) => {
-                return Ok(WithdrawalOutcome::Queued {
-                    request: queue.request,
+                return Ok(WithdrawalOutcome::Signed {
+                    request,
                     error: error.context("apply operator withdrawal"),
                 });
             }
         };
         if applied.digest != digest {
-            return Ok(WithdrawalOutcome::Queued {
-                request: queue.request,
+            return Ok(WithdrawalOutcome::Signed {
+                request,
                 error: anyhow::anyhow!("operator acknowledged another withdrawal"),
             });
         }
         self.pending_withdrawal = None;
         Ok(WithdrawalOutcome::Applied {
             epoch: applied.epoch,
-            request: queue.request,
+            request,
         })
     }
 
@@ -1527,7 +1506,7 @@ mod tests {
     }
 
     #[test]
-    fn withdrawal_response_loss_and_wrong_ack_preserve_one_exact_queue() {
+    fn withdrawal_response_loss_and_wrong_ack_preserve_one_exact_request() {
         deterministic::Runner::default().start(|context| async move {
             let mut settlement = Settlement::new().unwrap();
             let mut settlement_listener = context
@@ -1536,16 +1515,11 @@ mod tests {
                 .unwrap();
             let settlement_address = settlement_listener.local_addr().unwrap();
             let settlement_server = context.child("settlement").spawn(move |_| async move {
-                for expected in [
-                    settlement_rpc::METHOD_STATUS,
-                    settlement_rpc::METHOD_QUEUE_WITHDRAWAL,
-                ] {
-                    respond_rpc(&mut settlement_listener, |request| {
-                        assert_eq!(request.method, expected);
-                        settlement_rpc::handle(&mut settlement, request)
-                    })
-                    .await;
-                }
+                respond_rpc(&mut settlement_listener, |request| {
+                    assert_eq!(request.method, settlement_rpc::METHOD_STATUS);
+                    settlement_rpc::handle(&mut settlement, request)
+                })
+                .await;
             });
 
             let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
@@ -1606,17 +1580,17 @@ mod tests {
                 .withdraw(&context, settlement_address, operator_address, action)
                 .await
                 .unwrap();
-            let WithdrawalOutcome::Queued { request, error } = first else {
+            let WithdrawalOutcome::Signed { request, error } = first else {
                 panic!("lost operator response unexpectedly applied withdrawal");
             };
             assert!(format!("{error:#}").contains("apply operator withdrawal"));
-            assert!(agent.pending_withdrawal.as_ref().unwrap().queued);
+            assert!(agent.pending_withdrawal.is_some());
 
             let wrong_ack = agent
                 .withdraw(&context, settlement_address, operator_address, action)
                 .await
                 .unwrap();
-            let WithdrawalOutcome::Queued {
+            let WithdrawalOutcome::Signed {
                 request: retained,
                 error,
             } = wrong_ack
@@ -1625,7 +1599,7 @@ mod tests {
             };
             assert_eq!(retained, request);
             assert!(format!("{error:#}").contains("another withdrawal"));
-            assert!(agent.pending_withdrawal.as_ref().unwrap().queued);
+            assert!(agent.pending_withdrawal.is_some());
 
             let retry = agent
                 .withdraw(&context, settlement_address, operator_address, action)
@@ -1689,7 +1663,6 @@ mod tests {
                 .await
                 .unwrap();
             let settlement_address = settlement_listener.local_addr().unwrap();
-            let expected_opening = current_opening.clone();
             let settlement_server = context.child("settlement").spawn(move |_| async move {
                 respond_rpc(&mut settlement_listener, |request| {
                     assert_eq!(request.method, settlement_rpc::METHOD_STATUS);
@@ -1698,15 +1671,6 @@ mod tests {
                     rpc::Response::Success {
                         body: status.encode(),
                     }
-                })
-                .await;
-                respond_rpc(&mut settlement_listener, |request| {
-                    assert_eq!(request.method, settlement_rpc::METHOD_QUEUE_WITHDRAWAL);
-                    let queued =
-                        settlement_rpc::QueueWithdrawalRequest::decode(request.body).unwrap();
-                    assert_eq!(queued.request.body().state_root(), &current_root.digest);
-                    assert_eq!(queued.openings, [expected_opening]);
-                    rpc::Response::Success { body: Bytes::new() }
                 })
                 .await;
             });
@@ -1720,17 +1684,16 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            let WithdrawalOutcome::Queued { request, error } = outcome else {
+            let WithdrawalOutcome::Signed { request, error } = outcome else {
                 panic!("unreachable operator unexpectedly applied withdrawal");
             };
             assert_eq!(
                 request.body().action(),
                 &WithdrawalAction::Amount(NonZeroU64::new(7).unwrap())
             );
+            assert_eq!(request.body().state_root(), &current_root.digest);
             assert!(format!("{error:#}").contains("apply operator withdrawal"));
-            let pending = agent.pending_withdrawal.as_ref().unwrap();
-            assert!(pending.queued);
-            assert_eq!(pending.queue.openings, [current_opening]);
+            assert_eq!(agent.pending_withdrawal.as_ref(), Some(&request));
             settlement_server.await.unwrap();
 
             let mut wrong_only = Agent::new(0).unwrap();
@@ -1958,7 +1921,7 @@ mod tests {
                     .await;
                 }
                 settlement
-                    .register_epoch(0, 400, DepositBatch::empty(), WithdrawalBatch::empty())
+                    .register_epoch(0, 400, DepositBatch::empty(), WithdrawalBatch::empty(), &[])
                     .unwrap();
                 respond_rpc(&mut settlement_listener, |request| {
                     assert_eq!(request.method, settlement_rpc::METHOD_CONFIRM_REGISTRATION);

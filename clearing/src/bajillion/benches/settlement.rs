@@ -167,7 +167,7 @@ const fn nonzero_usize(value: usize) -> NonZeroUsize {
 
 fn settlement_config(max_pending_epochs: usize, live_accounts: usize) -> SettlementConfig {
     SettlementConfig::new(
-        nonzero_usize(max_pending_epochs.max(1)),
+        nonzero_usize(max_pending_epochs.max(2)),
         EpochDeadlinePolicy::new(
             NonZeroU64::new(ADMISSION_DEADLINE).expect("benchmark admission delay is positive"),
             NonZeroU64::new(CHALLENGE_DEADLINE - ADMISSION_DEADLINE)
@@ -363,7 +363,7 @@ fn admit_fixture(chain: &mut TestChain, admission: AdmissionFixture) {
         certificate,
     } = admission;
     chain
-        .register_close(0, context, deposits, withdrawals)
+        .register_close(0, context, deposits, withdrawals, &[], |_| true)
         .expect("benchmark close can be registered");
     chain
         .admit(0, header, roots, terminal_proof, certificate)
@@ -489,7 +489,7 @@ fn admit_input(source: &CloseSource) -> AdmitInput {
         certificate,
     } = source.admission.clone();
     chain
-        .register_close(0, context, deposits, withdrawals)
+        .register_close(0, context, deposits, withdrawals, &[], |_| true)
         .expect("benchmark close can be registered");
     AdmitInput {
         chain,

@@ -153,14 +153,6 @@ async fn prepare_request<E: Network>(
                 .context("confirm settlement deposit")?;
             false
         }
-        operator_rpc::OperatorRequest::ApplyWithdrawal(request) => {
-            if operator.staged_withdrawal(&request.request)?.is_none() {
-                settlement_rpc::confirm_withdrawal(network, settlement_address, &request.request)
-                    .await
-                    .context("confirm settlement withdrawal")?;
-            }
-            false
-        }
         _ => false,
     };
     if !register {
@@ -176,6 +168,7 @@ async fn prepare_request<E: Network>(
             predecessor_liability: registration.predecessor_liability,
             deposits: registration.deposits,
             withdrawals: registration.withdrawals,
+            openings: registration.openings,
             signature: registration.signature,
         },
     )
@@ -356,22 +349,48 @@ mod tests {
                             settlement_address,
                             &mut operator_listener,
                             &mut operator,
-                            [operator_rpc::METHOD_WITHDRAWAL_OPENING],
+                            [
+                                operator_rpc::METHOD_WITHDRAWAL_OPENING,
+                                operator_rpc::METHOD_WITHDRAWAL_OPENING,
+                            ],
                         )
                         .await;
                     });
 
+            let opening = operator_rpc::withdrawal_opening(
+                &context,
+                operator_address,
+                operator_rpc::WithdrawalOpeningRequest {
+                    account: account.clone(),
+                },
+            )
+            .await
+            .unwrap();
             let outcome = agent
                 .withdraw(&context, settlement_address, operator_address, action)
                 .await
                 .unwrap();
-            let WithdrawalOutcome::Queued { request, error } = outcome else {
+            let WithdrawalOutcome::Signed { request, error } = outcome else {
                 panic!("disappeared operator unexpectedly applied withdrawal");
             };
             assert_eq!(request.body().action(), &action);
             assert!(format!("{error:#}").contains("apply operator withdrawal"));
             operator_server.await.unwrap();
             drop(agent);
+
+            // The operator never carried the signed request, so the signer exercises the
+            // censorship fallback: queue the exact request at settlement so its deadline
+            // becomes an on-chain obligation that expires into hard-fault recovery.
+            settlement_rpc::queue_withdrawal(
+                &context,
+                settlement_address,
+                settlement_rpc::QueueWithdrawalRequest {
+                    request,
+                    openings: vec![opening.opening],
+                },
+            )
+            .await
+            .unwrap();
 
             let retained_opening_count = rusqlite::Connection::open(databases.agent())
                 .unwrap()
@@ -402,22 +421,9 @@ mod tests {
     }
 
     #[test]
-    fn unqueued_withdrawal_is_rejected_before_operator_mutation() {
+    fn fresh_withdrawal_application_requires_no_settlement_rpc() {
         deterministic::Runner::default().start(|context| async move {
-            let mut settlement = Settlement::new().unwrap();
-            let settlement_status = settlement.status().unwrap();
-            let mut listener = context
-                .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
-                .await
-                .unwrap();
-            let settlement_address = listener.local_addr().unwrap();
-            let settlement_server = context.child("settlement").spawn(move |_| async move {
-                let (_, mut sink, mut stream) = listener.accept().await.unwrap();
-                let request = rpc::recv_request(&mut stream).await.unwrap();
-                let response = settlement_rpc::handle(&mut settlement, request);
-                rpc::send_response(&mut sink, &response).await.unwrap();
-            });
-
+            let settlement_status = Settlement::new().unwrap().status().unwrap();
             let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
             let wallet = wallets().remove(0);
             let opening = operator.withdrawal_opening(&wallet.public_key()).unwrap();
@@ -432,23 +438,33 @@ mod tests {
             );
             let request = operator_rpc::OperatorRequest::ApplyWithdrawal(
                 operator_rpc::ApplyWithdrawalRequest {
-                    request: withdrawal,
+                    request: withdrawal.clone(),
                 },
             );
 
-            let error = prepare_request(&context, settlement_address, &mut operator, &request)
+            // The operator carries the signed request itself, so application must not
+            // depend on any settlement round trip. The settlement address is unreachable.
+            assert!(
+                prepare_request(
+                    &context,
+                    SocketAddr::from(([127, 0, 0, 1], 1)),
+                    &mut operator,
+                    &request,
+                )
                 .await
-                .unwrap_err();
-            assert!(format!("{error:#}").contains("withdrawal is not queued"));
+                .unwrap()
+                .is_none()
+            );
+            let staged = operator.apply_withdrawal(withdrawal).unwrap();
+            assert_eq!(staged.epoch, 0);
             assert_eq!(
                 operator
                     .payment_quote(&wallet.public_key())
                     .unwrap()
                     .state
                     .balance,
-                100
+                93
             );
-            settlement_server.await.unwrap();
         });
     }
 

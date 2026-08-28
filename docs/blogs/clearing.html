@@ -103,7 +103,10 @@ O’Grady</a></div>
         </div>
         <p><em>Update (8/27/26): Bajillion sends now batch entries. One
         signature and one cumulative endpoint pay many recipients,
-        acknowledged atomically with one receipt per entry.</em></p>
+        acknowledged atomically with one receipt per entry. Withdrawals
+        now settle all or nothing and can ride the close directly, so an
+        uncensored exit costs one onchain transaction: the
+        claim.</em></p>
         <p><em>Updated (8/26/26): Bajillion now strengthens admission
         and close coverage while making finalized claims and paired
         challenge evidence more compact.</em></p>
@@ -511,7 +514,8 @@ O’Grady</a></div>
         <p>Prefix continuity ties the epoch totals to the rows beneath
         them. The deposit total and withdrawal record count must
         reproduce the chain-sealed boundary. Every ordinary withdrawal
-        equals its authorized positive amount, while every close sweeps
+        releases its authorized positive amount exactly when the row
+        tail covers it and nothing otherwise, while every close sweeps
         its authenticated epoch tail. The totals must respect the close
         caps and conserve payments:</p>
         <p><span class="math display">
@@ -679,7 +683,12 @@ O’Grady</a></div>
         finalizing, but stopping it is not enough: users must still be
         able to get their funds out. So every account can queue a
         unilateral signed authorization directly onchain, either to
-        withdraw an exact amount or to close the account.</p>
+        withdraw an exact amount or to close the account. The queue is
+        only the censorship fallback. An uncensored user hands the same
+        signed authorization to the operator, which carries it inside
+        the next close’s sealed boundary under the same registration
+        rules, so the happy-path exit costs one onchain transaction: the
+        claim.</p>
         <p><span class="math display">
         Q=\mathsf{Sign}_a\bigl(\mathsf{deployment},\;\mathsf{rt}_z,\;v,\;\omega,\;\tau\bigr),
         \qquad
@@ -692,10 +701,14 @@ O’Grady</a></div>
         operation <span class="math inline">\omega</span>, and an
         absolute deadline <span class="math inline">\tau</span>. An
         ordinary withdrawal authorizes exactly the positive amount <span
-        class="math inline">x</span>; a close carries no amount. The
-        operator neither submits nor approves it, and its cooperation
-        decides only whether the authorization settles through a clean
-        close or through hard-fault settlement.</p>
+        class="math inline">x</span> and settles all or nothing: a
+        covered amount releases exactly <span
+        class="math inline">x</span>, while an amount the epoch tail can
+        no longer cover releases nothing and leaves the balance in the
+        account. A close carries no amount. The operator neither submits
+        nor approves it, and its cooperation decides only whether the
+        authorization settles through a clean close or through
+        hard-fault settlement.</p>
         <p>There is also a fast path for paying someone who is not
         registered with the operator. The operator accepts the sends
         normally and records one absent-recipient row whose
@@ -717,7 +730,15 @@ O’Grady</a></div>
         against the finalized root, and every admitted descendant that
         can survive a cut must carry it forward. The next close commits
         both its already-onchain signed authorization and its changed
-        account row.</p>
+        account row. An operator-carried authorization enters the same
+        sealed boundary at registration instead, validated against the
+        same finalized root, destination policy, and notice window, plus
+        one predecessor-root opening proving the account can cover it,
+        with its replay identity consumed at admission. The queue’s
+        proofs against every root that can survive a cut are unnecessary
+        here because the authorization binds one specific close, and
+        spending inside that epoch settles all or nothing at
+        certification.</p>
         <p>A close does not freeze the account inside that epoch: it can
         keep sending and receiving until the cut. The cut sweeps its
         authenticated epoch-tail balance and omits the account from the
@@ -739,8 +760,12 @@ O’Grady</a></div>
         releases no funds. Claim size is therefore the destination
         length plus the amount and one logarithmic opening. With one
         withdrawal output and a 21-byte destination, either claim is 39
-        bytes. Every accepted deposit must enter an admitted close
-        before its settlement-policy deadline. Admission discharges that
+        bytes. The opening adds one 32-byte sibling per doubling of the
+        epoch’s withdrawal count, so a surge barely moves it: if every
+        one of a million accounts exits through one close, each claim is
+        679 bytes and verification adds only the twenty path hashes.
+        Every accepted deposit must enter an admitted close before its
+        settlement-policy deadline. Admission discharges that
         obligation; expiry permanently tombstones the operator. The
         settlement queue already fixes the refund account and amount, so
         anyone can trigger that refund without an operator or state
@@ -782,14 +807,16 @@ O’Grady</a></div>
         root. Acknowledged sends that existed only in a never-admitted
         registration or invalidated suffix do not debit that root; each
         sender recovers its finalized balance exactly once through a
-        replay-protected state opening. An outstanding authorization
-        routes its amount to the signed destination and returns the
-        residual to the account. Claim reserves from earlier clean
-        finalizations remain separate and claimable, so recovery needs
-        neither an all-account scan nor a global payout crank. An
-        opening against the root ultimately frozen must remain available
-        until its position is claimed; the protocol supplies neither a
-        historical witness store nor a terminal-claim deadline.</p>
+        replay-protected state opening. An outstanding authorization the
+        frozen balance covers routes its amount to the signed
+        destination and returns the residual to the account, while one
+        it cannot cover returns the whole balance. Claim reserves from
+        earlier clean finalizations remain separate and claimable, so
+        recovery needs neither an all-account scan nor a global payout
+        crank. An opening against the root ultimately frozen must remain
+        available until its position is claimed; the protocol supplies
+        neither a historical witness store nor a terminal-claim
+        deadline.</p>
         <h2 id="streamlined-epoch-transitions">Streamlined Epoch
         Transitions</h2>
         <p>Closing an epoch is asynchronous: spending continues in epoch
@@ -1048,15 +1075,20 @@ O’Grady</a></div>
         Each figure likewise shrinks as <span
         class="math inline">1/T</span>.</p>
         <p>The certified close itself queues no withdrawals. Separate
-        one-record fixtures use <span class="math inline">W=1</span> and
-        a 21-byte destination without adding the claims to
-        certification. The identical <span
-        class="math inline">\mathsf{Amount}</span> and <span
-        class="math inline">\mathsf{Close}</span> claim proofs are 39
-        bytes and verify in 0.311 µs; each carries only the
-        validator-derived destination and amount plus one <span
-        class="math inline">\mathsf{WithdrawalOutputRoot}</span>
-        opening. The <span
+        fixtures use a 21-byte destination without adding the claims to
+        certification, once with a single withdrawal output and once
+        with a withdrawal surge in which all <span
+        class="math inline">N</span> accounts exit through one close.
+        The identical <span class="math inline">\mathsf{Amount}</span>
+        and <span class="math inline">\mathsf{Close}</span> claim proofs
+        carry only the validator-derived destination and amount plus one
+        <span class="math inline">\mathsf{WithdrawalOutputRoot}</span>
+        opening. At <span class="math inline">W=1</span> either claim is
+        39 bytes and verifies in 0.311 µs. The surge claim grows one
+        32-byte sibling per doubling of the withdrawal count, reaching
+        359 bytes when 1,024 accounts exit together and 679 bytes when
+        one million do, and its verification grows only by the path
+        hashes. The <span
         class="math inline">\mathsf{HigherShardTip}</span> challenge is
         663–983 bytes as lookup depth grows and verifies in 0.293–0.302
         ms. It retains both signatures for its represented payment.

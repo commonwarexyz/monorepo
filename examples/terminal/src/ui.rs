@@ -234,19 +234,19 @@ pub(crate) async fn run<E: Network>(
                 match agent.withdraw(network, settlement, operator, action).await {
                     Ok(WithdrawalOutcome::Applied { epoch, request }) => match request.body().action() {
                         WithdrawalAction::Amount(amount) => state.log(format!(
-                            "epoch {} withdrawal queued: {}",
+                            "epoch {} withdrawal carried by operator: {}",
                             epoch, amount
                         )),
                         WithdrawalAction::Close => state.log(format!(
-                            "epoch {} Close queued; payout is finalized at epoch close",
+                            "epoch {} Close carried by operator; payout is finalized at epoch close",
                             epoch
                         )),
                     },
-                    Ok(WithdrawalOutcome::Queued {
+                    Ok(WithdrawalOutcome::Signed {
                         request,
                         error,
                     }) => state.log(format!(
-                        "withdrawal queued at settlement through deadline {}; operator application unknown; retry uses the same signed request: {error:#}",
+                        "withdrawal signed through deadline {}; operator carriage unknown; retry uses the same signed request: {error:#}",
                         request.body().deadline()
                     )),
                     Err(error) => state.log(format!("withdrawal not confirmed: {error:#}")),
@@ -511,12 +511,12 @@ pub(crate) async fn scripted<E: Network>(
         .await?
     {
         WithdrawalOutcome::Applied { epoch, .. } => epoch,
-        WithdrawalOutcome::Queued { request, error } => anyhow::bail!(
-            "withdrawal queued at settlement through deadline {}; operator application unknown; retry uses the same signed request: {error:#}",
+        WithdrawalOutcome::Signed { request, error } => anyhow::bail!(
+            "withdrawal signed through deadline {}; operator carriage unknown; retry uses the same signed request: {error:#}",
             request.body().deadline()
         ),
     };
-    println!("epoch {} queued withdrawal 3", withdrawal);
+    println!("epoch {} carried withdrawal 3", withdrawal);
     let payment = agent.pay(network, settlement, operator, &[(1, 5)]).await?;
     println!(
         "epoch {} accepted payment #{}",

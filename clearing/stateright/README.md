@@ -78,8 +78,8 @@ registration.
 | `certification.rs` | A four-validator, two-slice `n = 3f + 1`, `q = 2f + 1` instance. It explores the valid verifier result plus 27 distinct local failure classes on either slice, missing/incomplete/exact delivery, every exact quorum, durable retention, rejection, and same-registration retry. The failure classes abstract outcomes of the production verifier. They do not reimplement cryptography or Merkle proofs. |
 | `challenge.rs` | All five settlement targets and every payer-signature, operator-signature, exact-link, and context-authentication bit combination over representative semantic endpoints. It separately checks structural validity, semantic contradiction, `NoContradiction`, and the canonical `SameSend`, `SameIndex`, and lossless `Full` receipt-fork encodings. |
 | `claims.rs` | Eight exact replay identities: two typed namespaces, two batches, and two positions. It explores every claim ordering while checking typed root identity, output value and position, destination routing, atomic mutation, reserve conservation, and independence across kind, batch, and position. |
-| `settlement.rs` | A three-account, five-candidate, three-pending-slot, bounded-time instance. It explores intake, immutable registration, deadline ties, certified admission, strict ancestry and FIFO finalization, challenge suffix cuts, clean-prefix drain, finalized reserve creation, claim routing, replay expiry, custody conservation, and terminal recovery. |
-| `scenarios.rs` | Twenty-one deterministic end-to-end traces using the same settlement transition function. They cover accepted and rejected boundaries, every challenge relation, front/middle/tail operator faults, registration and intake expiry, every sender-value bucket, Amount and Close, exact claim routing, replay, and finalized reserves that survive a later fault. |
+| `settlement.rs` | A three-account, eight-candidate, three-pending-slot, bounded-time instance. It explores intake, superset registration with operator-carried requests, deadline ties, certified admission including coverage-degraded and carried-offset closes, strict ancestry and FIFO finalization, challenge suffix cuts, clean-prefix drain, finalized reserve creation, claim routing, replay expiry, custody conservation, and terminal recovery. |
+| `scenarios.rs` | Twenty-five deterministic end-to-end traces using the same settlement transition function. They cover accepted and rejected boundaries, every challenge relation, front/middle/tail operator faults, registration and intake expiry, every sender-value bucket, Amount and Close, exact claim routing, replay, and finalized reserves that survive a later fault. |
 | `refinement.rs` | Test-only production adapter for the settlement model. It constructs real deposits, signed withdrawals, payments, closes, proof slices, sealed dealings, certificates, challenges, openings, and claims, then checks action acceptance, returned value, and a behavior-relevant private state projection after every step. |
 
 The models compose through two opaque capabilities. A `CertifiedClose` is emitted for one exact
@@ -101,14 +101,17 @@ The checked state counts are part of the tests so an accidental state-space redu
   shared transaction across entry recipients is not a fork, and only the terminal transaction is
   pinned at an equal committed endpoint);
 - 1,025 claim-ledger states covering every ordering of eight typed batch-position identities;
-- 3,929,740 settlement states from the ordinary initial state; and
-- 21 deterministic end-to-end scenarios using the same settlement transition function.
+- 6,034,482 settlement states from the ordinary initial state, including the operator-carried
+  registration branch and the coverage-degraded certification branch; and
+- 25 deterministic end-to-end scenarios using the same settlement transition function.
 
 The reachability properties require examples for all four challenge families and all three fork
 relations, every liveness-fault class and exact tie priority, a full three-close pipeline, four
 ordered finalizations, front/middle/tail suffix cuts, exact admission and challenge boundaries,
 Amount and Close claims, external payouts, batch-position replay, reserve survival after a later
-fault, and exact front/middle/tail and registration-expiry recovery outcomes. Each safety predicate
+fault, exact front/middle/tail and registration-expiry recovery outcomes, a carried withdrawal
+clearing at full value, a degraded amount finalizing with a zero reserve, an uncovered
+carried amount degrading at the frozen root, and a carried offset deferring its staged deposit. Each safety predicate
 also has a deliberately corrupted negative-control state so a disconnected or vacuous property
 fails its ordinary Rust test.
 
@@ -146,7 +149,9 @@ when the requested operation returns an error.
 The profiles cover a four-epoch clean pipeline, strict FIFO finalization, independent external,
 Amount, and amountless Close claims, replay rejection, malformed and mispositioned withdrawal
 openings, a challenged middle suffix with clean-prefix drain, registration/deposit/withdrawal
-expiry, direct deposit refund, and terminal state recovery. It also checks that beginning terminal
+expiry, direct deposit refund, terminal state recovery, an operator-carried request that
+registers, admits, and claims without ever being queued, and a coverage-degraded close whose
+uncovered amount finalizes with a zero release and no claimable output. It also checks that beginning terminal
 settlement is idempotently retryable while claims remain.
 Every admission uses the production proof-slice assembler and `seal`, so a modeled
 `CertifiedClose` reaches settlement only alongside a real authenticated dealing and certificate.
@@ -155,7 +160,7 @@ openings. The abstract `Full` receipt-fork relation remains a conservative gener
 over-approximation. Canonical `Full` decoding and verification behavior are covered by the
 production challenge tests.
 
-This is bounded trace refinement, not the Cartesian product of the 3,929,740-state lifecycle graph
+This is bounded trace refinement, not the Cartesian product of the 6,034,482-state lifecycle graph
 with cryptographic fixtures. The independent fixed-point model proves the declared finite
 interleavings. The refinement profiles catch drift at every production action and state component
 they traverse. Neither result is an inductive proof for arbitrary cardinalities or evidence of
@@ -168,7 +173,8 @@ leave an earlier clean prefix, which must resolve FIFO. No later epoch can skip 
 settlement then freezes the last finalized state and exposes one replay-protected claim per live
 account plus one replay-protected aggregate refund per account with unfinalized deposits. Deposit
 IDs remain intake replay keys, but multiple deposits to one account settle together. An Amount
-request splits the frozen tail into withdrawal and residual. An amountless Close sends the entire
+request the frozen balance covers splits the tail into withdrawal and residual, and one it cannot
+cover routes nothing with the whole balance residual. An amountless Close sends the entire
 authenticated tail to its destination. Clean reserves created before the fault stay in separate
 claim ledgers.
 
@@ -228,7 +234,7 @@ selected paths unless **Run to completion** is requested. The exhaustive tests r
 fixed-point check and assert the complete finite state counts above.
 
 The explorer is an interactive action/path view, not a static rendering of every graph node. A
-single image containing the settlement instance's 3,929,740 states would not be usable.
+single image containing the settlement instance's 6,034,482 states would not be usable.
 
 There is no single monolithic explorer target. The four models deliberately compose through
 `CertifiedClose` and `ProvenChallenge` capabilities so the checked graph does not multiply every

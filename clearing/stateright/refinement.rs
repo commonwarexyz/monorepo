@@ -9,12 +9,15 @@ const ACCOUNTS: [spec::Account; 3] = [
     spec::Account::Bob,
     spec::Account::Carol,
 ];
-const BATCHES: [spec::Batch; 5] = [
+const BATCHES: [spec::Batch; 8] = [
     spec::Batch::B0,
     spec::Batch::B1,
     spec::Batch::B2,
     spec::Batch::B3,
     spec::Batch::Offset,
+    spec::Batch::B1C,
+    spec::Batch::B2D,
+    spec::Batch::OffsetC,
 ];
 fn refinement_config() -> SettlementConfig {
     SettlementConfig::new(
@@ -40,9 +43,11 @@ fn spec_batch(registration: spec::RegistrationId) -> spec::Batch {
     match registration {
         spec::RegistrationId::B0 => spec::Batch::B0,
         spec::RegistrationId::B1 => spec::Batch::B1,
+        spec::RegistrationId::B1C => spec::Batch::B1C,
         spec::RegistrationId::B2 => spec::Batch::B2,
         spec::RegistrationId::B3 => spec::Batch::B3,
         spec::RegistrationId::Offset => spec::Batch::Offset,
+        spec::RegistrationId::OffsetC => spec::Batch::OffsetC,
     }
 }
 
@@ -270,11 +275,150 @@ fn external_payout_refinement_close(
     (close, successor)
 }
 
+// One payment from `payer` to `recipient` plus the payer's withdrawal from the
+// sealed batch, applied with the production coverage rule: the requested amount
+// releases exactly when the row tail covers it and nothing otherwise.
+fn payment_withdrawal_close(
+    cache: &TestCache,
+    context: &TestContext,
+    operator: &SigningKey,
+    payer: &SigningKey,
+    recipient: &SigningKey,
+    amount: u64,
+    withdrawals: &TestWithdrawals,
+) -> (TestClose, TestCache) {
+    let payer_key = payer.public_key();
+    let recipient_key = recipient.public_key();
+    let payer_predecessor = cache.opening(&payer_key).unwrap().leaf.state;
+    let recipient_predecessor = cache
+        .opening(&recipient_key)
+        .map_or_else(|_| AccountState::default(), |opening| opening.leaf.state);
+    assert_eq!(recipient_predecessor.cumulative_credit, 0);
+    assert_eq!(recipient_predecessor.receipt_count, 0);
+    let send = SignedSend::sign_next(
+        context.payment(),
+        payer,
+        recipient_key.clone(),
+        amount,
+        payer_predecessor.cumulative_debit,
+    )
+    .unwrap();
+    let receipt = SignedReceipt::issue_next::<Sha256, _>(
+        context.payment(),
+        &send,
+        &recipient_key,
+        0,
+        0,
+        0,
+        operator,
+    )
+    .unwrap();
+    let payment = Payment::new::<Sha256>(context.payment(), send, receipt).unwrap();
+    let payer_shards = ShardSet::empty(context.payment().epoch(), payer_key.clone());
+    let recipient_shards = ShardSet::new(
+        context.payment().epoch(),
+        recipient_key.clone(),
+        vec![ShardHead::new(0, payment.clone())],
+    )
+    .unwrap();
+
+    let request = withdrawals
+        .request_for(&payer_key)
+        .expect("the sealed batch carries the payer's withdrawal");
+    let tail = payer_predecessor.balance.checked_sub(amount).unwrap();
+    let applied = match request.body().action() {
+        WithdrawalAction::Amount(requested) if requested.get() <= tail => requested.get(),
+        WithdrawalAction::Amount(_) => 0,
+        WithdrawalAction::Close => tail,
+    };
+    let payer_balance = tail - applied;
+    let recipient_output = if recipient_predecessor.active {
+        SettlementOutput::None
+    } else {
+        SettlementOutput::ExternalPayout(amount)
+    };
+    let mut rows = vec![
+        (
+            AccountRow {
+                account: payer_key,
+                predecessor: payer_predecessor,
+                successor: AccountState {
+                    balance: payer_balance,
+                    active: payer_balance > 0,
+                    cumulative_debit: payer_predecessor
+                        .cumulative_debit
+                        .checked_add(amount)
+                        .unwrap(),
+                    ..payer_predecessor
+                },
+                outgoing: Some(payment),
+                output: SettlementOutput::Withdrawal(applied),
+                prefix: Prefix::default(),
+            },
+            payer_shards,
+        ),
+        (
+            AccountRow {
+                account: recipient_key,
+                predecessor: recipient_predecessor,
+                successor: AccountState {
+                    balance: recipient_predecessor.balance.checked_add(amount).unwrap(),
+                    active: true,
+                    cumulative_credit: amount,
+                    receipt_count: 1,
+                    ..recipient_predecessor
+                },
+                outgoing: None,
+                output: recipient_output,
+                prefix: Prefix::default(),
+            },
+            recipient_shards,
+        ),
+    ];
+    rows.sort_unstable_by(|left, right| left.0.account.cmp(&right.0.account));
+    let mut prefix = Prefix::default();
+    for (row, shards) in &mut rows {
+        let (debit, credit, _) = row.checked_deltas().unwrap();
+        let payout = if row.predecessor.active { 0 } else { credit };
+        let row_request = withdrawals.request_for(&row.account);
+        let withdrawal = match row.output {
+            SettlementOutput::Withdrawal(amount) => amount,
+            _ => 0,
+        };
+        prefix = prefix
+            .checked_extend(Prefix {
+                debit,
+                credit,
+                payout,
+                withdrawal,
+                withdrawal_count: u64::from(row_request.is_some()),
+                shard_count: shards.heads().len() as u64,
+                ..Prefix::default()
+            })
+            .unwrap();
+        row.prefix = prefix;
+    }
+    let (rows, shards): (Vec<_>, Vec<_>) = rows.into_iter().unzip();
+    let close = build_close::<Sha256, _, _>(
+        cache,
+        context,
+        &DepositBatch::empty(),
+        withdrawals,
+        rows,
+        shards,
+    )
+    .unwrap();
+    let successor = successor_cache(cache, &close);
+    assert_eq!(successor.root(), close.roots.successor);
+    (close, successor)
+}
+
 struct RegisteredMaterial {
     batch: spec::Batch,
     context: TestContext,
     deposits: TestDeposits,
     withdrawals: TestWithdrawals,
+    extra_openings: Vec<StateOpening<VerifyingKey, ShaDigest>>,
 }
 
 struct BatchMaterial {
@@ -308,9 +452,9 @@ impl RefinementDriver {
             model: spec::SettlementModel::default(),
             state: spec::SettlementState::default(),
             registered: None,
-            registrations: (0..5).map(|_| None).collect(),
-            batches: (0..5).map(|_| None).collect(),
-            requests: (0..4).map(|_| None).collect(),
+            registrations: (0..8).map(|_| None).collect(),
+            batches: (0..8).map(|_| None).collect(),
+            requests: (0..6).map(|_| None).collect(),
             terminal_initial: None,
             visited: 0,
         }
@@ -348,13 +492,22 @@ impl RefinementDriver {
             spec::Root::R2 => self.batches[spec::Batch::B1.index()]
                 .as_ref()
                 .map(|batch| &batch.successor),
+            spec::Root::R2C => self.batches[spec::Batch::B1C.index()]
+                .as_ref()
+                .map(|batch| &batch.successor),
             spec::Root::R3 => self.batches[spec::Batch::B2.index()]
+                .as_ref()
+                .map(|batch| &batch.successor),
+            spec::Root::R3D => self.batches[spec::Batch::B2D.index()]
                 .as_ref()
                 .map(|batch| &batch.successor),
             spec::Root::R4 => self.batches[spec::Batch::B3.index()]
                 .as_ref()
                 .map(|batch| &batch.successor),
             spec::Root::Offset => self.batches[spec::Batch::Offset.index()]
+                .as_ref()
+                .map(|batch| &batch.successor),
+            spec::Root::OffsetC => self.batches[spec::Batch::OffsetC.index()]
                 .as_ref()
                 .map(|batch| &batch.successor),
             spec::Root::Empty => None,
@@ -408,6 +561,37 @@ impl RefinementDriver {
                 }),
                 None,
             ],
+            // B1C's successor: Bob's carried withdrawal swept his balance and
+            // staged deposit, removing the account.
+            spec::Root::R2C => [
+                Some(AccountState {
+                    balance: 8,
+                    cumulative_debit: 2,
+                    active: true,
+                    ..AccountState::default()
+                }),
+                None,
+                None,
+            ],
+            // B2D's successor: Bob paid 8 to Alice, so his queued amount of 2
+            // was uncovered and released nothing.
+            spec::Root::R3D => [
+                Some(AccountState {
+                    balance: 15,
+                    cumulative_debit: 3,
+                    cumulative_credit: 8,
+                    receipt_count: 1,
+                    active: true,
+                }),
+                Some(AccountState {
+                    balance: 1,
+                    cumulative_debit: 8,
+                    cumulative_credit: 2,
+                    receipt_count: 1,
+                    active: true,
+                }),
+                None,
+            ],
             spec::Root::R4 => [
                 None,
                 Some(AccountState {
@@ -419,7 +603,7 @@ impl RefinementDriver {
                 }),
                 None,
             ],
-            spec::Root::Offset => [
+            spec::Root::Offset | spec::Root::OffsetC => [
                 Some(AccountState {
                     balance: 10,
                     active: true,
@@ -547,11 +731,21 @@ impl RefinementDriver {
             u64::from(registration.admission_deadline),
             u64::from(registration.challenge_deadline),
         );
+        // One predecessor-root opening per operator-carried extra, in batch
+        // order, mirroring what a production operator submits.
+        let pending = self.fixture.chain.pending_withdrawals();
+        let extra_openings = withdrawals
+            .requests()
+            .iter()
+            .filter(|request| pending.request_for(request.account()).is_none())
+            .filter_map(|request| cache.opening(request.account()).ok())
+            .collect();
         RegisteredMaterial {
             batch,
             context,
             deposits,
             withdrawals,
+            extra_openings,
         }
     }
 
@@ -622,8 +816,25 @@ impl RefinementDriver {
             material.context.clone(),
             material.deposits.clone(),
             material.withdrawals.clone(),
+            &material.extra_openings,
+            |_| true,
         );
         if result.is_ok() {
+            // Record carried requests so the replay-id projection can compute
+            // their production ids once admission consumes them.
+            for request in material.withdrawals.requests() {
+                let attempt = registration
+                    .registration()
+                    .withdrawals
+                    .into_iter()
+                    .flatten()
+                    .find(|fixture| self.key(fixture.account) == *request.account());
+                if let Some(fixture) = attempt
+                    && let spec::WithdrawalKey::Known(id) = fixture.replay_key()
+                {
+                    self.requests[id.index()].get_or_insert_with(|| request.clone());
+                }
+            }
             self.registrations[batch.index()] = Some(material.context.clone());
             self.registered = Some(material);
         }
@@ -635,7 +846,7 @@ impl RefinementDriver {
         let uses_active_registration = self
             .registered
             .as_ref()
-            .is_some_and(|registered| registered.batch == batch);
+            .is_some_and(|registered| registered.batch == spec_batch(batch.registration()));
         let registered = if uses_active_registration {
             self.registered
                 .take()
@@ -665,10 +876,27 @@ impl RefinementDriver {
                 &self.carol,
                 1,
             ),
-            spec::Batch::B2 | spec::Batch::B3 | spec::Batch::Offset => boundary_close(
+            // B1C carries Bob's never-queued withdrawal in a boundary close,
+            // and OffsetC's carried offset defers its staged deposit.
+            spec::Batch::B2
+            | spec::Batch::B3
+            | spec::Batch::Offset
+            | spec::Batch::B1C
+            | spec::Batch::OffsetC => boundary_close(
                 &cache,
                 &registered.context,
                 &registered.deposits,
+                &registered.withdrawals,
+            ),
+            // Bob spends below his queued amount, so certification degrades
+            // the release to zero.
+            spec::Batch::B2D => payment_withdrawal_close(
+                &cache,
+                &registered.context,
+                &self.fixture.operator,
+                &self.fixture.accounts[1],
+                &self.fixture.accounts[0],
+                8,
                 &registered.withdrawals,
             ),
         };
@@ -1064,9 +1292,12 @@ impl RefinementDriver {
                             let request = self.state.outstanding_withdrawals[index];
                             let (withdrawal, residual) =
                                 request.map_or((0, balance), |request| match request.action {
-                                    spec::WithdrawalAction::Amount(amount) => {
+                                    spec::WithdrawalAction::Amount(amount) if amount <= balance => {
                                         (amount, balance - amount)
                                     }
+                                    // An uncovered carried amount degrades at
+                                    // the frozen root.
+                                    spec::WithdrawalAction::Amount(_) => (0, balance),
                                     spec::WithdrawalAction::Close => (balance, 0),
                                 });
                             let expected_withdrawal = request.map(|request| {
@@ -1263,6 +1494,8 @@ impl RefinementDriver {
             spec::WithdrawalId::Close,
             spec::WithdrawalId::CloseAfterFault,
             spec::WithdrawalId::Offset,
+            spec::WithdrawalId::Carried,
+            spec::WithdrawalId::CarriedOffset,
         ] {
             let expected = self.state.withdrawal_replay_expiries[id.index()].map(u64::from);
             let actual = self.requests[id.index()].as_ref().map(|request| {
@@ -1806,6 +2039,122 @@ fn amountless_close_profile() -> RefinementDriver {
 #[test]
 fn amountless_close_fault_recovery_refines_production() {
     amountless_close_profile();
+}
+
+// A never-queued request rides B1C's registration, admission consumes its
+// replay id, and the claim releases the full carried amount.
+fn carried_profile() -> RefinementDriver {
+    let mut driver = RefinementDriver::new();
+    driver.step(spec::SettlementAction::RecordDeposit(
+        spec::DepositId::BobTwo,
+    ));
+    register_and_admit_refined(&mut driver, spec::Batch::B0);
+    driver.step(spec::SettlementAction::Observe(5));
+    driver.step(spec::SettlementAction::Finalize);
+    driver.step(spec::SettlementAction::RecordDeposit(
+        spec::DepositId::BobOne,
+    ));
+    register_and_admit_refined(&mut driver, spec::Batch::B1C);
+    driver.step(spec::SettlementAction::Observe(9));
+    driver.step(spec::SettlementAction::Finalize);
+    driver.step(spec::SettlementAction::ClaimWithdrawal {
+        batch: spec::Batch::B1C,
+        source: spec::Batch::B1C,
+        position: 0,
+    });
+    driver
+}
+
+#[test]
+fn carried_withdrawal_refines_production_step_by_step() {
+    carried_profile();
+}
+
+// A fault freezes R1 while the carried amount is outstanding, so the terminal
+// split degrades: nothing routes to the destination and the whole balance
+// stays residual.
+fn carried_fault_profile() -> RefinementDriver {
+    let mut driver = RefinementDriver::new();
+    driver.step(spec::SettlementAction::RecordDeposit(
+        spec::DepositId::BobTwo,
+    ));
+    register_and_admit_refined(&mut driver, spec::Batch::B0);
+    driver.step(spec::SettlementAction::Observe(5));
+    driver.step(spec::SettlementAction::Finalize);
+    driver.step(spec::SettlementAction::RecordDeposit(
+        spec::DepositId::BobOne,
+    ));
+    register_and_admit_refined(&mut driver, spec::Batch::B1C);
+    challenge_refined(
+        &mut driver,
+        spec::Batch::B1C,
+        spec::ChallengeKind::ReceiptFork(spec::ForkRelation::SameIndex),
+    );
+    driver.step(spec::SettlementAction::BeginTerminal);
+    driver.step(spec::SettlementAction::ClaimState(spec::Account::Bob));
+    driver.step(spec::SettlementAction::ClaimState(spec::Account::Alice));
+    driver.step(spec::SettlementAction::ClaimDeposit(spec::Account::Bob));
+    driver
+}
+
+#[test]
+fn uncovered_carried_amount_refines_terminal_degrade() {
+    carried_fault_profile();
+}
+
+// A carried request exactly offsetting Bob's staged deposit defers it, the
+// withdrawal clears, and the expired deposit refunds directly.
+fn carried_offset_profile() -> RefinementDriver {
+    let mut driver = RefinementDriver::new();
+    driver.step(spec::SettlementAction::RecordDeposit(
+        spec::DepositId::BobTwo,
+    ));
+    driver.step(spec::SettlementAction::Register(
+        spec::RegistrationId::OffsetC,
+    ));
+    driver.step(admission(spec::Batch::OffsetC));
+    driver.step(spec::SettlementAction::Observe(2));
+    driver.step(spec::SettlementAction::Observe(4));
+    driver.step(spec::SettlementAction::Finalize);
+    driver.step(spec::SettlementAction::ClaimWithdrawal {
+        batch: spec::Batch::OffsetC,
+        source: spec::Batch::OffsetC,
+        position: 0,
+    });
+    driver.step(spec::SettlementAction::ClaimDeposit(spec::Account::Bob));
+    driver
+}
+
+#[test]
+fn carried_offset_deferral_refines_production() {
+    carried_offset_profile();
+}
+
+// Bob spends below his queued amount, so certification certifies the degraded
+// close: the uncovered withdrawal finalizes with a zero release and owns no
+// claimable output.
+fn degraded_profile() -> RefinementDriver {
+    let mut driver = RefinementDriver::new();
+    driver.step(spec::SettlementAction::RecordDeposit(
+        spec::DepositId::BobTwo,
+    ));
+    register_and_admit_refined(&mut driver, spec::Batch::B0);
+    register_and_admit_refined(&mut driver, spec::Batch::B1);
+    queue_refined(&mut driver, spec::WithdrawalId::Amount);
+    driver.step(spec::SettlementAction::Register(spec::RegistrationId::B2));
+    driver.step(admission(spec::Batch::B2D));
+    driver.step(spec::SettlementAction::Observe(5));
+    driver.step(spec::SettlementAction::Finalize);
+    driver.step(spec::SettlementAction::Observe(6));
+    driver.step(spec::SettlementAction::Finalize);
+    driver.step(spec::SettlementAction::Observe(7));
+    driver.step(spec::SettlementAction::Finalize);
+    driver
+}
+
+#[test]
+fn degraded_amount_refines_production_step_by_step() {
+    degraded_profile();
 }
 
 #[test]

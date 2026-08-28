@@ -68,10 +68,16 @@ DEPOSIT OR WITHDRAWAL AUTHORIZATION
 
  withdrawal: read settlement's configured, non-faulted finalized root
              -> select the exact retained opening, or fetch, verify, and persist that root
-             -> sign and queue at settlement -> ask the operator to apply
+             -> sign against that root -> hand the request to the operator, which carries
+                it into its next registered close. settlement validates each carried
+                request at registration against that same finalized root: an
+                operator-supplied account opening proves it certifiable, and its
+                deadline must outlive the close's challenge window
 
-             once settlement accepts the queue, operator loss returns a pending outcome;
-             retry uses the exact signed request, and expiry enables hard-fault recovery
+             operator loss returns a pending outcome, and retry uses the exact signed
+             request. a censored signer instead queues the exact request at settlement,
+             which the operator must then include verbatim. queue expiry enables
+             hard-fault recovery
 
  Amount: wallet signs (state root, destination, exact amount, deadline)
  Close:  wallet signs (state root, destination, deadline); the amountless request sweeps
@@ -123,9 +129,11 @@ OPERATOR FAULT
 
 Recovery does not recreate unavailable evidence. Before staging each new payment or fresh
 withdrawal, the agent retains its payer opening against settlement's exact finalized root;
-recovery uses it only when that full root is later frozen. Queueing precedes operator application,
-so a queued withdrawal can expire into hard-fault recovery even if the operator disappears before
-applying it. This covers roots the agent observed while online, not an unobserved root reached while
+recovery uses it only when that full root is later frozen. A carried withdrawal is invisible to
+settlement until its close registers, so it gains the deadline-fault guarantee only once that close
+is admitted. If the operator disappears or censors first, the signer queues the exact signed
+request at settlement instead. That queued obligation expires into hard-fault recovery. This covers
+roots the agent observed while online, not an unobserved root reached while
 it was offline. An account reactivated by a current-epoch deposit cannot pay until it appears in a
 later epoch-predecessor state, because the current frozen root has no live payer leaf to retain.
 Receipt challenges still require the exact linked send/receipt pair. The example supplies no
@@ -171,7 +179,8 @@ selected entry into a draft batch and `b` pays every staged entry with one batch
 batch is rejected or accepted as a whole, so a failed `b` retries the identical batch. A
 pending-deposit refund needs only the wallet account and settlement; it does not contact the
 operator. A deposit first becomes settlement custody and is then credited by the operator. A
-withdrawal is authorized against the settlement state root and included in an epoch close.
+withdrawal is authorized against the settlement state root, carried by the operator, and included
+in an epoch close.
 Deposits and fresh withdrawal authorizations are accepted only while no payment context is
 registered: the epoch's first payment registers the context, and later requests are rejected
 until the successor epoch opens after the close finalizes. Every validator derives the exact
@@ -215,6 +224,7 @@ For a terminal-free walkthrough, start settlement and operator as above, then ru
 cargo run --release -p commonware-terminal --bin terminal-agent -- --scripted
 ```
 
-The walkthrough deposits, queues a withdrawal, pays an internal recipient, pays a two-recipient
-batch under one signature, pays an external recipient, starts an asynchronous close, opens the
-registered successor after finalization, and claims the finalized withdrawal and external payout.
+The walkthrough deposits, hands the operator a withdrawal to carry, pays an internal recipient,
+pays a two-recipient batch under one signature, pays an external recipient, starts an asynchronous
+close, opens the registered successor after finalization, and claims the finalized withdrawal and
+external payout.

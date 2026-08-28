@@ -82,6 +82,9 @@ pub(crate) struct SettlementRegistration {
     pub(crate) predecessor_liability: u64,
     pub(crate) deposits: DepositBatch<Key>,
     pub(crate) withdrawals: WithdrawalBatch<Key, Digest>,
+    /// One predecessor-root opening per withdrawal in batch order. Settlement uses them to
+    /// prove each operator-carried request certifiable before it registers the close.
+    pub(crate) openings: Vec<StateOpening<Key, Digest>>,
     pub(crate) signature: commonware_cryptography_curve25519::signing::Signature,
 }
 
@@ -469,6 +472,17 @@ impl Operator {
         request
             .verify_context(&self.protocol.deployment(), &quote.root.digest)
             .context("verify withdrawal context")?;
+
+        // Settlement refuses to register a carried amount that exactly offsets the close's
+        // staged deposit (that shape must defer the deposit through the queue), so fail it
+        // here instead of wedging the epoch at registration.
+        if let WithdrawalAction::Amount(amount) = request.body().action() {
+            let deposited = self.registration.deposits.amount_for(request.account());
+            ensure!(
+                deposited == 0 || amount.get() != deposited,
+                "a carried withdrawal cannot exactly offset the staged deposit"
+            );
+        }
         let replacement =
             registration_with_withdrawal(&self.protocol, &self.registration, request.clone())
                 .context("prospective withdrawal does not fit the epoch anchor")?;
@@ -724,6 +738,26 @@ impl Operator {
         let predecessor_liability = self.registration.context.predecessor_liability();
         let deposits = self.registration.deposits.clone();
         let withdrawals = self.registration.withdrawals.clone();
+        let openings = if withdrawals.requests().is_empty() {
+            Vec::new()
+        } else {
+            let current = self.store.load_current()?;
+            let assembled = assemble_epoch(&self.protocol, &current, &self.registration)?;
+            let predecessor = AccountCache::new_with_strategy::<Sha256>(
+                assembled.predecessor,
+                self.protocol.strategy(),
+            )
+            .context("commit registration predecessor state")?;
+            withdrawals
+                .requests()
+                .iter()
+                .map(|request| {
+                    predecessor
+                        .opening(request.account())
+                        .context("open carried withdrawal account")
+                })
+                .collect::<Result<Vec<_>>>()?
+        };
         let signature =
             self.protocol
                 .sign_registration(epoch, predecessor_liability, &deposits, &withdrawals);
@@ -732,6 +766,7 @@ impl Operator {
             predecessor_liability,
             deposits,
             withdrawals,
+            openings,
             signature,
         })
     }
@@ -3102,6 +3137,7 @@ mod tests {
                 operator.registration.context.predecessor_liability(),
                 operator.registration.deposits.clone(),
                 operator.registration.withdrawals.clone(),
+                &operator.settlement_registration().unwrap().openings,
             )
             .unwrap();
         let prepared =
@@ -3168,6 +3204,7 @@ mod tests {
                 operator.registration.context.predecessor_liability(),
                 operator.registration.deposits.clone(),
                 operator.registration.withdrawals.clone(),
+                &operator.settlement_registration().unwrap().openings,
             )
             .unwrap();
         let prepared =
@@ -3194,6 +3231,7 @@ mod tests {
                 operator.registration.context.predecessor_liability(),
                 operator.registration.deposits.clone(),
                 operator.registration.withdrawals.clone(),
+                &operator.settlement_registration().unwrap().openings,
             )
             .unwrap();
         let prepared =
@@ -3261,6 +3299,7 @@ mod tests {
                 operator.registration.context.predecessor_liability(),
                 operator.registration.deposits.clone(),
                 operator.registration.withdrawals.clone(),
+                &operator.settlement_registration().unwrap().openings,
             )
             .unwrap();
         let prepared =
@@ -3301,6 +3340,7 @@ mod tests {
                 operator.registration.context.predecessor_liability(),
                 operator.registration.deposits.clone(),
                 operator.registration.withdrawals.clone(),
+                &operator.settlement_registration().unwrap().openings,
             )
             .unwrap();
         let prepared =
@@ -3428,6 +3468,7 @@ mod tests {
                 operator.registration.context.predecessor_liability(),
                 operator.registration.deposits.clone(),
                 operator.registration.withdrawals.clone(),
+                &operator.settlement_registration().unwrap().openings,
             )
             .unwrap();
         let prepared =
@@ -3471,7 +3512,7 @@ mod tests {
     }
 
     #[test]
-    fn settlement_rejects_exact_offset_but_allows_close_and_deposit_in_either_order() {
+    fn exact_offset_is_rejected_at_staging_and_queueing_but_close_composes() {
         let mut first_operator = operator();
         let staged = first_operator.deposit(0, 10).unwrap();
         let event = DepositEvent {
@@ -3481,13 +3522,23 @@ mod tests {
         };
         let mut settlement = crate::settlement::Settlement::new().unwrap();
         settlement.deposit(event).unwrap();
-        first_operator.withdraw(0, amount(10)).unwrap();
-        let request = first_operator.store.load_current().unwrap().withdrawals[0]
-            .request
-            .clone();
-        let error = settlement
-            .queue_withdrawal(request, Vec::new())
-            .unwrap_err();
+
+        // The operator refuses to carry the offset shape, and the settlement queue
+        // refuses to defer it, so neither intake can wedge a registration.
+        let error = first_operator
+            .withdraw(0, amount(10))
+            .err()
+            .expect("exact-offset staging must be refused");
+        assert!(format!("{error:#}").contains("exactly offset"));
+        let offset = SignedWithdrawal::sign(
+            first_operator.protocol.deployment(),
+            settlement.status().unwrap().state_root.digest,
+            Bytes::from_static(b"Alice"),
+            amount(10),
+            50,
+            first_operator.wallets[0].signer(),
+        );
+        let error = settlement.queue_withdrawal(offset, Vec::new()).unwrap_err();
         assert!(format!("{error:#}").contains("exactly offset"));
 
         let mut second_operator = operator();
@@ -3608,6 +3659,7 @@ mod tests {
                 operator.registration.context.predecessor_liability(),
                 operator.registration.deposits.clone(),
                 operator.registration.withdrawals.clone(),
+                &operator.settlement_registration().unwrap().openings,
             )
             .unwrap();
         let prepared =

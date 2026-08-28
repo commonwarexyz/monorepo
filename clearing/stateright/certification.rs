@@ -343,13 +343,16 @@ pub(crate) fn certify_close(registration: RegistrationId, batch: Batch) -> Optio
     issued_valid_state(subject).issue_close()
 }
 
-pub(crate) fn certified_closes() -> [CertifiedClose; 5] {
+pub(crate) fn certified_closes() -> [CertifiedClose; 8] {
     [
         (RegistrationId::B0, Batch::B0),
         (RegistrationId::B1, Batch::B1),
         (RegistrationId::B2, Batch::B2),
         (RegistrationId::B3, Batch::B3),
         (RegistrationId::Offset, Batch::Offset),
+        (RegistrationId::B1C, Batch::B1C),
+        (RegistrationId::B2, Batch::B2D),
+        (RegistrationId::OffsetC, Batch::OffsetC),
     ]
     .map(|(registration, batch)| {
         certify_close(registration, batch).expect("every canonical fixture is certified")

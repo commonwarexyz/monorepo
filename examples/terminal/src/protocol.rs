@@ -673,16 +673,27 @@ impl Protocol {
                 .record_deposit(now, event.id, event.account.clone(), event.amount)
                 .context("record deposit in settlement chain")?;
         }
-        for request in withdrawals.requests() {
-            let account_opening = predecessor
-                .opening(request.account())
-                .context("open withdrawing account")?;
-            chain
-                .queue_withdrawal(now, request.clone(), &[account_opening], |_| true)
-                .context("queue withdrawal in settlement chain")?;
-        }
+        // Withdrawals are operator-carried, so the boundary passes through registration
+        // exactly as the authoritative settlement validates it: one predecessor-root
+        // opening per carried request proves the close certifiable before it registers.
+        let extra_openings = withdrawals
+            .requests()
+            .iter()
+            .map(|request| {
+                predecessor
+                    .opening(request.account())
+                    .context("open carried withdrawal account")
+            })
+            .collect::<Result<Vec<_>>>()?;
         chain
-            .register_close(now, context.clone(), deposits.clone(), withdrawals.clone())
+            .register_close(
+                now,
+                context.clone(),
+                deposits.clone(),
+                withdrawals.clone(),
+                &extra_openings,
+                |_| true,
+            )
             .context("register close")?;
         chain
             .admit(

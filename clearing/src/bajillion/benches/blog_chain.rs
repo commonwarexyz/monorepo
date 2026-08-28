@@ -48,6 +48,12 @@ struct WithdrawalClaimFixture {
     claim: WithdrawalClaim<Digest>,
 }
 
+struct WithdrawalClaims {
+    total: u32,
+    amount: WithdrawalClaimFixture,
+    close: WithdrawalClaimFixture,
+}
+
 struct Metrics {
     close_bytes: usize,
     slice_corpus_bytes: usize,
@@ -60,8 +66,6 @@ struct Metrics {
     validator_chain_commitment_bytes: usize,
     challenge_recipient_lookup_bytes: usize,
     challenge_bytes: usize,
-    amount_withdrawal_claim_bytes: usize,
-    close_withdrawal_claim_bytes: usize,
 }
 
 struct BlogChainFixture {
@@ -73,8 +77,7 @@ struct BlogChainFixture {
     terminal_proof: TerminalProof<Digest>,
     verifier: bls12381::Scheme,
     encoded_challenge: Bytes,
-    amount_withdrawal: WithdrawalClaimFixture,
-    close_withdrawal: WithdrawalClaimFixture,
+    claims: [WithdrawalClaims; 2],
     metrics: Metrics,
 }
 
@@ -87,18 +90,20 @@ impl BlogChainFixture {
 
         let assignment = validators.assignment();
         let (close, challenge, claim_signer) = active_chain_fixture(profile, assignment);
-        let amount_withdrawal = amount_withdrawal_claim_fixture(&close, &claim_signer);
-        let close_withdrawal = close_withdrawal_claim_fixture(&close, &claim_signer);
-        let amount_withdrawal_claim_bytes = amount_withdrawal.claim.encode_size();
-        let close_withdrawal_claim_bytes = close_withdrawal.claim.encode_size();
-        assert_eq!(
-            amount_withdrawal.claim.encode().len(),
-            amount_withdrawal_claim_bytes
-        );
-        assert_eq!(
-            close_withdrawal.claim.encode().len(),
-            close_withdrawal_claim_bytes
-        );
+        // Claim fixtures cover the single-output floor and a full withdrawal surge
+        // in which every live account exits through one certified close.
+        let surge = u32::try_from(profile.live_accounts)
+            .expect("benchmark account count fits the vector bound");
+        let claims = [1, surge].map(|total| WithdrawalClaims {
+            total,
+            amount: amount_withdrawal_claim_fixture(&close, &claim_signer, total),
+            close: close_withdrawal_claim_fixture(&close, &claim_signer, total),
+        });
+        for claims in &claims {
+            for fixture in [&claims.amount, &claims.close] {
+                assert_eq!(fixture.claim.encode().len(), fixture.claim.encode_size());
+            }
+        }
         assert_eq!(close.context.assignment().slice_bits(), SLICE_BITS);
         assert_eq!(
             close.context.assignment().committee(),
@@ -208,8 +213,6 @@ impl BlogChainFixture {
             validator_chain_commitment_bytes,
             challenge_recipient_lookup_bytes,
             challenge_bytes,
-            amount_withdrawal_claim_bytes,
-            close_withdrawal_claim_bytes,
         };
 
         Self {
@@ -221,8 +224,7 @@ impl BlogChainFixture {
             terminal_proof,
             verifier,
             encoded_challenge,
-            amount_withdrawal,
-            close_withdrawal,
+            claims,
             metrics,
         }
     }
@@ -304,20 +306,13 @@ impl BlogChainFixture {
         )
         .expect("benchmark challenge is well formed")
     }
+}
 
-    fn check_amount_withdrawal_claim(&self) -> WithdrawalOutput {
-        self.amount_withdrawal
-            .claim
-            .verify::<Sha256>(&self.amount_withdrawal.withdrawal_outputs)
-            .expect("benchmark withdrawal claim is valid")
-    }
-
-    fn check_close_withdrawal_claim(&self) -> WithdrawalOutput {
-        self.close_withdrawal
-            .claim
-            .verify::<Sha256>(&self.close_withdrawal.withdrawal_outputs)
-            .expect("benchmark close claim is valid")
-    }
+fn check_withdrawal_claim(fixture: &WithdrawalClaimFixture) -> WithdrawalOutput {
+    fixture
+        .claim
+        .verify::<Sha256>(&fixture.withdrawal_outputs)
+        .expect("benchmark withdrawal claim is valid")
 }
 
 fn withdrawal_output_tree(
@@ -325,7 +320,8 @@ fn withdrawal_output_tree(
     signer: &SigningKey,
     action: WithdrawalAction,
     amount: u64,
-) -> (WithdrawalOutput, Tree<Digest>) {
+    total: u32,
+) -> (WithdrawalOutput, Tree<Digest>, u32) {
     let account = signer.public_key();
     assert_eq!(close.rows[1].account, account);
     let request = SignedWithdrawal::sign(
@@ -341,32 +337,52 @@ fn withdrawal_output_tree(
         &RangeCfg::exact(WITHDRAWAL_DESTINATION.len()),
     )
     .expect("validator-derived benchmark output decodes");
-    let mut output_builder = Builder::<Sha256>::new(VectorKind::WithdrawalOutput, 1)
-        .expect("one withdrawal output is valid");
+
+    // The claimed output sits mid-vector among `total` outputs queued by the
+    // same certified close.
+    let position = total / 2;
+    let outputs = (0..total)
+        .map(|index| {
+            if index == position {
+                return output.clone();
+            }
+            let destination = Bytes::from(format!("exit-{index:016}").into_bytes());
+            assert_eq!(destination.len(), WITHDRAWAL_DESTINATION.len());
+            WithdrawalOutput::decode_cfg(
+                (destination, u64::from(index) + 1).encode(),
+                &RangeCfg::exact(WITHDRAWAL_DESTINATION.len()),
+            )
+            .expect("benchmark filler output decodes")
+        })
+        .collect::<Vec<_>>();
+    let mut output_builder = Builder::<Sha256>::new(VectorKind::WithdrawalOutput, total)
+        .expect("benchmark withdrawal output count is valid");
     output_builder
-        .add_encoded(output.encode().as_ref())
-        .expect("benchmark withdrawal output can be committed");
+        .add_values(&outputs, strategy())
+        .expect("benchmark withdrawal outputs can be committed");
     let output_tree = output_builder
         .build(strategy())
         .expect("benchmark withdrawal output tree is valid");
-    (output, output_tree)
+    (output, output_tree, position)
 }
 
 fn amount_withdrawal_claim_fixture(
     close: &CloseFixture,
     signer: &SigningKey,
+    total: u32,
 ) -> WithdrawalClaimFixture {
     let amount = NonZeroU64::MIN.get();
-    let (output, output_tree) = withdrawal_output_tree(
+    let (output, output_tree, position) = withdrawal_output_tree(
         close,
         signer,
         WithdrawalAction::Amount(NonZeroU64::MIN),
         amount,
+        total,
     );
     let encoded = (
         output.clone(),
         output_tree
-            .opening(0)
+            .opening(position)
             .expect("benchmark withdrawal output can be opened"),
     )
         .encode();
@@ -392,17 +408,18 @@ fn amount_withdrawal_claim_fixture(
 fn close_withdrawal_claim_fixture(
     close: &CloseFixture,
     signer: &SigningKey,
+    total: u32,
 ) -> WithdrawalClaimFixture {
-    let position = 1_usize;
-    let amount = close.rows[position].successor.balance;
+    let row = 1_usize;
+    let amount = close.rows[row].successor.balance;
     assert!(amount > 0);
-    let (output, output_tree) =
-        withdrawal_output_tree(close, signer, WithdrawalAction::Close, amount);
+    let (output, output_tree, position) =
+        withdrawal_output_tree(close, signer, WithdrawalAction::Close, amount, total);
 
     let encoded = (
         output.clone(),
         output_tree
-            .opening(0)
+            .opening(position)
             .expect("benchmark withdrawal output can be opened"),
     )
         .encode();
@@ -449,7 +466,7 @@ fn chain(close: &CloseFixture, validators: &Validators) -> TestChain {
         &close.cache,
         close.context.payment().epoch(),
         SettlementConfig::new(
-            NonZeroUsize::new(1).expect("benchmark pipeline bound is nonzero"),
+            NonZeroUsize::new(2).expect("benchmark pipeline bound is nonzero"),
             EpochDeadlinePolicy::new(
                 NonZeroU64::new(100).expect("benchmark admission delay is nonzero"),
                 notice,
@@ -479,6 +496,8 @@ fn preflight_chain(
             close.context.clone(),
             close.deposits.clone(),
             close.withdrawals.clone(),
+            &[],
+            |_| true,
         )
         .expect("benchmark close can be registered");
     let batch = chain
@@ -525,7 +544,7 @@ fn bench_blog_chain(c: &mut Criterion) {
         let credited = profile.credited_accounts;
         let shards = profile.receive_shards_per_credited;
         eprintln!(
-            "clearing blog chain metrics: profile={profile_index} N={live_accounts} A={changed} B={credited} h={shards} close_W=0 claim_W=1 n={VALIDATORS} f={FAULTS} q={QUORUM} slices={SLICES} workers={WORKERS} close_bytes={} slice_corpus_bytes={} validator={} dealing_bytes={} dealing_slices={} header_bytes={} root_bundle_witness_bytes={} external_certificate_bytes={} external_package_bytes={} validator_chain_commitment_bytes={} challenge_recipient_lookup_bytes={} challenge_bytes={} amount_withdrawal_claim_bytes={} close_withdrawal_claim_bytes={}",
+            "clearing blog chain metrics: profile={profile_index} N={live_accounts} A={changed} B={credited} h={shards} close_W=0 n={VALIDATORS} f={FAULTS} q={QUORUM} slices={SLICES} workers={WORKERS} close_bytes={} slice_corpus_bytes={} validator={} dealing_bytes={} dealing_slices={} header_bytes={} root_bundle_witness_bytes={} external_certificate_bytes={} external_package_bytes={} validator_chain_commitment_bytes={} challenge_recipient_lookup_bytes={} challenge_bytes={}",
             fixture.metrics.close_bytes,
             fixture.metrics.slice_corpus_bytes,
             usize::from(fixture.validator),
@@ -538,9 +557,15 @@ fn bench_blog_chain(c: &mut Criterion) {
             fixture.metrics.validator_chain_commitment_bytes,
             fixture.metrics.challenge_recipient_lookup_bytes,
             fixture.metrics.challenge_bytes,
-            fixture.metrics.amount_withdrawal_claim_bytes,
-            fixture.metrics.close_withdrawal_claim_bytes,
         );
+        for claims in &fixture.claims {
+            eprintln!(
+                "clearing blog chain claim metrics: profile={profile_index} W={} amount_claim_bytes={} close_claim_bytes={}",
+                claims.total,
+                claims.amount.claim.encode_size(),
+                claims.close.claim.encode_size(),
+            );
+        }
 
         let labels = format!("N={live_accounts} A={changed} B={credited} h={shards}");
         c.bench_function(
@@ -600,24 +625,27 @@ fn bench_blog_chain(c: &mut Criterion) {
                 b.iter(|| black_box(fixture.check_challenge()));
             },
         );
-        c.bench_function(
-            &format!(
-                "{}/p={profile_index} op=check-withdrawal-claim action=amount {labels} W=1",
-                module_path!()
-            ),
-            |b| {
-                b.iter(|| black_box(fixture.check_amount_withdrawal_claim()));
-            },
-        );
-        c.bench_function(
-            &format!(
-                "{}/p={profile_index} op=check-withdrawal-claim action=close {labels} W=1",
-                module_path!()
-            ),
-            |b| {
-                b.iter(|| black_box(fixture.check_close_withdrawal_claim()));
-            },
-        );
+        for claims in &fixture.claims {
+            let total = claims.total;
+            c.bench_function(
+                &format!(
+                    "{}/p={profile_index} op=check-withdrawal-claim action=amount {labels} W={total}",
+                    module_path!()
+                ),
+                |b| {
+                    b.iter(|| black_box(check_withdrawal_claim(&claims.amount)));
+                },
+            );
+            c.bench_function(
+                &format!(
+                    "{}/p={profile_index} op=check-withdrawal-claim action=close {labels} W={total}",
+                    module_path!()
+                ),
+                |b| {
+                    b.iter(|| black_box(check_withdrawal_claim(&claims.close)));
+                },
+            );
+        }
     }
 }
 
