@@ -12,6 +12,7 @@ use crate::aws::{
 };
 use commonware_cryptography::{Hasher as _, Sha256};
 use commonware_macros::boxed;
+use commonware_utils::iter::zip_eq;
 use futures::{
     future::try_join_all,
     stream::{self, StreamExt, TryStreamExt},
@@ -54,6 +55,36 @@ pub struct RegionResources {
     pub az_support: BTreeMap<String, BTreeSet<String>>,
     pub binary_sg_id: Option<String>,
     pub monitoring_sg_id: Option<String>,
+}
+
+/// Returns whether `name` matches `[A-Za-z0-9_-]+`.
+fn is_valid_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// Validates the deployment tag and instance names.
+///
+/// Both are written unescaped into file paths, YAML, shell scripts, S3 keys, and AWS tags.
+/// Instance names must also be unique ignoring case, because they name generated files on
+/// the operator's filesystem, and must not be [`MONITORING_NAME`].
+fn validate_names(config: &Config) -> Result<(), Error> {
+    if !is_valid_name(&config.tag) {
+        return Err(Error::InvalidTag(config.tag.clone()));
+    }
+    let mut instance_names = HashSet::new();
+    for instance in &config.instances {
+        let name = &instance.name;
+        if name == MONITORING_NAME || !is_valid_name(name) {
+            return Err(Error::InvalidInstanceName(name.clone()));
+        }
+        if !instance_names.insert(name.to_ascii_lowercase()) {
+            return Err(Error::DuplicateInstanceName(name.clone()));
+        }
+    }
+    Ok(())
 }
 
 /// Validates storage options before create allocates AWS resources.
@@ -149,18 +180,8 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     let tag = &config.tag;
     info!(tag = tag.as_str(), "loaded configuration");
 
-    // Ensure no instance is duplicated or named MONITORING_NAME
-    let mut instance_names = HashSet::new();
-    for instance in &config.instances {
-        if !instance_names.insert(&instance.name) {
-            return Err(Error::DuplicateInstanceName(instance.name.clone()));
-        }
-        if instance.name == MONITORING_NAME {
-            return Err(Error::InvalidInstanceName(instance.name.clone()));
-        }
-    }
-
-    // Validate storage settings before allocating any AWS resources.
+    // Validate the configuration before allocating any AWS resources.
+    validate_names(&config)?;
     validate_storage_config(&config)?;
 
     // Determine unique regions
@@ -828,9 +849,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                             count = chunk.len(),
                             "instances running in region"
                         );
-                        let deployments: Vec<Deployment> = chunk
-                            .into_iter()
-                            .zip(ips)
+                        let deployments: Vec<Deployment> = zip_eq(chunk, ips)
                             .map(|((instance_id, instance_config), ip)| Deployment {
                                 instance: instance_config,
                                 id: instance_id,
@@ -1515,7 +1534,7 @@ fn grouped_subnets(
 mod tests {
     use super::{
         RegionResources, grouped_subnets, run_launches, select_availability_zone_groups,
-        select_group_availability_zone, validate_storage_config,
+        select_group_availability_zone, validate_names, validate_storage_config,
     };
     use crate::aws::{Config, Error, InstanceConfig, MonitoringConfig};
     use std::{
@@ -1835,6 +1854,63 @@ mod tests {
                 storage_throughput,
             } if target == "monitoring" && storage_throughput == 124
         ));
+    }
+
+    #[test]
+    fn valid_names_pass() {
+        let cfg = config(
+            monitoring("gp3", None),
+            vec![
+                instance("validator-0", "us-east-1", "c8g.4xlarge", None),
+                instance("Worker_1", "us-east-1", "c8g.4xlarge", None),
+            ],
+        );
+
+        validate_names(&cfg).expect("names are valid");
+    }
+
+    #[test]
+    fn invalid_instance_names_rejected() {
+        for name in ["", "monitoring", "a b", "$(id)", "../x", "a.b", "\u{e9}"] {
+            let cfg = config(
+                monitoring("gp3", None),
+                vec![instance(name, "us-east-1", "c8g.4xlarge", None)],
+            );
+
+            let err = validate_names(&cfg).expect_err(name);
+
+            assert!(
+                matches!(err, Error::InvalidInstanceName(n) if n == name),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_tags_rejected() {
+        for tag in ["", "../x", "/tmp"] {
+            let mut cfg = config(monitoring("gp3", None), Vec::new());
+            cfg.tag = tag.to_string();
+
+            let err = validate_names(&cfg).expect_err(tag);
+
+            assert!(matches!(err, Error::InvalidTag(t) if t == tag), "{tag}");
+        }
+    }
+
+    #[test]
+    fn duplicate_instance_names_rejected() {
+        let cfg = config(
+            monitoring("gp3", None),
+            vec![
+                instance("worker", "us-east-1", "c8g.4xlarge", None),
+                instance("Worker", "us-west-2", "c8g.4xlarge", None),
+            ],
+        );
+
+        let err = validate_names(&cfg).expect_err("duplicate name ignoring case");
+
+        assert!(matches!(err, Error::DuplicateInstanceName(n) if n == "Worker"));
     }
 
     #[test]

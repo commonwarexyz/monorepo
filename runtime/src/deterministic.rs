@@ -2567,7 +2567,7 @@ mod tests {
             assert_eq!(strategy.parallelism(), 2);
 
             let output = strategy
-                .spawn(|strategy| strategy.map_collect_vec(0..2, |i| i + 1))
+                .spawn(2, |strategy| strategy.map_collect_vec(0..2, |i| i + 1))
                 .await;
 
             assert_eq!(output, vec![1, 2]);
@@ -2585,7 +2585,7 @@ mod tests {
             assert_eq!(first.parallelism(), 1);
             assert_eq!(first.run(2, || "serial", || "parallel"), "serial");
             let output = first
-                .spawn(|strategy| strategy.map_collect_vec(0..2, |i| i + 1))
+                .spawn(2, |strategy| strategy.map_collect_vec(0..2, |i| i + 1))
                 .now_or_never()
                 .expect("single-threaded pool should run spawned work inline");
             assert_eq!(output, vec![1, 2]);
@@ -2594,7 +2594,7 @@ mod tests {
             assert_eq!(second.parallelism(), 3);
             assert_eq!(second.run(2, || "serial", || "parallel"), "parallel");
             let output = second
-                .spawn(|strategy| strategy.map_collect_vec(0..3, |i| i + 1))
+                .spawn(3, |strategy| strategy.map_collect_vec(0..3, |i| i + 1))
                 .now_or_never()
                 .expect("single-threaded pool should run spawned work inline");
             assert_eq!(output, vec![1, 2, 3]);
@@ -2606,7 +2606,7 @@ mod tests {
             assert_eq!(third.parallelism(), 4);
             assert_eq!(third.run(2, || "serial", || "parallel"), "parallel");
             let output = third
-                .spawn(|strategy| strategy.map_collect_vec(0..4, |i| i + 1))
+                .spawn(4, |strategy| strategy.map_collect_vec(0..4, |i| i + 1))
                 .now_or_never()
                 .expect("single-threaded pool should run spawned work inline");
             assert_eq!(output, vec![1, 2, 3, 4]);
@@ -2624,7 +2624,7 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
 
             let output = strategy
-                .spawn(|strategy| strategy.map_collect_vec(0..2, |i| i + 1))
+                .spawn(2, |strategy| strategy.map_collect_vec(0..2, |i| i + 1))
                 .await;
             assert_eq!(output, vec![1, 2]);
 

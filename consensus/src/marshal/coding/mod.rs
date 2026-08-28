@@ -114,6 +114,7 @@ mod tests {
 
     type TestCodingVariant = Coding<CodingB, ReedSolomon<Sha256>, Sha256, K>;
     type TestCodedBlock = CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>;
+    type TestCommitment = Commitment<CodingB, ReedSolomon<Sha256>, Sha256>;
     type CodingSendRecord = (Round, Arc<TestCodedBlock>, Recipients<K>);
 
     // Smallest valid coding config used to build trusted genesis commitments.
@@ -153,7 +154,10 @@ mod tests {
             None
         }
 
-        async fn find_by_commitment(&self, _commitment: Commitment) -> Option<Arc<TestCodedBlock>> {
+        async fn find_by_commitment(
+            &self,
+            _commitment: TestCommitment,
+        ) -> Option<Arc<TestCodedBlock>> {
             None
         }
 
@@ -168,22 +172,22 @@ mod tests {
 
         fn subscribe_by_commitment(
             &self,
-            _commitment: Commitment,
+            _commitment: TestCommitment,
         ) -> Option<oneshot::Receiver<Arc<TestCodedBlock>>> {
             let (sender, receiver) = oneshot::channel();
             self.commitment_subscriptions.lock().push(sender);
             Some(receiver)
         }
 
-        fn retire(&self, _update: core::Retirement<Commitment>) {}
+        fn retire(&self, _update: core::Retirement<TestCommitment>) {}
 
         fn send(&self, round: Round, block: Arc<TestCodedBlock>, recipients: Recipients<K>) {
             self.sends.lock().push((round, block, recipients));
         }
     }
 
-    type CodingFetchRecord = Fetch<handler::Key<Commitment>, handler::Annotation>;
-    type CodingTargetedFetch = (handler::Key<Commitment>, NonEmptyVec<K>);
+    type CodingFetchRecord = Fetch<handler::Key<TestCommitment>, handler::Annotation>;
+    type CodingTargetedFetch = (handler::Key<TestCommitment>, NonEmptyVec<K>);
 
     /// A resolver that records each fetch invocation; other methods are no-ops.
     #[derive(Clone, Default)]
@@ -192,11 +196,11 @@ mod tests {
         targeted: Arc<Mutex<Vec<CodingTargetedFetch>>>,
         auto_delivery: Arc<Mutex<Option<Bytes>>>,
         delivery_responses: Arc<Mutex<Vec<oneshot::Receiver<bool>>>>,
-        sender: Option<mailbox::Sender<handler::Message<Commitment>>>,
+        sender: Option<mailbox::Sender<handler::Message<TestCommitment>>>,
     }
 
     impl RecordingResolver {
-        fn holding(metrics: impl Metrics) -> (handler::Receiver<Commitment>, Self) {
+        fn holding(metrics: impl Metrics) -> (handler::Receiver<TestCommitment>, Self) {
             let (sender, receiver) = mailbox::new(metrics, NZUsize!(100));
             (
                 handler::Receiver::new(receiver),
@@ -257,7 +261,7 @@ mod tests {
     }
 
     impl Resolver for RecordingResolver {
-        type Key = handler::Key<Commitment>;
+        type Key = handler::Key<TestCommitment>;
         type Subscriber = handler::Annotation;
 
         fn fetch<F>(&mut self, fetch: F) -> Feedback
@@ -460,11 +464,11 @@ mod tests {
         make_coding_block(genesis_ctx, Sha256::hash(&[b""]), Height::zero(), 0)
     }
 
-    fn genesis_coding_commitment<H: Hasher, B: CertifiableBlock>(block: &B) -> Commitment {
-        Commitment::from((
+    fn genesis_coding_commitment(block: &CodingB) -> TestCommitment {
+        TestCommitment::from((
             block.digest(),
             block.digest(),
-            hash_context::<H, _>(&block.context()),
+            hash_context::<Sha256, _>(&block.context()),
             GENESIS_CODING_CONFIG,
         ))
     }
@@ -472,7 +476,7 @@ mod tests {
     fn missing_candidate(me: K) -> (CodingCtx, TestCodedBlock) {
         let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
         let genesis = genesis_block();
-        let genesis_parent_commitment = genesis_coding_commitment::<Sha256, _>(&genesis);
+        let genesis_parent_commitment = genesis_coding_commitment(&genesis);
         let round = Round::new(Epoch::zero(), View::new(1));
         let candidate_ctx = CodingCtx {
             round,
@@ -685,10 +689,7 @@ mod tests {
             let candidate_ctx = CodingCtx {
                 round,
                 leader: participants[0].clone(),
-                parent: (
-                    View::zero(),
-                    genesis_coding_commitment::<Sha256, _>(&genesis),
-                ),
+                parent: (View::zero(), genesis_coding_commitment(&genesis)),
             };
             let candidate = make_coding_block(candidate_ctx, genesis.digest(), height, 100);
             let dishonest_block: TestCodedBlock =
@@ -1198,7 +1199,7 @@ mod tests {
                 parent: (View::zero(), genesis_commitment()),
             };
             let genesis = make_coding_block(genesis_ctx, Sha256::hash(&[b""]), Height::zero(), 0);
-            let genesis_parent_commitment = genesis_coding_commitment::<Sha256, _>(&genesis);
+            let genesis_parent_commitment = genesis_coding_commitment(&genesis);
 
             let round = Round::new(Epoch::zero(), View::new(1));
             let block_ctx = CodingCtx {
@@ -2316,7 +2317,7 @@ mod tests {
             let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
 
             // Re-proposal payload with valid coding config, but no block available.
-            let missing_payload = Commitment::from((
+            let missing_payload = TestCommitment::from((
                 Sha256::hash(&[b"missing_block"]),
                 Sha256::hash(&[b"missing_root"]),
                 Sha256::hash(&[b"missing_context"]),
@@ -2395,7 +2396,7 @@ mod tests {
             let shards = setup.extra;
 
             let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
-            let missing_commitment = Commitment::from((
+            let missing_commitment = TestCommitment::from((
                 Sha256::hash(&[b"missing_block"]),
                 Sha256::hash(&[b"missing_root"]),
                 Sha256::hash(&[b"missing_context"]),
@@ -3039,8 +3040,8 @@ mod tests {
         // Construct a Commitment with all-zero bytes (invalid CodingConfig:
         // minimum_shards=0, extra_shards=0). Serialize it and attempt to
         // deserialize -- this must fail.
-        let malformed_bytes = [0u8; Commitment::SIZE];
-        let result = Commitment::read(&mut &malformed_bytes[..]);
+        let malformed_bytes = [0u8; <TestCommitment as FixedSize>::SIZE];
+        let result = TestCommitment::read(&mut &malformed_bytes[..]);
         assert!(
             result.is_err(),
             "deserialization of Commitment with zeroed CodingConfig must fail"
@@ -3048,7 +3049,7 @@ mod tests {
 
         // A validly-constructed Commitment must still round-trip.
         let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
-        let valid = Commitment::from((
+        let valid = TestCommitment::from((
             Sha256::hash(&[b"block"]),
             Sha256::hash(&[b"root"]),
             Sha256::hash(&[b"context"]),
@@ -3056,7 +3057,7 @@ mod tests {
         ));
         let encoded = valid.encode();
         let decoded =
-            Commitment::read(&mut &encoded[..]).expect("valid Commitment must deserialize");
+            TestCommitment::read(&mut &encoded[..]).expect("valid Commitment must deserialize");
         assert_eq!(valid, decoded);
     }
 
@@ -3364,7 +3365,7 @@ mod tests {
             context.sleep(Duration::from_millis(100)).await;
 
             // Create finalization referencing commitment_a (the "correct" commitment).
-            let proposal: Proposal<Commitment> = Proposal {
+            let proposal: Proposal<TestCommitment> = Proposal {
                 round: round1,
                 parent: View::zero(),
                 payload: commitment_a,
@@ -3433,10 +3434,7 @@ mod tests {
             };
             let floor_block = make_coding_block(bad_context, parent.digest(), Height::new(2), 200);
             let coded_floor = CodedBlock::new(floor_block, coding_config, &Sequential);
-            assert_ne!(
-                coded_floor.parent(),
-                coded_floor.context().parent.1.block::<D>()
-            );
+            assert_ne!(coded_floor.parent(), coded_floor.context().parent.1.block());
 
             let finalization = CodingHarness::make_finalization(
                 Proposal::new(
@@ -3684,7 +3682,7 @@ mod tests {
                 parent: (View::zero(), genesis_commitment()),
             };
             let genesis = make_coding_block(genesis_ctx, Sha256::hash(&[b""]), Height::zero(), 0);
-            let genesis_parent_commitment = genesis_coding_commitment::<Sha256, _>(&genesis);
+            let genesis_parent_commitment = genesis_coding_commitment(&genesis);
 
             // Build the block we want propose() to return. Its embedded context
             // uses the proper genesis commitment so the parent lookup matches
@@ -3809,7 +3807,7 @@ mod tests {
                 parent: (View::zero(), genesis_commitment()),
             };
             let genesis = make_coding_block(genesis_ctx, Sha256::hash(&[b""]), Height::zero(), 0);
-            let genesis_parent_commitment = genesis_coding_commitment::<Sha256, _>(&genesis);
+            let genesis_parent_commitment = genesis_coding_commitment(&genesis);
 
             let propose_round = Round::new(Epoch::zero(), View::new(1));
             let propose_context = CodingCtx {
@@ -3921,7 +3919,7 @@ mod tests {
                 parent: (View::zero(), genesis_commitment()),
             };
             let genesis = make_coding_block(genesis_ctx, Sha256::hash(&[b""]), Height::zero(), 0);
-            let genesis_parent_commitment = genesis_coding_commitment::<Sha256, _>(&genesis);
+            let genesis_parent_commitment = genesis_coding_commitment(&genesis);
 
             let round = Round::new(Epoch::zero(), View::new(1));
             let ctx = CodingCtx {
@@ -4026,7 +4024,7 @@ mod tests {
                 parent: (View::zero(), genesis_commitment()),
             };
             let genesis = make_coding_block(genesis_ctx, Sha256::hash(&[b""]), Height::zero(), 0);
-            let genesis_parent_commitment = genesis_coding_commitment::<Sha256, _>(&genesis);
+            let genesis_parent_commitment = genesis_coding_commitment(&genesis);
 
             // Stash a stale block built against genesis as its parent at round V=2.
             let round = Round::new(Epoch::zero(), View::new(2));
@@ -4042,7 +4040,7 @@ mod tests {
 
             // Simulate a replay where parent selection now points to a
             // different parent commitment than the cached block was built for.
-            let new_parent_commitment = Commitment::from((
+            let new_parent_commitment = TestCommitment::from((
                 Sha256::hash(&[b"different-parent-block"]),
                 Sha256::hash(&[b"different-parent-inner"]),
                 Sha256::hash(&[b"different-parent-ctx"]),

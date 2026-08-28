@@ -604,9 +604,11 @@ fn authenticate_boundary_block<V: Variant>(
 mod tests {
     use super::*;
     use crate::dkg::tests::mocks;
+    use bytes::{Buf, BufMut};
+    use commonware_codec::{EncodeSize, Read, Write};
     use commonware_coding::ReedSolomon;
     use commonware_consensus::{
-        CertifiableBlock,
+        Block as ConsensusBlock, CertifiableBlock, Heightable,
         marshal::coding::{
             Coding,
             types::{CodedBlock, coding_config_for_participants},
@@ -618,8 +620,7 @@ mod tests {
         types::{Epoch, Height, Round, View, coding::Commitment},
     };
     use commonware_cryptography::{
-        Digest as _, Digestible as _, Hasher as _, bls12381::primitives::variant::MinPk,
-        sha256::Sha256,
+        Digest as _, Digestible, Hasher, bls12381::primitives::variant::MinPk, sha256::Sha256,
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{Runner as _, deterministic};
@@ -628,19 +629,76 @@ mod tests {
 
     const THRESHOLD_NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_DKG_PROBE_DISCOVERY_TEST";
 
+    type TestCommitment = Commitment<CodingBlock, ReedSolomon<Sha256>, Sha256>;
     type CodingContext =
-        commonware_consensus::simplex::types::Context<Commitment, mocks::TestPublicKey>;
-    type CodingBlock = mocks::MockBlock<mocks::TestDigest, CodingContext>;
-    type TestCodingVariant = Coding<CodingBlock, ReedSolomon<Sha256>, Sha256, mocks::TestPublicKey>;
-    type TestThresholdScheme = ThresholdScheme<mocks::TestPublicKey, MinPk>;
+        commonware_consensus::simplex::types::Context<TestCommitment, mocks::TestPublicKey>;
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct CodingBlock(mocks::MockBlock<mocks::TestDigest, CodingContext>);
+
+    impl CodingBlock {
+        fn new<H: Hasher<Digest = mocks::TestDigest>>(
+            context: CodingContext,
+            parent: mocks::TestDigest,
+            height: Height,
+            timestamp: u64,
+        ) -> Self {
+            Self(mocks::MockBlock::new::<H>(
+                context, parent, height, timestamp,
+            ))
+        }
+    }
+
+    impl Write for CodingBlock {
+        fn write(&self, writer: &mut impl BufMut) {
+            self.0.write(writer);
+        }
+    }
+
+    impl Read for CodingBlock {
+        type Cfg = ();
+
+        fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+            mocks::MockBlock::read_cfg(reader, cfg).map(Self)
+        }
+    }
+
+    impl EncodeSize for CodingBlock {
+        fn encode_size(&self) -> usize {
+            self.0.encode_size()
+        }
+    }
+
+    impl Digestible for CodingBlock {
+        type Digest = mocks::TestDigest;
+
+        fn digest(&self) -> Self::Digest {
+            self.0.digest()
+        }
+    }
+
+    impl Heightable for CodingBlock {
+        fn height(&self) -> Height {
+            self.0.height()
+        }
+    }
+
+    impl ConsensusBlock for CodingBlock {
+        fn parent(&self) -> Self::Digest {
+            self.0.parent()
+        }
+    }
 
     impl CertifiableBlock for CodingBlock {
         type Context = CodingContext;
 
         fn context(&self) -> Self::Context {
-            self.context().clone()
+            self.0.context().clone()
         }
     }
+
+    type TestCodingVariant = Coding<CodingBlock, ReedSolomon<Sha256>, Sha256, mocks::TestPublicKey>;
+    type TestThresholdScheme = ThresholdScheme<mocks::TestPublicKey, MinPk>;
 
     fn finalization<S, D>(proposal: Proposal<D>, schemes: &[S]) -> Finalization<S, D>
     where
