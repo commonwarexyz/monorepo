@@ -559,6 +559,7 @@ pub(super) fn items(
     fragment_start: usize,
     source_map: &SourceMap<'_>,
     depth: usize,
+    indentation: usize,
 ) -> Result<ProtectedFragment, Error> {
     let marker_prefix = crate::marker::unique_prefix(fragment_source, "nested");
     let mut shield = Shield {
@@ -579,7 +580,9 @@ pub(super) fn items(
         if shield.had_skip {
             return Ok(ProtectedFragment::preserved(fragment_source));
         }
-        return pretty::items(items, fragment_source).map_err(Error::from);
+        return crate::rustfmt::Formatter::default()
+            .items(fragment_source, indentation)
+            .map_err(Error::from);
     }
     if depth >= RECURSION_LIMIT && has_supported(&shield.nested) {
         return Err(Error::RecursionLimit);
@@ -596,7 +599,11 @@ pub(super) fn items(
             style: RestoreStyle::Items,
             had_skip: shield.had_skip,
         },
-        || pretty::items(&shielded, &shielded_source),
+        || {
+            crate::rustfmt::Formatter::default()
+                .items(&shielded_source, indentation)
+                .map_err(Error::from)
+        },
         |restored| syn::parse_file(restored).map(|_| ()),
     )
 }
@@ -607,6 +614,7 @@ pub(super) fn statements(
     fragment_start: usize,
     source_map: &SourceMap<'_>,
     depth: usize,
+    indentation: usize,
 ) -> Result<ProtectedFragment, Error> {
     let marker_prefix = crate::marker::unique_prefix(fragment_source, "nested");
     let mut shield = Shield {
@@ -627,7 +635,9 @@ pub(super) fn statements(
         if shield.had_skip {
             return Ok(ProtectedFragment::preserved(fragment_source));
         }
-        return pretty::statements(statements, fragment_source).map_err(Error::from);
+        return crate::rustfmt::Formatter::default()
+            .statements(fragment_source, indentation)
+            .map_err(Error::from);
     }
     if depth >= RECURSION_LIMIT && has_supported(&shield.nested) {
         return Err(Error::RecursionLimit);
@@ -644,14 +654,18 @@ pub(super) fn statements(
             style: RestoreStyle::Statements,
             had_skip: shield.had_skip,
         },
-        || pretty::statements(&shielded, &shielded_source),
+        || {
+            crate::rustfmt::Formatter::default()
+                .statements(&shielded_source, indentation)
+                .map_err(Error::from)
+        },
         |restored| parse_statements(restored).map(|_| ()),
     )
 }
 
 fn finish_collection(
     context: CollectionRestore<'_>,
-    format: impl FnOnce() -> Result<ProtectedFragment, pretty::Error>,
+    format: impl FnOnce() -> Result<ProtectedFragment, Error>,
     validate: impl Fn(&str) -> Result<(), syn::Error>,
 ) -> Result<ProtectedFragment, Error> {
     if !context.had_skip {

@@ -9,6 +9,7 @@
 pub mod file;
 pub mod macros;
 pub mod pretty;
+pub mod rustfmt;
 pub mod source;
 
 mod marker;

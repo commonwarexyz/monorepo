@@ -81,6 +81,7 @@ pub(super) fn stability_scope(
         items_range.start,
         &source_map,
         depth,
+        options.indentation + 4,
     )?;
     if items.disposition() != Disposition::Formatted
         && (items.text().contains('\n') || items.text().contains('\r'))
@@ -270,13 +271,18 @@ mod tests {
     }
 
     #[test]
-    fn preserves_internal_item_blank_lines() {
+    fn formats_internal_item_blank_lines() {
         let source = "BETA {\n    pub struct First;\n\n    pub trait Example {\n        type Value;\n\n        fn value(&self) -> Self::Value;\n    }\n\n    pub struct Last;\n}";
         let formatted =
             stability_scope(source, OPTIONS, 0).expect("stability scope should be protected");
 
-        assert_eq!(formatted.disposition(), Disposition::PreservedForTrivia);
-        assert_eq!(formatted.text(), source);
+        assert_eq!(formatted.disposition(), Disposition::Formatted);
+        assert!(
+            formatted
+                .text()
+                .contains("pub struct First;\n\n    pub trait Example")
+        );
+        assert!(formatted.text().contains("type Value;\n\n        fn value"));
     }
 
     #[test]

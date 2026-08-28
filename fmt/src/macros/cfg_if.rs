@@ -151,9 +151,6 @@ pub(super) fn cfg_if(
 ) -> Result<ProtectedFragment, Error> {
     let input = syn::parse_str::<CfgIfInput>(source).map_err(Error::Parse)?;
     let source_map = SourceMap::new(source);
-    if pretty::source_has_internal_blank_line(source) {
-        return preserve_cfg_if(source, &source_map, &input, options, depth);
-    }
     let Some(ranges) = source_ranges(&source_map, &input)? else {
         return Ok(ProtectedFragment::preserved(source));
     };
@@ -166,14 +163,27 @@ pub(super) fn cfg_if(
         let Some(predicate) = format_predicate(&source_map, &branch.predicate)? else {
             return preserve_cfg_if(source, &source_map, &input, options, depth);
         };
-        let Some(body) = format_body(&source_map, &branch.brace_token, &branch.body, depth)? else {
+        let Some(body) = format_body(
+            &source_map,
+            &branch.brace_token,
+            &branch.body,
+            depth,
+            options.indentation + 8,
+        )?
+        else {
             return preserve_cfg_if(source, &source_map, &input, options, depth);
         };
         branches.push(ConditionalLayout { predicate, body });
     }
     let else_body = match &input.else_branch {
         Some(branch) => {
-            let Some(body) = format_body(&source_map, &branch.brace_token, &branch.body, depth)?
+            let Some(body) = format_body(
+                &source_map,
+                &branch.brace_token,
+                &branch.body,
+                depth,
+                options.indentation + 8,
+            )?
             else {
                 return preserve_cfg_if(source, &source_map, &input, options, depth);
             };
@@ -296,6 +306,7 @@ fn format_body(
     brace: &token::Brace,
     body: &Body,
     depth: usize,
+    indentation: usize,
 ) -> Result<Option<String>, Error> {
     let Some(ranges) = body_ranges(source_map, brace)? else {
         return Ok(None);
@@ -303,10 +314,22 @@ fn format_body(
     let body_start = ranges.body.start;
     let body_source = source_map.slice(ranges.body)?;
     let body = match body {
-        Body::Items(items) => nested::items(items, body_source, body_start, source_map, depth)?,
-        Body::Statements(statements) => {
-            nested::statements(statements, body_source, body_start, source_map, depth)?
-        }
+        Body::Items(items) => nested::items(
+            items,
+            body_source,
+            body_start,
+            source_map,
+            depth,
+            indentation,
+        )?,
+        Body::Statements(statements) => nested::statements(
+            statements,
+            body_source,
+            body_start,
+            source_map,
+            depth,
+            indentation,
+        )?,
     };
     Ok(movable(body))
 }
@@ -513,25 +536,39 @@ mod tests {
     }
 
     #[test]
-    fn preserves_structural_and_immovable_comments() {
+    fn preserves_structural_and_formats_body_comments() {
         let structural = "if // keep seam\n#[cfg(test)] { const VALUE:usize=1; }";
         let formatted = cfg_if(structural, OPTIONS, 0).expect("cfg_if should be preserved");
         assert_eq!(formatted.disposition(), Disposition::PreservedForTrivia);
         assert_eq!(formatted.text(), structural);
 
         let block = "if #[cfg(test)] {\n    const VALUE: usize = /* keep */ 1;\n}";
-        let formatted = cfg_if(block, OPTIONS, 0).expect("cfg_if should be preserved");
-        assert_eq!(formatted.disposition(), Disposition::PreservedForTrivia);
-        assert_eq!(formatted.text(), block);
+        let formatted = cfg_if(block, OPTIONS, 0).expect("cfg_if should format");
+        assert_eq!(formatted.disposition(), Disposition::Formatted);
+        assert_eq!(formatted.text().matches("/* keep */").count(), 1);
+        assert!(
+            formatted
+                .text()
+                .contains("const VALUE: usize = /* keep */ 1;")
+        );
     }
 
     #[test]
-    fn preserves_internal_item_blank_lines() {
+    fn formats_internal_item_blank_lines() {
         let source = "if #[cfg(test)] {\n    pub struct First;\n\n    pub trait Example {\n        type Value;\n\n        fn value(&self) -> Self::Value;\n    }\n}";
         let formatted = cfg_if(source, OPTIONS, 0).expect("cfg_if should be protected");
 
-        assert_eq!(formatted.disposition(), Disposition::PreservedForTrivia);
-        assert_eq!(formatted.text(), source);
+        assert_eq!(formatted.disposition(), Disposition::Formatted);
+        assert!(
+            formatted
+                .text()
+                .contains("pub struct First;\n\n        pub trait Example")
+        );
+        assert!(
+            formatted
+                .text()
+                .contains("type Value;\n\n            fn value")
+        );
     }
 
     #[test]
@@ -539,14 +576,11 @@ mod tests {
         let source = "if #[cfg(test)] {\n    pub struct First;\n\n    fn run() { select! { value=receive()=>value } }\n}";
         let formatted = cfg_if(source, OPTIONS, 0).expect("nested selection should format");
 
-        assert_eq!(
-            formatted.disposition(),
-            Disposition::PreservedWithNestedFormatting
-        );
+        assert_eq!(formatted.disposition(), Disposition::Formatted);
         assert!(
             formatted
                 .text()
-                .contains("pub struct First;\n\n    fn run()")
+                .contains("pub struct First;\n\n        fn run()")
         );
         assert!(formatted.text().contains("value = receive() => value,"));
         let reparsed = syn::parse_str::<CfgIfInput>(formatted.text()).expect("cfg_if should parse");
@@ -589,7 +623,7 @@ mod tests {
     }
 
     #[test]
-    fn formats_aws_long_enum_and_later_variants() {
+    fn matches_rustfmt_fallback_for_unbreakable_enum() {
         let source = r#"if #[cfg(feature = "aws")] {
 /// Errors that can occur when deploying infrastructure on AWS
 #[derive(Debug)]
@@ -610,9 +644,10 @@ AwsS3 { bucket:String, operation:S3Operation, #[source] source:Box<aws_sdk_s3::E
                 .count(),
             1
         );
-        assert!(output.contains("AwsDescribeInstances(\n"));
-        assert!(output.contains("AwsS3 {\n"));
-        assert!(output.contains("#[source]\n"));
+        assert!(output.contains("AwsDescribeInstances(#[from]"));
+        assert!(output.contains("AwsS3 { bucket:String"));
+        assert_eq!(output.matches("AWS describe instances error").count(), 1);
+        assert!(output.contains("#[source] source:Box"));
         assert_ne!(output, source);
     }
 

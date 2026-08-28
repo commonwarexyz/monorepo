@@ -165,6 +165,9 @@ pub enum Error {
     /// An embedded Rust fragment could not be formatted safely.
     #[error("failed to format embedded Rust: {0}")]
     Pretty(#[from] crate::pretty::Error),
+    /// An embedded Rust fragment could not be formatted by rustfmt.
+    #[error("failed to format embedded Rust with rustfmt: {0}")]
+    Rustfmt(#[from] crate::rustfmt::Error),
     /// A parsed field could not be mapped back to its exact source text.
     #[error("failed to locate macro field source: {0}")]
     Source(#[from] crate::source::Error),
