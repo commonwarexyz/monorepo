@@ -4089,6 +4089,165 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_late_subscription_uses_notarized_cache_after_peer_buffer_pressure() {
+        let fixture: Fixture<C> = Fixture {
+            num_primary_peers: 10,
+            ..Default::default()
+        };
+
+        fixture.start(
+            |config, context, oracle, mut peers, _, coding_config| async move {
+                let target = CodedBlock::<B, C, H>::new(
+                    B::new(Sha256Digest::EMPTY, Height::new(1), 1),
+                    coding_config,
+                    &STRATEGY,
+                );
+                let target_commitment = target.commitment();
+                let receiver_idx = 3usize;
+                let receiver = peers[receiver_idx].public_key.clone();
+                let initial_round = Round::new(Epoch::zero(), View::new(1));
+                let refreshed_round = Round::new(Epoch::zero(), View::new(4));
+
+                for sender_idx in [1usize, 2, 4, 5] {
+                    let shard = target
+                        .shard(peers[sender_idx].index.get() as u16)
+                        .expect("missing target shard")
+                        .encode();
+                    peers[sender_idx].sender.send(
+                        Recipients::One(receiver.clone()),
+                        shard,
+                        true,
+                    );
+                }
+                context.sleep(config.link.latency * 2).await;
+
+                peers[receiver_idx]
+                    .mailbox
+                    .notarized(target_commitment, initial_round);
+                let target_sub = peers[receiver_idx].mailbox.subscribe(target_commitment);
+                select! {
+                    result = target_sub => {
+                        let block = result.expect("notarized target should reconstruct");
+                        assert_eq!(block.commitment(), target_commitment);
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("notarized target did not reconstruct");
+                    },
+                }
+
+                // A later certification observation owns the cached block independently of
+                // bounded pre-leader shard buffers.
+                peers[receiver_idx]
+                    .mailbox
+                    .notarized(target_commitment, refreshed_round);
+                assert!(
+                    peers[receiver_idx]
+                        .mailbox
+                        .get(target_commitment)
+                        .await
+                        .is_some(),
+                    "target should be cached after its notarization is refreshed"
+                );
+
+                // The fixture retains 64 pre-leader shards per peer. One authenticated peer
+                // sends 65 distinct codec-valid shards to exercise its eviction path.
+                let pressure_blocks = (2u64..=66)
+                    .map(|id| {
+                        CodedBlock::<B, C, H>::new(
+                            B::new(Sha256Digest::EMPTY, Height::new(id), id),
+                            coding_config,
+                            &STRATEGY,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                for block in &pressure_blocks {
+                    let shard = block
+                        .shard(peers[1].index.get() as u16)
+                        .expect("missing pressure shard")
+                        .encode();
+                    peers[1].sender.send(
+                        Recipients::One(receiver.clone()),
+                        shard,
+                        true,
+                    );
+                }
+                context.sleep(config.link.latency * 2).await;
+
+                for (block, should_reconstruct) in [
+                    (&pressure_blocks[0], false),
+                    (
+                        pressure_blocks.last().expect("pressure block missing"),
+                        true,
+                    ),
+                ] {
+                    for sender_idx in [2usize, 4, 5] {
+                        let shard = block
+                            .shard(peers[sender_idx].index.get() as u16)
+                            .expect("missing complementary pressure shard")
+                            .encode();
+                        peers[sender_idx].sender.send(
+                            Recipients::One(receiver.clone()),
+                            shard,
+                            true,
+                        );
+                    }
+                    context.sleep(config.link.latency * 2).await;
+
+                    let commitment = block.commitment();
+                    peers[receiver_idx]
+                        .mailbox
+                        .notarized(commitment, initial_round);
+                    context.sleep(config.link.latency * 2).await;
+                    if should_reconstruct {
+                        let block_sub = peers[receiver_idx].mailbox.subscribe(commitment);
+                        select! {
+                            result = block_sub => {
+                                let block = result.expect("retained pressure block should reconstruct");
+                                assert_eq!(block.commitment(), commitment);
+                            },
+                            _ = context.sleep(Duration::from_secs(5)) => {
+                                panic!("retained same-peer shard did not reconstruct");
+                            },
+                        }
+                    } else {
+                        assert!(
+                            peers[receiver_idx]
+                                .mailbox
+                                .get(commitment)
+                                .await
+                                .is_none(),
+                            "evicted same-peer shard should not reconstruct"
+                        );
+                    }
+                }
+
+                peers[receiver_idx].mailbox.retire(Retirement {
+                    round_floor: Round::new(Epoch::zero(), View::new(3)),
+                    exact_retirements: Vec::new(),
+                });
+
+                // This is the subscription used by Coding's Marshal buffer. It is installed
+                // only after peer pressure and retirement, with no resolver in this fixture.
+                let late_sub = peers[receiver_idx].mailbox.subscribe(target_commitment);
+                select! {
+                    result = late_sub => {
+                        let block = result.expect("refreshed target should remain cached");
+                        assert_eq!(block.commitment(), target_commitment);
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("late target subscription lost cached ownership");
+                    },
+                }
+
+                assert!(
+                    oracle.blocked().await.unwrap().is_empty(),
+                    "valid pressure shards should not block peers"
+                );
+            },
+        );
+    }
+
+    #[test_traced]
     fn test_leader_shard_after_notarized_is_buffered_until_discovered() {
         let fixture: Fixture<C> = Fixture {
             num_primary_peers: 10,
