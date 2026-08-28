@@ -109,7 +109,13 @@ fn read_varint(bytes: &[u8]) -> Option<(usize, usize)> {
     None
 }
 
-/// Reconstruct each section's whole-frame prefix from the raw crash image without repairing it.
+/// Reconstruct each section's expected recovery outcome from the raw crash image without
+/// repairing it.
+///
+/// Reads each blob's valid-page logical prefix, then walks frames (an outer varint length
+/// header followed by the item's codec bytes) until the first incomplete frame. Maps each
+/// section to the byte length of that whole-frame prefix, which recovery must retain, and to
+/// the item payloads decoded from it in append order.
 async fn recover_expected(
     context: &deterministic::Context,
     partition: &str,

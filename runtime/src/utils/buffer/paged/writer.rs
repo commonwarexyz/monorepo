@@ -936,8 +936,8 @@ impl<B: Blob> Writer<B> {
     ///
     /// Expects all appended bytes to have reached the blob (as after recovery): a partial page
     /// still buffered in this writer is unreadable from the blob and fails the scan. `buffer_size`
-    /// bounds each blob read, except that a value smaller than one physical page still reads one
-    /// page. Applies `read_options` to every blob read.
+    /// bounds each blob read, with a minimum of one physical page. Applies `read_options` to
+    /// every blob read.
     ///
     /// `proven` is a logical byte offset already known valid (a durability watermark or a
     /// replay-validated prefix). Pages wholly below it are accepted without reading, and the
