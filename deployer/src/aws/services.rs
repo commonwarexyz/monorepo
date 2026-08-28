@@ -1153,10 +1153,10 @@ scrape_configs:
       - targets:
           - localhost
         labels:
-          deployer_name: {instance_name}
-          deployer_ip: {ip}
-          deployer_region: {region}
-          deployer_arch: {arch}
+          deployer_name: '{instance_name}'
+          deployer_ip: '{ip}'
+          deployer_region: '{region}'
+          deployer_arch: '{arch}'
           __path__: /var/log/binary.log
 "#
     )
