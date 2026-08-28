@@ -24,33 +24,7 @@ pre-pr: lint test-docs test
 
 # Fixes the formatting of the workspace
 fix-fmt *args='':
-    #!/usr/bin/env bash
-    set -euo pipefail
-    source_files=()
-    while IFS= read -r -d '' source_file; do
-        source_files+=("$source_file")
-    done < <(find . -path ./target -prune -o -name '*.rs' -type f -print0)
-    if [ "${#source_files[@]}" -eq 0 ]; then
-        exit 0
-    fi
-    commonware_fmt_args=(--rustfmt "{{ rustfmt }}" --rustfmt-config-path .)
-    if [[ -n "{{ nightly_version }}" ]]; then
-        commonware_fmt_args+=(--rustfmt-toolchain "{{ nightly_version }}")
-    fi
-    for _ in 1 2 3 4; do
-        {{ rustfmt }} {{ nightly_version }} --edition 2024 {{ args }} "${source_files[@]}"
-        cargo run --quiet -p commonware-fmt -- "${commonware_fmt_args[@]}" "${source_files[@]}"
-        if {{ rustfmt }} {{ nightly_version }} --edition 2024 {{ args }} --check \
-            "${source_files[@]}" \
-            >/dev/null 2>&1 \
-            && cargo run --quiet -p commonware-fmt -- --check \
-                "${commonware_fmt_args[@]}" "${source_files[@]}" >/dev/null 2>&1
-        then
-            exit 0
-        fi
-    done
-    echo "formatters did not reach a fixed point after four passes" >&2
-    exit 1
+    find . -path ./target -prune -o -name '*.rs' -type f -print0 | xargs -0 {{ rustfmt }} {{ nightly_version }} --edition 2024 {{ args }}
 
 # Fixes the formatting of the `Cargo.toml` files in the workspace
 fix-toml-fmt:
@@ -62,21 +36,7 @@ check-toml-fmt:
 
 # Check the formatting of the workspace
 check-fmt:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    source_files=()
-    while IFS= read -r -d '' source_file; do
-        source_files+=("$source_file")
-    done < <(find . -path ./target -prune -o -name '*.rs' -type f -print0)
-    if [ "${#source_files[@]}" -eq 0 ]; then
-        exit 0
-    fi
-    {{ rustfmt }} {{ nightly_version }} --edition 2024 --check "${source_files[@]}"
-    commonware_fmt_args=(--rustfmt "{{ rustfmt }}" --rustfmt-config-path .)
-    if [[ -n "{{ nightly_version }}" ]]; then
-        commonware_fmt_args+=(--rustfmt-toolchain "{{ nightly_version }}")
-    fi
-    cargo run --quiet -p commonware-fmt -- --check "${commonware_fmt_args[@]}" "${source_files[@]}"
+    just fix-fmt --check
 
 # Run clippy lints
 clippy *args='':
