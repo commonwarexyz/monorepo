@@ -144,7 +144,22 @@ fn parse_body(input: ParseStream<'_>) -> ParseResult<Body> {
 }
 
 /// Formats the delimiter contents of a `cfg_if!` invocation.
+#[cfg(test)]
 pub(super) fn cfg_if(
+    source: &str,
+    options: Options,
+    depth: usize,
+) -> Result<ProtectedFragment, Error> {
+    cfg_if_with(
+        &crate::rustfmt::Formatter::default(),
+        source,
+        options,
+        depth,
+    )
+}
+
+pub(super) fn cfg_if_with(
+    formatter: &crate::rustfmt::Formatter,
     source: &str,
     options: Options,
     depth: usize,
@@ -155,13 +170,13 @@ pub(super) fn cfg_if(
         return Ok(ProtectedFragment::preserved(source));
     };
     if !has_only_whitespace_gaps(source, ranges) {
-        return preserve_cfg_if(source, &source_map, &input, options, depth);
+        return preserve_cfg_if(formatter, source, &source_map, &input, options, depth);
     }
 
     let mut branches = Vec::with_capacity(input.branches.len());
     for branch in &input.branches {
         let Some(predicate) = format_predicate(&source_map, &branch.predicate)? else {
-            return preserve_cfg_if(source, &source_map, &input, options, depth);
+            return preserve_cfg_if(formatter, source, &source_map, &input, options, depth);
         };
         let Some(body) = format_body(
             &source_map,
@@ -169,9 +184,10 @@ pub(super) fn cfg_if(
             &branch.body,
             depth,
             options.indentation + 8,
+            formatter,
         )?
         else {
-            return preserve_cfg_if(source, &source_map, &input, options, depth);
+            return preserve_cfg_if(formatter, source, &source_map, &input, options, depth);
         };
         branches.push(ConditionalLayout { predicate, body });
     }
@@ -183,9 +199,10 @@ pub(super) fn cfg_if(
                 &branch.body,
                 depth,
                 options.indentation + 8,
+                formatter,
             )?
             else {
-                return preserve_cfg_if(source, &source_map, &input, options, depth);
+                return preserve_cfg_if(formatter, source, &source_map, &input, options, depth);
             };
             Some(body)
         }
@@ -204,6 +221,7 @@ pub(super) fn cfg_if(
 }
 
 fn preserve_cfg_if(
+    formatter: &crate::rustfmt::Formatter,
     source: &str,
     source_map: &SourceMap<'_>,
     input: &CfgIfInput,
@@ -224,6 +242,7 @@ fn preserve_cfg_if(
         }
     }
     nested::preserve_bodies_with_nested(
+        formatter,
         source,
         source_map,
         &item_groups,
@@ -307,6 +326,7 @@ fn format_body(
     body: &Body,
     depth: usize,
     indentation: usize,
+    formatter: &crate::rustfmt::Formatter,
 ) -> Result<Option<String>, Error> {
     let Some(ranges) = body_ranges(source_map, brace)? else {
         return Ok(None);
@@ -315,6 +335,7 @@ fn format_body(
     let body_source = source_map.slice(ranges.body)?;
     let body = match body {
         Body::Items(items) => nested::items(
+            formatter,
             items,
             body_source,
             body_start,
@@ -323,6 +344,7 @@ fn format_body(
             indentation,
         )?,
         Body::Statements(statements) => nested::statements(
+            formatter,
             statements,
             body_source,
             body_start,

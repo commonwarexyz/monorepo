@@ -93,6 +93,7 @@ pub(crate) const fn delimiter_text(
 }
 
 pub(crate) fn format_at_depth(
+    formatter: &crate::rustfmt::Formatter,
     kind: MacroKind,
     source: &str,
     options: Options,
@@ -101,27 +102,30 @@ pub(crate) fn format_at_depth(
     if depth == 0
         && let Some(literals) = crate::pretty::MultilineLiterals::prepare(source)
     {
-        let formatted = format_shielded_at_depth(kind, literals.text(), options, depth)?;
+        let formatted = format_shielded_at_depth(formatter, kind, literals.text(), options, depth)?;
         if let Some(restored) = literals.restore(formatted) {
             return Ok(restored);
         }
-        return format_shielded_at_depth(kind, source, options, depth);
+        return format_shielded_at_depth(formatter, kind, source, options, depth);
     }
-    format_shielded_at_depth(kind, source, options, depth)
+    format_shielded_at_depth(formatter, kind, source, options, depth)
 }
 
 fn format_shielded_at_depth(
+    formatter: &crate::rustfmt::Formatter,
     kind: MacroKind,
     source: &str,
     options: Options,
     depth: usize,
 ) -> Result<crate::pretty::ProtectedFragment, Error> {
     match kind {
-        MacroKind::CfgIf => cfg_if::cfg_if(source, options, depth),
-        MacroKind::Select => select::select_at_depth(source, options, depth),
-        MacroKind::SelectLoop => select::select_loop_at_depth(source, options, depth),
+        MacroKind::CfgIf => cfg_if::cfg_if_with(formatter, source, options, depth),
+        MacroKind::Select => select::select_at_depth(formatter, source, options, depth),
+        MacroKind::SelectLoop => select::select_loop_at_depth(formatter, source, options, depth),
         MacroKind::StabilityMod => stability::stability_mod(source),
-        MacroKind::StabilityScope => stability::stability_scope(source, options, depth),
+        MacroKind::StabilityScope => {
+            stability::stability_scope_with(formatter, source, options, depth)
+        }
     }
 }
 
@@ -203,8 +207,14 @@ mod tests {
     #[test]
     fn preserves_multiline_explicit_doc_literals() {
         let source = "ALPHA { #[doc = r#\"first\nsecond\"#] pub struct Example; }";
-        let formatted = format_at_depth(MacroKind::StabilityScope, source, Options::default(), 0)
-            .expect("multiline doc literal should be accepted");
+        let formatted = format_at_depth(
+            &crate::rustfmt::Formatter::default(),
+            MacroKind::StabilityScope,
+            source,
+            Options::default(),
+            0,
+        )
+        .expect("multiline doc literal should be accepted");
 
         assert!(formatted.text().contains("r#\"first\nsecond\"#"));
     }

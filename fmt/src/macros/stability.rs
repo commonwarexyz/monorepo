@@ -42,7 +42,22 @@ pub(super) fn stability_mod(source: &str) -> Result<ProtectedFragment, Error> {
     Ok(ProtectedFragment::formatted(output))
 }
 
+#[cfg(test)]
 pub(super) fn stability_scope(
+    source: &str,
+    options: Options,
+    depth: usize,
+) -> Result<ProtectedFragment, Error> {
+    stability_scope_with(
+        &crate::rustfmt::Formatter::default(),
+        source,
+        options,
+        depth,
+    )
+}
+
+pub(super) fn stability_scope_with(
+    formatter: &crate::rustfmt::Formatter,
     source: &str,
     options: Options,
     depth: usize,
@@ -76,6 +91,7 @@ pub(super) fn stability_scope(
 
     let items_source = source_map.slice(items_range.clone())?;
     let items = nested::items(
+        formatter,
         &input.items,
         items_source,
         items_range.start,

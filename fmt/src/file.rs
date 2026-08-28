@@ -15,6 +15,39 @@ use thiserror::Error;
 
 const MAX_FORMAT_PASSES: usize = 4;
 
+/// Configured formatter for complete Rust source files.
+#[derive(Clone, Debug, Default)]
+pub struct Formatter {
+    rustfmt: crate::rustfmt::Formatter,
+}
+
+impl Formatter {
+    /// Creates a complete-file formatter using `rustfmt` for Rust fragments.
+    pub const fn new(rustfmt: crate::rustfmt::Formatter) -> Self {
+        Self { rustfmt }
+    }
+
+    /// Formats every supported Commonware macro invocation in `source`.
+    pub fn format(&self, source: &str) -> Result<Output, Error> {
+        let first = format_once(&self.rustfmt, source)?;
+        let formatted_macros = first.formatted_macros;
+        let preserved_macros = first.preserved_macros;
+        let mut text = first.text;
+        for _ in 1..MAX_FORMAT_PASSES {
+            let next = format_once(&self.rustfmt, &text)?;
+            if next.text == text {
+                return Ok(Output {
+                    text,
+                    formatted_macros,
+                    preserved_macros,
+                });
+            }
+            text = next.text;
+        }
+        Err(Error::NotFixedPoint)
+    }
+}
+
 /// The result of formatting one Rust source file.
 pub struct Output {
     text: String,
@@ -139,25 +172,10 @@ struct Pass {
 
 /// Formats every supported Commonware macro invocation in `source`.
 pub fn format(source: &str) -> Result<Output, Error> {
-    let first = format_once(source)?;
-    let formatted_macros = first.formatted_macros;
-    let preserved_macros = first.preserved_macros;
-    let mut text = first.text;
-    for _ in 1..MAX_FORMAT_PASSES {
-        let next = format_once(&text)?;
-        if next.text == text {
-            return Ok(Output {
-                text,
-                formatted_macros,
-                preserved_macros,
-            });
-        }
-        text = next.text;
-    }
-    Err(Error::NotFixedPoint)
+    Formatter::default().format(source)
 }
 
-fn format_once(source: &str) -> Result<Pass, Error> {
+fn format_once(formatter: &crate::rustfmt::Formatter, source: &str) -> Result<Pass, Error> {
     ensure_nesting_limit(source)?;
     let file = syn::parse_file(source).map_err(Error::Parse)?;
     let mut collector = Collector { macros: Vec::new() };
@@ -189,7 +207,7 @@ fn format_once(source: &str) -> Result<Pass, Error> {
             indentation: line_indentation(source, path_start),
             line_ending,
         };
-        let body = format_at_depth(kind, body_source, options, 0)?;
+        let body = format_at_depth(formatter, kind, body_source, options, 0)?;
         if body.disposition() == Disposition::Formatted {
             formatted_macros += 1;
         } else {

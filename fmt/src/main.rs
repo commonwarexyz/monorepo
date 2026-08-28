@@ -23,6 +23,18 @@ struct Args {
     #[arg(long, conflicts_with_all = ["check", "files"])]
     stdin: bool,
 
+    /// Rustfmt executable used for embedded Rust fragments.
+    #[arg(long, default_value = "rustfmt", value_name = "PATH")]
+    rustfmt: PathBuf,
+
+    /// Rustup toolchain argument passed to rustfmt, such as `+nightly`.
+    #[arg(long, value_name = "TOOLCHAIN")]
+    rustfmt_toolchain: Option<String>,
+
+    /// Path from which rustfmt resolves its configuration.
+    #[arg(long, value_name = "PATH")]
+    rustfmt_config_path: Option<PathBuf>,
+
     /// Rust source files to format.
     #[arg(
         value_name = "FILE",
@@ -51,8 +63,9 @@ impl Outcome {
 
 fn main() -> ExitCode {
     let args = Args::parse();
+    let formatter = formatter(&args);
     if args.stdin {
-        return match run_stdin() {
+        return match run_stdin(&formatter) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 eprintln!("error: {error}");
@@ -61,7 +74,7 @@ fn main() -> ExitCode {
         };
     }
 
-    let outcome = run_files(&args.files, args.check);
+    let outcome = run_files(&formatter, &args.files, args.check);
     if args.check {
         for path in &outcome.changed {
             eprintln!("{}", path.display());
@@ -77,13 +90,25 @@ fn main() -> ExitCode {
     }
 }
 
-fn run_stdin() -> Result<(), String> {
+fn formatter(args: &Args) -> commonware_fmt::file::Formatter {
+    let mut rustfmt = commonware_fmt::rustfmt::Formatter::new(args.rustfmt.as_os_str().to_owned());
+    if let Some(toolchain) = &args.rustfmt_toolchain {
+        rustfmt = rustfmt.with_toolchain(toolchain);
+    }
+    if let Some(config_path) = &args.rustfmt_config_path {
+        rustfmt = rustfmt.with_config_path(config_path);
+    }
+    commonware_fmt::file::Formatter::new(rustfmt)
+}
+
+fn run_stdin(formatter: &commonware_fmt::file::Formatter) -> Result<(), String> {
     let mut source = String::new();
     io::stdin()
         .lock()
         .read_to_string(&mut source)
         .map_err(|error| format!("failed to read stdin: {error}"))?;
-    let output = commonware_fmt::file::format(&source)
+    let output = formatter
+        .format(&source)
         .map_err(|error| format!("failed to format stdin: {error}"))?;
     write_output(io::stdout().lock(), output.text())
 }
@@ -97,7 +122,11 @@ fn write_output(mut writer: impl io::Write, output: &str) -> Result<(), String> 
         .map_err(|error| format!("failed to flush stdout: {error}"))
 }
 
-fn run_files(paths: &[PathBuf], check: bool) -> Outcome {
+fn run_files(
+    formatter: &commonware_fmt::file::Formatter,
+    paths: &[PathBuf],
+    check: bool,
+) -> Outcome {
     let mut outcome = Outcome::default();
     let inputs = collect_files(paths, &mut outcome.errors);
     for input in inputs {
@@ -111,7 +140,7 @@ fn run_files(paths: &[PathBuf], check: bool) -> Outcome {
                 continue;
             }
         };
-        let output = match commonware_fmt::file::format(&source) {
+        let output = match formatter.format(&source) {
             Ok(output) => output,
             Err(error) => {
                 outcome.errors.push(format!(
@@ -247,11 +276,40 @@ mod tests {
         "fn run() { select! {value=receive()=>value} }\n"
     }
 
+    fn format_files(paths: &[PathBuf], check: bool) -> Outcome {
+        run_files(&commonware_fmt::file::Formatter::default(), paths, check)
+    }
+
     #[test]
     fn stdin_conflicts_with_check_and_files() {
         assert!(Args::try_parse_from(["commonware-fmt"]).is_err());
         assert!(Args::try_parse_from(["commonware-fmt", "--stdin", "--check"]).is_err());
         assert!(Args::try_parse_from(["commonware-fmt", "--stdin", "input.rs"]).is_err());
+    }
+
+    #[test]
+    fn accepts_rustfmt_configuration() {
+        let args = Args::try_parse_from([
+            "commonware-fmt",
+            "--rustfmt",
+            "/opt/rustfmt",
+            "--rustfmt-toolchain",
+            "+nightly-2026-08-01",
+            "--rustfmt-config-path",
+            "/workspace",
+            "input.rs",
+        ])
+        .unwrap();
+
+        assert_eq!(args.rustfmt, Path::new("/opt/rustfmt"));
+        assert_eq!(
+            args.rustfmt_toolchain.as_deref(),
+            Some("+nightly-2026-08-01")
+        );
+        assert_eq!(
+            args.rustfmt_config_path.as_deref(),
+            Some(Path::new("/workspace"))
+        );
     }
 
     #[test]
@@ -323,7 +381,7 @@ mod tests {
             fs::canonicalize(temp.join("target.rs")).unwrap()
         );
 
-        let outcome = run_files(std::slice::from_ref(&link), false);
+        let outcome = format_files(std::slice::from_ref(&link), false);
         assert!(outcome.errors.is_empty());
         assert_eq!(outcome.changed, vec![link.clone()]);
         assert!(fs::symlink_metadata(link).unwrap().file_type().is_symlink());
@@ -345,7 +403,7 @@ mod tests {
         let original_inode = fs::metadata(&target).unwrap().ino();
         let original_mode = fs::metadata(&target).unwrap().mode();
 
-        let outcome = run_files(std::slice::from_ref(&target), false);
+        let outcome = format_files(std::slice::from_ref(&target), false);
 
         assert!(outcome.changed.is_empty());
         assert_eq!(outcome.errors.len(), 1);
@@ -367,7 +425,7 @@ mod tests {
         let path = temp.join("input.rs");
         fs::write(&path, unformatted()).expect("source should be written");
 
-        let outcome = run_files(std::slice::from_ref(&path), true);
+        let outcome = format_files(std::slice::from_ref(&path), true);
 
         assert!(outcome.errors.is_empty());
         assert_eq!(outcome.changed, vec![path.clone()]);
@@ -383,8 +441,8 @@ mod tests {
         let path = temp.join("input.rs");
         fs::write(&path, unformatted()).expect("source should be written");
 
-        let first = run_files(std::slice::from_ref(&path), false);
-        let second = run_files(std::slice::from_ref(&path), false);
+        let first = format_files(std::slice::from_ref(&path), false);
+        let second = format_files(std::slice::from_ref(&path), false);
 
         assert!(first.errors.is_empty());
         assert_eq!(first.changed, vec![path]);
@@ -400,7 +458,7 @@ mod tests {
         fs::write(&invalid, "fn invalid(\n").expect("invalid source should be written");
         fs::write(&valid, unformatted()).expect("valid source should be written");
 
-        let outcome = run_files(&[invalid, valid.clone()], false);
+        let outcome = format_files(&[invalid, valid.clone()], false);
 
         assert_eq!(outcome.errors.len(), 1);
         assert!(outcome.errors[0].contains("a-invalid.rs"));

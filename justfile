@@ -34,7 +34,11 @@ fix-fmt *args='':
         exit 0
     fi
     {{ rustfmt }} {{ nightly_version }} --edition 2024 {{ args }} "${source_files[@]}"
-    cargo run --quiet -p commonware-fmt -- "${source_files[@]}"
+    commonware_fmt_args=(--rustfmt "{{ rustfmt }}" --rustfmt-config-path .)
+    if [[ -n "{{ nightly_version }}" ]]; then
+        commonware_fmt_args+=(--rustfmt-toolchain "{{ nightly_version }}")
+    fi
+    cargo run --quiet -p commonware-fmt -- "${commonware_fmt_args[@]}" "${source_files[@]}"
 
 # Fixes the formatting of the `Cargo.toml` files in the workspace
 fix-toml-fmt:
@@ -56,7 +60,11 @@ check-fmt:
         exit 0
     fi
     {{ rustfmt }} {{ nightly_version }} --edition 2024 --check "${source_files[@]}"
-    cargo run --quiet -p commonware-fmt -- --check "${source_files[@]}"
+    commonware_fmt_args=(--rustfmt "{{ rustfmt }}" --rustfmt-config-path .)
+    if [[ -n "{{ nightly_version }}" ]]; then
+        commonware_fmt_args+=(--rustfmt-toolchain "{{ nightly_version }}")
+    fi
+    cargo run --quiet -p commonware-fmt -- --check "${commonware_fmt_args[@]}" "${source_files[@]}"
 
 # Run clippy lints
 clippy *args='':

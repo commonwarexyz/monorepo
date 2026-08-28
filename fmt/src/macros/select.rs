@@ -42,7 +42,8 @@ struct SelectLoopPrefix {
 }
 
 #[derive(Clone, Copy)]
-struct FormatContext<'map, 'source> {
+struct FormatContext<'formatter, 'map, 'source> {
+    formatter: &'formatter crate::rustfmt::Formatter,
     source: &'source str,
     source_map: &'map SourceMap<'source>,
     options: Options,
@@ -51,10 +52,17 @@ struct FormatContext<'map, 'source> {
 
 /// Formats the delimiter contents of a `select!` invocation.
 pub fn select(source: &str, options: Options) -> Result<ProtectedFragment, Error> {
-    super::format_at_depth(MacroKind::Select, source, options, 0)
+    super::format_at_depth(
+        &crate::rustfmt::Formatter::default(),
+        MacroKind::Select,
+        source,
+        options,
+        0,
+    )
 }
 
 pub(super) fn select_at_depth(
+    formatter: &crate::rustfmt::Formatter,
     source: &str,
     options: Options,
     depth: usize,
@@ -67,12 +75,13 @@ pub(super) fn select_at_depth(
         expression_ranges.push(source_map.span_range(branch.body.span())?);
     }
     if !internal_blank_lines_are_within(source, &expression_ranges) {
-        return preserve_select(source, &source_map, &input, options, depth);
+        return preserve_select(formatter, source, &source_map, &input, options, depth);
     }
     let Some(shell_trivia) = select_shell_trivia(source, &source_map, &input)? else {
-        return preserve_select(source, &source_map, &input, options, depth);
+        return preserve_select(formatter, source, &source_map, &input, options, depth);
     };
     let context = FormatContext {
+        formatter,
         source,
         source_map: &source_map,
         options,
@@ -81,7 +90,7 @@ pub(super) fn select_at_depth(
     let mut branches = Vec::with_capacity(input.branches.len());
     for branch in &input.branches {
         let Some(branch) = format_select_branch(context, branch)? else {
-            return preserve_select(source, &source_map, &input, options, depth);
+            return preserve_select(formatter, source, &source_map, &input, options, depth);
         };
         branches.push(branch);
     }
@@ -99,10 +108,17 @@ pub(super) fn select_at_depth(
 
 /// Formats the delimiter contents of a `select_loop!` invocation.
 pub fn select_loop(source: &str, options: Options) -> Result<ProtectedFragment, Error> {
-    super::format_at_depth(MacroKind::SelectLoop, source, options, 0)
+    super::format_at_depth(
+        &crate::rustfmt::Formatter::default(),
+        MacroKind::SelectLoop,
+        source,
+        options,
+        0,
+    )
 }
 
 pub(super) fn select_loop_at_depth(
+    formatter: &crate::rustfmt::Formatter,
     source: &str,
     options: Options,
     depth: usize,
@@ -128,18 +144,28 @@ pub(super) fn select_loop_at_depth(
         expression_ranges.push(source_map.span_range(on_end.expression.span())?);
     }
     if !internal_blank_lines_are_within(source, &expression_ranges) {
-        return preserve_select_loop(source, &source_map, &input, options, depth);
+        return preserve_select_loop(formatter, source, &source_map, &input, options, depth);
     }
     let Some(shell_trivia) = select_loop_shell_trivia(source, &source_map, &input)? else {
-        return preserve_select_loop(source, &source_map, &input, options, depth);
+        return preserve_select_loop(formatter, source, &source_map, &input, options, depth);
     };
-    let Some(context) = format_expression(source, &source_map, &input.context, depth)? else {
-        return preserve_select_loop(source, &source_map, &input, options, depth);
+    let Some(context) = format_expression(formatter, source, &source_map, &input.context, depth)?
+    else {
+        return preserve_select_loop(formatter, source, &source_map, &input, options, depth);
     };
     let on_start = match &input.on_start {
         Some(lifecycle) => {
-            let Some(lifecycle) = format_lifecycle(source, &source_map, lifecycle, depth)? else {
-                return preserve_select_loop(source, &source_map, &input, options, depth);
+            let Some(lifecycle) =
+                format_lifecycle(formatter, source, &source_map, lifecycle, depth)?
+            else {
+                return preserve_select_loop(
+                    formatter,
+                    source,
+                    &source_map,
+                    &input,
+                    options,
+                    depth,
+                );
             };
             Some(lifecycle)
         }
@@ -147,6 +173,7 @@ pub(super) fn select_loop_at_depth(
     };
 
     render_select_loop(
+        formatter,
         source,
         options,
         &input,
@@ -161,6 +188,7 @@ pub(super) fn select_loop_at_depth(
 }
 
 fn render_select_loop(
+    formatter: &crate::rustfmt::Formatter,
     source: &str,
     options: Options,
     input: &SelectLoopInput,
@@ -169,25 +197,30 @@ fn render_select_loop(
     depth: usize,
 ) -> Result<ProtectedFragment, Error> {
     let context = FormatContext {
+        formatter,
         source,
         source_map,
         options,
         depth,
     };
-    let Some(on_stopped) = format_lifecycle(source, source_map, &input.on_stopped, depth)? else {
-        return preserve_select_loop(source, source_map, input, options, depth);
+    let Some(on_stopped) =
+        format_lifecycle(formatter, source, source_map, &input.on_stopped, depth)?
+    else {
+        return preserve_select_loop(formatter, source, source_map, input, options, depth);
     };
     let mut branches = Vec::with_capacity(input.branches.len());
     for branch in &input.branches {
         let Some(branch) = format_select_loop_branch(context, branch)? else {
-            return preserve_select_loop(source, source_map, input, options, depth);
+            return preserve_select_loop(formatter, source, source_map, input, options, depth);
         };
         branches.push(branch);
     }
     let on_end = match &input.on_end {
         Some(lifecycle) => {
-            let Some(lifecycle) = format_lifecycle(source, source_map, lifecycle, depth)? else {
-                return preserve_select_loop(source, source_map, input, options, depth);
+            let Some(lifecycle) =
+                format_lifecycle(formatter, source, source_map, lifecycle, depth)?
+            else {
+                return preserve_select_loop(formatter, source, source_map, input, options, depth);
             };
             Some(lifecycle)
         }
@@ -245,14 +278,14 @@ fn render_select_loop(
 }
 
 fn format_select_branch(
-    context: FormatContext<'_, '_>,
+    context: FormatContext<'_, '_, '_>,
     branch: &SelectBranch,
 ) -> Result<Option<BranchLayout>, Error> {
     format_branch(context, &branch.pattern, &branch.future, None, &branch.body)
 }
 
 fn format_select_loop_branch(
-    context: FormatContext<'_, '_>,
+    context: FormatContext<'_, '_, '_>,
     branch: &SelectLoopBranch,
 ) -> Result<Option<BranchLayout>, Error> {
     format_branch(
@@ -268,13 +301,14 @@ fn format_select_loop_branch(
 }
 
 fn format_branch(
-    context: FormatContext<'_, '_>,
+    context: FormatContext<'_, '_, '_>,
     pattern: &syn::Pat,
     future: &Expr,
     divergence: Option<&Expr>,
     body_expression: &Expr,
 ) -> Result<Option<BranchLayout>, Error> {
     let FormatContext {
+        formatter,
         source,
         source_map,
         options,
@@ -286,9 +320,16 @@ fn format_branch(
     let body_range = source_map.span_range(body_expression.span())?;
     let body_source = source_map.slice(body_range.clone())?;
     let pattern = pretty::pattern(pattern, pattern_source)?;
-    let future = format_nested_expression(future, future_source, source, source_map, depth)?;
-    let mut body =
-        format_nested_expression(body_expression, body_source, source, source_map, depth)?;
+    let future =
+        format_nested_expression(formatter, future, future_source, source, source_map, depth)?;
+    let mut body = format_nested_expression(
+        formatter,
+        body_expression,
+        body_source,
+        source,
+        source_map,
+        depth,
+    )?;
     if exceeds_destination_width(body.text(), options.indentation + 4)
         && let Some(dedented) =
             source_layout_at_destination(context, body_expression, body_source, body_range.start)?
@@ -305,7 +346,14 @@ fn format_branch(
     let divergence = divergence
         .map(|expression| {
             let expression_source = spanned_source(source_map, expression)?;
-            format_nested_expression(expression, expression_source, source, source_map, depth)
+            format_nested_expression(
+                formatter,
+                expression,
+                expression_source,
+                source,
+                source_map,
+                depth,
+            )
         })
         .transpose()?;
     if [&pattern, &future, &body].into_iter().any(is_immovable)
@@ -325,12 +373,13 @@ fn format_branch(
 }
 
 fn source_layout_at_destination(
-    context: FormatContext<'_, '_>,
+    context: FormatContext<'_, '_, '_>,
     expression: &Expr,
     fragment_source: &str,
     fragment_start: usize,
 ) -> Result<Option<String>, Error> {
     let FormatContext {
+        formatter,
         source,
         source_map,
         options,
@@ -340,6 +389,7 @@ fn source_layout_at_destination(
         return Ok(None);
     }
     let preserved = nested::preserve_expression(
+        formatter,
         expression,
         fragment_source,
         fragment_start,
@@ -438,6 +488,7 @@ fn wrap_value_body(body: &str) -> String {
 }
 
 fn format_lifecycle(
+    formatter: &crate::rustfmt::Formatter,
     source: &str,
     source_map: &SourceMap<'_>,
     lifecycle: &SelectLoopLifecycle,
@@ -447,6 +498,7 @@ fn format_lifecycle(
     let expression_source = spanned_source(source_map, &lifecycle.expression)?;
     let expression = if expression_is_block {
         format_nested_block_expression(
+            formatter,
             &lifecycle.expression,
             expression_source,
             source,
@@ -455,6 +507,7 @@ fn format_lifecycle(
         )?
     } else {
         format_nested_expression(
+            formatter,
             &lifecycle.expression,
             expression_source,
             source,
@@ -473,14 +526,21 @@ fn format_lifecycle(
 }
 
 fn format_expression(
+    formatter: &crate::rustfmt::Formatter,
     source: &str,
     source_map: &SourceMap<'_>,
     expression: &Expr,
     depth: usize,
 ) -> Result<Option<String>, Error> {
     let expression_source = spanned_source(source_map, expression)?;
-    let expression =
-        format_nested_expression(expression, expression_source, source, source_map, depth)?;
+    let expression = format_nested_expression(
+        formatter,
+        expression,
+        expression_source,
+        source,
+        source_map,
+        depth,
+    )?;
     if is_immovable(&expression) {
         return Ok(None);
     }
@@ -493,6 +553,7 @@ fn spanned_source<'a>(source_map: &SourceMap<'a>, value: &impl Spanned) -> Resul
 }
 
 fn format_nested_expression(
+    formatter: &crate::rustfmt::Formatter,
     expression: &Expr,
     fragment_source: &str,
     source: &str,
@@ -501,6 +562,7 @@ fn format_nested_expression(
 ) -> Result<ProtectedFragment, Error> {
     if pretty::source_has_internal_blank_line(fragment_source) {
         nested::expression_preserving_blank_lines(
+            formatter,
             expression,
             fragment_source,
             source,
@@ -508,11 +570,19 @@ fn format_nested_expression(
             depth,
         )
     } else {
-        nested::expression(expression, fragment_source, source, source_map, depth)
+        nested::expression(
+            formatter,
+            expression,
+            fragment_source,
+            source,
+            source_map,
+            depth,
+        )
     }
 }
 
 fn format_nested_block_expression(
+    formatter: &crate::rustfmt::Formatter,
     expression: &Expr,
     fragment_source: &str,
     source: &str,
@@ -521,6 +591,7 @@ fn format_nested_block_expression(
 ) -> Result<ProtectedFragment, Error> {
     if pretty::source_has_internal_blank_line(fragment_source) {
         nested::block_expression_preserving_blank_lines(
+            formatter,
             expression,
             fragment_source,
             source,
@@ -528,7 +599,14 @@ fn format_nested_block_expression(
             depth,
         )
     } else {
-        nested::block_expression(expression, fragment_source, source, source_map, depth)
+        nested::block_expression(
+            formatter,
+            expression,
+            fragment_source,
+            source,
+            source_map,
+            depth,
+        )
     }
 }
 
@@ -538,6 +616,7 @@ fn is_immovable(fragment: &ProtectedFragment) -> bool {
 }
 
 fn preserve_select(
+    formatter: &crate::rustfmt::Formatter,
     source: &str,
     source_map: &SourceMap<'_>,
     input: &SelectInput,
@@ -549,10 +628,11 @@ fn preserve_select(
         .iter()
         .flat_map(|branch| [&branch.future, &branch.body])
         .collect::<Vec<_>>();
-    nested::preserve_with_nested(source, source_map, &expressions, options, depth)
+    nested::preserve_with_nested(formatter, source, source_map, &expressions, options, depth)
 }
 
 fn preserve_select_loop(
+    formatter: &crate::rustfmt::Formatter,
     source: &str,
     source_map: &SourceMap<'_>,
     input: &SelectLoopInput,
@@ -573,7 +653,7 @@ fn preserve_select_loop(
     if let Some(on_end) = &input.on_end {
         expressions.push(&on_end.expression);
     }
-    nested::preserve_with_nested(source, source_map, &expressions, options, depth)
+    nested::preserve_with_nested(formatter, source, source_map, &expressions, options, depth)
 }
 
 fn select_shell_trivia(

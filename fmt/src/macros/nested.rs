@@ -49,6 +49,7 @@ enum RestoreStyle {
 }
 
 struct CollectionRestore<'a> {
+    formatter: &'a crate::rustfmt::Formatter,
     fragment_source: &'a str,
     shielded_source: &'a str,
     marker_prefix: &'a str,
@@ -361,6 +362,7 @@ impl<'ast> Visit<'ast> for MarkerCollector<'_> {
 }
 
 pub(super) fn preserve_with_nested(
+    formatter: &crate::rustfmt::Formatter,
     source: &str,
     source_map: &SourceMap<'_>,
     expressions: &[&Expr],
@@ -371,10 +373,13 @@ pub(super) fn preserve_with_nested(
     for expression in expressions {
         collector.visit_expr(expression);
     }
-    preserve_collected(source, 0, source, source_map, collector, options, depth)
+    preserve_collected(
+        formatter, source, 0, source, source_map, collector, options, depth,
+    )
 }
 
 pub(super) fn preserve_bodies_with_nested(
+    formatter: &crate::rustfmt::Formatter,
     source: &str,
     source_map: &SourceMap<'_>,
     item_groups: &[&[Item]],
@@ -393,10 +398,13 @@ pub(super) fn preserve_bodies_with_nested(
             collector.visit_stmt(statement);
         }
     }
-    preserve_collected(source, 0, source, source_map, collector, options, depth)
+    preserve_collected(
+        formatter, source, 0, source, source_map, collector, options, depth,
+    )
 }
 
 fn preserve_collected(
+    formatter: &crate::rustfmt::Formatter,
     fragment_source: &str,
     fragment_start: usize,
     context_source: &str,
@@ -429,7 +437,7 @@ fn preserve_collected(
             indentation: line_indentation(context_source, path_start, options.indentation),
             line_ending: options.line_ending,
         };
-        let body = format_at_depth(child.kind, body_source, child_options, depth + 1)?;
+        let body = format_at_depth(formatter, child.kind, body_source, child_options, depth + 1)?;
         if body.text() != body_source {
             let start = body_range
                 .start
@@ -464,6 +472,7 @@ fn preserve_collected(
 }
 
 pub(super) fn preserve_expression(
+    formatter: &crate::rustfmt::Formatter,
     expression: &Expr,
     fragment_source: &str,
     fragment_start: usize,
@@ -475,6 +484,7 @@ pub(super) fn preserve_expression(
     let mut collector = ChildCollector::default();
     collector.visit_expr(expression);
     preserve_collected(
+        formatter,
         fragment_source,
         fragment_start,
         context_source,
@@ -486,6 +496,7 @@ pub(super) fn preserve_expression(
 }
 
 pub(super) fn expression(
+    formatter: &crate::rustfmt::Formatter,
     expression: &Expr,
     fragment_source: &str,
     source: &str,
@@ -493,6 +504,7 @@ pub(super) fn expression(
     depth: usize,
 ) -> Result<ProtectedFragment, Error> {
     format_expression(
+        formatter,
         expression,
         fragment_source,
         source,
@@ -503,6 +515,7 @@ pub(super) fn expression(
 }
 
 pub(super) fn expression_preserving_blank_lines(
+    formatter: &crate::rustfmt::Formatter,
     expression: &Expr,
     fragment_source: &str,
     source: &str,
@@ -510,6 +523,7 @@ pub(super) fn expression_preserving_blank_lines(
     depth: usize,
 ) -> Result<ProtectedFragment, Error> {
     format_expression(
+        formatter,
         expression,
         fragment_source,
         source,
@@ -520,6 +534,7 @@ pub(super) fn expression_preserving_blank_lines(
 }
 
 pub(super) fn block_expression(
+    formatter: &crate::rustfmt::Formatter,
     expression: &Expr,
     fragment_source: &str,
     source: &str,
@@ -527,6 +542,7 @@ pub(super) fn block_expression(
     depth: usize,
 ) -> Result<ProtectedFragment, Error> {
     format_expression(
+        formatter,
         expression,
         fragment_source,
         source,
@@ -537,6 +553,7 @@ pub(super) fn block_expression(
 }
 
 pub(super) fn block_expression_preserving_blank_lines(
+    formatter: &crate::rustfmt::Formatter,
     expression: &Expr,
     fragment_source: &str,
     source: &str,
@@ -544,6 +561,7 @@ pub(super) fn block_expression_preserving_blank_lines(
     depth: usize,
 ) -> Result<ProtectedFragment, Error> {
     format_expression(
+        formatter,
         expression,
         fragment_source,
         source,
@@ -554,6 +572,7 @@ pub(super) fn block_expression_preserving_blank_lines(
 }
 
 pub(super) fn items(
+    formatter: &crate::rustfmt::Formatter,
     items: &[Item],
     fragment_source: &str,
     fragment_start: usize,
@@ -580,7 +599,7 @@ pub(super) fn items(
         if shield.had_skip {
             return Ok(ProtectedFragment::preserved(fragment_source));
         }
-        return crate::rustfmt::Formatter::default()
+        return formatter
             .items(fragment_source, indentation)
             .map_err(Error::from);
     }
@@ -591,6 +610,7 @@ pub(super) fn items(
     let shielded_source = shield_source(fragment_source, fragment_start, &shield.nested)?;
     finish_collection(
         CollectionRestore {
+            formatter,
             fragment_source,
             shielded_source: &shielded_source,
             marker_prefix: &marker_prefix,
@@ -600,7 +620,7 @@ pub(super) fn items(
             had_skip: shield.had_skip,
         },
         || {
-            crate::rustfmt::Formatter::default()
+            formatter
                 .items(&shielded_source, indentation)
                 .map_err(Error::from)
         },
@@ -609,6 +629,7 @@ pub(super) fn items(
 }
 
 pub(super) fn statements(
+    formatter: &crate::rustfmt::Formatter,
     statements: &[Stmt],
     fragment_source: &str,
     fragment_start: usize,
@@ -635,7 +656,7 @@ pub(super) fn statements(
         if shield.had_skip {
             return Ok(ProtectedFragment::preserved(fragment_source));
         }
-        return crate::rustfmt::Formatter::default()
+        return formatter
             .statements(fragment_source, indentation)
             .map_err(Error::from);
     }
@@ -646,6 +667,7 @@ pub(super) fn statements(
     let shielded_source = shield_source(fragment_source, fragment_start, &shield.nested)?;
     finish_collection(
         CollectionRestore {
+            formatter,
             fragment_source,
             shielded_source: &shielded_source,
             marker_prefix: &marker_prefix,
@@ -655,7 +677,7 @@ pub(super) fn statements(
             had_skip: shield.had_skip,
         },
         || {
-            crate::rustfmt::Formatter::default()
+            formatter
                 .statements(&shielded_source, indentation)
                 .map_err(Error::from)
         },
@@ -678,6 +700,7 @@ fn finish_collection(
                 context.depth,
                 context.style,
                 false,
+                context.formatter,
             )?
         {
             validate(&restored).map_err(Error::Output)?;
@@ -692,6 +715,7 @@ fn finish_collection(
         context.depth,
         context.style,
         true,
+        context.formatter,
     )?
     else {
         return Ok(ProtectedFragment::preserved(context.fragment_source));
@@ -703,6 +727,7 @@ fn finish_collection(
 }
 
 fn format_expression(
+    formatter: &crate::rustfmt::Formatter,
     expression: &Expr,
     fragment_source: &str,
     source: &str,
@@ -760,6 +785,7 @@ fn format_expression(
             depth,
             RestoreStyle::Expression,
             true,
+            formatter,
         )?
         else {
             return Ok(ProtectedFragment::preserved(fragment_source));
@@ -779,6 +805,7 @@ fn format_expression(
             depth,
             RestoreStyle::Expression,
             true,
+            formatter,
         )?
         else {
             return Ok(ProtectedFragment::preserved(fragment_source));
@@ -795,6 +822,7 @@ fn format_expression(
         depth,
         RestoreStyle::Expression,
         false,
+        formatter,
     )?
     else {
         let Some(restored) = restore(
@@ -804,6 +832,7 @@ fn format_expression(
             depth,
             RestoreStyle::Expression,
             true,
+            formatter,
         )?
         else {
             return Ok(ProtectedFragment::preserved(fragment_source));
@@ -869,6 +898,7 @@ fn restore(
     depth: usize,
     style: RestoreStyle,
     allow_preserved: bool,
+    formatter: &crate::rustfmt::Formatter,
 ) -> Result<Option<String>, Error> {
     let mut collector = MarkerCollector {
         prefix: marker_prefix,
@@ -911,7 +941,7 @@ fn restore(
                     indentation,
                     line_ending,
                 };
-                let body = format_at_depth(kind, &nested.body, options, depth + 1)?;
+                let body = format_at_depth(formatter, kind, &nested.body, options, depth + 1)?;
                 if body.disposition() != Disposition::Formatted && !allow_preserved {
                     return Ok(None);
                 }
