@@ -13,7 +13,7 @@ use commonware_storage::merkle::{
     Bagging::ForwardFold, Family as MerkleFamily, Location, full::Config,
     hasher::Standard as StandardHasher, mmb, mmr,
 };
-use commonware_utils::{NZU64, Probability};
+use commonware_utils::{NZU64, Probability, probability};
 use libfuzzer_sys::fuzz_target;
 use std::num::{NonZeroU16, NonZeroUsize};
 
@@ -44,7 +44,7 @@ fn bounded_write_buffer(u: &mut Unstructured<'_>) -> Result<usize> {
 
 fn bounded_nonzero_rate(u: &mut Unstructured<'_>) -> Result<Probability> {
     let percent: u8 = u.int_in_range(1..=100)?;
-    Ok(Probability!(u64::from(percent), 100))
+    Ok(probability!(u64::from(percent), 100))
 }
 
 /// Operations that can be performed on the Merkle structure.
@@ -254,7 +254,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                 sync_rate: Some(sync_failure_rate),
                 write_rate: Some(deterministic::WriteConfig {
                     failure_rate: write_failure_rate,
-                    retention_rate: Probability!(0.0),
+                    retention_rate: probability!(0.0),
                     mode: deterministic::PartialWriteMode::Prefix,
                 }),
                 ..Default::default()

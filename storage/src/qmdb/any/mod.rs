@@ -150,30 +150,29 @@ pub type FixedConfig<T, S, B = ()> = Config<T, FConfig, S, B>;
 pub type VariableConfig<T, C, S, B = ()> = Config<T, VConfig<C>, S, B>;
 
 /// Initialize an `Any` authenticated db from the given config.
-pub async fn init<F, E, U, H, T, I, J, S>(
+pub async fn init<F, E, U, H, I, J, S>(
     context: E,
-    cfg: Config<T, J::Config, S, <I as crate::qmdb::IndexBuild<F>>::Concurrency>,
+    cfg: Config<I::Translator, J::Config, S, <I as crate::qmdb::IndexBuild<F>>::Concurrency>,
 ) -> Result<db::Db<F, E, J, I, H, U, BITMAP_CHUNK_BYTES, S>, crate::qmdb::Error<F>>
 where
     F: Family,
     E: Context + Spawner,
     U: Update,
     H: Hasher,
-    T: Translator,
-    I: IndexFactory<T, Value = Location<F>> + crate::qmdb::IndexBuild<F>,
+    I: IndexFactory<Value = Location<F>> + crate::qmdb::IndexBuild<F>,
     J: authenticated::Backing<E, Item = Operation<F, U>> + 'static,
     S: Strategy,
     Operation<F, U>: Codec,
 {
-    init_with_bitmap::<F, E, U, H, T, I, J, S, BITMAP_CHUNK_BYTES>(context, cfg, None).await
+    init_with_bitmap::<F, E, U, H, I, J, S, BITMAP_CHUNK_BYTES>(context, cfg, None).await
 }
 
 /// Like [`init`] but accepts a pre-allocated bitmap (used by `current::Db`, which sizes pruned
 /// chunks from grafted metadata). `bitmap = None` allocates internally.
 #[boxed]
-pub(crate) async fn init_with_bitmap<F, E, U, H, T, I, J, S, const N: usize>(
+pub(crate) async fn init_with_bitmap<F, E, U, H, I, J, S, const N: usize>(
     context: E,
-    cfg: Config<T, J::Config, S, <I as crate::qmdb::IndexBuild<F>>::Concurrency>,
+    cfg: Config<I::Translator, J::Config, S, <I as crate::qmdb::IndexBuild<F>>::Concurrency>,
     bitmap: Option<Arc<Shared<N>>>,
 ) -> Result<db::Db<F, E, J, I, H, U, N, S>, crate::qmdb::Error<F>>
 where
@@ -181,8 +180,7 @@ where
     E: Context + Spawner,
     U: Update,
     H: Hasher,
-    T: Translator,
-    I: IndexFactory<T, Value = Location<F>> + crate::qmdb::IndexBuild<F>,
+    I: IndexFactory<Value = Location<F>> + crate::qmdb::IndexBuild<F>,
     J: authenticated::Backing<E, Item = Operation<F, U>> + 'static,
     S: Strategy,
     Operation<F, U>: Codec,

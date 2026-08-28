@@ -16,7 +16,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
     },
 };
-use tracing::{error, trace, warn};
+use tracing::{debug, error, trace};
 
 /// Shared future for one logical page fetch. The output uses `Arc<Error>` because `Shared`
 /// requires cloneable results. The `IoBuf` contains only the logical, validated page bytes.
@@ -165,9 +165,8 @@ impl CacheRef {
     /// [Self::page_size] for how this relates to a page's physical size on disk).
     /// Initialization eagerly allocates and zeroes all cache slots from `pool`.
     ///
-    /// Any `page_size` is accepted, but one whose physical pages do not align with storage
-    /// pages (see the module docs) logs a warning: behavior stays correct, at the cost of
-    /// amplified cold random reads. Use [super::page_size] to pick an aligned value.
+    /// Any `page_size` is accepted, but physical pages that do not align with storage pages (see
+    /// the module docs) amplify cold random reads. Use [super::page_size] to pick an aligned value.
     /// Cache misses request [ReadOptions::DONT_CACHE] because the fetched page is retained here.
     pub fn new(pool: BufferPool, page_size: NonZeroU16, capacity: NonZeroUsize) -> Self {
         let page_size_u64 = page_size.get() as u64;
@@ -175,12 +174,9 @@ impl CacheRef {
         if !physical_page_size.is_multiple_of(STORAGE_PAGE_SIZE)
             && !STORAGE_PAGE_SIZE.is_multiple_of(physical_page_size)
         {
-            warn!(
+            debug!(
                 page_size = page_size.get(),
-                physical_page_size,
-                "page size produces physical pages that do not align with storage pages; pick a \
-                 page size via paged::page_size to avoid amplifying cold random reads (changing \
-                 an existing store's page size is a destructive format migration)"
+                physical_page_size, "physical pages do not align with storage pages"
             );
         }
 

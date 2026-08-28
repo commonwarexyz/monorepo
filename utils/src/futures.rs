@@ -9,8 +9,8 @@ use futures::{
 use pin_project::pin_project;
 use std::{collections::BTreeMap, future::Future, pin::Pin, task::Poll};
 
-/// A future type that can be used in `Pool`.
-type PooledFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
+/// A future type that can be used in [Pool].
+type PooledFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// An unordered pool of futures.
 ///
@@ -18,11 +18,11 @@ type PooledFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 ///
 /// **Note:** This pool is not thread-safe and should not be used across threads without external
 /// synchronization.
-pub struct Pool<T> {
-    pool: FuturesUnordered<PooledFuture<T>>,
+pub struct Pool<'a, T> {
+    pool: FuturesUnordered<PooledFuture<'a, T>>,
 }
 
-impl<T: Send> Default for Pool<T> {
+impl<'a, T: Send> Default for Pool<'a, T> {
     fn default() -> Self {
         // Insert a dummy future (that never resolves) to prevent the stream from being empty.
         // Else, the `select_next_some()` function returns `None` instantly.
@@ -32,7 +32,7 @@ impl<T: Send> Default for Pool<T> {
     }
 }
 
-impl<T: Send> Pool<T> {
+impl<'a, T: Send> Pool<'a, T> {
     /// Returns the number of futures in the pool.
     pub fn len(&self) -> usize {
         // Subtract the dummy future.
@@ -46,15 +46,15 @@ impl<T: Send> Pool<T> {
 
     /// Adds a future to the pool.
     ///
-    /// The future must be `'static` and `Send` to ensure it can be safely stored and executed.
-    pub fn push(&mut self, future: impl Future<Output = T> + Send + 'static) {
+    /// The future must be `Send` and outlive `'a` to ensure it can be safely stored and executed.
+    pub fn push(&mut self, future: impl Future<Output = T> + Send + 'a) {
         self.pool.push(Box::pin(future));
     }
 
     /// Returns a futures that resolves to the next future in the pool that resolves.
     ///
     /// If the pool is empty, the future will never resolve.
-    pub fn next_completed(&mut self) -> SelectNextSome<'_, FuturesUnordered<PooledFuture<T>>> {
+    pub fn next_completed(&mut self) -> SelectNextSome<'_, FuturesUnordered<PooledFuture<'a, T>>> {
         self.pool.select_next_some()
     }
 
@@ -67,7 +67,7 @@ impl<T: Send> Pool<T> {
     }
 
     /// Creates a dummy future that never resolves.
-    fn create_dummy_future() -> PooledFuture<T> {
+    fn create_dummy_future() -> PooledFuture<'a, T> {
         Box::pin(async { future::pending::<T>().await })
     }
 }
@@ -86,7 +86,7 @@ impl Drop for Aborter {
 }
 
 /// A future type that can be used in [AbortablePool].
-type AbortablePooledFuture<T> = Pin<Box<dyn Future<Output = Result<T, Aborted>> + Send>>;
+type AbortablePooledFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, Aborted>> + Send + 'a>>;
 
 /// An unordered pool of futures that can be individually aborted.
 ///
@@ -95,11 +95,11 @@ type AbortablePooledFuture<T> = Pin<Box<dyn Future<Output = Result<T, Aborted>> 
 ///
 /// **Note:** This pool is not thread-safe and should not be used across threads without external
 /// synchronization.
-pub struct AbortablePool<T> {
-    pool: FuturesUnordered<AbortablePooledFuture<T>>,
+pub struct AbortablePool<'a, T> {
+    pool: FuturesUnordered<AbortablePooledFuture<'a, T>>,
 }
 
-impl<T: Send> Default for AbortablePool<T> {
+impl<'a, T: Send> Default for AbortablePool<'a, T> {
     fn default() -> Self {
         // Insert a dummy future (that never resolves) to prevent the stream from being empty.
         // Else, the `select_next_some()` function returns `None` instantly.
@@ -109,7 +109,7 @@ impl<T: Send> Default for AbortablePool<T> {
     }
 }
 
-impl<T: Send> AbortablePool<T> {
+impl<'a, T: Send> AbortablePool<'a, T> {
     /// Returns the number of futures in the pool.
     pub fn len(&self) -> usize {
         // Subtract the dummy future.
@@ -123,9 +123,9 @@ impl<T: Send> AbortablePool<T> {
 
     /// Adds a future to the pool and returns an [Aborter] that can be used to abort it.
     ///
-    /// The future must be `'static` and `Send` to ensure it can be safely stored and executed.
+    /// The future must be `Send` and outlive `'a` to ensure it can be safely stored and executed.
     /// When the returned [Aborter] is dropped, the future will be aborted.
-    pub fn push(&mut self, future: impl Future<Output = T> + Send + 'static) -> Aborter {
+    pub fn push(&mut self, future: impl Future<Output = T> + Send + 'a) -> Aborter {
         let (handle, registration) = AbortHandle::new_pair();
         let abortable_future = Abortable::new(future, registration);
         self.pool.push(Box::pin(abortable_future));
@@ -138,12 +138,12 @@ impl<T: Send> AbortablePool<T> {
     /// Returns `Ok(T)` for successful completion or `Err(Aborted)` for aborted futures.
     pub fn next_completed(
         &mut self,
-    ) -> SelectNextSome<'_, FuturesUnordered<AbortablePooledFuture<T>>> {
+    ) -> SelectNextSome<'_, FuturesUnordered<AbortablePooledFuture<'a, T>>> {
         self.pool.select_next_some()
     }
 
     /// Creates a dummy future that never resolves.
-    fn create_dummy_future() -> AbortablePooledFuture<T> {
+    fn create_dummy_future() -> AbortablePooledFuture<'a, T> {
         Box::pin(async { Ok(future::pending::<T>().await) })
     }
 }
@@ -468,6 +468,27 @@ mod tests {
     }
 
     #[test]
+    fn test_borrowing_futures() {
+        block_on(async {
+            let values = vec![1, 2, 3];
+
+            // The pool borrows `values`, so it cannot outlive it.
+            let mut pool = Pool::<&i32>::default();
+            for value in &values {
+                pool.push(async move { value });
+            }
+            assert_eq!(pool.len(), values.len());
+
+            let mut sum = 0;
+            for _ in 0..values.len() {
+                sum += *pool.next_completed().await;
+            }
+            assert_eq!(sum, 6);
+            assert!(pool.is_empty());
+        });
+    }
+
+    #[test]
     fn test_abortable_pool_initialization() {
         let pool = AbortablePool::<i32>::default();
         assert_eq!(pool.len(), 0);
@@ -561,6 +582,29 @@ mod tests {
             assert_eq!(aborted.len(), 1);
             assert!(successful.contains(&&1));
             assert!(successful.contains(&&3));
+            assert!(pool.is_empty());
+
+            let _ = sender.send(());
+        });
+    }
+
+    #[test]
+    fn test_abortable_pool_borrowing_futures() {
+        block_on(async {
+            let value = 42;
+            let mut pool = AbortablePool::<&i32>::default();
+
+            // A borrowing future is aborted by its aborter, which holds no borrow itself.
+            let (sender, receiver) = oneshot::channel::<()>();
+            let hook = pool.push(async {
+                receiver.await.unwrap();
+                &value
+            });
+            drop(hook);
+            assert!(pool.next_completed().await.is_err());
+
+            let _hook = pool.push(async { &value });
+            assert_eq!(pool.next_completed().await, Ok(&42));
             assert!(pool.is_empty());
 
             let _ = sender.send(());
