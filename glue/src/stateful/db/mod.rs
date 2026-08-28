@@ -75,7 +75,6 @@
 //! generations currently assigned to at least one database, so memory usage
 //! is bounded by the number of databases regardless of how long sync runs.
 
-use commonware_codec::Encode;
 use commonware_consensus::{
     CertifiableBlock, Epochable, Roundable, Viewable,
     types::{Height, Round},
@@ -83,7 +82,7 @@ use commonware_consensus::{
 use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_runtime::{Error as RuntimeError, Handle, Metrics, Spawner, reschedule};
-use commonware_storage::qmdb::sync::{self, FeedbackTx, Request, Response, Source};
+use commonware_storage::qmdb::sync::{FeedbackTx, Request, Response, Source};
 use commonware_utils::{
     channel::{fallible::AsyncFallibleExt, mpsc, oneshot, ring},
     sync::{AsyncRwLockReadGuard, AsyncRwLockWriteGuard, TracedAsyncRwLock},
@@ -106,9 +105,10 @@ const MAX_CHANNEL_DRAIN_PER_TICK: usize = 32;
 
 pub mod any;
 pub mod current;
-pub mod immutable;
-pub mod keyless;
+mod immutable;
+mod keyless;
 pub mod p2p;
+pub mod qmdb;
 
 /// A database shared across tasks.
 ///
@@ -185,6 +185,18 @@ impl<DB> Shared<DB> {
     {
         let database = self.read_locked().await;
         DB::new_batch(database.batch_context())
+    }
+
+    #[cfg(test)]
+    async fn apply_and_finalize_for_test<E>(&self, batch: <DB as ManagedDb<E>>::Merkleized)
+    where
+        DB: ManagedDb<E>,
+    {
+        let (slot, db) = self.write().await;
+        let db = DB::apply(db, batch).await.unwrap();
+        let (db, sync) = DB::finalize(db).await.unwrap();
+        slot.put(db);
+        sync.await.expect("database sync failed");
     }
 }
 
@@ -343,7 +355,7 @@ pub trait Merkleized: Sized + Send + Sync {
 /// recoverable.
 pub trait ManagedDb<E>: Send + Sync + Sized {
     /// An in-progress batch of mutations that has not yet been merkleized.
-    type Unmerkleized: Unmerkleized;
+    type Unmerkleized: Unmerkleized<Merkleized = Self::Merkleized>;
 
     /// A batch whose root has been computed but has not yet been applied to
     /// the underlying database.
@@ -388,17 +400,15 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
 
     /// Apply a merkleized batch's changeset to the underlying database.
     ///
-    /// In QMDB, this encapsulates calling `merkleized.finalize()` to produce
-    /// a `Changeset`, then `db.apply_batch(changeset)`. The returned database
-    /// must expose the batch as an independently rewindable recovery checkpoint.
-    /// The checkpoint need not be durable until the handle returned by
-    /// [`Self::finalize`] resolves.
+    /// In QMDB, this is `db.apply_batch(batch)`. The returned database must expose the applied
+    /// state as an independently rewindable sync target, which need not be durable until the
+    /// handle returned by [`Self::finalize`] resolves.
     fn apply(
         self,
         batch: Self::Merkleized,
     ) -> impl Future<Output = Result<Self, Self::Error>> + Send;
 
-    /// Begin persisting every checkpoint applied before this call.
+    /// Begin persisting every batch applied before this call.
     ///
     /// Awaiting the returned handle proves the state applied before this call
     /// durable. Later batches may be applied while the handle is pending, but
@@ -418,7 +428,7 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
         async { Ok(self) }
     }
 
-    /// Return the latest applied recovery target.
+    /// Return the sync target of the latest applied state.
     ///
     /// Returning a target does not by itself prove that target durable.
     fn sync_target(&self) -> Self::SyncTarget;
@@ -576,12 +586,11 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
 
     /// Apply each merkleized batch's changeset.
     ///
-    /// Returns once every database exposes its batch as an independently
-    /// rewindable recovery checkpoint. Durability is started separately with
-    /// [`DatabaseSet::finalize`].
+    /// Returns once every database exposes its applied state as an independently rewindable
+    /// sync target. Durability is started separately with [`DatabaseSet::finalize`].
     fn apply(&self, batches: Self::Merkleized) -> impl Future<Output = ()> + Send;
 
-    /// Begin persisting every checkpoint applied before this call.
+    /// Begin persisting every batch applied before this call.
     ///
     /// The returned [`Barrier`] resolves once the captured state is durable in
     /// every database. Later batches may be applied while the barrier is
@@ -595,7 +604,7 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
     /// may remain active. Pruning effects must be durable before this call returns.
     fn prune(&self, targets: &Self::SyncTargets) -> impl Future<Output = ()> + Send;
 
-    /// Return the latest applied recovery targets.
+    /// Return the sync targets of the latest applied state.
     ///
     /// A target does not by itself prove durability.
     fn committed_targets(&self) -> impl Future<Output = Self::SyncTargets> + Send;
@@ -626,22 +635,31 @@ pub struct SyncEngineConfig {
     pub max_retained_roots: usize,
 }
 
+/// One database's side of a sync session, handed to [`StateSyncDb::sync_db`].
+pub struct SyncSession<T> {
+    /// Target to sync to first.
+    pub target: T,
+    /// Later targets. Only strictly advancing ones are adopted.
+    pub tip_updates: mpsc::Receiver<T>,
+    /// When `Some`, sync keeps following updates after reaching its target until a message
+    /// arrives. When `None`, it completes on reaching the target.
+    pub finish: Option<mpsc::Receiver<()>>,
+    /// Receives each target as it is reached. Sends block progress, so drain it.
+    pub reached_target: Option<mpsc::Sender<T>>,
+}
+
 /// A [`ManagedDb`] with a state-sync entrypoint.
 pub trait StateSyncDb<E, R>: ManagedDb<E> {
     /// Error returned by the state-sync engine for this database.
     type SyncError: Debug + Send;
 
     /// Run state-sync for this database and return a fully-initialized instance.
-    #[allow(clippy::too_many_arguments)]
     fn sync_db(
         context: E,
         config: Self::Config,
         source: R,
-        target: Self::SyncTarget,
-        tip_updates: mpsc::Receiver<Self::SyncTarget>,
-        finish: Option<mpsc::Receiver<()>>,
-        reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
-        sync_config: SyncEngineConfig,
+        session: SyncSession<Self::SyncTarget>,
+        limits: SyncEngineConfig,
     ) -> impl Future<Output = Result<Self, Self::SyncError>> + Send;
 }
 
@@ -828,10 +846,12 @@ where
             context,
             config,
             source,
-            target,
-            target_rx,
-            Some(finish_rx),
-            Some(reached_tx),
+            SyncSession {
+                target,
+                tip_updates: target_rx,
+                finish: Some(finish_rx),
+                reached_target: Some(reached_tx),
+            },
             sync_config,
         );
 
@@ -1290,10 +1310,12 @@ macro_rules! impl_state_sync_set {
                                     context,
                                     config,
                                     source,
-                                    target,
-                                    target_rx,
-                                    Some(finish_rx),
-                                    Some(reached_tx),
+                                    SyncSession {
+                                        target,
+                                        tip_updates: target_rx,
+                                        finish: Some(finish_rx),
+                                        reached_target: Some(reached_tx),
+                                    },
                                     sync_config,
                                 );
                                 let forward_reached = async move {
@@ -1687,125 +1709,6 @@ impl<D: Digest, T: Clone> CoordinatorState<D, T> {
     }
 }
 
-/// Sync a database that durably persists an operation log.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn sync_standard_db<E, DB, S>(
-    context: E,
-    config: DB::Config,
-    source: S,
-    target: sync::Target<DB::Family, DB::Digest>,
-    tip_updates: mpsc::Receiver<sync::Target<DB::Family, DB::Digest>>,
-    finish: Option<mpsc::Receiver<()>>,
-    reached_target: Option<mpsc::Sender<sync::Target<DB::Family, DB::Digest>>>,
-    sync_config: SyncEngineConfig,
-) -> Result<DB, sync::Error<DB::Family, S::Error, DB::Digest>>
-where
-    DB: sync::Database<Context = E>,
-    DB::Op: Encode,
-    S: sync::SourceFor<DB>,
-{
-    sync::sync(sync::engine::Config {
-        context,
-        source,
-        target,
-        max_outstanding_requests: sync_config.max_outstanding_requests,
-        fetch_batch_size: sync_config.fetch_batch_size,
-        apply_batch_size: sync_config.apply_batch_size,
-        db_config: config,
-        update_rx: Some(tip_updates),
-        finish_rx: finish,
-        reached_target_tx: reached_target,
-        max_retained_roots: sync_config.max_retained_roots,
-    })
-    .await
-}
-
-/// Aborts an adapter task when its owning sync future completes or is cancelled.
-struct Forwarder(Handle<()>);
-
-impl Drop for Forwarder {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
-}
-
-/// Sync a database that does not durably persist an operation log.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn sync_compact_db<E, DB, S>(
-    context: E,
-    config: DB::Config,
-    source: S,
-    target: sync::CompactTarget<DB::Family, DB::Digest>,
-    mut tip_updates: mpsc::Receiver<sync::CompactTarget<DB::Family, DB::Digest>>,
-    finish: Option<mpsc::Receiver<()>>,
-    reached_target: Option<mpsc::Sender<sync::CompactTarget<DB::Family, DB::Digest>>>,
-    sync_config: SyncEngineConfig,
-) -> Result<DB, sync::Error<DB::Family, S::Error, DB::Digest>>
-where
-    E: Metrics + Spawner,
-    DB: sync::Database<Context = E>,
-    DB::Op: Encode,
-    S: sync::SourceFor<DB>,
-{
-    let mut initial = sync::Target::try_from(&target).map_err(sync::Error::Engine)?;
-    // Start at the newest target already queued.
-    while let Ok(update) = tip_updates.try_recv() {
-        let Ok(update) = sync::Target::try_from(&update) else {
-            continue;
-        };
-        if update.advances(&initial) {
-            initial = update;
-        }
-    }
-
-    let (update_tx, update_rx) = mpsc::channel(sync_config.update_channel_size.get());
-    // Retain the handle until the engine exits so the adapter is aborted on completion or cancel.
-    let update_forwarder = Forwarder(context.child("compact_updates").spawn(move |_| async move {
-        while let Some(update) = tip_updates.recv().await {
-            // Ignore malformed updates.
-            let Ok(update) = sync::Target::try_from(&update) else {
-                continue;
-            };
-            if update_tx.send(update).await.is_err() {
-                break;
-            }
-        }
-    }));
-
-    let reached_target_tx = reached_target.map(|reached| {
-        let (tx, mut rx) = mpsc::channel::<sync::Target<DB::Family, DB::Digest>>(1);
-        context.child("compact_reached").spawn(move |_| async move {
-            while let Some(reached_engine_target) = rx.recv().await {
-                let target = sync::CompactTarget {
-                    root: reached_engine_target.root,
-                    size: reached_engine_target.range.end(),
-                };
-                if reached.send(target).await.is_err() {
-                    break;
-                }
-            }
-        });
-        tx
-    });
-
-    let result = sync::sync(sync::engine::Config {
-        context,
-        source,
-        target: initial,
-        db_config: config,
-        fetch_batch_size: sync_config.fetch_batch_size,
-        apply_batch_size: sync_config.apply_batch_size,
-        max_outstanding_requests: sync_config.max_outstanding_requests,
-        max_retained_roots: sync_config.max_retained_roots,
-        update_rx: Some(update_rx),
-        finish_rx: finish,
-        reached_target_tx,
-    })
-    .await;
-    drop(update_forwarder);
-    result
-}
-
 #[tracing::instrument(name = "stateful.db.apply", level = "info", skip_all, fields(index = index))]
 async fn apply<E, T: ManagedDb<E>>(database: T, batch: T::Merkleized, index: Option<usize>) -> T {
     // Mutable apply failures are fatal because the batch may already have been
@@ -1983,11 +1886,12 @@ impl_attachable_resolver_set!(
 );
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::{
         Anchor, AttachableResolver, AttachableResolverSet, Barrier, BatchContext,
         CoordinatorAction, CoordinatorState, DatabaseSet, MAX_CHANNEL_DRAIN_PER_TICK, ManagedDb,
-        Shared, StateSyncDb, StateSyncSet, SyncEngineConfig, TipUpdate, drain_single_tip_updates,
+        Shared, StateSyncDb, StateSyncSet, SyncEngineConfig, SyncSession, TipUpdate,
+        drain_single_tip_updates,
     };
     use crate::stateful::tests::mocks::{TestMerkleized, TestUnmerkleized, anchor as mock_anchor};
     use commonware_cryptography::sha256;
@@ -2011,28 +1915,258 @@ mod tests {
         time::Duration,
     };
 
-    mod managed_db_lifecycle {
-        use super::{ManagedDb, Shared};
-        use crate::stateful::db::Unmerkleized;
-        use commonware_cryptography::{Sha256, sha256::Digest};
+    /// Storage configurations for the QMDB families under test, keyed by a partition suffix.
+    pub(crate) mod configs {
+        use super::SyncEngineConfig;
         use commonware_parallel::Sequential;
-        use commonware_runtime::{
-            Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
-        };
+        use commonware_runtime::{BufferPooler, buffer::paged::CacheRef};
         use commonware_storage::{
             journal::contiguous::{
                 fixed::Config as FixedJournalConfig, variable::Config as VariableJournalConfig,
             },
-            merkle::{full::Config as MerkleConfig, mmr},
+            merkle::full::Config as MerkleConfig,
             qmdb::{
                 any as storage_any, current as storage_current, immutable as storage_immutable,
                 keyless as storage_keyless,
             },
             translator::TwoCap,
         };
-        use commonware_utils::{NZU16, NZU64, NZUsize, sequence::U64};
+        use commonware_utils::{NZU16, NZU64, NZUsize};
+
+        fn page_cache(context: &impl BufferPooler) -> CacheRef {
+            CacheRef::from_pooler(context, NZU16!(101), NZUsize!(11))
+        }
+
+        fn merkle_config(context: &impl BufferPooler, partition: &str) -> MerkleConfig<Sequential> {
+            MerkleConfig {
+                journal_partition: format!("{partition}-merkle-journal"),
+                metadata_partition: format!("{partition}-merkle-metadata"),
+                items_per_blob: NZU64!(11),
+                write_buffer: NZUsize!(1024),
+                strategy: Sequential,
+                page_cache: page_cache(context),
+            }
+        }
+
+        fn fixed_journal_config(
+            context: &impl BufferPooler,
+            partition: &str,
+        ) -> FixedJournalConfig {
+            FixedJournalConfig {
+                partition: format!("{partition}-log"),
+                items_per_blob: NZU64!(7),
+                page_cache: page_cache(context),
+                write_buffer: NZUsize!(1024),
+            }
+        }
+
+        fn variable_journal_config<C>(
+            context: &impl BufferPooler,
+            partition: &str,
+            codec_config: C,
+        ) -> VariableJournalConfig<C> {
+            VariableJournalConfig {
+                partition: format!("{partition}-log"),
+                items_per_section: NZU64!(7),
+                compression: None,
+                codec_config,
+                page_cache: page_cache(context),
+                write_buffer: NZUsize!(1024),
+            }
+        }
+
+        pub(crate) const fn sync_config() -> SyncEngineConfig {
+            SyncEngineConfig {
+                fetch_batch_size: NZU64!(1),
+                apply_batch_size: NZU64!(1),
+                max_outstanding_requests: 1,
+                update_channel_size: NZUsize!(1),
+                max_retained_roots: 0,
+            }
+        }
+
+        pub(crate) fn any_fixed_config(
+            context: &impl BufferPooler,
+            suffix: &str,
+        ) -> storage_any::FixedConfig<TwoCap, Sequential> {
+            let partition = format!("any-{suffix}");
+            storage_any::Config {
+                merkle_config: merkle_config(context, &partition),
+                journal_config: fixed_journal_config(context, &partition),
+                translator: TwoCap,
+                init_cache_size: Some(NZUsize!(1024)),
+                init_buffer: NZUsize!(1 << 21),
+                init_concurrency: (),
+            }
+        }
+
+        pub(crate) fn any_variable_config(
+            context: &impl BufferPooler,
+            suffix: &str,
+        ) -> storage_any::VariableConfig<TwoCap, ((), ()), Sequential> {
+            let partition = format!("any-{suffix}");
+            storage_any::Config {
+                merkle_config: merkle_config(context, &partition),
+                journal_config: variable_journal_config(context, &partition, ((), ())),
+                translator: TwoCap,
+                init_cache_size: Some(NZUsize!(1024)),
+                init_buffer: NZUsize!(1 << 21),
+                init_concurrency: (),
+            }
+        }
+
+        pub(crate) fn current_fixed_config(
+            context: &impl BufferPooler,
+            suffix: &str,
+        ) -> storage_current::FixedConfig<TwoCap, Sequential> {
+            let partition = format!("current-{suffix}");
+            storage_current::Config {
+                merkle_config: merkle_config(context, &partition),
+                journal_config: fixed_journal_config(context, &partition),
+                grafted_metadata_partition: format!("{partition}-grafted-metadata"),
+                translator: TwoCap,
+                init_cache_size: Some(NZUsize!(1024)),
+                init_buffer: NZUsize!(1 << 21),
+                init_concurrency: (),
+            }
+        }
+
+        pub(crate) fn current_variable_config(
+            context: &impl BufferPooler,
+            suffix: &str,
+        ) -> storage_current::VariableConfig<TwoCap, ((), ()), Sequential> {
+            let partition = format!("current-{suffix}");
+            storage_current::Config {
+                merkle_config: merkle_config(context, &partition),
+                journal_config: variable_journal_config(context, &partition, ((), ())),
+                grafted_metadata_partition: format!("{partition}-grafted-metadata"),
+                translator: TwoCap,
+                init_cache_size: Some(NZUsize!(1024)),
+                init_buffer: NZUsize!(1 << 21),
+                init_concurrency: (),
+            }
+        }
+
+        pub(crate) fn immutable_fixed_config(
+            context: &impl BufferPooler,
+            suffix: &str,
+        ) -> storage_immutable::fixed::Config<TwoCap, Sequential> {
+            let partition = format!("immutable-{suffix}");
+            storage_immutable::Config {
+                merkle_config: merkle_config(context, &partition),
+                log: fixed_journal_config(context, &partition),
+                translator: TwoCap,
+                init_cache_size: Some(NZUsize!(1024)),
+                init_buffer: NZUsize!(1 << 21),
+            }
+        }
+
+        pub(crate) fn immutable_variable_config(
+            context: &impl BufferPooler,
+            suffix: &str,
+        ) -> storage_immutable::variable::Config<TwoCap, ((), ()), Sequential> {
+            let partition = format!("immutable-{suffix}");
+            storage_immutable::Config {
+                merkle_config: merkle_config(context, &partition),
+                log: variable_journal_config(context, &partition, ((), ())),
+                translator: TwoCap,
+                init_cache_size: Some(NZUsize!(1024)),
+                init_buffer: NZUsize!(1 << 21),
+            }
+        }
+
+        pub(crate) fn keyless_fixed_config(
+            context: &impl BufferPooler,
+            suffix: &str,
+        ) -> storage_keyless::fixed::Config<Sequential> {
+            let partition = format!("keyless-{suffix}");
+            storage_keyless::Config {
+                merkle: merkle_config(context, &partition),
+                log: fixed_journal_config(context, &partition),
+            }
+        }
+
+        pub(crate) fn keyless_variable_config(
+            context: &impl BufferPooler,
+            suffix: &str,
+        ) -> storage_keyless::variable::Config<(), Sequential> {
+            let partition = format!("keyless-{suffix}");
+            storage_keyless::Config {
+                merkle: merkle_config(context, &partition),
+                log: variable_journal_config(context, &partition, ()),
+            }
+        }
+
+        pub(crate) fn immutable_compact_fixed_config(
+            context: &impl BufferPooler,
+            suffix: &str,
+        ) -> storage_immutable::fixed::CompactConfig<Sequential> {
+            storage_immutable::CompactConfig {
+                strategy: Sequential,
+                witness: variable_journal_config(
+                    context,
+                    &format!("immutable-compact-{suffix}"),
+                    (),
+                ),
+                commit_codec_config: (),
+            }
+        }
+
+        pub(crate) fn immutable_compact_variable_config(
+            context: &impl BufferPooler,
+            suffix: &str,
+        ) -> storage_immutable::variable::CompactConfig<((), ()), Sequential> {
+            storage_immutable::CompactConfig {
+                strategy: Sequential,
+                witness: variable_journal_config(
+                    context,
+                    &format!("immutable-compact-{suffix}"),
+                    (),
+                ),
+                commit_codec_config: ((), ()),
+            }
+        }
+
+        pub(crate) fn keyless_compact_fixed_config(
+            context: &impl BufferPooler,
+            suffix: &str,
+        ) -> storage_keyless::fixed::CompactConfig<Sequential> {
+            storage_keyless::CompactConfig {
+                strategy: Sequential,
+                witness: variable_journal_config(context, &format!("keyless-compact-{suffix}"), ()),
+                commit_codec_config: (),
+            }
+        }
+
+        pub(crate) fn keyless_compact_variable_config(
+            context: &impl BufferPooler,
+            suffix: &str,
+        ) -> storage_keyless::variable::CompactConfig<(), Sequential> {
+            storage_keyless::CompactConfig {
+                strategy: Sequential,
+                witness: variable_journal_config(context, &format!("keyless-compact-{suffix}"), ()),
+                commit_codec_config: (),
+            }
+        }
+    }
+
+    mod managed_db_lifecycle {
+        use super::{ManagedDb, Shared, configs::*};
+        use crate::stateful::db::{Merkleized as _, Unmerkleized as _, qmdb::Qmdb};
+        use commonware_cryptography::{Sha256, sha256::Digest};
+        use commonware_parallel::Sequential;
+        use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
+        use commonware_storage::{
+            merkle::mmr,
+            qmdb::{
+                Error as DbError, any as storage_any, current as storage_current,
+                immutable as storage_immutable, keyless as storage_keyless, sync,
+            },
+            translator::TwoCap,
+        };
+        use commonware_utils::{non_empty_range, sequence::U64};
         use rstest::rstest;
-        use std::{fmt::Debug, marker::PhantomData};
+        use std::{marker::PhantomData, sync::Arc};
 
         type Context = deterministic::Context;
 
@@ -2141,215 +2275,84 @@ mod tests {
         type KeylessCompactVariable =
             storage_keyless::variable::CompactDb<mmr::Family, Context, U64, Sha256, (), Sequential>;
 
-        fn page_cache(context: &Context) -> CacheRef {
-            CacheRef::from_pooler(context, NZU16!(101), NZUsize!(11))
-        }
-
-        fn merkle_config(context: &Context, suffix: &str) -> MerkleConfig<Sequential> {
-            MerkleConfig {
-                journal_partition: format!("initial-target-{suffix}-merkle-journal"),
-                metadata_partition: format!("initial-target-{suffix}-merkle-metadata"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
-                strategy: Sequential,
-                page_cache: page_cache(context),
-            }
-        }
-
-        fn fixed_journal_config(context: &Context, suffix: &str) -> FixedJournalConfig {
-            FixedJournalConfig {
-                partition: format!("initial-target-{suffix}-log"),
-                items_per_blob: NZU64!(7),
-                page_cache: page_cache(context),
-                write_buffer: NZUsize!(1024),
-            }
-        }
-
-        fn variable_journal_config<C>(
-            context: &Context,
-            suffix: &str,
-            codec_config: C,
-        ) -> VariableJournalConfig<C> {
-            VariableJournalConfig {
-                partition: format!("initial-target-{suffix}-log"),
-                items_per_section: NZU64!(7),
-                compression: None,
-                codec_config,
-                page_cache: page_cache(context),
-                write_buffer: NZUsize!(1024),
-            }
-        }
-
-        fn any_fixed_config(
-            context: &Context,
-            suffix: &str,
-        ) -> storage_any::FixedConfig<TwoCap, Sequential> {
-            storage_any::Config {
-                merkle_config: merkle_config(context, suffix),
-                journal_config: fixed_journal_config(context, suffix),
-                translator: TwoCap,
-                init_cache_size: Some(NZUsize!(1024)),
-                init_buffer: NZUsize!(1 << 21),
-                init_concurrency: (),
-            }
-        }
-
-        fn any_variable_config(
-            context: &Context,
-            suffix: &str,
-        ) -> storage_any::VariableConfig<TwoCap, ((), ()), Sequential> {
-            storage_any::Config {
-                merkle_config: merkle_config(context, suffix),
-                journal_config: variable_journal_config(context, suffix, ((), ())),
-                translator: TwoCap,
-                init_cache_size: Some(NZUsize!(1024)),
-                init_buffer: NZUsize!(1 << 21),
-                init_concurrency: (),
-            }
-        }
-
-        fn current_fixed_config(
-            context: &Context,
-            suffix: &str,
-        ) -> storage_current::FixedConfig<TwoCap, Sequential> {
-            storage_current::Config {
-                merkle_config: merkle_config(context, suffix),
-                journal_config: fixed_journal_config(context, suffix),
-                grafted_metadata_partition: format!("initial-target-{suffix}-grafted-metadata"),
-                translator: TwoCap,
-                init_cache_size: Some(NZUsize!(1024)),
-                init_buffer: NZUsize!(1 << 21),
-                init_concurrency: (),
-            }
-        }
-
-        fn current_variable_config(
-            context: &Context,
-            suffix: &str,
-        ) -> storage_current::VariableConfig<TwoCap, ((), ()), Sequential> {
-            storage_current::Config {
-                merkle_config: merkle_config(context, suffix),
-                journal_config: variable_journal_config(context, suffix, ((), ())),
-                grafted_metadata_partition: format!("initial-target-{suffix}-grafted-metadata"),
-                translator: TwoCap,
-                init_cache_size: Some(NZUsize!(1024)),
-                init_buffer: NZUsize!(1 << 21),
-                init_concurrency: (),
-            }
-        }
-
-        fn immutable_fixed_config(
-            context: &Context,
-            suffix: &str,
-        ) -> storage_immutable::fixed::Config<TwoCap, Sequential> {
-            storage_immutable::Config {
-                merkle_config: merkle_config(context, suffix),
-                log: fixed_journal_config(context, suffix),
-                translator: TwoCap,
-                init_cache_size: Some(NZUsize!(1024)),
-                init_buffer: NZUsize!(1 << 21),
-            }
-        }
-
-        fn immutable_variable_config(
-            context: &Context,
-            suffix: &str,
-        ) -> storage_immutable::variable::Config<TwoCap, ((), ()), Sequential> {
-            storage_immutable::Config {
-                merkle_config: merkle_config(context, suffix),
-                log: variable_journal_config(context, suffix, ((), ())),
-                translator: TwoCap,
-                init_cache_size: Some(NZUsize!(1024)),
-                init_buffer: NZUsize!(1 << 21),
-            }
-        }
-
-        fn keyless_fixed_config(
-            context: &Context,
-            suffix: &str,
-        ) -> storage_keyless::fixed::Config<Sequential> {
-            storage_keyless::Config {
-                merkle: merkle_config(context, suffix),
-                log: fixed_journal_config(context, suffix),
-            }
-        }
-
-        fn keyless_variable_config(
-            context: &Context,
-            suffix: &str,
-        ) -> storage_keyless::variable::Config<(), Sequential> {
-            storage_keyless::Config {
-                merkle: merkle_config(context, suffix),
-                log: variable_journal_config(context, suffix, ()),
-            }
-        }
-
-        fn immutable_compact_fixed_config(
-            context: &Context,
-            suffix: &str,
-        ) -> storage_immutable::fixed::CompactConfig<Sequential> {
-            storage_immutable::CompactConfig {
-                strategy: Sequential,
-                witness: variable_journal_config(context, suffix, ()),
-                commit_codec_config: (),
-            }
-        }
-
-        fn immutable_compact_variable_config(
-            context: &Context,
-            suffix: &str,
-        ) -> storage_immutable::variable::CompactConfig<((), ()), Sequential> {
-            storage_immutable::CompactConfig {
-                strategy: Sequential,
-                witness: variable_journal_config(context, suffix, ()),
-                commit_codec_config: ((), ()),
-            }
-        }
-
-        fn keyless_compact_fixed_config(
-            context: &Context,
-            suffix: &str,
-        ) -> storage_keyless::fixed::CompactConfig<Sequential> {
-            storage_keyless::CompactConfig {
-                strategy: Sequential,
-                witness: variable_journal_config(context, suffix, ()),
-                commit_codec_config: (),
-            }
-        }
-
-        fn keyless_compact_variable_config(
-            context: &Context,
-            suffix: &str,
-        ) -> storage_keyless::variable::CompactConfig<(), Sequential> {
-            storage_keyless::CompactConfig {
-                strategy: Sequential,
-                witness: variable_journal_config(context, suffix, ()),
-                commit_codec_config: (),
-            }
-        }
-
-        async fn assert_initial_sync_target_and_apply<T>(context: Context, config: T::Config)
-        where
-            T: ManagedDb<Context> + 'static,
-            T::Unmerkleized: Unmerkleized<Merkleized = T::Merkleized>,
-            <T::Unmerkleized as Unmerkleized>::Error: Debug,
-            T::SyncTarget: Debug,
+        /// Drive every [`ManagedDb`] method through the blanket impl, ending with a rewind whose
+        /// target disagrees with the rewound state.
+        async fn assert_lifecycle_round_trips<T>(
+            context: Context,
+            config: fn(&Context, &str) -> <T as ManagedDb<Context>>::Config,
+        ) where
+            T: Qmdb<Context = Context> + 'static,
+            Arc<T>: sync::SourceFor<T>,
         {
             let initial = T::initial_sync_target();
-            let db = T::init(context, config).await.unwrap();
+            let db = <T as ManagedDb<Context>>::init(context.child("db"), config(&context, "db"))
+                .await
+                .unwrap();
             assert_eq!(initial, db.sync_target());
             let db = Shared::new("test", db);
-            let batch = db
+            let first = db
                 .new_batch_for_test::<Context>()
                 .await
                 .merkleize()
                 .await
                 .expect("empty batch must merkleize");
+            let second = first
+                .new_batch()
+                .merkleize()
+                .await
+                .expect("forked batch must merkleize");
+
             let (slot, database) = db.write().await;
-            let database = T::apply(database, batch).await.unwrap();
+            let database = T::apply(database, first.clone()).await.unwrap();
+            let after_first = database.sync_target();
+            assert!(T::matches_sync_target(&first, &after_first));
+            let mut wrong_root = after_first.clone();
+            wrong_root.root = initial.root;
+            assert!(!T::matches_sync_target(&first, &wrong_root));
+            let mut wrong_range = after_first.clone();
+            wrong_range.range =
+                non_empty_range!(after_first.range.start(), after_first.range.end() + 1);
+            assert!(!T::matches_sync_target(&first, &wrong_range));
+            let database = T::apply(database, second.clone()).await.unwrap();
+            let after_second = database.sync_target();
+            assert!(T::matches_sync_target(&second, &after_second));
+            assert!(!T::matches_sync_target(&second, &after_first));
             let (database, sync) = T::finalize(database).await.unwrap();
-            slot.put(database);
-            sync.await.expect("empty batch database sync failed");
+            sync.await.expect("database sync failed");
+            drop(database);
+            drop(slot);
+            drop(db);
+
+            // Both applied states survive a reopen.
+            let database =
+                <T as ManagedDb<Context>>::init(context.child("reopen"), config(&context, "db"))
+                    .await
+                    .unwrap();
+            assert_eq!(database.sync_target(), after_second);
+            let database = T::rewind_to_target(database, after_first.clone())
+                .await
+                .unwrap();
+            assert_eq!(database.sync_target(), after_first);
+            let database = T::prune(database, &after_first).await.unwrap();
+            assert_eq!(database.sync_target(), after_first);
+            drop(database);
+
+            // The rewind survives a reopen.
+            let database =
+                <T as ManagedDb<Context>>::init(context.child("pruned"), config(&context, "db"))
+                    .await
+                    .unwrap();
+            assert_eq!(database.sync_target(), after_first);
+
+            // Same size as the applied state with the initial state's root: the rewind is a
+            // no-op and the post-rewind check fails.
+            let mut wrong = after_first;
+            wrong.root = T::initial_target().root;
+            let err = T::rewind_to_target(database, wrong)
+                .await
+                .err()
+                .expect("mismatched rewind target must fail");
+            assert!(matches!(err, DbError::DataCorrupted(_)));
         }
 
         #[rstest]
@@ -2394,18 +2397,15 @@ mod tests {
             PhantomData::<KeylessCompactVariable>,
             keyless_compact_variable_config
         )]
-        fn initial_sync_target_and_empty_apply_match_initialized_database<T>(
+        fn lifecycle_round_trips_from_initial_sync_target<T>(
             #[case] _db: PhantomData<T>,
-            #[case] config: fn(&Context, &str) -> T::Config,
+            #[case] config: fn(&Context, &str) -> <T as ManagedDb<Context>>::Config,
         ) where
-            T: ManagedDb<Context> + 'static,
-            T::Unmerkleized: Unmerkleized<Merkleized = T::Merkleized>,
-            <T::Unmerkleized as Unmerkleized>::Error: Debug,
-            T::SyncTarget: Debug,
+            T: Qmdb<Context = Context> + 'static,
+            Arc<T>: sync::SourceFor<T>,
         {
             deterministic::Runner::default().start(|context| async move {
-                let config = config(&context, "db");
-                assert_initial_sync_target_and_apply::<T>(context.child("db"), config).await;
+                assert_lifecycle_round_trips::<T>(context, config).await;
             });
         }
     }
@@ -3093,12 +3093,15 @@ mod tests {
             context: E,
             _config: Self::Config,
             release: Arc<AtomicBool>,
-            target: Self::SyncTarget,
-            tip_updates: mpsc::Receiver<Self::SyncTarget>,
-            mut finish: Option<mpsc::Receiver<()>>,
-            reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
-            _sync_config: SyncEngineConfig,
+            session: SyncSession<Self::SyncTarget>,
+            _limits: SyncEngineConfig,
         ) -> Result<Self, Self::SyncError> {
+            let SyncSession {
+                target,
+                tip_updates,
+                mut finish,
+                reached_target,
+            } = session;
             while !release.load(Ordering::SeqCst) {
                 context.sleep(Duration::from_millis(1)).await;
             }
@@ -3159,12 +3162,15 @@ mod tests {
             context: E,
             _config: Self::Config,
             release: Arc<AtomicBool>,
-            target: Self::SyncTarget,
-            mut tip_updates: mpsc::Receiver<Self::SyncTarget>,
-            mut finish: Option<mpsc::Receiver<()>>,
-            reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
-            _sync_config: SyncEngineConfig,
+            session: SyncSession<Self::SyncTarget>,
+            _limits: SyncEngineConfig,
         ) -> Result<Self, Self::SyncError> {
+            let SyncSession {
+                target,
+                mut tip_updates,
+                mut finish,
+                reached_target,
+            } = session;
             let mut final_target = target;
             while !release.load(Ordering::SeqCst) {
                 match tip_updates.try_recv() {
@@ -3236,12 +3242,15 @@ mod tests {
             context: E,
             _config: Self::Config,
             _resolver: (),
-            target: Self::SyncTarget,
-            mut tip_updates: mpsc::Receiver<Self::SyncTarget>,
-            mut finish: Option<mpsc::Receiver<()>>,
-            reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
-            _sync_config: SyncEngineConfig,
+            session: SyncSession<Self::SyncTarget>,
+            _limits: SyncEngineConfig,
         ) -> Result<Self, Self::SyncError> {
+            let SyncSession {
+                target,
+                mut tip_updates,
+                mut finish,
+                reached_target,
+            } = session;
             let update = tip_updates.recv().await.expect("expected forwarded tip");
             if let Some(reached_target) = reached_target.as_ref() {
                 let _ = reached_target.send(target).await;
@@ -3277,12 +3286,15 @@ mod tests {
             _context: E,
             _config: Self::Config,
             done: Arc<AtomicBool>,
-            target: Self::SyncTarget,
-            tip_updates: mpsc::Receiver<Self::SyncTarget>,
-            mut finish: Option<mpsc::Receiver<()>>,
-            reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
-            _sync_config: SyncEngineConfig,
+            session: SyncSession<Self::SyncTarget>,
+            _limits: SyncEngineConfig,
         ) -> Result<Self, Self::SyncError> {
+            let SyncSession {
+                target,
+                tip_updates,
+                mut finish,
+                reached_target,
+            } = session;
             done.store(true, Ordering::SeqCst);
             let mut final_target = target;
             let mut tip_updates = Some(tip_updates);
@@ -3342,11 +3354,8 @@ mod tests {
             _context: E,
             _config: Self::Config,
             _resolver: (),
-            _target: Self::SyncTarget,
-            _tip_updates: mpsc::Receiver<Self::SyncTarget>,
-            _finish: Option<mpsc::Receiver<()>>,
-            _reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
-            _sync_config: SyncEngineConfig,
+            _session: SyncSession<Self::SyncTarget>,
+            _limits: SyncEngineConfig,
         ) -> Result<Self, Self::SyncError> {
             Err(TestSyncError)
         }
@@ -3359,11 +3368,8 @@ mod tests {
             _context: E,
             _config: Self::Config,
             _resolver: (),
-            _target: Self::SyncTarget,
-            _tip_updates: mpsc::Receiver<Self::SyncTarget>,
-            _finish: Option<mpsc::Receiver<()>>,
-            _reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
-            _sync_config: SyncEngineConfig,
+            _session: SyncSession<Self::SyncTarget>,
+            _limits: SyncEngineConfig,
         ) -> Result<Self, Self::SyncError> {
             Ok(Self)
         }
@@ -3376,12 +3382,15 @@ mod tests {
             _context: E,
             _config: Self::Config,
             _resolver: (),
-            target: Self::SyncTarget,
-            _tip_updates: mpsc::Receiver<Self::SyncTarget>,
-            mut finish: Option<mpsc::Receiver<()>>,
-            reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
-            _sync_config: SyncEngineConfig,
+            session: SyncSession<Self::SyncTarget>,
+            _limits: SyncEngineConfig,
         ) -> Result<Self, Self::SyncError> {
+            let SyncSession {
+                target,
+                mut finish,
+                reached_target,
+                ..
+            } = session;
             if let Some(reached_target) = reached_target.as_ref() {
                 let _ = reached_target.send(target).await;
             }
@@ -3401,12 +3410,12 @@ mod tests {
             _context: E,
             _config: Self::Config,
             _resolver: (),
-            target: Self::SyncTarget,
-            _tip_updates: mpsc::Receiver<Self::SyncTarget>,
-            mut finish: Option<mpsc::Receiver<()>>,
-            _reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
-            _sync_config: SyncEngineConfig,
+            session: SyncSession<Self::SyncTarget>,
+            _limits: SyncEngineConfig,
         ) -> Result<Self, Self::SyncError> {
+            let SyncSession {
+                target, mut finish, ..
+            } = session;
             let Some(finish_rx) = finish.as_mut() else {
                 panic!("finish receiver should be provided");
             };
@@ -3429,12 +3438,15 @@ mod tests {
             context: E,
             _config: Self::Config,
             controller: SlowSyncController,
-            target: Self::SyncTarget,
-            tip_updates: mpsc::Receiver<Self::SyncTarget>,
-            mut finish: Option<mpsc::Receiver<()>>,
-            reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
-            _sync_config: SyncEngineConfig,
+            session: SyncSession<Self::SyncTarget>,
+            _limits: SyncEngineConfig,
         ) -> Result<Self, Self::SyncError> {
+            let SyncSession {
+                target,
+                tip_updates,
+                mut finish,
+                reached_target,
+            } = session;
             while !controller.release.load(Ordering::SeqCst) {
                 context.sleep(Duration::from_millis(1)).await;
             }
@@ -3521,12 +3533,15 @@ mod tests {
             _context: E,
             _config: Self::Config,
             observer: FastSyncObserver,
-            target: Self::SyncTarget,
-            tip_updates: mpsc::Receiver<Self::SyncTarget>,
-            mut finish: Option<mpsc::Receiver<()>>,
-            reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
-            _sync_config: SyncEngineConfig,
+            session: SyncSession<Self::SyncTarget>,
+            _limits: SyncEngineConfig,
         ) -> Result<Self, Self::SyncError> {
+            let SyncSession {
+                target,
+                tip_updates,
+                mut finish,
+                reached_target,
+            } = session;
             let mut final_target = target;
             let mut tip_updates = Some(tip_updates);
             let mut reported_target = None;
@@ -3586,12 +3601,15 @@ mod tests {
             _context: E,
             _config: Self::Config,
             observer: FastSyncObserver,
-            target: Self::SyncTarget,
-            tip_updates: mpsc::Receiver<Self::SyncTarget>,
-            mut finish: Option<mpsc::Receiver<()>>,
-            reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
-            _sync_config: SyncEngineConfig,
+            session: SyncSession<Self::SyncTarget>,
+            _limits: SyncEngineConfig,
         ) -> Result<Self, Self::SyncError> {
+            let SyncSession {
+                target,
+                tip_updates,
+                mut finish,
+                reached_target,
+            } = session;
             let mut final_target = target;
             let mut tip_updates = Some(tip_updates);
             let mut reported_target = None;

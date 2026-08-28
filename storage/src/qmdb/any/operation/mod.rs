@@ -90,18 +90,16 @@ impl<F: Family, S: Update> crate::qmdb::operation::Operation<F> for Operation<F,
     }
 }
 
-impl<F: Family, S: Update> crate::qmdb::operation::Floored<F> for Operation<F, S> {
-    fn has_floor(&self) -> Option<Location<F>> {
+impl<F: Family, S: Update> Committable<F> for Operation<F, S> {
+    fn floor(&self) -> Option<Location<F>> {
         match self {
             Self::CommitFloor(_, loc) => Some(*loc),
             _ => None,
         }
     }
-}
 
-impl<F: Family, S: Update> Committable for Operation<F, S> {
-    fn is_commit(&self) -> bool {
-        matches!(self, Self::CommitFloor(_, _))
+    fn initial_commit() -> Self {
+        Self::CommitFloor(None, Location::new(0))
     }
 }
 

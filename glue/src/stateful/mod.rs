@@ -198,6 +198,10 @@ where
     ///
     /// The returned targets are handed to the state sync coordinator so the
     /// sync engines can track the latest finalized state root and range.
+    ///
+    /// Each target must be the one the corresponding merkleized batch reports
+    /// ([`Merkleized::target`](db::qmdb::Merkleized::target)). A compact database syncs only
+    /// to a target covering its last commit and rejects any other.
     fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets;
 
     /// Block used to initialize the consensus engine in the first epoch.

@@ -1,7 +1,8 @@
-//! Stateful adapters for QMDB immutable databases.
+//! [`Qmdb`](crate::stateful::db::qmdb::Qmdb) implementations for
+//! [`qmdb::immutable`](commonware_storage::qmdb::immutable) databases.
 //!
-//! Use [`standard`] for the journaled implementation and [`compact`] for the
-//! compact implementation that retains only current Merkle peaks.
+//! `standard` holds the journaled implementations, `compact` the ones that retain
+//! only current Merkle peaks.
 
-pub mod compact;
-pub mod standard;
+mod compact;
+mod standard;

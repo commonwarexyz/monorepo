@@ -1,9 +1,6 @@
 use crate::{
     merkle::{Family, Location},
-    qmdb::{
-        any::value::ValueEncoding,
-        operation::{Committable, Floored},
-    },
+    qmdb::{any::value::ValueEncoding, operation::Committable},
 };
 use commonware_codec::{Encode as _, Error as CodecError, Read, Write};
 use commonware_formatting::hex;
@@ -52,14 +49,6 @@ impl<F: Family, V: ValueEncoding> Operation<F, V> {
             Self::Commit(value, _) => value,
         }
     }
-
-    /// Returns the inactivity floor location if this is a commit operation.
-    pub const fn has_floor(&self) -> Option<Location<F>> {
-        match self {
-            Self::Commit(_, loc) => Some(*loc),
-            Self::Append(_) => None,
-        }
-    }
 }
 
 impl<F: Family, V: Codec> Write for Operation<F, V> {
@@ -68,15 +57,16 @@ impl<F: Family, V: Codec> Write for Operation<F, V> {
     }
 }
 
-impl<F: Family, V: Codec> Committable for Operation<F, V> {
-    fn is_commit(&self) -> bool {
-        matches!(self, Self::Commit(_, _))
+impl<F: Family, V: ValueEncoding> Committable<F> for Operation<F, V> {
+    fn floor(&self) -> Option<Location<F>> {
+        match self {
+            Self::Commit(_, loc) => Some(*loc),
+            Self::Append(_) => None,
+        }
     }
-}
 
-impl<F: Family, V: ValueEncoding> Floored<F> for Operation<F, V> {
-    fn has_floor(&self) -> Option<Location<F>> {
-        self.has_floor()
+    fn initial_commit() -> Self {
+        Self::Commit(None, Location::new(0))
     }
 }
 

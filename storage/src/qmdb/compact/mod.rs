@@ -7,11 +7,14 @@ use crate::{
     Context,
     journal::contiguous::variable,
     merkle::{Family, Location},
-    qmdb::{Error, sync::journal::Memory},
+    qmdb::{
+        Error,
+        sync::{EngineError, Target, journal::Memory},
+    },
 };
 use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
-use commonware_utils::range::NonEmptyRange;
+use commonware_utils::{non_empty_range, range::NonEmptyRange};
 
 /// Configuration for a compact authenticated db.
 #[derive(Clone)]
@@ -24,6 +27,26 @@ pub struct Config<C, S: Strategy> {
 
     /// Codec config used to decode the persisted last commit operation on reopen.
     pub commit_codec_config: C,
+}
+
+/// Target covering only the commit at `size - 1`, which is all a compact database retains.
+pub(crate) fn target<F: Family, D: Digest>(root: D, size: Location<F>) -> Target<F, D> {
+    Target {
+        root,
+        range: non_empty_range!(size - 1, size),
+    }
+}
+
+/// Reject a target that covers more than a compact database's last commit.
+pub(crate) fn validate_target<F: Family, D: Digest>(
+    target: &Target<F, D>,
+) -> Result<(), EngineError<F, D>> {
+    if target.range.start() + 1 != target.range.end() {
+        return Err(EngineError::InvalidTarget {
+            bounds: target.range.clone(),
+        });
+    }
+    Ok(())
 }
 
 /// Build a compact db from state fetched by the sync engine.

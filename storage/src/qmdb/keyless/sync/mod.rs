@@ -1,9 +1,6 @@
 use crate::{
     Context,
-    journal::{
-        authenticated,
-        contiguous::{Contiguous as _, Mutable},
-    },
+    journal::{authenticated, contiguous::Contiguous as _},
     merkle::{
         Family, Location,
         full::{self, Merkle},
@@ -25,9 +22,10 @@ impl<F, E, V, C, H, S> sync::Database for Keyless<F, E, V, C, H, S>
 where
     F: Family,
     E: Context,
-    V: ValueEncoding + Codec,
-    C: Mutable<Item = Operation<F, V>> + sync::Journal<F, Context = E, Op = Operation<F, V>>,
-    C::Config: Clone + Send,
+    V: ValueEncoding,
+    C: sync::Journal<F, Context = E, Op = Operation<F, V>>
+        + authenticated::Backing<E, Item = Operation<F, V>, Config = <C as sync::Journal<F>>::Config>,
+    <C as sync::Journal<F>>::Config: Clone + Send,
     H: Hasher,
     S: Strategy,
     Operation<F, V>: EncodeShared,
@@ -36,7 +34,7 @@ where
     type Op = Operation<F, V>;
     type Journal = C;
     type Hasher = H;
-    type Config = super::Config<C::Config, S>;
+    type Config = super::Config<<C as sync::Journal<F>>::Config, S>;
     type Digest = H::Digest;
     type Context = E;
 
@@ -111,6 +109,10 @@ where
         db.sync().await
     }
 
+    async fn init(context: E, config: Self::Config) -> Result<Self, qmdb::Error<F>> {
+        Self::init(context, config).await
+    }
+
     async fn persist_sync_result(self) -> Result<Self, qmdb::Error<F>> {
         Ok(self)
     }
@@ -141,8 +143,11 @@ where
         .await
     }
 
-    fn root(&self) -> Self::Digest {
-        self.root()
+    fn target(&self) -> sync::Target<F, H::Digest> {
+        sync::Target {
+            root: self.root(),
+            range: commonware_utils::non_empty_range!(self.sync_boundary(), self.bounds().end),
+        }
     }
 }
 
@@ -184,6 +189,10 @@ where
         .await
     }
 
+    async fn init(context: E, config: Self::Config) -> Result<Self, qmdb::Error<F>> {
+        Self::init(context, config).await
+    }
+
     async fn persist_sync_result(self) -> Result<Self, qmdb::Error<F>> {
         self.sync().await
     }
@@ -197,8 +206,14 @@ where
         Ok(None)
     }
 
-    fn root(&self) -> Self::Digest {
-        self.root()
+    fn target(&self) -> sync::Target<F, H::Digest> {
+        self.target()
+    }
+
+    fn validate_target(
+        target: &sync::Target<F, H::Digest>,
+    ) -> Result<(), sync::EngineError<F, H::Digest>> {
+        qmdb::compact::validate_target(target)
     }
 }
 

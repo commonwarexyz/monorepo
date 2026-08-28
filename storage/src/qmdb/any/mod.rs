@@ -77,7 +77,6 @@ use crate::{
         bitmap::Shared,
         metrics::Metrics,
         operation::Committable,
-        single_operation_root,
     },
     translator::Translator,
 };
@@ -100,20 +99,6 @@ pub use value::{FixedValue, ValueEncoding, VariableValue};
 pub mod ordered;
 pub(crate) mod sync;
 pub mod unordered;
-
-/// Compute the authenticated root of a newly initialized database without opening storage.
-///
-/// The initial commit never carries metadata, so this root always represents
-/// `CommitFloor(None, 0)`.
-pub fn initial_root<F, U, H>() -> H::Digest
-where
-    F: Family,
-    H: Hasher,
-    U: Update,
-    Operation<F, U>: Codec,
-{
-    single_operation_root::<F, H>(&Operation::<F, U>::CommitFloor(None, Location::new(0)))
-}
 
 pub(crate) const BITMAP_CHUNK_BYTES: usize = 64;
 
@@ -196,7 +181,7 @@ where
 
     if log.size() == 0 {
         warn!("Authenticated log is empty, initializing new db");
-        let commit_floor = Operation::CommitFloor(None, Location::new(0));
+        let commit_floor = Operation::initial_commit();
         (log, _) = log.append(&commit_floor).await?;
         log = log.sync().await?;
     }
@@ -2449,6 +2434,32 @@ pub(crate) mod test {
             assert_eq!(db.size(), size_before);
 
             db.destroy().await.unwrap();
+        });
+    }
+
+    /// Rewinding to a size whose last operation is not a commit fails.
+    #[test_traced("INFO")]
+    fn test_any_rewind_to_non_commit_errors() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let ctx = context.child("db");
+            let db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.child("storage"),
+                variable_db_config::<OneCap>("rnc", &ctx),
+            )
+            .await
+            .unwrap();
+            let (db, _) =
+                commit_writes(db, [(key(0), Some(val(0))), (key(1), Some(val(1)))], None).await;
+
+            let size = db.size();
+            let Err(err) = db.rewind(size - 1).await else {
+                panic!("expected rewind to a non-commit size to fail");
+            };
+            assert!(
+                matches!(err, crate::qmdb::Error::HistoricalFloorPruned(loc) if loc == size - 1),
+                "unexpected rewind error: {err:?}"
+            );
         });
     }
 

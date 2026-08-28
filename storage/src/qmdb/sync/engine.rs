@@ -100,7 +100,6 @@ pub struct Config<DB, S>
 where
     DB: Database,
     S: SourceFor<DB>,
-    DB::Op: Encode,
 {
     /// Runtime context for creating database components
     pub context: DB::Context,
@@ -122,7 +121,8 @@ where
     /// Channel for receiving sync target updates.
     ///
     /// The caller selects targets before sending updates. The engine adopts only strictly
-    /// advancing targets and discards the rest.
+    /// advancing targets and discards the rest. An update that advances without changing the
+    /// root is a caller bug and fails the sync with [`EngineError::SyncTargetRootUnchanged`].
     pub update_rx: Option<mpsc::Receiver<Target<DB::Family, DB::Digest>>>,
     /// Channel that requests sync completion once the current target is reached.
     ///
@@ -145,7 +145,6 @@ pub(crate) struct Engine<DB, S>
 where
     DB: Database,
     S: SourceFor<DB>,
-    DB::Op: Encode,
 {
     /// Tracks outstanding fetch requests and their futures
     outstanding_requests: Requests<DB::Family, DB::Op, DB::Digest, S::Error>,
@@ -229,7 +228,6 @@ impl<DB, S> Engine<DB, S>
 where
     DB: Database,
     S: SourceFor<DB>,
-    DB::Op: Encode,
 {
     pub(crate) fn journal(&self) -> &DB::Journal {
         &self.journal
@@ -240,21 +238,21 @@ impl<DB, S> Engine<DB, S>
 where
     DB: Database,
     S: SourceFor<DB>,
-    DB::Op: Encode,
 {
     pub async fn new(config: Config<DB, S>) -> Result<Self, Error<DB, S>> {
-        if !config.target.range.end().is_valid() {
+        let target = config.target;
+        if !target.range.end().is_valid() {
             return Err(SyncError::Engine(EngineError::InvalidTarget {
-                lower_bound_pos: config.target.range.start(),
-                upper_bound_pos: config.target.range.end(),
+                bounds: target.range.clone(),
             }));
         }
+        DB::validate_target(&target).map_err(SyncError::Engine)?;
 
         // Create journal and verifier using the database's factory methods
         let journal = <DB::Journal as Journal<DB::Family>>::new(
             config.context.child("journal"),
             config.db_config.journal_config(),
-            config.target.range.clone(),
+            target.range.clone(),
         )
         .await?;
         let journal_size = journal.size();
@@ -263,11 +261,11 @@ where
         // reaches the target, try to recover the target's pinned nodes from local
         // Merkle state before asking peers for them. Partial journals resume without
         // probing completed database state.
-        let pinned_nodes = if journal_size == *config.target.range.end() {
+        let pinned_nodes = if journal_size == *target.range.end() {
             DB::local_pinned_nodes(
                 config.context.child("local_pinned_nodes"),
                 &config.db_config,
-                &config.target,
+                &target,
                 &journal,
             )
             .await?
@@ -283,7 +281,7 @@ where
             pinned_nodes,
             retained_roots: BTreeMap::new(),
             max_retained_roots: config.max_retained_roots,
-            target: config.target.clone(),
+            target,
             max_outstanding_requests: config.max_outstanding_requests,
             fetch_batch_size: config.fetch_batch_size,
             apply_batch_size: config.apply_batch_size,
@@ -665,6 +663,18 @@ where
         }
     }
 
+    /// Adopt `new_target` and reschedule fetches.
+    async fn retarget(
+        self,
+        new_target: Target<DB::Family, DB::Digest>,
+    ) -> Result<Self, Error<DB, S>> {
+        DB::validate_target(&new_target).map_err(SyncError::Engine)?;
+        let mut engine = self.reset_for_target_update(new_target).await?;
+        engine.record_progress();
+        engine.schedule_requests()?;
+        Ok(engine)
+    }
+
     /// Handle a sync event and return the next engine state.
     async fn handle_event(
         mut self,
@@ -672,20 +682,15 @@ where
     ) -> Result<NextStep<Self, DB>, Error<DB, S>> {
         match event {
             Event::TargetUpdate(new_target) => {
-                // A non-advancing update is discarded.
-                if !new_target.advances(&self.target) {
-                    return Ok(NextStep::Continue(self));
-                }
-                // A same-root update that advances is impossible for an append-only log and
-                // indicates a caller bug.
-                if new_target.root == self.target.root {
-                    return Err(SyncError::Engine(EngineError::SyncTargetRootUnchanged));
-                }
-
-                let mut updated_self = self.reset_for_target_update(new_target).await?;
-                updated_self.record_progress();
-                updated_self.schedule_requests()?;
-                Ok(NextStep::Continue(updated_self))
+                let engine = if new_target
+                    .supersedes(&self.target)
+                    .map_err(SyncError::Engine)?
+                {
+                    self.retarget(new_target).await?
+                } else {
+                    self
+                };
+                Ok(NextStep::Continue(engine))
             }
             Event::UpdateChannelClosed => {
                 self.update_rx = None;
@@ -733,8 +738,11 @@ where
                 while let Some(update_rx) = self.update_rx.as_mut() {
                     match update_rx.try_recv() {
                         Ok(new_target) => {
-                            if new_target.advances(&self.target) {
-                                return self.handle_event(Event::TargetUpdate(new_target)).await;
+                            if new_target
+                                .supersedes(&self.target)
+                                .map_err(SyncError::Engine)?
+                            {
+                                return Ok(NextStep::Continue(self.retarget(new_target).await?));
                             }
                         }
                         Err(TryRecvError::Empty) => break,
@@ -787,7 +795,7 @@ where
         )
         .await?;
 
-        let got_root = database.root();
+        let got_root = database.target().root;
         let expected_root = self.target.root;
         if got_root != expected_root {
             return Err(SyncError::Engine(EngineError::RootMismatch {
@@ -817,7 +825,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::merkle::mmr::{Family as MmrFamily, Proof};
+    use crate::{
+        merkle::mmr::{Family as MmrFamily, Proof},
+        qmdb::operation::Committable,
+    };
     use commonware_cryptography::{Sha256, sha256};
     use commonware_runtime::{Runner as _, deterministic};
     use commonware_utils::{NZU64, non_empty_range};
@@ -840,6 +851,16 @@ mod tests {
 
         fn journal_config(&self) -> Self::JournalConfig {
             self.journal_size
+        }
+    }
+
+    impl Committable<MmrFamily> for i32 {
+        fn floor(&self) -> Option<Location<MmrFamily>> {
+            None
+        }
+
+        fn initial_commit() -> Self {
+            0
         }
     }
 
@@ -891,6 +912,13 @@ mod tests {
         type Journal = TestJournal;
         type Op = i32;
 
+        async fn init(
+            _context: Self::Context,
+            _config: Self::Config,
+        ) -> Result<Self, qmdb::Error<Self::Family>> {
+            Ok(Self)
+        }
+
         async fn from_sync_result(
             _context: Self::Context,
             _config: Self::Config,
@@ -916,8 +944,11 @@ mod tests {
             Ok(Some(vec![]))
         }
 
-        fn root(&self) -> Self::Digest {
-            sha256::Digest::from([0u8; 32])
+        fn target(&self) -> Target<MmrFamily, sha256::Digest> {
+            Target {
+                root: sha256::Digest::from([0u8; 32]),
+                range: non_empty_range!(Location::new(0), Location::new(1)),
+            }
         }
     }
 
@@ -1039,6 +1070,29 @@ mod tests {
                 panic!("engine should retarget instead of completing");
             };
             assert_eq!(engine.target, advancing);
+        });
+    }
+
+    #[test]
+    fn step_fails_on_same_root_advance() {
+        deterministic::Runner::default().start(|context| async move {
+            let (update_tx, update_rx) = mpsc::channel(1);
+            let mut config = test_engine_config(context, 10, Arc::new(AtomicUsize::new(0)));
+            config.update_rx = Some(update_rx);
+            let same_root = Target {
+                root: config.target.root,
+                range: non_empty_range!(Location::new(5), Location::new(12)),
+            };
+            update_tx.send(same_root).await.unwrap();
+
+            let engine = Engine::new(config).await.unwrap();
+            let Err(err) = engine.step().await else {
+                panic!("a same-root advance must fail the sync");
+            };
+            assert!(matches!(
+                err,
+                SyncError::Engine(EngineError::SyncTargetRootUnchanged)
+            ));
         });
     }
 

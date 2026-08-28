@@ -245,10 +245,10 @@ fn fuzz_family<F: MerkleFamily>(input: &mut FuzzInput, test_name: &str) {
                         .await
                         .expect("commit should not fail");
                     let db = db.commit().await.expect("Commit should not fail");
-                    let target = sync::Target::new(
-                        db.root(),
-                        non_empty_range!(db.sync_boundary(), db.bounds().end),
-                    );
+                    let target = sync::Target {
+                        root: db.root(),
+                        range: non_empty_range!(db.sync_boundary(), db.bounds().end),
+                    };
 
                     let wrapped_src = Arc::new(db);
                     let _result = test_sync(

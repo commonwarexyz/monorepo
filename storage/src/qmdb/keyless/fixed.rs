@@ -3,21 +3,9 @@
 //! For variable-size values, use [super::variable].
 
 use crate::{
-    Context,
-    journal::{
-        authenticated,
-        contiguous::fixed::{self, Config as JournalConfig},
-    },
-    merkle::Family,
-    qmdb::{
-        Error, ROOT_BAGGING,
-        any::value::{FixedEncoding, FixedValue},
-        keyless::operation::Operation as BaseOperation,
-        operation::Committable,
-    },
+    journal::contiguous::fixed::{self, Config as JournalConfig},
+    qmdb::{any::value::FixedEncoding, keyless::operation::Operation as BaseOperation},
 };
-use commonware_cryptography::Hasher;
-use commonware_parallel::Strategy;
 
 /// Keyless operation for fixed-size values.
 pub type Operation<F, V> = BaseOperation<F, FixedEncoding<V>>;
@@ -29,45 +17,21 @@ pub type Db<F, E, V, H, S> =
 /// A compact keyless authenticated db for fixed-size data.
 pub type CompactDb<F, E, V, H, S> = super::CompactDb<F, E, FixedEncoding<V>, H, (), S>;
 
-type Journal<F, E, V, H, S> =
-    authenticated::Journal<F, E, fixed::Journal<E, Operation<F, V>>, H, S>;
-
 /// Configuration for a fixed-size [keyless](super) authenticated db.
 pub type Config<S> = super::Config<JournalConfig, S>;
 
 /// Configuration for a fixed-size [keyless](super) compact db.
 pub type CompactConfig<S> = super::CompactConfig<(), S>;
 
-impl<F: Family, E: Context, V: FixedValue, H: Hasher, S: Strategy> Db<F, E, V, H, S> {
-    /// Returns a [Db] initialized from `cfg`. Any uncommitted operations will be
-    /// discarded and the state of the db will be as of the last committed operation.
-    pub async fn init(context: E, cfg: Config<S>) -> Result<Self, Error<F>> {
-        let journal: Journal<F, E, V, H, S> = Journal::new(
-            context.child("journal"),
-            cfg.merkle,
-            cfg.log,
-            Operation::<F, V>::is_commit,
-            ROOT_BAGGING,
-        )
-        .await?;
-        Self::init_from_journal(journal, context).await
-    }
-}
-
-impl<F: Family, E: Context, V: FixedValue, H: Hasher, S: Strategy> CompactDb<F, E, V, H, S> {
-    /// Returns a [CompactDb] initialized from `cfg`.
-    pub async fn init(context: E, cfg: CompactConfig<S>) -> Result<Self, Error<F>> {
-        let merkle = crate::merkle::compact::Merkle::new(cfg.strategy);
-        Self::init_from_merkle(merkle, context.child("witness"), cfg.witness, ()).await
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
-        merkle::{Location, mmb, mmr},
-        qmdb::keyless::tests::{self, keyless_tests},
+        merkle::{Family, Location, mmb, mmr},
+        qmdb::{
+            Error,
+            keyless::tests::{self, keyless_tests},
+        },
     };
     use commonware_cryptography::Sha256;
     use commonware_macros::{boxed, test_traced};
@@ -471,6 +435,8 @@ mod tests {
         test_keyless_fixed_child_root_matches_pending_and_committed => run_child_root_matches_pending_and_committed, db;
         test_keyless_fixed_rewind_recovery => run_rewind_recovery, reopen;
         test_keyless_fixed_rewind_pruned_target_errors => run_rewind_pruned_target_errors, reopen;
+        test_keyless_fixed_rewind_to_non_commit_errors => run_rewind_to_non_commit_errors, db;
+        test_keyless_fixed_merkleized_batch_target => run_merkleized_batch_target, db;
         test_keyless_fixed_floor_tracking => run_floor_tracking, reopen_indexed;
         test_keyless_fixed_floor_regression_rejected => run_floor_regression_rejected, reopen;
         test_keyless_fixed_floor_beyond_commit_loc_rejected => run_floor_beyond_commit_loc_rejected, reopen;

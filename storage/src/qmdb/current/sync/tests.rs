@@ -278,7 +278,7 @@ mod harnesses {
         type Db = UnorderedFixedDb<F>;
 
         fn sync_target_root(db: &Self::Db) -> Digest {
-            SyncDatabase::root(db)
+            db.ops_root()
         }
 
         fn config(suffix: &str, pooler: &impl BufferPooler) -> ConfigOf<Self> {
@@ -325,7 +325,7 @@ mod harnesses {
         type Db = UnorderedVariableDb<F>;
 
         fn sync_target_root(db: &Self::Db) -> Digest {
-            SyncDatabase::root(db)
+            db.ops_root()
         }
 
         fn config(suffix: &str, pooler: &impl BufferPooler) -> ConfigOf<Self> {
@@ -372,7 +372,7 @@ mod harnesses {
         type Db = OrderedFixedDb<F>;
 
         fn sync_target_root(db: &Self::Db) -> Digest {
-            SyncDatabase::root(db)
+            db.ops_root()
         }
 
         fn config(suffix: &str, pooler: &impl BufferPooler) -> ConfigOf<Self> {
@@ -419,7 +419,7 @@ mod harnesses {
         type Db = OrderedVariableDb<F>;
 
         fn sync_target_root(db: &Self::Db) -> Digest {
-            SyncDatabase::root(db)
+            db.ops_root()
         }
 
         fn config(suffix: &str, pooler: &impl BufferPooler) -> ConfigOf<Self> {
@@ -515,7 +515,7 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
         let boundary = target_db.sync_boundary();
         let target_db = target_db.prune(boundary).await.unwrap();
 
-        let sync_root = SyncDatabase::root(&target_db);
+        let sync_root = target_db.ops_root();
         let verification_root = target_db.root();
         let lower_bound = target_db.sync_boundary();
         let upper_bound = target_db.bounds().end;
@@ -545,7 +545,7 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
         .await
         .unwrap();
 
-        assert_eq!(SyncDatabase::root(&synced_db), sync_root);
+        assert_eq!(synced_db.ops_root(), sync_root);
         assert_eq!(synced_db.root(), verification_root);
         assert_eq!(synced_db.sync_boundary(), lower_bound);
         assert_eq!(synced_db.get(&key).await.unwrap(), expected);
@@ -555,7 +555,7 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
         let reopened: Db = Db::init(context.child("reopened"), client_config)
             .await
             .unwrap();
-        assert_eq!(SyncDatabase::root(&reopened), sync_root);
+        assert_eq!(reopened.ops_root(), sync_root);
         assert_eq!(reopened.root(), verification_root);
         assert_eq!(reopened.sync_boundary(), lower_bound);
         assert_eq!(reopened.get(&key).await.unwrap(), expected);
@@ -606,7 +606,7 @@ fn test_current_local_pinned_nodes_rejects_target_before_local_lower_bound() {
         let bounds = db.bounds();
         let local_start = bounds.start;
         let local_end = bounds.end;
-        let sync_root = SyncDatabase::root(&db);
+        let sync_root = db.ops_root();
 
         assert!(local_start > crate::merkle::Location::new(0));
 

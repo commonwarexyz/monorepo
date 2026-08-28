@@ -2,7 +2,7 @@ use crate::{
     Context,
     journal::{authenticated, contiguous::Contiguous},
     merkle::{Family, Location, MAX_PINNED_NODES, MAX_PROOF_DIGESTS_PER_ELEMENT, Proof},
-    qmdb::{self, operation::Floored, sync::ServeError},
+    qmdb::{self, operation::Committable, sync::ServeError},
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{
@@ -482,7 +482,7 @@ impl<F, E, C, H, S> Source for authenticated::Journal<F, E, C, H, S>
 where
     F: Family,
     E: Context,
-    C: Contiguous<Item: EncodeShared + Floored<F>>,
+    C: Contiguous<Item: EncodeShared + Committable<F>>,
     H: Hasher,
     S: Strategy,
 {
@@ -645,12 +645,12 @@ pub(crate) mod tests {
     /// Fetch `target`'s final commit operation and pinned nodes from `source`.
     pub async fn fetch_compact_state<R: Source>(
         source: &R,
-        target: crate::qmdb::sync::CompactTarget<R::Family, R::Digest>,
+        target: crate::qmdb::sync::Target<R::Family, R::Digest>,
     ) -> Result<(Response<R::Family, R::Op, R::Digest>, FeedbackTx), R::Error> {
         source
             .serve(Request::Boundary {
-                size: target.size,
-                start: target.size - 1,
+                size: target.range.end(),
+                start: target.range.start(),
             })
             .await
     }

@@ -51,7 +51,8 @@ use crate::{
     },
     merkle::{Family, Location, Proof, full::Config as MerkleConfig},
     qmdb::{
-        Error, any::value::ValueEncoding, batch_chain, metrics::Metrics, single_operation_root,
+        Error, ROOT_BAGGING, any::value::ValueEncoding, batch_chain, find_inactivity_floor_at,
+        metrics::Metrics, operation::Committable,
     },
 };
 use commonware_codec::EncodeShared;
@@ -73,19 +74,6 @@ pub use compact::{
     UnmerkleizedBatch as CompactUnmerkleizedBatch,
 };
 pub use operation::Operation;
-
-/// Compute the authenticated root of a newly initialized database without opening storage.
-///
-/// The initial commit never carries metadata, so this root always represents `Commit(None, 0)`.
-pub fn initial_root<F, V, H>() -> H::Digest
-where
-    F: Family,
-    V: ValueEncoding,
-    H: Hasher,
-    Operation<F, V>: EncodeShared,
-{
-    single_operation_root::<F, H>(&Operation::<F, V>::Commit(None, Location::new(0)))
-}
 
 /// Configuration for a [Keyless] authenticated db.
 #[derive(Clone)]
@@ -148,6 +136,31 @@ where
     F: Family,
     E: Context,
     V: ValueEncoding,
+    C: authenticated::Backing<E, Item = Operation<F, V>>,
+    H: Hasher,
+    S: Strategy,
+    Operation<F, V>: EncodeShared,
+{
+    /// Returns a [Keyless] db initialized from `cfg`. Any uncommitted operations will be
+    /// discarded and the state of the db will be as of the last committed operation.
+    pub async fn init(context: E, cfg: Config<C::Config, S>) -> Result<Self, Error<F>> {
+        let journal = authenticated::Journal::<F, E, C, H, S>::new(
+            context.child("journal"),
+            cfg.merkle,
+            cfg.log,
+            Operation::<F, V>::is_commit,
+            ROOT_BAGGING,
+        )
+        .await?;
+        Self::init_from_journal(journal, context).await
+    }
+}
+
+impl<F, E, V, C, H, S> Keyless<F, E, V, C, H, S>
+where
+    F: Family,
+    E: Context,
+    V: ValueEncoding,
     C: Mutable<Item = Operation<F, V>>,
     H: Hasher,
     S: Strategy,
@@ -161,27 +174,14 @@ where
         let metrics = Metrics::new(context);
         if journal.size() == 0 {
             warn!("no operations found in log, creating initial commit");
-            (journal, _) = journal
-                .append(&Operation::Commit(None, Location::new(0)))
-                .await?;
+            (journal, _) = journal.append(&Operation::initial_commit()).await?;
             journal = journal.sync().await?;
         }
 
-        let (last_commit_loc, inactivity_floor_loc) = {
-            let bounds = journal.bounds();
-            let last_commit_loc = Location::new(
-                bounds
-                    .end
-                    .checked_sub(1)
-                    .expect("at least one commit should exist"),
-            );
-            let op = journal.read(*last_commit_loc).await?;
-            let inactivity_floor_loc = op
-                .has_floor()
-                .expect("last operation should be a commit with floor");
-            (last_commit_loc, inactivity_floor_loc)
-        };
-        let inactive_peaks = F::inactive_peaks(last_commit_loc + 1, inactivity_floor_loc);
+        let size = journal.size();
+        let inactivity_floor_loc = find_inactivity_floor_at(&journal, size).await?;
+        let last_commit_loc = size - 1;
+        let inactive_peaks = F::inactive_peaks(size, inactivity_floor_loc);
         let root = journal.root(inactive_peaks)?;
 
         let db = Self {
@@ -412,7 +412,7 @@ where
     ///   or exceeds the current committed size.
     /// - Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] if the operation at
     ///   `size - 1` has been pruned.
-    /// - Returns [`Error::UnexpectedData`] if the operation at `size - 1` is not a commit.
+    /// - Returns [`Error::HistoricalFloorPruned`] if the operation at `size - 1` is not a commit.
     ///
     /// Any error from this method is fatal for this handle. Rewind may mutate journal state
     /// before this method finishes updating in-memory rewind state. Callers must drop this
@@ -436,19 +436,7 @@ where
         }
 
         let rewind_last_loc = Location::new(rewind_size - 1);
-        let rewind_floor = {
-            let bounds = self.journal.bounds();
-            if rewind_size <= bounds.start {
-                return Err(Error::Journal(crate::journal::Error::ItemPruned(
-                    *rewind_last_loc,
-                )));
-            }
-            let rewind_last_op = self.journal.read(*rewind_last_loc).await?;
-            let Operation::Commit(_, floor) = rewind_last_op else {
-                return Err(Error::UnexpectedData(rewind_last_loc));
-            };
-            floor
-        };
+        let rewind_floor = find_inactivity_floor_at(&self.journal, size).await?;
 
         // Journal rewind happens before in-memory commit-location updates. If a later step fails,
         // this handle may be internally diverged and must be dropped by the caller.
@@ -622,11 +610,11 @@ where
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::qmdb::verify_proof;
+    use crate::qmdb::{sync::Target, verify_proof};
     use commonware_cryptography::Sha256;
     use commonware_parallel::Strategy;
     use commonware_runtime::{Supervisor as _, deterministic};
-    use commonware_utils::NZU64;
+    use commonware_utils::{NZU64, non_empty_range};
     use std::{future::Future, pin::Pin};
 
     pub(crate) type Reopen<D> =
@@ -2303,6 +2291,64 @@ pub(crate) mod tests {
         ));
 
         db.destroy().await.unwrap();
+    }
+
+    #[boxed]
+    pub(crate) async fn run_merkleized_batch_target<F: Family, V, C, H, S: Strategy>(
+        db: TestKeyless<F, V, C, H, S>,
+    ) where
+        V: ValueEncoding<Value: TestValue>,
+        C: Mutable<Item = Operation<F, V>>,
+        H: Hasher,
+        Operation<F, V>: EncodeShared,
+    {
+        let floor = Location::new(1);
+        let batch = db
+            .new_batch()
+            .append(V::Value::make(1))
+            .merkleize(&db, None, floor)
+            .await;
+        let size = batch.bounds().tip.size;
+        assert_eq!(
+            batch.target().unwrap(),
+            Target {
+                root: batch.root(),
+                range: non_empty_range!(floor, size)
+            }
+        );
+
+        // A floor at the batch size is what `apply_batch` rejects, so there is no target.
+        let batch = db
+            .new_batch()
+            .append(V::Value::make(2))
+            .merkleize(&db, None, size)
+            .await;
+        assert!(matches!(
+            batch.target(),
+            Err(Error::FloorBeyondSize(floor, commit)) if floor == size && commit == size - 1
+        ));
+    }
+
+    #[boxed]
+    pub(crate) async fn run_rewind_to_non_commit_errors<F: Family, V, C, H, S: Strategy>(
+        db: TestKeyless<F, V, C, H, S>,
+    ) where
+        V: ValueEncoding<Value: TestValue>,
+        C: Mutable<Item = Operation<F, V>>,
+        H: Hasher,
+        Operation<F, V>: EncodeShared,
+    {
+        let (db, _) = commit_appends(db, (0..2).map(V::Value::make), None).await;
+        let size = db.last_commit_loc() + 1;
+
+        // The operation at `size - 2` is an append, so no commit governs `size - 1`.
+        let Err(err) = db.rewind(size - 1).await else {
+            panic!("expected rewind to a non-commit size to fail");
+        };
+        assert!(
+            matches!(err, Error::HistoricalFloorPruned(loc) if loc == size - 1),
+            "unexpected rewind error: {err:?}"
+        );
     }
 
     #[boxed]

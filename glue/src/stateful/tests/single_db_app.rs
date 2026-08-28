@@ -54,9 +54,7 @@ use commonware_storage::{
     },
     translator::TwoCap,
 };
-use commonware_utils::{
-    NZDuration, NZU64, NZUsize, non_empty_range, range::NonEmptyRange, sync::Mutex, test_rng,
-};
+use commonware_utils::{NZDuration, NZU64, NZUsize, range::NonEmptyRange, sync::Mutex, test_rng};
 use futures::StreamExt;
 use rand_core::Rng;
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
@@ -233,13 +231,12 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         let parent = ancestry.next().await?;
         let height = Height::new(parent.height().get() + 1);
         let merkleized = Self::execute(height, batches).await;
-        let bounds = merkleized.bounds();
         let block = Block {
             context: context.1.clone(),
             parent: parent.digest(),
             height,
             state_root: merkleized.root(),
-            range: non_empty_range!(bounds.inactivity_floor, bounds.tip.size),
+            range: merkleized.target().range,
         };
         Some(Proposed { block, merkleized })
     }
@@ -253,10 +250,7 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         let mut ancestry = Box::pin(ancestry);
         let tip = ancestry.next().await?;
         let merkleized = Self::execute(tip.height(), batches).await;
-        let bounds = merkleized.bounds();
-        if merkleized.root() != tip.state_root
-            || non_empty_range!(bounds.inactivity_floor, bounds.tip.size) != tip.range
-        {
+        if merkleized.root() != tip.state_root || merkleized.target().range != tip.range {
             return None;
         }
         Some(merkleized)
@@ -272,7 +266,10 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
     }
 
     fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {
-        Target::new(block.state_root, block.range.clone())
+        Target {
+            root: block.state_root,
+            range: block.range.clone(),
+        }
     }
 }
 

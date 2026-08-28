@@ -139,6 +139,10 @@ macro_rules! impl_sync_database {
             type Config = $config;
             type Digest = H::Digest;
 
+            async fn init(context: E, config: Self::Config) -> Result<Self, qmdb::Error<F>> {
+                crate::qmdb::any::init(context, config).await
+            }
+
             async fn from_sync_result(
                 context: Self::Context,
                 config: Self::Config,
@@ -193,8 +197,11 @@ macro_rules! impl_sync_database {
                 .await
             }
 
-            fn root(&self) -> Self::Digest {
-                crate::qmdb::any::db::Db::root(self)
+            fn target(&self) -> qmdb::sync::Target<F, H::Digest> {
+                qmdb::sync::Target {
+                    root: crate::qmdb::any::db::Db::root(self),
+                    range: commonware_utils::non_empty_range!(self.sync_boundary(), self.bounds().end),
+                }
             }
         }
     };

@@ -19,6 +19,7 @@ use crate::{
         bitmap::Shared,
         delete_known_loc,
         operation::{Key, Operation as OperationTrait},
+        sync::{self, Target},
         update_known_loc,
     },
 };
@@ -26,7 +27,7 @@ use ahash::{AHashMap, AHashSet};
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
-use commonware_utils::{bitmap, iter::zip_eq};
+use commonware_utils::{bitmap, iter::zip_eq, non_empty_range};
 use core::{cmp::Ordering, ops::Range};
 use std::{
     collections::{BTreeMap, hash_map},
@@ -2537,6 +2538,28 @@ where
     }
 }
 
+impl<F: Family, D: Digest, U: update::Update, S: Strategy> sync::MerkleizedBatch
+    for MerkleizedBatch<F, D, U, S>
+where
+    Operation<F, U>: Codec,
+{
+    type Family = F;
+    type Digest = D;
+    type Unmerkleized<H: Hasher<Digest = D>> = UnmerkleizedBatch<F, H, U, S>;
+
+    fn root(&self) -> D {
+        self.root()
+    }
+
+    fn target(&self) -> Result<Target<F, D>, crate::qmdb::Error<F>> {
+        Ok(self.target())
+    }
+
+    fn new_batch<H: Hasher<Digest = D>>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, U, S> {
+        self.new_batch::<H>()
+    }
+}
+
 impl<F: Family, D: Digest, U: update::Update, S: Strategy> MerkleizedBatch<F, D, U, S> {
     /// Return the speculative root.
     pub const fn root(&self) -> D {
@@ -2546,6 +2569,14 @@ impl<F: Family, D: Digest, U: update::Update, S: Strategy> MerkleizedBatch<F, D,
     /// Return the [`Bounds`] of the batch.
     pub const fn bounds(&self) -> &Bounds<F, D> {
         &self.bounds
+    }
+
+    /// Return the sync target reached once this batch is applied.
+    pub fn target(&self) -> Target<F, D> {
+        Target {
+            root: self.root(),
+            range: non_empty_range!(self.bounds.inactivity_floor, self.bounds.tip.size),
+        }
     }
 
     /// Iterate over ancestor batches (parent first, then grandparent, etc.). Stops when a

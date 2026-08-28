@@ -20,11 +20,11 @@ use crate::{
     merkle::{self, Family, Location, MAX_PINNED_NODES, Proof, compact},
     qmdb::{
         self, Error,
-        operation::Floored,
-        sync::{CompactTarget, Request, Response},
+        operation::Committable,
+        sync::{Request, Response, Target},
     },
 };
-use commonware_codec::{Decode as _, EncodeSize, Read, Write};
+use commonware_codec::{Decode as _, Encode, EncodeSize, Read, Write};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_runtime::{Error as RError, Handle};
@@ -104,12 +104,9 @@ impl<F: Family, D: Digest> VerifiedWitness<F, D> {
         self.witness.size
     }
 
-    /// The compact-sync target (root and size) this witness can serve.
-    pub(crate) const fn target(&self) -> CompactTarget<F, D> {
-        CompactTarget {
-            root: self.root,
-            size: self.size(),
-        }
+    /// The sync target this witness can serve.
+    pub(crate) fn target(&self) -> Target<F, D> {
+        super::target(self.root, self.size())
     }
 }
 
@@ -467,7 +464,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
     where
         H: Hasher<Digest = D>,
         S: Strategy,
-        Op: Read + Floored<F>,
+        Op: Read + Committable<F>,
     {
         self.check_import_applied()?;
 
@@ -606,21 +603,6 @@ where
     })
 }
 
-/// Validate that a decoded commit floor does not point past the commit it authenticates.
-///
-/// The inactivity floor of a commit must sit at or below the commit's own location. A higher
-/// floor would reference operations that do not exist yet, which indicates disk corruption in
-/// the persisted witness.
-pub(crate) fn validate_inactivity_floor<F: Family>(
-    inactivity_floor_loc: Location<F>,
-    last_commit_loc: Location<F>,
-) -> Result<(), Error<F>> {
-    if inactivity_floor_loc > last_commit_loc {
-        return Err(Error::DataCorrupted("invalid compact witness"));
-    }
-    Ok(())
-}
-
 /// Load the tip witness from the journal and rebuild the Merkle from it.
 async fn load_tip<E, F, H, S, Op>(
     journal: &Journal<E, F, H::Digest>,
@@ -632,7 +614,7 @@ where
     F: Family,
     H: Hasher,
     S: Strategy,
-    Op: Read + Floored<F>,
+    Op: Read + Committable<F>,
 {
     let size = journal.size();
     if size == 0 {
@@ -657,7 +639,7 @@ where
     D: Digest,
     H: Hasher<Digest = D>,
     S: Strategy,
-    Op: Read + Floored<F>,
+    Op: Read + Committable<F>,
 {
     let size = witness.size;
     if size == 0 {
@@ -670,9 +652,9 @@ where
     let last_commit_op = Op::decode_cfg(witness.op_bytes.as_ref(), commit_codec_config)
         .map_err(|_| Error::DataCorrupted("invalid commit operation"))?;
     let inactivity_floor_loc = last_commit_op
-        .has_floor()
+        .floor()
         .ok_or(Error::DataCorrupted("last operation was not a commit"))?;
-    validate_inactivity_floor(inactivity_floor_loc, last_commit_loc)?;
+    qmdb::validate_inactivity_floor(inactivity_floor_loc, last_commit_loc)?;
 
     let hasher = qmdb::hasher::<H>();
     merkle
@@ -697,18 +679,17 @@ pub(crate) async fn init<E, F, H, S, Op>(
     mut journal: Journal<E, F, H::Digest>,
     merkle: &mut compact::Merkle<F, H::Digest, S>,
     commit_codec_config: &Op::Cfg,
-    initial_commit_op_bytes: Vec<u8>,
 ) -> Result<(Store<E, F, H::Digest>, Op), Error<F>>
 where
     E: Context,
     F: Family,
     H: Hasher,
     S: Strategy,
-    Op: Read + Floored<F>,
+    Op: Read + Encode + Committable<F>,
 {
     if journal.size() == 0 {
-        journal = bootstrap_initial_commit::<E, F, H, S>(journal, merkle, initial_commit_op_bytes)
-            .await?;
+        let initial_commit = Op::initial_commit().encode().to_vec();
+        journal = bootstrap_initial_commit::<E, F, H, S>(journal, merkle, initial_commit).await?;
     }
     let (witness, op) = load_tip::<E, F, H, S, Op>(&journal, merkle, commit_codec_config).await?;
     Ok((Store::new(journal, witness), op))

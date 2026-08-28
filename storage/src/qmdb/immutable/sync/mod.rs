@@ -1,7 +1,7 @@
 use crate::{
     Context,
     index::unordered::Index,
-    journal::{authenticated, contiguous::Mutable},
+    journal::authenticated,
     merkle::{
         Family, Location,
         full::{self, Merkle},
@@ -28,9 +28,14 @@ where
     E: Context,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, K, V>> + sync::Journal<F, Context = E, Op = Operation<F, K, V>>,
-    C::Item: EncodeShared,
-    C::Config: Clone + Send,
+    C: sync::Journal<F, Context = E, Op = Operation<F, K, V>>
+        + authenticated::Backing<
+            E,
+            Item = Operation<F, K, V>,
+            Config = <C as sync::Journal<F>>::Config,
+        >,
+    Operation<F, K, V>: EncodeShared,
+    <C as sync::Journal<F>>::Config: Clone + Send,
     H: Hasher,
     T: Translator,
     S: Strategy,
@@ -39,7 +44,7 @@ where
     type Op = Operation<F, K, V>;
     type Journal = C;
     type Hasher = H;
-    type Config = immutable::Config<T, C::Config, S>;
+    type Config = immutable::Config<T, <C as sync::Journal<F>>::Config, S>;
     type Digest = H::Digest;
     type Context = E;
 
@@ -135,6 +140,10 @@ where
         db.sync().await
     }
 
+    async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
+        Self::init(context, config).await
+    }
+
     async fn persist_sync_result(self) -> Result<Self, Error<F>> {
         Ok(self)
     }
@@ -165,8 +174,11 @@ where
         .await
     }
 
-    fn root(&self) -> Self::Digest {
-        self.root()
+    fn target(&self) -> sync::Target<F, H::Digest> {
+        sync::Target {
+            root: self.root(),
+            range: commonware_utils::non_empty_range!(self.sync_boundary(), self.bounds().end),
+        }
     }
 }
 
@@ -209,6 +221,10 @@ where
         .await
     }
 
+    async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
+        Self::init(context, config).await
+    }
+
     async fn persist_sync_result(self) -> Result<Self, Error<F>> {
         self.sync().await
     }
@@ -222,8 +238,14 @@ where
         Ok(None)
     }
 
-    fn root(&self) -> Self::Digest {
-        self.root()
+    fn target(&self) -> sync::Target<F, H::Digest> {
+        self.target()
+    }
+
+    fn validate_target(
+        target: &sync::Target<F, H::Digest>,
+    ) -> Result<(), sync::EngineError<F, H::Digest>> {
+        qmdb::compact::validate_target(target)
     }
 }
 

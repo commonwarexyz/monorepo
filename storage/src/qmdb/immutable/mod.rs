@@ -80,8 +80,11 @@ use crate::{
     },
     merkle::{Family, Location, Proof, full::Config as MerkleConfig},
     qmdb::{
-        Error, any::ValueEncoding, batch_chain, build_snapshot_from_log, metrics::Metrics,
-        operation::Key, single_operation_root,
+        Error, ROOT_BAGGING,
+        any::ValueEncoding,
+        batch_chain, build_snapshot_from_log, find_inactivity_floor_at,
+        metrics::Metrics,
+        operation::{Committable, Key},
     },
     translator::Translator,
 };
@@ -107,20 +110,6 @@ pub use compact::{
     UnmerkleizedBatch as CompactUnmerkleizedBatch,
 };
 pub use operation::Operation;
-
-/// Compute the authenticated root of a newly initialized database without opening storage.
-///
-/// The initial commit never carries metadata, so this root always represents `Commit(None, 0)`.
-pub fn initial_root<F, K, V, H>() -> H::Digest
-where
-    F: Family,
-    K: Key,
-    V: ValueEncoding,
-    H: Hasher,
-    Operation<F, K, V>: EncodeShared,
-{
-    single_operation_root::<F, H>(&Operation::<F, K, V>::Commit(None, Location::new(0)))
-}
 
 /// Configuration for an [Immutable] authenticated db.
 #[derive(Clone)]
@@ -207,6 +196,40 @@ where
     }
 }
 
+impl<F, E, K, V, C, H, T, S> Immutable<F, E, K, V, C, H, T, S>
+where
+    F: Family,
+    E: Context,
+    K: Key,
+    V: ValueEncoding,
+    C: authenticated::Backing<E, Item = Operation<F, K, V>>,
+    Operation<F, K, V>: EncodeShared,
+    H: Hasher,
+    T: Translator,
+    S: Strategy,
+{
+    /// Returns an [Immutable] db initialized from `cfg`. Any uncommitted log operations will be
+    /// discarded and the state of the db will be as of the last committed operation.
+    pub async fn init(context: E, cfg: Config<T, C::Config, S>) -> Result<Self, Error<F>> {
+        let journal = authenticated::Journal::<F, E, C, H, S>::new(
+            context.child("journal"),
+            cfg.merkle_config,
+            cfg.log,
+            Operation::<F, K, V>::is_commit,
+            ROOT_BAGGING,
+        )
+        .await?;
+        Self::init_from_journal(
+            journal,
+            context,
+            cfg.translator,
+            cfg.init_buffer,
+            cfg.init_cache_size,
+        )
+        .await
+    }
+}
+
 // Shared read-only functionality.
 impl<F, E, K, V, C, H, T, S> Immutable<F, E, K, V, C, H, T, S>
 where
@@ -234,42 +257,27 @@ where
     ) -> Result<Self, Error<F>> {
         if journal.size() == 0 {
             warn!("Authenticated log is empty, initialized new db.");
-            (journal, _) = journal
-                .append(&Operation::Commit(None, Location::new(0)))
-                .await?;
+            (journal, _) = journal.append(&Operation::initial_commit()).await?;
             journal = journal.sync().await?;
         }
 
         let mut snapshot = Index::new(context.child("snapshot"), translator);
 
-        let (last_commit_loc, inactivity_floor_loc) = {
-            let bounds = journal.journal.bounds();
-            let last_commit_loc =
-                Location::new(bounds.end.checked_sub(1).expect("commit should exist"));
+        let size = journal.size();
+        let inactivity_floor_loc = find_inactivity_floor_at(&journal, size).await?;
+        let last_commit_loc = size - 1;
 
-            // Read the floor from the last commit operation.
-            let last_op = journal.journal.read(*last_commit_loc).await?;
-            let inactivity_floor_loc = last_op
-                .has_floor()
-                .expect("last operation should be a commit with floor");
-            if inactivity_floor_loc > last_commit_loc {
-                return Err(Error::DataCorrupted("inactivity floor exceeds last commit"));
-            }
-
-            // Replay the log from the inactivity floor to build the snapshot.
-            build_snapshot_from_log::<F, _, _, _>(
-                inactivity_floor_loc,
-                &journal.journal,
-                &mut snapshot,
-                init_buffer,
-                cache_size,
-                |_, _| {},
-            )
-            .await?;
-
-            (last_commit_loc, inactivity_floor_loc)
-        };
-        let inactive_peaks = F::inactive_peaks(last_commit_loc + 1, inactivity_floor_loc);
+        // Replay the log from the inactivity floor to build the snapshot.
+        build_snapshot_from_log::<F, _, _, _>(
+            inactivity_floor_loc,
+            &journal.journal,
+            &mut snapshot,
+            init_buffer,
+            cache_size,
+            |_, _| {},
+        )
+        .await?;
+        let inactive_peaks = F::inactive_peaks(size, inactivity_floor_loc);
         let root = journal.root(inactive_peaks)?;
 
         let metrics = Metrics::new(context);
@@ -555,19 +563,9 @@ where
         }
 
         let (rewind_last_loc, rewind_floor, rewound_keys) = {
-            let bounds = self.journal.bounds();
             let rewind_last_loc = Location::new(rewind_size - 1);
-            if rewind_size <= bounds.start {
-                return Err(Error::Journal(crate::journal::Error::ItemPruned(
-                    *rewind_last_loc,
-                )));
-            }
-            let rewind_last_op = self.journal.read(*rewind_last_loc).await?;
-            let Operation::Commit(_, rewind_floor) = &rewind_last_op else {
-                return Err(Error::UnexpectedData(rewind_last_loc));
-            };
-            let rewind_floor = *rewind_floor;
-            if *rewind_floor < bounds.start {
+            let rewind_floor = find_inactivity_floor_at(&self.journal, size).await?;
+            if *rewind_floor < self.journal.bounds().start {
                 return Err(Error::Journal(crate::journal::Error::ItemPruned(
                     *rewind_floor,
                 )));
@@ -842,13 +840,13 @@ pub(super) mod tests {
     use super::*;
     use crate::{
         merkle::{Family, Location},
-        qmdb::verify_proof,
+        qmdb::{sync::Target, verify_proof},
         translator::TwoCap,
     };
     use commonware_codec::EncodeShared;
     use commonware_cryptography::{Sha256, sha256, sha256::Digest};
     use commonware_runtime::{Supervisor as _, deterministic};
-    use commonware_utils::NZU64;
+    use commonware_utils::{NZU64, non_empty_range};
     use core::{future::Future, pin::Pin};
     use std::ops::Range;
 
@@ -1697,6 +1695,75 @@ pub(super) mod tests {
         assert_eq!(db.get(&key2).await.unwrap(), None);
 
         db.destroy().await.unwrap();
+    }
+
+    #[boxed]
+    pub(crate) async fn run_merkleized_batch_target<F: Family, V, C>(
+        context: deterministic::Context,
+        open_db: impl Fn(
+            deterministic::Context,
+        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+    ) where
+        V: ValueEncoding<Value = Digest>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
+        C::Item: EncodeShared,
+    {
+        let db = open_db(context.child("db")).await;
+        let floor = Location::new(1);
+        let batch = db
+            .new_batch()
+            .set(Sha256::hash(&[&[1]]), Sha256::fill(1))
+            .merkleize(&db, None, floor)
+            .await;
+        let size = batch.bounds().tip.size;
+        assert_eq!(
+            batch.target().unwrap(),
+            Target {
+                root: batch.root(),
+                range: non_empty_range!(floor, size)
+            }
+        );
+
+        // A floor at the batch size is what `apply_batch` rejects, so there is no target.
+        let batch = db
+            .new_batch()
+            .set(Sha256::hash(&[&[2]]), Sha256::fill(2))
+            .merkleize(&db, None, size)
+            .await;
+        assert!(matches!(
+            batch.target(),
+            Err(Error::FloorBeyondSize(floor, commit)) if floor == size && commit == size - 1
+        ));
+    }
+
+    #[boxed]
+    pub(crate) async fn run_rewind_to_non_commit_errors<F: Family, V, C>(
+        context: deterministic::Context,
+        open_db: impl Fn(
+            deterministic::Context,
+        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+    ) where
+        V: ValueEncoding<Value = Digest>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
+        C::Item: EncodeShared,
+    {
+        let db = open_db(context.child("db")).await;
+        let (db, _) = commit_sets(
+            db,
+            (0u64..2).map(|i| (Sha256::hash(&[&i.to_be_bytes()]), Sha256::fill(i as u8))),
+            None,
+        )
+        .await;
+        let size = db.last_commit_loc + 1;
+
+        // The operation at `size - 2` is a set, so no commit governs `size - 1`.
+        let Err(err) = db.rewind(size - 1).await else {
+            panic!("expected rewind to a non-commit size to fail");
+        };
+        assert!(
+            matches!(err, Error::HistoricalFloorPruned(loc) if loc == size - 1),
+            "unexpected rewind error: {err:?}"
+        );
     }
 
     #[boxed]

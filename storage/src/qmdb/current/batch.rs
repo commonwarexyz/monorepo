@@ -25,13 +25,17 @@ use crate::{
             grafting,
         },
         operation::Key,
+        sync::{self, Target},
     },
 };
 use ahash::AHashMap;
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
-use commonware_utils::bitmap::{self, Readable as _};
+use commonware_utils::{
+    bitmap::{self, Readable as _},
+    non_empty_range,
+};
 use core::ops::Range;
 use std::sync::Arc;
 
@@ -1045,6 +1049,28 @@ impl<const N: usize> bitmap::Readable<N> for BitmapBatch<N> {
     }
 }
 
+impl<F: Graftable, D: Digest, U: update::Update, const N: usize, S: Strategy> sync::MerkleizedBatch
+    for MerkleizedBatch<F, D, U, N, S>
+where
+    Operation<F, U>: Codec,
+{
+    type Family = F;
+    type Digest = D;
+    type Unmerkleized<H: Hasher<Digest = D>> = UnmerkleizedBatch<F, H, U, N, S>;
+
+    fn root(&self) -> D {
+        self.root()
+    }
+
+    fn target(&self) -> Result<Target<F, D>, Error<F>> {
+        Ok(self.target())
+    }
+
+    fn new_batch<H: Hasher<Digest = D>>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, U, N, S> {
+        self.new_batch::<H>()
+    }
+}
+
 impl<F: Graftable, D: Digest, U: update::Update, const N: usize, S: Strategy>
     MerkleizedBatch<F, D, U, N, S>
 {
@@ -1056,6 +1082,14 @@ impl<F: Graftable, D: Digest, U: update::Update, const N: usize, S: Strategy>
     /// Return the QMDB ops-only root.
     pub fn ops_root(&self) -> D {
         self.inner.root()
+    }
+
+    /// Return the sync target reached once this batch is applied.
+    pub fn target(&self) -> Target<F, D> {
+        Target {
+            root: self.ops_root(),
+            range: non_empty_range!(self.sync_boundary(), self.inner.bounds().tip.size),
+        }
     }
 
     /// Return the [`Bounds`] of the batch.
