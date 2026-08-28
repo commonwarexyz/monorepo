@@ -1156,7 +1156,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_validation_marker_rejects_damaged_data_without_mutation() {
+    fn test_validation_marker_damage_never_mutates() {
         #[derive(Clone, Copy)]
         enum Damage {
             MissingIndex,

@@ -54,11 +54,12 @@
 //! # Recovery
 //!
 //! To recover existing data, pass `Some(bits)` to [Ordinal::init]. The bits identify which records
-//! were durably committed by the caller. [Ordinal] validates required records using their CRC32 and
-//! rebuilds the in-memory [crate::rmap::RMap]. Stored sections omitted from `bits` are removed, and
-//! stored records whose bits are unset are cleared before replay. Missing or invalid required records
-//! fail initialization. Passing `Some(BTreeMap::new())` or `None` removes all stored sections and
-//! starts empty.
+//! were durably committed by the caller and rebuild the in-memory [crate::rmap::RMap] without
+//! re-reading the records they mark (a damaged marked record surfaces at [Ordinal::get]). Records in
+//! sections listed with no bitmap are instead validated using their CRC32. Stored sections omitted
+//! from `bits` are removed, and stored records whose bits are unset are cleared before replay.
+//! Records missing from stored sections fail initialization. Passing `Some(BTreeMap::new())` or
+//! `None` removes all stored sections and starts empty.
 //!
 //! # Example
 //!

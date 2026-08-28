@@ -105,6 +105,15 @@ pub struct Writer<B: Blob> {
     /// The active checksum of the partial page in the blob, if any.
     partial_page_state: Option<ActiveChecksum>,
 
+    /// The durable checksum of the page a partial-page flush would rewrite, if any.
+    ///
+    /// Rewrites preserve this slot byte-identically so a torn rewrite can never lose the page's
+    /// last durable contents. It trails [Self::partial_page_state] until a completed sync proves
+    /// the flushed state durable: an unsynced flush ([Self::replay], [Self::snapshot]) must not
+    /// advance it, or a later rewrite would evict the durable checksum and a crash cutting both
+    /// writes could leave no slot covering the synced prefix.
+    durable_page_state: Option<ActiveChecksum>,
+
     /// Durability state for plain writes, resizes, and range-sync writes.
     sync_state: SyncState,
 
@@ -161,6 +170,7 @@ impl<B: Blob> Writer<B> {
             blob,
             current_page,
             partial_page_state,
+            durable_page_state: partial_page_state,
             sync_state: if needs_sync {
                 SyncState::Dirty
             } else {
@@ -368,6 +378,26 @@ impl<B: Blob> Writer<B> {
         Ok(offset)
     }
 
+    /// Whether a flush would emit any physical page write. Mirrors the emptiness rules of
+    /// [Self::to_physical_pages]: full buffered pages always flush, and a partial page flushes
+    /// only when its length differs from the last flushed partial state.
+    fn has_flush_work(&self, write_partial_page: bool) -> bool {
+        let page_size = self.cache_ref.page_size() as usize;
+        if self.buffer.len() / page_size > 0 {
+            return true;
+        }
+        if !write_partial_page {
+            return false;
+        }
+        let partial_len = self.buffer.len() % page_size;
+        if partial_len == 0 {
+            return false;
+        }
+        self.partial_page_state
+            .as_ref()
+            .is_none_or(|state| state.len as usize != partial_len)
+    }
+
     /// Flush all full pages from the buffer to disk, resetting the buffer to contain only the bytes
     /// in any final partial page.
     ///
@@ -386,21 +416,34 @@ impl<B: Blob> Writer<B> {
         write_partial_page: bool,
         sync: bool,
     ) -> Result<bool, Error> {
-        // Prepare the *physical* pages corresponding to the data in the buffer.
-        // Pass the old partial page state so the CRC record is constructed correctly.
+        // If there's nothing to write, return early without observing any pending barrier (an
+        // empty start_sync must remain a cheap re-observation of the in-flight sync).
+        if !self.has_flush_work(write_partial_page) {
+            return Ok(false);
+        }
+
+        // A flush mutates the blob, so first resolve any outstanding start_sync barrier. Once
+        // no unsynced mutation remains, the last flushed partial state is durable and becomes
+        // the checksum the rewrite below must preserve.
+        self.sync_state.wait_for_pending().await?;
+        if self.sync_state.is_clean() {
+            self.durable_page_state = self.partial_page_state;
+        }
+
+        // Prepare the *physical* pages corresponding to the data in the buffer. Rewrites
+        // preserve the durable checksum, not merely the last flushed one: an unsynced flush
+        // (replay, snapshot) may have rewritten the partial page with no barrier, and a torn
+        // later rewrite must still leave the durable contents recoverable.
         let (physical_pages, partial_page_state) = self.to_physical_pages(
             &self.buffer,
             write_partial_page,
             self.partial_page_state.as_ref(),
+            self.durable_page_state.as_ref(),
         );
-
-        // If there's nothing to write, return early.
-        if physical_pages.is_empty() {
-            return Ok(false);
-        }
-
-        // A flush mutates the blob, so first resolve any outstanding start_sync barrier.
-        self.sync_state.wait_for_pending().await?;
+        assert!(
+            !physical_pages.is_empty(),
+            "flush work predicate must match physical page construction"
+        );
 
         // Split buffered bytes into full logical pages to hand off now, leaving any trailing
         // partial page in tip for continued buffering.
@@ -443,6 +486,15 @@ impl<B: Blob> Writer<B> {
         // the blob after any mutable method returns an error.
         self.current_page += pages_to_cache as u64;
         self.partial_page_state = partial_page_state;
+        self.durable_page_state = if sync {
+            // The write below is made durable before this flush returns.
+            partial_page_state
+        } else if pages_to_cache > 0 {
+            // The tip moved to a page with no durable contents to preserve yet.
+            None
+        } else {
+            self.durable_page_state
+        };
 
         // Make sure the buffer offset and underlying blob agree on the state of the tip.
         assert_eq!(self.current_page * self.cache_ref.page_size(), new_offset);
@@ -560,17 +612,20 @@ impl<B: Blob> Writer<B> {
     ///
     /// * `buffer` - The buffer containing logical page data
     /// * `include_partial_page` - Whether to include a partial page if one exists
-    /// * `old_checksum` - The active checksum from a previously committed partial page, if any.
-    ///   When present, the first page's CRC record will preserve it in its original slot and place
-    ///   the new checksum in the other slot.
+    /// * `flushed` - The active checksum of the last flushed partial page, if any. Used only to
+    ///   detect a partial page with nothing new to write.
+    /// * `durable` - The durable checksum of the page being rewritten, if any. When present, the
+    ///   first page's CRC record preserves it in its original slot and places the new checksum
+    ///   in the other slot.
     ///
-    /// Returns the physical pages to write and, for any included partial page, the active
-    /// checksum future flushes must protect.
+    /// Returns the physical pages to write and, for any included partial page, its new active
+    /// checksum.
     fn to_physical_pages(
         &self,
         buffer: &Buffer,
         include_partial_page: bool,
-        old_checksum: Option<&ActiveChecksum>,
+        flushed: Option<&ActiveChecksum>,
+        durable: Option<&ActiveChecksum>,
     ) -> (IoBufs, Option<ActiveChecksum>) {
         let page_size = self.cache_ref.page_size() as usize;
         let physical_page_size = page_size + CHECKSUM_SIZE as usize;
@@ -581,7 +636,7 @@ impl<B: Blob> Writer<B> {
         if pages_to_write > 0 {
             self.append_full_pages(
                 &buffer.slice(..pages_to_write * page_size),
-                old_checksum,
+                durable,
                 &mut write_buffer,
             );
         }
@@ -599,23 +654,19 @@ impl<B: Blob> Writer<B> {
         // If there are no full pages and the partial page length matches what was already
         // written, there's nothing new to write.
         if pages_to_write == 0
-            && let Some(old_checksum) = old_checksum
-            && partial_page.len() == old_checksum.len as usize
+            && let Some(flushed) = flushed
+            && partial_page.len() == flushed.len as usize
         {
             return (write_buffer, None);
         }
         let partial_len = partial_page.len();
         let crc = Crc32::checksum(partial_page);
 
-        // For partial pages: if this is the first page and there's an old CRC, preserve it.
+        // For partial pages: if this is the first page and there's a durable CRC, preserve it.
         // Otherwise just use the new CRC in slot 0.
-        let old_checksum = if pages_to_write == 0 {
-            old_checksum
-        } else {
-            None
-        };
+        let durable = if pages_to_write == 0 { durable } else { None };
         let (crc_record, active_checksum) =
-            Self::build_crc_record(partial_len as u16, crc, old_checksum);
+            Self::build_crc_record(partial_len as u16, crc, durable);
 
         // A persisted partial page still occupies one full physical page:
         // [partial logical bytes, zero padding, crc record].
@@ -858,7 +909,10 @@ impl<B: Blob> Writer<B> {
         }
 
         // The flush had nothing to write. Sync only if a durability barrier is still pending.
-        self.sync_state.sync(&self.blob).await
+        // Everything flushed is durable once it completes.
+        self.sync_state.sync(&self.blob).await?;
+        self.durable_page_state = self.partial_page_state;
+        Ok(())
     }
 
     /// Flushes buffered data and begins making all pending mutations durable, returning a
@@ -1244,6 +1298,7 @@ impl<B: Blob> Writer<B> {
 
         // Shrink the blob to a page boundary, which requires no CRC-slot rewrite.
         self.partial_page_state = None;
+        self.durable_page_state = None;
         self.current_page = full_pages;
         self.buffer.offset = tail_offset;
         self.buffer.clear();
@@ -1293,7 +1348,10 @@ impl<B: Blob> Writer<B> {
                 &old_checksum,
             )
             .await?;
+
+        // The shrink surgery above made the new record durable.
         self.partial_page_state = Some(final_record);
+        self.durable_page_state = Some(final_record);
 
         Ok(())
     }
@@ -1388,6 +1446,70 @@ mod tests {
             let (_, sync) = writer.seal().await.unwrap();
             sync.await.unwrap();
             assert_eq!(blob.uncached_snapshot(), (1, 1));
+        });
+    }
+
+    /// Unsynced partial-page flushes ([Writer::snapshot], [Writer::replay]) rewrite the tail
+    /// page without a durability barrier. Every rewrite must keep the page's durable checksum
+    /// slot byte-identical: a crash can cut the unsynced rewrites per byte, and whichever bytes
+    /// land, the footer must still validate the synced prefix.
+    #[test_traced("DEBUG")]
+    fn test_unsynced_flushes_preserve_durable_checksum_slot() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let page_size = PAGE_SIZE.get() as usize;
+            let physical_page = page_size + CHECKSUM_SIZE as usize;
+            let (blob, blob_size) = context
+                .open("test_partition", b"snapshot_torn")
+                .await
+                .unwrap();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob.clone(), blob_size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+
+            // Make a mid-page prefix durable and capture the page's durable image.
+            let synced: Vec<u8> = (1u8..=24).collect();
+            writer.append(&synced).await.unwrap();
+            writer.sync().await.unwrap();
+            let durable_image = blob
+                .read_at(0, physical_page, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce();
+
+            // Two unsynced rewrites of the same page.
+            writer.append(&[25u8; 8]).await.unwrap();
+            drop(writer.snapshot().await.unwrap());
+            writer.append(&[26u8; 8]).await.unwrap();
+            drop(writer.snapshot().await.unwrap());
+            let torn_image = blob
+                .read_at(0, physical_page, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce();
+
+            // Crash: of the unsynced rewrites, only the final one's footer bytes land, while
+            // the logical region keeps its durable bytes.
+            let mut crash = durable_image.as_ref().to_vec();
+            crash[page_size..].copy_from_slice(&torn_image.as_ref()[page_size..]);
+            let (crashed, _) = context
+                .open("test_partition", b"snapshot_crash")
+                .await
+                .unwrap();
+            crashed
+                .write_at(0, crash, WriteOptions::default())
+                .await
+                .unwrap();
+            crashed.sync().await.unwrap();
+
+            // The synced prefix must recover through the preserved durable slot.
+            let recovered = Writer::new(crashed, physical_page as u64, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            assert_eq!(recovered.size(), synced.len() as u64);
+            let read = recovered.read_at(0, synced.len()).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), synced.as_slice());
         });
     }
 
@@ -3854,7 +3976,7 @@ mod tests {
 
             // Convert buffered logical bytes into physical-page writes.
             let (physical_pages, partial_page_state) =
-                append.to_physical_pages(&buffer, true, None);
+                append.to_physical_pages(&buffer, true, None, None);
 
             // Two full pages should each contribute a logical slice and a CRC slice, and the
             // trailing partial page should contribute one materialized padded physical page.

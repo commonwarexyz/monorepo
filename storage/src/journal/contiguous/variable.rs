@@ -1117,7 +1117,6 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
                 )));
             }
             warn!(blob, valid, size, "truncating to last well-formed page");
-            let writer = pending.get_mut(&blob).expect("suspect blob is present");
             writer.resize(valid).await?;
             writer.sync().await?;
         }

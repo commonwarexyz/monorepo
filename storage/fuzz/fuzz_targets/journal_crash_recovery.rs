@@ -129,6 +129,8 @@ enum JournalOperation {
     Read { pos: u64 },
     /// Sync the journal to storage.
     Sync,
+    /// Capture and drop a snapshot reader, flushing buffered data without a durability barrier.
+    Snapshot,
     /// Commit the journal.
     Commit,
     /// Rewind the journal to a smaller size.
@@ -289,6 +291,7 @@ trait FuzzJournal: Sized {
     fn append(self, item: Item) -> impl Future<Output = Result<(Self, u64), Error>> + Send;
     fn read(&self, pos: u64) -> impl Future<Output = Result<Item, Error>> + Send;
     fn sync(self) -> impl Future<Output = Result<Self, Error>> + Send;
+    fn snapshot(self) -> impl Future<Output = Result<Self, Error>> + Send;
     fn commit(self) -> impl Future<Output = Result<Self, Error>> + Send;
     fn rewind(self, size: u64) -> impl Future<Output = Result<Self, Error>> + Send;
     fn prune(self, min_pos: u64) -> impl Future<Output = Result<(Self, bool), Error>> + Send;
@@ -360,6 +363,12 @@ impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
         FixedJournal::sync(self).await
     }
 
+    async fn snapshot(self) -> Result<Self, Error> {
+        let (journal, reader) = FixedJournal::snapshot(self).await?;
+        drop(reader);
+        Ok(journal)
+    }
+
     async fn commit(self) -> Result<Self, Error> {
         FixedJournal::commit(self).await
     }
@@ -426,6 +435,12 @@ impl FuzzJournal for VariableJournal<deterministic::Context, Item> {
 
     async fn sync(self) -> Result<Self, Error> {
         VariableJournal::sync(self).await
+    }
+
+    async fn snapshot(self) -> Result<Self, Error> {
+        let (journal, reader) = VariableJournal::snapshot(self).await?;
+        drop(reader);
+        Ok(journal)
     }
 
     async fn rewind(self, size: u64) -> Result<Self, Error> {
@@ -652,6 +667,14 @@ async fn run_ops<J: FuzzJournal>(
                     expected.synced(journal.bounds());
                     journal
                 }
+                Err(_) => return,
+            },
+
+            // A snapshot flushes buffered data without a durability barrier, changing no
+            // durability expectation. It schedules unsynced partial-page rewrites for the
+            // next crash to cut.
+            JournalOperation::Snapshot => match journal.snapshot().await {
+                Ok(journal) => journal,
                 Err(_) => return,
             },
 
