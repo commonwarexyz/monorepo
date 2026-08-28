@@ -698,10 +698,13 @@ where
         let mut marshaled = self.clone();
         let round = context.round;
 
-        // Register the certification gate task synchronously so `certify` finds a pending
-        // entry even while the optimistic block subscription is still waiting locally.
-        // This lets `certify` take the task and bump a round-bound notarized fetch
-        // via `hint_notarized`.
+        let block_request = marshal.subscribe_by_digest(digest, DigestFallback::Wait);
+
+        // Publish the certification gate only after enqueueing the block subscription. Marshal
+        // processes ordinary messages in FIFO order, so a certification hint cannot consume a
+        // transient buffer hit before this request either receives the block or installs a waiter.
+        // The gate remains visible while the optimistic verification and durable store are in
+        // flight, allowing certification to activate round-bound recovery through `hint_notarized`.
         let (task_tx, task_rx) = oneshot::channel();
         self.gates.insert(round, digest, task_rx);
 
@@ -730,7 +733,6 @@ where
                     )
                 });
 
-                let block_request = marshal.subscribe_by_digest(digest, DigestFallback::Wait);
                 let block = select! {
                     _ = tx.closed() => {
                         debug!(
