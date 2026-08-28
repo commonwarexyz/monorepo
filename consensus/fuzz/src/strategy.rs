@@ -91,6 +91,14 @@ pub trait Strategy: Send + Sync {
     /// `None` means every observed view is faulty. `Some(views)` uses the same
     /// distinct-view schedule shape as `network_faults`.
     fn disrupter_faults(&self, required_containers: u64, rng: &mut impl Rng) -> Option<Vec<View>>;
+
+    /// Whether a `Disrupter` may emit raw byte-corrupted copies of observed
+    /// votes, certificates, and resolver messages (which fail decode/signature
+    /// checks). Semantic-only strategies return `false` to restrict emissions to
+    /// validly re-signed messages.
+    fn emit_byte_corruption(&self) -> bool {
+        true
+    }
 }
 
 #[derive(Clone, Copy, Debug)]

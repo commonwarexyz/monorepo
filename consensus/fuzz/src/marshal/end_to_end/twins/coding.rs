@@ -369,10 +369,16 @@ where
                 *idx,
                 application,
                 state.genesis_digest,
+                commonware_consensus::types::Height::zero(),
                 &self.stack_label,
             );
         }
-        invariants::check_all_blocks(&state.honest, state.genesis_digest, Some(&self.stack_label));
+        invariants::check_all_blocks(
+            &state.honest,
+            state.genesis_digest,
+            commonware_consensus::types::Height::zero(),
+            Some(&self.stack_label),
+        );
     }
 }
 

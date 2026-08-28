@@ -15,6 +15,8 @@ pub(crate) mod mallory;
 #[cfg(feature = "mocks")]
 pub mod marshal;
 pub mod network;
+#[cfg(feature = "mocks")]
+pub mod scenarios;
 pub mod simplex;
 pub(crate) mod simplex_audit;
 #[cfg(any(feature = "mocks", test))]

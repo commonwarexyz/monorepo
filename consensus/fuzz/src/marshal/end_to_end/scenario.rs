@@ -53,9 +53,12 @@ use crate::{
     utils::apply_partition,
 };
 use commonware_consensus::{
-    marshal::mocks::{
-        application::Application,
-        harness::{LINK, NUM_VALIDATORS},
+    marshal::{
+        Start,
+        mocks::{
+            application::Application,
+            harness::{LINK, NUM_VALIDATORS},
+        },
     },
     simplex::ForwardPolicy,
     types::{Epoch, Round, TermLength, View},
@@ -553,7 +556,8 @@ pub fn run_scenario<P: Simplex>(
                 &mut oracle,
                 validator.clone(),
                 provider,
-                genesis_marshal_block.clone(),
+                Start::Genesis(genesis_marshal_block.clone()),
+                None,
                 DEFAULT_MAX_PENDING_ACKS,
                 Some(node),
             )
@@ -640,7 +644,12 @@ pub fn run_scenario<P: Simplex>(
             .filter(|(idx, _, _)| Role::from_index(*idx).is_correct())
             .map(|(idx, _, app)| (*idx, app.clone()))
             .collect();
-        invariants::check_all_blocks(&correct, genesis_commitment, Some("marshal-scenario"));
+        invariants::check_all_blocks(
+            &correct,
+            genesis_commitment,
+            commonware_consensus::types::Height::zero(),
+            Some("marshal-scenario"),
+        );
 
         ScenarioOutcome {
             template,

@@ -31,12 +31,68 @@ use commonware_cryptography::{
     Digestible, Sha256, certificate::Scheme, sha256::Digest as Sha256Digest,
 };
 use commonware_runtime::{Clock as _, deterministic};
-use commonware_utils::{FuzzRng, sync::Mutex};
+use commonware_utils::{FuzzRng, channel::mpsc, sync::Mutex};
 use futures::StreamExt;
 use rand_core::Rng as _;
 use std::{
     collections::HashMap, fmt, marker::PhantomData, num::NonZeroUsize, sync::Arc, time::Duration,
 };
+
+/// Buffer for delivery-height updates; far above the single-epoch block count so
+/// a subscriber never misses one.
+const PROGRESS_CHANNEL_CAPACITY: usize = 256;
+
+/// Shared delivery-height progress for one node, so a liveness watcher can await a
+/// target height on a channel instead of polling (and cloning) the application's
+/// block map. All clones share one subscriber set.
+#[derive(Clone)]
+pub(crate) struct ProgressHandle {
+    inner: Arc<Mutex<Progress>>,
+}
+
+struct Progress {
+    latest: u64,
+    subscribers: Vec<mpsc::Sender<u64>>,
+}
+
+impl ProgressHandle {
+    pub(crate) fn new() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(Progress {
+                latest: 0,
+                subscribers: Vec::new(),
+            })),
+        }
+    }
+
+    /// Highest delivered height recorded so far.
+    pub(crate) fn latest(&self) -> u64 {
+        self.inner.lock().latest
+    }
+
+    /// Subscribe to delivery-height updates: returns the current height and a
+    /// receiver yielding each subsequent height.
+    pub(crate) fn subscribe(&self) -> (u64, mpsc::Receiver<u64>) {
+        let mut progress = self.inner.lock();
+        let (tx, rx) = mpsc::channel(PROGRESS_CHANNEL_CAPACITY);
+        progress.subscribers.push(tx);
+        (progress.latest, rx)
+    }
+
+    fn record(&self, height: u64) {
+        let mut progress = self.inner.lock();
+        if height <= progress.latest {
+            return;
+        }
+        progress.latest = height;
+        progress.subscribers.retain(|tx| {
+            !matches!(
+                tx.try_send(height),
+                Err(mpsc::error::TrySendError::Closed(_))
+            )
+        });
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct DeliveryReporter<C>
@@ -48,6 +104,7 @@ where
     tips: Arc<Mutex<Vec<(Round, Height, Sha256Digest)>>>,
     max_pending_acks: Option<NonZeroUsize>,
     stack: Arc<str>,
+    progress: Option<ProgressHandle>,
 }
 
 impl<C> DeliveryReporter<C>
@@ -66,7 +123,15 @@ where
             tips: Arc::new(Mutex::new(Vec::new())),
             max_pending_acks,
             stack,
+            progress: None,
         }
+    }
+
+    /// Publish delivery-height updates to `progress` so a liveness watcher can
+    /// await progress on a channel instead of polling.
+    pub(crate) fn with_progress(mut self, progress: ProgressHandle) -> Self {
+        self.progress = Some(progress);
+        self
     }
 }
 
@@ -141,6 +206,9 @@ where
                             self.stack,
                         );
                     }
+                }
+                if let Some(progress) = &self.progress {
+                    progress.record(block.height().get());
                 }
             }
         }

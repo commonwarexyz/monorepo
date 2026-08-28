@@ -26,8 +26,9 @@ use crate::{
 };
 pub use coding::fuzz_marshal_coding_twins;
 use commonware_consensus::{
-    marshal::mocks::{
-        application::Application, block::Block as MockBlock, harness::NUM_VALIDATORS,
+    marshal::{
+        Start,
+        mocks::{application::Application, block::Block as MockBlock, harness::NUM_VALIDATORS},
     },
     simplex::{mocks::twins, types::Context as SimplexContext},
     types::{Epoch, TermLength, View},
@@ -235,7 +236,8 @@ where
                 &mut oracle,
                 validator.clone(),
                 ConstantProvider::new(schemes[idx].clone()),
-                genesis_block.clone(),
+                Start::Genesis(genesis_block.clone()),
+                None,
                 self.max_pending_acks,
                 None,
             )
@@ -523,9 +525,20 @@ where
         _topology: &TwinsTopology<P, Self::Case>,
     ) {
         for (idx, application) in &state.primaries {
-            invariants::check_local_blocks(*idx, application, state.genesis, &self.stack_label);
+            invariants::check_local_blocks(
+                *idx,
+                application,
+                state.genesis,
+                commonware_consensus::types::Height::zero(),
+                &self.stack_label,
+            );
         }
-        invariants::check_all_blocks(&state.honest, state.genesis, Some(&self.stack_label));
+        invariants::check_all_blocks(
+            &state.honest,
+            state.genesis,
+            commonware_consensus::types::Height::zero(),
+            Some(&self.stack_label),
+        );
     }
 }
 
