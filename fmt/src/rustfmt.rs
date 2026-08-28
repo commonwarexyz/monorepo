@@ -300,16 +300,34 @@ impl Formatter {
             return Err(Error::UnsupportedIndentation(indentation));
         }
         let prefix = crate::marker::unique_prefix(source, "rustfmt_match_arm");
-        let module_depth = indentation / INDENT - 1;
+        let module_depth = if indentation == INDENT {
+            0
+        } else {
+            indentation / INDENT - 2
+        };
         let wrapper = match_arm_wrapper(source, indentation, module_depth, &prefix);
         let formatted = self.run(&wrapper)?;
         let file = syn::parse_file(&formatted).map_err(Error::Reparse)?;
         let item = nested_item(&file.items, module_depth, &prefix)?;
-        let Item::Const(item) = item else {
-            return Err(Error::WrapperShape);
-        };
-        let Expr::Match(expression) = item.expr.as_ref() else {
-            return Err(Error::WrapperShape);
+        let expression = if indentation == INDENT {
+            let Item::Const(item) = item else {
+                return Err(Error::WrapperShape);
+            };
+            let Expr::Match(expression) = item.expr.as_ref() else {
+                return Err(Error::WrapperShape);
+            };
+            expression
+        } else {
+            let Item::Fn(item) = item else {
+                return Err(Error::WrapperShape);
+            };
+            if item.sig.ident != format!("{prefix}item") {
+                return Err(Error::WrapperShape);
+            }
+            let [syn::Stmt::Expr(Expr::Match(expression), _)] = item.block.stmts.as_slice() else {
+                return Err(Error::WrapperShape);
+            };
+            expression
         };
         let [arm] = expression.arms.as_slice() else {
             return Err(Error::WrapperShape);
@@ -472,6 +490,24 @@ fn match_arm_wrapper(
     prefix: &str,
 ) -> String {
     let mut output = module_prefix(module_depth, prefix);
+    if indentation >= INDENT * 2 {
+        output.push_str(&" ".repeat(indentation - INDENT * 2));
+        output.push_str("fn ");
+        output.push_str(prefix);
+        output.push_str("item() {\n");
+        output.push_str(&" ".repeat(indentation - INDENT));
+        output.push_str("match () {\n");
+        output.push_str(&" ".repeat(indentation));
+        output.push_str("_ => ");
+        output.push_str(&indent_inline_source(source, indentation));
+        output.push_str(",\n");
+        output.push_str(&" ".repeat(indentation - INDENT));
+        output.push_str("};\n");
+        output.push_str(&" ".repeat(indentation - INDENT * 2));
+        output.push_str("}\n");
+        close_modules(&mut output, module_depth);
+        return output;
+    }
     output.push_str(&" ".repeat(indentation - INDENT));
     output.push_str("const _: () = match () {\n");
     output.push_str(&" ".repeat(indentation));
@@ -901,6 +937,19 @@ mod tests {
 
         assert!(formatted.text().contains("value.map(|value|"));
         assert!(formatted.text().contains('\n'), "{}", formatted.text());
+        syn::parse_str::<Expr>(formatted.text()).expect("formatted body should parse");
+    }
+
+    #[test]
+    fn match_arm_wrapper_retains_deep_destination_indentation() {
+        let source = "match value {\n    _ => {\n        if skip_finalized_block(&mut self.skip_finalized_until, block.height()) {\n            async {\n                verifications\n                    .drive(self.processor.notify_finalized(\n                        self.context.as_present(),\n                        block.as_ref(),\n                    ))\n                    .await;\n                acknowledgement.acknowledge();\n            }\n            .instrument(process)\n            .await;\n        } else {}\n    }\n}";
+        let formatted = Formatter::default().match_arm_body(source, 12).unwrap();
+
+        assert!(
+            formatted.text().contains("match value {"),
+            "{}",
+            formatted.text()
+        );
         syn::parse_str::<Expr>(formatted.text()).expect("formatted body should parse");
     }
 
