@@ -1463,51 +1463,10 @@ mod tests {
     }
 
     #[test]
-    fn policy_keeps_coalesced_hints_in_fifo_position() {
+    fn policy_drains_fifo() {
         let mut overflow = pending();
         let first = public_key(1);
         let second = public_key(2);
-        let (get_block_9, _get_block_9_rx) = get_block(9);
-        let (get_info_11, _get_info_11_rx) = get_info(11);
-
-        <TestMessage as Policy>::handle(&mut overflow, get_block_9);
-        <TestMessage as Policy>::handle(&mut overflow, hint_finalized(10, first.clone()));
-        <TestMessage as Policy>::handle(&mut overflow, get_info_11);
-        <TestMessage as Policy>::handle(&mut overflow, hint_finalized(10, second.clone()));
-
-        let drained = drain(&mut overflow);
-        assert_eq!(drained.len(), 3);
-        assert!(matches!(
-            &drained[0],
-            TestMessage::GetBlock {
-                identifier: Identifier::Height(height),
-                ..
-            } if *height == Height::new(9)
-        ));
-        assert!(matches!(
-            &drained[2],
-            TestMessage::GetInfo {
-                identifier: Identifier::Height(height),
-                ..
-            } if *height == Height::new(11)
-        ));
-        let TestMessage::HintFinalized {
-            height, targets, ..
-        } = &drained[1]
-        else {
-            panic!("expected hint");
-        };
-        assert_eq!(*height, Height::new(10));
-        assert_eq!(targets.len().get(), 2);
-        assert!(targets.contains(&first));
-        assert!(targets.contains(&second));
-    }
-
-    /// A `Wait` subscription, `HintNotarized`, and a later mailbox barrier must
-    /// retain their enqueue order.
-    #[test]
-    fn policy_drains_ordinary_messages_in_enqueue_order() {
-        let mut overflow = pending();
         let (response, _subscribe_rx) = oneshot::channel();
         let subscribe = TestMessage::SubscribeByDigest {
             span: Span::none(),
@@ -1522,11 +1481,13 @@ mod tests {
         };
 
         <TestMessage as Policy>::handle(&mut overflow, subscribe);
+        <TestMessage as Policy>::handle(&mut overflow, hint_finalized(10, first.clone()));
         <TestMessage as Policy>::handle(&mut overflow, hint_notarized(1));
+        <TestMessage as Policy>::handle(&mut overflow, hint_finalized(10, second.clone()));
         <TestMessage as Policy>::handle(&mut overflow, processed);
 
         let drained = drain(&mut overflow);
-        assert_eq!(drained.len(), 3);
+        assert_eq!(drained.len(), 4);
         assert!(matches!(
             &drained[0],
             TestMessage::SubscribeByDigest {
@@ -1535,12 +1496,22 @@ mod tests {
                 ..
             } if *digest == block(1).digest()
         ));
+        let TestMessage::HintFinalized {
+            height, targets, ..
+        } = &drained[1]
+        else {
+            panic!("expected hint");
+        };
+        assert_eq!(*height, Height::new(10));
+        assert_eq!(targets.len().get(), 2);
+        assert!(targets.contains(&first));
+        assert!(targets.contains(&second));
         assert!(matches!(
-            &drained[1],
+            &drained[2],
             TestMessage::HintNotarized { round: hinted, .. } if *hinted == round(1)
         ));
         assert!(matches!(
-            &drained[2],
+            &drained[3],
             TestMessage::GetProcessedHeight { .. }
         ));
     }

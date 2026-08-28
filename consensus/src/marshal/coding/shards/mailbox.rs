@@ -369,9 +369,8 @@ mod tests {
     type C = ReedSolomon<H>;
     type TestMessage = Message<B, C, H, ed25519::PublicKey>;
 
-    /// `Notarized` must drain before the marshal hint's `GetByCommitment`.
     #[test]
-    fn policy_drains_messages_in_enqueue_order() {
+    fn policy_drains_fifo() {
         let block = CodedBlock::<B, C, H>::new(
             B::new(Sha256Digest::EMPTY, Height::new(1), 1),
             coding_config_for_participants(4),
