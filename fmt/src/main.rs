@@ -144,10 +144,9 @@ fn replace(path: &Path, source: &str) -> io::Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let metadata = fs::metadata(path)?;
     if has_multiple_hard_links(&metadata) {
-        let mut file = fs::OpenOptions::new().write(true).open(path)?;
-        file.write_all(source.as_bytes())?;
-        file.set_len(source.len() as u64)?;
-        return file.flush();
+        return Err(io::Error::other(
+            "refusing to replace a file with multiple hard links",
+        ));
     }
 
     let mut temporary = NamedTempFile::new_in(parent)?;
@@ -329,28 +328,33 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn preserves_hard_link_aliases_when_replacing_files() {
-        use std::os::unix::fs::MetadataExt as _;
+    fn refuses_to_replace_hard_linked_files_without_writing() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
         let temp = TempDir::new();
         let target = temp.join("target.rs");
         let alias = temp.join("alias.rs");
         fs::write(&target, unformatted()).expect("Rust file should be written");
         fs::hard_link(&target, &alias).expect("hard link should be created");
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o4755))
+            .expect("permissions should be set");
         let original_inode = fs::metadata(&target).unwrap().ino();
+        let original_mode = fs::metadata(&target).unwrap().mode();
 
         let outcome = run_files(std::slice::from_ref(&target), false);
 
-        assert!(outcome.errors.is_empty());
-        assert_eq!(outcome.changed, vec![target.clone()]);
+        assert!(outcome.changed.is_empty());
+        assert_eq!(outcome.errors.len(), 1);
+        assert!(outcome.errors[0].contains("multiple hard links"));
         assert_eq!(
             fs::read_to_string(&target).unwrap(),
             fs::read_to_string(&alias).unwrap()
         );
-        assert_ne!(fs::read_to_string(&target).unwrap(), unformatted());
+        assert_eq!(fs::read_to_string(&target).unwrap(), unformatted());
         assert_eq!(fs::metadata(&target).unwrap().ino(), original_inode);
         assert_eq!(fs::metadata(&alias).unwrap().ino(), original_inode);
         assert_eq!(fs::metadata(&target).unwrap().nlink(), 2);
+        assert_eq!(fs::metadata(&target).unwrap().mode(), original_mode);
     }
 
     #[test]
