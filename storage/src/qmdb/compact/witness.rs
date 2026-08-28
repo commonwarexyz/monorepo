@@ -1,10 +1,9 @@
 //! The persisted witness of a compact-db state and its verification.
 //!
-//! A [`Witness`] is a complete snapshot of one applied state: the commit operation, the
-//! committed size, and the pinned nodes one operation below it. The commit's inclusion proof is
-//! not stored. [`restore`] rebuilds the tree by appending the commit operation to the pinned
-//! nodes and derives the root and proof from it; a structurally invalid entry fails with
-//! [`Error::DataCorrupted`].
+//! A [`Witness`] records one applied state: the commit operation, the committed size, and the
+//! pinned nodes one operation below it. The commit's inclusion proof is not stored. [`restore`]
+//! rebuilds the Merkle by appending the commit operation to the pinned nodes and derives the root
+//! and proof from it; a structurally invalid entry fails with [`Error::DataCorrupted`].
 
 use super::variant::Variant;
 use crate::{
@@ -18,7 +17,7 @@ use commonware_parallel::Strategy;
 
 /// An applied state persisted by the witness journal.
 #[derive(Clone)]
-pub(crate) struct Witness<F: Family, D: Digest, O> {
+pub(crate) struct Witness<F: Family, D: Digest, O: Variant<F>> {
     /// The last commit operation, at `size - 1`.
     pub(crate) commit: O,
     /// The committed database size.
@@ -61,7 +60,7 @@ impl<F: Family, D: Digest, O: Variant<F>> Read for Witness<F, D, O> {
 impl<F: Family, D: Digest, O> arbitrary::Arbitrary<'_> for Witness<F, D, O>
 where
     D: for<'a> arbitrary::Arbitrary<'a>,
-    O: for<'a> arbitrary::Arbitrary<'a>,
+    O: Variant<F> + for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
@@ -76,8 +75,7 @@ where
 #[derive(Clone)]
 pub(super) struct VerifiedWitness<F: Family, D: Digest, O: Variant<F>> {
     pub(super) witness: Witness<F, D, O>,
-    /// Inactivity floor declared by the commit. The root is computed over the peaks it leaves
-    /// active.
+    /// Inactivity floor declared by the commit.
     pub(super) inactivity_floor_loc: Location<F>,
     /// Root committed by `witness`.
     pub(super) root: D,
@@ -166,9 +164,9 @@ pub(super) fn validate_inactivity_floor<F: Family>(
     Ok(())
 }
 
-/// Materialize the tree `witness` describes and derive its root and commit proof.
+/// Materialize the Merkle `witness` describes and derive its root and commit proof.
 ///
-/// The tree is built from the pinned nodes one operation below the commit plus the commit
+/// The Merkle is built from the pinned nodes one operation below the commit plus the commit
 /// itself, then pruned back to its frontier. Merkle errors propagate unchanged.
 pub(super) fn restore<F, O, H, S>(
     strategy: S,

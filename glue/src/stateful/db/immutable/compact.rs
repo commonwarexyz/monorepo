@@ -1,4 +1,4 @@
-//! The immutable compact db: a [`CompactUnmerkleized`] batch sets keys.
+//! Immutable compact adapter: batches set keys.
 //!
 //! See [`crate::stateful::db::compact`] for the shared
 //! [`ManagedDb`](crate::stateful::db::ManagedDb) implementation.

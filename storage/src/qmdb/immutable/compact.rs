@@ -1,7 +1,6 @@
-//! The immutable compact db: a [`compact::Db`] whose batches set keys.
+//! Immutable [`compact::Db`] db.
 //!
-//! See [`crate::qmdb::compact`] for the shared implementation. Commits carry an inactivity
-//! floor for wire-format compatibility with [`crate::qmdb::immutable::Immutable`].
+//! See [`crate::qmdb::compact`] for the shared implementation.
 
 use super::operation::Operation;
 pub use crate::qmdb::compact::Config;
@@ -24,7 +23,7 @@ where
     type Mutations = BTreeMap<K, V::Value>;
     const NAME: &'static str = "immutable";
 
-    fn commit_op(metadata: Option<V::Value>, inactivity_floor_loc: Location<F>) -> Self {
+    fn commit(metadata: Option<V::Value>, inactivity_floor_loc: Location<F>) -> Self {
         Self::Commit(metadata, inactivity_floor_loc)
     }
 

@@ -1,7 +1,6 @@
-//! The keyless compact db: a [`compact::Db`] whose batches append values.
+//! Keyless [`compact::Db`] db.
 //!
-//! See [`crate::qmdb::compact`] for the shared implementation. Commits carry an inactivity
-//! floor for wire-format compatibility with [`crate::qmdb::keyless::Keyless`].
+//! See [`crate::qmdb::compact`] for the shared implementation.
 
 use super::operation::Operation;
 pub use crate::qmdb::compact::Config;
@@ -23,7 +22,7 @@ where
     type Mutations = Vec<V::Value>;
     const NAME: &'static str = "keyless";
 
-    fn commit_op(metadata: Option<V::Value>, inactivity_floor_loc: Location<F>) -> Self {
+    fn commit(metadata: Option<V::Value>, inactivity_floor_loc: Location<F>) -> Self {
         Self::Commit(metadata, inactivity_floor_loc)
     }
 

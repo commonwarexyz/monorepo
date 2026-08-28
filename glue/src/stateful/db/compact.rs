@@ -1,4 +1,4 @@
-//! Compact [`ManagedDb`] implementation for QMDB compact databases.
+//! [`ManagedDb`] for the QMDB compact dbs.
 //!
 //! One implementation serves every compact variant: the adapters are generic over the operation
 //! type, and [`keyless`](super::keyless::compact) and [`immutable`](super::immutable::compact)

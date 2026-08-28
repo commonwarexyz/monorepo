@@ -1,4 +1,4 @@
-//! The keyless compact db: a [`CompactUnmerkleized`] batch appends values.
+//! Keyless compact adapter: batches append values.
 //!
 //! See [`crate::stateful::db::compact`] for the shared
 //! [`ManagedDb`](crate::stateful::db::ManagedDb) implementation.

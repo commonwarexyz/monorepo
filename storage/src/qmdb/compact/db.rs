@@ -1,10 +1,8 @@
 //! A compact authenticated db that discards historical operations, retaining only a witness
 //! for each applied batch.
 //!
-//! One implementation serves the keyless and immutable variants. The operation type implements
-//! [`Variant`]: how a batch accumulates mutations and how commit operations are built and
-//! inspected; [`crate::qmdb::keyless`] and [`crate::qmdb::immutable`] fix it through type
-//! aliases and add the variant-specific batch mutator (`append` / `set`).
+//! One implementation serves the keyless and immutable variants. [`crate::qmdb::keyless`] and
+//! [`crate::qmdb::immutable`] pin the operation type through aliases and add `append` and `set`.
 //!
 //! Mirrors the API of the full dbs ([`crate::qmdb::keyless::Keyless`],
 //! [`crate::qmdb::immutable::Immutable`]): `new_batch -> merkleize -> apply_batch -> commit /
@@ -29,11 +27,9 @@
 //!
 //! # Inactivity floor
 //!
-//! Commits carry an inactivity floor for wire-format compatibility with the full dbs: the
-//! root is computed over the encoded operation sequence, and that sequence must include the same
-//! floor to produce the same root as the full db. The floor has no effect on pruning or
-//! snapshot rebuilding here; all historical in-memory state is discarded whenever a batch is
-//! applied.
+//! Commits carry the inactivity floor so the compact db's commit leaves and root match the full
+//! db's: the root is computed over the peaks the floor leaves active. The floor drives no pruning
+//! or retention here.
 
 use super::{
     Config, Variant, batch as compact_batch,
@@ -66,9 +62,8 @@ enum TipState {
     Committed,
     /// Journaled after the latest durability operation started.
     Uncommitted,
-    /// From compact sync and not in the journal, which still holds the partition's previous
-    /// contents until the first application or durability operation journals the tip in their
-    /// place.
+    /// From compact sync. The journal still holds the partition's previous contents until the
+    /// first apply or durability operation replaces them with the tip.
     Imported,
 }
 
@@ -93,7 +88,7 @@ where
     /// The verified tip witness; `tip_state` says whether it is in the journal.
     tip: VerifiedWitness<F, H::Digest, O>,
 
-    /// The tip witness's relationship to the journal.
+    /// Whether the tip is journaled and durable.
     tip_state: TipState,
 
     /// The sync pipelined by the last [`Self::start_sync`], cleared by the next full
@@ -175,9 +170,9 @@ where
         mut journal: witness::Journal<E, F, H::Digest, O>,
     ) -> Result<Self, Error<F>> {
         let entry = if journal.size() == 0 {
-            // Leaf 0 has nothing pinned below it, so the genesis witness needs no tree.
+            // Leaf 0 has nothing pinned below it, so the genesis witness needs no Merkle.
             let genesis = Witness {
-                commit: O::commit_op(None, Location::new(0)),
+                commit: O::commit(None, Location::new(0)),
                 size: Location::new(1),
                 pinned_nodes: Vec::new(),
             };
@@ -315,9 +310,8 @@ where
     /// Journal a pending compact-sync import, if any, in place of the partition's previous
     /// contents.
     ///
-    /// Clears to a nonzero size: if a crash interrupts the import, reopen sees an empty journal
-    /// at a nonzero size, whose tip position is below its pruning boundary, and fails instead of
-    /// mistaking it for a fresh db.
+    /// Clears to at least size 1 so a crash mid-import reopens as a corrupt journal rather than a
+    /// fresh db.
     async fn flush_import(mut self) -> Result<Self, Error<F>> {
         if self.tip_state != TipState::Imported {
             return Ok(self);
@@ -625,11 +619,9 @@ where
 
     /// Resolve pending mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
     ///
-    /// `inactivity_floor` is threaded through the commit operation for wire-format parity with
-    /// the full db. It must be >= the database's current floor (monotonically
-    /// non-decreasing) and at most the batch's commit location (`total_size - 1`); these bounds
-    /// are validated, but the floor does not drive any local pruning or retention in the
-    /// compact db.
+    /// `inactivity_floor` goes into the commit operation so the root matches the full db's. It
+    /// must be at least the db's current floor and at most the batch's commit location
+    /// (`total_size - 1`).
     #[tracing::instrument(
         name = "qmdb.compact.batch.merkleize",
         level = "info",
@@ -653,7 +645,7 @@ where
             live_ancestors.last().map(|oldest| oldest.bounds.base),
         );
 
-        let commit = O::commit_op(metadata, inactivity_floor);
+        let commit = O::commit(metadata, inactivity_floor);
         let mutations = O::into_ops(self.mutations);
         let mut ops = Vec::with_capacity(mutations.len() + 1);
         ops.extend(mutations);
@@ -743,7 +735,7 @@ where
     O: Variant<F>,
     H: Hasher,
 {
-    qmdb::single_operation_root::<F, H>(&O::commit_op(None, Location::new(0)))
+    qmdb::single_operation_root::<F, H>(&O::commit(None, Location::new(0)))
 }
 
 impl<F, E, O, H, S> Source for Db<F, E, O, H, S>
@@ -1443,7 +1435,7 @@ pub(crate) mod tests {
                     journal,
                     size_b - 1,
                     pinned_b,
-                    O::commit_op(Some(meta_b.clone()), Location::new(0)),
+                    O::commit(Some(meta_b.clone()), Location::new(0)),
                 )
                 .unwrap();
                 assert_eq!(imported.target(), target_b);
@@ -1941,7 +1933,7 @@ pub(crate) mod tests {
                     journal,
                     target_b.size - 1,
                     pinned_b,
-                    O::commit_op(Some(meta_b.clone()), Location::new(0)),
+                    O::commit(Some(meta_b.clone()), Location::new(0)),
                 )
                 .unwrap();
                 assert_eq!(imported.target(), target_b);
@@ -2016,7 +2008,7 @@ pub(crate) mod tests {
                     journal,
                     target_b.size - 1,
                     pinned_b,
-                    O::commit_op(Some(meta_b.clone()), Location::new(0)),
+                    O::commit(Some(meta_b.clone()), Location::new(0)),
                 )
                 .unwrap();
                 assert_eq!(imported.target(), target_b);
@@ -2169,7 +2161,7 @@ pub(crate) mod tests {
             // Overwrite the persisted commit op with a floor beyond its own commit location.
             let journal = open_witness_journal::<O>(context.child("tamper"), partition).await;
             let (_, size, pinned_nodes) = witness::tests::tip(&journal).await;
-            let bad_op = O::commit_op(Some(O::value(11)), oversized_floor);
+            let bad_op = O::commit(Some(O::value(11)), oversized_floor);
             witness::tests::overwrite_tip(journal, bad_op, size, pinned_nodes).await;
 
             let journal =

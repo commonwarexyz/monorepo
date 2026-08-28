@@ -7,7 +7,7 @@
 //! `(leaf_count, pinned_nodes)` snapshot has the same root and the same future append
 //! behavior as the original.
 //!
-//! Nodes created by appends are retained only until the structure is pruned to its frontier;
+//! Nodes created by appends are retained only until the Merkle is pruned to its frontier;
 //! after that they are no longer readable.
 
 use crate::merkle::{
@@ -86,7 +86,8 @@ impl<F: Family, D: Digest, S: Strategy> Merkle<F, D, S> {
         }
     }
 
-    /// Create a `Merkle` with no retained nodes from a compact state snapshot.
+    /// Create a `Merkle` with no retained nodes from its compact state: a leaf count and the
+    /// pinned nodes.
     pub(crate) fn from_compact_state(
         strategy: S,
         leaves: Location<F>,
@@ -222,7 +223,7 @@ mod tests {
         merkle.prune_to_frontier();
         assert_eq!(merkle.root(&hasher, 0).unwrap(), root);
 
-        // A tree built from the snapshot reproduces the same state.
+        // A Merkle rebuilt from the compact state has the same root and leaf count.
         let mut restored =
             TestMerkle::<F>::from_compact_state(Sequential, leaves, pinned_nodes).unwrap();
         assert_eq!(restored.root(&hasher, 0).unwrap(), root);
