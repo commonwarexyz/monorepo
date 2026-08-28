@@ -619,6 +619,7 @@ commonware_macros::stability_scope!(BETA {
             }
         }
 
+        #[track_caller]
         fn spawn<F, T>(
             &self,
             len: usize,
