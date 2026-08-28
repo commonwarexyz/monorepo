@@ -2610,7 +2610,7 @@ mod tests {
                         {
                             break;
                         }
-                        batcher::Message::Update { .. } => {}
+                        batcher::Message::Update { .. } => {},
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(1)) => {
@@ -2986,7 +2986,7 @@ mod tests {
                 },
                 _ = context.sleep(Duration::from_secs(2)) => {
                     panic!("expected current-view nullify before leader timeout expired");
-                },
+                }
             }
         });
     }
@@ -3111,9 +3111,7 @@ mod tests {
             loop {
                 select! {
                     msg = batcher_receiver.recv() => {
-                        if let batcher::Message::Constructed(Vote::Finalize(finalize)) =
-                            msg.unwrap()
-                        {
+                        if let batcher::Message::Constructed(Vote::Finalize(finalize)) = msg.unwrap() {
                             assert_eq!(
                                 finalize.view(),
                                 View::new(3),
@@ -3124,7 +3122,7 @@ mod tests {
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
                         panic!("expected finalize for view 3 after heal");
-                    },
+                    }
                 }
             }
         });
@@ -3200,36 +3198,38 @@ mod tests {
             let mut saw_view_1_nullify = false;
             loop {
                 select! {
-                    msg = batcher_receiver.recv() => match msg.unwrap() {
-                        batcher::Message::Update { .. } => {}
-                        batcher::Message::Constructed(Vote::Notarize(notarize)) => {
-                            if notarize.view() == View::new(1) {
-                                saw_view_1_notarize = true;
+                    msg = batcher_receiver.recv() => {
+                        match msg.unwrap() {
+                            batcher::Message::Update { .. } => {}
+                            batcher::Message::Constructed(Vote::Notarize(notarize)) => {
+                                if notarize.view() == View::new(1) {
+                                    saw_view_1_notarize = true;
+                                }
+                                if notarize.view() == View::new(2) {
+                                    assert!(
+                                        saw_view_1_notarize,
+                                        "expected view 1 notarize before optimistic view 2 notarize"
+                                    );
+                                    assert!(
+                                        saw_view_1_nullify,
+                                        "expected the view-1 timeout to interleave before the view-2 notarize"
+                                    );
+                                    break;
+                                }
                             }
-                            if notarize.view() == View::new(2) {
-                                assert!(
-                                    saw_view_1_notarize,
-                                    "expected view 1 notarize before optimistic view 2 notarize"
-                                );
-                                assert!(
-                                    saw_view_1_nullify,
-                                    "expected the view-1 timeout to interleave before the view-2 notarize"
-                                );
-                                break;
+                            batcher::Message::Constructed(Vote::Nullify(nullify))
+                                if nullify.view() == View::new(1) =>
+                            {
+                                saw_view_1_nullify = true;
                             }
+                            _ => {}
                         }
-                        batcher::Message::Constructed(Vote::Nullify(nullify))
-                            if nullify.view() == View::new(1) =>
-                        {
-                            saw_view_1_nullify = true;
-                        }
-                        _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(8)) => {
                         panic!(
                             "expected optimistic notarize for view 2 despite interleaved timeout handling"
                         );
-                    },
+                    }
                 }
             }
         });
@@ -3251,9 +3251,12 @@ mod tests {
                 ..
             } = ed25519::fixture(&mut context, &namespace, n);
 
-            let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                participants.clone(),
+                true,
+            )
+            .await;
 
             let elector = RoundRobin::<Sha256>::default().with_term(
                 term_length,
@@ -3325,8 +3328,7 @@ mod tests {
             loop {
                 select! {
                     msg = batcher_receiver.recv() => {
-                        if let batcher::Message::Constructed(Vote::Notarize(notarize)) =
-                            msg.unwrap()
+                        if let batcher::Message::Constructed(Vote::Notarize(notarize)) = msg.unwrap()
                             && notarize.view() == View::new(1)
                         {
                             break;
@@ -3334,7 +3336,7 @@ mod tests {
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
                         panic!("expected notarize for view 1 after journal sync");
-                    },
+                    }
                 }
             }
         });
@@ -3399,7 +3401,7 @@ mod tests {
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
                         panic!("expected nullify for view 1");
-                    },
+                    }
                 }
             };
             let nullification =
@@ -3517,20 +3519,22 @@ mod tests {
 
             loop {
                 select! {
-                    msg = batcher_receiver.recv() => match msg.unwrap() {
-                        batcher::Message::Update { .. } => {}
-                        batcher::Message::Constructed(Vote::Notarize(notarize))
-                            if notarize.view() == View::new(2) =>
-                        {
-                            break;
+                    msg = batcher_receiver.recv() => {
+                        match msg.unwrap() {
+                            batcher::Message::Update { .. } => {}
+                            batcher::Message::Constructed(Vote::Notarize(notarize))
+                                if notarize.view() == View::new(2) =>
+                            {
+                                break;
+                            }
+                            _ => {}
                         }
-                        _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(8)) => {
                         panic!(
                             "expected optimistic notarize for view 2 after local parent notarize"
                         );
-                    },
+                    }
                 }
             }
 
@@ -3632,8 +3636,7 @@ mod tests {
             loop {
                 select! {
                     msg = batcher_receiver.recv() => {
-                        if let batcher::Message::Constructed(Vote::Notarize(notarize)) =
-                            msg.unwrap()
+                        if let batcher::Message::Constructed(Vote::Notarize(notarize)) = msg.unwrap()
                             && notarize.view() == View::new(1)
                         {
                             break;
@@ -3641,7 +3644,7 @@ mod tests {
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
                         panic!("expected notarize for view 1");
-                    },
+                    }
                 }
             }
 
@@ -3659,8 +3662,7 @@ mod tests {
             loop {
                 select! {
                     msg = batcher_receiver.recv() => {
-                        if let batcher::Message::Constructed(Vote::Notarize(notarize)) =
-                            msg.unwrap()
+                        if let batcher::Message::Constructed(Vote::Notarize(notarize)) = msg.unwrap()
                             && notarize.view() == View::new(2)
                         {
                             break;
@@ -3668,7 +3670,7 @@ mod tests {
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
                         panic!("expected optimistic notarize for view 2");
-                    },
+                    }
                 }
             }
 
@@ -3690,7 +3692,7 @@ mod tests {
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
                         panic!("expected failed certification to nullify view 1");
-                    },
+                    }
                 }
             }
 
@@ -3710,8 +3712,7 @@ mod tests {
             loop {
                 select! {
                     msg = batcher_receiver.recv() => {
-                        if let batcher::Message::Constructed(Vote::Notarize(notarize)) =
-                            msg.unwrap()
+                        if let batcher::Message::Constructed(Vote::Notarize(notarize)) = msg.unwrap()
                             && notarize.view() == View::new(3)
                         {
                             panic!("rejected ancestry must not produce a view 3 notarize");
@@ -3741,7 +3742,7 @@ mod tests {
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
                         panic!("expected nullification to advance to the next term");
-                    },
+                    }
                 }
             }
         });
@@ -4055,17 +4056,13 @@ mod tests {
                             kind,
                             target,
                             ..
-                        } = message.unwrap()
-                        else {
+                        } = message.unwrap() else {
                             continue;
                         };
                         assert_eq!(proposal, View::new(3));
                         assert_eq!(view, View::new(2));
                         assert!(matches!(kind, crate::simplex::actors::Kind::Notarization));
-                        assert!(
-                            target.is_some(),
-                            "certification repair should retain leader affinity"
-                        );
+                        assert!(target.is_some(), "certification repair should retain leader affinity");
                         break;
                     },
                     _ = context.sleep(Duration::from_secs(20)) => {
@@ -5293,8 +5290,7 @@ mod tests {
                         batcher::Message::Update { .. } => {}
                         batcher::Message::Constructed(_) => {}
                     },
-                    message =
-                        commonware_p2p::Receiver::recv(&mut observer_vote_receiver) => {
+                    message = commonware_p2p::Receiver::recv(&mut observer_vote_receiver) => {
                         let (_, message) = message.unwrap();
                         let vote: Vote<S, Sha256Digest> = Vote::decode(message).unwrap();
                         if vote.view() == leader_view {
@@ -5374,8 +5370,7 @@ mod tests {
                         batcher::Message::Update { .. } => {}
                         batcher::Message::Constructed(_) => {}
                     },
-                    message =
-                        commonware_p2p::Receiver::recv(&mut observer_vote_receiver) => {
+                    message = commonware_p2p::Receiver::recv(&mut observer_vote_receiver) => {
                         let (_, message) = message.unwrap();
                         let vote: Vote<S, Sha256Digest> = Vote::decode(message).unwrap();
                         if vote.view() == target_view {
@@ -7580,14 +7575,13 @@ mod tests {
                         {
                             panic!("stale verification failure nullified the replacement proposal");
                         }
-                        batcher::Message::Update { .. } | batcher::Message::Constructed(_) => {}
+                        batcher::Message::Update { .. }
+                        | batcher::Message::Constructed(_) => {}
                     },
                     message = resolver_receiver.recv() => match message.unwrap() {
-                        MailboxMessage::Certified {
-                            view: certified,
-                            success,
-                            ..
-                        } if certified == view => {
+                        MailboxMessage::Certified { view: certified, success, .. }
+                            if certified == view =>
+                        {
                             assert!(success);
                             break;
                         }
@@ -7729,15 +7723,18 @@ mod tests {
             let reported = loop {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certified { view, success, .. } if view == view5 => {
+                        MailboxMessage::Certified { view, success, .. }
+                            if view == view5 =>
+                        {
                             break Some(success);
                         }
                         MailboxMessage::Certified { .. }
                         | MailboxMessage::Certificate { .. }
                         | MailboxMessage::Resolve { .. } => {}
                     },
-                    msg = batcher_receiver.recv() =>
-                        if let batcher::Message::Update { .. } = msg.unwrap() {},
+                    msg = batcher_receiver.recv() => {
+                        if let batcher::Message::Update { .. } = msg.unwrap() {}
+                    },
                     _ = context.sleep(Duration::from_secs(6)) => {
                         break None;
                     },
@@ -7847,15 +7844,18 @@ mod tests {
             let certified = loop {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certified { view, success, .. } if view == target_view => {
+                        MailboxMessage::Certified { view, success, .. }
+                            if view == target_view =>
+                        {
                             break Some(success);
                         }
                         MailboxMessage::Certified { .. }
                         | MailboxMessage::Certificate { .. }
                         | MailboxMessage::Resolve { .. } => {}
                     },
-                    msg = batcher_receiver.recv() =>
-                        if let batcher::Message::Update { .. } = msg.unwrap() {},
+                    msg = batcher_receiver.recv() => {
+                        if let batcher::Message::Update { .. } = msg.unwrap() {}
+                    },
                     _ = context.sleep(Duration::from_secs(6)) => break None,
                 }
             };
@@ -7954,9 +7954,7 @@ mod tests {
                     msg = batcher_receiver.recv() => match msg.unwrap() {
                         batcher::Message::Constructed(Vote::Nullify(n))
                             if n.view() == target_view =>
-                        {
-                            break;
-                        }
+                            break,
                         batcher::Message::Update { .. } => {}
                         _ => {}
                     },
@@ -8086,9 +8084,7 @@ mod tests {
                     msg = batcher_receiver.recv() => match msg.unwrap() {
                         batcher::Message::Constructed(Vote::Notarize(n))
                             if n.view() == target_view =>
-                        {
-                            break;
-                        }
+                            break,
                         batcher::Message::Update { .. } => {}
                         _ => {}
                     },
@@ -8107,9 +8103,7 @@ mod tests {
                     msg = batcher_receiver.recv() => match msg.unwrap() {
                         batcher::Message::Constructed(Vote::Nullify(n))
                             if n.view() == target_view =>
-                        {
-                            break;
-                        }
+                            break,
                         batcher::Message::Update { .. } => {}
                         _ => {}
                     },
@@ -8252,9 +8246,7 @@ mod tests {
                     msg = batcher_receiver.recv() => match msg.unwrap() {
                         batcher::Message::Constructed(Vote::Nullify(n))
                             if n.view() == target_view =>
-                        {
-                            break;
-                        }
+                            break,
                         batcher::Message::Update { .. } => {}
                         _ => {}
                     },
@@ -8386,14 +8378,14 @@ mod tests {
             // and emit a nullify vote.
             loop {
                 select! {
-                    msg = batcher_receiver.recv() => match msg.unwrap() {
-                        batcher::Message::Constructed(Vote::Nullify(nullify))
-                            if nullify.view() == target_view =>
-                        {
-                            break;
+                    msg = batcher_receiver.recv() => {
+                        match msg.unwrap() {
+                            batcher::Message::Constructed(Vote::Nullify(nullify)) if nullify.view() == target_view => {
+                                break;
+                            }
+                            batcher::Message::Update { .. } => {},
+                            _ => {}
                         }
-                        batcher::Message::Update { .. } => {}
-                        _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
                         panic!(
@@ -8708,7 +8700,10 @@ mod tests {
             // Sanity check: canceled certification should not have advanced this view yet.
             let advanced_before_restart = select! {
                 msg = batcher_receiver.recv() => {
-                    if let batcher::Message::Update { current, .. } = msg.unwrap() {
+                    if let batcher::Message::Update {
+                        current, ..
+                    } = msg.unwrap()
+                    {
 
                         current > target_view
                     } else {
@@ -8792,10 +8787,7 @@ mod tests {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
                         MailboxMessage::Certified { view, success, .. } if view == target_view => {
-                            assert!(
-                                success,
-                                "expected successful certification after restart for canceled certification view"
-                            );
+                            assert!(success, "expected successful certification after restart for canceled certification view");
                             break;
                         }
                         MailboxMessage::Certified { .. }
@@ -8807,9 +8799,7 @@ mod tests {
                             batcher::Message::Constructed(Vote::Nullify(nullify))
                                 if nullify.view() == target_view =>
                             {
-                                panic!(
-                                    "unexpected immediate nullify for view {target_view} after restart"
-                                );
+                                panic!("unexpected immediate nullify for view {target_view} after restart");
                             }
                             batcher::Message::Update { .. } => {
 
@@ -8935,9 +8925,8 @@ mod tests {
             loop {
                 select! {
                     msg = batcher_receiver.recv() => match msg.unwrap() {
-                        batcher::Message::Constructed(Vote::Nullify(n)) if n.view() == view_4 => {
-                            break;
-                        }
+                        batcher::Message::Constructed(Vote::Nullify(n)) if n.view() == view_4 =>
+                            break,
                         batcher::Message::Update { .. } => {}
                         _ => {}
                     },
@@ -9135,12 +9124,10 @@ mod tests {
             loop {
                 select! {
                     msg = batcher_receiver.recv() => match msg.unwrap() {
-                        batcher::Message::Constructed(Vote::Notarize(n))
-                            if n.view() == target_view =>
-                        {
+                        batcher::Message::Constructed(Vote::Notarize(n)) if n.view() == target_view => {
                             break;
                         }
-                        batcher::Message::Update { .. } => {}
+                        batcher::Message::Update { .. } => {},
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(2)) => {
@@ -9159,18 +9146,18 @@ mod tests {
             loop {
                 select! {
                     msg = batcher_receiver.recv() => match msg.unwrap() {
-                        batcher::Message::Constructed(Vote::Nullify(nullify))
-                            if nullify.view() == target_view =>
-                        {
+                        batcher::Message::Constructed(Vote::Nullify(nullify)) if nullify.view() == target_view => {
                             // Successfully voted nullify after having voted notarize
                             break;
                         }
-                        batcher::Message::Update { .. } => {}
+                        batcher::Message::Update { .. } => {},
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
-                        panic!("voter should emit nullify for view {target_view} after certification failure, \
-                             even though it already voted notarize");
+                        panic!(
+                            "voter should emit nullify for view {target_view} after certification failure, \
+                             even though it already voted notarize"
+                        );
                     },
                 }
             }
@@ -9425,12 +9412,10 @@ mod tests {
             loop {
                 select! {
                     msg = batcher_receiver.recv() => match msg.unwrap() {
-                        batcher::Message::Constructed(Vote::Notarize(v))
-                            if v.view() == target_view =>
-                        {
+                        batcher::Message::Constructed(Vote::Notarize(v)) if v.view() == target_view => {
                             break;
                         }
-                        batcher::Message::Update { .. } => {}
+                        batcher::Message::Update { .. } => {},
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(2)) => {
@@ -9454,9 +9439,9 @@ mod tests {
                                 "received nullify for view {target_view} before certification timeout"
                             );
                         }
-                        batcher::Message::Update { .. } => {}
+                        batcher::Message::Update { .. } => {},
                         _ => {}
-                    },
+                    }
                 }
             }
 
@@ -9469,7 +9454,7 @@ mod tests {
                         {
                             break;
                         }
-                        batcher::Message::Update { .. } => {}
+                        batcher::Message::Update { .. } => {},
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(6)) => {
@@ -9576,9 +9561,7 @@ mod tests {
                 select! {
                     _ = context.sleep_until(quiet_deadline) => break,
                     msg = batcher_receiver.recv() => match msg.unwrap() {
-                        batcher::Message::Constructed(Vote::Notarize(v))
-                            if v.view() == target_view =>
-                        {
+                        batcher::Message::Constructed(Vote::Notarize(v)) if v.view() == target_view => {
                             panic!(
                                 "unexpected notarize for view {target_view} from recovered certificate"
                             );
@@ -9590,9 +9573,9 @@ mod tests {
                                 "received nullify for view {target_view} before certification timeout after recovered certificate"
                             );
                         }
-                        batcher::Message::Update { .. } => {}
+                        batcher::Message::Update { .. } => {},
                         _ => {}
-                    },
+                    }
                 }
             }
 
@@ -9605,7 +9588,7 @@ mod tests {
                         {
                             break;
                         }
-                        batcher::Message::Update { .. } => {}
+                        batcher::Message::Update { .. } => {},
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(6)) => {
@@ -9704,7 +9687,7 @@ mod tests {
                         {
                             break;
                         }
-                        batcher::Message::Update { .. } => {}
+                        batcher::Message::Update { .. } => {},
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(2)) => {
@@ -9754,9 +9737,9 @@ mod tests {
                                 "received nullify for view 2 before its fresh leader timeout elapsed"
                             );
                         }
-                        batcher::Message::Update { .. } => {}
+                        batcher::Message::Update { .. } => {},
                         _ => {}
-                    },
+                    }
                 }
             }
         });
@@ -10126,10 +10109,7 @@ mod tests {
                 select! {
                     msg = batcher_receiver.recv() => match msg.unwrap() {
                         batcher::Message::Constructed(Vote::Notarize(notarize))
-                            if notarize.view() == target_view =>
-                        {
-                            break;
-                        }
+                            if notarize.view() == target_view => break,
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
@@ -10189,8 +10169,7 @@ mod tests {
             loop {
                 select! {
                     _ = context.sleep_until(deadline) => break,
-                    message =
-                        commonware_p2p::Receiver::recv(&mut observer_vote_receiver) => {
+                    message = commonware_p2p::Receiver::recv(&mut observer_vote_receiver) => {
                         let (_, message) = message.unwrap();
                         let vote: Vote<S, Sha256Digest> = Vote::decode(message).unwrap();
                         assert!(
@@ -10232,7 +10211,9 @@ mod tests {
             while !certified {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certified { view, success, .. } if view == target_view => {
+                        MailboxMessage::Certified { view, success, .. }
+                            if view == target_view =>
+                        {
                             assert!(success, "expected successful certification");
                             certified = true;
                         }
@@ -10251,8 +10232,7 @@ mod tests {
                     _ = context.sleep_until(deadline) => {
                         panic!("timed out waiting for finalize in view {target_view}");
                     },
-                    message =
-                        commonware_p2p::Receiver::recv(&mut observer_vote_receiver) => {
+                    message = commonware_p2p::Receiver::recv(&mut observer_vote_receiver) => {
                         let (_, message) = message.unwrap();
                         let vote: Vote<S, Sha256Digest> = Vote::decode(message).unwrap();
                         if matches!(
@@ -10353,17 +10333,16 @@ mod tests {
                         _ => {}
                     },
                     msg = batcher_receiver.recv() => {
-                        if let batcher::Message::Update { current, .. } = msg.unwrap()
-                            && current >= target_view.next()
-                        {
-                            assert_eq!(current, target_view.next());
-                            advanced = true;
-                        }
+                        if let batcher::Message::Update {
+                            current, ..
+                        } = msg.unwrap()
+                            && current >= target_view.next() {
+                                assert_eq!(current, target_view.next());
+                                advanced = true;
+                            }
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
-                        panic!(
-                            "timed out waiting for restarted voter to advance past view {target_view}"
-                        );
+                        panic!("timed out waiting for restarted voter to advance past view {target_view}");
                     },
                 }
             }
@@ -10522,14 +10501,17 @@ mod tests {
             loop {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certified { view, success, .. } if view == target_view => {
+                        MailboxMessage::Certified { view, success, .. }
+                            if view == target_view =>
+                        {
                             assert!(!success, "expected failed certification");
                             break;
                         }
                         _ => {}
                     },
-                    msg = batcher_receiver.recv() =>
-                        if let batcher::Message::Update { .. } = msg.unwrap() {},
+                    msg = batcher_receiver.recv() => {
+                        if let batcher::Message::Update { .. } = msg.unwrap() {}
+                    },
                     _ = context.sleep(Duration::from_secs(5)) => {
                         panic!("timed out waiting for failed certification in first run");
                     },
@@ -10606,7 +10588,9 @@ mod tests {
             loop {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certified { view, success, .. } if view == target_view => {
+                        MailboxMessage::Certified { view, success, .. }
+                            if view == target_view =>
+                        {
                             assert!(!success, "replayed certification should be a failure");
                             replayed_certified = true;
                         }

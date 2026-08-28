@@ -85,11 +85,11 @@ async fn wait_for_event<F: Family, Op: Send, D: Digest, E: Send>(
     select! {
         finish = finish_fut => finish.map_or_else(
             || Some(Event::FinishChannelClosed),
-            |_| Some(Event::FinishRequested),
+            |_| Some(Event::FinishRequested)
         ),
         target = target_update_fut => target.map_or_else(
             || Some(Event::UpdateChannelClosed),
-            |target| Some(Event::TargetUpdate(target)),
+            |target| Some(Event::TargetUpdate(target))
         ),
         result = batch_result_fut => Some(Event::BatchReceived(result)),
     }

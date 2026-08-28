@@ -868,7 +868,7 @@ where
                         .await
                         {
                             return (current_anchor, current_target);
-                        }
+                        };
                         if reached != current_target {
                             continue;
                         }
@@ -3253,7 +3253,7 @@ mod tests {
             );
             select! {
                 _ = finish_signal => Ok(Self {
-                    final_target: target,
+                    final_target: target
                 }),
                 _ = context.sleep(Duration::from_millis(10)) => {
                     if let Some(reached_target) = reached_target.as_ref() {

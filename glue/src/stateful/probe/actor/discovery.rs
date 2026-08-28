@@ -87,12 +87,11 @@ where
                 }
 
                 // Arm the retry timer only while actively searching for a floor.
-                let retry =
-                    if self.sample.floor().is_none() && !self.floor_subscribers.is_empty() {
-                        Either::Left(self.context.sleep_until(deadline))
-                    } else {
-                        Either::Right(future::pending())
-                    };
+                let retry = if self.sample.floor().is_none() && !self.floor_subscribers.is_empty() {
+                    Either::Left(self.context.sleep_until(deadline))
+                } else {
+                    Either::Right(future::pending())
+                };
             },
             on_stopped => {
                 debug!("shutdown signal received");

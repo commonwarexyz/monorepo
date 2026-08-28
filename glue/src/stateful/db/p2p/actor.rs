@@ -195,7 +195,7 @@ where
             _ = &mut resolver_task => {
                 return;
             },
-            Some(message) = mailbox_message else continue =>
+            Some(message) = mailbox_message else continue => {
                 match self.handle_mailbox_message(message) {
                     MailboxAction::None => {}
                     MailboxAction::Fetch(request) => {
@@ -204,7 +204,8 @@ where
                     MailboxAction::Cancel(request) => {
                         resolver_mailbox.retain(move |key, _| key != &request);
                     }
-                },
+                }
+            },
             Some(message) = handler_rx.recv() else {
                 return;
             } => match message {

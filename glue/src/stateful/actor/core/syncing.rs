@@ -145,9 +145,9 @@ where
                     ..
                 } => {
                     span.in_scope(|| {
-                            debug!(epoch = %context.epoch(), view = %context.view(), "proposal rejected: state sync in progress");
-                            response.send_lossy(None);
-                        });
+                        debug!(epoch = %context.epoch(), view = %context.view(), "proposal rejected: state sync in progress");
+                        response.send_lossy(None);
+                    });
                 }
                 Message::Verify {
                     span,

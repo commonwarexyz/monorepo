@@ -80,74 +80,66 @@ where
             Some(message) = self.mailbox.recv() else {
                 debug!("mailbox closed, shutting down");
                 return ControlFlow::Break(());
-            } => {
-                match message {
-                    MailboxMessage::NextLog { span, response, .. } => {
-                        let process =
-                            info_span!(parent: &span, "dkg.reshare.actor.dealing.next_log");
-                        process.in_scope(|| {
-                            let _ = response.send_lossy(None);
-                        });
-                    }
-                    MailboxMessage::ReleaseLog { .. } => {}
-                    MailboxMessage::EpochInfo { span, response, .. } => {
-                        let process =
-                            info_span!(parent: &span, "dkg.reshare.actor.dealing.epoch_info");
-                        process.in_scope(|| {
-                            let _ = response.send_lossy(EpochInfoResponse::Pending);
-                        });
-                    }
-                    MailboxMessage::Finalized {
-                        span,
-                        block,
-                        response,
-                    } => {
-                        let process = info_span!(
-                            parent: &span,
-                            "dkg.reshare.actor.dealing.finalized",
-                            height = block.height().traced()
+            } => match message {
+                MailboxMessage::NextLog { span, response, .. } => {
+                    let process = info_span!(parent: &span, "dkg.reshare.actor.dealing.next_log");
+                    process.in_scope(|| {
+                        let _ = response.send_lossy(None);
+                    });
+                }
+                MailboxMessage::ReleaseLog { .. } => {}
+                MailboxMessage::EpochInfo { span, response, .. } => {
+                    let process = info_span!(parent: &span, "dkg.reshare.actor.dealing.epoch_info");
+                    process.in_scope(|| {
+                        let _ = response.send_lossy(EpochInfoResponse::Pending);
+                    });
+                }
+                MailboxMessage::Finalized {
+                    span,
+                    block,
+                    response,
+                } => {
+                    let process = info_span!(
+                        parent: &span,
+                        "dkg.reshare.actor.dealing.finalized",
+                        height = block.height().traced()
+                    );
+                    let done = async {
+                        let bounds = self
+                            .epocher
+                            .containing(block.height())
+                            .expect("epocher must know of block height");
+                        assert_eq!(bounds.epoch(), epoch, "dealing received future epoch block");
+                        assert_eq!(
+                            bounds.phase(),
+                            EpochPhase::Early,
+                            "dealing received block after early phase"
                         );
-                        let done = async {
-                            let bounds = self
-                                .epocher
-                                .containing(block.height())
-                                .expect("epocher must know of block height");
-                            assert_eq!(
-                                bounds.epoch(),
+
+                        if let Some(dealer) = dealer.as_deref_mut() {
+                            Self::send_dealings(
+                                &self.signer.public_key(),
+                                store,
                                 epoch,
-                                "dealing received future epoch block"
-                            );
-                            assert_eq!(
-                                bounds.phase(),
-                                EpochPhase::Early,
-                                "dealing received block after early phase"
-                            );
-
-                            if let Some(dealer) = dealer.as_deref_mut() {
-                                Self::send_dealings(
-                                    &self.signer.public_key(),
-                                    store,
-                                    epoch,
-                                    dealer,
-                                    player.as_deref_mut(),
-                                    &mut sender,
-                                )
-                                .await;
-                            }
-
-                            let done = self
-                                .epocher
-                                .midpoint(epoch)
-                                .and_then(|midpoint| midpoint.previous())
-                                == Some(block.height());
-                            response.acknowledge();
-                            done
+                                dealer,
+                                player.as_deref_mut(),
+                                &mut sender,
+                            )
+                            .await;
                         }
-                        .instrument(process)
-                        .await;
-                        if done {
-                            return ControlFlow::Continue(());
-                        }
+
+                        let done = self
+                            .epocher
+                            .midpoint(epoch)
+                            .and_then(|midpoint| midpoint.previous())
+                            == Some(block.height());
+                        response.acknowledge();
+                        done
+                    }
+                    .instrument(process)
+                    .await;
+                    if done {
+                        return ControlFlow::Continue(());
                     }
                 }
             },

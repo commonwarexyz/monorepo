@@ -284,9 +284,7 @@ mod tests {
             let deadline = start + dial_timeout * 2;
             let message = select! {
                 message = releases.recv() => message.expect("Releaser mailbox closed"),
-                _ = context.sleep_until(deadline) => {
-                    panic!("Dial reservation was not released")
-                },
+                _ = context.sleep_until(deadline) => panic!("Dial reservation was not released"),
             };
             let tracker::Message::Release { metadata } = message else {
                 panic!("Unexpected releaser message");

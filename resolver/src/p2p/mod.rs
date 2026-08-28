@@ -1358,9 +1358,7 @@ mod tests {
 
             // With no peers, no event should arrive
             select! {
-                _ = cons_out1.recv() => {
-                    panic!("Fetch should have failed due to no peers")
-                },
+                _ = cons_out1.recv() => panic!("Fetch should have failed due to no peers"),
                 _ = context.sleep(Duration::from_millis(100)) => {},
             };
         });
@@ -2635,8 +2633,7 @@ mod tests {
             assert_eq!(value, first_response);
 
             let delivery = select! {
-                delivery =
-                    started.recv() => delivery.expect("second delivery did not start"),
+                delivery = started.recv() => delivery.expect("second delivery did not start"),
                 _ = context.sleep(Duration::from_secs(2)) => {
                     panic!("late subscriber was not delivered");
                 },
@@ -2786,8 +2783,7 @@ mod tests {
             );
 
             let delivery = select! {
-                delivery =
-                    started.recv() => delivery.expect("retry delivery did not start"),
+                delivery = started.recv() => delivery.expect("retry delivery did not start"),
                 _ = context.sleep(Duration::from_secs(2)) => {
                     panic!("ambiguous response was not retried with the late subscriber");
                 },
@@ -3019,8 +3015,7 @@ mod tests {
             assert_eq!(value, data);
 
             let delivery = select! {
-                delivery =
-                    started.recv() => delivery.expect("second delivery did not start"),
+                delivery = started.recv() => delivery.expect("second delivery did not start"),
                 _ = context.sleep(Duration::from_secs(2)) => {
                     panic!("late subscriber was not delivered while an unrelated waiter was armed");
                 },

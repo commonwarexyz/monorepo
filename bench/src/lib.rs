@@ -111,23 +111,16 @@ commonware_macros::stability_scope!(ALPHA {
                 return;
             };
             if let Some(parent) = std::path::Path::new(&path).parent() {
-                fs::create_dir_all(parent).unwrap_or_else(|err| {
-                    panic!(
-                        "failed to create benchmark metrics directory `{}`: {err}",
-                        parent.display()
-                    )
-                });
+                fs::create_dir_all(parent)
+                    .unwrap_or_else(|err| panic!("failed to create benchmark metrics directory `{}`: {err}", parent.display()));
             }
             let mut file = fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(&path)
-                .unwrap_or_else(|err| {
-                    panic!("failed to open benchmark metrics file `{path}`: {err}")
-                });
-            writeln!(file, "{line}").unwrap_or_else(|err| {
-                panic!("failed to write benchmark metrics file `{path}`: {err}")
-            });
+                .unwrap_or_else(|err| panic!("failed to open benchmark metrics file `{path}`: {err}"));
+            writeln!(file, "{line}")
+                .unwrap_or_else(|err| panic!("failed to write benchmark metrics file `{path}`: {err}"));
         }
     }
 

@@ -1115,7 +1115,9 @@ mod tests {
                 &schemes, &verifier, EPOCH, notarized,
             )));
             let first = select! {
-                message = requester_voter_receiver.recv() => message.expect("voter mailbox closed"),
+                message = requester_voter_receiver.recv() => {
+                    message.expect("voter mailbox closed")
+                },
                 _ = context.sleep(Duration::from_secs(2)) => {
                     panic!("notarization was not fetched");
                 },
@@ -1161,7 +1163,9 @@ mod tests {
                 Some(participants[2].clone()),
             );
             let recovered = select! {
-                message = requester_voter_receiver.recv() => message.expect("voter mailbox closed"),
+                message = requester_voter_receiver.recv() => {
+                    message.expect("voter mailbox closed")
+                },
                 _ = context.sleep(Duration::from_secs(2)) => {
                     panic!("ambiguous notarization answer blocked ancestry repair");
                 },

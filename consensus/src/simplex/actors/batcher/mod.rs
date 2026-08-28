@@ -1315,8 +1315,9 @@ mod tests {
             let mut received_finalization = false;
             for _ in 0..3 {
                 let message = select! {
-                    message =
-                        voter_receiver.recv() => message.expect("voter receiver closed"),
+                    message = voter_receiver.recv() => {
+                        message.expect("voter receiver closed")
+                    },
                     _ = context.sleep(Duration::from_millis(100)) => {
                         panic!("timed out waiting for all ready vote kinds")
                     },
@@ -4014,8 +4015,8 @@ mod tests {
 
             // Try to receive another message (with timeout)
             let got_duplicate = select! {
-                _ = voter_receiver.recv() => true,
-                _ = context.sleep(Duration::from_millis(100)) => false,
+                _ = voter_receiver.recv() => { true },
+                _ = context.sleep(Duration::from_millis(100)) => { false },
             };
 
             // Should not receive another notarization since we already have one
@@ -4170,8 +4171,8 @@ mod tests {
 
             // Should NOT have a certificate yet
             let got_certificate = select! {
-                _output = voter_receiver.recv() => true,
-                _ = context.sleep(Duration::from_millis(100)) => false,
+                _output = voter_receiver.recv() => { true },
+                _ = context.sleep(Duration::from_millis(100)) => { false },
             };
             assert!(
                 !got_certificate,
@@ -4200,8 +4201,8 @@ mod tests {
 
             // Still should not have certificate (only 3 votes for proposal_a: 0, 1, 6)
             let got_certificate = select! {
-                _output = voter_receiver.recv() => true,
-                _ = context.sleep(Duration::from_millis(100)) => false,
+                _output = voter_receiver.recv() => { true },
+                _ = context.sleep(Duration::from_millis(100)) => { false },
             };
             assert!(
                 !got_certificate,
@@ -4565,16 +4566,13 @@ mod tests {
                     Some(voter::Message::Proposal { proposal: p, .. }) => {
                         assert_eq!(p.view(), future_view);
                         assert_eq!(p.payload, proposal.payload);
-                    }
+                    },
                     Some(_) => panic!("expected forwarded optimistic future proposal"),
                     None => panic!("voter channel closed"),
                 },
                 _ = context.sleep(Duration::from_millis(250)) => {
-                    panic!(
-                        "expected forwarded optimistic future proposal for view {}",
-                        future_view
-                    )
-                },
+                    panic!("expected forwarded optimistic future proposal for view {}", future_view)
+                }
             }
         });
     }
@@ -5776,7 +5774,7 @@ mod tests {
                             "expected notarization for optimistic future view {} without waiting for view update",
                             future_view
                         );
-                    },
+                    }
                 }
             }
         });
@@ -5952,9 +5950,7 @@ mod tests {
             select! {
                 msg = voter_receiver.recv() => match msg {
                     Some(voter::Message::Proposal { .. }) => {}
-                    Some(voter::Message::Verified {
-                        certificate: cert, ..
-                    }) if cert.view() == view2 => {
+                    Some(voter::Message::Verified { certificate: cert, .. }) if cert.view() == view2 => {
                         panic!("should not receive any certificate for the finalized view");
                     }
                     _ => {}

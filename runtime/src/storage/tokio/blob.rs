@@ -193,11 +193,7 @@ impl Blob {
                             io_slices_len as i32,
                             offset.try_into().map_err(|_| Error::OffsetOverflow)?,
                             flags.unwrap_or(0)
-                                | if attempted_dont_cache {
-                                    libc::RWF_DONTCACHE
-                                } else {
-                                    0
-                                },
+                                | if attempted_dont_cache { libc::RWF_DONTCACHE } else { 0 },
                         )
                     };
                 } else {
