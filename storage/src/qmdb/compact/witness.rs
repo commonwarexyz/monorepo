@@ -28,7 +28,7 @@ use commonware_codec::{Decode as _, Encode, EncodeSize, Read, Write};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_runtime::{Error as RError, Handle};
-use commonware_utils::sync::RwLock;
+use commonware_utils::{non_empty_range, sync::RwLock};
 use futures::FutureExt as _;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -106,7 +106,11 @@ impl<F: Family, D: Digest> VerifiedWitness<F, D> {
 
     /// The sync target this witness can serve.
     pub(crate) fn target(&self) -> Target<F, D> {
-        super::target(self.root, self.size())
+        let size = self.size();
+        Target {
+            root: self.root,
+            range: non_empty_range!(size - 1, size),
+        }
     }
 }
 

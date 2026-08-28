@@ -1307,7 +1307,10 @@ mod compact_variable_mmr {
         deterministic::Runner::default().start(|_context| async move {
             let source: Arc<commonware_utils::sync::AsyncRwLock<Option<SourceDb>>> =
                 Arc::new(commonware_utils::sync::AsyncRwLock::new(None));
-            let target = qmdb::compact::target(sha256::Digest::from([0; 32]), Location::new(1));
+            let target = Target {
+                root: sha256::Digest::from([0; 32]),
+                range: non_empty_range!(Location::new(0), Location::new(1)),
+            };
 
             assert!(matches!(
                 fetch_compact_state(&source, target).await,
@@ -1337,7 +1340,10 @@ mod compact_variable_mmr {
             let source = source.commit().await.unwrap();
 
             let bounds = source.bounds();
-            let target = qmdb::compact::target(source.root(), bounds.end);
+            let target = Target {
+                root: source.root(),
+                range: non_empty_range!(bounds.end - 1, bounds.end),
+            };
             let source = Arc::new(source);
             let client_cfg = client_config(&suffix, &context);
             let client: ClientDb = sync::sync(compact_engine_config(
@@ -1383,7 +1389,10 @@ mod compact_variable_mmr {
             let source = source.commit().await.unwrap();
 
             let bounds = source.bounds();
-            let target = qmdb::compact::target(source.root(), bounds.end);
+            let target = Target {
+                root: source.root(),
+                range: non_empty_range!(bounds.end - 1, bounds.end),
+            };
             let source = Arc::new(source);
             let good_state = fetch_compact_state(&source, target.clone())
                 .await
@@ -1432,7 +1441,10 @@ mod compact_variable_mmr {
             let source = source.commit().await.unwrap();
 
             let bounds = source.bounds();
-            let target = qmdb::compact::target(source.root(), bounds.end);
+            let target = Target {
+                root: source.root(),
+                range: non_empty_range!(bounds.end - 1, bounds.end),
+            };
             let source = Arc::new(source);
             let good_state = fetch_compact_state(&source, target.clone())
                 .await
@@ -1487,7 +1499,10 @@ mod compact_variable_mmr {
             let source = source.commit().await.unwrap();
 
             let bounds = source.bounds();
-            let target = qmdb::compact::target(source.root(), bounds.end);
+            let target = Target {
+                root: source.root(),
+                range: non_empty_range!(bounds.end - 1, bounds.end),
+            };
             let source = Arc::new(source);
             let good_state = fetch_compact_state(&source, target.clone())
                 .await
@@ -1543,7 +1558,10 @@ mod compact_variable_mmr {
             let source = source.commit().await.unwrap();
 
             let bounds = source.bounds();
-            let target = qmdb::compact::target(source.root(), bounds.end);
+            let target = Target {
+                root: source.root(),
+                range: non_empty_range!(bounds.end - 1, bounds.end),
+            };
             let source = Arc::new(source);
             let good_state = fetch_compact_state(&source, target.clone())
                 .await
@@ -1588,7 +1606,10 @@ mod compact_variable_mmr {
                 .await;
             let (source, _) = source.apply_batch(batch1).await.unwrap();
             let source = source.commit().await.unwrap();
-            let stale_target = qmdb::compact::target(source.root(), source.bounds().end);
+            let stale_target = Target {
+                root: source.root(),
+                range: non_empty_range!(source.bounds().end - 1, source.bounds().end),
+            };
 
             let batch2 = source
                 .new_batch()
@@ -1597,7 +1618,10 @@ mod compact_variable_mmr {
                 .await;
             let (source, _) = source.apply_batch(batch2).await.unwrap();
             let source = source.commit().await.unwrap();
-            let current_target = qmdb::compact::target(source.root(), source.bounds().end);
+            let current_target = Target {
+                root: source.root(),
+                range: non_empty_range!(source.bounds().end - 1, source.bounds().end),
+            };
             assert_ne!(stale_target, current_target);
 
             let source = Arc::new(source);
@@ -1807,7 +1831,10 @@ mod compact_variable_mmr {
             let (source, _) = source.apply_batch(batch).await.unwrap();
             let source = source.commit().await.unwrap();
             let bounds = source.bounds();
-            let target = qmdb::compact::target(source.root(), bounds.end);
+            let target = Target {
+                root: source.root(),
+                range: non_empty_range!(bounds.end - 1, bounds.end),
+            };
 
             let synced: ClientDb = sync::sync(compact_engine_config(
                 context.child("client"),
@@ -1863,7 +1890,10 @@ mod compact_variable_mmr {
             let (source, _) = source.apply_batch(batch).await.unwrap();
             let source = source.commit().await.unwrap();
             let bounds = source.bounds();
-            let target_b = qmdb::compact::target(source.root(), bounds.end);
+            let target_b = Target {
+                root: source.root(),
+                range: non_empty_range!(bounds.end - 1, bounds.end),
+            };
             assert_ne!(target_b, target_a);
             let source = Arc::new(source);
             let (response, _) = fetch_compact_state(&source, target_b.clone())
@@ -2013,7 +2043,10 @@ mod compact_variable_mmb {
         deterministic::Runner::default().start(|_context| async move {
             let source: Arc<commonware_utils::sync::AsyncRwLock<Option<SourceDb>>> =
                 Arc::new(commonware_utils::sync::AsyncRwLock::new(None));
-            let target = qmdb::compact::target(sha256::Digest::from([0; 32]), Location::new(1));
+            let target = Target {
+                root: sha256::Digest::from([0; 32]),
+                range: non_empty_range!(Location::new(0), Location::new(1)),
+            };
 
             assert!(matches!(
                 fetch_compact_state(&source, target).await,
@@ -2043,7 +2076,10 @@ mod compact_variable_mmb {
             let source = source.commit().await.unwrap();
 
             let bounds = source.bounds();
-            let target = qmdb::compact::target(source.root(), bounds.end);
+            let target = Target {
+                root: source.root(),
+                range: non_empty_range!(bounds.end - 1, bounds.end),
+            };
             let source = Arc::new(source);
             let client_cfg = client_config(&suffix, &context);
             let client: ClientDb = sync::sync(compact_engine_config(
@@ -2089,7 +2125,10 @@ mod compact_variable_mmb {
             let source = source.commit().await.unwrap();
 
             let bounds = source.bounds();
-            let target = qmdb::compact::target(source.root(), bounds.end);
+            let target = Target {
+                root: source.root(),
+                range: non_empty_range!(bounds.end - 1, bounds.end),
+            };
             let source = Arc::new(source);
             let good_state = fetch_compact_state(&source, target.clone())
                 .await
@@ -2138,7 +2177,10 @@ mod compact_variable_mmb {
             let source = source.commit().await.unwrap();
 
             let bounds = source.bounds();
-            let target = qmdb::compact::target(source.root(), bounds.end);
+            let target = Target {
+                root: source.root(),
+                range: non_empty_range!(bounds.end - 1, bounds.end),
+            };
             let source = Arc::new(source);
             let good_state = fetch_compact_state(&source, target.clone())
                 .await
@@ -2196,7 +2238,10 @@ mod compact_variable_mmb {
             let source = source.commit().await.unwrap();
 
             let bounds = source.bounds();
-            let target = qmdb::compact::target(source.root(), bounds.end);
+            let target = Target {
+                root: source.root(),
+                range: non_empty_range!(bounds.end - 1, bounds.end),
+            };
             let source = Arc::new(source);
             let good_state = fetch_compact_state(&source, target.clone())
                 .await
@@ -2255,7 +2300,10 @@ mod compact_variable_mmb {
             let source = source.commit().await.unwrap();
 
             let bounds = source.bounds();
-            let target = qmdb::compact::target(source.root(), bounds.end);
+            let target = Target {
+                root: source.root(),
+                range: non_empty_range!(bounds.end - 1, bounds.end),
+            };
             let source = Arc::new(source);
             let good_state = fetch_compact_state(&source, target.clone())
                 .await
@@ -2300,7 +2348,10 @@ mod compact_variable_mmb {
                 .await;
             let (source, _) = source.apply_batch(batch1).await.unwrap();
             let source = source.commit().await.unwrap();
-            let stale_target = qmdb::compact::target(source.root(), source.bounds().end);
+            let stale_target = Target {
+                root: source.root(),
+                range: non_empty_range!(source.bounds().end - 1, source.bounds().end),
+            };
 
             let batch2 = source
                 .new_batch()
@@ -2309,7 +2360,10 @@ mod compact_variable_mmb {
                 .await;
             let (source, _) = source.apply_batch(batch2).await.unwrap();
             let source = source.commit().await.unwrap();
-            let current_target = qmdb::compact::target(source.root(), source.bounds().end);
+            let current_target = Target {
+                root: source.root(),
+                range: non_empty_range!(source.bounds().end - 1, source.bounds().end),
+            };
             assert_ne!(stale_target, current_target);
 
             let source = Arc::new(source);

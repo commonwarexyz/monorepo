@@ -610,7 +610,10 @@ where
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::qmdb::{sync::Target, verify_proof};
+    use crate::qmdb::{
+        sync::{MerkleizedBatch as _, Target},
+        verify_proof,
+    };
     use commonware_cryptography::Sha256;
     use commonware_parallel::Strategy;
     use commonware_runtime::{Supervisor as _, deterministic};

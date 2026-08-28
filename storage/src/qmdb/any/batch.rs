@@ -2552,7 +2552,10 @@ where
     }
 
     fn target(&self) -> Result<Target<F, D>, crate::qmdb::Error<F>> {
-        Ok(self.target())
+        Ok(Target {
+            root: self.root(),
+            range: non_empty_range!(self.bounds.inactivity_floor, self.bounds.tip.size),
+        })
     }
 
     fn new_batch<H: Hasher<Digest = D>>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, U, S> {
@@ -2569,14 +2572,6 @@ impl<F: Family, D: Digest, U: update::Update, S: Strategy> MerkleizedBatch<F, D,
     /// Return the [`Bounds`] of the batch.
     pub const fn bounds(&self) -> &Bounds<F, D> {
         &self.bounds
-    }
-
-    /// Return the sync target reached once this batch is applied.
-    pub fn target(&self) -> Target<F, D> {
-        Target {
-            root: self.root(),
-            range: non_empty_range!(self.bounds.inactivity_floor, self.bounds.tip.size),
-        }
     }
 
     /// Iterate over ancestor batches (parent first, then grandparent, etc.). Stops when a

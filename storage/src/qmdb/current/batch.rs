@@ -1063,7 +1063,10 @@ where
     }
 
     fn target(&self) -> Result<Target<F, D>, Error<F>> {
-        Ok(self.target())
+        Ok(Target {
+            root: self.ops_root(),
+            range: non_empty_range!(self.sync_boundary(), self.inner.bounds().tip.size),
+        })
     }
 
     fn new_batch<H: Hasher<Digest = D>>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, U, N, S> {
@@ -1082,14 +1085,6 @@ impl<F: Graftable, D: Digest, U: update::Update, const N: usize, S: Strategy>
     /// Return the QMDB ops-only root.
     pub fn ops_root(&self) -> D {
         self.inner.root()
-    }
-
-    /// Return the sync target reached once this batch is applied.
-    pub fn target(&self) -> Target<F, D> {
-        Target {
-            root: self.ops_root(),
-            range: non_empty_range!(self.sync_boundary(), self.inner.bounds().tip.size),
-        }
     }
 
     /// Return the [`Bounds`] of the batch.

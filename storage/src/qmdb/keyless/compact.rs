@@ -45,6 +45,7 @@ use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_runtime::Handle;
+use commonware_utils::non_empty_range;
 use std::sync::{Arc, Weak};
 
 /// A keyless authenticated db that discards historical operations, retaining only a witness
@@ -127,7 +128,11 @@ where
     }
 
     fn target(&self) -> Result<Target<F, D>, Error<F>> {
-        Ok(self.target())
+        let tip = self.bounds.tip;
+        Ok(Target {
+            root: tip.root,
+            range: non_empty_range!(tip.size - 1, tip.size),
+        })
     }
 
     fn new_batch<H: Hasher<Digest = D>>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, V, S> {
@@ -156,11 +161,6 @@ where
     /// Return the [`Bounds`] of the batch.
     pub const fn bounds(&self) -> &Bounds<F, D> {
         &self.bounds
-    }
-
-    /// Return the sync target reached once this batch is applied.
-    pub fn target(&self) -> Target<F, D> {
-        qmdb::compact::target(self.bounds.tip.root, self.bounds.tip.size)
     }
 
     /// Create a new speculative batch with this one as its parent.
@@ -653,7 +653,7 @@ mod tests {
     use super::*;
     use crate::{
         merkle::mmr,
-        qmdb::{any::value::FixedEncoding, compact::witness},
+        qmdb::{any::value::FixedEncoding, compact::witness, sync::MerkleizedBatch as _},
     };
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::test_traced;
@@ -1614,8 +1614,14 @@ mod tests {
 
             // A compact batch's target covers only its commit.
             let size = batch.bounds().tip.size;
-            let target = batch.target();
-            assert_eq!(target, qmdb::compact::target(batch.root(), size));
+            let target = batch.target().unwrap();
+            assert_eq!(
+                target,
+                Target {
+                    root: batch.root(),
+                    range: non_empty_range!(size - 1, size),
+                }
+            );
             assert_eq!(target.range.start(), size - 1);
             assert_eq!(target.range.end(), size);
 

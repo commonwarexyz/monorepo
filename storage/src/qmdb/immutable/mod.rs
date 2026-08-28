@@ -840,7 +840,10 @@ pub(super) mod tests {
     use super::*;
     use crate::{
         merkle::{Family, Location},
-        qmdb::{sync::Target, verify_proof},
+        qmdb::{
+            sync::{MerkleizedBatch as _, Target},
+            verify_proof,
+        },
         translator::TwoCap,
     };
     use commonware_codec::EncodeShared;

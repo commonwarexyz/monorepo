@@ -330,7 +330,14 @@ where
     }
 
     fn target(&self) -> Result<Target<F, D>, Error<F>> {
-        self.target()
+        let floor = self.bounds.inactivity_floor;
+        let size = self.bounds.tip.size;
+        NonEmptyRange::new(floor..size)
+            .map(|range| Target {
+                root: self.root(),
+                range,
+            })
+            .map_err(|_| Error::FloorBeyondSize(floor, size - 1))
     }
 
     fn new_batch<H: Hasher<Digest = D>>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, V, S> {
@@ -350,20 +357,6 @@ where
     /// Return the [`Bounds`] of the batch.
     pub const fn bounds(&self) -> &Bounds<F, D> {
         &self.bounds
-    }
-
-    /// Return the sync target reached once this batch is applied. Fails with the
-    /// [`Error::FloorBeyondSize`] that `apply_batch` would return if the declared inactivity
-    /// floor is not below the batch's commit.
-    pub fn target(&self) -> Result<Target<F, D>, Error<F>> {
-        let floor = self.bounds.inactivity_floor;
-        let size = self.bounds.tip.size;
-        NonEmptyRange::new(floor..size)
-            .map(|range| Target {
-                root: self.root(),
-                range,
-            })
-            .map_err(|_| Error::FloorBeyondSize(floor, size - 1))
     }
 
     /// Read a value at `loc`.

@@ -510,6 +510,7 @@ pub mod tests {
                 traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
             },
             store::tests::{TestKey, TestValue},
+            sync::MerkleizedBatch as _,
             verify_proof,
         },
         translator::Translator,
@@ -2446,7 +2447,7 @@ pub mod tests {
                 .merkleize(&db, None)
                 .await
                 .unwrap();
-            let expected = merkleized.target();
+            let expected = merkleized.target().unwrap();
             (db, _) = db.apply_batch(merkleized).await.unwrap();
             assert_eq!(
                 <UnorderedVariableDb as crate::qmdb::sync::Database>::target(&db),
