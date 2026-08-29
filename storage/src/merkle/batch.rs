@@ -633,8 +633,11 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
 
     /// Inclusion proof for the element at `loc` using `inactive_peaks` and the bagging carried by
     /// `hasher`.
+    ///
+    /// Nodes below this batch chain are read from `base`.
     pub fn proof(
         &self,
+        base: &Mem<F, D>,
         hasher: &impl Hasher<F, Digest = D>,
         loc: Location<F>,
         inactive_peaks: usize,
@@ -642,7 +645,7 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
         if !loc.is_valid_index() {
             return Err(Error::LocationOverflow(loc));
         }
-        self.range_proof(hasher, loc..loc + 1, inactive_peaks)
+        self.range_proof(base, hasher, loc..loc + 1, inactive_peaks)
             .map_err(|e| match e {
                 Error::RangeOutOfBounds(_) => Error::LeafOutOfBounds(loc),
                 _ => e,
@@ -651,8 +654,11 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
 
     /// Inclusion proof for all elements in `range` using `inactive_peaks` and the bagging carried
     /// by `hasher`.
+    ///
+    /// Nodes below this batch chain are read from `base`.
     pub fn range_proof(
         &self,
+        base: &Mem<F, D>,
         hasher: &impl Hasher<F, Digest = D>,
         range: Range<Location<F>>,
         inactive_peaks: usize,
@@ -662,7 +668,7 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
             self.leaves(),
             inactive_peaks,
             range,
-            |pos| Self::get_node(self, pos),
+            |pos| Self::get_node(self, pos).or_else(|| base.get_node(pos)),
             Error::ElementPruned,
         )
     }

@@ -251,6 +251,7 @@ mod tests {
         test_variable_proof_verify => run_proof_verify, open;
         test_variable_prune => run_prune, open;
         test_variable_batch_chain => run_batch_chain, open;
+        test_variable_operations_match_applied_log => run_operations_match_applied_log, open;
         test_variable_build_and_authenticate => run_build_and_authenticate, open;
         test_variable_recovery_from_failed_merkle_sync => run_recovery_from_failed_merkle_sync, open;
         test_variable_recovery_from_failed_log_sync => run_recovery_from_failed_log_sync, open;

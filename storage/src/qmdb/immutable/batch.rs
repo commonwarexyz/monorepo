@@ -4,7 +4,7 @@ use super::Immutable;
 use crate::{
     Context,
     journal::{authenticated, contiguous::Mutable},
-    merkle::{Family, Location},
+    merkle::{Family, Location, Proof},
     qmdb::{
         Error,
         any::{ValueEncoding, batch::lookup_sorted},
@@ -320,6 +320,39 @@ where
     /// Return the [`Bounds`] of the batch.
     pub const fn bounds(&self) -> &Bounds<F, D> {
         &self.bounds
+    }
+
+    /// Return the operations this batch appends to the log and the location of the first.
+    #[allow(clippy::type_complexity)]
+    pub fn operations(&self) -> (Location<F>, Arc<Vec<Operation<F, K, V>>>) {
+        (
+            self.bounds.base.size,
+            Arc::clone(self.journal_batch.items()),
+        )
+    }
+
+    /// Inclusion proof for the operations returned by [`Self::operations`], anchored at
+    /// this batch's tip. The pair verifies against [`Self::root`] via
+    /// [`crate::qmdb::verify_proof`].
+    ///
+    /// Nodes below this batch chain are read from `db`'s in-memory Merkle tier, which
+    /// retains them at least until this batch's changes are flushed (by a commit or sync
+    /// after apply). Calling this later can fail with a pruned-node error, never produce
+    /// a wrong proof.
+    pub fn proof<E, C, H, T>(
+        &self,
+        db: &Immutable<F, E, K, V, C, H, T, S>,
+    ) -> Result<Proof<F, D>, Error<F>>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, K, V>>,
+        H: Hasher<Digest = D>,
+        T: Translator,
+    {
+        let inactive_peaks = F::inactive_peaks(self.bounds.tip.size, self.bounds.inactivity_floor);
+        db.journal
+            .speculative_proof(&self.journal_batch, inactive_peaks)
+            .map_err(Into::into)
     }
 
     /// Iterate over ancestor batches (parent first, then grandparent, etc.).
