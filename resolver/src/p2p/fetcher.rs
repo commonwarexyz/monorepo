@@ -47,9 +47,18 @@ pub struct Config<P: PublicKey> {
     pub me: Option<P>,
 
     /// Initial expected performance for new participants.
+    ///
+    /// Stored as the cost of a 1-byte response with this latency (microseconds per
+    /// byte). Successful responses are scored as wall-clock time divided by
+    /// response size, so larger payloads at the same latency improve a peer's
+    /// ranking.
     pub initial: Duration,
 
     /// Timeout for requests.
+    ///
+    /// Timeouts, missing data, and send failures are scored as this latency for a
+    /// 1-byte response, which keeps them comparable to size-normalized successes
+    /// while remaining a heavy penalty.
     pub timeout: Duration,
 
     /// How long fetches remain in the pending queue before being retried.
@@ -93,7 +102,7 @@ where
     me: Option<P>,
     /// Participants to exclude from requests (blocked peers)
     excluded: HashSet<P>,
-    /// Participants and their performance (lower is better, in milliseconds)
+    /// Participants and their performance (lower is better, in microseconds per byte)
     participants: PrioritySet<P, u128>,
 
     // Request tracking
@@ -136,7 +145,7 @@ where
     /// only removed when blocked (invalid data) or cleared on successful fetch.
     targets: HashMap<Key, HashSet<P>>,
 
-    /// Per-peer performance metric (exponential moving average of response time in ms)
+    /// Per-peer performance metric (exponential moving average of response time per byte)
     performance: GaugeFamily<Peer<P>>,
 
     /// Status of request creation attempts (Success when eligible peers exist, Dropped otherwise)
@@ -163,7 +172,7 @@ where
     pub fn new(context: E, config: Config<P>) -> Self {
         let performance = context.family(
             "peer_performance",
-            "Per-peer performance (exponential moving average of response time in ms)",
+            "Per-peer performance (exponential moving average of response time per byte in µs)",
         );
         let requests_created =
             context.family("requests_created", "Status of request creation attempts");
@@ -207,12 +216,21 @@ where
         id
     }
 
+    /// Performance cost for a response: microseconds per byte (lower is better).
+    ///
+    /// Empty responses use a denominator of 1 so they stay comparable to timeouts.
+    fn performance_cost(elapsed: Duration, bytes: usize) -> u128 {
+        elapsed
+            .as_micros()
+            .saturating_div((bytes as u128).max(1))
+    }
+
     /// Calculate a participant's new priority using exponential moving average.
-    fn update_performance(&mut self, participant: &P, elapsed: Duration) {
+    fn update_performance(&mut self, participant: &P, cost: u128) {
         let Some(past) = self.participants.get(participant) else {
             return;
         };
-        let next = past.saturating_add(elapsed.as_millis()) / 2;
+        let next = past.saturating_add(cost) / 2;
         self.participants.put(participant.clone(), next);
         let _ = self.performance.get_or_create_by(participant).try_set(next);
     }
@@ -304,7 +322,7 @@ where
                         // Send was not handled, try next peer
                         self.requests_sent.inc(Status::Dropped);
                         debug!(?peer, ?feedback, "send failed");
-                        self.update_performance(&peer, self.timeout);
+                        self.update_performance(&peer, self.timeout.as_micros());
                     }
                 }
             }
@@ -413,7 +431,7 @@ where
         // Remove the request and update performance with timeout penalty
         let req = self.requests.remove(&id)?;
         self.key_to_id.remove(&req.key);
-        self.update_performance(&req.peer, self.timeout);
+        self.update_performance(&req.peer, self.timeout.as_micros());
 
         Some(req.key)
     }
@@ -455,9 +473,11 @@ where
 
     /// Attribute a received data response to its serving peer.
     ///
-    /// Ignored responses must not be recorded because the consumer declined to attribute them.
-    pub fn record_response(&mut self, peer: &P, elapsed: Duration) {
-        self.update_performance(peer, elapsed);
+    /// Performance is scored as wall-clock time divided by response size so peers
+    /// that deliver more bytes in the same time rank better. Ignored responses must
+    /// not be recorded because the consumer declined to attribute them.
+    pub fn record_response(&mut self, peer: &P, elapsed: Duration, bytes: usize) {
+        self.update_performance(peer, Self::performance_cost(elapsed, bytes));
         self.resolves.observe(elapsed.as_secs_f64());
     }
 
@@ -466,13 +486,13 @@ where
     /// Missing data is scored like a timeout because it did not resolve the request.
     pub fn pop_missing(&mut self, id: ID, peer: &P) -> Option<Key> {
         let req = self.pop_request(id, peer)?;
-        self.update_performance(&req.peer, self.timeout);
+        self.update_performance(&req.peer, self.timeout.as_micros());
         Some(req.key)
     }
 
     /// Reconciles the list of peers that can be used to fetch future requests.
     pub fn reconcile(&mut self, keep: &[P]) {
-        self.participants.reconcile(keep, self.initial.as_millis());
+        self.participants.reconcile(keep, self.initial.as_micros());
 
         // Clear waiter (may no longer apply)
         self.waiter = None;
@@ -1083,9 +1103,38 @@ mod tests {
 
             // Receiving bytes is not enough to score the peer: the consumer may
             // decide the key became obsolete before inspecting the response.
-            assert_eq!(fetcher.participants.get(&peer), Some(100));
-            fetcher.record_response(&peer, elapsed);
-            assert_eq!(fetcher.participants.get(&peer), Some(60));
+            assert_eq!(fetcher.participants.get(&peer), Some(100_000));
+            fetcher.record_response(&peer, elapsed, 1);
+            // initial 100ms (=100_000µs/byte) and 20ms/1byte -> (100_000+20_000)/2
+            assert_eq!(fetcher.participants.get(&peer), Some(60_000));
+        });
+    }
+
+    #[test]
+    fn test_record_response_scores_by_size() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
+            let local_peer = PrivateKey::from_seed(0).public_key();
+            let small = PrivateKey::from_seed(1).public_key();
+            let large = PrivateKey::from_seed(2).public_key();
+            fetcher.reconcile(&[local_peer, small.clone(), large.clone()]);
+
+            let elapsed = Duration::from_millis(20);
+            fetcher.record_response(&small, elapsed, 1);
+            fetcher.record_response(&large, elapsed, 1_000);
+
+            // Same latency, larger payload -> lower (better) cost.
+            let small_score = fetcher.participants.get(&small).unwrap();
+            let large_score = fetcher.participants.get(&large).unwrap();
+            assert!(
+                large_score < small_score,
+                "larger payload should score better: large={large_score} small={small_score}"
+            );
+
+            let peers = fetcher.get_eligible_peers(&MockKey(1), false);
+            assert_eq!(peers[0], large);
+            assert_eq!(peers[1], small);
         });
     }
 
@@ -1957,25 +2006,25 @@ mod tests {
             // Add peers with initial performance (100ms)
             fetcher.reconcile(&[public_key, peer1.clone(), peer2.clone(), peer3.clone()]);
 
-            // Simulate different response times by updating performance:
-            // - peer1: very fast (10ms)
-            // - peer2: slow (500ms)
-            // - peer3: medium (200ms)
-            // After update_performance with EMA: new = (past + elapsed) / 2
+            // Simulate different response costs by updating performance:
+            // - peer1: very fast (10ms for 1 byte)
+            // - peer2: slow (500ms for 1 byte)
+            // - peer3: medium (200ms for 1 byte)
+            // After update_performance with EMA: new = (past + cost) / 2
 
             // peer1: simulate multiple fast responses to drive down its priority
             for _ in 0..5 {
-                fetcher.update_performance(&peer1, Duration::from_millis(10));
+                fetcher.update_performance(&peer1, Duration::from_millis(10).as_micros());
             }
 
             // peer2: simulate slow responses to increase its priority
             for _ in 0..5 {
-                fetcher.update_performance(&peer2, Duration::from_millis(500));
+                fetcher.update_performance(&peer2, Duration::from_millis(500).as_micros());
             }
 
             // peer3: simulate medium responses
             for _ in 0..5 {
-                fetcher.update_performance(&peer3, Duration::from_millis(200));
+                fetcher.update_performance(&peer3, Duration::from_millis(200).as_micros());
             }
 
             // Get eligible peers - should be ordered by priority (fastest first)

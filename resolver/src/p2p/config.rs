@@ -35,6 +35,9 @@ pub struct Config<
     pub me: Option<P>,
 
     /// Initial expected performance for new participants.
+    ///
+    /// Interpreted as the cost of a 1-byte response with this latency when seeding
+    /// peer rankings. See [`crate::p2p::fetcher::Config::initial`].
     pub initial: Duration,
 
     /// Timeout for requests.
