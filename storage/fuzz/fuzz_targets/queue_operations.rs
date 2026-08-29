@@ -169,6 +169,7 @@ fn fuzz(input: FuzzInput) {
             codec_config: ((0usize..).into(), ()),
             page_cache: CacheRef::from_pooler(&context, page_size, page_cache_size),
             write_buffer,
+            replay_buffer: commonware_utils::NZUsize!(4096),
         };
 
         let mut queue = Queue::<_, Vec<u8>>::init(context.child("storage"), cfg)

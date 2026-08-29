@@ -93,6 +93,7 @@ pub(super) fn qmdb_config(
             metadata_partition: format!("{prefix}-qmdb-a-mmr-metadata"),
             items_per_blob: NZU64!(11),
             write_buffer: IO_BUFFER_SIZE,
+            replay_buffer: IO_BUFFER_SIZE,
             strategy: Sequential,
             page_cache: page_cache.clone(),
         },
@@ -101,6 +102,7 @@ pub(super) fn qmdb_config(
             items_per_blob: NZU64!(7),
             page_cache: page_cache.clone(),
             write_buffer: IO_BUFFER_SIZE,
+            replay_buffer: IO_BUFFER_SIZE,
         },
         translator: TwoCap,
         init_cache_size: Some(NZUsize!(1024)),
@@ -118,6 +120,7 @@ pub(super) fn qmdb_config(
             codec_config: (),
             page_cache,
             write_buffer: IO_BUFFER_SIZE,
+            replay_buffer: IO_BUFFER_SIZE,
         },
         commit_codec_config: (),
     };

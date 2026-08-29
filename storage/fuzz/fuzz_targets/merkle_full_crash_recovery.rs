@@ -100,6 +100,7 @@ fn merkle_config(
         metadata_partition: format!("metadata-{partition_suffix}"),
         items_per_blob: NZU64!(items_per_blob),
         write_buffer,
+        replay_buffer: commonware_utils::NZUsize!(4096),
         strategy: Sequential,
         page_cache: CacheRef::from_pooler(pooler, page_size, page_cache_size),
     }

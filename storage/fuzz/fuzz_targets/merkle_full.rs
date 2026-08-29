@@ -85,6 +85,7 @@ fn test_config(partition_suffix: &str, pooler: &impl BufferPooler) -> Config<Seq
         metadata_partition: format!("metadata-{partition_suffix}"),
         items_per_blob: NZU64!(ITEMS_PER_BLOB),
         write_buffer: NZUsize!(1024),
+        replay_buffer: NZUsize!(1024),
         strategy: Sequential,
         page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
     }

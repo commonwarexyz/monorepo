@@ -1003,6 +1003,7 @@ impl EngineDefinition for ReshareEngine {
                 metadata_partition: format!("{partition_prefix}-qmdb-mmr-metadata"),
                 items_per_blob: NZU64!(11),
                 write_buffer: IO_BUFFER_SIZE,
+                replay_buffer: IO_BUFFER_SIZE,
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
@@ -1011,6 +1012,7 @@ impl EngineDefinition for ReshareEngine {
                 items_per_blob: NZU64!(7),
                 page_cache: page_cache.clone(),
                 write_buffer: IO_BUFFER_SIZE,
+                replay_buffer: IO_BUFFER_SIZE,
             },
             translator: TwoCap,
             init_cache_size: Some(NZUsize!(1024)),
@@ -1326,6 +1328,7 @@ fn archive_config<C>(
 ) -> prunable::Config<TwoCap, C> {
     prunable::Config {
         translator: TwoCap,
+        metadata_partition: format!("{prefix}-{name}-metadata"),
         key_partition: format!("{prefix}-{name}-key"),
         key_page_cache: page_cache,
         value_partition: format!("{prefix}-{name}-value"),

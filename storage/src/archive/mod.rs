@@ -250,6 +250,7 @@ mod tests {
     ) -> impl MultiArchive<Key = FixedBytes<64>, Value = i32> {
         let cfg = prunable::Config {
             translator: TwoCap,
+            metadata_partition: "test-metadata".into(),
             key_partition: "test-key".into(),
             key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             value_partition: "test-value".into(),
