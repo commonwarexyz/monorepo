@@ -674,10 +674,9 @@ where
 
     /// Inclusion proof for the items `batch` appends, anchored at the batch's speculative tip.
     ///
-    /// Nodes below the batch chain are read from this journal's in-memory Merkle tier,
-    /// which retains them at least until the batch's changes are flushed. Calling this
-    /// after that flush can fail with [merkle::Error::ElementPruned], never produce a
-    /// wrong proof.
+    /// Nodes below the batch chain are read from this journal's
+    /// [in-memory Merkle tier][crate::merkle::mem::Mem], which retains them at least until
+    /// the batch's changes are flushed.
     pub fn speculative_proof(
         &self,
         batch: &MerkleizedBatch<F, H::Digest, C::Item, S>,

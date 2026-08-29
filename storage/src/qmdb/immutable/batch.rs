@@ -341,10 +341,9 @@ where
     /// this batch's tip. The pair verifies against [`Self::root`] via
     /// [`crate::qmdb::verify_proof`].
     ///
-    /// Nodes below this batch chain are read from `db`'s in-memory Merkle tier, which
-    /// retains them at least until this batch's changes are flushed (by a commit or sync
-    /// after apply). Calling this later can fail with a pruned-node error, never produce
-    /// a wrong proof. Errors for a batch created by `to_batch`, which appends nothing.
+    /// Nodes below this batch chain are read from `db`'s
+    /// [in-memory Merkle tier][crate::merkle::mem::Mem], which retains them at least until
+    /// this batch's changes are flushed (by a commit or sync after apply).
     pub fn proof<E, C, H, T>(
         &self,
         db: &Immutable<F, E, K, V, C, H, T, S>,
