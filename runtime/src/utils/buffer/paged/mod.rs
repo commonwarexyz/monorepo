@@ -27,19 +27,19 @@
 //! physical pages that straddle storage-page boundaries amplify cold random reads.
 //!
 //! Two checksums are stored so that re-writing a partial page cannot destroy the valid checksum
-//! for its previously committed contents. Each rewrite covers the whole physical page: the new
-//! checksum lands in the alternate slot, while the committed prefix and its protected checksum
-//! are resubmitted byte-identically, leaving their durable bytes unchanged even if the write
-//! tears. A checksum over a page is computed over the first [0,len) bytes in the page, with all
-//! other bytes in the page ignored. Ordinary partial-page payload writes 0-pad the range
-//! [len, page_size), but recovery does not depend on bytes outside [0,len). A checksum with
-//! length 0 is never considered valid. If both checksums are valid for the page, the one with the
-//! larger `len` is considered authoritative. Partial-page shrink first makes the shorter checksum
-//! durable in the alternate slot, then invalidates the old longer checksum.
+//! for its last durable contents. Each rewrite covers the whole physical page: the new checksum
+//! lands in the slot not protecting the durable contents, while the durable prefix and its
+//! protected checksum are resubmitted byte-identically, leaving their durable bytes unchanged
+//! even if the write tears. A checksum over a page is computed over the first [0,len) bytes in
+//! the page, with all other bytes in the page ignored. Ordinary partial-page payload writes
+//! 0-pad the range [len, page_size), but recovery does not depend on bytes outside [0,len). A
+//! checksum with length 0 is never considered valid. If both checksums are valid for the page,
+//! the one with the larger `len` is considered authoritative. Partial-page shrink first makes
+//! the shorter checksum durable in the alternate slot, then invalidates the old longer checksum.
 //!
 //! A _full_ page is one whose crc stores a len equal to the logical page size. Otherwise the page
 //! is called _partial_. All pages in a blob are full except for the very last page, which can be
-//! full or partial. A partial page's committed prefix remains recoverable while it is rewritten.
+//! full or partial. A partial page's durable prefix remains recoverable while it is rewritten.
 
 use crate::{Blob, Buf, BufMut, Error, IoBuf, ReadOptions};
 use commonware_codec::{EncodeFixed, FixedSize, Read as CodecRead, ReadExt, Write};
@@ -58,8 +58,8 @@ pub use sealed::Sealed;
 use tracing::{debug, error};
 pub use writer::Writer;
 
-// A checksum record contains two slots. Each slot stores one u16 length and one CRC.
-const CHECKSUM_SIZE: u64 = Checksum::SIZE as u64;
+/// Size in bytes of the checksum record appended to each logical page.
+pub const CHECKSUM_SIZE: u64 = Checksum::SIZE as u64;
 
 /// The storage-page granularity physical pages should align to (see the module docs).
 pub(crate) const STORAGE_PAGE_SIZE: u64 = 4096;
