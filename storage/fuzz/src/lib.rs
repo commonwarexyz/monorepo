@@ -1,9 +1,31 @@
 //! Shared input generators and crash-recovery flows for storage fuzz targets.
 
 use arbitrary::Unstructured;
-use commonware_runtime::deterministic::{self, PartialWriteMode};
+use commonware_runtime::{
+    deterministic::{self, PartialWriteMode},
+    mocks::PendingSyncs,
+};
 use commonware_utils::{Probability, probability};
 use std::future::Future;
+
+/// Complete the oldest parked durability completion, if any.
+///
+/// Interrupted-sync arms call this between polls so each iteration advances the
+/// interrupted future one durability barrier deeper before the crash cuts it. The
+/// final release may stay unobserved, leaving that barrier's data volatile.
+pub fn release_oldest_pending_sync(pending: &PendingSyncs) {
+    let released = {
+        let mut parked = pending.lock();
+        if parked.is_empty() {
+            None
+        } else {
+            Some(parked.remove(0))
+        }
+    };
+    if let Some(sync) = released {
+        let _ = sync.release.send(Ok(()));
+    }
+}
 
 fn recovery_fault_config(seed: u64) -> deterministic::FaultConfig {
     let selectors = seed.to_le_bytes();
@@ -49,7 +71,8 @@ fn recovery_fault_config(seed: u64) -> deterministic::FaultConfig {
 /// `fault_seed` selects the mutation, failure and retention rates, and partial-write mode.
 ///
 /// The recovered object or error is discarded because mutable-operation errors retire the
-/// instance. The returned checkpoint is suitable for a fault-free recovery and verification.
+/// instance. The fault config is cleared before the crash (retention policies bind when a
+/// write is issued), so the returned checkpoint recovers fault-free.
 pub fn faulted_recovery<F, Fut, T, E>(
     checkpoint: deterministic::Checkpoint,
     fault_seed: u64,
@@ -61,8 +84,10 @@ where
 {
     let (_, checkpoint) =
         deterministic::Runner::from(checkpoint).start_and_recover(move |context| async move {
-            *context.storage_fault_config().write() = recovery_fault_config(fault_seed);
+            let config = context.storage_fault_config();
+            *config.write() = recovery_fault_config(fault_seed);
             drop(recover(context).await);
+            *config.write() = deterministic::FaultConfig::default();
         });
     checkpoint
 }
@@ -91,4 +116,61 @@ pub fn bounded_buffer(u: &mut Unstructured<'_>) -> arbitrary::Result<usize> {
 pub fn bounded_nonzero_rate(u: &mut Unstructured<'_>) -> arbitrary::Result<Probability> {
     let percent: u8 = u.int_in_range(1..=100)?;
     Ok(probability!(u64::from(percent), 100))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_runtime::deterministic::PartialWriteMode;
+
+    /// Build a fault seed from the selector bytes the decoder consumes.
+    fn seed(mutation: u8, failure: u8, retention: u8, partial: u8, mode: u8) -> u64 {
+        u64::from_le_bytes([mutation, failure, retention, partial, mode, 0, 0, 0])
+    }
+
+    /// Pin the seed-to-config decoding: a regression here would silently skew or
+    /// disable fault injection in every recovery target's faulted pass.
+    #[test]
+    fn test_recovery_fault_config_decoding() {
+        // Mutation 0 injects write failures with the selected retention and mode.
+        let config = recovery_fault_config(seed(0, 49, 25, 0, 0));
+        let write = config.write_rate.unwrap();
+        assert_eq!(write.failure_rate, probability!(50, 100));
+        assert_eq!(write.retention_rate, probability!(25, 100));
+        assert_eq!(write.mode, PartialWriteMode::Prefix);
+        assert!(config.sync_rate.is_none());
+        assert!(config.resize_rate.is_none());
+        assert!(config.remove_rate.is_none());
+
+        // Mutations 1..=3 zero the write failure rate but keep crash retention and
+        // mode, routing the failure rate to sync, resize, or remove respectively.
+        let config = recovery_fault_config(seed(1, 99, 100, 0, 1));
+        let write = config.write_rate.unwrap();
+        assert_eq!(write.failure_rate, probability!(0, 1));
+        assert_eq!(write.retention_rate, probability!(100, 100));
+        assert_eq!(write.mode, PartialWriteMode::Subset);
+        assert_eq!(config.sync_rate, Some(probability!(100, 100)));
+        assert!(config.resize_rate.is_none());
+        assert!(config.remove_rate.is_none());
+
+        let config = recovery_fault_config(seed(2, 0, 0, 75, 0));
+        let resize = config.resize_rate.unwrap();
+        assert_eq!(resize.failure_rate, probability!(1, 100));
+        assert_eq!(resize.partial_rate, probability!(75, 100));
+        assert_eq!(config.write_rate.unwrap().failure_rate, probability!(0, 1));
+        assert!(config.sync_rate.is_none());
+        assert!(config.remove_rate.is_none());
+
+        let config = recovery_fault_config(seed(3, 199, 0, 0, 0));
+        assert_eq!(config.remove_rate, Some(probability!(100, 100)));
+        assert!(config.sync_rate.is_none());
+        assert!(config.resize_rate.is_none());
+
+        // Selector bits above the two-bit mutation mask are ignored.
+        let config = recovery_fault_config(seed(0x04, 0, 0, 0, 0));
+        assert_eq!(
+            config.write_rate.unwrap().failure_rate,
+            probability!(1, 100)
+        );
+    }
 }

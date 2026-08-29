@@ -17,10 +17,13 @@ use commonware_runtime::{
     mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs},
 };
 use commonware_storage::journal::{Error, segmented::variable};
-use commonware_storage_fuzz::faulted_recovery;
+use commonware_storage_fuzz::{faulted_recovery, release_oldest_pending_sync};
 use commonware_utils::{NZUsize, Probability};
 use libfuzzer_sys::fuzz_target;
-use std::{collections::BTreeMap, num::NonZeroU16};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    num::NonZeroU16,
+};
 
 type Journal = variable::Journal<DelayedSyncContext<deterministic::Context>, Vec<u8>>;
 
@@ -37,7 +40,9 @@ struct FuzzInput {
     subset: bool,
     /// Per-item target section selector.
     routes: [u8; 32],
-    /// How far the interrupted final sync is polled before the crash.
+    /// Whether the interrupted final sync is driven through the armed gate to
+    /// completion before the crash, or left parked with one section's flush
+    /// volatile so the crash tears it per the retention policy.
     final_polls: u8,
 }
 
@@ -119,9 +124,10 @@ fn read_varint(bytes: &[u8]) -> Option<(usize, usize)> {
 async fn recover_expected(
     context: &deterministic::Context,
     partition: &str,
-) -> BTreeMap<u64, (u64, Vec<Vec<u8>>)> {
+) -> (BTreeMap<u64, (u64, Vec<Vec<u8>>)>, BTreeSet<u64>) {
     let physical_page_size = PAGE_SIZE + PAGE_CHECKSUM_RECORD_SIZE;
     let mut sections = BTreeMap::new();
+    let mut gated = BTreeSet::new();
     for name in context.scan(partition).await.expect("oracle scan failed") {
         let section = u64::from_be_bytes(name.as_slice().try_into().expect("invalid section name"));
         let (blob, size) = context
@@ -172,9 +178,15 @@ async fn recover_expected(
             frames.push(payload[inner..].to_vec());
             offset = end;
         }
+
+        // Any valid logical prefix (even a partial frame short of a whole one) means the
+        // journal recovers a nonzero size for this section and gates appends on replay.
+        if !logical.is_empty() {
+            gated.insert(section);
+        }
         sections.insert(section, (offset as u64, frames));
     }
-    sections
+    (sections, gated)
 }
 
 /// Drain a full replay, asserting it yields exactly the expected frames in order.
@@ -249,7 +261,10 @@ fn fuzz(input: FuzzInput) {
             .await
             .expect("initial init failed");
         let mut durable: BTreeMap<u64, usize> = BTreeMap::new();
-        for (offset, (section, item)) in phase_script.iter().enumerate() {
+
+        // The extra iteration reaches baseline == script length: everything synced,
+        // with the crash tearing only the no-op final sync.
+        for offset in 0..=phase_script.len() {
             if offset == baseline && baseline > 0 {
                 journal = drive_pending_syncs(&pending, journal.sync_all())
                     .await
@@ -258,11 +273,16 @@ fn fuzz(input: FuzzInput) {
                     *durable.entry(*section).or_default() += 1;
                 }
             }
+            let Some((section, item)) = phase_script.get(offset) else {
+                break;
+            };
             (journal, _, _) = journal.append(*section, item).await.expect("append failed");
         }
 
-        // Flush buffered writes into storage behind held durability barriers, then crash: the
-        // image retains an arbitrary byte subset of everything past the baseline.
+        // Interrupt the final sync behind the armed one-shot gate: the first section's
+        // durability barrier parks with its flush left volatile (every other section
+        // syncs durably), so the crash tears that section's bytes per the retention
+        // policy. Releasing the gate and polling again instead completes the sync.
         *fault_config.write() = deterministic::FaultConfig {
             write_rate: Some(WriteConfig {
                 failure_rate: Probability::new(0, 1).unwrap(),
@@ -276,14 +296,20 @@ fn fuzz(input: FuzzInput) {
             }),
             ..Default::default()
         };
+        pending.arm();
         let mut sync = Box::pin(journal.sync_all());
-        for _ in 0..usize::from(phase_input.final_polls) % 8 + 1 {
-            if futures::future::poll_immediate(sync.as_mut())
-                .await
-                .is_some()
-            {
+        for _ in 0..usize::from(phase_input.final_polls) % 2 + 1 {
+            if let Some(result) = futures::future::poll_immediate(sync.as_mut()).await {
+                // A sync that ran to completion is an observed barrier: it must
+                // succeed and every scripted item becomes durable.
+                drop(result.expect("interrupted sync failed"));
+                durable.clear();
+                for (section, _) in &phase_script {
+                    *durable.entry(*section).or_default() += 1;
+                }
                 break;
             }
+            release_oldest_pending_sync(&pending);
         }
         drop(sync);
         durable
@@ -293,7 +319,27 @@ fn fuzz(input: FuzzInput) {
 
     deterministic::Runner::from(checkpoint).start(move |context| async move {
         *context.storage_fault_config().write() = deterministic::FaultConfig::default();
-        let expected = recover_expected(&context, "segmented-variable-recovery").await;
+        let (expected, gated) = recover_expected(&context, "segmented-variable-recovery").await;
+
+        // Under the crash model every legal image is a per-section prefix of the
+        // scripted items (retention keeps subsets of submitted bytes, and a stale
+        // checksum slot exposes an older prefix), so a flush path that rewrites,
+        // reorders, or fabricates CRC-valid frames must be caught here.
+        for (&section, (_, frames)) in &expected {
+            let scripted: Vec<&Vec<u8>> = script
+                .iter()
+                .filter(|(candidate, _)| *candidate == section)
+                .map(|(_, item)| item)
+                .collect();
+            assert!(
+                frames.len() <= scripted.len()
+                    && frames
+                        .iter()
+                        .zip(&scripted)
+                        .all(|(frame, item)| frame == *item),
+                "crash image diverges from the scripted prefix in section {section}"
+            );
+        }
 
         // Every item covered by the completed baseline sync must survive the crash in order.
         for (section, count) in &durable {
@@ -320,9 +366,10 @@ fn fuzz(input: FuzzInput) {
             pending: pending.clone(),
         };
 
-        // Every section retained from the previous execution rejects appends until replayed.
-        // Each probe consumes its journal (append takes self and returns it only on success).
-        for (&section, _) in expected.iter().filter(|(_, (size, _))| *size > 0) {
+        // Every section retained from the previous execution rejects appends until replayed,
+        // including sections whose valid prefix holds no complete frame. Each probe consumes
+        // its journal (append takes self and returns it only on success).
+        for &section in &gated {
             let journal = Journal::init(context.child("gate"), config(&context))
                 .await
                 .expect("gate init failed");
@@ -339,7 +386,7 @@ fn fuzz(input: FuzzInput) {
             .expect("recovery init failed");
         let mut journal = assert_replay(journal, &expected).await;
         let mut sentinels = expected.clone();
-        for (&section, (size, frames)) in &expected {
+        for (&section, (size, _)) in &expected {
             let offset;
             (journal, offset, _) = journal
                 .append(section, &vec![0xCD; 9])
@@ -351,7 +398,6 @@ fn fuzz(input: FuzzInput) {
             );
             let entry = sentinels.get_mut(&section).unwrap();
             entry.0 = size + 11;
-            entry.1 = frames.clone();
             entry.1.push(vec![0xCD; 9]);
         }
         journal = journal.sync_all().await.expect("sentinel sync failed");

@@ -48,21 +48,24 @@ fn config() -> Config<<Vec<u8> as Read>::Cfg> {
 }
 
 fn value(input: &FuzzInput, tag: u8) -> Vec<u8> {
-    let mut value = input.payload.to_vec();
-    value[0] = tag;
+    let mut value = vec![tag];
+    value.extend_from_slice(&input.payload);
     value
 }
 
+/// Snapshot the store's complete key set, so a load that fabricates or misparses
+/// an extra key diverges from the expected map.
 fn snapshot<E: commonware_storage::Context>(
     metadata: &Metadata<E, U64, Vec<u8>>,
 ) -> BTreeMap<u64, Vec<u8>> {
-    [0, 1, 2, SENTINEL_KEY]
-        .into_iter()
-        .filter_map(|key| {
-            metadata
-                .get(&U64::new(key))
-                .cloned()
-                .map(|value| (key, value))
+    metadata
+        .keys()
+        .map(|key| {
+            let value = metadata
+                .get(key)
+                .expect("listed key must be readable")
+                .clone();
+            (u64::from(key), value)
         })
         .collect()
 }
@@ -152,7 +155,10 @@ fn run(input: &FuzzInput, mode: PartialWriteMode) {
         }
     });
 
-    let checkpoint = faulted_recovery(checkpoint, input.seed, |context| async move {
+    // Metadata::init performs no write_at and no remove, so force the faulted pass's
+    // mutation selector to the sync (1) or resize (2) arm it can actually exercise.
+    let fault_seed = (input.seed & !0x03) | (1 + (input.seed & 1));
+    let checkpoint = faulted_recovery(checkpoint, fault_seed, |context| async move {
         Metadata::<_, U64, Vec<u8>>::init(context.child("faulted_recovery"), config()).await
     });
 

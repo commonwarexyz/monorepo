@@ -17,9 +17,13 @@ pub(crate) async fn corrupt_page(
     let physical_page_size = logical_page_size + CHECKSUM_SIZE;
     let offset = page * physical_page_size;
     let (blob, size) = context.open(partition, &blob.to_be_bytes()).await.unwrap();
+
+    // A complete physical page must follow the target: a trailing partial page can never
+    // validate, so a target followed only by one would be the last validatable page.
     assert!(
-        size.checked_sub(physical_page_size)
-            .is_some_and(|remaining| offset < remaining),
+        offset
+            .checked_add(physical_page_size * 2)
+            .is_some_and(|end| end <= size),
         "corruption target must be an interior page"
     );
     let byte = blob

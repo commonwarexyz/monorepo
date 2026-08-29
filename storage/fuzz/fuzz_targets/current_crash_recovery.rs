@@ -7,7 +7,7 @@
 //! storage faults, crashes again, then recovers cleanly and verifies the DB is usable.
 
 use arbitrary::Arbitrary;
-use commonware_cryptography::Sha256;
+use commonware_cryptography::{Sha256, sha256::Digest};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
     Runner, Supervisor as _,
@@ -137,8 +137,16 @@ fn apply_pending(pending: &mut HashMap<RawKey, Option<RawValue>>, committed: &mu
     }
 }
 
-/// Return the complete snapshots recovery may expose after an errored batch.
-fn failure_states(pending: &HashMap<RawKey, Option<RawValue>>, committed: &State) -> Vec<State> {
+/// Return the complete (state, root) snapshots recovery may expose after an errored batch.
+///
+/// An applied batch can be KV-identical to the committed state while still appending
+/// operations (and changing the root), so entries collapse only when the roots also match.
+fn failure_states(
+    pending: &HashMap<RawKey, Option<RawValue>>,
+    committed: &State,
+    committed_root: Digest,
+    post_root: Digest,
+) -> Vec<(State, Digest)> {
     let mut post = committed.clone();
     for (key, value) in pending {
         match value {
@@ -151,37 +159,59 @@ fn failure_states(pending: &HashMap<RawKey, Option<RawValue>>, committed: &State
         }
     }
 
-    if post == *committed {
-        vec![committed.clone()]
+    if post == *committed && post_root == committed_root {
+        vec![(committed.clone(), committed_root)]
     } else {
-        vec![committed.clone(), post]
+        vec![(committed.clone(), committed_root), (post, post_root)]
     }
 }
 
-/// Commit pending writes, returning the complete snapshots allowed after failure.
+/// Commit pending writes, returning the (state, root) snapshots allowed after failure.
+///
+/// On success, `committed_root` advances to the applied batch's canonical root, which
+/// equals the db's root after `apply_batch` (commit changes durability, not the root).
 async fn commit_pending<F: Graftable>(
     db: Db<F>,
     pending_writes: &mut Vec<(Key, Option<Value>)>,
     pending: &mut HashMap<RawKey, Option<RawValue>>,
     committed: &mut State,
-) -> Result<Db<F>, Vec<State>> {
+    committed_root: &mut Digest,
+) -> Result<Db<F>, Vec<(State, Digest)>> {
     let mut batch = db.new_batch();
     for (k, v) in pending_writes.drain(..) {
         batch = batch.write(k, v);
     }
-    let merkleized = match batch.merkleize(&db, None).await {
-        Ok(m) => m,
-        Err(_) => return Err(vec![committed.clone()]),
-    };
+    // Merkleize only reads and hashes, and reads are never fault-injected, so an
+    // error here is a real bug rather than a legal crash trigger.
+    let merkleized = batch
+        .merkleize(&db, None)
+        .await
+        .expect("merkleize failed without any mutable operation");
+    let post_root = merkleized.root();
     let db = match db.apply_batch(merkleized).await {
         Ok((db, _)) => db,
-        Err(_) => return Err(failure_states(pending, committed)),
+        Err(_) => {
+            return Err(failure_states(
+                pending,
+                committed,
+                *committed_root,
+                post_root,
+            ));
+        }
     };
     let db = match db.commit().await {
         Ok(db) => db,
-        Err(_) => return Err(failure_states(pending, committed)),
+        Err(_) => {
+            return Err(failure_states(
+                pending,
+                committed,
+                *committed_root,
+                post_root,
+            ));
+        }
     };
     apply_pending(pending, committed);
+    *committed_root = post_root;
     Ok(db)
 }
 
@@ -203,7 +233,8 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
     let runner = deterministic::Runner::new(cfg);
 
     // Phase 1: Execute operations with fault injection until crash.
-    // Track committed KV state so we can verify it survives recovery.
+    // Track committed KV state and per-boundary roots so recovery can be
+    // verified against an independently recorded snapshot.
     let ((known_keys, allowed_states), checkpoint) = runner.start_and_recover(|ctx| {
         let suffix = suffix.clone();
         let operations = operations.clone();
@@ -211,6 +242,9 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
             let mut db: Db<F> = Db::init(ctx.child("db"), make_config(&ctx, &suffix, params))
                 .await
                 .unwrap();
+
+            // Root recorded at the last successful commit boundary (initially empty).
+            let mut committed_root = db.root();
 
             let fault_cfg = ctx.storage_fault_config();
             *fault_cfg.write() = deterministic::FaultConfig {
@@ -245,8 +279,14 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
                         db
                     }
                     CurrentOperation::Commit => {
-                        match commit_pending(db, &mut pending_writes, &mut pending, &mut committed)
-                            .await
+                        match commit_pending(
+                            db,
+                            &mut pending_writes,
+                            &mut pending,
+                            &mut committed,
+                            &mut committed_root,
+                        )
+                        .await
                         {
                             Ok(db) => db,
                             Err(states) => {
@@ -261,6 +301,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
                             &mut pending_writes,
                             &mut pending,
                             &mut committed,
+                            &mut committed_root,
                         )
                         .await
                         {
@@ -279,10 +320,9 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
                 };
             }
 
-            (
-                known_keys.into_iter().collect::<Vec<_>>(),
-                failure.unwrap_or_else(|| vec![committed]),
-            )
+            // A failed prune leaves both the committed state and the root unchanged.
+            let allowed = failure.unwrap_or_else(|| vec![(committed, committed_root)]);
+            (known_keys.into_iter().collect::<Vec<_>>(), allowed)
         }
     });
 
@@ -306,26 +346,30 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
                 .await
                 .expect("recovery must succeed");
 
-            // Read every observed key in one batch so the result must match one atomic snapshot.
+            // Read every observed key in one batch so the result must match one atomic
+            // snapshot, and require the recovered root to match the root recorded at
+            // that same boundary: the root is a pure function of the log, so accepting
+            // the instance's own root would let a self-consistent rebuild bug pass.
+            let root = db.root();
             let keys = known_keys.iter().copied().map(Key::new).collect::<Vec<_>>();
             let key_refs = keys.iter().collect::<Vec<_>>();
             let recovered = db
                 .get_many(&key_refs)
                 .await
                 .expect("whole-snapshot read should not fail");
-            let matches_allowed = allowed_states.iter().any(|state| {
-                known_keys
-                    .iter()
-                    .map(|key| state.get(key).copied().map(Value::new))
-                    .eq(recovered.iter().cloned())
+            let matches_allowed = allowed_states.iter().any(|(state, expected_root)| {
+                *expected_root == root
+                    && known_keys
+                        .iter()
+                        .map(|key| state.get(key).copied().map(Value::new))
+                        .eq(recovered.iter().cloned())
             });
             assert!(
                 matches_allowed,
-                "recovery exposed a state that was not atomic at a batch boundary"
+                "recovery exposed a (state, root) pair that was not atomic at a batch boundary"
             );
 
-            // Verify all recovered KV pairs are provable.
-            let root = db.root();
+            // Verify all recovered KV pairs are provable against the matched root.
             for (key, value) in keys
                 .into_iter()
                 .zip(recovered)

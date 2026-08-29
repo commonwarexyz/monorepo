@@ -40,10 +40,10 @@
 //! # Positions
 //!
 //! Position arguments (`Read`, `Rewind`, `Replay`) come straight from the fuzzer, so a random `u64`
-//! is almost always out of range. Each such op runs twice: once with the value clamped into the
-//! live range, which must take the success path, and once with the raw value, which exercises the
-//! validation path (`ItemPruned` below the start, `ItemOutOfRange` past the end). Clamping
-//! guarantees the success path is covered on every input; the raw value still tests rejection.
+//! is almost always out of range. `Read` and `Replay` run twice (`Read` skips the clamped pass on
+//! an empty journal): once with the value clamped into the live range, which must take the success
+//! path, and once with the raw value, which exercises the validation path (`ItemPruned` below the
+//! start, `ItemOutOfRange` past the end). `Rewind` runs once, usually clamped, occasionally raw.
 
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_runtime::{BufferPooler, ReadOptions, Runner, Supervisor as _, deterministic};
@@ -565,29 +565,22 @@ fn assert_read(result: Result<Item, Error>, pos: u64, bounds: &Range<u64>) {
     );
 }
 
-/// Whether the cycle continues after the raw replay. Validation
-/// precedes any I/O, so an out-of-range start is deterministic: `< start` -> `ItemPruned`,
-/// `> end` -> `ItemOutOfRange` (`== end` is in range). An in-range start succeeds or hits a
-/// tail-repair I/O fault (ends the cycle); any other result is a bug.
-fn should_continue_raw_replay(
-    result: Result<Vec<(u64, Item)>, Error>,
-    start_pos: u64,
-    bounds: &Range<u64>,
-) -> bool {
-    let in_range = start_pos >= bounds.start && start_pos <= bounds.end;
-    match &result {
-        Ok(_) if in_range => true,
-        Err(Error::ItemPruned(_)) if start_pos < bounds.start => true,
-        Err(Error::ItemOutOfRange(_)) if start_pos > bounds.end => true,
-        // An in-range start that failed with a non-validation error is a tail-repair I/O fault.
-        Err(e) if in_range && !matches!(e, Error::ItemPruned(_) | Error::ItemOutOfRange(_)) => {
-            false
-        }
-        _ => panic!(
-            "raw replay at {start_pos} (bounds [{}, {})) returned {result:?}",
-            bounds.start, bounds.end
-        ),
-    }
+/// Check a raw-position replay. Validation precedes any I/O, so an out-of-range start is
+/// deterministic: `< start` -> `ItemPruned`, `> end` -> `ItemOutOfRange` (`== end` is in
+/// range). Replay is a pure read and read faults are never injected, so an in-range start
+/// must succeed and any other result is a real bug.
+fn assert_raw_replay(result: Result<Vec<(u64, Item)>, Error>, start_pos: u64, bounds: &Range<u64>) {
+    let ok = match &result {
+        Ok(_) => start_pos >= bounds.start && start_pos <= bounds.end,
+        Err(Error::ItemPruned(_)) => start_pos < bounds.start,
+        Err(Error::ItemOutOfRange(_)) => start_pos > bounds.end,
+        Err(_) => false,
+    };
+    assert!(
+        ok,
+        "raw replay at {start_pos} (bounds [{}, {})) returned {result:?}",
+        bounds.start, bounds.end
+    );
 }
 
 /// Assert the items from replaying an in-bounds `start` are exactly positions `[start, bounds.end)`,
@@ -609,9 +602,9 @@ fn assert_replay_suffix(items: &[(u64, Item)], start: u64, bounds: &Range<u64>) 
     }
 }
 
-/// Run a cycle's ops under faults, updating `expected`. Stops early on any error that may have left
-/// the journal inconsistent (a mutable-method error or a tail-repair I/O fault); the journal is
-/// then dropped to crash. Reads never fault, so a bad read panics instead of ending the cycle.
+/// Run a cycle's ops under faults, updating `expected`. Stops early on a mutable-method error,
+/// which may have left the journal inconsistent; the journal is then dropped to crash. Reads and
+/// replays never fault, so a bad one panics instead of ending the cycle.
 async fn run_ops<J: FuzzJournal>(
     mut journal: J,
     expected: &mut Expected,
@@ -630,7 +623,11 @@ async fn run_ops<J: FuzzJournal>(
                         expected.appended(item);
                         journal
                     }
-                    Err(_) => {
+                    Err(err) => {
+                        assert!(
+                            !matches!(err, Error::Corruption(_)),
+                            "append reported corruption mid-cycle: {err:?}"
+                        );
                         expected.append_failed(size_before);
                         return;
                     }
@@ -652,7 +649,13 @@ async fn run_ops<J: FuzzJournal>(
                     expected.synced(journal.bounds());
                     journal
                 }
-                Err(_) => return,
+                Err(err) => {
+                    assert!(
+                        !matches!(err, Error::Corruption(_)),
+                        "sync reported corruption mid-cycle: {err:?}"
+                    );
+                    return;
+                }
             },
 
             // A snapshot flushes buffered data without a durability barrier, changing no
@@ -660,7 +663,13 @@ async fn run_ops<J: FuzzJournal>(
             // next crash to cut.
             JournalOperation::Snapshot => match journal.snapshot().await {
                 Ok(journal) => journal,
-                Err(_) => return,
+                Err(err) => {
+                    assert!(
+                        !matches!(err, Error::Corruption(_)),
+                        "snapshot reported corruption mid-cycle: {err:?}"
+                    );
+                    return;
+                }
             },
 
             JournalOperation::Commit => match journal.commit().await {
@@ -668,7 +677,13 @@ async fn run_ops<J: FuzzJournal>(
                     expected.committed(journal.size().await);
                     journal
                 }
-                Err(_) => return,
+                Err(err) => {
+                    assert!(
+                        !matches!(err, Error::Corruption(_)),
+                        "commit reported corruption mid-cycle: {err:?}"
+                    );
+                    return;
+                }
             },
 
             JournalOperation::Rewind { size } => {
@@ -704,7 +719,11 @@ async fn run_ops<J: FuzzJournal>(
                             );
                             return;
                         }
-                        Err(_) => {
+                        Err(err) => {
+                            assert!(
+                                !matches!(err, Error::Corruption(_)),
+                                "rewind reported corruption mid-cycle: {err:?}"
+                            );
                             expected.rewound(target.min(bounds.end), bounds.end);
                             return;
                         }
@@ -720,7 +739,12 @@ async fn run_ops<J: FuzzJournal>(
                         expected.pruned(journal.bounds().start);
                         journal
                     }
-                    Err(_) => {
+                    Err(err) => {
+                        assert!(
+                            !matches!(err, Error::Corruption(_)),
+                            "prune reported corruption mid-cycle: {err:?}"
+                        );
+
                         // A failed prune advances the boundary at most to the section floor.
                         let capped = (*min_pos).min(size);
                         let section_floor =
@@ -732,39 +756,32 @@ async fn run_ops<J: FuzzJournal>(
             }
 
             JournalOperation::Replay { buffer, start_pos } => {
-                // The clamped replay must return the full suffix matching `read()`, or hit a
-                // tail-repair I/O fault.
+                // The clamped replay must return the full suffix matching `read()`. Replay
+                // is a pure read over successfully written data, so any error is a real bug.
                 let bounds = journal.bounds();
                 let clamped = bounds.start + (*start_pos % (bounds.end - bounds.start + 1));
-                let clamped_ok = match journal.replay(clamped, NZUsize!(*buffer)).await {
-                    Ok(items) => {
-                        assert_replay_suffix(&items, clamped, &bounds);
-                        for (pos, item) in &items {
-                            let via_read = journal.read(*pos).await.unwrap_or_else(|e| {
-                                panic!("read({pos}) cross-check during replay: {e:?}")
-                            });
-                            assert_eq!(*item, via_read, "replay/read divergence at {pos}");
-                        }
-                        true
-                    }
-                    // A clamped start is always in bounds, so a validation error is a bug.
-                    Err(e @ (Error::ItemPruned(_) | Error::ItemOutOfRange(_))) => panic!(
-                        "in-bounds replay at {clamped} (bounds [{}, {})) returned {e:?}",
-                        bounds.start, bounds.end
-                    ),
-                    // Tail-repair I/O fault: end the cycle.
-                    Err(_) => false,
-                };
-                if !clamped_ok {
-                    return;
+                let items = journal
+                    .replay(clamped, NZUsize!(*buffer))
+                    .await
+                    .unwrap_or_else(|e| {
+                        panic!(
+                            "in-bounds replay at {clamped} (bounds [{}, {})) returned {e:?}",
+                            bounds.start, bounds.end
+                        )
+                    });
+                assert_replay_suffix(&items, clamped, &bounds);
+                for (pos, item) in &items {
+                    let via_read = journal
+                        .read(*pos)
+                        .await
+                        .unwrap_or_else(|e| panic!("read({pos}) cross-check during replay: {e:?}"));
+                    assert_eq!(*item, via_read, "replay/read divergence at {pos}");
                 }
-                if !should_continue_raw_replay(
+                assert_raw_replay(
                     journal.replay(*start_pos, NZUsize!(*buffer)).await,
                     *start_pos,
                     &bounds,
-                ) {
-                    return;
-                }
+                );
                 journal
             }
 
@@ -805,21 +822,29 @@ where
 }
 
 /// Attempt ordinary journal recovery under storage faults and return its crash checkpoint.
+///
+/// `cycle` varies the fault selectors per restart, so a multi-cycle run can hit a different
+/// mutation class (write, sync, resize, or remove) at each recovery.
 fn faulted_restart<J: FuzzJournal + Send + 'static>(
     checkpoint: deterministic::Checkpoint,
     partition: String,
     params: Params,
+    cycle: u64,
 ) -> deterministic::Checkpoint
 where
     J::Config: Send,
 {
-    faulted_recovery(checkpoint, params.recovery_seed, move |ctx| async move {
-        J::init(
-            ctx.child("faulted_recovery"),
-            J::config(&partition, &ctx, &params),
-        )
-        .await
-    })
+    faulted_recovery(
+        checkpoint,
+        params.recovery_seed ^ cycle,
+        move |ctx| async move {
+            J::init(
+                ctx.child("faulted_recovery"),
+                J::config(&partition, &ctx, &params),
+            )
+            .await
+        },
+    )
 }
 
 /// Split the operation stream into one `ops` list per cycle, cutting at each `Crash` marker. Always
@@ -867,9 +892,9 @@ where
         partition.clone(),
         params,
     );
-    checkpoint = faulted_restart::<J>(checkpoint, partition.clone(), params);
+    checkpoint = faulted_restart::<J>(checkpoint, partition.clone(), params, 0);
 
-    for ops in cycles.iter().skip(1) {
+    for (cycle, ops) in cycles.iter().enumerate().skip(1) {
         let runner = deterministic::Runner::from(checkpoint);
         (expected, checkpoint) = run_cycle::<J>(
             runner,
@@ -878,7 +903,7 @@ where
             partition.clone(),
             params,
         );
-        checkpoint = faulted_restart::<J>(checkpoint, partition.clone(), params);
+        checkpoint = faulted_restart::<J>(checkpoint, partition.clone(), params, cycle as u64);
     }
 
     // Final fault-free phase: verify the last recovery, then append, sync, drop, and reopen a
