@@ -874,18 +874,18 @@ pub(crate) fn short_digest(digest: &Digest) -> String {
         .collect()
 }
 
-/// A committed close that omits one recipient's credit, plus that recipient's held receipt.
+/// A committed close that omits one receiver's credit, plus that receiver's held receipt.
 ///
 /// This is the demo's fraud construction, kept out of the honest operator binary. The close
-/// credits a deposit to a bystander account, so the omitted recipient is absent from its change
+/// credits a deposit to a bystander account, so the omitted receiver is absent from its change
 /// vector, mirroring how the challenge tests build an inconsistent close. The held pair is a
-/// valid operator-signed receipt crediting the recipient under the same epoch context, so it
+/// valid operator-signed receipt crediting the receiver under the same epoch context, so it
 /// convicts the close with a `HigherShardTip` challenge.
 pub(crate) struct OmittingClose {
     pub(crate) deposit: DepositEvent,
     pub(crate) deposits: DepositBatch<Key>,
     pub(crate) result: SettlementResult,
-    pub(crate) recipient: Key,
+    pub(crate) receiver: Key,
     pub(crate) held_credit: u64,
     pub(crate) held_pair: Payment,
     pub(crate) held_lookup: HigherShardTipLookup<Key, Digest>,
@@ -897,7 +897,7 @@ pub(crate) fn omitting_close<R: CryptoRng>(rng: &mut R) -> Result<OmittingClose>
     let protocol = Protocol::new(NonZeroUsize::MIN)?;
     let wallets = wallets();
     let payer = &wallets[0];
-    let recipient = wallets[1].public_key();
+    let receiver = wallets[1].public_key();
     let bystander = wallets[2].public_key();
     let held_credit = 5;
 
@@ -957,33 +957,33 @@ pub(crate) fn omitting_close<R: CryptoRng>(rng: &mut R) -> Result<OmittingClose>
         successor,
     )?;
 
-    // The omitting close excludes the recipient, so its composed lookup is an ordered absence.
+    // The omitting close excludes the receiver, so its composed lookup is an ordered absence.
     let index = ChallengeIndex::new::<Sha256>(prepared.close_context(), prepared.close())
         .context("index the omitting close")?;
     let held_lookup = index
-        .higher_shard_tip_lookup::<Sha256>(&recipient, None, 0)
-        .context("compose the omitted recipient lookup")?;
+        .higher_shard_tip_lookup::<Sha256>(&receiver, None, 0)
+        .context("compose the omitted receiver lookup")?;
     let result = protocol.complete(prepared, rng)?;
     let context = result.payment_context.clone();
 
-    // The recipient holds an operator-signed receipt crediting it under the same epoch context.
-    let send = SignedSend::sign_next(&context, payer.signer(), recipient.clone(), held_credit, 0)
-        .context("sign the omitted recipient's send")?;
+    // The receiver holds an operator-signed receipt crediting it under the same epoch context.
+    let send = SignedSend::sign_next(&context, payer.signer(), receiver.clone(), held_credit, 0)
+        .context("sign the omitted receiver's send")?;
     let receipt = SignedReceipt::issue_next::<Sha256, _>(
         &context,
         &send,
-        &recipient,
+        &receiver,
         0,
         0,
         0,
         protocol.operator(),
     )
-    .context("issue the omitted recipient's receipt")?;
+    .context("issue the omitted receiver's receipt")?;
     Ok(OmittingClose {
         deposit,
         deposits,
         result,
-        recipient,
+        receiver,
         held_credit,
         held_pair: Payment::from_parts_unchecked(send, receipt),
         held_lookup,

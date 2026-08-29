@@ -231,7 +231,7 @@ impl Read for EpochRootsRequest {
 /// What settlement holds for one epoch: its registered payment anchor and, once a close is
 /// admitted, that close's identity and roots.
 ///
-/// Recipients anchor intake against `anchor` and reconciliation against `admitted`, so
+/// Receivers anchor intake against `anchor` and reconciliation against `admitted`, so
 /// operator-served committed-side evidence is trusted only when it matches this record.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct EpochRootsResponse {
@@ -998,14 +998,14 @@ impl<T: Read<Cfg = ()>> Read for ClaimResponse<T> {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ExternalPayoutResponse {
-    pub(crate) recipient: Key,
+    pub(crate) receiver: Key,
     pub(crate) amount: u64,
 }
 
 impl From<ExternalPayout<Key>> for ExternalPayoutResponse {
     fn from(payout: ExternalPayout<Key>) -> Self {
         Self {
-            recipient: payout.recipient,
+            receiver: payout.recipient,
             amount: payout.amount,
         }
     }
@@ -1013,14 +1013,14 @@ impl From<ExternalPayout<Key>> for ExternalPayoutResponse {
 
 impl Write for ExternalPayoutResponse {
     fn write(&self, buf: &mut impl BufMut) {
-        self.recipient.write(buf);
+        self.receiver.write(buf);
         self.amount.write(buf);
     }
 }
 
 impl EncodeSize for ExternalPayoutResponse {
     fn encode_size(&self) -> usize {
-        self.recipient.encode_size() + self.amount.encode_size()
+        self.receiver.encode_size() + self.amount.encode_size()
     }
 }
 
@@ -1029,7 +1029,7 @@ impl Read for ExternalPayoutResponse {
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self {
-            recipient: Key::read(buf)?,
+            receiver: Key::read(buf)?,
             amount: u64::read(buf)?,
         })
     }
@@ -1657,7 +1657,7 @@ pub(crate) async fn claim_roots<E: Network>(
 
 /// Looks up the close settlement holds for one epoch, or `None` while none is admitted.
 ///
-/// This is the recipient's reconciliation anchor: coverage of a held receipt is decided
+/// This is the receiver's reconciliation anchor: coverage of a held receipt is decided
 /// only against settlement's own batch identity and change root.
 pub(crate) async fn epoch_roots<E: Network>(
     network: &E,
@@ -1694,8 +1694,9 @@ pub(crate) async fn confirm_registration<E: Network>(
 ///
 /// The demo agent hands withdrawals to the operator, which carries them into its next
 /// registered close. When the operator will not carry it, the wallet escalates the exact
-/// signed request here so its deadline becomes an on-chain obligation that expires into
-/// hard-fault recovery, which is the censorship-fallback exit.
+/// signed request here to force carriage: registration demands every queued request
+/// verbatim, so the next registered close must include it. Only an operator that stalls
+/// entirely lets the deadline expire into hard-fault recovery, the censorship-fallback exit.
 pub(crate) async fn queue_withdrawal<E: Network>(
     network: &E,
     address: SocketAddr,
@@ -1982,7 +1983,7 @@ mod tests {
         let entries = (0..MAX_ENTRIES)
             .map(|index| {
                 let seed = 20_000 + u64::try_from(index).unwrap();
-                Entry::new(Wallet::from_seed("recipient", seed).public_key(), 1).unwrap()
+                Entry::new(Wallet::from_seed("receiver", seed).public_key(), 1).unwrap()
             })
             .collect::<Vec<_>>();
         let payment = |previous_debit: u64| {
@@ -1993,11 +1994,11 @@ mod tests {
                 previous_debit,
             )
             .unwrap();
-            let recipient = send.body().entries()[0].recipient().clone();
+            let receiver = send.body().entries()[0].recipient().clone();
             let receipt = SignedReceipt::issue_next::<Sha256, _>(
                 &context,
                 &send,
-                &recipient,
+                &receiver,
                 0,
                 0,
                 0,
@@ -2056,7 +2057,7 @@ mod tests {
 
         for response in [
             ExternalPayoutClaimResponse::Released(ExternalPayoutResponse {
-                recipient: identities()[0].key.clone(),
+                receiver: identities()[0].key.clone(),
                 amount: 7,
             }),
             ExternalPayoutClaimResponse::Unavailable,

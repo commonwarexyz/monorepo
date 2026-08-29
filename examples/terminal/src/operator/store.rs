@@ -34,8 +34,8 @@ use std::{
 };
 use thiserror::Error;
 
-const SCHEMA_VERSION: i64 = 7;
-/// Bounds one page of incoming pairs served to a recipient. Each stored row is one linked
+const SCHEMA_VERSION: i64 = 8;
+/// Bounds one page of incoming pairs served to a receiver. Each stored row is one linked
 /// [`Payment`] at most [`MAX_PAYMENT_BYTES`], so this page stays well under the RPC body limit.
 pub(crate) const MAX_INCOMING_PAGE: usize = 128;
 const MAX_CLAIM_BYTES: usize = 16 * 1024;
@@ -164,22 +164,22 @@ pub(crate) struct StoredAccount {
 pub(crate) struct StoredPayment {
     pub(crate) sequence: u64,
     pub(crate) payer_name: String,
-    pub(crate) recipient_name: String,
+    pub(crate) receiver_name: String,
     pub(crate) external: bool,
     pub(crate) tx_id: Digest,
     pub(crate) payment: Payment,
 }
 
 pub(crate) struct StoredShardEndpoint {
-    pub(crate) recipient: Key,
+    pub(crate) receiver: Key,
     pub(crate) shard: u64,
     pub(crate) cumulative_credit: u64,
     pub(crate) receipt_index: u64,
 }
 
-/// One accepted linked pair crediting a recipient, with its stable acceptance-order cursor.
+/// One accepted linked pair crediting a receiver, with its stable acceptance-order cursor.
 ///
-/// The cursor is the payment log's autoincrement sequence, so a recipient can fetch new
+/// The cursor is the payment log's autoincrement sequence, so a receiver can fetch new
 /// credits incrementally by passing the highest sequence it already holds.
 pub(crate) struct IncomingPayment {
     pub(crate) sequence: u64,
@@ -274,9 +274,9 @@ struct NewPaymentPlan {
 }
 
 struct EntryPlan {
-    recipient_key: Key,
-    recipient: Option<StoredAccount>,
-    recipient_name: String,
+    receiver_key: Key,
+    receiver: Option<StoredAccount>,
+    receiver_name: String,
     external: bool,
     previous_credit: u64,
     previous_index: u64,
@@ -462,27 +462,27 @@ impl Store {
                  sequence INTEGER PRIMARY KEY AUTOINCREMENT,
                  epoch INTEGER NOT NULL CHECK (epoch >= 0),
                  payer_name TEXT NOT NULL,
-                 recipient BLOB NOT NULL CHECK (length(recipient) = 32),
-                 recipient_name TEXT NOT NULL,
+                 receiver BLOB NOT NULL CHECK (length(receiver) = 32),
+                 receiver_name TEXT NOT NULL,
                  external INTEGER NOT NULL CHECK (external IN (0, 1)),
                  tx_id BLOB NOT NULL CHECK (length(tx_id) = 32),
                  encoded BLOB NOT NULL CHECK (
                      length(encoded) > 0 AND length(encoded) <= {max_payment_bytes}
                  ),
-                 UNIQUE(tx_id, recipient)
+                 UNIQUE(tx_id, receiver)
              );
              CREATE INDEX IF NOT EXISTS payments_epoch_sequence
                  ON payments(epoch, sequence);
-             CREATE INDEX IF NOT EXISTS payments_recipient_sequence
-                 ON payments(recipient, sequence);
+             CREATE INDEX IF NOT EXISTS payments_receiver_sequence
+                 ON payments(receiver, sequence);
 
              CREATE TABLE IF NOT EXISTS receive_shards (
                  epoch INTEGER NOT NULL CHECK (epoch >= 0),
-                 recipient BLOB NOT NULL CHECK (length(recipient) = 32),
+                 receiver BLOB NOT NULL CHECK (length(receiver) = 32),
                  shard INTEGER NOT NULL CHECK (shard >= 0),
                  cumulative_credit INTEGER NOT NULL CHECK (cumulative_credit >= 0),
                  receipt_index INTEGER NOT NULL CHECK (receipt_index >= 0),
-                 PRIMARY KEY(epoch, recipient, shard)
+                 PRIMARY KEY(epoch, receiver, shard)
              );
 
              CREATE TABLE IF NOT EXISTS deposits (
@@ -544,7 +544,7 @@ impl Store {
              CREATE TABLE IF NOT EXISTS payout_claims (
                  epoch INTEGER NOT NULL CHECK (epoch >= 0),
                  position INTEGER NOT NULL CHECK (position >= 0),
-                 recipient BLOB NOT NULL CHECK (length(recipient) = 32),
+                 receiver BLOB NOT NULL CHECK (length(receiver) = 32),
                  amount INTEGER NOT NULL CHECK (amount > 0),
                  proof BLOB NOT NULL,
                  claimed INTEGER NOT NULL DEFAULT 0 CHECK (claimed IN (0, 1)),
@@ -920,7 +920,7 @@ impl Store {
             "epoch payment count exceeds its configured bound"
         );
         let mut statement = connection.prepare(
-            "SELECT sequence, payer_name, recipient_name, external,
+            "SELECT sequence, payer_name, receiver_name, external,
                     length(tx_id), tx_id, length(encoded), encoded
              FROM payments WHERE epoch = ?1 ORDER BY sequence",
         )?;
@@ -941,7 +941,7 @@ impl Store {
                 Ok(StoredPayment {
                     sequence,
                     payer_name: row.get(1)?,
-                    recipient_name: row.get(2)?,
+                    receiver_name: row.get(2)?,
                     external: row.get::<_, i64>(3)? != 0,
                     tx_id,
                     payment,
@@ -950,15 +950,15 @@ impl Store {
             .collect::<rusqlite::Result<Vec<_>>>()?;
 
         let mut statement = connection.prepare(
-            "SELECT length(recipient), recipient, shard, cumulative_credit, receipt_index
-             FROM receive_shards WHERE epoch = ?1 ORDER BY recipient, shard",
+            "SELECT length(receiver), receiver, shard, cumulative_credit, receipt_index
+             FROM receive_shards WHERE epoch = ?1 ORDER BY receiver, shard",
         )?;
         let receive_shards = statement
             .query_map([epoch_sql], |row| {
-                let recipient = read_fixed_blob(row, 0, 1, Key::SIZE, "shard recipient")?;
+                let receiver = read_fixed_blob(row, 0, 1, Key::SIZE, "shard receiver")?;
                 Ok(StoredShardEndpoint {
-                    recipient: Key::decode(recipient.as_slice()).map_err(|error| {
-                        to_sqlite_error(anyhow::anyhow!("decode receive-shard recipient: {error}"))
+                    receiver: Key::decode(receiver.as_slice()).map_err(|error| {
+                        to_sqlite_error(anyhow::anyhow!("decode receive-shard receiver: {error}"))
                     })?,
                     shard: from_sql_u64(row.get(2)?, "receive shard").map_err(to_sqlite_error)?,
                     cumulative_credit: from_sql_u64(row.get(3)?, "shard credit")
@@ -1096,7 +1096,7 @@ impl Store {
                 SignedReceipt::issue_next_batch::<Sha256, _>(context, &send, &starts, operator)
                     .context("issue operator receipts")?;
 
-            // Every entry lands in this one transaction: the payer debit, each recipient credit,
+            // Every entry lands in this one transaction: the payer debit, each receiver credit,
             // each shard advance, and each linked payment row commit or roll back together.
             //
             // A stored row is one linked [Payment], which encodes as the shared send followed
@@ -1105,26 +1105,26 @@ impl Store {
             let encoded_send = send.encode();
             let mut advance_shard = transaction.prepare_cached(
                 "INSERT INTO receive_shards(
-                     epoch, recipient, shard, cumulative_credit, receipt_index
+                     epoch, receiver, shard, cumulative_credit, receipt_index
                  ) VALUES(?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(epoch, recipient, shard) DO UPDATE SET
+                 ON CONFLICT(epoch, receiver, shard) DO UPDATE SET
                      cumulative_credit = excluded.cumulative_credit,
                      receipt_index = excluded.receipt_index",
             )?;
             let mut insert_payment = transaction.prepare_cached(
                 "INSERT INTO payments(
-                     epoch, payer_name, recipient, recipient_name, external, tx_id, encoded
+                     epoch, payer_name, receiver, receiver_name, external, tx_id, encoded
                  ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             )?;
             let mut sequence = None;
             let mut receipts = Vec::with_capacity(plan.entries.len());
             for (entry, receipt) in plan.entries.iter().zip(issued) {
-                if let Some(recipient) = entry.recipient.as_ref() {
-                    upsert_account_state(transaction, epoch, recipient)?;
+                if let Some(receiver) = entry.receiver.as_ref() {
+                    upsert_account_state(transaction, epoch, receiver)?;
                 }
                 advance_shard.execute(params![
                     epoch_sql,
-                    entry.recipient_key.as_ref(),
+                    entry.receiver_key.as_ref(),
                     shard_sql,
                     sql_u64(receipt.body().cumulative_shard_credit(), "shard credit")?,
                     sql_u64(receipt.body().index(), "receipt index")?,
@@ -1136,8 +1136,8 @@ impl Store {
                 insert_payment.execute(params![
                     epoch_sql,
                     plan.payer.name,
-                    entry.recipient_key.as_ref(),
-                    entry.recipient_name,
+                    entry.receiver_key.as_ref(),
+                    entry.receiver_name,
                     i64::from(entry.external),
                     tx_id.digest().as_ref(),
                     encoded.as_slice(),
@@ -1196,16 +1196,16 @@ impl Store {
         find_accepted_batch(&self.connection, send, &send.tx_id::<Sha256>())
     }
 
-    /// Serves accepted linked pairs crediting `recipient` in acceptance order after `after`.
+    /// Serves accepted linked pairs crediting `receiver` in acceptance order after `after`.
     ///
-    /// Rows are stored as canonical [`Payment`] bytes keyed by `(tx_id, recipient)` on the
+    /// Rows are stored as canonical [`Payment`] bytes keyed by `(tx_id, receiver)` on the
     /// accept path, so this decodes and serves them directly. Every retained epoch is served:
     /// the operator keeps its per-entry payment rows across finalization (only shadowed and
-    /// zero-balance account-state versions are pruned), so a recipient can fetch the credits of
+    /// zero-balance account-state versions are pruned), so a receiver can fetch the credits of
     /// the open epoch and every closed epoch this database still holds.
     pub(crate) fn incoming_payments(
         &self,
-        recipient: &Key,
+        receiver: &Key,
         after: u64,
         limit: usize,
     ) -> Result<Vec<IncomingPayment>> {
@@ -1213,17 +1213,13 @@ impl Store {
         let mut statement = self.connection.prepare_cached(
             "SELECT sequence, epoch, length(encoded), encoded
              FROM payments
-             WHERE recipient = ?1 AND sequence > ?2
+             WHERE receiver = ?1 AND sequence > ?2
              ORDER BY sequence
              LIMIT ?3",
         )?;
         let rows = statement
             .query_map(
-                params![
-                    recipient.as_ref(),
-                    sql_u64(after, "incoming cursor")?,
-                    limit
-                ],
+                params![receiver.as_ref(), sql_u64(after, "incoming cursor")?, limit],
                 |row| {
                     let sequence =
                         from_sql_u64(row.get(0)?, "payment sequence").map_err(to_sqlite_error)?;
@@ -1964,7 +1960,7 @@ impl Store {
                 ])?;
             }
             let mut insert_payout_claim = transaction.prepare_cached(
-                "INSERT INTO payout_claims(epoch, position, recipient, amount, proof)
+                "INSERT INTO payout_claims(epoch, position, receiver, amount, proof)
                  VALUES(?1, ?2, ?3, ?4, ?5)",
             )?;
             for (position, payout, proof) in external_claims {
@@ -2100,21 +2096,21 @@ impl Store {
 
     pub(crate) fn external_payout_evidence(
         &self,
-        recipient: &Key,
+        receiver: &Key,
     ) -> Result<ExternalPayoutEvidence> {
         let stored = self
             .connection
             .query_row(
                 "SELECT claims.position, length(claims.proof), claims.proof,
                         length(settlements.roots), settlements.roots,
-                        length(claims.recipient), claims.recipient, claims.amount,
+                        length(claims.receiver), claims.receiver, claims.amount,
                         length(settlements.header), settlements.header
                  FROM payout_claims AS claims
                  JOIN settlements USING(epoch)
-                 WHERE claims.claimed = 0 AND claims.recipient = ?1
+                 WHERE claims.claimed = 0 AND claims.receiver = ?1
                  ORDER BY claims.epoch, claims.position
                  LIMIT 1",
-                [recipient.as_ref()],
+                [receiver.as_ref()],
                 |row| {
                     let proof_len = row.get::<_, i64>(1)?;
                     if proof_len <= 0
@@ -2128,14 +2124,14 @@ impl Store {
                         row.get::<_, i64>(0)?,
                         row.get::<_, Vec<u8>>(2)?,
                         read_fixed_blob(row, 3, 4, RootBundle::<Digest>::SIZE, "settlement roots")?,
-                        read_fixed_blob(row, 5, 6, Key::SIZE, "claim recipient")?,
+                        read_fixed_blob(row, 5, 6, Key::SIZE, "claim receiver")?,
                         row.get::<_, i64>(7)?,
                         read_fixed_blob(row, 8, 9, Header::<Digest>::SIZE, "header")?,
                     ))
                 },
             )
             .optional()?
-            .context("there is no unclaimed external payout for this recipient")?;
+            .context("there is no unclaimed external payout for this receiver")?;
         let position = u32::try_from(stored.0).context("claim position does not fit u32")?;
         let claim = ExternalPayoutClaim::<Key, Digest>::decode(stored.1.as_slice())
             .context("decode external payout claim")?;
@@ -2150,7 +2146,7 @@ impl Store {
             .context("verify external payout claim")?;
         ensure!(
             payout.recipient.as_ref() == stored.3.as_slice(),
-            "stored claim recipient differs from its proof"
+            "stored claim receiver differs from its proof"
         );
         ensure!(
             payout.amount == from_sql_u64(stored.4, "claim amount")?,
@@ -2539,45 +2535,38 @@ fn validate_new_payment(
     let shard_sql = sql_u64(shard, "receive shard")?;
     let mut read_endpoint = connection.prepare_cached(
         "SELECT cumulative_credit, receipt_index FROM receive_shards
-         WHERE epoch = ?1 AND recipient = ?2 AND shard = ?3",
+         WHERE epoch = ?1 AND receiver = ?2 AND shard = ?3",
     )?;
     let mut external_total = 0_u64;
     let mut entries = Vec::with_capacity(send.body().entries().len());
     for entry in send.body().entries() {
-        let recipient_key = entry.recipient().clone();
+        let receiver_key = entry.recipient().clone();
         ensure!(
-            recipient_key != payer_key,
+            receiver_key != payer_key,
             "self-payments are omitted from this operator"
         );
         let amount = entry.amount();
-        let mut recipient = effective_account(connection, epoch, &recipient_key)?;
-        let external = recipient.is_none();
-        let recipient_name = recipient.as_ref().map_or_else(
-            || "external".to_string(),
-            |recipient| recipient.name.clone(),
-        );
-        if let Some(recipient) = recipient.as_mut() {
-            recipient.current.balance = checked_sql_add(
-                recipient.current.balance,
+        let mut receiver = effective_account(connection, epoch, &receiver_key)?;
+        let external = receiver.is_none();
+        let receiver_name = receiver
+            .as_ref()
+            .map_or_else(|| "external".to_string(), |receiver| receiver.name.clone());
+        if let Some(receiver) = receiver.as_mut() {
+            receiver.current.balance =
+                checked_sql_add(receiver.current.balance, amount, "receiver account balance")?;
+            receiver.current.cumulative_credit = checked_sql_add(
+                receiver.current.cumulative_credit,
                 amount,
-                "recipient account balance",
+                "receiver cumulative credit",
             )?;
-            recipient.current.cumulative_credit = checked_sql_add(
-                recipient.current.cumulative_credit,
-                amount,
-                "recipient cumulative credit",
-            )?;
-            recipient.current.receipt_count = checked_sql_add(
-                recipient.current.receipt_count,
-                1,
-                "recipient receipt count",
-            )?;
+            receiver.current.receipt_count =
+                checked_sql_add(receiver.current.receipt_count, 1, "receiver receipt count")?;
         } else {
             external_total = checked_sql_add(external_total, amount, "external payment total")?;
         }
         let endpoint = read_endpoint
             .query_row(
-                params![epoch_sql, recipient_key.as_ref(), shard_sql],
+                params![epoch_sql, receiver_key.as_ref(), shard_sql],
                 |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
             )
             .optional()?
@@ -2585,9 +2574,9 @@ fn validate_new_payment(
         let previous_credit = from_sql_u64(endpoint.0, "shard credit")?;
         checked_sql_add(previous_credit, amount, "receive-shard cumulative credit")?;
         entries.push(EntryPlan {
-            recipient_key,
-            recipient,
-            recipient_name,
+            receiver_key,
+            receiver,
+            receiver_name,
             external,
             previous_credit,
             previous_index: from_sql_u64(endpoint.1, "receipt index")?,
@@ -3132,7 +3121,7 @@ mod tests {
         context: EpochPaymentContext,
         operator: SigningKey,
         payer: SigningKey,
-        recipient: SigningKey,
+        receiver: SigningKey,
     }
 
     impl PaymentFixture {
@@ -3149,7 +3138,7 @@ mod tests {
                 context,
                 operator: SigningKey::from_seed(1),
                 payer: SigningKey::from_seed(101),
-                recipient: SigningKey::from_seed(102),
+                receiver: SigningKey::from_seed(102),
             }
         }
 
@@ -3157,7 +3146,7 @@ mod tests {
             SignedSend::sign_next(
                 &self.context,
                 &self.payer,
-                self.recipient.public_key(),
+                self.receiver.public_key(),
                 1,
                 previous_debit,
             )
@@ -3244,7 +3233,7 @@ mod tests {
             .payments()
             .next()
             .expect("accepted batch has one entry");
-        let recipient = payment.recipient().clone();
+        let receiver = payment.recipient().clone();
         let encoded = payment.encode();
         let transaction = fixture.store.connection.transaction().unwrap();
         for index in 1..(MAX_ACCEPTED_PAYMENTS - 1) {
@@ -3254,9 +3243,9 @@ mod tests {
             transaction
                 .execute(
                     "INSERT INTO payments(
-                         epoch, payer_name, recipient, recipient_name, external, tx_id, encoded
-                     ) VALUES(0, 'fixture payer', ?1, 'fixture recipient', 0, ?2, ?3)",
-                    params![recipient.as_ref(), tx_id.as_ref(), encoded.as_ref()],
+                         epoch, payer_name, receiver, receiver_name, external, tx_id, encoded
+                     ) VALUES(0, 'fixture payer', ?1, 'fixture receiver', 0, ?2, ?3)",
+                    params![receiver.as_ref(), tx_id.as_ref(), encoded.as_ref()],
                 )
                 .unwrap();
         }
@@ -3312,7 +3301,7 @@ mod tests {
     fn stored_batch_rows_match_the_linked_payment_encoding() {
         let mut fixture = PaymentFixture::new();
         let entries = vec![
-            Entry::new(fixture.recipient.public_key(), 1).unwrap(),
+            Entry::new(fixture.receiver.public_key(), 1).unwrap(),
             Entry::new(SigningKey::from_seed(103).public_key(), 2).unwrap(),
         ];
         let send =
@@ -3366,60 +3355,60 @@ mod tests {
         );
         assert_payment_domain_rejected(
             |fixture| {
-                let recipient = fixture.recipient.public_key();
+                let receiver = fixture.receiver.public_key();
                 fixture
                     .store
                     .connection
                     .execute(
                         "UPDATE account_states SET current_balance = ?1 WHERE public_key = ?2",
-                        params![i64::MAX, recipient.as_ref()],
+                        params![i64::MAX, receiver.as_ref()],
                     )
                     .unwrap();
             },
             0,
-            "recipient account balance",
+            "receiver account balance",
         );
         assert_payment_domain_rejected(
             |fixture| {
-                let recipient = fixture.recipient.public_key();
+                let receiver = fixture.receiver.public_key();
                 fixture
                     .store
                     .connection
                     .execute(
                         "UPDATE account_states SET current_credit = ?1 WHERE public_key = ?2",
-                        params![i64::MAX, recipient.as_ref()],
+                        params![i64::MAX, receiver.as_ref()],
                     )
                     .unwrap();
             },
             0,
-            "recipient cumulative credit",
+            "receiver cumulative credit",
         );
         assert_payment_domain_rejected(
             |fixture| {
-                let recipient = fixture.recipient.public_key();
+                let receiver = fixture.receiver.public_key();
                 fixture
                     .store
                     .connection
                     .execute(
                         "UPDATE account_states SET current_receipts = ?1 WHERE public_key = ?2",
-                        params![i64::MAX, recipient.as_ref()],
+                        params![i64::MAX, receiver.as_ref()],
                     )
                     .unwrap();
             },
             0,
-            "recipient receipt count",
+            "receiver receipt count",
         );
         assert_payment_domain_rejected(
             |fixture| {
-                let recipient = fixture.recipient.public_key();
+                let receiver = fixture.receiver.public_key();
                 fixture
                     .store
                     .connection
                     .execute(
                         "INSERT INTO receive_shards(
-                             epoch, recipient, shard, cumulative_credit, receipt_index
+                             epoch, receiver, shard, cumulative_credit, receipt_index
                          ) VALUES(0, ?1, 0, ?2, 0)",
-                        params![recipient.as_ref(), i64::MAX],
+                        params![receiver.as_ref(), i64::MAX],
                     )
                     .unwrap();
             },

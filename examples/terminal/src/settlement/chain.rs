@@ -130,7 +130,7 @@ pub(crate) struct ClaimRoots {
 /// What settlement holds for one epoch: the registered payment anchor, and the admitted
 /// close's identity and roots once a close is admitted.
 ///
-/// This is the anchor for both intake and reconciliation. A recipient records a pair as
+/// This is the anchor for both intake and reconciliation. A receiver records a pair as
 /// reliance-grade only when its context anchor matches `anchor` here, and it decides coverage
 /// of a held receipt only against `admitted`, never against operator-claimed roots.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -214,14 +214,14 @@ pub(crate) struct Settlement {
     /// claimable indefinitely and claimants verify operator-served evidence against these
     /// roots, so unlike the bounded replay caches this record is never evicted.
     finalized_batches: BTreeMap<BatchId<Digest>, ClaimRoots>,
-    /// The batch finalized for each epoch. Recipients anchor reconciliation by epoch, so
+    /// The batch finalized for each epoch. Receivers anchor reconciliation by epoch, so
     /// like the claim roots this record is never evicted.
     finalized_epochs: BTreeMap<u64, BatchId<Digest>>,
-    /// The registered payment anchor of each epoch. Recipients anchor intake by epoch, so
+    /// The registered payment anchor of each epoch. Receivers anchor intake by epoch, so
     /// this record is retained past registration and admission and is never evicted.
     epoch_anchors: BTreeMap<u64, Digest>,
     /// The admitted close of each epoch, retained past a proven challenge that clears the live
-    /// registration so a recipient can still anchor reconciliation on it. Never evicted.
+    /// registration so a receiver can still anchor reconciliation on it. Never evicted.
     admitted_epochs: BTreeMap<u64, (BatchId<Digest>, VectorRoot<Digest>)>,
     finalized_replays: ReplayCache<u64, FinalizedAdmission>,
     challenge_replays: ReplayCache<BatchId<Digest>, ProvenChallenge>,
@@ -767,7 +767,7 @@ impl Settlement {
                     submission.certificate.clone(),
                 )
                 .context("admit certified close on settlement")?;
-            // Retain the admitted close by epoch so a recipient can still anchor on it after a
+            // Retain the admitted close by epoch so a receiver can still anchor on it after a
             // proven challenge clears the live registration. This lets a wallet that crashed
             // between a proven verdict and recording it re-mark from the idempotent resubmission.
             self.admitted_epochs.insert(

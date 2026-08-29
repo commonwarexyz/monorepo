@@ -101,27 +101,27 @@ fn payment_is_atomic_and_rejects_overspend() {
 fn accepted_batch_reads_across_the_operating_fence() {
     let mut operator = operator();
     let payer = operator.wallets[0].public_key();
-    let quote = operator.payment_quote(&payer).unwrap();
+    let head = operator.payment_head(&payer).unwrap();
     let send = SignedSend::sign_next(
-        &quote.context,
+        &head.context,
         operator.wallets[0].signer(),
         operator.wallets[1].public_key(),
         25,
-        quote.state.cumulative_debit,
+        head.state.cumulative_debit,
     )
     .unwrap();
     let committed = operator.accept_send(send.clone()).unwrap();
 
     // Sign a second send that is never accepted, before any fence blocks quoting.
-    let quote = operator
-        .payment_quote(&operator.wallets[3].public_key())
+    let head = operator
+        .payment_head(&operator.wallets[3].public_key())
         .unwrap();
     let uncommitted = SignedSend::sign_next(
-        &quote.context,
+        &head.context,
         operator.wallets[3].signer(),
         operator.wallets[2].public_key(),
         1,
-        quote.state.cumulative_debit,
+        head.state.cumulative_debit,
     )
     .unwrap();
 
@@ -143,17 +143,17 @@ fn accepted_batch_reads_across_the_operating_fence() {
 }
 
 #[test]
-fn arbitrary_unregistered_recipient_is_rejected_without_a_debit() {
+fn arbitrary_unregistered_receiver_is_rejected_without_a_debit() {
     let mut operator = operator();
     let payer = operator.wallets[0].public_key();
-    let quote = operator.payment_quote(&payer).unwrap();
-    let recipient = Wallet::from_seed("Mallory", 9_999).public_key();
+    let head = operator.payment_head(&payer).unwrap();
+    let receiver = Wallet::from_seed("Mallory", 9_999).public_key();
     let send = SignedSend::sign_next(
-        &quote.context,
+        &head.context,
         operator.wallets[0].signer(),
-        recipient,
+        receiver,
         25,
-        quote.state.cumulative_debit,
+        head.state.cumulative_debit,
     )
     .unwrap();
 
@@ -188,18 +188,18 @@ fn compact_status_does_not_materialize_epoch_artifacts() {
 }
 
 #[test]
-fn payment_quote_serves_the_retained_predecessor_cache() {
+fn payment_head_serves_the_retained_predecessor_cache() {
     let database = TempDatabase::new();
     let mut operator = Operator::open(database.path(), NonZeroUsize::new(2).unwrap()).unwrap();
     let payer = operator.wallets[0].public_key();
-    let before = operator.payment_quote(&payer).unwrap();
+    let before = operator.payment_head(&payer).unwrap();
     for amount in [3, 4, 5] {
         operator.pay(0, 1, amount).unwrap();
     }
 
     // The predecessor commitment is constant across the epoch. Only the live account
     // state moves with accepted payments.
-    let after = operator.payment_quote(&payer).unwrap();
+    let after = operator.payment_head(&payer).unwrap();
     assert_eq!(after.root, before.root);
     assert_eq!(after.opening, before.opening);
     assert_eq!(after.state.balance, before.state.balance - 12);
@@ -208,7 +208,7 @@ fn payment_quote_serves_the_retained_predecessor_cache() {
         before.state.cumulative_debit + 12
     );
 
-    // Quotes serve the retained cache and never replay the payment log: tampering
+    // Head reads serve the retained cache and never replay the payment log: tampering
     // with a stored row is invisible here. Startup replays and verifies every row,
     // so the reopened operator must reject the same database loudly.
     let connection = rusqlite::Connection::open(database.path()).unwrap();
@@ -226,10 +226,10 @@ fn payment_quote_serves_the_retained_predecessor_cache() {
             [tampered.as_slice()],
         )
         .unwrap();
-    let quoted = operator.payment_quote(&payer).unwrap();
-    assert_eq!(quoted.root, after.root);
-    assert_eq!(quoted.state, after.state);
-    assert_eq!(quoted.opening, after.opening);
+    let reread = operator.payment_head(&payer).unwrap();
+    assert_eq!(reread.root, after.root);
+    assert_eq!(reread.state, after.state);
+    assert_eq!(reread.opening, after.opening);
     drop(operator);
     drop(connection);
 
@@ -244,14 +244,14 @@ fn payment_quote_serves_the_retained_predecessor_cache() {
 fn payment_retry_returns_the_original_receipt_without_a_second_debit() {
     let mut operator = operator();
     let payer = operator.wallets[0].public_key();
-    let recipient = operator.wallets[1].public_key();
-    let quote = operator.payment_quote(&payer).unwrap();
+    let receiver = operator.wallets[1].public_key();
+    let head = operator.payment_head(&payer).unwrap();
     let send = SignedSend::sign_next(
-        &quote.context,
+        &head.context,
         operator.wallets[0].signer(),
-        recipient,
+        receiver,
         25,
-        quote.state.cumulative_debit,
+        head.state.cumulative_debit,
     )
     .unwrap();
 
@@ -277,14 +277,14 @@ fn payment_retry_returns_the_original_receipt_without_a_second_debit() {
 fn payment_retry_survives_epoch_cutover() {
     let mut operator = operator();
     let payer = operator.wallets[0].public_key();
-    let recipient = operator.wallets[1].public_key();
-    let quote = operator.payment_quote(&payer).unwrap();
+    let receiver = operator.wallets[1].public_key();
+    let head = operator.payment_head(&payer).unwrap();
     let send = SignedSend::sign_next(
-        &quote.context,
+        &head.context,
         operator.wallets[0].signer(),
-        recipient,
+        receiver,
         25,
-        quote.state.cumulative_debit,
+        head.state.cumulative_debit,
     )
     .unwrap();
 
@@ -319,18 +319,18 @@ fn completed_close_event_is_replayable() {
 #[test]
 fn batched_send_survives_retry_and_closes() {
     let mut operator = operator();
-    let quote = operator
-        .payment_quote(&operator.wallets[0].public_key())
+    let head = operator
+        .payment_head(&operator.wallets[0].public_key())
         .unwrap();
     let send = SignedSend::sign_next_batch(
-        &quote.context,
+        &head.context,
         operator.wallets[0].signer(),
         vec![
             Entry::new(operator.wallets[1].public_key(), 2).unwrap(),
             Entry::new(operator.wallets[2].public_key(), 3).unwrap(),
             Entry::new(operator.external.key.clone(), 1).unwrap(),
         ],
-        quote.state.cumulative_debit,
+        head.state.cumulative_debit,
     )
     .unwrap();
 
@@ -453,7 +453,7 @@ fn intake_stops_before_the_terminal_clock_exhausts() {
 
     assert!(
         operator
-            .payment_quote(&operator.wallets[0].public_key())
+            .payment_head(&operator.wallets[0].public_key())
             .is_err()
     );
     assert!(operator.validate_close_start(terminal_epoch).is_err());
@@ -479,7 +479,7 @@ fn balance_intake_stops_while_the_current_epoch_can_still_close() {
 
     assert!(
         operator
-            .payment_quote(&operator.wallets[0].public_key())
+            .payment_head(&operator.wallets[0].public_key())
             .is_err()
     );
     operator.validate_close_start(epoch).unwrap();
@@ -593,7 +593,7 @@ fn staged_close_keeps_incoming_and_outgoing_activity_live_until_cutover() {
     assert_eq!(operator.store.current_liability().unwrap(), 400);
     assert_eq!(
         operator
-            .payment_quote(&operator.wallets[1].public_key())
+            .payment_head(&operator.wallets[1].public_key())
             .unwrap()
             .state
             .balance,
@@ -601,14 +601,14 @@ fn staged_close_keeps_incoming_and_outgoing_activity_live_until_cutover() {
     );
 
     let payer = operator.wallets[0].public_key();
-    let recipient = operator.wallets[1].public_key();
-    let quote = operator.payment_quote(&payer).unwrap();
+    let receiver = operator.wallets[1].public_key();
+    let head = operator.payment_head(&payer).unwrap();
     let incoming = SignedSend::sign_next(
-        &quote.context,
+        &head.context,
         operator.wallets[0].signer(),
-        recipient.clone(),
+        receiver.clone(),
         7,
-        quote.state.cumulative_debit,
+        head.state.cumulative_debit,
     )
     .unwrap();
     assert!(
@@ -618,13 +618,13 @@ fn staged_close_keeps_incoming_and_outgoing_activity_live_until_cutover() {
     );
     operator.accept_send(incoming).unwrap();
 
-    let quote = operator.payment_quote(&recipient).unwrap();
+    let head = operator.payment_head(&receiver).unwrap();
     let outgoing = SignedSend::sign_next(
-        &quote.context,
+        &head.context,
         operator.wallets[1].signer(),
         operator.wallets[2].public_key(),
         12,
-        quote.state.cumulative_debit,
+        head.state.cumulative_debit,
     )
     .unwrap();
     operator.accept_send(outgoing).unwrap();
@@ -633,7 +633,7 @@ fn staged_close_keeps_incoming_and_outgoing_activity_live_until_cutover() {
     let bob = data
         .accounts
         .iter()
-        .find(|account| account.key == recipient)
+        .find(|account| account.key == receiver)
         .unwrap();
     assert_eq!(bob.current.balance, 95);
     assert_eq!(bob.current.cumulative_debit, 12);
@@ -643,18 +643,12 @@ fn staged_close_keeps_incoming_and_outgoing_activity_live_until_cutover() {
 
     rotate_epoch(&mut operator, 0);
     assert_eq!(operator.store.current_liability().unwrap(), 305);
-    assert!(
-        operator
-            .store
-            .current_account(&recipient)
-            .unwrap()
-            .is_none()
-    );
+    assert!(operator.store.current_account(&receiver).unwrap().is_none());
     let frozen = operator.store.epoch_reader().load(0).unwrap();
     let bob = frozen
         .accounts
         .iter()
-        .find(|account| account.key == recipient)
+        .find(|account| account.key == receiver)
         .unwrap();
     assert_eq!(bob.current.balance, 0);
     assert_eq!(bob.current.cumulative_debit, 12);
@@ -745,13 +739,13 @@ fn payment_to_a_closed_configured_identity_becomes_an_external_claim() {
 fn invalid_requests_are_rejected_before_epoch_registration() {
     let operator = operator();
     let payer = operator.wallets[0].public_key();
-    let quote = operator.payment_quote(&payer).unwrap();
+    let head = operator.payment_head(&payer).unwrap();
     let invalid = SignedSend::sign_next(
-        &quote.context,
+        &head.context,
         operator.wallets[0].signer(),
         operator.wallets[1].public_key(),
         101,
-        quote.state.cumulative_debit,
+        head.state.cumulative_debit,
     )
     .unwrap();
 
@@ -1104,8 +1098,8 @@ fn stale_same_epoch_anchor_is_rejected_without_mutation() {
     let stale = operator.registration.context.payment().clone();
     operator.deposit(0, 10).unwrap();
     let payer = &operator.wallets[1];
-    let recipient = &operator.wallets[2];
-    let send = SignedSend::sign_next(&stale, payer.signer(), recipient.public_key(), 1, 0).unwrap();
+    let receiver = &operator.wallets[2];
+    let send = SignedSend::sign_next(&stale, payer.signer(), receiver.public_key(), 1, 0).unwrap();
 
     let error = match operator
         .store
@@ -1961,7 +1955,7 @@ fn external_payout_claim_survives_restart_and_stays_consumed() {
 #[test]
 fn external_payout_evidence_replays_until_acknowledged() {
     let mut operator = operator();
-    let recipient = external_identity().key;
+    let receiver = external_identity().key;
     operator.pay(0, operator.wallet_count(), 10).unwrap();
     let data = operator.store.load_current().unwrap();
     let prepared = prepare_epoch(&operator.protocol, data, operator.registration.clone()).unwrap();
@@ -1971,15 +1965,15 @@ fn external_payout_evidence_replays_until_acknowledged() {
         .finish_prepared(prepared, &mut TestRng::new(19))
         .unwrap();
 
-    let first = operator.external_payout_evidence(&recipient).unwrap();
-    let retry = operator.external_payout_evidence(&recipient).unwrap();
+    let first = operator.external_payout_evidence(&receiver).unwrap();
+    let retry = operator.external_payout_evidence(&receiver).unwrap();
     assert_eq!(retry.batch_id, first.batch_id);
     assert_eq!(retry.claim, first.claim);
 
     operator
         .acknowledge_external_payout_claim(first.batch_id, &first.claim)
         .unwrap();
-    assert!(operator.external_payout_evidence(&recipient).is_err());
+    assert!(operator.external_payout_evidence(&receiver).is_err());
 }
 
 #[test]
@@ -2086,7 +2080,7 @@ fn exact_offset_deposit_defers_and_settles_in_the_next_epoch() {
 
     // The deferring aggregate is unspendable during the deferring epoch: this close's
     // row for the account carries no deposit.
-    assert_eq!(operator.payment_quote(&account).unwrap().state.balance, 93);
+    assert_eq!(operator.payment_head(&account).unwrap().state.balance, 93);
     assert!(operator.pay(0, 1, 94).is_err());
     operator.pay(0, 1, 5).unwrap();
 
@@ -2137,7 +2131,7 @@ fn exact_offset_deposit_defers_and_settles_in_the_next_epoch() {
     assert_eq!(release.amount(), 7);
 
     // The deferred aggregate lands staged and spendable in the successor epoch.
-    assert_eq!(operator.payment_quote(&account).unwrap().state.balance, 95);
+    assert_eq!(operator.payment_head(&account).unwrap().state.balance, 95);
     let registration = operator.settlement_registration().unwrap();
     assert_eq!(registration.epoch, 1);
     settlement
@@ -2178,10 +2172,10 @@ fn exact_offset_withdrawal_defers_at_intake() {
     let mut operator = operator();
     let account = operator.wallets[0].public_key();
     operator.deposit(0, 7).unwrap();
-    assert_eq!(operator.payment_quote(&account).unwrap().state.balance, 107);
+    assert_eq!(operator.payment_head(&account).unwrap().state.balance, 107);
 
     operator.withdraw(0, amount(7)).unwrap();
-    assert_eq!(operator.payment_quote(&account).unwrap().state.balance, 93);
+    assert_eq!(operator.payment_head(&account).unwrap().state.balance, 93);
     assert_eq!(operator.registration.deposits.amount_for(&account), 0);
     assert_eq!(operator.registration.deferred.amount_for(&account), 7);
 }
@@ -2192,12 +2186,12 @@ fn growing_aggregate_returns_a_parked_deposit_to_its_epoch() {
     let account = operator.wallets[0].public_key();
     operator.deposit(0, 7).unwrap();
     operator.withdraw(0, amount(7)).unwrap();
-    assert_eq!(operator.payment_quote(&account).unwrap().state.balance, 93);
+    assert_eq!(operator.payment_head(&account).unwrap().state.balance, 93);
 
     // The grown aggregate no longer offsets the withdrawal exactly, so the whole
     // aggregate returns to this epoch's boundary with its credit.
     operator.deposit(0, 5).unwrap();
-    assert_eq!(operator.payment_quote(&account).unwrap().state.balance, 105);
+    assert_eq!(operator.payment_head(&account).unwrap().state.balance, 105);
     assert_eq!(operator.registration.deposits.amount_for(&account), 12);
     assert!(operator.registration.deferred.is_empty());
 }
@@ -2214,15 +2208,15 @@ fn growing_aggregate_returns_a_re_parked_carried_deposit() {
     operator
         .finish_prepared(prepared, &mut TestRng::new(57))
         .unwrap();
-    assert_eq!(operator.payment_quote(&account).unwrap().state.balance, 100);
+    assert_eq!(operator.payment_head(&account).unwrap().state.balance, 100);
 
     // A carried exact offset parks the carried-in aggregate again, and a later
     // deposit that breaks the offset returns it whole with its origin intact.
     operator.withdraw(0, amount(7)).unwrap();
-    assert_eq!(operator.payment_quote(&account).unwrap().state.balance, 86);
+    assert_eq!(operator.payment_head(&account).unwrap().state.balance, 86);
     assert_eq!(operator.registration.deferred.amount_for(&account), 7);
     operator.deposit(0, 5).unwrap();
-    assert_eq!(operator.payment_quote(&account).unwrap().state.balance, 98);
+    assert_eq!(operator.payment_head(&account).unwrap().state.balance, 98);
     assert_eq!(operator.registration.deposits.amount_for(&account), 12);
     assert!(operator.registration.deferred.is_empty());
 }
@@ -2239,7 +2233,7 @@ fn parked_deposit_survives_operator_restart() {
 
     let operator = Operator::open(database.path(), NonZeroUsize::new(2).unwrap()).unwrap();
     assert_eq!(operator.registration.deferred.amount_for(&account), 7);
-    assert_eq!(operator.payment_quote(&account).unwrap().state.balance, 93);
+    assert_eq!(operator.payment_head(&account).unwrap().state.balance, 93);
 }
 
 #[test]
@@ -2258,9 +2252,9 @@ fn offsetable_withdrawal_must_be_coverable_without_the_aggregate() {
         format!("{error:#}").contains("without its deposit aggregate"),
         "unexpected error: {error:#}"
     );
-    assert_eq!(operator.payment_quote(&account).unwrap().state.balance, 105);
+    assert_eq!(operator.payment_head(&account).unwrap().state.balance, 105);
     operator.withdraw(0, amount(100)).unwrap();
-    assert_eq!(operator.payment_quote(&account).unwrap().state.balance, 5);
+    assert_eq!(operator.payment_head(&account).unwrap().state.balance, 5);
 }
 
 #[test]
@@ -2319,7 +2313,7 @@ fn queued_exact_offset_re_defers_the_carried_aggregate() {
     operator.withdraw(0, amount(7)).unwrap();
     register(&mut settlement, &mut operator);
     let first_close = close(&mut settlement, &mut operator, 0, 54);
-    assert_eq!(operator.payment_quote(&account).unwrap().state.balance, 100);
+    assert_eq!(operator.payment_head(&account).unwrap().state.balance, 100);
 
     // A QUEUED withdrawal exactly offsets the carried-in aggregate in its landing
     // epoch. The chain accepts and defers again, so the operator must represent the
@@ -2337,14 +2331,14 @@ fn queued_exact_offset_re_defers_the_carried_aggregate() {
         .queue_withdrawal(queued.clone(), vec![opening.opening])
         .unwrap();
     operator.apply_withdrawal(queued).unwrap();
-    assert_eq!(operator.payment_quote(&account).unwrap().state.balance, 86);
+    assert_eq!(operator.payment_head(&account).unwrap().state.balance, 86);
     assert_eq!(operator.registration.deferred.amount_for(&account), 7);
     register(&mut settlement, &mut operator);
     let second_close = close(&mut settlement, &mut operator, 1, 55);
 
     // The twice-deferred deposit lands spendable two epochs after intake and is
     // included well before its inclusion deadline in the demo geometry.
-    assert_eq!(operator.payment_quote(&account).unwrap().state.balance, 93);
+    assert_eq!(operator.payment_head(&account).unwrap().state.balance, 93);
     assert_eq!(operator.registration.deposits.amount_for(&account), 7);
     register(&mut settlement, &mut operator);
     close(&mut settlement, &mut operator, 2, 56);

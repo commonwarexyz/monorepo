@@ -146,11 +146,11 @@ fn claim_roots_response(
     }
 }
 
-fn quote_response_with_debit(
+fn head_response_with_debit(
     context: PaymentContext<Key, Digest>,
     state: AccountState,
     leaf_debit: u64,
-) -> operator_rpc::PaymentQuoteResponse {
+) -> operator_rpc::PaymentHeadResponse {
     let account = wallets()[0].public_key();
     let opening = AccountCache::new::<Sha256>(vec![StateLeaf {
         account: account.clone(),
@@ -162,7 +162,7 @@ fn quote_response_with_debit(
         },
     }])
     .unwrap();
-    operator_rpc::PaymentQuoteResponse {
+    operator_rpc::PaymentHeadResponse {
         context,
         state,
         root: opening.root(),
@@ -170,22 +170,22 @@ fn quote_response_with_debit(
     }
 }
 
-fn payment_quote_response(
+fn payment_head_response(
     context: PaymentContext<Key, Digest>,
     state: AccountState,
-) -> operator_rpc::PaymentQuoteResponse {
-    quote_response_with_debit(context, state, 0)
+) -> operator_rpc::PaymentHeadResponse {
+    head_response_with_debit(context, state, 0)
 }
 
 fn settlement_status_response() -> settlement_rpc::StatusResponse {
-    let quote = payment_quote_response(
+    let head = payment_head_response(
         PaymentContext::new(Sha256::hash(&[b"status-root"]), 0, operator_key()),
         AccountState::default(),
     );
     settlement_rpc::StatusResponse {
         now: 0,
         deployment: deployment(),
-        state_root: quote.root,
+        state_root: head.root,
         last_finalized: None,
         custody_balance: 400,
         claimable_balance: 0,
@@ -194,7 +194,7 @@ fn settlement_status_response() -> settlement_rpc::StatusResponse {
 }
 
 #[derive(Clone, Copy, Debug)]
-enum PaymentQuoteGateCase {
+enum PaymentHeadGateCase {
     WrongDeployment,
     HardFaulted,
     MismatchedStateRoot,
@@ -204,7 +204,7 @@ enum PaymentQuoteGateCase {
     InvalidProof,
 }
 
-impl PaymentQuoteGateCase {
+impl PaymentHeadGateCase {
     const ALL: [Self; 7] = [
         Self::WrongDeployment,
         Self::HardFaulted,
@@ -240,7 +240,7 @@ impl PaymentQuoteGateCase {
 
     fn corrupt(
         self,
-        quote: &mut operator_rpc::PaymentQuoteResponse,
+        head: &mut operator_rpc::PaymentHeadResponse,
         status: &mut settlement_rpc::StatusResponse,
     ) {
         match self {
@@ -255,19 +255,18 @@ impl PaymentQuoteGateCase {
                 let account = wallets()[2].public_key();
                 let opening = AccountCache::new::<Sha256>(vec![StateLeaf {
                     account: account.clone(),
-                    state: quote.opening.leaf.state,
+                    state: head.opening.leaf.state,
                 }])
                 .unwrap();
-                quote.root = opening.root();
-                quote.opening = opening.opening(&account).unwrap();
-                status.state_root = quote.root;
+                head.root = opening.root();
+                head.opening = opening.opening(&account).unwrap();
+                status.state_root = head.root;
             }
-            Self::InactivePayer => quote.opening.leaf.state.active = false,
-            Self::ZeroBalance => quote.opening.leaf.state.balance = 0,
+            Self::InactivePayer => head.opening.leaf.state.active = false,
+            Self::ZeroBalance => head.opening.leaf.state.balance = 0,
             Self::InvalidProof => {
-                quote.opening.proof.proof.leaf_count = 2;
-                quote
-                    .opening
+                head.opening.proof.proof.leaf_count = 2;
+                head.opening
                     .proof
                     .proof
                     .siblings
@@ -296,10 +295,10 @@ fn payment_debit_is_local_and_advances_only_after_a_verified_receipt() {
             respond(&mut listener, |request| {
                 assert!(matches!(
                     request,
-                    operator_rpc::OperatorRequest::PaymentQuote(_)
+                    operator_rpc::OperatorRequest::PaymentHead(_)
                 ));
                 rpc::Response::Success {
-                    body: payment_quote_response(
+                    body: payment_head_response(
                         payment_context.clone(),
                         AccountState {
                             balance: 100,
@@ -322,14 +321,14 @@ fn payment_debit_is_local_and_advances_only_after_a_verified_receipt() {
             let mut first_payment = None;
             respond(&mut listener, |request| {
                 let operator_rpc::OperatorRequest::AcceptSend(request) = request else {
-                    panic!("payment retry unexpectedly requested another quote");
+                    panic!("payment retry unexpectedly requested another head");
                 };
                 assert_eq!(request.send.body().cumulative_debit(), 7);
-                let recipient = request.send.body().entries()[0].recipient().clone();
+                let receiver = request.send.body().entries()[0].recipient().clone();
                 let receipt = SignedReceipt::issue_next::<Sha256, _>(
                     &payment_context,
                     &request.send,
-                    &recipient,
+                    &receiver,
                     0,
                     0,
                     0,
@@ -364,15 +363,15 @@ fn payment_debit_is_local_and_advances_only_after_a_verified_receipt() {
             .await;
             let first_payment = first_payment.unwrap();
 
-            // The retry re-quotes to confirm the staged context is still live before it
+            // The retry re-reads the head to confirm the staged context is still live before it
             // resubmits the exact bytes.
             respond(&mut listener, |request| {
                 assert!(matches!(
                     request,
-                    operator_rpc::OperatorRequest::PaymentQuote(_)
+                    operator_rpc::OperatorRequest::PaymentHead(_)
                 ));
                 rpc::Response::Success {
-                    body: payment_quote_response(
+                    body: payment_head_response(
                         payment_context.clone(),
                         AccountState {
                             balance: 93,
@@ -405,10 +404,10 @@ fn payment_debit_is_local_and_advances_only_after_a_verified_receipt() {
             respond(&mut listener, |request| {
                 assert!(matches!(
                     request,
-                    operator_rpc::OperatorRequest::PaymentQuote(_)
+                    operator_rpc::OperatorRequest::PaymentHead(_)
                 ));
                 rpc::Response::Success {
-                    body: payment_quote_response(
+                    body: payment_head_response(
                         payment_context.clone(),
                         AccountState {
                             balance: 93,
@@ -433,11 +432,11 @@ fn payment_debit_is_local_and_advances_only_after_a_verified_receipt() {
                     panic!("expected the second signed send");
                 };
                 assert_eq!(request.send.body().cumulative_debit(), 10);
-                let recipient = request.send.body().entries()[0].recipient().clone();
+                let receiver = request.send.body().entries()[0].recipient().clone();
                 let receipt = SignedReceipt::issue_next::<Sha256, _>(
                     &payment_context,
                     &request.send,
-                    &recipient,
+                    &receiver,
                     0,
                     7,
                     1,
@@ -520,10 +519,10 @@ fn stale_uncommitted_payment_is_abandoned_on_the_finalized_endpoint_proof() {
             respond(&mut listener, |request| {
                 assert!(matches!(
                     request,
-                    operator_rpc::OperatorRequest::PaymentQuote(_)
+                    operator_rpc::OperatorRequest::PaymentHead(_)
                 ));
                 rpc::Response::Success {
-                    body: payment_quote_response(
+                    body: payment_head_response(
                         cut_context.clone(),
                         AccountState {
                             balance: 100,
@@ -552,16 +551,16 @@ fn stale_uncommitted_payment_is_abandoned_on_the_finalized_endpoint_proof() {
                 ));
             }
 
-            // The retry re-quotes and learns the staged epoch was cut. The quote's
+            // The retry re-reads the head and learns the staged epoch was cut. The head's
             // verified opening still carries the prior endpoint, and the staged epoch
             // has finalized, so the wallet abandons on settlement's proof alone.
             respond(&mut listener, |request| {
                 assert!(matches!(
                     request,
-                    operator_rpc::OperatorRequest::PaymentQuote(_)
+                    operator_rpc::OperatorRequest::PaymentHead(_)
                 ));
                 rpc::Response::Success {
-                    body: payment_quote_response(
+                    body: payment_head_response(
                         live_context.clone(),
                         AccountState {
                             balance: 100,
@@ -586,10 +585,10 @@ fn stale_uncommitted_payment_is_abandoned_on_the_finalized_endpoint_proof() {
             respond(&mut listener, |request| {
                 assert!(matches!(
                     request,
-                    operator_rpc::OperatorRequest::PaymentQuote(_)
+                    operator_rpc::OperatorRequest::PaymentHead(_)
                 ));
                 rpc::Response::Success {
-                    body: payment_quote_response(
+                    body: payment_head_response(
                         live_context.clone(),
                         AccountState {
                             balance: 100,
@@ -613,11 +612,11 @@ fn stale_uncommitted_payment_is_abandoned_on_the_finalized_endpoint_proof() {
                 };
                 assert_eq!(request.send.body().epoch(), live_context.epoch());
                 assert_eq!(request.send.body().cumulative_debit(), 7);
-                let recipient = request.send.body().entries()[0].recipient().clone();
+                let receiver = request.send.body().entries()[0].recipient().clone();
                 let receipt = SignedReceipt::issue_next::<Sha256, _>(
                     &live_context,
                     &request.send,
-                    &recipient,
+                    &receiver,
                     0,
                     0,
                     0,
@@ -693,10 +692,10 @@ fn committed_payment_resolves_from_the_finalized_endpoint_without_a_verdict() {
             respond(&mut listener, |request| {
                 assert!(matches!(
                     request,
-                    operator_rpc::OperatorRequest::PaymentQuote(_)
+                    operator_rpc::OperatorRequest::PaymentHead(_)
                 ));
                 rpc::Response::Success {
-                    body: payment_quote_response(
+                    body: payment_head_response(
                         committed_context.clone(),
                         AccountState {
                             balance: 100,
@@ -727,11 +726,11 @@ fn committed_payment_resolves_from_the_finalized_endpoint_without_a_verdict() {
                     panic!("expected the initially staged send");
                 };
                 assert_eq!(request.send.body().cumulative_debit(), 7);
-                let recipient = request.send.body().entries()[0].recipient().clone();
+                let receiver = request.send.body().entries()[0].recipient().clone();
                 let receipt = SignedReceipt::issue_next::<Sha256, _>(
                     &committed_context,
                     &request.send,
-                    &recipient,
+                    &receiver,
                     0,
                     0,
                     0,
@@ -753,10 +752,10 @@ fn committed_payment_resolves_from_the_finalized_endpoint_without_a_verdict() {
                 };
             }
 
-            // The retry re-quotes and learns the committed epoch was cut. The verified
+            // The retry re-reads the head and learns the committed epoch was cut. The verified
             // opening of the finalized head carries the staged successor endpoint, so
             // the wallet concludes commitment itself and only fetches the receipts.
-            let quote = quote_response_with_debit(
+            let head = head_response_with_debit(
                 successor_context.clone(),
                 AccountState {
                     balance: 93,
@@ -765,15 +764,15 @@ fn committed_payment_resolves_from_the_finalized_endpoint_without_a_verdict() {
                 7,
             );
             let mut status = settlement_status_response();
-            status.state_root = quote.root;
+            status.state_root = head.root;
             status.last_finalized = Some(0);
             respond(&mut listener, |request| {
                 assert!(matches!(
                     request,
-                    operator_rpc::OperatorRequest::PaymentQuote(_)
+                    operator_rpc::OperatorRequest::PaymentHead(_)
                 ));
                 rpc::Response::Success {
-                    body: quote.encode(),
+                    body: head.encode(),
                 }
             })
             .await;
@@ -846,10 +845,10 @@ fn unfinalized_staged_epoch_keeps_resolution_undecidable() {
             respond(&mut listener, |request| {
                 assert!(matches!(
                     request,
-                    operator_rpc::OperatorRequest::PaymentQuote(_)
+                    operator_rpc::OperatorRequest::PaymentHead(_)
                 ));
                 rpc::Response::Success {
-                    body: payment_quote_response(
+                    body: payment_head_response(
                         cut_context.clone(),
                         AccountState {
                             balance: 100,
@@ -876,15 +875,15 @@ fn unfinalized_staged_epoch_keeps_resolution_undecidable() {
                     operator_rpc::OperatorRequest::AcceptSend(_)
                 ));
             }
-            // The retry re-quotes and learns the staged epoch was cut, but nothing has
+            // The retry re-reads the head and learns the staged epoch was cut, but nothing has
             // finalized yet, so commitment is not decidable and everything is kept.
             respond(&mut listener, |request| {
                 assert!(matches!(
                     request,
-                    operator_rpc::OperatorRequest::PaymentQuote(_)
+                    operator_rpc::OperatorRequest::PaymentHead(_)
                 ));
                 rpc::Response::Success {
-                    body: payment_quote_response(
+                    body: payment_head_response(
                         live_context.clone(),
                         AccountState {
                             balance: 100,
@@ -956,10 +955,10 @@ fn finalized_endpoint_commits_without_receipts_when_the_fetch_fails() {
             respond(&mut listener, |request| {
                 assert!(matches!(
                     request,
-                    operator_rpc::OperatorRequest::PaymentQuote(_)
+                    operator_rpc::OperatorRequest::PaymentHead(_)
                 ));
                 rpc::Response::Success {
-                    body: payment_quote_response(
+                    body: payment_head_response(
                         cut_context.clone(),
                         AccountState {
                             balance: 100,
@@ -988,7 +987,7 @@ fn finalized_endpoint_commits_without_receipts_when_the_fetch_fails() {
                     operator_rpc::OperatorRequest::AcceptSend(_)
                 ));
             }
-            let quote = quote_response_with_debit(
+            let head = head_response_with_debit(
                 live_context.clone(),
                 AccountState {
                     balance: 93,
@@ -997,16 +996,16 @@ fn finalized_endpoint_commits_without_receipts_when_the_fetch_fails() {
                 7,
             );
             let mut status = settlement_status_response();
-            status.state_root = quote.root;
+            status.state_root = head.root;
             status.last_finalized = Some(0);
             let resolution_status = status;
             respond(&mut listener, |request| {
                 assert!(matches!(
                     request,
-                    operator_rpc::OperatorRequest::PaymentQuote(_)
+                    operator_rpc::OperatorRequest::PaymentHead(_)
                 ));
                 rpc::Response::Success {
-                    body: quote.encode(),
+                    body: head.encode(),
                 }
             })
             .await;
@@ -1030,7 +1029,7 @@ fn finalized_endpoint_commits_without_receipts_when_the_fetch_fails() {
 
             // The carve-out lets the next send proceed against the live epoch even
             // though the finalized batch's receipts are unheld.
-            let quote = quote_response_with_debit(
+            let head = head_response_with_debit(
                 live_context.clone(),
                 AccountState {
                     balance: 93,
@@ -1040,16 +1039,16 @@ fn finalized_endpoint_commits_without_receipts_when_the_fetch_fails() {
                 7,
             );
             let mut status = settlement_status_response();
-            status.state_root = quote.root;
+            status.state_root = head.root;
             status.last_finalized = Some(0);
             let fresh_status = status;
             respond(&mut listener, |request| {
                 assert!(matches!(
                     request,
-                    operator_rpc::OperatorRequest::PaymentQuote(_)
+                    operator_rpc::OperatorRequest::PaymentHead(_)
                 ));
                 rpc::Response::Success {
-                    body: quote.encode(),
+                    body: head.encode(),
                 }
             })
             .await;
@@ -1065,11 +1064,11 @@ fn finalized_endpoint_commits_without_receipts_when_the_fetch_fails() {
                     panic!("expected the successor send");
                 };
                 assert_eq!(request.send.body().cumulative_debit(), 10);
-                let recipient = request.send.body().entries()[0].recipient().clone();
+                let receiver = request.send.body().entries()[0].recipient().clone();
                 let receipt = SignedReceipt::issue_next::<Sha256, _>(
                     &live_context,
                     &request.send,
-                    &recipient,
+                    &receiver,
                     0,
                     0,
                     0,
@@ -1163,10 +1162,10 @@ fn forged_resolution_opening_fails_verification_and_retries() {
             respond(&mut listener, |request| {
                 assert!(matches!(
                     request,
-                    operator_rpc::OperatorRequest::PaymentQuote(_)
+                    operator_rpc::OperatorRequest::PaymentHead(_)
                 ));
                 rpc::Response::Success {
-                    body: payment_quote_response(
+                    body: payment_head_response(
                         cut_context.clone(),
                         AccountState {
                             balance: 100,
@@ -1196,16 +1195,15 @@ fn forged_resolution_opening_fails_verification_and_retries() {
             // A lying operator serves a corrupted opening under settlement's true head
             // root. It cannot forge the Merkle proof, so resolution rejects it and the
             // wallet retries with everything intact.
-            let mut quote = payment_quote_response(
+            let mut head = payment_head_response(
                 live_context.clone(),
                 AccountState {
                     balance: 100,
                     ..AccountState::default()
                 },
             );
-            quote.opening.proof.proof.leaf_count = 2;
-            quote
-                .opening
+            head.opening.proof.proof.leaf_count = 2;
+            head.opening
                 .proof
                 .proof
                 .siblings
@@ -1213,10 +1211,10 @@ fn forged_resolution_opening_fails_verification_and_retries() {
             respond(&mut listener, |request| {
                 assert!(matches!(
                     request,
-                    operator_rpc::OperatorRequest::PaymentQuote(_)
+                    operator_rpc::OperatorRequest::PaymentHead(_)
                 ));
                 rpc::Response::Success {
-                    body: quote.encode(),
+                    body: head.encode(),
                 }
             })
             .await;
@@ -1278,10 +1276,10 @@ fn finalized_endpoint_below_the_committed_endpoint_is_reported_not_healed() {
             respond(&mut listener, |request| {
                 assert!(matches!(
                     request,
-                    operator_rpc::OperatorRequest::PaymentQuote(_)
+                    operator_rpc::OperatorRequest::PaymentHead(_)
                 ));
                 rpc::Response::Success {
-                    body: payment_quote_response(
+                    body: payment_head_response(
                         live_context.clone(),
                         AccountState {
                             balance: 100,
@@ -1304,11 +1302,11 @@ fn finalized_endpoint_below_the_committed_endpoint_is_reported_not_healed() {
                     panic!("expected the first signed send");
                 };
                 assert_eq!(request.send.body().cumulative_debit(), 7);
-                let recipient = request.send.body().entries()[0].recipient().clone();
+                let receiver = request.send.body().entries()[0].recipient().clone();
                 let receipt = SignedReceipt::issue_next::<Sha256, _>(
                     &live_context,
                     &request.send,
-                    &recipient,
+                    &receiver,
                     0,
                     0,
                     0,
@@ -1338,10 +1336,10 @@ fn finalized_endpoint_below_the_committed_endpoint_is_reported_not_healed() {
             respond(&mut listener, |request| {
                 assert!(matches!(
                     request,
-                    operator_rpc::OperatorRequest::PaymentQuote(_)
+                    operator_rpc::OperatorRequest::PaymentHead(_)
                 ));
                 rpc::Response::Success {
-                    body: payment_quote_response(
+                    body: payment_head_response(
                         live_context.clone(),
                         AccountState {
                             balance: 93,
@@ -1374,10 +1372,10 @@ fn finalized_endpoint_below_the_committed_endpoint_is_reported_not_healed() {
                 respond(&mut listener, |request| {
                     assert!(matches!(
                         request,
-                        operator_rpc::OperatorRequest::PaymentQuote(_)
+                        operator_rpc::OperatorRequest::PaymentHead(_)
                     ));
                     rpc::Response::Success {
-                        body: payment_quote_response(
+                        body: payment_head_response(
                             successor_context.clone(),
                             AccountState {
                                 balance: 93,
@@ -1457,10 +1455,10 @@ fn deterministically_rejected_sends_are_never_staged() {
             respond(&mut listener, |request| {
                 assert!(matches!(
                     request,
-                    operator_rpc::OperatorRequest::PaymentQuote(_)
+                    operator_rpc::OperatorRequest::PaymentHead(_)
                 ));
                 rpc::Response::Success {
-                    body: payment_quote_response(
+                    body: payment_head_response(
                         payment_context.clone(),
                         AccountState {
                             balance: 100,
@@ -1489,7 +1487,7 @@ fn deterministically_rejected_sends_are_never_staged() {
         assert!(format!("{error:#}").contains("self-payments"));
         assert!(agent.pending_payment.is_none());
 
-        // An unaffordable batch total is rejected after the quote, before staging, so the
+        // An unaffordable batch total is rejected after the head read, before staging, so the
         // wallet can immediately stage an acceptable send instead.
         let error = agent
             .pay(
@@ -1965,12 +1963,12 @@ fn withdrawal_uses_only_the_exact_retained_head_when_the_operator_is_unreachable
 }
 
 #[test]
-fn forged_quote_operator_is_rejected_before_staging() {
+fn forged_head_operator_is_rejected_before_staging() {
     deterministic::Runner::default().start(|context| async move {
         let database = TempDatabase::new();
         let impostor = Wallet::from_seed("impostor", 1_001);
         let payment_context = PaymentContext::new(
-            Sha256::hash(&[b"forged-quote-operator"]),
+            Sha256::hash(&[b"forged-head-operator"]),
             7,
             impostor.public_key(),
         );
@@ -1983,10 +1981,10 @@ fn forged_quote_operator_is_rejected_before_staging() {
             respond(&mut listener, |request| {
                 assert!(matches!(
                     request,
-                    operator_rpc::OperatorRequest::PaymentQuote(_)
+                    operator_rpc::OperatorRequest::PaymentHead(_)
                 ));
                 rpc::Response::Success {
-                    body: payment_quote_response(
+                    body: payment_head_response(
                         payment_context,
                         AccountState {
                             balance: 100,
@@ -2016,16 +2014,16 @@ fn forged_quote_operator_is_rejected_before_staging() {
 }
 
 #[test]
-fn adversarial_payment_quotes_are_rejected_before_send_or_persistence() {
+fn adversarial_payment_heads_are_rejected_before_send_or_persistence() {
     deterministic::Runner::default().start(|context| async move {
-        for (case_index, case) in PaymentQuoteGateCase::ALL.into_iter().enumerate() {
+        for (case_index, case) in PaymentHeadGateCase::ALL.into_iter().enumerate() {
             let database = TempDatabase::new();
             let payment_context = PaymentContext::new(
-                Sha256::hash(&[b"adversarial-payment-quote"]),
+                Sha256::hash(&[b"adversarial-payment-head"]),
                 7,
                 operator_key(),
             );
-            let mut quote = payment_quote_response(
+            let mut head = payment_head_response(
                 payment_context,
                 AccountState {
                     balance: 100,
@@ -2033,9 +2031,9 @@ fn adversarial_payment_quotes_are_rejected_before_send_or_persistence() {
                 },
             );
             let mut status = settlement_status_response();
-            status.state_root = quote.root;
-            case.corrupt(&mut quote, &mut status);
-            let rejected_root = quote.root;
+            status.state_root = head.root;
+            case.corrupt(&mut head, &mut status);
+            let rejected_root = head.root;
             let base_port = u16::try_from(case_index).unwrap() * 2;
 
             let mut operator_listener = context
@@ -2050,12 +2048,12 @@ fn adversarial_payment_quotes_are_rejected_before_send_or_persistence() {
             let settlement_address = settlement_listener.local_addr().unwrap();
             let server = context.child(case.actor()).spawn(move |_| async move {
                 respond(&mut operator_listener, |request| {
-                    let operator_rpc::OperatorRequest::PaymentQuote(request) = request else {
-                        panic!("expected one payment quote request");
+                    let operator_rpc::OperatorRequest::PaymentHead(request) = request else {
+                        panic!("expected one payment head request");
                     };
                     assert_eq!(request.account, wallets()[0].public_key());
                     rpc::Response::Success {
-                        body: quote.encode(),
+                        body: head.encode(),
                     }
                 })
                 .await;
@@ -2111,9 +2109,9 @@ fn unregistered_valid_payment_context_does_not_commit() {
         let operator_server = context.child("operator").spawn(move |_| async move {
             let mut first_send = None;
             for expected in [
-                operator_rpc::METHOD_PAYMENT_QUOTE,
+                operator_rpc::METHOD_PAYMENT_HEAD,
                 operator_rpc::METHOD_ACCEPT_SEND,
-                operator_rpc::METHOD_PAYMENT_QUOTE,
+                operator_rpc::METHOD_PAYMENT_HEAD,
                 operator_rpc::METHOD_ACCEPT_SEND,
             ] {
                 respond_rpc(&mut operator_listener, |request| {
@@ -2219,10 +2217,10 @@ fn response_loss_restart_retries_byte_identical_pending_send() {
             respond(&mut listener, |request| {
                 assert!(matches!(
                     request,
-                    operator_rpc::OperatorRequest::PaymentQuote(_)
+                    operator_rpc::OperatorRequest::PaymentHead(_)
                 ));
                 rpc::Response::Success {
-                    body: payment_quote_response(
+                    body: payment_head_response(
                         payment_context.clone(),
                         AccountState {
                             balance: 100,
@@ -2254,11 +2252,11 @@ fn response_loss_restart_retries_byte_identical_pending_send() {
                 };
                 assert_eq!(request.send.body().cumulative_debit(), 7);
                 first_send = request.send;
-                let recipient = first_send.body().entries()[0].recipient().clone();
+                let receiver = first_send.body().entries()[0].recipient().clone();
                 let receipt = SignedReceipt::issue_next::<Sha256, _>(
                     &payment_context,
                     &first_send,
-                    &recipient,
+                    &receiver,
                     0,
                     0,
                     0,
@@ -2275,14 +2273,14 @@ fn response_loss_restart_retries_byte_identical_pending_send() {
                 };
             }
 
-            // The restarted retry re-quotes to confirm the staged context is still live.
+            // The restarted retry re-reads the head to confirm the staged context is still live.
             respond(&mut listener, |request| {
                 assert!(matches!(
                     request,
-                    operator_rpc::OperatorRequest::PaymentQuote(_)
+                    operator_rpc::OperatorRequest::PaymentHead(_)
                 ));
                 rpc::Response::Success {
-                    body: payment_quote_response(
+                    body: payment_head_response(
                         payment_context.clone(),
                         AccountState {
                             balance: 93,
@@ -2362,10 +2360,10 @@ fn successful_receipt_commit_survives_restart_and_advances_next_debit() {
             respond(&mut listener, |request| {
                 assert!(matches!(
                     request,
-                    operator_rpc::OperatorRequest::PaymentQuote(_)
+                    operator_rpc::OperatorRequest::PaymentHead(_)
                 ));
                 rpc::Response::Success {
-                    body: payment_quote_response(
+                    body: payment_head_response(
                         payment_context.clone(),
                         AccountState {
                             balance: 100,
@@ -2389,11 +2387,11 @@ fn successful_receipt_commit_survives_restart_and_advances_next_debit() {
                     panic!("expected the first signed send");
                 };
                 assert_eq!(request.send.body().cumulative_debit(), 7);
-                let recipient = request.send.body().entries()[0].recipient().clone();
+                let receiver = request.send.body().entries()[0].recipient().clone();
                 let receipt = SignedReceipt::issue_next::<Sha256, _>(
                     &payment_context,
                     &request.send,
-                    &recipient,
+                    &receiver,
                     0,
                     0,
                     0,
@@ -2423,10 +2421,10 @@ fn successful_receipt_commit_survives_restart_and_advances_next_debit() {
             respond(&mut listener, |request| {
                 assert!(matches!(
                     request,
-                    operator_rpc::OperatorRequest::PaymentQuote(_)
+                    operator_rpc::OperatorRequest::PaymentHead(_)
                 ));
                 rpc::Response::Success {
-                    body: payment_quote_response(
+                    body: payment_head_response(
                         payment_context.clone(),
                         AccountState {
                             balance: 93,
@@ -2450,11 +2448,11 @@ fn successful_receipt_commit_survives_restart_and_advances_next_debit() {
                     panic!("expected the second signed send");
                 };
                 assert_eq!(request.send.body().cumulative_debit(), 10);
-                let recipient = request.send.body().entries()[0].recipient().clone();
+                let receiver = request.send.body().entries()[0].recipient().clone();
                 let receipt = SignedReceipt::issue_next::<Sha256, _>(
                     &payment_context,
                     &request.send,
-                    &recipient,
+                    &receiver,
                     0,
                     7,
                     1,
@@ -2659,7 +2657,7 @@ fn external_payout_ack_loss_recovers_after_agent_restart() {
             claim: evidence.claim,
         };
         let payout = settlement_rpc::ExternalPayoutResponse {
-            recipient: account.clone(),
+            receiver: account.clone(),
             amount: 100,
         };
 
@@ -3246,14 +3244,14 @@ fn unfinalized_batch_payout_evidence_is_not_cached_and_completes_after_finalizat
             claim: evidence.claim,
         };
 
-        // Recipient bound, but naming a batch settlement does not know: an unknown
+        // Receiver bound, but naming a batch settlement does not know: an unknown
         // batch is not finalized, so nothing may enter the cache.
         let poisoned = operator_rpc::ExternalPayoutEvidenceResponse {
             batch_id: BatchId::new(Sha256::hash(&[b"mislabeled-payout-batch"])),
             claim: honest.claim.clone(),
         };
         let payout = settlement_rpc::ExternalPayoutResponse {
-            recipient: account.clone(),
+            receiver: account.clone(),
             amount: 100,
         };
 
@@ -3418,7 +3416,7 @@ fn endpoint_resolved_payment_recovers_after_hard_fault_frozen_at_its_head() {
         let account = wallets()[0].public_key();
 
         // The finalized head H whose verified opening resolves the send as committed.
-        let quote = quote_response_with_debit(
+        let head = head_response_with_debit(
             live.clone(),
             AccountState {
                 balance: 93,
@@ -3426,8 +3424,8 @@ fn endpoint_resolved_payment_recovers_after_hard_fault_frozen_at_its_head() {
             },
             7,
         );
-        let frozen_root = quote.root;
-        let frozen_opening = quote.opening.clone();
+        let frozen_root = head.root;
+        let frozen_opening = head.opening.clone();
         let mut status = settlement_status_response();
         status.state_root = frozen_root;
         status.last_finalized = Some(0);
@@ -3443,10 +3441,10 @@ fn endpoint_resolved_payment_recovers_after_hard_fault_frozen_at_its_head() {
             respond(&mut listener, |request| {
                 assert!(matches!(
                     request,
-                    operator_rpc::OperatorRequest::PaymentQuote(_)
+                    operator_rpc::OperatorRequest::PaymentHead(_)
                 ));
                 rpc::Response::Success {
-                    body: payment_quote_response(
+                    body: payment_head_response(
                         cut_context.clone(),
                         AccountState {
                             balance: 100,
@@ -3477,10 +3475,10 @@ fn endpoint_resolved_payment_recovers_after_hard_fault_frozen_at_its_head() {
             respond(&mut listener, |request| {
                 assert!(matches!(
                     request,
-                    operator_rpc::OperatorRequest::PaymentQuote(_)
+                    operator_rpc::OperatorRequest::PaymentHead(_)
                 ));
                 rpc::Response::Success {
-                    body: quote.encode(),
+                    body: head.encode(),
                 }
             })
             .await;
@@ -3891,15 +3889,15 @@ fn balance_poll_retains_the_head_for_hard_fault_recovery() {
             operator.public_key(),
         );
         let account = wallets()[0].public_key();
-        let quote = payment_quote_response(
+        let head = payment_head_response(
             payment_context,
             AccountState {
                 balance: 100,
                 ..AccountState::default()
             },
         );
-        let frozen_root = quote.root;
-        let frozen_opening = quote.opening.clone();
+        let frozen_root = head.root;
+        let frozen_opening = head.opening.clone();
         let mut status = settlement_status_response();
         status.state_root = frozen_root;
 
@@ -3913,10 +3911,10 @@ fn balance_poll_retains_the_head_for_hard_fault_recovery() {
             respond(&mut listener, |request| {
                 assert!(matches!(
                     request,
-                    operator_rpc::OperatorRequest::PaymentQuote(_)
+                    operator_rpc::OperatorRequest::PaymentHead(_)
                 ));
                 rpc::Response::Success {
-                    body: quote.encode(),
+                    body: head.encode(),
                 }
             })
             .await;
@@ -4054,7 +4052,7 @@ fn held_in_shard(fixture: &crate::protocol::OmittingClose, shard: u64) -> Paymen
     Payment::from_parts_unchecked(send, receipt)
 }
 
-/// (c) THE POINT: a recipient holding a verified receipt convicts a close that omits its
+/// (c) THE POINT: a receiver holding a verified receipt convicts a close that omits its
 /// credit, end to end through the real settlement RPC dispatch, and the close is invalidated.
 #[test]
 fn omitted_credit_is_convicted_by_the_held_receipt() {
@@ -4838,7 +4836,7 @@ fn incoming_intake_is_durable_and_refetch_is_idempotent() {
         drop(bob);
 
         // The pair and cursor are durable before any reliance, so the reopened wallet holds
-        // them, and the provider service-accounting query answers from that held evidence.
+        // them, and the receiver service-accounting query answers from that held evidence.
         let mut recovered = Agent::open(database.path(), 1).unwrap();
         assert_eq!(recovered.incoming().count, 1);
         assert_eq!(recovered.incoming().cursor, 1);
@@ -4964,11 +4962,11 @@ fn signed_withdrawal_escalates_to_settlement() {
     });
 }
 
-/// (d) Payer regression guard: the provider intake and reconciliation are additive. A wallet
+/// (d) Payer regression guard: the receiver intake and reconciliation are additive. A wallet
 /// holding no incoming credits touches neither operator nor settlement during reconciliation,
-/// and the empty provider ledger survives the schema across a restart.
+/// and the empty receiver ledger survives the schema across a restart.
 #[test]
-fn payer_flow_is_unaffected_by_provider_state() {
+fn payer_flow_is_unaffected_by_receiver_state() {
     deterministic::Runner::default().start(|context| async move {
         let database = TempDatabase::new();
         let payer = Agent::open(database.path(), 0).unwrap();
@@ -4992,7 +4990,7 @@ fn payer_flow_is_unaffected_by_provider_state() {
         assert_eq!(payer.last_reconciled_epoch(), None);
         drop(payer);
 
-        // The additive schema leaves the reopened payer's empty provider ledger intact.
+        // The additive schema leaves the reopened payer's empty receiver ledger intact.
         let recovered = Agent::open(database.path(), 0).unwrap();
         assert_eq!(recovered.incoming(), IncomingSummary::default());
         assert_eq!(recovered.last_reconciled_epoch(), None);

@@ -69,7 +69,7 @@ impl Agent {
             .context("begin hard-fault settlement")?;
 
         // Recovery at a frozen root requires an opening retained at or refreshed to that
-        // root. Openings refresh on every quote or balance poll, so this fails only for a
+        // root. Openings refresh on every head read or balance poll, so this fails only for a
         // wallet passive across the final finalization, which then depends on the
         // operator's survival to serve one.
         let opening = self

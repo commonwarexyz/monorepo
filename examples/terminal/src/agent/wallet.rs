@@ -26,7 +26,7 @@ use std::{collections::BTreeSet, net::SocketAddr, path::Path};
 /// Durable state follows one discipline. It holds only what this wallet alone can
 /// produce: its signed sends, its signed withdrawal requests, and its deposit identities.
 /// The exceptions are proofs that must survive counterparty death, namely the frozen-root
-/// recovery openings, cached claim evidence, and the provider's held incoming pairs. A held
+/// recovery openings, cached claim evidence, and the receiver's held incoming pairs. A held
 /// incoming pair is a self-verified (send, receipt) crediting this wallet: like the recovery
 /// openings it is irreplaceable once the operator is gone, so it is retained, never an
 /// overwritable cache. Everything the counterparty can reproduce is a cache and never gates
@@ -34,17 +34,17 @@ use std::{collections::BTreeSet, net::SocketAddr, path::Path};
 ///
 /// Frozen-root recovery requires an opening retained at or refreshed to the last
 /// finalized root, which advances with every finalization by anyone. Openings refresh on
-/// every quote or balance poll, so only a wallet passive across the final finalization
+/// every head read or balance poll, so only a wallet passive across the final finalization
 /// holds none, and it then depends on the operator's survival to serve one.
 ///
-/// As a service provider, this wallet may rely on a payment exactly when its verified pair is
-/// durably held. A quote balance that moved is an observation, not reliance-grade: the
-/// enforceable preconfirmation is the held operator receipt, and reconciliation later proves
-/// every finalized credit was backed by one.
+/// As a receiver, this wallet may rely on a payment exactly when its verified pair is
+/// durably held. A balance that moved in the operator's head is an observation, not
+/// reliance-grade: the enforceable preconfirmation is the held operator receipt, and
+/// reconciliation later proves every finalized credit was backed by one.
 pub(crate) struct Agent {
     pub(super) wallet: Wallet,
     pub(super) store: Store,
-    pub(super) recipients: Vec<AccountIdentity>,
+    pub(super) receivers: Vec<AccountIdentity>,
     pub(super) deposit_nonce: u64,
     pub(super) pending_payment: Option<PendingPayment>,
     pub(super) pending_deposit: Option<DepositEvent>,
@@ -54,7 +54,7 @@ pub(crate) struct Agent {
     pub(super) pending_close_epoch: Option<u64>,
     pub(super) cumulative_debit: u64,
     pub(super) receipt_count: u64,
-    /// Provider intake ledger summary and durable fetch cursor.
+    /// Receiver intake ledger summary and durable fetch cursor.
     pub(super) incoming: IncomingSummary,
     /// Highest epoch whose held credits reconciled cleanly against the committed close.
     pub(super) last_reconciled_epoch: Option<u64>,
@@ -65,12 +65,12 @@ pub(crate) struct Agent {
 
 impl Agent {
     pub(crate) fn new(identity: usize) -> Result<Self> {
-        let (wallet, recipients) = Self::identity(identity)?;
+        let (wallet, receivers) = Self::identity(identity)?;
         let account = wallet.public_key();
         let (store, state) = Store::in_memory(&account, &deployment(), &operator_key())?;
         Ok(Self::from_state(
             wallet,
-            recipients,
+            receivers,
             store,
             state,
             initial_deposit_nonce(),
@@ -78,12 +78,12 @@ impl Agent {
     }
 
     pub(crate) fn open(path: &Path, identity: usize) -> Result<Self> {
-        let (wallet, recipients) = Self::identity(identity)?;
+        let (wallet, receivers) = Self::identity(identity)?;
         let account = wallet.public_key();
         let (store, state) = Store::open(path, &account, &deployment(), &operator_key())?;
         Ok(Self::from_state(
             wallet,
-            recipients,
+            receivers,
             store,
             state,
             initial_deposit_nonce(),
@@ -98,14 +98,14 @@ impl Agent {
         } else {
             wallets.remove(identity)
         };
-        let mut recipients = identities();
-        recipients.push(external_identity());
-        Ok((wallet, recipients))
+        let mut receivers = identities();
+        receivers.push(external_identity());
+        Ok((wallet, receivers))
     }
 
     fn from_state(
         wallet: Wallet,
-        recipients: Vec<AccountIdentity>,
+        receivers: Vec<AccountIdentity>,
         store: Store,
         state: State,
         deposit_nonce: u64,
@@ -113,7 +113,7 @@ impl Agent {
         Self {
             wallet,
             store,
-            recipients,
+            receivers,
             deposit_nonce,
             pending_payment: state.pending_payment,
             pending_deposit: state.pending_deposit,
@@ -137,28 +137,28 @@ impl Agent {
         self.wallet.public_key()
     }
 
-    pub(crate) const fn recipient_count(&self) -> usize {
-        self.recipients.len()
+    pub(crate) const fn receiver_count(&self) -> usize {
+        self.receivers.len()
     }
 
-    /// Returns the first selectable recipient that is not this wallet.
-    pub(crate) fn default_recipient(&self) -> usize {
+    /// Returns the first selectable receiver that is not this wallet.
+    pub(crate) fn default_receiver(&self) -> usize {
         let account = self.account();
-        self.recipients
+        self.receivers
             .iter()
             .position(|identity| identity.key != account)
-            .expect("the recipient roster is larger than one wallet")
+            .expect("the receiver roster is larger than one wallet")
     }
 
-    pub(crate) fn recipient_name(&self, index: usize) -> &'static str {
-        self.recipients[index % self.recipients.len()].name
+    pub(crate) fn receiver_name(&self, index: usize) -> &'static str {
+        self.receivers[index % self.receivers.len()].name
     }
 
     pub(crate) const fn receipt_count(&self) -> u64 {
         self.receipt_count
     }
 
-    /// Returns the provider's verified incoming ledger summary.
+    /// Returns the receiver's verified incoming ledger summary.
     pub(crate) const fn incoming(&self) -> IncomingSummary {
         self.incoming
     }
@@ -168,10 +168,10 @@ impl Agent {
         self.last_reconciled_epoch
     }
 
-    /// Answers the provider's service-accounting question: has `payer` paid this wallet under
+    /// Answers the receiver's service-accounting question: has `payer` paid this wallet under
     /// transaction `tx_id`, and for how much? The payer chooses the transaction id by signing
     /// its send, so it is the natural invoice reference. A hit means the credit's verified pair
-    /// is durably held, which is exactly the condition under which a provider may rely on it.
+    /// is durably held, which is exactly the condition under which a receiver may rely on it.
     pub(crate) fn paid(&self, payer: &Key, tx_id: &Digest) -> Result<Option<IncomingCredit>> {
         self.store.paid(payer, tx_id)
     }
@@ -192,10 +192,10 @@ impl Agent {
         settlement_rpc::status(network, settlement).await
     }
 
-    /// Reads the live balance quote and verifies it against settlement's exact head.
+    /// Reads the live account head and verifies it against settlement's exact state root.
     ///
     /// Polling doubles as the passive wallet's retention heartbeat: the verified head
-    /// opening is retained through [`Self::verify_quoted_head`], so a wallet that only
+    /// opening is retained through [`Self::verify_head`], so a wallet that only
     /// watches its balance still refreshes its frozen-root recovery evidence.
     pub(crate) async fn balance<E: Network>(
         &mut self,
@@ -203,10 +203,10 @@ impl Agent {
         settlement: SocketAddr,
         operator: SocketAddr,
     ) -> Result<u64> {
-        let quote = operator_rpc::payment_quote(
+        let head = operator_rpc::payment_head(
             network,
             operator,
-            operator_rpc::PaymentQuoteRequest {
+            operator_rpc::PaymentHeadRequest {
                 account: self.account(),
             },
         )
@@ -219,8 +219,8 @@ impl Agent {
             settlement_status.deployment == deployment(),
             "settlement status has an unexpected deployment"
         );
-        self.verify_quoted_head(&quote, &settlement_status)?;
-        Ok(quote.state.balance)
+        self.verify_head(&head, &settlement_status)?;
+        Ok(head.state.balance)
     }
     pub(crate) async fn start_close<E: Network>(
         &mut self,

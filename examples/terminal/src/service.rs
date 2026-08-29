@@ -146,8 +146,8 @@ async fn prepare_request<E: Network>(
                 }
             };
             ensure!(
-                &payout.recipient == request.claim.recipient(),
-                "settlement returned another external payout recipient"
+                &payout.receiver == request.claim.recipient(),
+                "settlement returned another external payout receiver"
             );
             return Ok(Some(operator_rpc::acknowledge_external_payout_confirmed(
                 operator, request,
@@ -406,8 +406,9 @@ mod tests {
             drop(agent);
 
             // The operator never carried the signed request, so the signer exercises the
-            // censorship fallback: queue the exact request at settlement so its deadline
-            // becomes an on-chain obligation that expires into hard-fault recovery.
+            // censorship fallback: queue the exact request at settlement, which the next
+            // registered close must then carry verbatim. With the operator gone no close ever
+            // registers, so the deadline expires into hard-fault recovery instead.
             settlement_rpc::queue_withdrawal(
                 &context,
                 settlement_address,
@@ -486,7 +487,7 @@ mod tests {
             assert_eq!(staged.epoch, 0);
             assert_eq!(
                 operator
-                    .payment_quote(&wallet.public_key())
+                    .payment_head(&wallet.public_key())
                     .unwrap()
                     .state
                     .balance,
@@ -564,14 +565,14 @@ mod tests {
             let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
             let mut identities = wallets();
             let payer = identities.remove(0);
-            let recipient = identities.remove(0);
-            let quote = operator.payment_quote(&payer.public_key()).unwrap();
+            let receiver = identities.remove(0);
+            let head = operator.payment_head(&payer.public_key()).unwrap();
             let send = SignedSend::sign_next(
-                &quote.context,
+                &head.context,
                 payer.signer(),
-                recipient.public_key(),
+                receiver.public_key(),
                 7,
-                quote.state.cumulative_debit,
+                head.state.cumulative_debit,
             )
             .unwrap();
             let request =
@@ -690,7 +691,7 @@ mod tests {
                     .spawn(move |operator_context| async move {
                         let mut accepted = None;
                         for expected_method in [
-                            operator_rpc::METHOD_PAYMENT_QUOTE,
+                            operator_rpc::METHOD_PAYMENT_HEAD,
                             operator_rpc::METHOD_ACCEPT_SEND,
                         ] {
                             let (_, mut sink, mut stream) =

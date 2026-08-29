@@ -50,16 +50,17 @@ enum PendingOutcome {
 }
 
 impl Agent {
-    /// Pays every `(recipient index, amount)` entry with one batched send.
+    /// Pays every `(receiver index, amount)` entry with one batched send.
     ///
     /// A send this operator deterministically rejects must never be staged: a retry resubmits the
     /// exact staged bytes. Those bytes bind one `(anchor, epoch)`, so once that epoch is cut they
-    /// can never be accepted again. A retry therefore re-quotes first: while the staged context is
-    /// still live it resubmits unchanged (a lost-response retry), and once the operator has moved
-    /// past it the wallet concludes commitment from settlement alone, by reading its own
-    /// endpoint out of a Merkle-verified opening of a finalized root. A committed send finishes
-    /// locally, and a send the finalized endpoint provably excludes is abandoned and re-staged
-    /// against the live context, so the wallet can never drop or double count a real transfer.
+    /// can never be accepted again. A retry therefore re-reads the head first: while the staged
+    /// context is still live it resubmits unchanged (a lost-response retry), and once the
+    /// operator has moved past it the wallet concludes commitment from settlement alone, by
+    /// reading its own endpoint out of a Merkle-verified opening of a finalized root. A
+    /// committed send finishes locally, and a send the finalized endpoint provably excludes is
+    /// abandoned and re-staged against the live context, so the wallet can never drop or double
+    /// count a real transfer.
     pub(crate) async fn pay<E: Network>(
         &mut self,
         network: &E,
@@ -88,13 +89,13 @@ impl Agent {
                     PendingOutcome::Live(staged) => *staged,
                     PendingOutcome::Resolved(outcome) => return Ok(outcome),
                     PendingOutcome::Abandoned => {
-                        self.quote_and_stage(network, settlement, operator, &requested, total)
+                        self.stage_against_head(network, settlement, operator, &requested, total)
                             .await?
                     }
                 }
             }
             None => {
-                self.quote_and_stage(network, settlement, operator, &requested, total)
+                self.stage_against_head(network, settlement, operator, &requested, total)
                     .await?
             }
         };
@@ -108,18 +109,16 @@ impl Agent {
     fn payment_entries(&self, entries: &[(usize, u64)]) -> Result<(Vec<Entry<Key>>, u64)> {
         let mut requested = Vec::with_capacity(entries.len());
         let mut total = 0_u64;
-        for (recipient, amount) in entries {
-            let recipient = self.recipients[recipient % self.recipients.len()]
-                .key
-                .clone();
+        for (receiver, amount) in entries {
+            let receiver = self.receivers[receiver % self.receivers.len()].key.clone();
             ensure!(
-                recipient != self.account(),
+                receiver != self.account(),
                 "self-payments are omitted from this operator"
             );
             total = total
                 .checked_add(*amount)
                 .context("payment total overflow")?;
-            requested.push(Entry::new(recipient, *amount).context("stage payment entry")?);
+            requested.push(Entry::new(receiver, *amount).context("stage payment entry")?);
         }
         requested.sort_unstable_by(|left, right| left.recipient().cmp(right.recipient()));
         Ok((requested, total))
@@ -131,7 +130,7 @@ impl Agent {
     /// resolves by settlement-anchored arithmetic: once the staged epoch has finalized, the
     /// wallet's endpoint in a Merkle-verified opening of the finalized head decides
     /// commitment, and until then resolution errs and retries. The opening still travels
-    /// through the operator's quote, so the independence is about trust, not availability:
+    /// through the operator's head, so the independence is about trust, not availability:
     /// the operator can refuse to serve it but cannot forge it, and sustained refusal ends
     /// in settlement's liveness deadlines and the hard-fault recovery path.
     async fn resolve_pending<E: Network>(
@@ -148,18 +147,18 @@ impl Agent {
             "another payment retry is pending"
         );
 
-        // Re-quote to learn whether the staged epoch is still the operator's live context.
-        let quote = operator_rpc::payment_quote(
+        // Re-read the head to learn whether the staged epoch is still the operator's live context.
+        let head = operator_rpc::payment_head(
             network,
             operator,
-            operator_rpc::PaymentQuoteRequest {
+            operator_rpc::PaymentHeadRequest {
                 account: self.account(),
             },
         )
         .await
         .context("read payer state")?;
         ensure!(
-            quote.context.operator() == &operator_key(),
+            head.context.operator() == &operator_key(),
             "payment context has an unexpected operator"
         );
         let context = PaymentContext::new(
@@ -167,7 +166,7 @@ impl Agent {
             pending_send.body().epoch(),
             operator_key(),
         );
-        if quote.context.epoch() == context.epoch() && quote.context.anchor() == context.anchor() {
+        if head.context.epoch() == context.epoch() && head.context.anchor() == context.anchor() {
             // The staged context is still live: resubmit the exact bytes unchanged.
             self.store
                 .recovery_opening(&recovery_root)?
@@ -199,8 +198,8 @@ impl Agent {
             "the staged epoch has not finalized, so its commitment is not yet decidable"
         );
 
-        self.verify_quoted_head(&quote, &settlement_status)?;
-        let endpoint = quote.opening.leaf.state.cumulative_debit;
+        self.verify_head(&head, &settlement_status)?;
+        let endpoint = head.opening.leaf.state.cumulative_debit;
         let staged_endpoint = pending_send.body().cumulative_debit();
         let outcome = if endpoint == staged_endpoint {
             // The send committed. The operator is only an optional source of receipts,
@@ -263,7 +262,7 @@ impl Agent {
         Ok(outcome)
     }
 
-    /// Verifies the quoted opening is this wallet's own row in settlement's exact head
+    /// Verifies the served opening is this wallet's own row in settlement's exact head
     /// root, durably retains it for frozen-root recovery, then opportunistically records
     /// accepted payments that finalized root covers.
     ///
@@ -272,44 +271,43 @@ impl Agent {
     /// own root. Retention lives here, the one chokepoint, so every resolution that read
     /// the head leaves recovery evidence behind if the deployment later hard-faults
     /// frozen at this root.
-    pub(super) fn verify_quoted_head(
+    pub(super) fn verify_head(
         &mut self,
-        quote: &operator_rpc::PaymentQuoteResponse,
+        head: &operator_rpc::PaymentHeadResponse,
         settlement_status: &settlement_rpc::StatusResponse,
     ) -> Result<()> {
         ensure!(
-            settlement_status.state_root == quote.root,
+            settlement_status.state_root == head.root,
             "payer opening is not the exact settlement head"
         );
         ensure!(
-            quote.opening.leaf.account == self.account(),
+            head.opening.leaf.account == self.account(),
             "payer opening belongs to another account"
         );
-        quote
-            .opening
+        head.opening
             .proof
             .verify::<Sha256>(
                 VectorKind::State,
-                &quote.root,
-                quote.opening.leaf.encode().as_ref(),
+                &head.root,
+                head.opening.leaf.encode().as_ref(),
             )
             .context("verify payer state opening")?;
 
         // A row without live custody carries nothing a hard-fault claim could release, so
         // only live openings are retained. The store refuses dead rows for the same reason.
-        if quote.opening.leaf.state.active && quote.opening.leaf.state.balance > 0 {
+        if head.opening.leaf.state.active && head.opening.leaf.state.balance > 0 {
             self.store
-                .retain_recovery_opening(&quote.root, &quote.opening)
+                .retain_recovery_opening(&head.root, &head.opening)
                 .context("durably retain payer state opening")?;
         }
         self.store
-            .observe_finalized(quote.opening.leaf.state.cumulative_debit)
+            .observe_finalized(head.opening.leaf.state.cumulative_debit)
             .context("record finalized payments")?;
         Ok(())
     }
 
-    /// Quotes the payer head, verifies affordability, and durably stages a fresh send.
-    async fn quote_and_stage<E: Network>(
+    /// Reads the payer head, verifies affordability, and durably stages a fresh send.
+    async fn stage_against_head<E: Network>(
         &mut self,
         network: &E,
         settlement: SocketAddr,
@@ -317,17 +315,17 @@ impl Agent {
         requested: &[Entry<Key>],
         total: u64,
     ) -> Result<StagedSend> {
-        let quote = operator_rpc::payment_quote(
+        let head = operator_rpc::payment_head(
             network,
             operator,
-            operator_rpc::PaymentQuoteRequest {
+            operator_rpc::PaymentHeadRequest {
                 account: self.account(),
             },
         )
         .await
         .context("read payer state")?;
         ensure!(
-            quote.context.operator() == &operator_key(),
+            head.context.operator() == &operator_key(),
             "payment context has an unexpected operator"
         );
         let settlement_status = settlement_rpc::status(network, settlement)
@@ -342,35 +340,35 @@ impl Agent {
             "settlement is permanently hard-faulted"
         );
         ensure!(
-            quote.opening.leaf.state.active && quote.opening.leaf.state.balance > 0,
+            head.opening.leaf.state.active && head.opening.leaf.state.balance > 0,
             "payer opening is not live"
         );
 
         // Mid-epoch credits only grow the payer balance and debits are serialized here, so
-        // affordability at the quote holds at acceptance.
+        // affordability at the head read holds at acceptance.
         ensure!(
-            quote.state.balance >= total,
+            head.state.balance >= total,
             "payer has insufficient available balance"
         );
-        self.verify_quoted_head(&quote, &settlement_status)?;
+        self.verify_head(&head, &settlement_status)?;
         let send = SignedSend::sign_next_batch(
-            &quote.context,
+            &head.context,
             self.wallet.signer(),
             requested.to_vec(),
             self.cumulative_debit,
         )
         .context("sign payment")?;
         self.store
-            .stage_payment(&send, &quote.root, self.cumulative_debit)
+            .stage_payment(&send, &head.root, self.cumulative_debit)
             .context("durably stage payment")?;
         self.pending_payment = Some(PendingPayment {
             send: send.clone(),
-            recovery_root: quote.root,
+            recovery_root: head.root,
         });
         Ok(StagedSend {
-            context: quote.context,
+            context: head.context,
             send,
-            predecessor_state_root: quote.root,
+            predecessor_state_root: head.root,
         })
     }
 

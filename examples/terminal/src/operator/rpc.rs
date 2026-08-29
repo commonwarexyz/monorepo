@@ -28,7 +28,7 @@ use commonware_runtime::Network;
 use std::net::SocketAddr;
 
 pub(crate) const METHOD_STATUS: u8 = 0;
-pub(crate) const METHOD_PAYMENT_QUOTE: u8 = 1;
+pub(crate) const METHOD_PAYMENT_HEAD: u8 = 1;
 pub(crate) const METHOD_ACCEPT_SEND: u8 = 2;
 pub(crate) const METHOD_APPLY_DEPOSIT: u8 = 3;
 pub(crate) const METHOD_WITHDRAWAL_OPENING: u8 = 4;
@@ -161,7 +161,7 @@ impl Read for PollCloseRequest {
     }
 }
 
-key_request!(PaymentQuoteRequest);
+key_request!(PaymentHeadRequest);
 key_request!(WithdrawalOpeningRequest);
 key_request!(WithdrawalEvidenceRequest);
 key_request!(ExternalPayoutEvidenceRequest);
@@ -275,14 +275,14 @@ impl Read for StatusResponse {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct PaymentQuoteResponse {
+pub(crate) struct PaymentHeadResponse {
     pub(crate) context: PaymentContext<Key, Digest>,
     pub(crate) state: AccountState,
     pub(crate) root: VectorRoot<Digest>,
     pub(crate) opening: StateOpening<Key, Digest>,
 }
 
-impl Write for PaymentQuoteResponse {
+impl Write for PaymentHeadResponse {
     fn write(&self, buf: &mut impl BufMut) {
         self.context.write(buf);
         self.state.write(buf);
@@ -291,7 +291,7 @@ impl Write for PaymentQuoteResponse {
     }
 }
 
-impl EncodeSize for PaymentQuoteResponse {
+impl EncodeSize for PaymentHeadResponse {
     fn encode_size(&self) -> usize {
         self.context.encode_size()
             + self.state.encode_size()
@@ -300,7 +300,7 @@ impl EncodeSize for PaymentQuoteResponse {
     }
 }
 
-impl Read for PaymentQuoteResponse {
+impl Read for PaymentHeadResponse {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
@@ -312,7 +312,7 @@ impl Read for PaymentQuoteResponse {
         };
         if response.opening.proof.proof.leaf_count > MAX_ACCOUNTS as u32 {
             return Err(CodecError::Invalid(
-                "clearing_terminal::PaymentQuoteResponse",
+                "clearing_terminal::PaymentHeadResponse",
                 "payer opening exceeds the terminal account bound",
             ));
         }
@@ -403,7 +403,7 @@ impl Read for IncomingPaymentsRequest {
     }
 }
 
-/// One accepted linked pair crediting the recipient, with the epoch that accepted it.
+/// One accepted linked pair crediting the receiver, with the epoch that accepted it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct IncomingPair {
     pub(crate) epoch: u64,
@@ -468,7 +468,7 @@ impl Read for IncomingPaymentsResponse {
     }
 }
 
-/// Requests one recipient's committed receive-shard evidence for a retained epoch.
+/// Requests one receiver's committed receive-shard evidence for a retained epoch.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CommittedShardTipRequest {
     pub(crate) account: Key,
@@ -905,7 +905,7 @@ fn close_event(event: Option<CloseEvent>) -> Result<PollCloseResponse> {
 
 pub(crate) enum OperatorRequest {
     Status,
-    PaymentQuote(PaymentQuoteRequest),
+    PaymentHead(PaymentHeadRequest),
     AcceptSend(AcceptSendRequest),
     AcceptedBatch(AcceptSendRequest),
     ApplyDeposit(ApplyDepositRequest),
@@ -927,9 +927,9 @@ pub(crate) fn decode_request(request: rpc::Request) -> Result<OperatorRequest> {
         METHOD_STATUS => StatusRequest::decode(body)
             .map(|_| OperatorRequest::Status)
             .context("decode status request"),
-        METHOD_PAYMENT_QUOTE => PaymentQuoteRequest::decode(body)
-            .map(OperatorRequest::PaymentQuote)
-            .context("decode payment-quote request"),
+        METHOD_PAYMENT_HEAD => PaymentHeadRequest::decode(body)
+            .map(OperatorRequest::PaymentHead)
+            .context("decode payment-head request"),
         METHOD_ACCEPT_SEND => AcceptSendRequest::decode(body)
             .map(OperatorRequest::AcceptSend)
             .context("decode accept-send request"),
@@ -978,15 +978,15 @@ pub(crate) fn decode_request(request: rpc::Request) -> Result<OperatorRequest> {
 fn dispatch(operator: &mut Operator, request: OperatorRequest) -> Result<Bytes> {
     match request {
         OperatorRequest::Status => Ok(build_status(operator)?.encode()),
-        OperatorRequest::PaymentQuote(request) => {
-            let quote = operator
-                .payment_quote(&request.account)
-                .context("read payment quote")?;
-            Ok(PaymentQuoteResponse {
-                context: quote.context,
-                state: quote.state,
-                root: quote.root,
-                opening: quote.opening,
+        OperatorRequest::PaymentHead(request) => {
+            let head = operator
+                .payment_head(&request.account)
+                .context("read payment head")?;
+            Ok(PaymentHeadResponse {
+                context: head.context,
+                state: head.state,
+                root: head.root,
+                opening: head.opening,
             }
             .encode())
         }
@@ -1013,12 +1013,12 @@ fn dispatch(operator: &mut Operator, request: OperatorRequest) -> Result<Bytes> 
             .encode())
         }
         OperatorRequest::WithdrawalOpening(request) => {
-            let quote = operator
+            let head = operator
                 .withdrawal_opening(&request.account)
                 .context("read withdrawal opening")?;
             Ok(WithdrawalOpeningResponse {
-                root: quote.root,
-                opening: quote.opening,
+                root: head.root,
+                opening: head.opening,
             }
             .encode())
         }
@@ -1161,15 +1161,15 @@ pub(crate) async fn status<E: Network>(network: &E, address: SocketAddr) -> Resu
         .context("decode operator status")
 }
 
-pub(crate) async fn payment_quote<E: Network>(
+pub(crate) async fn payment_head<E: Network>(
     network: &E,
     address: SocketAddr,
-    request: PaymentQuoteRequest,
-) -> Result<PaymentQuoteResponse> {
-    PaymentQuoteResponse::decode(
-        invoke(network, address, METHOD_PAYMENT_QUOTE, request.encode()).await?,
+    request: PaymentHeadRequest,
+) -> Result<PaymentHeadResponse> {
+    PaymentHeadResponse::decode(
+        invoke(network, address, METHOD_PAYMENT_HEAD, request.encode()).await?,
     )
-    .context("decode payment quote")
+    .context("decode payment head")
 }
 
 pub(crate) async fn accept_send<E: Network>(
@@ -1201,7 +1201,7 @@ pub(crate) async fn accepted_batch<E: Network>(
 
 /// Fetches one page of the pairs crediting the caller's account after its durable cursor.
 ///
-/// This is the provider's intake, not a display cache: a provider may rely on a payment only
+/// This is the receiver's intake, not a display cache: a receiver may rely on a payment only
 /// once its verified pair is durably held, so the caller verifies and persists every returned
 /// pair before treating any credit as reliance-grade. Absence or failure changes nothing.
 pub(crate) async fn incoming_payments<E: Network>(
@@ -1215,7 +1215,7 @@ pub(crate) async fn incoming_payments<E: Network>(
     .context("decode incoming payments")
 }
 
-/// Fetches one recipient's committed receive-shard evidence for a retained epoch.
+/// Fetches one receiver's committed receive-shard evidence for a retained epoch.
 ///
 /// This is the availability dependence of reconciliation: the operator can refuse to serve the
 /// lookup but cannot forge one, since it opens against the committed close's own change root.
@@ -1530,11 +1530,11 @@ mod tests {
         assert!(error.contains("Extra Data"));
 
         let account = identities().remove(0).key;
-        let mut trailing = PaymentQuoteRequest { account }.encode().to_vec();
+        let mut trailing = PaymentHeadRequest { account }.encode().to_vec();
         trailing.push(0xff);
         let error = error_text(handle(
             &mut operator,
-            request(METHOD_PAYMENT_QUOTE, trailing),
+            request(METHOD_PAYMENT_HEAD, trailing),
         ));
         assert!(error.contains("Extra Data"));
 
@@ -1684,33 +1684,29 @@ mod tests {
         .unwrap();
         assert_eq!(applied_close.digest, close_digest);
         assert_eq!(
-            operator
-                .payment_quote(&close_account)
-                .unwrap()
-                .state
-                .balance,
+            operator.payment_head(&close_account).unwrap().state.balance,
             100
         );
 
-        let quote = PaymentQuoteResponse::decode(success_body(handle(
+        let head = PaymentHeadResponse::decode(success_body(handle(
             &mut operator,
             request(
-                METHOD_PAYMENT_QUOTE,
-                PaymentQuoteRequest {
+                METHOD_PAYMENT_HEAD,
+                PaymentHeadRequest {
                     account: payer_key.clone(),
                 }
                 .encode(),
             ),
         )))
         .unwrap();
-        assert_eq!(quote.state.balance, 103);
+        assert_eq!(head.state.balance, 103);
 
         let send = SignedSend::sign_next(
-            &quote.context,
+            &head.context,
             payer.signer(),
             wallets[0].public_key(),
             5,
-            quote.state.cumulative_debit,
+            head.state.cumulative_debit,
         )
         .unwrap();
         let accepted = AcceptedBatchResponse::decode(success_body(handle(
@@ -1721,7 +1717,7 @@ mod tests {
         assert_eq!(accepted.epoch, 0);
         assert_eq!(accepted.total, 5);
         assert_eq!(accepted.acceptance.receipts[0].body().amount(), 5);
-        accepted.acceptance.verify(&quote.context).unwrap();
+        accepted.acceptance.verify(&head.context).unwrap();
 
         let started = StartCloseResponse::decode(success_body(handle(
             &mut operator,
@@ -1805,11 +1801,11 @@ mod tests {
     #[test]
     fn unconfirmed_external_payout_acknowledgement_keeps_evidence() {
         let mut operator = operator();
-        let recipient = crate::protocol::external_identity().key;
+        let receiver = crate::protocol::external_identity().key;
         operator.pay(0, operator.wallet_count(), 7).unwrap();
         operator.start_close(0).unwrap();
         operator.wait_for_closes().unwrap();
-        let evidence = operator.external_payout_evidence(&recipient).unwrap();
+        let evidence = operator.external_payout_evidence(&receiver).unwrap();
         let acknowledgement = AcknowledgeExternalPayoutRequest {
             batch_id: evidence.batch_id,
             claim: evidence.claim,
@@ -1820,7 +1816,7 @@ mod tests {
             request(METHOD_ACKNOWLEDGE_EXTERNAL_PAYOUT, acknowledgement.encode()),
         ));
         assert!(error.contains("settlement confirmation"));
-        assert!(operator.external_payout_evidence(&recipient).is_ok());
+        assert!(operator.external_payout_evidence(&receiver).is_ok());
     }
 
     #[test]
@@ -1828,11 +1824,11 @@ mod tests {
         let mut operator = operator();
         let mut wallets = wallets();
         let payer = wallets.remove(0);
-        let quote = PaymentQuoteResponse::decode(success_body(handle(
+        let head = PaymentHeadResponse::decode(success_body(handle(
             &mut operator,
             request(
-                METHOD_PAYMENT_QUOTE,
-                PaymentQuoteRequest {
+                METHOD_PAYMENT_HEAD,
+                PaymentHeadRequest {
                     account: payer.public_key(),
                 }
                 .encode(),
@@ -1840,11 +1836,11 @@ mod tests {
         )))
         .unwrap();
         let send = SignedSend::sign_next(
-            &quote.context,
+            &head.context,
             payer.signer(),
             wallets[0].public_key(),
             5,
-            quote.state.cumulative_debit,
+            head.state.cumulative_debit,
         )
         .unwrap();
         let accepted = AcceptedBatchResponse::decode(success_body(handle(

@@ -3,8 +3,8 @@
 //! Receipts remain durable because this example has no authenticated signal that their challenge
 //! windows closed. An embedding may prune them only after obtaining that signal.
 //!
-//! The provider's held incoming pairs follow the same discipline. Each is a self-verified
-//! (send, receipt) pair credited to this wallet, durably retained so a provider can enforce its
+//! The receiver's held incoming pairs follow the same discipline. Each is a self-verified
+//! (send, receipt) pair credited to this wallet, durably retained so a receiver can enforce its
 //! preconfirmation. They are irreplaceable once the operator is gone, so like the recovery
 //! openings they are counterparty-death-surviving evidence, never an overwritable cache.
 
@@ -69,13 +69,13 @@ pub(crate) struct State {
     pub(crate) pending_withdrawal_claim: Option<PendingWithdrawalClaim>,
     pub(crate) pending_payout_claim: Option<PendingPayoutClaim>,
     pub(crate) receipt_count: u64,
-    /// Provider intake state: the durable fetch cursor and the verified-credit ledger summary.
+    /// Receiver intake state: the durable fetch cursor and the verified-credit ledger summary.
     pub(crate) incoming: IncomingSummary,
     /// Highest epoch whose held credits were reconciled against the committed close.
     pub(crate) last_reconciled_epoch: Option<u64>,
 }
 
-/// The provider's verified incoming ledger summary: total credited value, count of held
+/// The receiver's verified incoming ledger summary: total credited value, count of held
 /// pairs, and the durable fetch cursor.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct IncomingSummary {
@@ -107,7 +107,7 @@ pub(crate) struct HeldReceipt {
     pub(crate) pair: Payment,
 }
 
-/// One held credit answering a provider's service-accounting query.
+/// One held credit answering a receiver's service-accounting query.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct IncomingCredit {
     pub(crate) epoch: u64,
@@ -509,7 +509,7 @@ impl Store {
     /// opening whose endpoint excludes the send. The abandoned row stays in the ledger so
     /// the wallet's own history is complete, and the retained recovery opening is
     /// deliberately left in place. It is keyed by full root, can be shared with an already
-    /// committed sibling payment quoted at the same finalized head, and stays load-bearing
+    /// committed sibling payment read at the same finalized head, and stays load-bearing
     /// for frozen-root recovery.
     pub(crate) fn abandon_payment(&mut self, send: &SignedSend<Key, Digest>) -> Result<()> {
         self.ensure_usable()?;
@@ -553,7 +553,7 @@ impl Store {
 
     /// Records every accepted payment at or below a finalized endpoint as finalized.
     ///
-    /// This is an opportunistic observation during ordinary quote flows: the caller passes
+    /// This is an opportunistic observation during ordinary head reads: the caller passes
     /// the endpoint of a Merkle-verified opening against a finalized settlement root, and
     /// an endpoint at or below the watermark skips its redundant write.
     pub(crate) fn observe_finalized(&mut self, endpoint: u64) -> Result<()> {
@@ -661,7 +661,7 @@ impl Store {
 
     /// Durably records one verified intake page: the accepted pairs and the advanced cursor.
     ///
-    /// The pairs and the cursor commit together, so a provider that observes the cursor
+    /// The pairs and the cursor commit together, so a receiver that observes the cursor
     /// advance is guaranteed to hold every credit up to it. Insertion is idempotent per
     /// transaction id, so a crash before this commit leaves the cursor unchanged and the
     /// exact page refetches and reinserts without duplication. Only self-verified pairs
@@ -685,7 +685,7 @@ impl Store {
         read_incoming_summary(&self.connection)
     }
 
-    /// Answers the provider's service-accounting question: has `payer` paid this account under
+    /// Answers the receiver's service-accounting question: has `payer` paid this account under
     /// transaction `tx_id`, and for how much? The payer chooses the transaction id by signing
     /// its send, so it is the natural invoice reference.
     pub(crate) fn paid(&self, payer: &Key, tx_id: &Digest) -> Result<Option<IncomingCredit>> {
@@ -1465,7 +1465,7 @@ fn validate_payout_result(
     account: &Key,
 ) -> Result<()> {
     ensure!(
-        &result.recipient == account,
+        &result.receiver == account,
         "pending external payout belongs to another account"
     );
     Ok(())

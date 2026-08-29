@@ -1,4 +1,4 @@
-//! The provider lane: verified incoming intake and anchored reconciliation.
+//! The receive lane: verified incoming intake and anchored reconciliation.
 
 use super::{Agent, store::IncomingRecord};
 use crate::{
@@ -61,18 +61,18 @@ impl Agent {
     /// Pulls, verifies, settlement-anchors, and durably persists the pairs newly crediting this
     /// wallet.
     ///
-    /// This is the provider's intake, folded into the balance heartbeat. A provider may rely on
-    /// a payment exactly when its verified pair is durably held: a moved quote balance is an
-    /// observation, not reliance-grade. Every fetched pair is fully verified, sends grouped by
-    /// transaction id and each distinct send verified once, then the operator receipt, its exact
-    /// linkage, and its recipient. It is then anchored: the pair's `(epoch, anchor)` must be the
-    /// context settlement registered for that epoch. A receipt over an operator-chosen anchor
-    /// with no settlement obligation has no close to adjudicate against and can never be
-    /// enforced, so it is not reliance-grade. Unverifiable and unanchored pairs are ignored and
-    /// never stored, yet the durable cursor still advances past them so a poisoned entry cannot
-    /// wedge intake. The pairs and the advanced cursor commit together, so reliance never
-    /// outruns durability, and a lost response refetches the exact page and reinserts it
-    /// idempotently.
+    /// This is the receiver's intake, folded into the balance heartbeat. A receiver may rely on
+    /// a payment exactly when its verified pair is durably held: a balance read from the
+    /// operator's head is an observation, not reliance-grade. Every fetched pair is fully
+    /// verified, sends grouped by transaction id and each distinct send verified once, then the
+    /// operator receipt, its exact linkage, and its recipient. It is then anchored: the pair's
+    /// `(epoch, anchor)` must be the context settlement registered for that epoch. A receipt
+    /// over an operator-chosen anchor with no settlement obligation has no close to adjudicate
+    /// against and can never be enforced, so it is not reliance-grade. Unverifiable and
+    /// unanchored pairs are ignored and never stored, yet the durable cursor still advances past
+    /// them so a poisoned entry cannot wedge intake. The pairs and the advanced cursor commit
+    /// together, so reliance never outruns durability, and a lost response refetches the exact
+    /// page and reinserts it idempotently.
     pub(crate) async fn intake_incoming<E: Network>(
         &mut self,
         network: &E,

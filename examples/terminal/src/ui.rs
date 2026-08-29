@@ -95,7 +95,7 @@ impl TerminalSession {
 }
 
 struct UiState {
-    recipient: usize,
+    receiver: usize,
     amount: u64,
     staged: Vec<(usize, u64)>,
     balance: Option<u64>,
@@ -113,7 +113,7 @@ impl UiState {
                 .to_string(),
         );
         Self {
-            recipient: 1,
+            receiver: 1,
             amount: DEFAULT_AMOUNT,
             staged: Vec::new(),
             balance: None,
@@ -140,7 +140,7 @@ pub(crate) async fn run<E: Clock + Network>(
 ) -> Result<()> {
     let mut terminal = TerminalSession::enter()?;
     let mut state = UiState::new();
-    state.recipient = agent.default_recipient();
+    state.receiver = agent.default_receiver();
     loop {
         refresh_bounded(network, operator, settlement, &mut agent, &mut state).await?;
         terminal
@@ -158,9 +158,9 @@ pub(crate) async fn run<E: Clock + Network>(
         }
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => break,
-            KeyCode::Left => state.recipient = state.recipient.saturating_sub(1),
+            KeyCode::Left => state.receiver = state.receiver.saturating_sub(1),
             KeyCode::Right => {
-                state.recipient = (state.recipient + 1) % agent.recipient_count();
+                state.receiver = (state.receiver + 1) % agent.receiver_count();
             }
             KeyCode::Char('-') => state.amount = state.amount.saturating_sub(1).max(1),
             KeyCode::Char('+') | KeyCode::Char('=') => {
@@ -169,18 +169,18 @@ pub(crate) async fn run<E: Clock + Network>(
             KeyCode::PageDown => state.amount = state.amount.saturating_sub(10).max(1),
             KeyCode::PageUp => state.amount = state.amount.saturating_add(10),
             KeyCode::Char('p') => {
-                let recipient = agent.recipient_name(state.recipient);
+                let receiver = agent.receiver_name(state.receiver);
                 match agent
                     .pay(
                         network,
                         settlement,
                         operator,
-                        &[(state.recipient, state.amount)],
+                        &[(state.receiver, state.amount)],
                     )
                     .await
                 {
                     Ok(PaymentOutcome::Accepted(payment)) => state.log(format!(
-                        "epoch {} payment #{} to {recipient}: {}",
+                        "epoch {} payment #{} to {receiver}: {}",
                         payment.epoch, payment.sequence, payment.total
                     )),
                     Ok(PaymentOutcome::CommittedUnheld { epoch, total }) => state.log(format!(
@@ -193,18 +193,18 @@ pub(crate) async fn run<E: Clock + Network>(
                 if state
                     .staged
                     .iter()
-                    .any(|(recipient, _)| *recipient == state.recipient)
+                    .any(|(receiver, _)| *receiver == state.receiver)
                 {
                     state.log(format!(
-                        "{} is already staged; batch entries name unique recipients",
-                        agent.recipient_name(state.recipient)
+                        "{} is already staged; batch entries name unique receivers",
+                        agent.receiver_name(state.receiver)
                     ));
                 } else {
-                    state.staged.push((state.recipient, state.amount));
+                    state.staged.push((state.receiver, state.amount));
                     state.log(format!(
                         "staged {} to {}; press b to send the batch",
                         state.amount,
-                        agent.recipient_name(state.recipient)
+                        agent.receiver_name(state.receiver)
                     ));
                 }
             }
@@ -218,7 +218,7 @@ pub(crate) async fn run<E: Clock + Network>(
                     {
                         Ok(PaymentOutcome::Accepted(payment)) => {
                             state.log(format!(
-                                "epoch {} batch #{} paid {} across {} recipients",
+                                "epoch {} batch #{} paid {} across {} receivers",
                                 payment.epoch,
                                 payment.sequence,
                                 payment.total,
@@ -291,7 +291,7 @@ pub(crate) async fn run<E: Clock + Network>(
             }
             KeyCode::Char('x') => match agent.escalate_withdrawal(network, settlement).await {
                 Ok(request) => state.log(format!(
-                    "withdrawal escalated to settlement through deadline {}; its expiry becomes an on-chain obligation recoverable via h",
+                    "withdrawal escalated to settlement through deadline {}; the next registered close must carry it verbatim; if the operator stalls, expiry becomes hard-fault recovery via h",
                     request.body().deadline()
                 )),
                 Err(error) => state.log(format!("withdrawal escalation rejected: {error:#}")),
@@ -432,7 +432,7 @@ async fn refresh<E: Network>(
     // The verified balance poll also refreshes the wallet's frozen-root recovery opening.
     state.balance = agent.balance(network, settlement, operator).await.ok();
 
-    // Provider intake and its background assurance loop degrade silently like the rest of the
+    // Receiver intake and its background assurance loop degrade silently like the rest of the
     // heartbeat: a held pair is reliance-grade only once durably persisted and settlement-anchored
     // here. Enforcement events are surfaced into the activity feed so the conviction arc is
     // visible in the running wallet.
@@ -495,7 +495,7 @@ fn render(frame: &mut Frame<'_>, agent: &Agent, state: &UiState) {
             )),
         ]),
         Line::raw(format!(
-            "Provider ledger: verified incoming {} across {} pair(s) | last reconciled {reconciled}",
+            "Receiver ledger: verified incoming {} across {} pair(s) | last reconciled {reconciled}",
             incoming.total, incoming.count
         )),
     ])
@@ -547,7 +547,7 @@ fn render(frame: &mut Frame<'_>, agent: &Agent, state: &UiState) {
         let entries = state
             .staged
             .iter()
-            .map(|(recipient, amount)| format!("{} {amount}", agent.recipient_name(*recipient)))
+            .map(|(receiver, amount)| format!("{} {amount}", agent.receiver_name(*receiver)))
             .collect::<Vec<_>>()
             .join(", ");
         format!("Batch: {entries}")
@@ -556,15 +556,15 @@ fn render(frame: &mut Frame<'_>, agent: &Agent, state: &UiState) {
         Line::raw(operator),
         Line::raw(settlement),
         Line::raw(format!(
-            "Recipient: {} | amount {}",
-            agent.recipient_name(state.recipient),
+            "Receiver: {} | amount {}",
+            agent.receiver_name(state.receiver),
             state.amount
         )),
         Line::raw(staged),
         Line::raw(
             "p pay  a stage  b pay batch  d deposit  r refund deposit  w withdraw  f Close  x escalate  c claim  e payout  h recover state  s cut epoch",
         ),
-        Line::raw("Left/Right recipient  +/- amount  PgUp/PgDn +/-10"),
+        Line::raw("Left/Right receiver  +/- amount  PgUp/PgDn +/-10"),
     ])
     .block(
         Block::default()
@@ -644,7 +644,7 @@ pub(crate) async fn scripted<E: Network>(
     );
 
     // The payer chooses the transaction id by signing its send, so it is the invoice reference a
-    // recipient answers its service-accounting query against below.
+    // receiver answers its service-accounting query against below.
     let invoice = payment.acceptance.send.tx_id::<Sha256>().into_digest();
     let payer_account = agent.account();
     let batch = accepted(
@@ -653,7 +653,7 @@ pub(crate) async fn scripted<E: Network>(
             .await?,
     )?;
     println!(
-        "epoch {} accepted batch #{} paying {} across {} recipients",
+        "epoch {} accepted batch #{} paying {} across {} receivers",
         batch.epoch,
         batch.sequence,
         batch.total,
@@ -665,7 +665,7 @@ pub(crate) async fn scripted<E: Network>(
                 network,
                 settlement,
                 operator,
-                &[(agent.recipient_count() - 1, 2)],
+                &[(agent.receiver_count() - 1, 2)],
             )
             .await?,
     )?;
@@ -674,30 +674,30 @@ pub(crate) async fn scripted<E: Network>(
         external_payment.epoch, external_payment.sequence
     );
 
-    // Provider gate-before-service: the recipient durably intakes and settlement-anchors its
-    // incoming pairs BEFORE the epoch is cut, and only then relies on the payment. A moved quote
-    // balance is not reliance-grade, but the held, anchored receipt is.
-    let provider_database = std::env::temp_dir().join(format!(
-        "commonware-terminal-provider-{}.sqlite",
+    // Receiver gate-before-service: the receiver durably intakes and settlement-anchors its
+    // incoming pairs BEFORE the epoch is cut, and only then relies on the payment. A balance
+    // read from the operator's head is not reliance-grade, but the held, anchored receipt is.
+    let receiver_database = std::env::temp_dir().join(format!(
+        "commonware-terminal-receiver-{}.sqlite",
         std::process::id()
     ));
-    let mut recipient = Agent::open(&provider_database, 1)?;
-    recipient
+    let mut receiver = Agent::open(&receiver_database, 1)?;
+    receiver
         .intake_incoming(network, settlement, operator)
         .await?;
-    let ledger = recipient.incoming();
+    let ledger = receiver.incoming();
     println!(
-        "recipient {} durably holds verified incoming {} across {} pair(s) before the close is cut",
-        recipient.name(),
+        "receiver {} durably holds verified incoming {} across {} pair(s) before the close is cut",
+        receiver.name(),
         ledger.total,
         ledger.count
     );
-    match recipient.paid(&payer_account, &invoice)? {
+    match receiver.paid(&payer_account, &invoice)? {
         Some(credit) => println!(
-            "provider gate: releasing service, payer paid {} under the invoice in epoch {}",
+            "receiver gate: releasing service, payer paid {} under the invoice in epoch {}",
             credit.amount, credit.epoch
         ),
-        None => println!("provider gate: no held evidence for the invoice, withholding service"),
+        None => println!("receiver gate: no held evidence for the invoice, withholding service"),
     }
 
     let close = agent.start_close(network, operator).await?;
@@ -734,15 +734,15 @@ pub(crate) async fn scripted<E: Network>(
         .await?;
     println!("claimed withdrawal {}", release.amount);
 
-    // Provider reconciliation after finalization: every finalized credit is proven backed by the
+    // Receiver reconciliation after finalization: every finalized credit is proven backed by the
     // committed close, so the earlier service release was evidence-backed.
-    let summary = recipient.reconcile(network, settlement, operator).await?;
+    let summary = receiver.reconcile(network, settlement, operator).await?;
     for epoch in &summary.reconciled {
-        println!("recipient reconciled epoch {epoch}: every held credit is evidence-backed");
+        println!("receiver reconciled epoch {epoch}: every held credit is evidence-backed");
     }
-    let _ = std::fs::remove_file(&provider_database);
+    let _ = std::fs::remove_file(&receiver_database);
     for suffix in ["-wal", "-shm"] {
-        let mut path = provider_database.clone().into_os_string();
+        let mut path = receiver_database.clone().into_os_string();
         path.push(suffix);
         let _ = std::fs::remove_file(path);
     }
@@ -757,23 +757,23 @@ pub(crate) async fn scripted<E: Network>(
     Ok(())
 }
 
-/// Demonstrates the enforcement thesis live: an operator that omits a recipient's credit is
-/// convicted by the recipient's held receipt, and the close is invalidated.
+/// Demonstrates the enforcement thesis live: an operator that omits a receiver's credit is
+/// convicted by the receiver's held receipt, and the close is invalidated.
 ///
 /// The honest operator binary can never produce an inconsistent close, so the fraud is assembled
 /// here with the shared omitting-close machinery and adjudicated by a self-contained settlement
-/// through the real challenge dispatch. This mirrors what a recipient's reconciliation does on
+/// through the real challenge dispatch. This mirrors what a receiver's reconciliation does on
 /// the wire: it holds an operator-signed receipt, resolves the committed tip that omits it, and
 /// files one `HigherShardTip` challenge that settlement proves.
 fn fraud_arc() -> Result<()> {
     let fraud = omitting_close(&mut rand::rng())?;
     let committed = fraud
         .held_lookup
-        .resolve::<Sha256>(&fraud.result.roots.change, &fraud.recipient, 0)
+        .resolve::<Sha256>(&fraud.result.roots.change, &fraud.receiver, 0)
         .context("resolve the omitted committed tip")?
         .map_or(0, |tip| tip.cumulative_credit);
     println!(
-        "fraud: the operator's admitted close commits cumulative credit {committed} for the omitted recipient, which holds an operator-signed receipt for {}",
+        "fraud: the operator's admitted close commits cumulative credit {committed} for the omitted receiver, which holds an operator-signed receipt for {}",
         fraud.held_credit
     );
 
@@ -790,7 +790,7 @@ fn fraud_arc() -> Result<()> {
     )?;
     settlement.admit_submission(SettlementSubmission::from(&fraud.result))?;
 
-    // The recipient files exactly the challenge its reconciliation would: its held pair against
+    // The receiver files exactly the challenge its reconciliation would: its held pair against
     // the committed lookup that omits it.
     let challenge = Challenge::HigherShardTip {
         payment: Box::new(PaymentWitness::from_payment(&fraud.held_pair)),

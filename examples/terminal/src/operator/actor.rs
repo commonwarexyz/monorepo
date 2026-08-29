@@ -63,7 +63,7 @@ pub(crate) struct CloseStarted {
     pub(crate) queued: bool,
 }
 
-pub(crate) struct PaymentQuote {
+pub(crate) struct PaymentHead {
     pub(crate) context: PaymentContext<Key, Digest>,
     pub(crate) state: AccountState,
     pub(crate) root: VectorRoot<Digest>,
@@ -75,8 +75,8 @@ pub(crate) struct WithdrawalOpening {
     pub(crate) opening: StateOpening<Key, Digest>,
 }
 
-/// Committed-side receive-shard evidence for one recipient, reconstructed from retained
-/// epoch data. A recipient resolves the lookup against `change_root` to read the close's
+/// Committed-side receive-shard evidence for one receiver, reconstructed from retained
+/// epoch data. A receiver resolves the lookup against `change_root` to read the close's
 /// public credit tip for its shard, then challenges when a held receipt exceeds it.
 pub(crate) struct CommittedShardTip {
     pub(crate) batch_id: BatchId<Digest>,
@@ -145,7 +145,7 @@ pub(crate) struct Operator {
     /// Predecessor state commitment retained for the current epoch.
     ///
     /// Payments, deposits, and withdrawals mutate only `current_*` account state, so the
-    /// predecessor set is immutable between rotations. Quotes, openings, and registration
+    /// predecessor set is immutable between rotations. Head reads, openings, and registration
     /// openings serve this cache instead of replaying the epoch from SQLite.
     predecessor: AccountCache,
     active_close: Option<ActiveClose>,
@@ -268,7 +268,7 @@ impl Operator {
     }
 
     #[cfg(test)]
-    pub(crate) const fn recipient_count(&self) -> usize {
+    pub(crate) const fn receiver_count(&self) -> usize {
         self.wallets.len() + 1
     }
 
@@ -276,32 +276,32 @@ impl Operator {
     pub(crate) fn pay(
         &mut self,
         payer: usize,
-        recipient: usize,
+        receiver: usize,
         amount: u64,
     ) -> Result<AcceptedBatch> {
         self.ensure_operating()?;
         ensure!(amount > 0, "payment amount must be positive");
         let payer = &self.wallets[payer % self.wallets.len()];
-        let recipient_index = recipient % self.recipient_count();
-        let recipient = if recipient_index == self.wallets.len() {
+        let receiver_index = receiver % self.receiver_count();
+        let receiver = if receiver_index == self.wallets.len() {
             self.external.key.clone()
         } else {
-            self.wallets[recipient_index].public_key()
+            self.wallets[receiver_index].public_key()
         };
-        let quote = self.payment_quote(&payer.public_key())?;
-        ensure!(quote.state.balance > 0, "selected payer has no balance");
+        let head = self.payment_head(&payer.public_key())?;
+        ensure!(head.state.balance > 0, "selected payer has no balance");
         let send = SignedSend::sign_next(
-            &quote.context,
+            &head.context,
             payer.signer(),
-            recipient,
+            receiver,
             amount,
-            quote.state.cumulative_debit,
+            head.state.cumulative_debit,
         )
         .context("sign payment request")?;
         self.accept_send(send)
     }
 
-    pub(crate) fn payment_quote(&self, account: &Key) -> Result<PaymentQuote> {
+    pub(crate) fn payment_head(&self, account: &Key) -> Result<PaymentHead> {
         self.ensure_operating()?;
         self.ensure_balance_intake_horizon()?;
         let state = self
@@ -316,7 +316,7 @@ impl Operator {
             .predecessor
             .opening(account)
             .context("open payer recovery state")?;
-        Ok(PaymentQuote {
+        Ok(PaymentHead {
             context: self.registration.context.payment().clone(),
             state: state.current,
             root: self.predecessor.root(),
@@ -341,30 +341,30 @@ impl Operator {
         self.store.accepted_batch(send)
     }
 
-    /// Serves accepted linked pairs crediting `recipient` after the caller's durable cursor.
+    /// Serves accepted linked pairs crediting `receiver` after the caller's durable cursor.
     ///
     /// This is a plain durable read of committed payment rows, so it stays readable across the
     /// operating fence and refuses only past a storage fault.
     pub(crate) fn incoming_payments(
         &self,
-        recipient: &Key,
+        receiver: &Key,
         after: u64,
         limit: usize,
     ) -> Result<Vec<IncomingPayment>> {
         self.ensure_store_usable()?;
-        self.store.incoming_payments(recipient, after, limit)
+        self.store.incoming_payments(receiver, after, limit)
     }
 
-    /// Reconstructs one recipient's committed receive-shard evidence for a retained epoch.
+    /// Reconstructs one receiver's committed receive-shard evidence for a retained epoch.
     ///
     /// The close is rebuilt from the retained payment log with the same lookup constructor the
     /// operator uses for withdrawal openings, so the served [`HigherShardTipLookup`] opens
     /// against the reconstructed close's own change root. Retention is honest: once a finalized
-    /// epoch's account-state versions are pruned it may no longer reconstruct, which a recipient
+    /// epoch's account-state versions are pruned it may no longer reconstruct, which a receiver
     /// treats as an availability signal and retries.
     pub(crate) fn committed_shard_tip(
         &self,
-        recipient: &Key,
+        receiver: &Key,
         shard: u64,
         epoch: u64,
     ) -> Result<CommittedShardTip> {
@@ -377,15 +377,15 @@ impl Operator {
         let index = ChallengeIndex::new::<Sha256>(prepared.close_context(), close)
             .context("index committed close for shard-tip evidence")?;
 
-        // A recipient that received credit has a changed row and terminal shard set. An absent
-        // recipient has neither, and the lookup constructor requires the matching pairing.
+        // A receiver that received credit has a changed row and terminal shard set. An absent
+        // receiver has neither, and the lookup constructor requires the matching pairing.
         let shards = close
             .rows
             .iter()
-            .position(|row| &row.account == recipient)
+            .position(|row| &row.account == receiver)
             .map(|position| &close.shard_sets[position]);
         let lookup = index
-            .higher_shard_tip_lookup::<Sha256>(recipient, shards, shard)
+            .higher_shard_tip_lookup::<Sha256>(receiver, shards, shard)
             .context("compose committed shard-tip lookup")?;
         Ok(CommittedShardTip {
             batch_id: close.header.batch_id::<Sha256>(),
@@ -396,7 +396,7 @@ impl Operator {
 
     pub(crate) fn accept_send(&mut self, send: SignedSend<Key, Digest>) -> Result<AcceptedBatch> {
         self.ensure_operating()?;
-        self.validate_recipients(&send)?;
+        self.validate_receivers(&send)?;
 
         // A replay lookup is the only pre-mutation probe: the store transaction fully
         // validates a new send before any mutation, so validating here too would repeat
@@ -423,7 +423,7 @@ impl Operator {
         send: &SignedSend<Key, Digest>,
     ) -> Result<bool> {
         self.ensure_operating()?;
-        self.validate_recipients(send)?;
+        self.validate_receivers(send)?;
         let required = self.store.payment_requires_epoch_registration(
             self.registration.context.payment(),
             send,
@@ -548,9 +548,9 @@ impl Operator {
             return Ok(staged);
         }
         self.ensure_withdrawal_intake_horizon(request.body().action())?;
-        let quote = self.withdrawal_opening(request.account())?;
+        let head = self.withdrawal_opening(request.account())?;
         request
-            .verify_context(&self.protocol.deployment(), &quote.root.digest)
+            .verify_context(&self.protocol.deployment(), &head.root.digest)
             .context("verify withdrawal context")?;
 
         // An amount exactly offsetting the staged aggregate defers it to the successor
@@ -589,10 +589,10 @@ impl Operator {
 
     pub(crate) fn external_payout_evidence(
         &self,
-        recipient: &Key,
+        receiver: &Key,
     ) -> Result<ExternalPayoutEvidence> {
         self.ensure_store_usable()?;
-        self.store.external_payout_evidence(recipient)
+        self.store.external_payout_evidence(receiver)
     }
 
     pub(crate) fn acknowledge_external_payout_claim(
@@ -894,16 +894,16 @@ impl Operator {
         ensure_close_horizon(self.registration.context.payment().epoch())
     }
 
-    fn validate_recipients(&self, send: &SignedSend<Key, Digest>) -> Result<()> {
+    fn validate_receivers(&self, send: &SignedSend<Key, Digest>) -> Result<()> {
         for entry in send.body().entries() {
-            let recipient = entry.recipient();
+            let receiver = entry.recipient();
             ensure!(
-                recipient == &self.external.key
+                receiver == &self.external.key
                     || self
                         .identities
                         .iter()
-                        .any(|identity| &identity.key == recipient),
-                "payment recipient is neither a registered account nor the configured external recipient"
+                        .any(|identity| &identity.key == receiver),
+                "payment receiver is neither a registered account nor the configured external receiver"
             );
         }
         Ok(())
@@ -1462,7 +1462,7 @@ fn assemble_epoch(
                 Some(tx_id)
             }
         };
-        let recipient = payment.recipient().clone();
+        let receiver = payment.recipient().clone();
         let payer_account = accounts
             .get(&payer)
             .context("stored payment payer is not registered")?;
@@ -1470,15 +1470,15 @@ fn assemble_epoch(
             payer_account.name == stored.payer_name,
             "stored payer label does not match its key"
         );
-        let recipient_account = accounts.get(&recipient);
+        let receiver_account = accounts.get(&receiver);
         ensure!(
-            stored.external == recipient_account.is_none(),
-            "stored recipient classification is inconsistent"
+            stored.external == receiver_account.is_none(),
+            "stored receiver classification is inconsistent"
         );
-        if let Some(account) = recipient_account {
+        if let Some(account) = receiver_account {
             ensure!(
-                account.name == stored.recipient_name,
-                "stored recipient label does not match its key"
+                account.name == stored.receiver_name,
+                "stored receiver label does not match its key"
             );
         }
 
@@ -1503,7 +1503,7 @@ fn assemble_epoch(
 
         let shard = payment.receipt().body().shard();
         let endpoint = receipt_endpoints
-            .entry((recipient.clone(), shard))
+            .entry((receiver.clone(), shard))
             .or_insert((0, 0));
         verify_receipt_step(endpoint.0, endpoint.1, payment)
             .context("stored receipt endpoint is not consecutive")?;
@@ -1517,18 +1517,18 @@ fn assemble_epoch(
             .debit
             .checked_add(payment.amount())
             .context("payer debit overflow")?;
-        let recipient_activity = activity.entry(recipient.clone()).or_default();
-        recipient_activity.credit = recipient_activity
+        let receiver_activity = activity.entry(receiver.clone()).or_default();
+        receiver_activity.credit = receiver_activity
             .credit
             .checked_add(payment.amount())
-            .context("recipient credit overflow")?;
-        recipient_activity.receipts = recipient_activity
+            .context("receiver credit overflow")?;
+        receiver_activity.receipts = receiver_activity
             .receipts
             .checked_add(1)
-            .context("recipient receipt count overflow")?;
+            .context("receiver receipt count overflow")?;
         outgoing.insert(payer, payment.clone());
         heads
-            .entry(recipient)
+            .entry(receiver)
             .or_default()
             .insert(shard, payment.clone());
     }
@@ -1539,11 +1539,11 @@ fn assemble_epoch(
         data.receive_shards.len() == receipt_endpoints.len(),
         "stored receive-shard endpoint count is inconsistent"
     );
-    for (stored, ((recipient, shard), (credit, index))) in
+    for (stored, ((receiver, shard), (credit, index))) in
         data.receive_shards.iter().zip(&receipt_endpoints)
     {
         ensure!(
-            &stored.recipient == recipient
+            &stored.receiver == receiver
                 && stored.shard == *shard
                 && stored.cumulative_credit == *credit
                 && stored.receipt_index == *index,

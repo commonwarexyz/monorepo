@@ -3,7 +3,7 @@
 mod claim;
 mod custody;
 mod pay;
-mod provide;
+mod receive;
 mod store;
 #[cfg(test)]
 mod tests;

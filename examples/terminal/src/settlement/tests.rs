@@ -99,12 +99,12 @@ fn admission_fixture() -> (
 
 fn receipt_fork(result: &SettlementResult, protocol: &Protocol) -> Challenge<Key, Digest> {
     let wallets = wallets();
-    let recipient = wallets[2].public_key();
+    let receiver = wallets[2].public_key();
     let payment = |payer: usize, amount| {
         let send = SignedSend::sign_next(
             &result.payment_context,
             wallets[payer].signer(),
-            recipient.clone(),
+            receiver.clone(),
             amount,
             0,
         )
@@ -112,7 +112,7 @@ fn receipt_fork(result: &SettlementResult, protocol: &Protocol) -> Challenge<Key
         let receipt = SignedReceipt::issue_next::<Sha256, _>(
             &result.payment_context,
             &send,
-            &recipient,
+            &receiver,
             0,
             0,
             0,

@@ -6,7 +6,7 @@ Run `commonware-clearing` through three independently owned roles:
   recovery, and claim replay protection.
 - `terminal-operator` owns the SQLite ledger, accepts signed sends, issues receipts, and constructs
   closes.
-- `terminal-agent` owns one wallet key, verifies returned receipts, holds as a service provider
+- `terminal-agent` owns one wallet key, verifies returned receipts, holds as a receiver
   the pairs crediting it, reconciles them against admitted closes, and provides the Ratatui UI.
 
 The processes exchange one bounded request and response per connection using canonical
@@ -38,7 +38,7 @@ commit each transfer with its replay-protection mutation.
 PAYMENT
 
  wallet                    operator                         settlement
-   |-- quote payer ----------->|                                 |
+   |-- read payer head ------->|                                 |
    |<-- context, state root, StateOpening                        |
    |-- read status --------------------------------------------->|
    |<-- deployment, exact finalized state root, fault status ----|
@@ -60,7 +60,7 @@ PAYMENT
    +-- admitted close omits an accepted send => the payment did not happen and the payer's
        funds stay, resolved by abandoning against the finalized endpoint. A payer can never be
        over-debited: public validity certifies every committed debit against a payer-signed
-       send, so enforcing an omitted credit belongs to the harmed recipient, not the payer
+       send, so enforcing an omitted credit belongs to the harmed receiver, not the payer
 
  A send names one or more strictly recipient-sorted entries under one signature and one
  cumulative debit endpoint. The operator accepts or rejects the batch as a whole and
@@ -100,7 +100,7 @@ operator prepare -> deal -> validators seal every assigned proof slice
           -> FINALIZED
                 |
                 +-- withdrawal output + one opening -> destination, amount
-                +-- external payout + one opening   -> recipient, amount
+                +-- external payout + one opening   -> receiver, amount
                 +-- successor state becomes the next finalized head
 
  Epochs register and finalize in exact order: e, e+1, e+2. A retry may repeat e,
@@ -140,30 +140,32 @@ withdrawal, the agent retains its payer opening against settlement's exact final
 recovery uses it only when that full root is later frozen. A carried withdrawal is invisible to
 settlement until its close registers, so it gains the deadline-fault guarantee only once that close
 is admitted. If the operator disappears or censors first, the signer queues the exact signed
-request at settlement instead. That queued obligation expires into hard-fault recovery. This covers
-roots the agent observed while online, not an unobserved root reached while
+request at settlement instead. The next registered close must then carry the queued request
+verbatim, and only an operator that stalls entirely lets the obligation expire into hard-fault
+recovery. This covers roots the agent observed while online, not an unobserved root reached while
 it was offline. An account reactivated by a current-epoch deposit cannot pay until it appears in a
 later epoch-predecessor state, because the current frozen root has no live payer leaf to retain.
 Receipt challenges still require the exact linked send/receipt pair. The example supplies no
 data-availability network or third-party opening retrieval.
 
-Provider enforcement flow. A wallet that provides a service is the party an omitted credit harms,
+Receiver enforcement flow. A wallet that provides a service is the party an omitted credit harms,
 so it enforces its own preconfirmations. It fetches the pairs crediting it from the operator by a
 durable cursor, verifies each fully (payer send signature once per transaction, operator receipt
 signature, exact linkage, and its own recipient), and anchors the pair's `(epoch, anchor)` to the
 context settlement registered for that epoch. A receipt over an operator-chosen anchor with no
 settlement obligation is never reliance-grade. Only then does it durably hold the pair and gate
-service on it, so a moved quote balance is an observation, not reliance. In the background it
-reconciles held credits against the admitted close: settlement serves the batch identity and
-change root it admitted for the epoch, and operator-served committed-side evidence is trusted only
-when it matches that anchor exactly, so the operator can withhold a lookup but can never fabricate
-coverage. Withholding has no settlement-clock backstop once a close is admitted, so an epoch that
-finalizes while its lookup is still withheld is surfaced as an alarm and kept retrying. When a held receipt exceeds the anchored committed tip inside the admission-to-
+service on it, so a balance read from the operator's head is an observation, not reliance. In the
+background it reconciles held credits against the admitted close: settlement serves the batch
+identity and change root it admitted for the epoch, and operator-served committed-side evidence is
+trusted only when it matches that anchor exactly, so the operator can withhold a lookup but can
+never fabricate coverage. Withholding has no settlement-clock backstop once a close is admitted,
+so an epoch that finalizes while its lookup is still withheld is surfaced as an alarm and kept
+retrying. When a held receipt exceeds the anchored committed tip inside the admission-to-
 finalization window, the wallet convicts the close with one `HigherShardTip` challenge and stops,
 because one proven challenge invalidates the whole close. The operator is the pair-delivery
 channel, and withholding a pair only degrades to the acceptance gate: an unheld credit is never
 relied upon and so harms no one. Wallets file `HigherShardTip` only, and the
-authenticated-absence form covers even a recipient the close omits entirely.
+authenticated-absence form covers even a receiver the close omits entirely.
 `LatestAcknowledgedSend` exists for a holder whose held pair no committed shard tip contradicts,
 proving the omission through the payer-row angle instead, and the receipt-range and receipt-fork
 families require operator equivocation the honest demo never produces. Settlement adjudicates
@@ -197,25 +199,27 @@ Every role is durable, so starting the demo over requires deleting
 (or passing fresh `--database` paths) before starting the trio again.
 
 Agent identities are `0=Alice`, `1=Bob`, `2=Carol`, `3=Dave`, and `4=Eve (external)`. The first
-four are registered operator accounts. Eve demonstrates an unregistered recipient claiming an
+four are registered operator accounts. Eve demonstrates an unregistered receiver claiming an
 external payout. Run more agent processes with different identities to exercise independently
 owned wallets. Each identity defaults to `terminal-agent-<identity>.sqlite`; pass `--database` to
 choose an explicit wallet database path.
 
 The UI supports payments, deposits, direct pending-deposit refunds with `r`, exact withdrawals,
 amountless account Close authorizations, withdrawal claims, payer-state hard-fault recovery with
-`h`, and epoch closure. A per-wallet provider-ledger line shows the verified incoming credit and
+`h`, and epoch closure. A per-wallet receiver-ledger line shows the verified incoming credit and
 the last reconciled epoch, updated on the heartbeat, and enforcement events, convictions,
 reconciliations, and alarms, are logged into the activity feed as they happen. When a signed
 withdrawal cannot be carried because the operator is unreachable, `x` escalates the exact request
-to settlement, whose deadline then expires into hard-fault recovery. `p` pays the selected
-recipient the selected amount. `a` stages the
+into settlement's queue. The next registered close must carry the queued request verbatim, and
+the deadline expiring into hard-fault recovery is the backstop if the operator stalls entirely.
+`p` pays the selected receiver the selected amount. `a` stages the
 selected entry into a draft batch and `b` pays every staged entry with one batched send. The
 batch is rejected or accepted as a whole, so a failed `b` retries the identical batch. A
 pending-deposit refund needs only the wallet account and settlement; it does not contact the
-operator. A deposit first becomes settlement custody and is then credited by the operator. A
-withdrawal is authorized against the settlement state root, carried by the operator, and included
-in an epoch close.
+operator. A deposit is placed at settlement, the only ramp in: settlement takes custody and
+records a refund path, and the operator then loads the balance, crediting only after settlement
+reports the deposit recorded. A withdrawal is authorized against the settlement state root,
+carried by the operator, and included in an epoch close.
 Deposits and fresh withdrawal authorizations are accepted only while no payment context is
 registered: the epoch's first payment registers the context, and later requests are rejected
 until the successor epoch opens after the close finalizes. Every validator derives the exact
@@ -225,9 +229,9 @@ stays pending and leaves the account usable for the rest of the epoch. Its outpu
 predecessor balance plus deposits and incoming credits minus outgoing debits. That tail may be
 zero, in which case the Close completes without creating payout work.
 
-Payments to an absent identity become claimable external payouts rather than recipient-sized
+Payments to an absent identity become claimable external payouts rather than receiver-sized
 settlement output. This includes Eve and a configured account removed by Close until a later
-deposit reactivates it. Each recipient claims independently with `e`.
+deposit reactivates it. Each receiver claims independently with `e`.
 
 Before returning an epoch's first operator-signed receipt, the operator sends settlement an
 operator-signed registration containing the exact epoch, predecessor liability, deposit boundary, and
@@ -259,12 +263,12 @@ For a terminal-free walkthrough, start settlement and operator as above, then ru
 cargo run --release -p commonware-terminal --bin terminal-agent -- --scripted
 ```
 
-The walkthrough deposits, hands the operator a withdrawal to carry, pays an internal recipient,
-pays a two-recipient batch under one signature, and pays an external recipient. A recipient then
+The walkthrough deposits, hands the operator a withdrawal to carry, pays an internal receiver,
+pays a two-receiver batch under one signature, and pays an external receiver. A receiver then
 durably intakes and settlement-anchors its incoming pairs and gates service on that held evidence
 before the epoch is cut, the walkthrough starts an asynchronous close, opens the registered
-successor after finalization, reconciles the recipient's finalized credit as evidence-backed, and
+successor after finalization, reconciles the receiver's finalized credit as evidence-backed, and
 claims the finalized withdrawal and external payout. It closes with a self-contained fraud arc:
-an assembled omitting close is admitted, the omitted recipient's held receipt convicts it with a
+an assembled omitting close is admitted, the omitted receiver's held receipt convicts it with a
 proven `HigherShardTip` challenge through the real dispatch, and the fraudulent operator is fenced.
 The operator binary stays honest, and the fraud is assembled only in the scripted walkthrough.

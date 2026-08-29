@@ -212,7 +212,7 @@ impl ClaimChannel for PayoutChannel {
     }
 
     /// Binding is full local verification: the claim must open against the finalized
-    /// batch's own change root and certify this wallet as the recipient settlement pays.
+    /// batch's own change root and certify this wallet as the receiver settlement pays.
     fn bind(
         agent: &Agent,
         evidence: &Self::Evidence,
@@ -231,7 +231,7 @@ impl ClaimChannel for PayoutChannel {
 
     fn verify_release(agent: &Agent, _: &Self::Evidence, release: &Self::Release) -> Result<()> {
         ensure!(
-            release.recipient == agent.account(),
+            release.receiver == agent.account(),
             "settlement returned another external payout"
         );
         Ok(())
@@ -421,7 +421,7 @@ impl Agent {
 
     /// Claims this wallet's external payout.
     ///
-    /// The recipient needs no out-of-band provenance: fetched evidence names its batch
+    /// The receiver needs no out-of-band provenance: fetched evidence names its batch
     /// and is verified locally against that batch's own claim roots.
     pub(crate) async fn claim_external_payout<E: Network>(
         &mut self,
