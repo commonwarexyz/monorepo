@@ -22,6 +22,10 @@ commonware_macros::stability_scope!(ALPHA {
     mod zoda;
     pub use zoda::{Error as ZodaError, Zoda};
 
+    // TODO: remove this once we have a full impl.
+    #[allow(dead_code)]
+    mod ocelot;
+
     /// Configuration common to all encoding schemes.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct Config {
