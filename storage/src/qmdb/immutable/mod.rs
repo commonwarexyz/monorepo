@@ -1236,21 +1236,6 @@ pub(super) mod tests {
         assert_eq!(child_start, child_range.start);
         assert_eq!(*child_start + child_ops.len() as u64, *child_range.end);
 
-        // Every captured delta and proof must match what the log recovers for its
-        // range, and verify against the batch's own root.
-        for (start, ops, proof, root) in [
-            (seed_start, seed_ops, seed_proof, seed_root),
-            (parent_start, parent_ops, parent_proof, parent_root),
-            (child_start, child_ops, child_proof, child_root),
-        ] {
-            let len = core::num::NonZeroU64::new(ops.len() as u64).unwrap();
-            let end = Location::new(*start + ops.len() as u64);
-            let (log_proof, log_ops) = db.historical_proof(end, start, len).await.unwrap();
-            assert_eq!(log_ops, *ops);
-            assert_eq!(log_proof, proof);
-            assert!(verify_proof::<Sha256, _, _>(&proof, start, &ops, &root));
-        }
-
         // A write-free batch still captures its commit-only suffix.
         let empty = db
             .new_batch()
@@ -1261,12 +1246,22 @@ pub(super) mod tests {
         let (db, empty_range) = db.apply_batch(empty).await.unwrap();
         assert_eq!(empty_start, empty_range.start);
         assert_eq!(*empty_start + empty_ops.len() as u64, *empty_range.end);
-        assert!(verify_proof::<Sha256, _, _>(
-            &empty_proof,
-            empty_start,
-            &empty_ops,
-            &empty_root
-        ));
+
+        // Every captured delta and proof must match what the log recovers for its
+        // range, and verify against the batch's own root.
+        for (start, ops, proof, root) in [
+            (seed_start, seed_ops, seed_proof, seed_root),
+            (parent_start, parent_ops, parent_proof, parent_root),
+            (child_start, child_ops, child_proof, child_root),
+            (empty_start, empty_ops, empty_proof, empty_root),
+        ] {
+            let len = core::num::NonZeroU64::new(ops.len() as u64).unwrap();
+            let end = Location::new(*start + ops.len() as u64);
+            let (log_proof, log_ops) = db.historical_proof(end, start, len).await.unwrap();
+            assert_eq!(log_ops, *ops);
+            assert_eq!(log_proof, proof);
+            assert!(verify_proof::<Sha256, _, _>(&proof, start, &ops, &root));
+        }
 
         // After the batch's changes are flushed, proof is a verifying proof or an
         // error, never a wrong proof.

@@ -46,6 +46,12 @@ where
 
 /// A speculative batch of operations whose root digest has been computed,
 /// in contrast to [`UnmerkleizedBatch`].
+///
+/// # Branch validity
+///
+/// Reads through the chain, constructing child batches, and applying the batch later are
+/// only valid while every batch applied to the DB since this batch was merkleized is an
+/// ancestor of this batch (see [`crate::qmdb::batch_chain`] for more details).
 #[derive(Clone)]
 pub struct MerkleizedBatch<F: Family, D: Digest, V: ValueEncoding, S: Strategy>
 where
@@ -343,7 +349,7 @@ where
     /// Nodes below this batch chain are read from `db`'s in-memory Merkle tier, which
     /// retains them at least until this batch's changes are flushed (by a commit or sync
     /// after apply). Calling this later can fail with a pruned-node error, never produce
-    /// a wrong proof.
+    /// a wrong proof. Errors for a batch created by `to_batch`, which appends nothing.
     pub fn proof<E, C, H>(&self, db: &Keyless<F, E, V, C, H, S>) -> Result<Proof<F, D>, Error<F>>
     where
         E: Context,

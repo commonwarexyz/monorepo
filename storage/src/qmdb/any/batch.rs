@@ -2549,6 +2549,8 @@ impl<F: Family, D: Digest, U: update::Update, S: Strategy> MerkleizedBatch<F, D,
     }
 
     /// Return the operations this batch appends to the log and the location of the first.
+    ///
+    /// Includes floor-raise moves and the trailing commit.
     pub fn operations(&self) -> (Location<F>, Arc<Vec<Operation<F, U>>>) {
         (
             self.bounds.base.size,
@@ -2605,7 +2607,7 @@ where
     /// Nodes below this batch chain are read from `db`'s in-memory Merkle tier, which
     /// retains them at least until this batch's changes are flushed (by a commit or sync
     /// after apply). Calling this later can fail with a pruned-node error, never produce
-    /// a wrong proof.
+    /// a wrong proof. Errors for a batch created by `to_batch`, which appends nothing.
     pub fn proof<E, C, I, H, const N: usize>(
         &self,
         db: &Db<F, E, C, I, H, U, N, S>,
@@ -3676,12 +3678,21 @@ mod tests {
             assert_eq!(child_start, child_range.start);
             assert_eq!(*child_start + child_ops.len() as u64, *child_range.end);
 
+            // A write-free batch still captures its commit-only suffix.
+            let empty = db.new_batch().merkleize(&db, None).await.unwrap();
+            let (empty_start, empty_ops) = empty.operations();
+            let (empty_root, empty_proof) = (empty.root(), empty.proof(&db).unwrap());
+            let (db, empty_range) = db.apply_batch(empty).await.unwrap();
+            assert_eq!(empty_start, empty_range.start);
+            assert_eq!(*empty_start + empty_ops.len() as u64, *empty_range.end);
+
             // Every captured delta and proof must match what the log recovers for its
             // range, and verify against the batch's own root.
             for (start, ops, proof, root) in [
                 (seed_start, seed_ops, seed_proof, seed_root),
                 (parent_start, parent_ops, parent_proof, parent_root),
                 (child_start, child_ops, child_proof, child_root),
+                (empty_start, empty_ops, empty_proof, empty_root),
             ] {
                 let len = core::num::NonZeroU64::new(ops.len() as u64).unwrap();
                 let end = Location::new(*start + ops.len() as u64);
@@ -3692,20 +3703,6 @@ mod tests {
                     &proof, start, &ops, &root
                 ));
             }
-
-            // A write-free batch still captures its commit-only suffix.
-            let empty = db.new_batch().merkleize(&db, None).await.unwrap();
-            let (empty_start, empty_ops) = empty.operations();
-            let (empty_root, empty_proof) = (empty.root(), empty.proof(&db).unwrap());
-            let (db, empty_range) = db.apply_batch(empty).await.unwrap();
-            assert_eq!(empty_start, empty_range.start);
-            assert_eq!(*empty_start + empty_ops.len() as u64, *empty_range.end);
-            assert!(crate::qmdb::verify_proof::<Sha256, _, _>(
-                &empty_proof,
-                empty_start,
-                &empty_ops,
-                &empty_root
-            ));
 
             // After the batch's changes are flushed, proof is a verifying proof or an
             // error, never a wrong proof.
