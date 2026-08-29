@@ -3,7 +3,7 @@ use crate::{Context, SyncCompletion};
 use commonware_codec::{Codec, FixedSize, ReadExt};
 use commonware_cryptography::{Crc32, crc32};
 use commonware_runtime::{
-    Blob, BufMut, Error as RError, Handle, IoBufMut, WriteOptions,
+    Blob, BufMut, Error as RError, Handle, IoBufMut, ReadOptions, WriteOptions,
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
 use commonware_utils::{hash_map, HashMap, Span};
@@ -153,10 +153,11 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
             return Ok((BTreeMap::new(), Wrapper::empty(blob)));
         }
 
-        // Read blob
+        // The full encoded blob remains in the in-memory mirror after decoding, so request that
+        // pages brought in by this read need not remain in the OS page cache.
         let len: usize = len.try_into().expect("blob too large for platform");
         let buf = blob
-            .read_at(0, len)
+            .read_at(0, len, ReadOptions::DONT_CACHE)
             .await?
             .coalesce_with_pool(context.storage_buffer_pool());
 
@@ -414,7 +415,8 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
             (&mut target.data.as_mut()[checksum_index..]).put_u32(checksum);
 
             // Freeze the mirror so async writes can hold zero-copy slices, then recover the
-            // mutable mirror after all writes complete.
+            // mutable mirror after all writes complete. Since the mirror remains authoritative,
+            // every write requests cache bypass.
             let data = std::mem::take(&mut target.data).freeze();
 
             // Write each modified value from the frozen mirror, followed by the
@@ -429,17 +431,17 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
                     target.blob.write_at(
                         start as u64,
                         data.slice(start..end),
-                        WriteOptions::default(),
+                        WriteOptions::DONT_CACHE,
                     )
                 })
                 .chain([
                     target
                         .blob
-                        .write_at(0, data.slice(0..u64::SIZE), WriteOptions::default()),
+                        .write_at(0, data.slice(0..u64::SIZE), WriteOptions::DONT_CACHE),
                     target.blob.write_at(
                         checksum_index as u64,
                         data.slice(checksum_index..checksum_index + crc32::Digest::SIZE),
-                        WriteOptions::default(),
+                        WriteOptions::DONT_CACHE,
                     ),
                 ]);
             try_join_all(writes).await?;
@@ -500,10 +502,13 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
         // Shrinking rewrites must also persist the resize, so they need a full sync.
         let next_data = next_data.freeze();
         let shrinking = next_data.len() < target_data_len;
+
+        // The encoded blob becomes the authoritative in-memory mirror below, so every write
+        // requests cache bypass.
         let sync = if pipelined {
             target
                 .blob
-                .write_at(0, next_data.clone(), WriteOptions::default())
+                .write_at(0, next_data.clone(), WriteOptions::DONT_CACHE)
                 .await?;
             if shrinking {
                 target.blob.resize(next_data.len() as u64).await?;
@@ -512,7 +517,7 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
         } else if shrinking {
             target
                 .blob
-                .write_at(0, next_data.clone(), WriteOptions::default())
+                .write_at(0, next_data.clone(), WriteOptions::DONT_CACHE)
                 .await?;
             target.blob.resize(next_data.len() as u64).await?;
             target.blob.sync().await?;
@@ -522,7 +527,11 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
             // durability.
             target
                 .blob
-                .write_at(0, next_data.clone(), WriteOptions::SYNC)
+                .write_at(
+                    0,
+                    next_data.clone(),
+                    WriteOptions::SYNC | WriteOptions::DONT_CACHE,
+                )
                 .await?;
             None
         };

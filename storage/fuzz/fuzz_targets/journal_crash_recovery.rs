@@ -2,10 +2,10 @@
 
 //! Fuzz target contiguous journal crash recovery.
 //!
-//! A journal is an append-only log of items. Appends are buffered; `sync` and `commit` push data
-//! to storage, and an unclean shutdown loses anything not yet durable. On the next `init()` the
-//! journal must rebuild a consistent state from whatever survived. This target tests recovering
-//! after storage faults.
+//! A journal is an append-only log of items. Appends are buffered; `sync` and `commit` establish
+//! durability, while the configured crash policy may retain unsynchronized storage mutations. On
+//! the next `init()` the journal must rebuild a consistent state from whatever survived. This
+//! target tests recovering after storage faults.
 //!
 //! # Cycles
 //!
@@ -14,7 +14,8 @@
 //!   1. `init()` recovers the journal left by the previous cycle's crash.
 //!   2. Check it against the `Expected` carried from that crash.
 //!   3. Append and query under fault injection (the cycle's `ops`).
-//!   4. Drop the journal without a clean shutdown: the crash. Unsynced data is lost.
+//!   4. Drop the journal without a clean shutdown: the crash. Unsynchronized bytes survive
+//!      according to the configured write-retention policy.
 //!
 //! `Crash` markers split the op list into one `ops` list per cycle. Driving recovery repeatedly on
 //! the same journal is the point: watermark, pruning-metadata, and section-layout bugs often need a
@@ -29,9 +30,9 @@
 //!
 //! # Faults
 //!
-//! The operation phase runs under write/sync/resize fault injection. The torn-write modes
-//! (`partial_write_rate`, `partial_resize_rate`) cut a write or truncation short, leaving the
-//! half-finished bytes a real crash would.
+//! The operation phase runs under write/sync/resize fault injection. `write_retention_rate`
+//! controls the prefix of a failed or unsynchronized write that survives, while
+//! `partial_resize_rate` can stop a failed truncation at an intermediate length.
 //!
 //! # Positions
 //!
@@ -42,7 +43,7 @@
 //! guarantees the success path is covered on every input; the raw value still tests rejection.
 
 use arbitrary::{Arbitrary, Unstructured};
-use commonware_runtime::{BufferPooler, Runner, Supervisor as _, deterministic};
+use commonware_runtime::{BufferPooler, ReadOptions, Runner, Supervisor as _, deterministic};
 use commonware_storage::journal::{
     Error,
     contiguous::{
@@ -51,7 +52,7 @@ use commonware_storage::journal::{
         variable::{Config as VariableConfig, Journal as VariableJournal},
     },
 };
-use commonware_utils::{NZU64, NZUsize, sequence::FixedBytes};
+use commonware_utils::{NZU64, NZUsize, Probability, probability, sequence::FixedBytes};
 use futures::StreamExt;
 use libfuzzer_sys::fuzz_target;
 use std::{
@@ -99,9 +100,9 @@ fn bounded_write_buffer(u: &mut Unstructured<'_>) -> arbitrary::Result<usize> {
 }
 
 /// A fault rate in [0.0, 1.0]. Allows 0 so the fuzzer can disable individual fault types.
-fn bounded_rate(u: &mut Unstructured<'_>) -> arbitrary::Result<f64> {
+fn bounded_rate(u: &mut Unstructured<'_>) -> arbitrary::Result<Probability> {
     let percent: u8 = u.int_in_range(0..=100)?;
-    Ok(f64::from(percent) / 100.0)
+    Ok(probability!(u64::from(percent), 100))
 }
 
 /// Op sequence capped at `MAX_OPERATIONS`; a derived `Vec` would instead grow with input length.
@@ -165,19 +166,19 @@ struct FuzzInput {
     write_buffer: usize,
     /// Failure rate for write operations.
     #[arbitrary(with = bounded_rate)]
-    write_failure_rate: f64,
-    /// Probability that a write failure is a partial (torn) write.
+    write_failure_rate: Probability,
+    /// Probability used to retain bytes from a failed or unsynchronized write.
     #[arbitrary(with = bounded_rate)]
-    partial_write_rate: f64,
+    write_retention_rate: Probability,
     /// Failure rate for sync operations.
     #[arbitrary(with = bounded_rate)]
-    sync_failure_rate: f64,
+    sync_failure_rate: Probability,
     /// Failure rate for resize operations (truncation during rewind/prune).
     #[arbitrary(with = bounded_rate)]
-    resize_failure_rate: f64,
+    resize_failure_rate: Probability,
     /// Probability that a resize failure is partial.
     #[arbitrary(with = bounded_rate)]
-    partial_resize_rate: f64,
+    partial_resize_rate: Probability,
     /// Operations to execute, split into one `ops` list per cycle at each `Crash` marker.
     #[arbitrary(with = bounded_operations)]
     operations: Vec<JournalOperation>,
@@ -190,22 +191,27 @@ struct Params {
     page_cache_size: NonZeroUsize,
     items_per_section: u64,
     write_buffer: NonZeroUsize,
-    write_rate: f64,
-    partial_write_rate: f64,
-    sync_rate: f64,
-    resize_rate: f64,
-    partial_resize_rate: f64,
+    write_rate: Probability,
+    write_retention_rate: Probability,
+    sync_rate: Probability,
+    resize_rate: Probability,
+    partial_resize_rate: Probability,
 }
 
 impl Params {
     /// The fault config applied during the operation phase of each cycle.
     fn fault_config(&self) -> deterministic::FaultConfig {
         deterministic::FaultConfig {
-            write_rate: Some(self.write_rate),
-            partial_write_rate: Some(self.partial_write_rate),
+            write_rate: Some(deterministic::WriteConfig {
+                failure_rate: self.write_rate,
+                retention_rate: self.write_retention_rate,
+                mode: deterministic::PartialWriteMode::Prefix,
+            }),
             sync_rate: Some(self.sync_rate),
-            resize_rate: Some(self.resize_rate),
-            partial_resize_rate: Some(self.partial_resize_rate),
+            resize_rate: Some(deterministic::ResizeConfig {
+                failure_rate: self.resize_rate,
+                partial_rate: self.partial_resize_rate,
+            }),
             ..Default::default()
         }
     }
@@ -311,7 +317,9 @@ async fn collect_replay<C: Contiguous<Item = Item>>(
     start_pos: u64,
     buffer: NonZeroUsize,
 ) -> Result<Vec<(u64, Item)>, Error> {
-    let stream = reader.replay(start_pos, buffer).await?;
+    let stream = reader
+        .replay(start_pos, buffer, ReadOptions::default())
+        .await?;
     futures::pin_mut!(stream);
     let mut out = Vec::new();
     while let Some(result) = stream.next().await {
@@ -821,7 +829,7 @@ where
         items_per_section: input.items_per_section,
         write_buffer: NonZeroUsize::new(input.write_buffer).unwrap(),
         write_rate: input.write_failure_rate,
-        partial_write_rate: input.partial_write_rate,
+        write_retention_rate: input.write_retention_rate,
         sync_rate: input.sync_failure_rate,
         resize_rate: input.resize_failure_rate,
         partial_resize_rate: input.partial_resize_rate,

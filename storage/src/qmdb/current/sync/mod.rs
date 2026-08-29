@@ -27,7 +27,7 @@
 
 use crate::{
     Context,
-    index::Factory as IndexFactory,
+    index::{Factory as IndexFactory, Unordered as UnorderedIndex},
     journal::{
         authenticated,
         contiguous::{Contiguous, Mutable, fixed, variable},
@@ -62,7 +62,7 @@ use crate::{
             },
         },
         metrics::Metrics as AnyMetrics,
-        operation::{Committable, Key},
+        operation::Key,
         sync::{Database, DatabaseConfig as Config, FeedbackTx, Request, Response},
     },
     translator::Translator,
@@ -94,11 +94,11 @@ impl<T: Translator, J: Clone, S: Strategy> Config for super::Config<T, J, S> {
 /// * Builds the grafted tree from the bitmap and ops tree.
 /// * Computes and caches the canonical root.
 #[allow(clippy::too_many_arguments)]
-async fn build_db<F, E, U, I, H, J, T, const N: usize, S>(
+async fn build_db<F, E, U, I, H, J, const N: usize, S>(
     context: E,
     merkle_config: full::Config<S>,
     log: J,
-    translator: T,
+    translator: I::Translator,
     pinned_nodes: Option<Vec<H::Digest>>,
     range: NonEmptyRange<Location<F>>,
     apply_batch_size: NonZeroU64,
@@ -111,13 +111,12 @@ async fn build_db<F, E, U, I, H, J, T, const N: usize, S>(
 where
     F: Graftable,
     E: Context + Spawner,
-    U: Update + Send + Sync + 'static,
-    I: IndexFactory<T> + crate::qmdb::SnapshotBuild<F>,
+    U: Update,
+    I: IndexFactory + crate::qmdb::SnapshotBuild<F>,
     H: Hasher,
-    T: Translator,
     J: Mutable<Item = Operation<F, U>> + 'static,
     S: Strategy,
-    Operation<F, U>: Codec + Committable + CodecShared,
+    Operation<F, U>: Codec,
 {
     // Build authenticated log.
     let merkle = Merkle::<F, _, _, S>::init_sync(
@@ -267,7 +266,7 @@ macro_rules! impl_current_sync_database {
                 let cache_size = config.init_cache_size;
                 let init_buffer = config.init_buffer;
                 let init_concurrency = config.init_concurrency;
-                build_db::<F, _, $update<K, V>, _, H, _, T, N, _>(
+                build_db::<F, _, $update<K, V>, _, H, _, N, _>(
                     context,
                     merkle_config,
                     log,
@@ -353,17 +352,17 @@ impl_current_sync_database!(
 
 /// A `current` database serves proofs from the `any` database it wraps. The sync engine
 /// operates on the ops root, which is `any`'s root.
-impl<F, E, U, C, I, H, const N: usize, S> crate::qmdb::sync::Source
+impl<F, E, C, I, H, U, const N: usize, S> crate::qmdb::sync::Source
     for db::Db<F, E, C, I, H, U, N, S>
 where
     F: Graftable,
     E: Context,
-    U: Update + Send + Sync + 'static,
-    C: Mutable<Item = Operation<F, U>> + Send + Sync,
-    I: crate::index::Unordered<Value = Location<F>> + Send + Sync,
+    C: Mutable<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
+    U: Update,
     S: Strategy,
-    Operation<F, U>: Codec + Send,
+    Operation<F, U>: Codec,
 {
     type Family = F;
     type Digest = H::Digest;

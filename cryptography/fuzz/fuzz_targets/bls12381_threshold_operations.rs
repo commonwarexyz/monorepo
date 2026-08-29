@@ -9,7 +9,7 @@ use commonware_cryptography::bls12381::primitives::{
     variant::{MinPk, MinSig, PartialSignature},
 };
 use commonware_parallel::{Rayon, Sequential};
-use commonware_utils::{Participant, test_rng};
+use commonware_utils::{Participant, non_empty, test_rng};
 use libfuzzer_sys::fuzz_target;
 use std::num::NonZeroUsize;
 
@@ -296,7 +296,7 @@ fn fuzz(op: FuzzOperation) {
                     &mut rng,
                     &public,
                     index,
-                    &entries_refs,
+                    non_empty![@entries_refs.iter()],
                     &Sequential,
                 );
             }
@@ -326,7 +326,7 @@ fn fuzz(op: FuzzOperation) {
                     &mut rng,
                     &public,
                     index,
-                    &entries_refs,
+                    non_empty![@entries_refs.iter()],
                     &Sequential,
                 );
             }
@@ -346,12 +346,13 @@ fn fuzz(op: FuzzOperation) {
                         value: sig,
                     })
                     .collect();
+                let partials = non_empty![@partials_evals.iter()];
                 let _ = threshold::batch_verify_same_message::<_, MinPk, _>(
                     &mut rng,
                     &public,
                     &namespace,
                     &message,
-                    &partials_evals,
+                    partials,
                     &Sequential,
                 );
             }
@@ -371,12 +372,13 @@ fn fuzz(op: FuzzOperation) {
                         value: sig,
                     })
                     .collect();
+                let partials = non_empty![@partials_evals.iter()];
                 let _ = threshold::batch_verify_same_message::<_, MinSig, _>(
                     &mut rng,
                     &public,
                     &namespace,
                     &message,
-                    &partials_evals,
+                    partials,
                     &Sequential,
                 );
             }

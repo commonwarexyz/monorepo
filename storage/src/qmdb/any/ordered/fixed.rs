@@ -168,7 +168,7 @@ pub(crate) mod test {
         Runner as _, Supervisor as _,
         deterministic::{self, Context},
     };
-    use commonware_utils::{NZU64, NZUsize, TestRng, hash_map, HashMap, sequence::FixedBytes};
+    use commonware_utils::{NZU64, NZUsize, TestRng, hash_map, HashMap, probability, sequence::FixedBytes};
     use futures::StreamExt as _;
     use rand::{Rng, seq::IteratorRandom};
     use std::{
@@ -790,7 +790,7 @@ pub(crate) mod test {
             // across configs, never cached pages), so replay's first item forces a storage read,
             // and with far fewer ops than the routing batch size no batch reaches a worker, so
             // workers never read the log themselves.
-            context.storage_fault_config().write().read_rate = Some(1.0);
+            context.storage_fault_config().write().read_rate = Some(probability!(1.0));
             let result = index
                 .build_snapshot(
                     context.child("build"),
@@ -1020,7 +1020,7 @@ pub(crate) mod test {
         executor.start(|context| async move {
             let mut db = open_db(context.child("first")).await;
 
-            let mut map = hash_map::new();
+            let mut map = HashMap::<Digest, Digest>::default();
             {
                 let mut batch = db.new_batch();
                 for i in 0u64..ELEMENTS {
@@ -1275,7 +1275,7 @@ pub(crate) mod test {
         executor.start(|context| async move {
             let mut db = open_db(context.child("first")).await;
 
-            let mut map = hash_map::new();
+            let mut map = HashMap::<Digest, Digest>::default();
             const ELEMENTS: u64 = 10;
             // insert & apply multiple batches to ensure repeated inactivity floor raising.
             let metadata = Sha256::hash(&[&42u64.to_be_bytes()]);

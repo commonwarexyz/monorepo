@@ -66,7 +66,7 @@ mod tests {
         Clock, Quota, Runner, Supervisor as _, deterministic,
         telemetry::metrics::count_running_tasks,
     };
-    use commonware_utils::{NZU32, NZUsize, ordered::Set};
+    use commonware_utils::{NZU32, NZUsize, ordered::Set, probability};
     use std::{num::NonZeroUsize, time::Duration};
 
     /// Default rate limit quota for tests (high enough to not interfere with normal operation)
@@ -76,12 +76,12 @@ mod tests {
     const LINK: Link = Link {
         latency: Duration::from_millis(10),
         jitter: Duration::from_millis(1),
-        success_rate: 1.0,
+        success_rate: probability!(1.0),
     };
     const LINK_SLOW: Link = Link {
         latency: Duration::from_secs(1),
         jitter: Duration::from_millis(1),
-        success_rate: 1.0,
+        success_rate: probability!(1.0),
     };
 
     async fn setup_network_and_peers(

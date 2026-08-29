@@ -1,5 +1,6 @@
 use super::{Config, Translator};
 use crate::{
+    Context,
     archive::{Error, Identifier},
     index::{Unordered, unordered::Index},
     journal::segmented::oversized::{
@@ -9,7 +10,7 @@ use crate::{
 };
 use commonware_codec::{CodecShared, FixedSize, Read, ReadExt, Write};
 use commonware_runtime::{
-    Buf, BufMut, BufferPooler, Handle, Metrics, Storage,
+    Buf, BufMut, Handle,
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
 use commonware_utils::Array;
@@ -100,7 +101,7 @@ where
 }
 
 /// The archive's state, boxed so the public [Archive] handle stays pointer-sized.
-struct Inner<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShared> {
+struct Inner<T: Translator, E: Context, K: Array, V: CodecShared> {
     items_per_section: u64,
 
     /// Combined index + value storage with crash recovery.
@@ -147,9 +148,7 @@ struct Inner<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: Co
     syncs: Counter,
 }
 
-impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShared>
-    Inner<T, E, K, V>
-{
+impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
     /// Calculate the section for a given index.
     const fn section(&self, index: u64) -> u64 {
         (index / self.items_per_section) * self.items_per_section
@@ -195,7 +194,14 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         let mut intervals = RMap::new();
         let oversized = {
             debug!("initializing archive from index journal");
-            let mut replay = oversized.replay(0, 0, cfg.replay_buffer).await?;
+            let mut replay = oversized
+                .replay(
+                    0,
+                    0,
+                    cfg.replay_buffer,
+                    commonware_runtime::ReadOptions::default(),
+                )
+                .await?;
             while let Some(result) = replay.next().await {
                 let (_section, position, entry) = result?;
 
@@ -585,13 +591,9 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
 /// Mutating functions consume the archive and return it only on success: an error (or a
 /// dropped future) destroys the handle. Puts below the prune floor are satisfied without
 /// storing (see [crate::archive::Archive]).
-pub struct Archive<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShared>(
-    Box<Inner<T, E, K, V>>,
-);
+pub struct Archive<T: Translator, E: Context, K: Array, V: CodecShared>(Box<Inner<T, E, K, V>>);
 
-impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShared> std::fmt::Debug
-    for Archive<T, E, K, V>
-{
+impl<T: Translator, E: Context, K: Array, V: CodecShared> std::fmt::Debug for Archive<T, E, K, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Archive")
             .field("first_index", &self.0.first_index())
@@ -600,9 +602,7 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
     }
 }
 
-impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShared>
-    Archive<T, E, K, V>
-{
+impl<T: Translator, E: Context, K: Array, V: CodecShared> Archive<T, E, K, V> {
     /// Initialize a new `Archive` instance.
     ///
     /// The in-memory index for `Archive` is populated during this call
@@ -622,8 +622,8 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
     }
 }
 
-impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShared>
-    crate::archive::Archive for Archive<T, E, K, V>
+impl<T: Translator, E: Context, K: Array, V: CodecShared> crate::archive::Archive
+    for Archive<T, E, K, V>
 {
     type Key = K;
     type Value = V;
@@ -706,8 +706,8 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
     }
 }
 
-impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShared>
-    crate::archive::MultiArchive for Archive<T, E, K, V>
+impl<T: Translator, E: Context, K: Array, V: CodecShared> crate::archive::MultiArchive
+    for Archive<T, E, K, V>
 {
     async fn get_all(&self, index: u64) -> Result<Option<Vec<V>>, Error> {
         self.0.get_all(index).await

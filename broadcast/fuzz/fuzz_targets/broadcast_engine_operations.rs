@@ -13,7 +13,9 @@ use commonware_cryptography::{
 };
 use commonware_p2p::{Recipients, simulated::Network};
 use commonware_runtime::{Buf, BufMut, Clock, Quota, Runner, Supervisor as _, deterministic};
-use commonware_utils::{NZUsize, TestRng, channel::oneshot, futures::Pool, vec::Bounded};
+use commonware_utils::{
+    NZUsize, Probability, TestRng, channel::oneshot, futures::Pool, probability, vec::Bounded,
+};
 use futures::FutureExt as _;
 use libfuzzer_sys::fuzz_target;
 use rand::seq::SliceRandom;
@@ -150,7 +152,7 @@ impl<'a> Arbitrary<'a> for BroadcastAction {
 #[derive(Debug)]
 pub struct FuzzInput {
     peer_seeds: Vec<u64>,
-    network_success_rate: f64,
+    network_success_rate: Probability,
     network_latency_ms: u64,
     network_jitter_ms: u64,
     cache_size: usize,
@@ -161,7 +163,7 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let num_peers = u.int_in_range(1..=5)?;
         let peer_seeds = (0..num_peers).collect::<Vec<_>>(); // avoid duplicate seeds
-        let network_success_rate = u.int_in_range(30..=100)? as f64 / 100.0;
+        let network_success_rate = probability!(u.int_in_range(30..=100)?, 100);
         let network_latency_ms = u.int_in_range(1..=100)?;
         let network_jitter_ms = u.int_in_range(0..=50)?;
         let cache_size = u.int_in_range(5..=10)?;
@@ -203,7 +205,7 @@ fn resolve_recipients(pattern: &RecipientPattern, peers: &[PublicKey]) -> Recipi
 
 // Keep subscriptions alive without spawning one task per receiver. Ready
 // subscriptions are validated, while unresolved ones remain pending.
-fn drain_ready_subscriptions(pending: &mut Pool<Subscription>) {
+fn drain_ready_subscriptions(pending: &mut Pool<'_, Subscription>) {
     while let Some((digest, result)) = pending.next_completed().now_or_never() {
         if let Ok(message) = result {
             assert_eq!(message.digest(), digest);

@@ -203,7 +203,7 @@ where
     context: ContextCell<E>,
     fetcher: F,
     mailbox: mailbox::Receiver<Message<F::Key, Con::Subscriber>>,
-    fetches: AbortablePool<FetchCompletion<F::Key, F::Value>>,
+    fetches: AbortablePool<'static, FetchCompletion<F::Key, F::Value>>,
     deliveries: DeliveryTracker<Con, u64>,
     requests: BTreeMap<F::Key, Attempt>,
     subscribers: subscribers::Tracker<F::Key, Con::Subscriber>,

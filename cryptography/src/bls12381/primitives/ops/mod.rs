@@ -135,7 +135,7 @@ mod tests {
     use blst::BLST_ERROR;
     use commonware_codec::{DecodeExt, Encode, Error as CodecError, ReadExt};
     use commonware_formatting::from_hex;
-    use commonware_math::algebra::CryptoGroup;
+    use commonware_math::algebra::{Additive, CryptoGroup};
     use commonware_parallel::Sequential;
     use commonware_utils::{test_rng, union_unique};
     use rstest::rstest;
@@ -365,6 +365,31 @@ mod tests {
         assert!(
             MinPk::batch_verify(&mut test_rng(), &publics, &hms, &signatures, &Sequential).is_err()
         );
+    }
+
+    fn batch_verify_rejects_identity_signature<V: Variant>() {
+        let mut rng = test_rng();
+        let (_, public) = keypair::<_, V>(&mut rng);
+        let namespace = b"test";
+        let message = b"message";
+        let hm = hash_with_namespace::<V>(V::MESSAGE, namespace, message);
+
+        assert!(matches!(
+            V::batch_verify(
+                &mut rng,
+                &[public],
+                &[hm],
+                &[V::Signature::zero()],
+                &Sequential,
+            ),
+            Err(Error::InvalidSignature)
+        ));
+    }
+
+    #[test]
+    fn test_batch_verify_rejects_identity_signature() {
+        batch_verify_rejects_identity_signature::<MinPk>();
+        batch_verify_rejects_identity_signature::<MinSig>();
     }
 
     fn parse_sign_vector(

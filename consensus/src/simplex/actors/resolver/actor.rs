@@ -649,7 +649,9 @@ mod tests {
     use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network};
     use commonware_parallel::Sequential;
     use commonware_runtime::{Quota, Runner, Supervisor, deterministic};
-    use commonware_utils::{NZU32, NZUsize, channel::oneshot, non_empty_vec, sync::Mutex};
+    use commonware_utils::{
+        NZU32, NZUsize, channel::oneshot, non_empty, non_empty_vec, probability, sync::Mutex,
+    };
     use std::{collections::BTreeSet, sync::Arc};
 
     const NAMESPACE: &[u8] = b"resolver-actor";
@@ -831,7 +833,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: 1.0,
+                success_rate: probability!(1.0),
             };
             oracle
                 .add_link(
@@ -1016,7 +1018,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: 1.0,
+                success_rate: probability!(1.0),
             };
             oracle
                 .add_link(
@@ -1976,7 +1978,8 @@ mod tests {
                 .take(3)
                 .map(|scheme| Notarize::sign(scheme, notarization.proposal.clone()).unwrap())
                 .collect();
-            let alternate = Notarization::from_notarizes(&verifier, &votes, &Sequential).unwrap();
+            let alternate =
+                Notarization::from_notarizes(&verifier, non_empty![@&votes], &Sequential).unwrap();
             assert_ne!(notarization, alternate);
 
             // A targeted request can receive the leader's preferred

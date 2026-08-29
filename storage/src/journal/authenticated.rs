@@ -31,7 +31,7 @@ use commonware_codec::{Encode, EncodeShared};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
-use commonware_runtime::Handle;
+use commonware_runtime::{Handle, ReadOptions};
 use core::{
     num::{NonZeroU64, NonZeroUsize},
     ops::Range,
@@ -227,7 +227,6 @@ impl<F: Family, D: Digest, Item: Send + Sync, S: Strategy> Readable
 {
     type Family = F;
     type Digest = D;
-    type Error = merkle::Error<F>;
 
     fn size(&self) -> Position<F> {
         self.inner.size()
@@ -235,10 +234,6 @@ impl<F: Family, D: Digest, Item: Send + Sync, S: Strategy> Readable
 
     fn get_node(&self, pos: Position<F>) -> Option<D> {
         self.inner.get_node(pos)
-    }
-
-    fn pruning_boundary(&self) -> Location<F> {
-        self.inner.pruning_boundary()
     }
 }
 
@@ -328,14 +323,13 @@ where
         }
     }
 
-    /// Add `items` to `batch`, merkleize, and compute the post-apply root, all as one CPU-bound
-    /// job submitted through [`Strategy::spawn`].
+    /// Add `items` to `batch`, merkleize, and compute the post-apply root, all as one CPU-bound job
+    /// submitted through [`Strategy::spawn`].
     ///
-    /// The job hashes against an immutable snapshot of the committed Merkle state, so a
-    /// parallel strategy hosts the batch's dominant CPU phase on its own pool instead of
-    /// occupying the calling task. If the caller is cancelled mid-job, the job still runs to
-    /// completion against its snapshot and the result is discarded (a panic inside the job is
-    /// caught by [`Strategy::spawn`] and only propagates to a caller that awaits it).
+    /// The job hashes against an immutable snapshot of the committed Merkle state, so a parallel
+    /// strategy can host the batch's dominant CPU phase on its own pool instead of occupying the
+    /// calling task. If the job's caller is cancelled, the job still runs to completion
+    /// against its snapshot and the result is discarded.
     pub(crate) async fn merkleize(
         &self,
         batch: UnmerkleizedBatch<F, H, C::Item, S>,
@@ -345,13 +339,15 @@ where
     where
         C::Item: 'static,
     {
+        let ancestors = batch.inner.retain_ancestors();
         let mem = self.merkle.snapshot();
         let hasher = self.hasher.clone();
         let strategy = self.strategy().clone();
         strategy
-            .spawn(move |_| {
+            .spawn(items.len(), move |_| {
                 let merkleized = batch.add_many(items).merkleize(&mem);
                 let root = merkleized.root(&mem, &hasher, inactive_peaks)?;
+                drop(ancestors);
                 Ok((merkleized, root))
             })
             .await
@@ -935,8 +931,9 @@ where
         &self,
         start_pos: u64,
         buffer: NonZeroUsize,
+        read_options: ReadOptions,
     ) -> Result<impl Stream<Item = Result<(u64, C::Item), JournalError>> + Send, JournalError> {
-        self.journal.replay(start_pos, buffer).await
+        self.journal.replay(start_pos, buffer, read_options).await
     }
 }
 
@@ -1055,6 +1052,7 @@ mod tests {
             },
             operation::Committable,
         },
+        utils::detached::{DropMonitor, block_strategy},
     };
     use commonware_codec::Encode;
     use commonware_cryptography::{Sha256, sha256::Digest};
@@ -1065,8 +1063,8 @@ mod tests {
         buffer::paged::CacheRef,
         deterministic::{self, Context},
         mocks::{
-            DelayedSyncContext, PendingSyncs, drive_pending_syncs, fail_pending_syncs,
-            next_pending_sync,
+            DelayedSyncContext, PendingSyncs, RecordingContext, drive_pending_syncs,
+            fail_pending_syncs, next_pending_sync,
         },
         reschedule,
     };
@@ -1075,6 +1073,7 @@ mod tests {
     use std::{
         future::Future,
         num::{NonZeroU16, NonZeroUsize},
+        time::Duration,
     };
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(101);
@@ -1088,6 +1087,14 @@ mod tests {
         F,
         deterministic::Context,
         ContiguousJournal<deterministic::Context, TestOp<F>>,
+        Sha256,
+        Sequential,
+    >;
+
+    type RecordingTestJournal<F> = Journal<
+        F,
+        RecordingContext<deterministic::Context>,
+        ContiguousJournal<RecordingContext<deterministic::Context>, TestOp<F>>,
         Sha256,
         Sequential,
     >;
@@ -2880,13 +2887,19 @@ mod tests {
     async fn test_replay_operations_inner<F: Family + PartialEq>(context: Context) {
         // Test empty journal
         let journal = create_empty_journal::<F>(context.child("empty"), "replay").await;
-        let stream = journal.replay(0, NZUsize!(10)).await.unwrap();
+        let stream = journal
+            .replay(0, NZUsize!(10), ReadOptions::default())
+            .await
+            .unwrap();
         futures::pin_mut!(stream);
         assert!(stream.next().await.is_none());
 
         // Test replaying all operations
         let journal = create_journal_with_ops::<F>(context.child("with_ops"), "replay", 50).await;
-        let stream = journal.replay(0, NZUsize!(100)).await.unwrap();
+        let stream = journal
+            .replay(0, NZUsize!(100), ReadOptions::default())
+            .await
+            .unwrap();
         futures::pin_mut!(stream);
 
         for i in 0..50 {
@@ -2910,10 +2923,61 @@ mod tests {
         executor.start(test_replay_operations_inner::<mmb::Family>);
     }
 
+    #[test_traced("INFO")]
+    fn test_replay_propagates_read_options_to_backing_journal() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (context, recordings) = RecordingContext::new(context);
+            let merkle_cfg = merkle_config("replay-options", &context);
+            let journal_cfg = journal_config("replay-options", &context);
+            let page_cache = journal_cfg.page_cache.clone();
+            let mut journal = RecordingTestJournal::<mmr::Family>::new(
+                context,
+                merkle_cfg,
+                journal_cfg,
+                |op| op.is_commit(),
+                ForwardFold,
+            )
+            .await
+            .unwrap();
+
+            for i in 0..8 {
+                let operation = create_operation::<mmr::Family>(i);
+                (journal, _) = journal.append(&operation).await.unwrap();
+            }
+            journal = journal.sync().await.unwrap();
+
+            // Evict cached pages so the first replay item requires a backing read through the
+            // authenticated wrapper.
+            page_cache.clear();
+            let stream = journal
+                .replay(0, NZUsize!(100), ReadOptions::DONT_CACHE)
+                .await
+                .unwrap();
+            recordings.clear();
+            futures::pin_mut!(stream);
+            let (position, operation) = stream.next().await.unwrap().unwrap();
+            assert_eq!(position, 0);
+            assert_eq!(operation, create_operation::<mmr::Family>(0));
+
+            // The authenticated wrapper forwards DONT_CACHE unchanged to the backing journal.
+            let reads = recordings.snapshot().reads;
+            assert!(!reads.is_empty());
+            assert!(
+                reads
+                    .iter()
+                    .all(|options| *options == ReadOptions::DONT_CACHE)
+            );
+        });
+    }
+
     /// Verify replay() starting from a middle location.
     async fn test_replay_from_middle_inner<F: Family + PartialEq>(context: Context) {
         let journal = create_journal_with_ops::<F>(context, "replay_middle", 50).await;
-        let stream = journal.replay(25, NZUsize!(100)).await.unwrap();
+        let stream = journal
+            .replay(25, NZUsize!(100), ReadOptions::default())
+            .await
+            .unwrap();
         futures::pin_mut!(stream);
 
         let mut count = 0;
@@ -3531,5 +3595,114 @@ mod tests {
     fn test_apply_batch_after_committed_ancestor_dropped_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(test_apply_batch_after_committed_ancestor_dropped_inner::<mmb::Family>);
+    }
+
+    /// Merkleization retains a speculative suffix after its committed prefix is released.
+    async fn test_merkleize_after_committed_prefix_dropped_inner<F: Family + PartialEq>(
+        context: Context,
+    ) {
+        let mut journal =
+            create_empty_journal::<F>(context.child("storage"), "committed-prefix").await;
+
+        // Build a speculative suffix over a prefix that will be committed independently.
+        let prefix_items = (0..8u8).map(create_operation::<F>).collect();
+        let (prefix, _) = journal
+            .merkleize(journal.new_batch(), prefix_items, 0)
+            .await
+            .unwrap();
+        let pending_items = (8..10u8).map(create_operation::<F>).collect();
+        let (pending, _) = journal
+            .merkleize(prefix.new_batch::<Sha256>(), pending_items, 0)
+            .await
+            .unwrap();
+
+        // Commit and release the prefix. Its Merkle nodes now resolve through the snapshot.
+        journal = journal.apply_batch(&prefix).await.unwrap();
+        drop(prefix);
+
+        // The child batch is the pending suffix's only remaining owner. Merkleization must retain
+        // that suffix through root computation.
+        let child_batch = pending.new_batch::<Sha256>();
+        drop(pending);
+        let (child, expected_root) = journal
+            .merkleize(child_batch, vec![create_operation::<F>(10)], 0)
+            .await
+            .unwrap();
+        journal = journal.apply_batch(&child).await.unwrap();
+
+        assert_eq!(journal_root(&journal), expected_root);
+        assert_eq!(*journal.size(), 11);
+    }
+
+    #[test_traced("INFO")]
+    fn test_merkleize_after_committed_prefix_dropped_mmr() {
+        let executor = deterministic::Runner::default();
+        executor.start(test_merkleize_after_committed_prefix_dropped_inner::<mmr::Family>);
+    }
+
+    #[test_traced("INFO")]
+    fn test_merkleize_after_committed_prefix_dropped_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(test_merkleize_after_committed_prefix_dropped_inner::<mmb::Family>);
+    }
+
+    /// A detached merkleization job owns the full ancestor chain after its waiter is dropped.
+    #[test_traced("INFO")]
+    fn test_merkleize_retains_ancestors_after_cancellation() {
+        deterministic::Runner::default().start(|context| async move {
+            let strategy = Rayon::new(NZUsize!(2)).unwrap();
+            let merkle_cfg = merkle_config_with("cancelled-merkleize", &context, strategy);
+            let journal_cfg = journal_config("cancelled-merkleize", &context);
+            type RayonJournal = Journal<
+                mmr::Family,
+                Context,
+                ContiguousJournal<Context, DropMonitor<TestOp<mmr::Family>>>,
+                Sha256,
+                Rayon,
+            >;
+            let journal = RayonJournal::new(
+                context,
+                merkle_cfg,
+                journal_cfg,
+                |_: &DropMonitor<TestOp<mmr::Family>>| false,
+                ForwardFold,
+            )
+            .await
+            .unwrap();
+
+            let a_items = (0..8u8)
+                .map(create_operation::<mmr::Family>)
+                .map(DropMonitor::untracked)
+                .collect();
+            let a_batch = journal.new_batch().add_many(a_items);
+            let a = journal.merkle.with_mem(|mem| a_batch.merkleize(mem));
+            let b_items = (8..10u8)
+                .map(create_operation::<mmr::Family>)
+                .map(DropMonitor::untracked)
+                .collect();
+            let b_batch = a.new_batch::<Sha256>().add_many(b_items);
+            let b = journal.merkle.with_mem(|mem| b_batch.merkleize(mem));
+
+            let ancestor = Arc::downgrade(&a.inner);
+            let c_batch = b.new_batch::<Sha256>();
+            drop(b);
+
+            let release = block_strategy(journal.strategy(), 2);
+            let (item, clean_drop) = DropMonitor::tracked(create_operation::<mmr::Family>(10));
+            let mut merkleize = Box::pin(journal.merkleize(c_batch, vec![item], 0));
+            assert!(futures::poll!(merkleize.as_mut()).is_pending());
+            drop(merkleize);
+            drop(a);
+
+            assert!(ancestor.upgrade().is_some());
+            drop(release);
+            assert!(
+                clean_drop
+                    .recv_timeout(Duration::from_secs(10))
+                    .expect("detached merkleization did not finish"),
+                "detached merkleization panicked"
+            );
+            assert!(ancestor.upgrade().is_none());
+        });
     }
 }

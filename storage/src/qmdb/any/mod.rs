@@ -81,7 +81,7 @@ use crate::{
     },
     translator::Translator,
 };
-use commonware_codec::{CodecShared, Encode};
+use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
@@ -110,7 +110,7 @@ where
     F: Family,
     H: Hasher,
     U: Update,
-    Operation<F, U>: Encode,
+    Operation<F, U>: Codec,
 {
     single_operation_root::<F, H>(&Operation::<F, U>::CommitFloor(None, Location::new(0)))
 }
@@ -150,42 +150,40 @@ pub type FixedConfig<T, S, B = ()> = Config<T, FConfig, S, B>;
 pub type VariableConfig<T, C, S, B = ()> = Config<T, VConfig<C>, S, B>;
 
 /// Initialize an `Any` authenticated db from the given config.
-pub async fn init<F, E, U, H, T, I, J, S>(
+pub async fn init<F, E, U, H, I, J, S>(
     context: E,
-    cfg: Config<T, J::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
+    cfg: Config<I::Translator, J::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
 ) -> Result<db::Db<F, E, J, I, H, U, BITMAP_CHUNK_BYTES, S>, crate::qmdb::Error<F>>
 where
     F: Family,
     E: Context + Spawner,
-    U: Update + Send + Sync,
+    U: Update,
     H: Hasher,
-    T: Translator,
-    I: IndexFactory<T, Value = Location<F>> + crate::qmdb::SnapshotBuild<F>,
+    I: IndexFactory<Value = Location<F>> + crate::qmdb::SnapshotBuild<F>,
     J: authenticated::Backing<E, Item = Operation<F, U>> + 'static,
     S: Strategy,
-    Operation<F, U>: Committable + CodecShared,
+    Operation<F, U>: Codec,
 {
-    init_with_bitmap::<F, E, U, H, T, I, J, S, BITMAP_CHUNK_BYTES>(context, cfg, None).await
+    init_with_bitmap::<F, E, U, H, I, J, S, BITMAP_CHUNK_BYTES>(context, cfg, None).await
 }
 
 /// Like [`init`] but accepts a pre-allocated bitmap (used by `current::Db`, which sizes pruned
 /// chunks from grafted metadata). `bitmap = None` allocates internally.
 #[boxed]
-pub(crate) async fn init_with_bitmap<F, E, U, H, T, I, J, S, const N: usize>(
+pub(crate) async fn init_with_bitmap<F, E, U, H, I, J, S, const N: usize>(
     context: E,
-    cfg: Config<T, J::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
+    cfg: Config<I::Translator, J::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
     bitmap: Option<Arc<Shared<N>>>,
 ) -> Result<db::Db<F, E, J, I, H, U, N, S>, crate::qmdb::Error<F>>
 where
     F: Family,
     E: Context + Spawner,
-    U: Update + Send + Sync,
+    U: Update,
     H: Hasher,
-    T: Translator,
-    I: IndexFactory<T, Value = Location<F>> + crate::qmdb::SnapshotBuild<F>,
+    I: IndexFactory<Value = Location<F>> + crate::qmdb::SnapshotBuild<F>,
     J: authenticated::Backing<E, Item = Operation<F, U>> + 'static,
     S: Strategy,
-    Operation<F, U>: Committable + CodecShared,
+    Operation<F, U>: Codec,
 {
     let mut log = authenticated::Journal::<F, E, J, H, S>::new(
         context.child("log"),
@@ -377,15 +375,15 @@ pub(crate) mod test {
         -> impl Future<Output = Result<Self, Error>> + Send;
     }
 
-    impl<E, U, C, I, H, const N: usize, S> RewindableDb for AnyDb<mmr::Family, E, C, I, H, U, N, S>
+    impl<E, C, I, H, U, const N: usize, S> RewindableDb for AnyDb<mmr::Family, E, C, I, H, U, N, S>
     where
         E: crate::Context,
-        U: UpdateTrait,
         C: Mutable<Item = AnyOperation<mmr::Family, U>>,
         I: UnorderedIndex<Value = Location>,
         H: Hasher,
-        AnyOperation<mmr::Family, U>: Codec,
+        U: UpdateTrait,
         S: Strategy,
+        AnyOperation<mmr::Family, U>: Codec,
     {
         async fn rewind_to_size(self, size: Location) -> Result<Self, Error> {
             self.rewind(size).await

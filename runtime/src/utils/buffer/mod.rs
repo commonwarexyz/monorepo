@@ -161,7 +161,7 @@ mod tests {
     use super::*;
     use crate::{
         Blob as _, BufferPool, BufferPoolConfig, Error, Handle, IoBufMut, IoBufs, IoBufsMut,
-        Runner, Storage, WriteOptions, deterministic,
+        ReadOptions, Runner, Storage, WriteOptions, deterministic,
         mocks::{DelayedSyncBlob, next_pending_sync},
         telemetry::metrics::Registry,
     };
@@ -246,8 +246,13 @@ mod tests {
     }
 
     impl crate::Blob for SyncTrackingBlob {
-        async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
-            self.read_at_buf(offset, len, IoBufMut::with_capacity(len))
+        async fn read_at(
+            &self,
+            offset: u64,
+            len: usize,
+            options: ReadOptions,
+        ) -> Result<IoBufsMut, Error> {
+            self.read_at_buf(offset, len, IoBufMut::with_capacity(len), options)
                 .await
         }
 
@@ -256,6 +261,7 @@ mod tests {
             offset: u64,
             len: usize,
             buf: impl Into<IoBufsMut> + Send,
+            _options: ReadOptions,
         ) -> Result<IoBufsMut, Error> {
             let start = usize::try_from(offset).map_err(|_| Error::OffsetOverflow)?;
             let end = start.checked_add(len).ok_or(Error::OffsetOverflow)?;

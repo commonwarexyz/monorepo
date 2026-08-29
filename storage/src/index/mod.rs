@@ -198,14 +198,17 @@ pub trait Unordered: Send + Sync {
 }
 
 /// A trait for index types that can be constructed from a metrics context and translator.
-pub trait Factory<T: Translator>: Unordered + Sized {
+pub trait Factory: Unordered + Sized {
+    /// The translator used by this index.
+    type Translator: Translator;
+
     /// Create a new index with the given metrics context and translator.
-    fn new(ctx: impl Metrics, translator: T) -> Self;
+    fn new(ctx: impl Metrics, translator: Self::Translator) -> Self;
 }
 
 /// A trait defining the additional operations provided by a memory-efficient index that allows
 /// ordered traversal of the indexed keys.
-pub trait Ordered: Unordered + Send + Sync {
+pub trait Ordered: Unordered {
     // Returns an iterator over all values associated with a translated key that lexicographically
     // precedes the result of translating `key`. The implementation will cycle around to the last
     // translated key if `key` is less than or equal to the first translated key. The returned
@@ -1550,7 +1553,7 @@ mod tests {
 
     fn run_index_cursor_across_threads<I>(index: Arc<Mutex<I>>)
     where
-        I: Unordered<Value = u64> + Send + 'static,
+        I: Unordered<Value = u64> + 'static,
     {
         // Insert some initial data
         {

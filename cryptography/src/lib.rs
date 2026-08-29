@@ -1,5 +1,11 @@
 //! Generate keys, sign arbitrary messages, and deterministically verify signatures.
 //!
+//! # Randomness
+//!
+//! Cryptographic operations that accept an RNG require a cryptographically secure and
+//! unpredictable source unless documented otherwise. A weak or predictable RNG may compromise
+//! security.
+//!
 //! # Status
 //!
 //! Stability varies by primitive. See [README](https://github.com/commonwarexyz/monorepo#stability) for details.
@@ -185,7 +191,7 @@ commonware_macros::stability_scope!(BETA {
 
         /// Verify all items added to the batch.
         ///
-        /// Returns `true` if all items are valid, `false` otherwise.
+        /// Returns `false` if no items were added or any item is invalid.
         ///
         /// # Why Randomness?
         ///
