@@ -2,13 +2,16 @@
 
 use crate::{
     agent::{Agent, DepositOutcome, PaymentOutcome, WithdrawalOutcome},
-    operator::DEFAULT_AMOUNT,
-    operator_rpc::{AcceptedBatchResponse, PollCloseResponse, StatusResponse as OperatorStatus},
+    operator::{
+        DEFAULT_AMOUNT,
+        rpc::{AcceptedBatchResponse, PollCloseResponse, StatusResponse as OperatorStatus},
+    },
     protocol::omitting_close,
     rpc,
-    settlement::{Settlement, SettlementSubmission},
-    settlement_rpc,
-    settlement_rpc::StatusResponse as SettlementStatus,
+    settlement::{
+        Settlement, SettlementSubmission, rpc as settlement_rpc,
+        rpc::StatusResponse as SettlementStatus,
+    },
 };
 use anyhow::{Context, Result};
 use commonware_clearing::bajillion::{
@@ -450,6 +453,11 @@ async fn refresh<E: Network>(
                 "epoch {epoch} ALARM: a held credit can no longer be enforced (finalized understatement or a faulted unadmitted close)"
             ));
         }
+        for epoch in summary.withheld {
+            state.log(format!(
+                "epoch {epoch} ALARM: finalized while the operator withholds the committed evidence for held credits (unverifiable, window closed)"
+            ));
+        }
     }
     Ok(())
 }
@@ -765,7 +773,7 @@ fn fraud_arc() -> Result<()> {
         .context("resolve the omitted committed tip")?
         .map_or(0, |tip| tip.cumulative_credit);
     println!(
-        "fraud: the operator's admitted close credits the omitted recipient {committed}, but it holds an operator-signed receipt for {}",
+        "fraud: the operator's admitted close commits cumulative credit {committed} for the omitted recipient, which holds an operator-signed receipt for {}",
         fraud.held_credit
     );
 
@@ -824,7 +832,12 @@ mod tests {
         REFRESH_BUDGET, UiState, handle_hard_fault_recovery, handle_pending_deposit_recovery,
         refresh, refresh_bounded,
     };
-    use crate::{agent::Agent, operator_rpc, rpc, settlement::Settlement, settlement_rpc};
+    use crate::{
+        agent::Agent,
+        operator::rpc as operator_rpc,
+        rpc,
+        settlement::{Settlement, rpc as settlement_rpc},
+    };
     use bytes::Bytes;
     use commonware_codec::Encode as _;
     use commonware_runtime::{

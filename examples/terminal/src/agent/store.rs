@@ -9,12 +9,12 @@
 //! openings they are counterparty-death-surviving evidence, never an overwritable cache.
 
 use crate::{
-    operator_rpc,
+    operator::rpc as operator_rpc,
     protocol::{
         Acceptance, DepositEvent, Key, MAX_ACCEPTANCE_BYTES, MAX_ACCOUNTS, MAX_PAYMENT_BYTES,
         Payment,
     },
-    settlement_rpc,
+    settlement::rpc as settlement_rpc,
     store::CommitUnknown,
 };
 use anyhow::{Context, Result, ensure};
@@ -62,7 +62,7 @@ pub(crate) type PendingPayoutClaim = PendingClaim<
     settlement_rpc::ExternalPayoutResponse,
 >;
 
-pub(crate) struct AgentState {
+pub(crate) struct State {
     pub(crate) cumulative_debit: u64,
     pub(crate) pending_payment: Option<PendingPayment>,
     pub(crate) pending_deposit: Option<DepositEvent>,
@@ -160,7 +160,7 @@ struct Binding {
     operator: Key,
 }
 
-pub(crate) struct AgentStore {
+pub(crate) struct Store {
     connection: Connection,
     account: Key,
     operator: Key,
@@ -170,13 +170,13 @@ pub(crate) struct AgentStore {
     finalized_watermark: u64,
 }
 
-impl AgentStore {
+impl Store {
     pub(crate) fn open(
         path: &Path,
         account: &Key,
         deployment: &Digest,
         operator: &Key,
-    ) -> Result<(Self, AgentState)> {
+    ) -> Result<(Self, State)> {
         let connection = Connection::open(path)
             .with_context(|| format!("open SQLite agent at {}", path.display()))?;
         Self::from_connection(connection, false, account, deployment, operator)
@@ -186,7 +186,7 @@ impl AgentStore {
         account: &Key,
         deployment: &Digest,
         operator: &Key,
-    ) -> Result<(Self, AgentState)> {
+    ) -> Result<(Self, State)> {
         Self::from_connection(
             Connection::open_in_memory().context("open in-memory SQLite agent")?,
             true,
@@ -202,7 +202,7 @@ impl AgentStore {
         account: &Key,
         deployment: &Digest,
         operator: &Key,
-    ) -> Result<(Self, AgentState)> {
+    ) -> Result<(Self, State)> {
         connection.execute_batch(
             "PRAGMA foreign_keys = ON;
              PRAGMA trusted_schema = OFF;
@@ -1088,7 +1088,7 @@ fn read_binding(connection: &Connection) -> Result<Binding> {
     })
 }
 
-fn read_state(connection: &Connection, account: &Key, operator: &Key) -> Result<AgentState> {
+fn read_state(connection: &Connection, account: &Key, operator: &Key) -> Result<State> {
     let (cumulative_debit, receipt_count) = read_receipt_state(connection, account, operator)?;
     let pending_payment = read_pending_payment(connection, account)?;
     let pending_deposit = read_pending_deposit(connection, account)?;
@@ -1105,7 +1105,7 @@ fn read_state(connection: &Connection, account: &Key, operator: &Key) -> Result<
     let incoming = read_incoming_summary(connection)?;
     let last_reconciled_epoch = read_last_reconciled(connection)?;
 
-    Ok(AgentState {
+    Ok(State {
         cumulative_debit,
         pending_payment,
         pending_deposit,
@@ -2143,14 +2143,14 @@ mod tests {
     }
 
     fn open_error(path: &Path, account: &Key, deployment: &Digest, operator: &Key) -> String {
-        match AgentStore::open(path, account, deployment, operator) {
+        match Store::open(path, account, deployment, operator) {
             Ok(_) => panic!("incompatible agent database was accepted"),
             Err(error) => format!("{error:#}"),
         }
     }
 
-    fn open_store(path: &Path, account: &Key) -> (AgentStore, AgentState) {
-        AgentStore::open(path, account, &deployment(), &operator_key()).unwrap()
+    fn open_store(path: &Path, account: &Key) -> (Store, State) {
+        Store::open(path, account, &deployment(), &operator_key()).unwrap()
     }
 
     fn recovery_evidence(
@@ -2338,7 +2338,7 @@ mod tests {
     fn database_binding_rejects_another_identity() {
         let database = TempDatabase::new();
         let identities = identities();
-        let (store, _) = AgentStore::open(
+        let (store, _) = Store::open(
             database.path(),
             &identities[0].key,
             &deployment(),
@@ -2374,7 +2374,7 @@ mod tests {
         assert!(error.contains("incompatible agent database schema"));
 
         let malformed = TempDatabase::new();
-        let (store, _) = AgentStore::open(
+        let (store, _) = Store::open(
             malformed.path(),
             &identity.key,
             &deployment(),
@@ -2403,7 +2403,7 @@ mod tests {
     fn database_rejects_unexpected_trigger() {
         let database = TempDatabase::new();
         let identity = identities().remove(0);
-        let (store, _) = AgentStore::open(
+        let (store, _) = Store::open(
             database.path(),
             &identity.key,
             &deployment(),
@@ -2436,7 +2436,7 @@ mod tests {
         let identity = identities().remove(0);
 
         let metadata = TempDatabase::new();
-        let (store, _) = AgentStore::open(
+        let (store, _) = Store::open(
             metadata.path(),
             &identity.key,
             &deployment(),
@@ -2464,7 +2464,7 @@ mod tests {
         let wallet = wallets().remove(0);
         let account = wallet.public_key();
         let (mut store, _) =
-            AgentStore::open(pending.path(), &account, &deployment(), &operator_key()).unwrap();
+            Store::open(pending.path(), &account, &deployment(), &operator_key()).unwrap();
         let context = PaymentContext::new(
             Sha256::hash(&[b"noncanonical-pending-singleton"]),
             1,

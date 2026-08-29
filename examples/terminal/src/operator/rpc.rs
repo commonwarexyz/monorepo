@@ -1,10 +1,12 @@
 //! Bounded operator RPC bodies and synchronous dispatch.
 
+use super::{
+    actor::{CloseEvent, CommittedShardTip, Operator},
+    store::MAX_INCOMING_PAGE,
+};
 use crate::{
-    operator::{CloseEvent, CommittedShardTip, Operator},
-    protocol::{Acceptance, DepositEvent, Key, MAX_ACCOUNTS, Payment},
+    protocol::{Acceptance, DepositEvent, Key, MAX_ACCOUNTS, MAX_DESTINATION_BYTES, Payment},
     rpc,
-    store::{MAX_DESTINATION_BYTES, MAX_INCOMING_PAGE},
 };
 use anyhow::{Context, Result, bail};
 use bytes::{Buf, BufMut, Bytes};
@@ -327,8 +329,8 @@ pub(crate) struct AcceptedBatchResponse {
     pub(crate) acceptance: Acceptance,
 }
 
-impl From<crate::store::AcceptedBatch> for AcceptedBatchResponse {
-    fn from(accepted: crate::store::AcceptedBatch) -> Self {
+impl From<crate::operator::store::AcceptedBatch> for AcceptedBatchResponse {
+    fn from(accepted: crate::operator::store::AcceptedBatch) -> Self {
         Self {
             epoch: accepted.epoch,
             sequence: accepted.sequence,

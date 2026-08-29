@@ -21,8 +21,10 @@ also survive restarts. Each wallet's cumulative debit, pending signed send, auth
 receipts, and the exact state-root openings observed before payment and withdrawal authorization
 are SQLite-backed.
 Openings are retained by full root so a later hard fault can freeze an older finalized root.
-Deposit and withdrawal authorization retries remain process-local, so those
-workflows do not promise exactly-once behavior across an agent restart. Settlement keeps bounded
+A staged deposit survives an agent restart and is retried with the same event id, which
+settlement and the operator both deduplicate. Withdrawal authorization retries remain
+process-local, so that workflow alone does not promise exactly-once behavior across an agent
+restart. Settlement keeps bounded
 in-memory replay windows for admission, challenge, terminal-state claims, and pending-deposit
 refunds. Successful finalized withdrawal and external-payout claims retain their exact results for
 the deployment lifetime, allowing response-loss retries and mandatory operator
@@ -155,15 +157,17 @@ service on it, so a moved quote balance is an observation, not reliance. In the 
 reconciles held credits against the admitted close: settlement serves the batch identity and
 change root it admitted for the epoch, and operator-served committed-side evidence is trusted only
 when it matches that anchor exactly, so the operator can withhold a lookup but can never fabricate
-coverage. When a held receipt exceeds the anchored committed tip inside the admission-to-
+coverage. Withholding has no settlement-clock backstop once a close is admitted, so an epoch that
+finalizes while its lookup is still withheld is surfaced as an alarm and kept retrying. When a held receipt exceeds the anchored committed tip inside the admission-to-
 finalization window, the wallet convicts the close with one `HigherShardTip` challenge and stops,
 because one proven challenge invalidates the whole close. The operator is the pair-delivery
 channel, and withholding a pair only degrades to the acceptance gate: an unheld credit is never
-relied upon and so harms no one. Wallets file `HigherShardTip` only. `LatestAcknowledgedSend`
-exists for a holder whose credit has no receive-shard tip to point at, such as an unregistered
-external-payout recipient proving omission through the payer-row angle, and the receipt-range and
-receipt-fork families require operator equivocation the honest demo never produces. Settlement
-adjudicates all four.
+relied upon and so harms no one. Wallets file `HigherShardTip` only, and the
+authenticated-absence form covers even a recipient the close omits entirely.
+`LatestAcknowledgedSend` exists for a holder whose held pair no committed shard tip contradicts,
+proving the omission through the payer-row angle instead, and the receipt-range and receipt-fork
+families require operator equivocation the honest demo never produces. Settlement adjudicates
+all four.
 
 Registration confirmation is live rather than historical. A registered context remains
 confirmable while its matching close is challengeable, but finalization, expiry, or a proven fault

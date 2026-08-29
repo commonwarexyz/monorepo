@@ -59,6 +59,9 @@ pub(crate) const MAX_PAYMENT_BYTES: usize = 12 * 1024;
 pub(crate) const MAX_ACCEPTANCE_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_DEPOSIT_EVENTS: usize = MAX_ACCOUNTS;
 pub(crate) const MAX_WITHDRAWALS: usize = MAX_ACCOUNTS;
+
+/// Maximum withdrawal destination length in bytes, shared by every codec that carries one.
+pub(crate) const MAX_DESTINATION_BYTES: usize = 256;
 const MAX_ROWS: u64 = 1_024;
 const MAX_SHARDS: u64 = 1_024;
 pub(crate) const INITIAL_BALANCE: u64 = 100;

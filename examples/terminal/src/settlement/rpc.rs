@@ -1,13 +1,14 @@
 //! Bounded settlement-chain RPC bodies and dispatch.
 
+use super::chain::{
+    AdmissionOutcome, ClaimOutcome, DepositPresence, Settlement, SettlementStatus,
+    SettlementSubmission,
+};
 use crate::{
-    protocol::{DepositEvent, Key, MAX_ACCOUNTS, verify_registration_signature},
-    rpc,
-    settlement::{
-        AdmissionOutcome, ClaimOutcome, DepositPresence, Settlement, SettlementStatus,
-        SettlementSubmission,
+    protocol::{
+        DepositEvent, Key, MAX_ACCOUNTS, MAX_DESTINATION_BYTES, verify_registration_signature,
     },
-    store::MAX_DESTINATION_BYTES,
+    rpc,
 };
 use anyhow::{Context, Result, bail, ensure};
 use bytes::{Buf, BufMut, Bytes};
@@ -166,8 +167,8 @@ pub(crate) struct ClaimRootsResponse {
     pub(crate) change: VectorRoot<Digest>,
 }
 
-impl From<crate::settlement::ClaimRoots> for ClaimRootsResponse {
-    fn from(roots: crate::settlement::ClaimRoots) -> Self {
+impl From<super::chain::ClaimRoots> for ClaimRootsResponse {
+    fn from(roots: super::chain::ClaimRoots) -> Self {
         Self {
             withdrawal_outputs: roots.withdrawal_outputs,
             change: roots.change,
@@ -247,8 +248,8 @@ pub(crate) struct AdmittedRootsResponse {
     pub(crate) finalized: bool,
 }
 
-impl From<crate::settlement::EpochRoots> for EpochRootsResponse {
-    fn from(roots: crate::settlement::EpochRoots) -> Self {
+impl From<super::chain::EpochRoots> for EpochRootsResponse {
+    fn from(roots: super::chain::EpochRoots) -> Self {
         Self {
             anchor: roots.anchor,
             admitted: roots.admitted.map(|admitted| AdmittedRootsResponse {

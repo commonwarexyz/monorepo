@@ -8,9 +8,8 @@
 //! (chain custody, the registered slot, claim-root and replay records, fault state,
 //! and the logical clock) is rebuilt rather than persisted.
 
-use crate::{
-    protocol::deployment, rpc, settlement::Settlement, settlement_rpc, store::CommitUnknown,
-};
+use super::{chain::Settlement, rpc as settlement_rpc};
+use crate::{protocol::deployment, rpc, store::CommitUnknown};
 use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
 use commonware_codec::{DecodeExt as _, Encode as _, FixedSize};
@@ -340,16 +339,18 @@ mod tests {
             DepositEvent, INITIAL_BALANCE, Key, Protocol, SettlementResult, identities,
             settlement_config,
         },
-        settlement::SettlementSubmission,
-        settlement_rpc::{
-            AdmitRequest, AdmitResponse, BeginHardFaultSettlementRequest,
-            BeginHardFaultSettlementResponse, ClaimHardFaultRequest, ClaimHardFaultResponse,
-            ClaimPendingDepositRequest, ClaimPendingDepositResponse, ClaimRootsRequest,
-            ClaimRootsResponse, HardFaultReasonResponse, METHOD_ADMIT,
-            METHOD_BEGIN_HARD_FAULT_SETTLEMENT, METHOD_CLAIM_HARD_FAULT,
-            METHOD_CLAIM_PENDING_DEPOSIT, METHOD_CLAIM_ROOTS, METHOD_CONFIRM_DEPOSIT,
-            METHOD_DEPOSIT, METHOD_REGISTER_EPOCH, METHOD_STATUS, RegisterEpochRequest,
-            StatusResponse,
+        settlement::{
+            SettlementSubmission,
+            rpc::{
+                AdmitRequest, AdmitResponse, BeginHardFaultSettlementRequest,
+                BeginHardFaultSettlementResponse, ClaimHardFaultRequest, ClaimHardFaultResponse,
+                ClaimPendingDepositRequest, ClaimPendingDepositResponse, ClaimRootsRequest,
+                ClaimRootsResponse, HardFaultReasonResponse, METHOD_ADMIT,
+                METHOD_BEGIN_HARD_FAULT_SETTLEMENT, METHOD_CLAIM_HARD_FAULT,
+                METHOD_CLAIM_PENDING_DEPOSIT, METHOD_CLAIM_ROOTS, METHOD_CONFIRM_DEPOSIT,
+                METHOD_DEPOSIT, METHOD_REGISTER_EPOCH, METHOD_STATUS, RegisterEpochRequest,
+                StatusResponse,
+            },
         },
     };
     use commonware_clearing::bajillion::{

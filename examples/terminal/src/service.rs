@@ -1,7 +1,11 @@
 //! Runtime-owning service loops for the three terminal binaries.
 
 use crate::{
-    agent::Agent, operator::Operator, operator_rpc, rpc, settlement_rpc, settlement_store, ui,
+    agent::Agent,
+    operator::{Operator, rpc as operator_rpc},
+    rpc,
+    settlement::{rpc as settlement_rpc, store as settlement_store},
+    ui,
 };
 use anyhow::{Context, Result, ensure};
 use commonware_runtime::{Clock, Listener, Network, Runner as _, tokio};
@@ -206,8 +210,7 @@ mod tests {
     use crate::{
         agent::{DepositOutcome, WithdrawalOutcome},
         protocol::wallets,
-        settlement::Settlement,
-        settlement_rpc,
+        settlement::{Settlement, rpc as settlement_rpc},
     };
     use bytes::Bytes;
     use commonware_clearing::bajillion::{

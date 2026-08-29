@@ -6,15 +6,11 @@
 )]
 
 mod agent;
-mod agent_store;
 mod operator;
-mod operator_rpc;
 mod protocol;
 mod rpc;
 mod service;
 mod settlement;
-mod settlement_rpc;
-mod settlement_store;
 mod store;
 mod ui;
 

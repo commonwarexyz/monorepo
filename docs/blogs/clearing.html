@@ -659,7 +659,9 @@ O’Grady</a></div>
         receipt is linked to its own valid send, adjacent receipts must
         increase credit by exactly the upper payment, and an index gap
         must leave at least one base unit for each omitted positive
-        payment. A violation is a contradiction.</p></li>
+        payment. The lower endpoint may also be the canonical shard
+        start, in which case the challenge carries a single retained
+        pair. A violation is a contradiction.</p></li>
         <li><p><strong>Receipt fork.</strong> Two distinct linked
         receipt bodies either reuse one receipt index within a shard or
         acknowledge the same payer transaction entry differently.

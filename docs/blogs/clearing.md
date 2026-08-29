@@ -270,7 +270,7 @@ If it accepts $\Xi_0$, it must accept $\Xi_1$. A validation committee (or TEE or
 
 2. **Higher receive-shard tip.** Authenticate the public tip $(G^\star,J^\star)$ for one shard, using $(0,0)$ for authenticated absence, and present a matching retained receipt at $(G^+,J^+)$. Either strict increase, $G^+>G^\star$ or $J^+>J^\star$, is a contradiction.
 
-3. **Inconsistent receipt range.** For lower and upper pairs in one anchor, recipient, and shard, where each receipt is linked to its own valid send, adjacent receipts must increase credit by exactly the upper payment, and an index gap must leave at least one base unit for each omitted positive payment. A violation is a contradiction.
+3. **Inconsistent receipt range.** For lower and upper pairs in one anchor, recipient, and shard, where each receipt is linked to its own valid send, adjacent receipts must increase credit by exactly the upper payment, and an index gap must leave at least one base unit for each omitted positive payment. The lower endpoint may also be the canonical shard start, in which case the challenge carries a single retained pair. A violation is a contradiction.
 
 4. **Receipt fork.** Two distinct linked receipt bodies either reuse one receipt index within a shard or acknowledge the same payer transaction entry differently. Entries of one batched send share the transaction identifier without forking it. Different signature bytes over one identical receipt body are not a fork.
 
