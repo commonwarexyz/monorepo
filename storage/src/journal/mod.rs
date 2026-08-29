@@ -9,11 +9,14 @@ use thiserror::Error;
 
 commonware_macros::stability_mod!(ALPHA, pub mod authenticated);
 pub mod contiguous;
+pub(crate) mod durability;
 mod frame;
 pub mod segmented;
 
 #[cfg(all(test, feature = "arbitrary"))]
 mod conformance;
+#[cfg(test)]
+mod utils;
 
 /// Errors that can occur when interacting with `Journal`.
 #[derive(Debug, Error)]
@@ -44,6 +47,8 @@ pub enum Error {
     ReplayInterrupted,
     #[error("replay failed")]
     ReplayFailed,
+    #[error("section must be replayed before append: {0}")]
+    ReplayRequired(u64),
     #[error("size overflow")]
     SizeOverflow,
     #[error("missing blob: {0}")]

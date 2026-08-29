@@ -672,6 +672,7 @@ mod tests {
             codec_config: (),
             page_cache: CacheRef::from_pooler(pooler, WITNESS_PAGE_SIZE, WITNESS_PAGE_CACHE_SIZE),
             write_buffer: NZUsize!(1024),
+            replay_buffer: NZUsize!(1024),
         }
     }
 
