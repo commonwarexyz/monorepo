@@ -1,33 +1,17 @@
 #![no_main]
 
-use arbitrary::{Arbitrary, Result, Unstructured};
+use arbitrary::Arbitrary;
 use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::queue::{Config, Queue};
+use commonware_storage_fuzz::{
+    bounded_buffer, bounded_items, bounded_page_cache_size, bounded_page_size,
+};
 use commonware_utils::NZUsize;
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::BTreeSet,
     num::{NonZeroU16, NonZeroU64, NonZeroUsize},
 };
-
-/// Maximum write buffer size.
-const MAX_WRITE_BUF: usize = 2048;
-
-fn bounded_page_size(u: &mut Unstructured<'_>) -> Result<u16> {
-    u.int_in_range(1..=256)
-}
-
-fn bounded_page_cache_size(u: &mut Unstructured<'_>) -> Result<usize> {
-    u.int_in_range(1..=16)
-}
-
-fn bounded_items_per_section(u: &mut Unstructured<'_>) -> Result<u64> {
-    u.int_in_range(1..=64)
-}
-
-fn bounded_write_buffer(u: &mut Unstructured<'_>) -> Result<usize> {
-    u.int_in_range(1..=MAX_WRITE_BUF)
-}
 
 #[derive(Arbitrary, Debug, Clone)]
 enum QueueOperation {
@@ -58,10 +42,10 @@ struct FuzzInput {
     #[arbitrary(with = bounded_page_cache_size)]
     page_cache_size: usize,
     /// Items per section.
-    #[arbitrary(with = bounded_items_per_section)]
+    #[arbitrary(with = bounded_items)]
     items_per_section: u64,
     /// Write buffer size.
-    #[arbitrary(with = bounded_write_buffer)]
+    #[arbitrary(with = bounded_buffer)]
     write_buffer: usize,
     /// Sequence of operations to execute.
     operations: Vec<QueueOperation>,
@@ -170,7 +154,9 @@ fn fuzz(input: FuzzInput) {
             codec_config: ((0usize..).into(), ()),
             page_cache: CacheRef::from_pooler(&context, page_size, page_cache_size),
             write_buffer,
-            replay_buffer: NZUsize!(4096),
+            // The queue is initialized once on an empty partition and never reopened,
+            // so replay never reads anything: fuzzing this knob adds no coverage.
+            replay_buffer: NZUsize!(1024),
         };
 
         let mut queue = Queue::<_, Vec<u8>>::init(context.child("storage"), cfg)

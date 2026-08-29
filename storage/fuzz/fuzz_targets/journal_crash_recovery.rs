@@ -17,6 +17,9 @@
 //!   4. Drop the journal without a clean shutdown: the crash. Unsynchronized bytes survive
 //!      according to the configured write-retention policy.
 //!
+//! Between cycles, an ordinary recovery attempt runs under storage faults and crashes. The next
+//! clean `init()` verifies that checkpoint before operations continue.
+//!
 //! `Crash` markers split the op list into one `ops` list per cycle. Driving recovery repeatedly on
 //! the same journal is the point: watermark, pruning-metadata, and section-layout bugs often need a
 //! recover-then-mutate-then-recover sequence to appear, not just a single crash.
@@ -30,17 +33,17 @@
 //!
 //! # Faults
 //!
-//! The operation phase runs under write/sync/resize fault injection. `write_retention_rate`
-//! controls the prefix of a failed or unsynchronized write that survives, while
+//! The operation phase runs under write/sync/resize fault injection. `write_config` controls write
+//! failures and whether retained bytes form a prefix or arbitrary subset, while
 //! `partial_resize_rate` can stop a failed truncation at an intermediate length.
 //!
 //! # Positions
 //!
 //! Position arguments (`Read`, `Rewind`, `Replay`) come straight from the fuzzer, so a random `u64`
-//! is almost always out of range. Each such op runs twice: once with the value clamped into the
-//! live range, which must take the success path, and once with the raw value, which exercises the
-//! validation path (`ItemPruned` below the start, `ItemOutOfRange` past the end). Clamping
-//! guarantees the success path is covered on every input; the raw value still tests rejection.
+//! is almost always out of range. `Read` and `Replay` run twice (`Read` skips the clamped pass on
+//! an empty journal): once with the value clamped into the live range, which must take the success
+//! path, and once with the raw value, which exercises the validation path (`ItemPruned` below the
+//! start, `ItemOutOfRange` past the end). `Rewind` runs once, usually clamped, occasionally raw.
 
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_runtime::{BufferPooler, ReadOptions, Runner, Supervisor as _, deterministic};
@@ -51,6 +54,9 @@ use commonware_storage::journal::{
         fixed::{Config as FixedConfig, Journal as FixedJournal},
         variable::{Config as VariableConfig, Journal as VariableJournal},
     },
+};
+use commonware_storage_fuzz::{
+    bounded_buffer, bounded_items, bounded_page_cache_size, bounded_page_size, faulted_recovery,
 };
 use commonware_utils::{NZU64, NZUsize, Probability, probability, sequence::FixedBytes};
 use futures::StreamExt;
@@ -67,37 +73,11 @@ const ITEM_SIZE: usize = 32;
 /// The journal item type.
 type Item = FixedBytes<ITEM_SIZE>;
 
-/// Maximum replay buffer size.
-const MAX_REPLAY_BUF: usize = 2048;
-
-/// Maximum write buffer size.
-const MAX_WRITE_BUF: usize = 2048;
-
 /// Buffer size used for internal verification replays.
 const VERIFY_REPLAY_BUF: usize = 1024;
 
 /// Maximum number of operations per fuzz input.
 const MAX_OPERATIONS: usize = 128;
-
-fn bounded_non_zero(u: &mut Unstructured<'_>) -> arbitrary::Result<usize> {
-    u.int_in_range(1..=MAX_REPLAY_BUF)
-}
-
-fn bounded_page_size(u: &mut Unstructured<'_>) -> arbitrary::Result<u16> {
-    u.int_in_range(1..=256)
-}
-
-fn bounded_page_cache_size(u: &mut Unstructured<'_>) -> arbitrary::Result<usize> {
-    u.int_in_range(1..=16)
-}
-
-fn bounded_items_per_section(u: &mut Unstructured<'_>) -> arbitrary::Result<u64> {
-    u.int_in_range(1..=64)
-}
-
-fn bounded_write_buffer(u: &mut Unstructured<'_>) -> arbitrary::Result<usize> {
-    u.int_in_range(1..=MAX_WRITE_BUF)
-}
 
 /// A fault rate in [0.0, 1.0]. Allows 0 so the fuzzer can disable individual fault types.
 fn bounded_rate(u: &mut Unstructured<'_>) -> arbitrary::Result<Probability> {
@@ -129,6 +109,8 @@ enum JournalOperation {
     Read { pos: u64 },
     /// Sync the journal to storage.
     Sync,
+    /// Capture and drop a snapshot reader, flushing buffered data without a durability barrier.
+    Snapshot,
     /// Commit the journal.
     Commit,
     /// Rewind the journal to a smaller size.
@@ -137,7 +119,7 @@ enum JournalOperation {
     Prune { min_pos: u64 },
     /// Replay items from the journal.
     Replay {
-        #[arbitrary(with = bounded_non_zero)]
+        #[arbitrary(with = bounded_buffer)]
         buffer: usize,
         start_pos: u64,
     },
@@ -159,17 +141,16 @@ struct FuzzInput {
     #[arbitrary(with = bounded_page_cache_size)]
     page_cache_size: usize,
     /// Items per section/blob.
-    #[arbitrary(with = bounded_items_per_section)]
+    #[arbitrary(with = bounded_items)]
     items_per_section: u64,
     /// Write buffer size.
-    #[arbitrary(with = bounded_write_buffer)]
+    #[arbitrary(with = bounded_buffer)]
     write_buffer: usize,
-    /// Failure rate for write operations.
-    #[arbitrary(with = bounded_rate)]
-    write_failure_rate: Probability,
-    /// Probability used to retain bytes from a failed or unsynchronized write.
-    #[arbitrary(with = bounded_rate)]
-    write_retention_rate: Probability,
+    /// Replay buffer size.
+    #[arbitrary(with = bounded_buffer)]
+    replay_buffer: usize,
+    /// Failure and byte-retention configuration for write operations.
+    write_config: deterministic::WriteConfig,
     /// Failure rate for sync operations.
     #[arbitrary(with = bounded_rate)]
     sync_failure_rate: Probability,
@@ -191,22 +172,19 @@ struct Params {
     page_cache_size: NonZeroUsize,
     items_per_section: u64,
     write_buffer: NonZeroUsize,
-    write_rate: Probability,
-    write_retention_rate: Probability,
+    replay_buffer: NonZeroUsize,
+    write_config: deterministic::WriteConfig,
     sync_rate: Probability,
     resize_rate: Probability,
     partial_resize_rate: Probability,
+    recovery_seed: u64,
 }
 
 impl Params {
     /// The fault config applied during the operation phase of each cycle.
     fn fault_config(&self) -> deterministic::FaultConfig {
         deterministic::FaultConfig {
-            write_rate: Some(deterministic::WriteConfig {
-                failure_rate: self.write_rate,
-                retention_rate: self.write_retention_rate,
-                mode: deterministic::PartialWriteMode::Prefix,
-            }),
+            write_rate: Some(self.write_config),
             sync_rate: Some(self.sync_rate),
             resize_rate: Some(deterministic::ResizeConfig {
                 failure_rate: self.resize_rate,
@@ -298,6 +276,7 @@ trait FuzzJournal: Sized {
     fn append(self, item: Item) -> impl Future<Output = Result<(Self, u64), Error>> + Send;
     fn read(&self, pos: u64) -> impl Future<Output = Result<Item, Error>> + Send;
     fn sync(self) -> impl Future<Output = Result<Self, Error>> + Send;
+    fn snapshot(self) -> impl Future<Output = Result<Self, Error>> + Send;
     fn commit(self) -> impl Future<Output = Result<Self, Error>> + Send;
     fn rewind(self, size: u64) -> impl Future<Output = Result<Self, Error>> + Send;
     fn prune(self, min_pos: u64) -> impl Future<Output = Result<(Self, bool), Error>> + Send;
@@ -341,7 +320,7 @@ impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
                 params.page_cache_size,
             ),
             write_buffer: params.write_buffer,
-            replay_buffer: NZUsize!(4096),
+            replay_buffer: params.replay_buffer,
         }
     }
 
@@ -367,6 +346,12 @@ impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
 
     async fn sync(self) -> Result<Self, Error> {
         FixedJournal::sync(self).await
+    }
+
+    async fn snapshot(self) -> Result<Self, Error> {
+        let (journal, reader) = FixedJournal::snapshot(self).await?;
+        drop(reader);
+        Ok(journal)
     }
 
     async fn commit(self) -> Result<Self, Error> {
@@ -409,7 +394,7 @@ impl FuzzJournal for VariableJournal<deterministic::Context, Item> {
                 params.page_cache_size,
             ),
             write_buffer: params.write_buffer,
-            replay_buffer: NZUsize!(4096),
+            replay_buffer: params.replay_buffer,
         }
     }
 
@@ -435,6 +420,12 @@ impl FuzzJournal for VariableJournal<deterministic::Context, Item> {
 
     async fn sync(self) -> Result<Self, Error> {
         VariableJournal::sync(self).await
+    }
+
+    async fn snapshot(self) -> Result<Self, Error> {
+        let (journal, reader) = VariableJournal::snapshot(self).await?;
+        drop(reader);
+        Ok(journal)
     }
 
     async fn rewind(self, size: u64) -> Result<Self, Error> {
@@ -574,29 +565,22 @@ fn assert_read(result: Result<Item, Error>, pos: u64, bounds: &Range<u64>) {
     );
 }
 
-/// Whether the cycle continues after the raw replay. Validation
-/// precedes any I/O, so an out-of-range start is deterministic: `< start` -> `ItemPruned`,
-/// `> end` -> `ItemOutOfRange` (`== end` is in range). An in-range start succeeds or hits a
-/// tail-repair I/O fault (ends the cycle); any other result is a bug.
-fn should_continue_raw_replay(
-    result: Result<Vec<(u64, Item)>, Error>,
-    start_pos: u64,
-    bounds: &Range<u64>,
-) -> bool {
-    let in_range = start_pos >= bounds.start && start_pos <= bounds.end;
-    match &result {
-        Ok(_) if in_range => true,
-        Err(Error::ItemPruned(_)) if start_pos < bounds.start => true,
-        Err(Error::ItemOutOfRange(_)) if start_pos > bounds.end => true,
-        // An in-range start that failed with a non-validation error is a tail-repair I/O fault.
-        Err(e) if in_range && !matches!(e, Error::ItemPruned(_) | Error::ItemOutOfRange(_)) => {
-            false
-        }
-        _ => panic!(
-            "raw replay at {start_pos} (bounds [{}, {})) returned {result:?}",
-            bounds.start, bounds.end
-        ),
-    }
+/// Check a raw-position replay. Validation precedes any I/O, so an out-of-range start is
+/// deterministic: `< start` -> `ItemPruned`, `> end` -> `ItemOutOfRange` (`== end` is in
+/// range). Replay is a pure read and read faults are never injected, so an in-range start
+/// must succeed and any other result is a real bug.
+fn assert_raw_replay(result: Result<Vec<(u64, Item)>, Error>, start_pos: u64, bounds: &Range<u64>) {
+    let ok = match &result {
+        Ok(_) => start_pos >= bounds.start && start_pos <= bounds.end,
+        Err(Error::ItemPruned(_)) => start_pos < bounds.start,
+        Err(Error::ItemOutOfRange(_)) => start_pos > bounds.end,
+        Err(_) => false,
+    };
+    assert!(
+        ok,
+        "raw replay at {start_pos} (bounds [{}, {})) returned {result:?}",
+        bounds.start, bounds.end
+    );
 }
 
 /// Assert the items from replaying an in-bounds `start` are exactly positions `[start, bounds.end)`,
@@ -618,9 +602,9 @@ fn assert_replay_suffix(items: &[(u64, Item)], start: u64, bounds: &Range<u64>) 
     }
 }
 
-/// Run a cycle's ops under faults, updating `expected`. Stops early on any error that may have left
-/// the journal inconsistent (a mutable-method error or a tail-repair I/O fault); the journal is
-/// then dropped to crash. Reads never fault, so a bad read panics instead of ending the cycle.
+/// Run a cycle's ops under faults, updating `expected`. Stops early on a mutable-method error,
+/// which may have left the journal inconsistent; the journal is then dropped to crash. Reads and
+/// replays never fault, so a bad one panics instead of ending the cycle.
 async fn run_ops<J: FuzzJournal>(
     mut journal: J,
     expected: &mut Expected,
@@ -639,7 +623,11 @@ async fn run_ops<J: FuzzJournal>(
                         expected.appended(item);
                         journal
                     }
-                    Err(_) => {
+                    Err(err) => {
+                        assert!(
+                            !matches!(err, Error::Corruption(_)),
+                            "append reported corruption mid-cycle: {err:?}"
+                        );
                         expected.append_failed(size_before);
                         return;
                     }
@@ -661,7 +649,27 @@ async fn run_ops<J: FuzzJournal>(
                     expected.synced(journal.bounds());
                     journal
                 }
-                Err(_) => return,
+                Err(err) => {
+                    assert!(
+                        !matches!(err, Error::Corruption(_)),
+                        "sync reported corruption mid-cycle: {err:?}"
+                    );
+                    return;
+                }
+            },
+
+            // A snapshot flushes buffered data without a durability barrier, changing no
+            // durability expectation. It schedules unsynced partial-page rewrites for the
+            // next crash to cut.
+            JournalOperation::Snapshot => match journal.snapshot().await {
+                Ok(journal) => journal,
+                Err(err) => {
+                    assert!(
+                        !matches!(err, Error::Corruption(_)),
+                        "snapshot reported corruption mid-cycle: {err:?}"
+                    );
+                    return;
+                }
             },
 
             JournalOperation::Commit => match journal.commit().await {
@@ -669,7 +677,13 @@ async fn run_ops<J: FuzzJournal>(
                     expected.committed(journal.size().await);
                     journal
                 }
-                Err(_) => return,
+                Err(err) => {
+                    assert!(
+                        !matches!(err, Error::Corruption(_)),
+                        "commit reported corruption mid-cycle: {err:?}"
+                    );
+                    return;
+                }
             },
 
             JournalOperation::Rewind { size } => {
@@ -705,7 +719,11 @@ async fn run_ops<J: FuzzJournal>(
                             );
                             return;
                         }
-                        Err(_) => {
+                        Err(err) => {
+                            assert!(
+                                !matches!(err, Error::Corruption(_)),
+                                "rewind reported corruption mid-cycle: {err:?}"
+                            );
                             expected.rewound(target.min(bounds.end), bounds.end);
                             return;
                         }
@@ -721,7 +739,12 @@ async fn run_ops<J: FuzzJournal>(
                         expected.pruned(journal.bounds().start);
                         journal
                     }
-                    Err(_) => {
+                    Err(err) => {
+                        assert!(
+                            !matches!(err, Error::Corruption(_)),
+                            "prune reported corruption mid-cycle: {err:?}"
+                        );
+
                         // A failed prune advances the boundary at most to the section floor.
                         let capped = (*min_pos).min(size);
                         let section_floor =
@@ -733,39 +756,32 @@ async fn run_ops<J: FuzzJournal>(
             }
 
             JournalOperation::Replay { buffer, start_pos } => {
-                // The clamped replay must return the full suffix matching `read()`, or hit a
-                // tail-repair I/O fault.
+                // The clamped replay must return the full suffix matching `read()`. Replay
+                // is a pure read over successfully written data, so any error is a real bug.
                 let bounds = journal.bounds();
                 let clamped = bounds.start + (*start_pos % (bounds.end - bounds.start + 1));
-                let clamped_ok = match journal.replay(clamped, NZUsize!(*buffer)).await {
-                    Ok(items) => {
-                        assert_replay_suffix(&items, clamped, &bounds);
-                        for (pos, item) in &items {
-                            let via_read = journal.read(*pos).await.unwrap_or_else(|e| {
-                                panic!("read({pos}) cross-check during replay: {e:?}")
-                            });
-                            assert_eq!(*item, via_read, "replay/read divergence at {pos}");
-                        }
-                        true
-                    }
-                    // A clamped start is always in bounds, so a validation error is a bug.
-                    Err(e @ (Error::ItemPruned(_) | Error::ItemOutOfRange(_))) => panic!(
-                        "in-bounds replay at {clamped} (bounds [{}, {})) returned {e:?}",
-                        bounds.start, bounds.end
-                    ),
-                    // Tail-repair I/O fault: end the cycle.
-                    Err(_) => false,
-                };
-                if !clamped_ok {
-                    return;
+                let items = journal
+                    .replay(clamped, NZUsize!(*buffer))
+                    .await
+                    .unwrap_or_else(|e| {
+                        panic!(
+                            "in-bounds replay at {clamped} (bounds [{}, {})) returned {e:?}",
+                            bounds.start, bounds.end
+                        )
+                    });
+                assert_replay_suffix(&items, clamped, &bounds);
+                for (pos, item) in &items {
+                    let via_read = journal
+                        .read(*pos)
+                        .await
+                        .unwrap_or_else(|e| panic!("read({pos}) cross-check during replay: {e:?}"));
+                    assert_eq!(*item, via_read, "replay/read divergence at {pos}");
                 }
-                if !should_continue_raw_replay(
+                assert_raw_replay(
                     journal.replay(*start_pos, NZUsize!(*buffer)).await,
                     *start_pos,
                     &bounds,
-                ) {
-                    return;
-                }
+                );
                 journal
             }
 
@@ -805,6 +821,32 @@ where
     })
 }
 
+/// Attempt ordinary journal recovery under storage faults and return its crash checkpoint.
+///
+/// `cycle` varies the fault selectors per restart, so a multi-cycle run can hit a different
+/// mutation class (write, sync, resize, or remove) at each recovery.
+fn faulted_restart<J: FuzzJournal + Send + 'static>(
+    checkpoint: deterministic::Checkpoint,
+    partition: String,
+    params: Params,
+    cycle: u64,
+) -> deterministic::Checkpoint
+where
+    J::Config: Send,
+{
+    faulted_recovery(
+        checkpoint,
+        params.recovery_seed ^ cycle,
+        move |ctx| async move {
+            J::init(
+                ctx.child("faulted_recovery"),
+                J::config(&partition, &ctx, &params),
+            )
+            .await
+        },
+    )
+}
+
 /// Split the operation stream into one `ops` list per cycle, cutting at each `Crash` marker. Always
 /// returns at least one list (possibly empty), so a bare recovery is still exercised.
 fn split_into_cycles(ops: &[JournalOperation]) -> Vec<Vec<JournalOperation>> {
@@ -830,11 +872,12 @@ where
         page_cache_size: NonZeroUsize::new(input.page_cache_size).unwrap(),
         items_per_section: input.items_per_section,
         write_buffer: NonZeroUsize::new(input.write_buffer).unwrap(),
-        write_rate: input.write_failure_rate,
-        write_retention_rate: input.write_retention_rate,
+        replay_buffer: NonZeroUsize::new(input.replay_buffer).unwrap(),
+        write_config: input.write_config,
         sync_rate: input.sync_failure_rate,
         resize_rate: input.resize_failure_rate,
         partial_resize_rate: input.partial_resize_rate,
+        recovery_seed: input.seed,
     };
     let partition = format!("crash-recovery-{tag}-{}", input.seed);
     let cycles = split_into_cycles(&input.operations);
@@ -849,8 +892,9 @@ where
         partition.clone(),
         params,
     );
+    checkpoint = faulted_restart::<J>(checkpoint, partition.clone(), params, 0);
 
-    for ops in cycles.iter().skip(1) {
+    for (cycle, ops) in cycles.iter().enumerate().skip(1) {
         let runner = deterministic::Runner::from(checkpoint);
         (expected, checkpoint) = run_cycle::<J>(
             runner,
@@ -859,6 +903,7 @@ where
             partition.clone(),
             params,
         );
+        checkpoint = faulted_restart::<J>(checkpoint, partition.clone(), params, cycle as u64);
     }
 
     // Final fault-free phase: verify the last recovery, then append, sync, drop, and reopen a

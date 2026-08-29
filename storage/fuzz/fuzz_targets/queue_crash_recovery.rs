@@ -8,42 +8,22 @@
 //! - Acknowledged items (once committed) may or may not be re-delivered after crash
 //! - Queue state is consistent after recovery
 
-use arbitrary::{Arbitrary, Result, Unstructured};
+use arbitrary::Arbitrary;
 use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::queue::{Config, Queue};
-use commonware_utils::{NZUsize, Probability, probability};
+use commonware_storage_fuzz::{
+    bounded_buffer, bounded_items, bounded_nonzero_rate, bounded_page_cache_size,
+    bounded_page_size, faulted_recovery,
+};
+use commonware_utils::Probability;
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::BTreeMap,
     num::{NonZeroU16, NonZeroU64, NonZeroUsize},
 };
 
-/// Maximum write buffer size.
-const MAX_WRITE_BUF: usize = 2048;
-
 /// Item size for queue entries (32 bytes like a hash digest).
 const ITEM_SIZE: usize = 32;
-
-fn bounded_page_size(u: &mut Unstructured<'_>) -> Result<u16> {
-    u.int_in_range(1..=256)
-}
-
-fn bounded_page_cache_size(u: &mut Unstructured<'_>) -> Result<usize> {
-    u.int_in_range(1..=16)
-}
-
-fn bounded_items_per_section(u: &mut Unstructured<'_>) -> Result<u64> {
-    u.int_in_range(1..=64)
-}
-
-fn bounded_write_buffer(u: &mut Unstructured<'_>) -> Result<usize> {
-    u.int_in_range(1..=MAX_WRITE_BUF)
-}
-
-fn bounded_nonzero_rate(u: &mut Unstructured<'_>) -> Result<Probability> {
-    let percent: u8 = u.int_in_range(1..=100)?;
-    Ok(probability!(u64::from(percent), 100))
-}
 
 /// Operations that can be performed on the queue.
 #[derive(Arbitrary, Debug, Clone)]
@@ -80,17 +60,18 @@ struct FuzzInput {
     #[arbitrary(with = bounded_page_cache_size)]
     page_cache_size: usize,
     /// Items per section.
-    #[arbitrary(with = bounded_items_per_section)]
+    #[arbitrary(with = bounded_items)]
     items_per_section: u64,
     /// Write buffer size.
-    #[arbitrary(with = bounded_write_buffer)]
+    #[arbitrary(with = bounded_buffer)]
     write_buffer: usize,
+    #[arbitrary(with = bounded_buffer)]
+    replay_buffer: usize,
     /// Failure rate for sync operations (0, 1].
     #[arbitrary(with = bounded_nonzero_rate)]
     sync_failure_rate: Probability,
-    /// Failure rate for write operations (0, 1].
-    #[arbitrary(with = bounded_nonzero_rate)]
-    write_failure_rate: Probability,
+    /// Failure and byte-retention configuration for write operations.
+    write_config: deterministic::WriteConfig,
     /// Sequence of operations to execute.
     operations: Vec<QueueOperation>,
 }
@@ -105,9 +86,10 @@ struct RecoveryState {
     /// Items that were successfully enqueued or committed (position -> value).
     committed: BTreeMap<u64, u8>,
 
-    /// Items that were enqueued/appended but the operation may have failed,
-    /// or were appended but not yet committed.
-    pending: Vec<u8>,
+    /// Items whose covering operation failed (position -> value). Every append
+    /// targets the queue size at call time, so a failed operation's bytes can only
+    /// become durable at its predicted position.
+    pending: BTreeMap<u64, u8>,
 
     /// Current in-memory ack floor (lost on crash).
     current_ack_floor: u64,
@@ -116,11 +98,13 @@ struct RecoveryState {
     /// These may be lost on crash. On commit, they move to `committed`.
     uncommitted: BTreeMap<u64, u8>,
 
+    /// Blob-aligned pruning boundary removed by the last successful Sync.
+    /// Recovery reports this boundary as the ack floor.
+    synced_boundary: u64,
+
     /// Whether we observed a mutable storage error during the operation phase.
     ///
-    /// After mutable errors, the queue may be left in an inconsistent state until
-    /// restart. In that case recovery checks should only assert basic liveness,
-    /// not exact durability/accounting bounds.
+    /// The failed operation's suffix is uncertain, but earlier committed items remain durable.
     saw_mutable_error: bool,
 }
 
@@ -128,9 +112,10 @@ impl RecoveryState {
     fn new() -> Self {
         Self {
             committed: BTreeMap::new(),
-            pending: Vec::new(),
+            pending: BTreeMap::new(),
             current_ack_floor: 0,
             uncommitted: BTreeMap::new(),
+            synced_boundary: 0,
             saw_mutable_error: false,
         }
     }
@@ -148,10 +133,10 @@ impl RecoveryState {
         self.committed.insert(pos, value);
     }
 
-    fn enqueue_failed(&mut self, value: u8) {
+    fn enqueue_failed(&mut self, pos: u64, value: u8) {
         // Enqueue may have partially succeeded (append but not commit).
         // Track as pending - it may or may not be persisted.
-        self.pending.push(value);
+        self.pending.insert(pos, value);
     }
 
     fn append_succeeded(&mut self, pos: u64, value: u8) {
@@ -159,8 +144,8 @@ impl RecoveryState {
         self.uncommitted.insert(pos, value);
     }
 
-    fn append_failed(&mut self, value: u8) {
-        self.pending.push(value);
+    fn append_failed(&mut self, pos: u64, value: u8) {
+        self.pending.insert(pos, value);
     }
 
     fn commit_succeeded(&mut self) {
@@ -175,13 +160,30 @@ impl RecoveryState {
         // Uncommitted items remain uncommitted; they may or may not be durable.
         // Move them to pending since we can't be sure.
         let uncommitted = std::mem::take(&mut self.uncommitted);
-        for (_pos, value) in uncommitted {
-            self.pending.push(value);
+        for (pos, value) in uncommitted {
+            self.pending.insert(pos, value);
         }
     }
 
     fn update_ack_floor(&mut self, ack_floor: u64) {
         self.current_ack_floor = ack_floor;
+    }
+
+    /// Record the boundary pruned by a successful Sync, mirroring the journal's
+    /// clamp: the target blob is capped to the tail blob, boundaries are
+    /// blob-aligned, and the boundary never regresses.
+    fn sync_succeeded(&mut self, ack_floor: u64, size: u64, items_per_section: u64) {
+        let min_blob = (ack_floor / items_per_section).min(size / items_per_section);
+        self.synced_boundary = self.synced_boundary.max(min_blob * items_per_section);
+    }
+
+    /// Returns the expected item content at a recovered position, if tracked.
+    fn expected_item(&self, pos: u64) -> Option<u8> {
+        self.committed
+            .get(&pos)
+            .or_else(|| self.uncommitted.get(&pos))
+            .or_else(|| self.pending.get(&pos))
+            .copied()
     }
 
     /// Returns the minimum size we expect after recovery.
@@ -193,16 +195,6 @@ impl RecoveryState {
     fn max_recovered_size(&self) -> u64 {
         (self.committed.len() + self.pending.len() + self.uncommitted.len()) as u64
     }
-
-    /// Returns the minimum ack floor we expect after recovery.
-    fn min_recovered_ack_floor(&self) -> u64 {
-        0
-    }
-
-    /// Returns the maximum ack floor we expect after recovery.
-    fn max_recovered_ack_floor(&self) -> u64 {
-        self.current_ack_floor
-    }
 }
 
 fn make_item(value: u8) -> Vec<u8> {
@@ -213,6 +205,7 @@ fn make_item(value: u8) -> Vec<u8> {
 async fn run_operations(
     mut queue: Queue<deterministic::Context, Vec<u8>>,
     operations: &[QueueOperation],
+    items_per_section: u64,
 ) -> RecoveryState {
     let mut state = RecoveryState::new();
 
@@ -220,6 +213,7 @@ async fn run_operations(
         queue = match op {
             QueueOperation::Enqueue { value } => {
                 let item = make_item(*value);
+                let pos = queue.size();
                 match queue.enqueue(item).await {
                     Ok((queue, pos)) => {
                         // enqueue = append + commit, so success means ALL
@@ -229,7 +223,7 @@ async fn run_operations(
                         queue
                     }
                     Err(_) => {
-                        state.enqueue_failed(*value);
+                        state.enqueue_failed(pos, *value);
                         state.mark_mutable_error();
                         return state;
                     }
@@ -238,13 +232,14 @@ async fn run_operations(
 
             QueueOperation::Append { value } => {
                 let item = make_item(*value);
+                let pos = queue.size();
                 match queue.append(item).await {
                     Ok((queue, pos)) => {
                         state.append_succeeded(pos, *value);
                         queue
                     }
                     Err(_) => {
-                        state.append_failed(*value);
+                        state.append_failed(pos, *value);
                         state.mark_mutable_error();
                         return state;
                     }
@@ -264,9 +259,16 @@ async fn run_operations(
             },
 
             QueueOperation::DequeueAndAck => {
-                if let Ok(Some((pos, _item))) = queue.dequeue().await
-                    && queue.ack(pos).is_ok()
-                {
+                // Reads are never fault-injected and every prior mutable op
+                // succeeded, so a dequeue error here can only be a real bug.
+                let dequeued = queue
+                    .dequeue()
+                    .await
+                    .expect("dequeue failed on successfully written data");
+                if let Some((pos, _item)) = dequeued {
+                    // Ack of a just-dequeued position is in-memory bookkeeping on an
+                    // in-range position, so it has no legal way to fail.
+                    queue.ack(pos).expect("ack of dequeued position failed");
                     state.update_ack_floor(queue.ack_floor());
                 }
                 queue
@@ -274,7 +276,10 @@ async fn run_operations(
 
             QueueOperation::DequeueNoAck => {
                 // Dequeue without acking - item should be re-delivered on recovery
-                let _ = queue.dequeue().await;
+                queue
+                    .dequeue()
+                    .await
+                    .expect("dequeue failed on successfully written data");
                 queue
             }
 
@@ -284,15 +289,11 @@ async fn run_operations(
                 if size > ack_floor {
                     let range = size - ack_floor;
                     let pos = ack_floor + (*offset as u64 % range);
-                    match queue.ack(pos) {
-                        Ok(()) => {
-                            state.update_ack_floor(queue.ack_floor());
-                        }
-                        Err(_) => {
-                            state.mark_mutable_error();
-                            return state;
-                        }
-                    }
+
+                    // Ack is in-memory bookkeeping and the position is in range, so an
+                    // error here is a real bug, never an injected fault.
+                    queue.ack(pos).expect("ack of in-range position failed");
+                    state.update_ack_floor(queue.ack_floor());
                 }
                 queue
             }
@@ -300,15 +301,12 @@ async fn run_operations(
             QueueOperation::AckUpToOffset { offset } => {
                 let size = queue.size();
                 let up_to = (*offset as u64) % (size + 1);
-                match queue.ack_up_to(up_to) {
-                    Ok(()) => {
-                        state.update_ack_floor(queue.ack_floor());
-                    }
-                    Err(_) => {
-                        state.mark_mutable_error();
-                        return state;
-                    }
-                }
+
+                // Same as ack: in-memory, in-range, no legal failure.
+                queue
+                    .ack_up_to(up_to)
+                    .expect("ack_up_to of in-range position failed");
+                state.update_ack_floor(queue.ack_floor());
                 queue
             }
 
@@ -318,6 +316,7 @@ async fn run_operations(
                     // previously uncommitted items are now durable too.
                     state.commit_succeeded();
                     state.update_ack_floor(queue.ack_floor());
+                    state.sync_succeeded(queue.ack_floor(), queue.size(), items_per_section);
                     queue
                 }
                 Err(_) => {
@@ -337,17 +336,88 @@ async fn run_operations(
     state
 }
 
-/// Verify recovery after a mutable error during the operation phase.
-///
-/// Mutable errors may leave storage temporarily inconsistent, so we only assert
-/// that the queue can be re-initialized and used again for basic operations.
-async fn verify_recovery_after_mutable_error(mut queue: Queue<deterministic::Context, Vec<u8>>) {
-    // Basic read-path sanity should not fail.
+async fn verify_recovered_items(
+    queue: &mut Queue<deterministic::Context, Vec<u8>>,
+    state: &RecoveryState,
+    size: u64,
+    ack_floor: u64,
+) {
+    queue.reset();
+    let mut dequeued_count = 0u64;
+    loop {
+        match queue.dequeue().await {
+            Ok(Some((pos, item))) => {
+                dequeued_count += 1;
+
+                // Every surviving position was appended by exactly one tracked
+                // operation, so it must be tracked and its content must match.
+                let value = state
+                    .expected_item(pos)
+                    .unwrap_or_else(|| panic!("recovered untracked position {pos}"));
+                assert_eq!(
+                    item,
+                    make_item(value),
+                    "item at position {pos} has wrong content after recovery",
+                );
+                assert!(
+                    dequeued_count <= size,
+                    "dequeued more items than queue size"
+                );
+            }
+            Ok(None) => break,
+            Err(err) => panic!(
+                "dequeue at position {} failed after recovery: {err} (size={size}, \
+                 ack_floor={ack_floor})",
+                ack_floor + dequeued_count,
+            ),
+        }
+    }
+    assert_eq!(
+        dequeued_count,
+        size - ack_floor,
+        "dequeued {dequeued_count} items but expected {} unacked (size={size}, \
+         ack_floor={ack_floor})",
+        size - ack_floor,
+    );
+}
+
+/// Verify the durable prefix and basic usability after a mutable operation failed.
+async fn verify_recovery_after_mutable_error(
+    mut queue: Queue<deterministic::Context, Vec<u8>>,
+    state: &RecoveryState,
+) {
     let size_before = queue.size();
-    queue
-        .dequeue()
-        .await
-        .expect("dequeue should not error after recovery");
+    let ack_floor = queue.ack_floor();
+    let durable_end = state
+        .committed
+        .last_key_value()
+        .map_or(0, |(&position, _)| position + 1);
+    assert!(
+        size_before >= durable_end,
+        "recovered size {size_before} lost committed positions through {durable_end}",
+    );
+
+    // A failed operation can leave at most its own tracked items behind, and the
+    // faulted recovery pass only truncates, so recovery cannot fabricate items.
+    assert!(
+        size_before <= state.max_recovered_size(),
+        "recovered size {size_before} exceeds all tracked appends ({})",
+        state.max_recovered_size(),
+    );
+    assert!(
+        ack_floor <= state.current_ack_floor,
+        "recovered ack floor {ack_floor} exceeds requested floor {}",
+        state.current_ack_floor,
+    );
+
+    // Successful prunes remove blobs durably, so the boundary cannot regress even
+    // when a later operation failed.
+    assert!(
+        ack_floor >= state.synced_boundary,
+        "recovered ack floor {ack_floor} regressed below the last synced boundary {}",
+        state.synced_boundary,
+    );
+    verify_recovered_items(&mut queue, state, size_before, ack_floor).await;
 
     // Queue should remain writable after recovery.
     let (queue, new_pos) = queue
@@ -369,7 +439,7 @@ async fn verify_recovery_after_mutable_error(mut queue: Queue<deterministic::Con
 /// Verify the queue state after recovery.
 async fn verify_recovery(mut queue: Queue<deterministic::Context, Vec<u8>>, state: &RecoveryState) {
     if state.saw_mutable_error() {
-        verify_recovery_after_mutable_error(queue).await;
+        verify_recovery_after_mutable_error(queue, state).await;
         return;
     }
 
@@ -390,63 +460,15 @@ async fn verify_recovery(mut queue: Queue<deterministic::Context, Vec<u8>>, stat
         state.max_recovered_size()
     );
 
-    // Ack floor should be within expected bounds
-    // Note: ack_floor after recovery = journal.bounds().start (pruning boundary)
-    assert!(
-        ack_floor >= state.min_recovered_ack_floor(),
-        "recovered ack_floor {} is less than minimum expected {}",
-        ack_floor,
-        state.min_recovered_ack_floor()
-    );
-    assert!(
-        ack_floor <= state.max_recovered_ack_floor(),
-        "recovered ack_floor {} is greater than maximum expected {}",
-        ack_floor,
-        state.max_recovered_ack_floor()
-    );
-
-    // Reset to re-read all unacked items from the beginning
-    queue.reset();
-
-    // Verify all unacked items can be dequeued and have correct content
-    let mut dequeued_count = 0u64;
-    loop {
-        match queue.dequeue().await {
-            Ok(Some((pos, item))) => {
-                dequeued_count += 1;
-
-                // Verify item content if we know what it should be
-                if let Some(value) = state.committed.get(&pos) {
-                    let expected = make_item(*value);
-                    assert_eq!(
-                        item, expected,
-                        "item at position {} has wrong content after recovery",
-                        pos
-                    );
-                }
-
-                // Prevent infinite loop
-                if dequeued_count > size {
-                    panic!("dequeued more items than queue size");
-                }
-            }
-            Ok(None) => break,
-            Err(e) => panic!(
-                "dequeue at position {} failed after recovery: {e} (size={}, ack_floor={})",
-                ack_floor + dequeued_count,
-                size,
-                ack_floor
-            ),
-        }
-    }
-
-    // The number of unacked items should be size - ack_floor
-    let expected_unacked = size - ack_floor;
+    // Recovery reports ack_floor = journal.bounds().start (the pruning boundary),
+    // and with every operation successful the only prunes are from Syncs, so the
+    // recovered floor must equal the boundary the last successful Sync established.
     assert_eq!(
-        dequeued_count, expected_unacked,
-        "dequeued {} items but expected {} unacked (size={}, ack_floor={})",
-        dequeued_count, expected_unacked, size, ack_floor
+        ack_floor, state.synced_boundary,
+        "recovered ack_floor diverged from the boundary pruned by the last successful sync"
     );
+
+    verify_recovered_items(&mut queue, state, size, ack_floor).await;
 
     // Verify we can enqueue new items after recovery
     let (_queue, new_pos) = queue.enqueue(make_item(0xFF)).await.unwrap();
@@ -458,11 +480,12 @@ fn fuzz(input: FuzzInput) {
     let page_cache_size = NonZeroUsize::new(input.page_cache_size).unwrap();
     let items_per_section = NonZeroU64::new(input.items_per_section).unwrap();
     let write_buffer = NonZeroUsize::new(input.write_buffer).unwrap();
+    let replay_buffer = NonZeroUsize::new(input.replay_buffer).unwrap();
     let cfg = deterministic::Config::default().with_seed(input.seed);
     let partition_name = format!("queue-crash-recovery-{}", input.seed);
     let operations = input.operations.clone();
     let sync_failure_rate = input.sync_failure_rate;
-    let write_failure_rate = input.write_failure_rate;
+    let write_config = input.write_config;
 
     let runner = deterministic::Runner::new(cfg);
 
@@ -477,7 +500,7 @@ fn fuzz(input: FuzzInput) {
                 codec_config: ((0usize..).into(), ()),
                 page_cache: CacheRef::from_pooler(&ctx, page_size, page_cache_size),
                 write_buffer,
-                replay_buffer: NZUsize!(4096),
+                replay_buffer,
             };
 
             let queue = Queue::<_, Vec<u8>>::init(ctx.child("storage"), queue_cfg)
@@ -487,18 +510,28 @@ fn fuzz(input: FuzzInput) {
             // Enable fault injection
             let fault_config = deterministic::FaultConfig {
                 sync_rate: Some(sync_failure_rate),
-                write_rate: Some(deterministic::WriteConfig {
-                    failure_rate: write_failure_rate,
-                    retention_rate: probability!(0.0),
-                    mode: deterministic::PartialWriteMode::Prefix,
-                }),
+                write_rate: Some(write_config),
                 ..Default::default()
             };
             let faults = ctx.storage_fault_config();
             *faults.write() = fault_config;
 
-            run_operations(queue, &operations).await
+            run_operations(queue, &operations, items_per_section.get()).await
         }
+    });
+
+    let recovery_partition = partition_name.clone();
+    let checkpoint = faulted_recovery(checkpoint, input.seed, move |ctx| async move {
+        let queue_cfg = Config {
+            partition: recovery_partition,
+            items_per_section,
+            compression: None,
+            codec_config: ((0usize..).into(), ()),
+            page_cache: CacheRef::from_pooler(&ctx, page_size, page_cache_size),
+            write_buffer,
+            replay_buffer,
+        };
+        Queue::<_, Vec<u8>>::init(ctx.child("faulted_recovery"), queue_cfg).await
     });
 
     // Recovery phase - re-initialize queue from checkpoint
@@ -514,7 +547,7 @@ fn fuzz(input: FuzzInput) {
             codec_config: ((0usize..).into(), ()),
             page_cache: CacheRef::from_pooler(&ctx, page_size, page_cache_size),
             write_buffer,
-            replay_buffer: NZUsize!(4096),
+            replay_buffer,
         };
 
         let queue = Queue::<_, Vec<u8>>::init(ctx.child("storage"), queue_cfg)

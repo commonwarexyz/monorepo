@@ -1108,8 +1108,10 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Replay<E, I, V> {
     /// Returns the next `(section, position, entry)`, or `None` once every section is
     /// exhausted.
     ///
-    /// An error ends the section that produced it, and iteration continues with the
-    /// next section. Errors while mutating storage to repair a section, and
+    /// An index error ends the section that produced it, and iteration continues with
+    /// the next section. A value-verification error is returned without ending its
+    /// section and dooms the tracked replay: finishing it fails with
+    /// [Error::ReplayFailed]. Errors while mutating storage to repair a section, and
     /// [Error::ReplayInterrupted], end the replay.
     pub async fn next(&mut self) -> Option<Result<(u64, u64, I), Error>> {
         loop {
