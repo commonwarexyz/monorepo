@@ -1,6 +1,5 @@
 //! Mock implementations of runtime primitives for testing.
 
-/// In-memory storage exposed for direct test construction and inspection.
 #[cfg(any(test, feature = "test-utils"))]
 pub use crate::storage::memory::Storage as MemoryStorage;
 use crate::{

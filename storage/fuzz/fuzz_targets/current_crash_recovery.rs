@@ -3,8 +3,8 @@
 //! Fuzz test for Current QMDB crash recovery with fault injection.
 //!
 //! Phase 1 runs state-changing operations (update, delete, commit, prune) with
-//! injected write/sync failures, then "crashes". Phase 2 recovers from the
-//! checkpoint and verifies that `init()` succeeds and the DB is usable.
+//! injected write/sync failures, then "crashes". Phase 2 attempts recovery under
+//! storage faults, crashes again, then recovers cleanly and verifies the DB is usable.
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
@@ -21,7 +21,8 @@ use commonware_storage::{
     translator::TwoCap,
 };
 use commonware_storage_fuzz::{
-    bounded_buffer, bounded_items, bounded_nonzero_rate, bounded_page_cache_size, bounded_page_size,
+    bounded_buffer, bounded_items, bounded_nonzero_rate, bounded_page_cache_size,
+    bounded_page_size, faulted_recovery,
 };
 use commonware_utils::{NZU64, NZUsize, Probability, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
@@ -283,6 +284,15 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
                 failure.unwrap_or_else(|| vec![committed]),
             )
         }
+    });
+
+    let recovery_suffix = suffix.clone();
+    let checkpoint = faulted_recovery(checkpoint, input.seed, move |ctx| async move {
+        Db::<F>::init(
+            ctx.child("faulted_recovery"),
+            make_config(&ctx, &recovery_suffix, params),
+        )
+        .await
     });
 
     // Phase 2: Recover and verify consistency.

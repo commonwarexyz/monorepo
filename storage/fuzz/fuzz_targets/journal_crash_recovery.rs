@@ -17,6 +17,9 @@
 //!   4. Drop the journal without a clean shutdown: the crash. Unsynchronized bytes survive
 //!      according to the configured write-retention policy.
 //!
+//! Between cycles, an ordinary recovery attempt runs under storage faults and crashes. The next
+//! clean `init()` verifies that checkpoint before operations continue.
+//!
 //! `Crash` markers split the op list into one `ops` list per cycle. Driving recovery repeatedly on
 //! the same journal is the point: watermark, pruning-metadata, and section-layout bugs often need a
 //! recover-then-mutate-then-recover sequence to appear, not just a single crash.
@@ -53,7 +56,7 @@ use commonware_storage::journal::{
     },
 };
 use commonware_storage_fuzz::{
-    bounded_buffer, bounded_items, bounded_page_cache_size, bounded_page_size,
+    bounded_buffer, bounded_items, bounded_page_cache_size, bounded_page_size, faulted_recovery,
 };
 use commonware_utils::{NZU64, NZUsize, Probability, probability, sequence::FixedBytes};
 use futures::StreamExt;
@@ -174,6 +177,7 @@ struct Params {
     sync_rate: Probability,
     resize_rate: Probability,
     partial_resize_rate: Probability,
+    recovery_seed: u64,
 }
 
 impl Params {
@@ -800,6 +804,24 @@ where
     })
 }
 
+/// Attempt ordinary journal recovery under storage faults and return its crash checkpoint.
+fn faulted_restart<J: FuzzJournal + Send + 'static>(
+    checkpoint: deterministic::Checkpoint,
+    partition: String,
+    params: Params,
+) -> deterministic::Checkpoint
+where
+    J::Config: Send,
+{
+    faulted_recovery(checkpoint, params.recovery_seed, move |ctx| async move {
+        J::init(
+            ctx.child("faulted_recovery"),
+            J::config(&partition, &ctx, &params),
+        )
+        .await
+    })
+}
+
 /// Split the operation stream into one `ops` list per cycle, cutting at each `Crash` marker. Always
 /// returns at least one list (possibly empty), so a bare recovery is still exercised.
 fn split_into_cycles(ops: &[JournalOperation]) -> Vec<Vec<JournalOperation>> {
@@ -830,6 +852,7 @@ where
         sync_rate: input.sync_failure_rate,
         resize_rate: input.resize_failure_rate,
         partial_resize_rate: input.partial_resize_rate,
+        recovery_seed: input.seed,
     };
     let partition = format!("crash-recovery-{tag}-{}", input.seed);
     let cycles = split_into_cycles(&input.operations);
@@ -844,6 +867,7 @@ where
         partition.clone(),
         params,
     );
+    checkpoint = faulted_restart::<J>(checkpoint, partition.clone(), params);
 
     for ops in cycles.iter().skip(1) {
         let runner = deterministic::Runner::from(checkpoint);
@@ -854,6 +878,7 @@ where
             partition.clone(),
             params,
         );
+        checkpoint = faulted_restart::<J>(checkpoint, partition.clone(), params);
     }
 
     // Final fault-free phase: verify the last recovery, then append, sync, drop, and reopen a

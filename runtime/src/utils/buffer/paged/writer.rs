@@ -980,6 +980,7 @@ impl<B: Blob> Writer<B> {
             return Ok(IoBufs::default());
         }
 
+        // Identify the inclusive logical page range spanning the requested bytes.
         let logical_page_size = u64::from(logical_page_size.get());
         let first_page = offset / logical_page_size;
         let last_page = (end - 1) / logical_page_size;
@@ -1078,7 +1079,7 @@ impl<B: Blob> Writer<B> {
         let tail_start = usize::try_from(offset.max(page_start) - page_start)
             .map_err(|_| Error::OffsetOverflow)?;
         out.append(tail.slice(tail_start..));
-        debug_assert_eq!(out.len(), len);
+        assert_eq!(out.len(), len);
         Ok((logical_size, out))
     }
 

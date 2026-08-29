@@ -12,7 +12,8 @@ use arbitrary::Arbitrary;
 use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::queue::{Config, Queue};
 use commonware_storage_fuzz::{
-    bounded_buffer, bounded_items, bounded_nonzero_rate, bounded_page_cache_size, bounded_page_size,
+    bounded_buffer, bounded_items, bounded_nonzero_rate, bounded_page_cache_size,
+    bounded_page_size, faulted_recovery,
 };
 use commonware_utils::Probability;
 use libfuzzer_sys::fuzz_target;
@@ -484,6 +485,20 @@ fn fuzz(input: FuzzInput) {
 
             run_operations(queue, &operations).await
         }
+    });
+
+    let recovery_partition = partition_name.clone();
+    let checkpoint = faulted_recovery(checkpoint, input.seed, move |ctx| async move {
+        let queue_cfg = Config {
+            partition: recovery_partition,
+            items_per_section,
+            compression: None,
+            codec_config: ((0usize..).into(), ()),
+            page_cache: CacheRef::from_pooler(&ctx, page_size, page_cache_size),
+            write_buffer,
+            replay_buffer,
+        };
+        Queue::<_, Vec<u8>>::init(ctx.child("faulted_recovery"), queue_cfg).await
     });
 
     // Recovery phase - re-initialize queue from checkpoint

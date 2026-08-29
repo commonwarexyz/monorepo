@@ -1,15 +1,6 @@
 #![no_main]
 
 //! Prunable archive recovery under supported partial-write crash cuts.
-//!
-//! Recovery CRC-validates only value suffixes not covered by a durable per-section boundary.
-//! This target reconstructs the expected prefix directly from the raw index and value crash image
-//! before opening the archive, checks every public read and range helper, restarts before
-//! repairing truncated suffixes, and reopens the synced result.
-//!
-//! Between puts, the op stream pipelines non-blocking sync requests whose completions resolve out
-//! of order, so marker generations race held data syncs (the durability-barrier seeding class).
-//! Prunes run mid-stream and the crash itself can interrupt a blocking sync or a prune.
 
 use arbitrary::Arbitrary;
 use commonware_codec::{DecodeExt as _, FixedSize, Read, ReadExt as _};
@@ -25,6 +16,7 @@ use commonware_storage::{
     rmap::RMap,
     translator::EightCap,
 };
+use commonware_storage_fuzz::faulted_recovery;
 use commonware_utils::{NZUsize, Probability, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 use std::{
@@ -87,6 +79,7 @@ impl FixedSize for IndexRecord {
     const SIZE: usize = u64::SIZE + Key::SIZE + u64::SIZE + u32::SIZE;
 }
 
+/// Build the prunable archive configuration used by this target.
 fn config(
     context: &impl BufferPooler,
     items_per_section: NonZeroU64,
@@ -110,6 +103,7 @@ fn config(
     }
 }
 
+/// Generate the append stream, including repeated indices in multi-value mode.
 fn entries(input: &FuzzInput, items_per_section: u64) -> Vec<Entry> {
     let count = usize::from(input.count % 24) + 1;
     (0..count)
@@ -134,10 +128,12 @@ fn entries(input: &FuzzInput, items_per_section: u64) -> Vec<Entry> {
         .collect()
 }
 
+/// Return the distinct indices represented by `entries`.
 fn indices(entries: &[Entry]) -> BTreeSet<u64> {
     entries.iter().map(|entry| entry.index).collect()
 }
 
+/// Read and validate a value frame, returning `None` when the frame is not recoverable.
 async fn read_value(
     context: &deterministic::Context,
     partition: &str,
@@ -243,6 +239,7 @@ async fn read_index_sections(
     sections
 }
 
+/// Reconstruct retained entries and repaired section sizes from the raw crash image.
 async fn recover_expected(
     context: &deterministic::Context,
     cfg: &prunable::Config<EightCap, ()>,
@@ -284,6 +281,7 @@ async fn recover_expected(
     (expected, index_sizes, value_sizes)
 }
 
+/// Assert each partition's section sizes match the recovery oracle.
 async fn assert_blob_sizes(
     context: &deterministic::Context,
     partition: &str,
@@ -305,6 +303,7 @@ async fn assert_blob_sizes(
     );
 }
 
+/// Compare range, gap, and missing-item helpers with the expected index set.
 fn assert_range_helpers(
     archive: &TestArchive,
     candidates: &BTreeSet<u64>,
@@ -357,6 +356,7 @@ fn assert_range_helpers(
     }
 }
 
+/// Compare index, key, value, and range views with the expected entries.
 async fn assert_view(archive: &TestArchive, intended: &[Entry], expected: &[Entry]) {
     let intended_indices = indices(intended);
     for &index in &intended_indices {
@@ -415,8 +415,11 @@ async fn assert_view(archive: &TestArchive, intended: &[Entry], expected: &[Entr
     }
 }
 
+/// Run the archive through faulted appends, recovery, and tail repair.
 fn fuzz(input: FuzzInput) {
     let items_per_section = NonZeroU64::new(u64::from(input.items_per_section % 8) + 1).unwrap();
+    let retention_percent = input.retention % 101;
+    let final_op = input.final_op;
     let intended = entries(&input, items_per_section.get());
     let baseline_count = intended.len() / 2;
     let baseline = intended[..baseline_count].to_vec();
@@ -536,11 +539,7 @@ fn fuzz(input: FuzzInput) {
             *fault_config.write() = deterministic::FaultConfig {
                 write_rate: Some(WriteConfig {
                     failure_rate: Probability::new(0, 1).unwrap(),
-                    retention_rate: Probability::new(
-                        u64::from(first_phase_input.retention % 101),
-                        100,
-                    )
-                    .unwrap(),
+                    retention_rate: Probability::new(u64::from(retention_percent), 100).unwrap(),
                     mode: if first_phase_input.subset {
                         PartialWriteMode::Subset
                     } else {
@@ -596,9 +595,16 @@ fn fuzz(input: FuzzInput) {
             (durable, exempt_below, pruned)
         });
 
+    let checkpoint = faulted_recovery(checkpoint, input.seed, move |context| async move {
+        TestArchive::init(
+            context.child("faulted_recovery"),
+            config(&context, items_per_section),
+        )
+        .await
+    });
+
     let recovery_intended = intended.clone();
     let recovery_baseline = baseline.clone();
-    let recovery_input = input.clone();
     let ((expected, expected_index_sizes, expected_value_sizes), checkpoint) =
         deterministic::Runner::from(checkpoint).start_and_recover(move |context| async move {
             *context.storage_fault_config().write() = deterministic::FaultConfig::default();
@@ -620,10 +626,7 @@ fn fuzz(input: FuzzInput) {
             }
             // Only the abandoned-request arm flushes every buffered byte before the crash:
             // an interrupted sync or prune legitimately strands unwritten appends.
-            if recovery_input.retention % 101 == 100
-                && !pruned
-                && recovery_input.final_op.is_multiple_of(3)
-            {
+            if retention_percent == 100 && !pruned && final_op.is_multiple_of(3) {
                 assert_eq!(
                     expected.len(),
                     recovery_intended.len(),

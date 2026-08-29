@@ -1,4 +1,4 @@
-use super::Header;
+use super::{Header, Layout};
 use crate::{
     Buf, BufferPool, Handle, IoBufs, IoBufsMut, ReadOptions, WriteOptions,
     deterministic::AuditHasher,
@@ -84,6 +84,55 @@ impl Storage {
     pub(crate) fn from_snapshot(snapshot: Snapshot, pool: BufferPool) -> Self {
         Self::with_partitions(snapshot.0, pool)
     }
+
+    fn open_versioned_with_layout(
+        &self,
+        partition: &str,
+        name: &[u8],
+        layout: Layout,
+        versions: RangeInclusive<u16>,
+    ) -> Result<(Blob, u64, u16), crate::Error> {
+        super::validate_partition_name(partition)?;
+
+        let key = (partition.to_string(), name.to_vec());
+        let mut generations = self.generations.lock();
+        let mut partitions = self.partitions.lock();
+        let partition_entry = partitions.entry(partition.into()).or_default();
+        let content = partition_entry.entry(name.into()).or_default();
+
+        // Handle header: existing blobs have their header read; new blobs and blobs left torn
+        // by an interrupted creation get a fresh header written.
+        let existing = resolve_header(content, &versions, partition, name)?;
+        let (logical_size, blob_version, data_offset, generation) = match existing {
+            Some((logical_size, blob_version, data_offset)) => (
+                logical_size,
+                blob_version,
+                data_offset,
+                generations.get_or_insert(&key),
+            ),
+            None => {
+                let (region, blob_version) = Header::create_for_layout(layout, &versions);
+                let data_offset = region.len() as u64;
+                content.clear();
+                content.extend_from_slice(&region);
+                (0, blob_version, data_offset, generations.rotate(&key))
+            }
+        };
+
+        Ok((
+            Blob::new(
+                self.partitions.clone(),
+                self.generations.clone(),
+                key,
+                content.clone(),
+                self.pool.clone(),
+                data_offset,
+                generation,
+            ),
+            logical_size,
+            blob_version,
+        ))
+    }
 }
 
 impl Storage {
@@ -125,6 +174,17 @@ impl Storage {
             .or_default()
             .insert(name.into(), content);
     }
+
+    /// Open a blob, creating missing or recoverable content with the legacy V0 layout.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn open_versioned_v0(
+        &self,
+        partition: &str,
+        name: &[u8],
+        versions: RangeInclusive<u16>,
+    ) -> Result<(Blob, u64, u16), crate::Error> {
+        self.open_versioned_with_layout(partition, name, Layout::V0, versions)
+    }
 }
 
 impl crate::Storage for Storage {
@@ -136,46 +196,7 @@ impl crate::Storage for Storage {
         name: &[u8],
         versions: RangeInclusive<u16>,
     ) -> Result<(Self::Blob, u64, u16), crate::Error> {
-        super::validate_partition_name(partition)?;
-
-        let key = (partition.to_string(), name.to_vec());
-        let mut generations = self.generations.lock();
-        let mut partitions = self.partitions.lock();
-        let partition_entry = partitions.entry(partition.into()).or_default();
-        let content = partition_entry.entry(name.into()).or_default();
-
-        // Handle header: existing blobs have their header read; new blobs and blobs left torn
-        // by an interrupted creation get a fresh header written.
-        let existing = resolve_header(content, &versions, partition, name)?;
-        let (logical_size, blob_version, data_offset, generation) = match existing {
-            Some((logical_size, blob_version, data_offset)) => (
-                logical_size,
-                blob_version,
-                data_offset,
-                generations.get_or_insert(&key),
-            ),
-            None => {
-                let (region, blob_version) = Header::create(&versions);
-                let data_offset = region.len() as u64;
-                content.clear();
-                content.extend_from_slice(&region);
-                (0, blob_version, data_offset, generations.rotate(&key))
-            }
-        };
-
-        Ok((
-            Blob::new(
-                self.partitions.clone(),
-                self.generations.clone(),
-                key,
-                content.clone(),
-                self.pool.clone(),
-                data_offset,
-                generation,
-            ),
-            logical_size,
-            blob_version,
-        ))
+        self.open_versioned_with_layout(partition, name, Layout::V1, versions)
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), crate::Error> {
@@ -741,6 +762,61 @@ mod tests {
                 assert_subset_write_preserves_header(layout, cut).await;
             }
         }
+    }
+
+    #[tokio::test]
+    async fn test_v0_writer_reopens_with_current_layout() {
+        const PARTITION: &str = "legacy";
+        const NAME: &[u8] = b"blob";
+        const PAYLOAD: &[u8] = b"payload";
+        const VERSION: u16 = 7;
+
+        let legacy_writer = Storage::new(test_pool());
+        let (blob, size, version) = legacy_writer
+            .open_versioned_v0(PARTITION, NAME, VERSION..=VERSION)
+            .unwrap();
+        assert_eq!(size, 0);
+        assert_eq!(version, VERSION);
+        blob.write_at(0, PAYLOAD, WriteOptions::SYNC).await.unwrap();
+        drop(blob);
+
+        let data_offset = Layout::V0.data_offset() as usize;
+        let raw = legacy_writer.raw_blob(PARTITION, NAME).unwrap();
+        assert_eq!(&raw[..Header::MAGIC_LENGTH], &Layout::V0.magic());
+        assert_eq!(&raw[data_offset..], PAYLOAD);
+
+        let current = Storage::from_snapshot(legacy_writer.take_snapshot(), test_pool());
+        let (blob, size, version) = current
+            .open_versioned(PARTITION, NAME, VERSION..=VERSION)
+            .await
+            .unwrap();
+        assert_eq!(size, PAYLOAD.len() as u64);
+        assert_eq!(version, VERSION);
+        assert_eq!(
+            blob.read_at(0, PAYLOAD.len(), ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce(),
+            PAYLOAD
+        );
+
+        blob.write_at(PAYLOAD.len() as u64, b"!", WriteOptions::SYNC)
+            .await
+            .unwrap();
+        drop(blob);
+        let (blob, size, version) = current
+            .open_versioned(PARTITION, NAME, VERSION..=VERSION)
+            .await
+            .unwrap();
+        assert_eq!(size, (PAYLOAD.len() + 1) as u64);
+        assert_eq!(version, VERSION);
+        assert_eq!(
+            blob.read_at(0, PAYLOAD.len() + 1, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce(),
+            b"payload!"
+        );
     }
 
     #[tokio::test]

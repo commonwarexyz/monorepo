@@ -10,6 +10,7 @@ use commonware_runtime::{
     deterministic::{self, PartialWriteMode, WriteConfig},
 };
 use commonware_storage::freezer::{Config, Freezer, Identifier};
+use commonware_storage_fuzz::faulted_recovery;
 use commonware_utils::{NZU16, NZUsize, Probability, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 
@@ -37,6 +38,7 @@ struct FuzzInput {
     retention: u8,
 }
 
+/// Build the deterministic Freezer configuration used by the recovery scenario.
 fn config(pooler: &impl BufferPooler) -> Config<()> {
     Config {
         key_partition: "freezer-recovery-index".into(),
@@ -57,6 +59,7 @@ fn config(pooler: &impl BufferPooler) -> Config<()> {
     }
 }
 
+/// Find a deterministic key whose checksum maps to `slot`.
 fn key_for_slot(slot: u32, tag: u8) -> Key {
     for nonce in 0..10_000u64 {
         let mut key = [0u8; 32];
@@ -69,18 +72,22 @@ fn key_for_slot(slot: u32, tag: u8) -> Key {
     unreachable!("bounded key search must cover every four-entry table slot")
 }
 
+/// Return the baseline key for `slot`.
 fn baseline_key(slot: u32) -> Key {
     key_for_slot(slot, 0x10 + slot as u8)
 }
 
+/// Return the candidate key mapped to table slot 1.
 fn candidate_key() -> Key {
     key_for_slot(1, 0x80)
 }
 
+/// Return the sentinel key used for post-recovery checks.
 fn sentinel_key() -> Key {
     key_for_slot(3, 0xF0)
 }
 
+/// Assert all scenario keys expose the expected values and presence state.
 async fn assert_values<E: commonware_storage::Context>(
     freezer: &Freezer<E, Key, i32>,
     expected: &[(Key, i32)],
@@ -100,6 +107,7 @@ async fn assert_values<E: commonware_storage::Context>(
     }
 }
 
+/// Run one crash/recovery scenario for the selected partial-write mode.
 fn run(input: &FuzzInput, mode: PartialWriteMode) {
     let phase_input = input.clone();
     let runner = deterministic::Runner::new(deterministic::Config::default().with_seed(input.seed));
@@ -186,6 +194,16 @@ fn run(input: &FuzzInput, mode: PartialWriteMode) {
             (freezer_checkpoint, baseline, candidate_cursors)
         });
 
+    let runtime_checkpoint =
+        faulted_recovery(runtime_checkpoint, input.seed, move |context| async move {
+            Freezer::<_, Key, i32>::init(
+                context.child("faulted_recovery"),
+                config(&context),
+                Some(freezer_checkpoint),
+            )
+            .await
+        });
+
     deterministic::Runner::from(runtime_checkpoint).start(move |context| async move {
         *context.storage_fault_config().write() = deterministic::FaultConfig::default();
 
@@ -233,6 +251,7 @@ fn run(input: &FuzzInput, mode: PartialWriteMode) {
     });
 }
 
+/// Exercise recovery under both supported partial-write retention modes.
 fn fuzz(input: FuzzInput) {
     for mode in [PartialWriteMode::Prefix, PartialWriteMode::Subset] {
         run(&input, mode);

@@ -1,19 +1,6 @@
 #![no_main]
 
 //! Oversized journal crash recovery under supported partial-write crash cuts.
-//!
-//! Inferred recovery (no checkpoint) retains each section's prefix through its last valid entry:
-//! the entry must sit inside the index's valid-page whole-record prefix and reference an
-//! in-bounds, checksum-valid value frame. Interior value damage below that boundary is adopted
-//! lazily and surfaces as a read error. This target reconstructs that prefix directly from the
-//! raw crash image before opening the journal, asserts identity for every retained entry (an
-//! in-model crash cut never forges a frame), proves entries covered by completed syncs survive,
-//! checks recovery is idempotent across reopen, and lands sentinel appends on the repaired tail.
-//!
-//! Between appends, the op stream pipelines non-blocking sync requests whose completions resolve
-//! out of order. The crash itself lands under fault-injected writes (prefix or subset retention)
-//! and can interrupt a blocking sync mid-flight. Completions after the fault window opens are
-//! never credited as durable.
 
 use arbitrary::Arbitrary;
 use commonware_codec::{DecodeExt as _, FixedSize, Read, ReadExt as _, Write};
@@ -29,6 +16,7 @@ use commonware_storage::journal::{
     Error as JournalError,
     segmented::oversized::{Config, Oversized, Record},
 };
+use commonware_storage_fuzz::faulted_recovery;
 use commonware_utils::{NZU16, NZUsize, Probability};
 use libfuzzer_sys::fuzz_target;
 use std::{
@@ -174,7 +162,7 @@ fn valid_page_len(page: &[u8]) -> Option<usize> {
 }
 
 /// Return whether `entry` references an in-bounds value frame whose checksum verifies against
-/// the raw glob bytes.
+/// the raw value bytes.
 async fn frame_valid(
     context: &deterministic::Context,
     section: u64,
@@ -347,6 +335,8 @@ async fn blob_sizes(context: &deterministic::Context) -> BTreeMap<(bool, u64), u
 
 fn fuzz(input: FuzzInput) {
     let intended = items(&input);
+    let retention_percent = input.retention % 101;
+    let final_op = input.final_op;
     let mut appended: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
     for &(section, id) in &intended {
         appended.entry(section).or_default().push(id);
@@ -443,8 +433,7 @@ fn fuzz(input: FuzzInput) {
         *fault_config.write() = deterministic::FaultConfig {
             write_rate: Some(WriteConfig {
                 failure_rate: Probability::new(0, 1).unwrap(),
-                retention_rate: Probability::new(u64::from(first_phase_input.retention % 101), 100)
-                    .unwrap(),
+                retention_rate: Probability::new(u64::from(retention_percent), 100).unwrap(),
                 mode: if first_phase_input.subset {
                     PartialWriteMode::Subset
                 } else {
@@ -502,8 +491,16 @@ fn fuzz(input: FuzzInput) {
         durable
     });
 
+    let checkpoint = faulted_recovery(checkpoint, input.seed, |context| async move {
+        Oversized::<_, TestEntry, TestValue>::init(
+            context.child("faulted_recovery"),
+            config(&context),
+            None,
+        )
+        .await
+    });
+
     let recovery_appended = appended.clone();
-    let recovery_input = input.clone();
     let ((expected, sizes), checkpoint) = deterministic::Runner::from(checkpoint)
         .start_and_recover(move |context| async move {
             *context.storage_fault_config().write() = deterministic::FaultConfig::default();
@@ -523,7 +520,7 @@ fn fuzz(input: FuzzInput) {
                     "section {section} lost entries covered by a completed sync"
                 );
             }
-            if recovery_input.retention % 101 == 100 && recovery_input.final_op.is_multiple_of(3) {
+            if retention_percent == 100 && final_op.is_multiple_of(3) {
                 for (section, ids) in &recovery_appended {
                     let retained: Vec<u64> = expected
                         .get(section)

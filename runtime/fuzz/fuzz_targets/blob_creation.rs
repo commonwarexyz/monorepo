@@ -14,12 +14,6 @@ const PAYLOAD: &[u8] = b"payload!";
 const V0_NAME: &[u8] = b"v0";
 const V1_NAME: &[u8] = b"v1";
 
-/// Frozen V0 prelude: `CWIC`, runtime version 0, then the caller-owned blob version.
-const fn v0_header(blob_version: u16) -> [u8; 8] {
-    let version = blob_version.to_be_bytes();
-    [b'C', b'W', b'I', b'C', 0, 0, version[0], version[1]]
-}
-
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {
     blob_version: u16,
@@ -75,7 +69,7 @@ fn fuzz(input: FuzzInput) {
 
         // Create the canonical V1 region through the same storage path used in production.
         let (blob, size, version) = storage
-            .open_versioned(PARTITION, V1_NAME, versions)
+            .open_versioned(PARTITION, V1_NAME, versions.clone())
             .await
             .expect("initial blob creation failed");
         assert_eq!(size, 0);
@@ -95,9 +89,18 @@ fn fuzz(input: FuzzInput) {
         storage.set_raw_blob(PARTITION, V1_NAME, interrupted);
         assert_recovers(&storage, V1_NAME, input.blob_version, &canonical_v1).await;
 
-        // A pre-V1 writer could leave only a prefix of its 8-byte prelude. A complete prelude is
-        // still a valid V0 blob. Every shorter prefix is treated as a new blob and recreated V1.
-        let canonical_v0 = v0_header(input.blob_version);
+        // Create a canonical V0 region through the pre-V1 storage path, then model a writer that
+        // left only a prefix of its prelude. A complete prelude remains V0; every shorter prefix
+        // is treated as a new blob and recreated V1.
+        let (blob, size, version) = storage
+            .open_versioned_v0(PARTITION, V0_NAME, versions)
+            .expect("legacy blob creation failed");
+        assert_eq!(size, 0);
+        assert_eq!(version, input.blob_version);
+        drop(blob);
+        let canonical_v0 = storage
+            .raw_blob(PARTITION, V0_NAME)
+            .expect("created legacy blob has no durable image");
         let retained = usize::from(input.retained_prefix) % (canonical_v0.len() + 1);
         storage.set_raw_blob(PARTITION, V0_NAME, canonical_v0[..retained].to_vec());
         let expected_header = if retained == canonical_v0.len() {

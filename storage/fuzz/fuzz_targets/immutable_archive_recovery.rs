@@ -15,6 +15,7 @@ use commonware_storage::{
     },
     rmap::RMap,
 };
+use commonware_storage_fuzz::faulted_recovery;
 use commonware_utils::{NZU16, NZU64, NZUsize, Probability, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 
@@ -51,6 +52,7 @@ struct Entry {
     value: Value,
 }
 
+/// Build the immutable archive configuration used by the recovery scenario.
 fn config(pooler: &impl BufferPooler) -> Config<()> {
     Config {
         metadata_partition: "immutable-recovery-metadata".into(),
@@ -75,6 +77,7 @@ fn config(pooler: &impl BufferPooler) -> Config<()> {
     }
 }
 
+/// Construct a deterministic entry for `index` and `tag`.
 fn entry(input: &FuzzInput, index: u64, tag: u8) -> Entry {
     let mut key = [0u8; 16];
     key[..8].copy_from_slice(&index.to_be_bytes());
@@ -88,6 +91,7 @@ fn entry(input: &FuzzInput, index: u64, tag: u8) -> Entry {
     }
 }
 
+/// Return the sparse baseline and complete candidate states for recovery.
 fn intended(input: &FuzzInput) -> (Vec<Entry>, Vec<Entry>) {
     let baseline = vec![entry(input, 0, 0x10), entry(input, 2, 0x12)];
     let mut candidate = baseline.clone();
@@ -96,6 +100,7 @@ fn intended(input: &FuzzInput) -> (Vec<Entry>, Vec<Entry>) {
     (baseline, candidate)
 }
 
+/// Verify each intended entry through index and key APIs and return those found.
 async fn snapshot(archive: &TestArchive, intended: &[Entry]) -> Vec<Entry> {
     let mut recovered = Vec::new();
     for entry in intended {
@@ -128,6 +133,7 @@ async fn snapshot(archive: &TestArchive, intended: &[Entry]) -> Vec<Entry> {
     recovered
 }
 
+/// Compare range, gap, and missing-item helpers with the supplied entries.
 fn assert_ranges(archive: &TestArchive, entries: &[Entry]) {
     let mut model = RMap::new();
     for entry in entries {
@@ -156,6 +162,7 @@ fn assert_ranges(archive: &TestArchive, entries: &[Entry]) {
     }
 }
 
+/// Run one immutable archive crash/recovery scenario for the selected write mode.
 fn run(input: &FuzzInput, mode: PartialWriteMode) {
     let phase_input = input.clone();
     let recovery_input = input.clone();
@@ -178,7 +185,7 @@ fn run(input: &FuzzInput, mode: PartialWriteMode) {
         archive = archive.sync().await.expect("baseline sync failed");
 
         // Candidate puts and their sync run under one partial-write policy. Any mutating error ends
-        // the phase immediately. Recovery is always performed with faults disabled.
+        // the phase immediately.
         let rate = Probability::new(u64::from(phase_input.rate % 100) + 1, 100).unwrap();
         let (failure_rate, sync_rate) = match phase_input.fault {
             FaultKind::Write => (rate, None),
@@ -215,6 +222,12 @@ fn run(input: &FuzzInput, mode: PartialWriteMode) {
             }
             Err(_) => Outcome::SyncFailed,
         }
+    });
+
+    // A failed recovery instance is abandoned. Its crash checkpoint must remain recoverable by
+    // the same ordinary initialization path with faults disabled.
+    let checkpoint = faulted_recovery(checkpoint, input.seed, |context| async move {
+        Archive::<_, Key, Value>::init(context.child("faulted_recovery"), config(&context)).await
     });
 
     deterministic::Runner::from(checkpoint).start(move |context| async move {
@@ -259,6 +272,7 @@ fn run(input: &FuzzInput, mode: PartialWriteMode) {
     });
 }
 
+/// Exercise the scenario under both supported partial-write modes.
 fn fuzz(input: FuzzInput) {
     for mode in [PartialWriteMode::Prefix, PartialWriteMode::Subset] {
         run(&input, mode);

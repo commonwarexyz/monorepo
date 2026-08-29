@@ -4,10 +4,9 @@
 //!
 //! Replay repairs torn pages lazily, and a section retained from a previous execution rejects
 //! appends with [`Error::ReplayRequired`] until a replay from offset zero validates it. This
-//! target reconstructs each section's expected item prefix directly from the raw crash image
-//! (the contiguous valid-page prefix, cut at the last whole frame) before opening the journal,
-//! asserts the append gate, drains a full replay against that prefix, and reopens the repaired
-//! result.
+//! target reconstructs each section's expected item prefix directly from the post-recovery-crash
+//! image (the contiguous valid-page prefix, cut at the last whole frame), asserts the append gate,
+//! drains a full replay against that prefix, and reopens the repaired result.
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Crc32;
@@ -18,6 +17,7 @@ use commonware_runtime::{
     mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs},
 };
 use commonware_storage::journal::{Error, segmented::variable};
+use commonware_storage_fuzz::faulted_recovery;
 use commonware_utils::{NZUsize, Probability};
 use libfuzzer_sys::fuzz_target;
 use std::{collections::BTreeMap, num::NonZeroU16};
@@ -213,6 +213,25 @@ async fn assert_replay(journal: Journal, expected: &BTreeMap<u64, (u64, Vec<Vec<
     journal
 }
 
+/// Drive the journal's lazy recovery through a complete replay.
+async fn recover_once(context: deterministic::Context) -> Result<(), Error> {
+    let pending = PendingSyncs::default();
+    pending.unblock();
+    let context = DelayedSyncContext {
+        inner: context,
+        pending,
+    };
+    let journal = Journal::init(context.child("journal"), config(&context)).await?;
+    let mut replay = journal
+        .replay(0, 0, NZUsize!(1024), ReadOptions::default())
+        .await?;
+    while let Some(result) = replay.next().await {
+        result?;
+    }
+    drop(replay.finish()?);
+    Ok(())
+}
+
 fn fuzz(input: FuzzInput) {
     let script = items(&input);
     let baseline = usize::from(input.baseline) % (script.len() + 1);
@@ -269,6 +288,8 @@ fn fuzz(input: FuzzInput) {
         drop(sync);
         durable
     });
+
+    let checkpoint = faulted_recovery(checkpoint, input.seed, recover_once);
 
     deterministic::Runner::from(checkpoint).start(move |context| async move {
         *context.storage_fault_config().write() = deterministic::FaultConfig::default();

@@ -14,7 +14,8 @@ use commonware_storage::merkle::{
     hasher::Standard as StandardHasher, mem::Mem, mmb, mmr,
 };
 use commonware_storage_fuzz::{
-    bounded_buffer, bounded_items, bounded_nonzero_rate, bounded_page_cache_size, bounded_page_size,
+    bounded_buffer, bounded_items, bounded_nonzero_rate, bounded_page_cache_size,
+    bounded_page_size, faulted_recovery,
 };
 use commonware_utils::{NZU64, Probability};
 use libfuzzer_sys::fuzz_target;
@@ -258,6 +259,25 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
 
             run_operations(merkle, &hasher, &operations).await
         }
+    });
+
+    let recovery_partition_suffix = partition_suffix.clone();
+    let checkpoint = faulted_recovery(checkpoint, input.seed, move |ctx| async move {
+        let hasher = StandardHasher::<Sha256>::new(ForwardFold);
+        Merkle::<F>::init(
+            ctx.child("faulted_recovery"),
+            &hasher,
+            merkle_config(
+                &recovery_partition_suffix,
+                &ctx,
+                page_size,
+                page_cache_size,
+                items_per_blob,
+                write_buffer,
+                replay_buffer,
+            ),
+        )
+        .await
     });
 
     // Phase 2: Recover and verify consistency

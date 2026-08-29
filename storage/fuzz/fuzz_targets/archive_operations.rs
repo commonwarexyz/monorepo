@@ -72,6 +72,7 @@ fn multi_index(section: u8, slot: u8, items_per_section: u64) -> u64 {
     u64::from(section & 0x01) * items_per_section + u64::from(slot & 0x03)
 }
 
+/// Assert index lookup and `get_all` match the modeled values and insertion order.
 async fn assert_index_matches(
     archive: &TestArchive,
     items: &[(u64, RawKey, RawValue)],
@@ -102,6 +103,7 @@ async fn assert_index_matches(
     );
 }
 
+/// Assert key lookup returns a modeled value, or no value when the key is absent.
 async fn assert_key_matches(
     archive: &TestArchive,
     items: &[(u64, RawKey, RawValue)],

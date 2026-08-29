@@ -10,6 +10,7 @@ use commonware_runtime::{
     mocks::{DelayedSyncContext, PendingSyncs},
 };
 use commonware_storage::metadata::{Config, Metadata};
+use commonware_storage_fuzz::faulted_recovery;
 use commonware_utils::{Probability, sequence::U64};
 use libfuzzer_sys::fuzz_target;
 use std::collections::BTreeMap;
@@ -149,6 +150,10 @@ fn run(input: &FuzzInput, mode: PartialWriteMode) {
 
             (baseline, candidate)
         }
+    });
+
+    let checkpoint = faulted_recovery(checkpoint, input.seed, |context| async move {
+        Metadata::<_, U64, Vec<u8>>::init(context.child("faulted_recovery"), config()).await
     });
 
     deterministic::Runner::from(checkpoint).start(move |context| async move {
