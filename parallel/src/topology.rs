@@ -36,6 +36,84 @@ cfg_if::cfg_if! {
         /// `libc::CPU_SETSIZE`, which counts representable CPUs.
         const CPU_SET_BYTES: usize = std::mem::size_of::<libc::cpu_set_t>();
 
+        /// A CPU affinity mask: a safe wrapper over `libc::cpu_set_t`.
+        ///
+        /// Together with [`thread_affinity`], [`set_thread_affinity`], and [`current_cpu`],
+        /// this funnels all of the module's libc FFI through a handful of one-line unsafe
+        /// blocks, so the rest of the pin protocol is safe code.
+        #[derive(Clone, Copy)]
+        struct CpuSet(libc::cpu_set_t);
+
+        impl CpuSet {
+            /// The empty set.
+            const fn empty() -> Self {
+                // SAFETY: an all-zero cpu_set_t is the valid empty set.
+                Self(unsafe { std::mem::zeroed() })
+            }
+
+            /// Adds `cpu` to the set.
+            ///
+            /// Panics past `CPU_SETSIZE` (the libc crate's `CPU_SET` is unguarded there, so
+            /// the bound is asserted here; callers reject such CPUs up front).
+            fn set(&mut self, cpu: usize) {
+                assert!(cpu < libc::CPU_SETSIZE as usize);
+
+                // SAFETY: cpu is within CPU_SETSIZE (asserted above); the set is valid.
+                unsafe { libc::CPU_SET(cpu, &mut self.0) };
+            }
+
+            /// Whether `cpu` is in the set (`false` past `CPU_SETSIZE`).
+            fn contains(&self, cpu: usize) -> bool {
+                if cpu >= libc::CPU_SETSIZE as usize {
+                    return false;
+                }
+
+                // SAFETY: cpu is within CPU_SETSIZE (checked above); the set is valid.
+                unsafe { libc::CPU_ISSET(cpu, &self.0) }
+            }
+
+            /// Whether every CPU in `self` is also in `other`.
+            fn is_subset_of(&self, other: &Self) -> bool {
+                (0..libc::CPU_SETSIZE as usize).all(|cpu| !self.contains(cpu) || other.contains(cpu))
+            }
+
+            /// Whether the sets hold exactly the same CPUs. Used by restore assertions in
+            /// tests; the pin protocol itself only needs the subset test.
+            #[cfg(test)]
+            fn equals(&self, other: &Self) -> bool {
+                // SAFETY: both sets are valid; CPU_EQUAL only compares their bits.
+                unsafe { libc::CPU_EQUAL(&self.0, &other.0) }
+            }
+        }
+
+        /// The calling thread's current affinity mask, or `None` when the kernel refuses the
+        /// query (a possible-CPU count past `cpu_set_t`'s capacity, see [`Topology::detect`]).
+        fn thread_affinity() -> Option<CpuSet> {
+            let mut mask = CpuSet::empty();
+
+            // SAFETY: pid 0 is the calling thread; the set is a valid cpu_set_t of
+            // `CPU_SET_BYTES`.
+            if unsafe { libc::sched_getaffinity(0, CPU_SET_BYTES, &mut mask.0) } != 0 {
+                return None;
+            }
+            Some(mask)
+        }
+
+        /// Applies `mask` to the calling thread; `false` when the kernel refuses.
+        fn set_thread_affinity(mask: &CpuSet) -> bool {
+            // SAFETY: pid 0 is the calling thread; the set is a valid cpu_set_t of
+            // `CPU_SET_BYTES`.
+            unsafe { libc::sched_setaffinity(0, CPU_SET_BYTES, &mask.0) == 0 }
+        }
+
+        /// The CPU the calling thread is running on, or `None` when the query fails.
+        /// Advisory: the thread may migrate immediately after.
+        fn current_cpu() -> Option<usize> {
+            // SAFETY: sched_getcpu takes no arguments and only returns a value; -1 on error.
+            let cpu = unsafe { libc::sched_getcpu() };
+            usize::try_from(cpu).ok()
+        }
+
         /// The process-wide topology, detected on first use.
         fn topology() -> &'static Topology {
             static TOPOLOGY: OnceLock<Topology> = OnceLock::new();
@@ -50,7 +128,7 @@ cfg_if::cfg_if! {
             /// could deliberately migrate a job somewhere unrelated.
             cpu_to_domain: Box<[Option<u16>]>,
             /// The CPUs of each domain, as ready-to-use affinity sets.
-            domain_sets: Box<[libc::cpu_set_t]>,
+            domain_sets: Box<[CpuSet]>,
             /// Live pins per domain. Each pin reserves a slot against the domain's effective
             /// width (its CPUs the pinning thread may use) minus one, so pinned jobs can never
             /// crowd a domain or the caller working in it: past the cap, a job simply runs
@@ -66,12 +144,7 @@ cfg_if::cfg_if! {
                 // every CPU id visible in sysfs is small), so pinning could never engage.
                 // Report no domains rather than charge every spawn for a doomed syscall
                 // sequence.
-                // SAFETY: an all-zero cpu_set_t is the valid empty set, filled below.
-                let mut probe: libc::cpu_set_t = unsafe { std::mem::zeroed() };
-
-                // SAFETY: pid 0 is the calling thread; `probe` is a valid set of
-                // `CPU_SET_BYTES`.
-                if unsafe { libc::sched_getaffinity(0, CPU_SET_BYTES, &mut probe) } != 0 {
+                if thread_affinity().is_none() {
                     return Self::empty();
                 }
                 Self::from_sysfs().unwrap_or_else(Self::empty)
@@ -100,12 +173,7 @@ cfg_if::cfg_if! {
             /// the query fails or the snapshot does not cover the CPU. Advisory: the thread may
             /// migrate immediately after.
             fn current_domain(&self) -> Option<u16> {
-                // SAFETY: sched_getcpu takes no arguments and only returns a value; -1 on error.
-                let cpu = unsafe { libc::sched_getcpu() };
-                if cpu < 0 {
-                    return None;
-                }
-                self.domain_of(cpu as usize)
+                self.domain_of(current_cpu()?)
             }
 
             /// The `shared_cpu_list` of `cpu`'s last-level cache: the highest-level Data or
@@ -181,21 +249,16 @@ cfg_if::cfg_if! {
                 let mut table: Vec<Option<u16>> = vec![None; max_cpu + 1];
                 let mut domains: Vec<&str> = Vec::new();
 
-                // SAFETY: an all-zero cpu_set_t is the valid empty set.
-                let empty: libc::cpu_set_t = unsafe { std::mem::zeroed() };
-                let mut sets: Vec<libc::cpu_set_t> = Vec::new();
+                let mut sets: Vec<CpuSet> = Vec::new();
                 for (cpu, list) in lists {
                     let list = list.as_str();
                     let domain = domains.iter().position(|&d| d == list).unwrap_or_else(|| {
                         domains.push(list);
-                        sets.push(empty);
+                        sets.push(CpuSet::empty());
                         domains.len() - 1
                     });
                     table[*cpu] = Some(u16::try_from(domain).ok()?);
-
-                    // SAFETY: cpu is within CPU_SETSIZE (checked above) and the set is
-                    // initialized.
-                    unsafe { libc::CPU_SET(*cpu, &mut sets[domain]) };
+                    sets[domain].set(*cpu);
                 }
                 if domains.len() <= 1 {
                     return None;
@@ -236,8 +299,8 @@ cfg_if::cfg_if! {
         /// affinity mask on drop (including unwinds) unless the thread's mask was rewritten
         /// mid-job to CPUs outside the pin, in which case that newer placement is left in place.
         pub(crate) struct AffinityGuard {
-            saved: libc::cpu_set_t,
-            effective: libc::cpu_set_t,
+            saved: CpuSet,
+            effective: CpuSet,
             topology: &'static Topology,
             domain: usize,
         }
@@ -262,29 +325,16 @@ cfg_if::cfg_if! {
                     return None;
                 }
                 let target = topology.domain_sets.get(domain)?;
-
-                // SAFETY: an all-zero cpu_set_t is the valid empty set, filled by sched_getaffinity
-                // below.
-                let mut saved: libc::cpu_set_t = unsafe { std::mem::zeroed() };
-
-                // SAFETY: pid 0 is the calling thread; `saved` is a valid set of
-                // `CPU_SET_BYTES`.
-                if unsafe { libc::sched_getaffinity(0, CPU_SET_BYTES, &mut saved) } != 0 {
-                    return None;
-                }
+                let saved = thread_affinity()?;
 
                 // Intersect the domain with the thread's current allowance so the pin narrows
-                // placement and never widens it past operator restrictions. SAFETY: an all-zero
-                // cpu_set_t is the valid empty set.
-                let mut effective: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+                // placement and never widens it past operator restrictions.
+                let mut effective = CpuSet::empty();
                 let mut allowed = 0usize;
                 for cpu in 0..(libc::CPU_SETSIZE as usize) {
-                    // SAFETY: cpu is within CPU_SETSIZE; all three sets are valid.
-                    unsafe {
-                        if libc::CPU_ISSET(cpu, target) && libc::CPU_ISSET(cpu, &saved) {
-                            libc::CPU_SET(cpu, &mut effective);
-                            allowed += 1;
-                        }
+                    if target.contains(cpu) && saved.contains(cpu) {
+                        effective.set(cpu);
+                        allowed += 1;
                     }
                 }
 
@@ -315,9 +365,7 @@ cfg_if::cfg_if! {
                         Err(current) => live = current,
                     }
                 }
-                // SAFETY: pid 0 is the calling thread; `effective` is a valid set of
-                // `CPU_SET_BYTES`.
-                if unsafe { libc::sched_setaffinity(0, CPU_SET_BYTES, &effective) } != 0 {
+                if !set_thread_affinity(&effective) {
                     // The only bail point after the reservation: hand the slot back.
                     pins.fetch_sub(1, Ordering::AcqRel);
                     return None;
@@ -343,32 +391,13 @@ cfg_if::cfg_if! {
                 // back would resurrect an allowance the operator may have just revoked. (A
                 // rewrite landing within the pin's own CPUs is indistinguishable from the pin
                 // and gets restored over.)
-                // SAFETY: an all-zero cpu_set_t is the valid empty set, filled below.
-                let mut current: libc::cpu_set_t = unsafe { std::mem::zeroed() };
-
-                // SAFETY: pid 0 is the calling thread; `current` is a valid set of
-                // `CPU_SET_BYTES`.
-                let mut ours =
-                    unsafe { libc::sched_getaffinity(0, CPU_SET_BYTES, &mut current) } == 0;
+                let ours =
+                    thread_affinity().is_some_and(|current| current.is_subset_of(&self.effective));
                 if ours {
-                    for cpu in 0..(libc::CPU_SETSIZE as usize) {
-                        // SAFETY: cpu is within CPU_SETSIZE; both sets are valid.
-                        let strayed = unsafe {
-                            libc::CPU_ISSET(cpu, &current)
-                                && !libc::CPU_ISSET(cpu, &self.effective)
-                        };
-                        if strayed {
-                            ours = false;
-                            break;
-                        }
-                    }
-                }
-                if ours {
-                    // SAFETY: pid 0 is the calling thread; `saved` is the mask read at pin
-                    // time. Restoring wide does not migrate the thread, so a worker that
-                    // served a caller tends to stay in that caller's domain: repeat spawns
-                    // pin without moving anyone.
-                    unsafe { libc::sched_setaffinity(0, CPU_SET_BYTES, &self.saved) };
+                    // Restoring wide does not migrate the thread, so a worker that served a
+                    // caller tends to stay in that caller's domain: repeat spawns pin without
+                    // moving anyone.
+                    set_thread_affinity(&self.saved);
                 }
 
                 // Release the thread's pin and the domain slot unconditionally: cleanup is
@@ -388,23 +417,15 @@ cfg_if::cfg_if! {
             use std::sync::atomic::AtomicBool;
 
             /// The calling thread's current affinity mask.
-            fn current_mask() -> libc::cpu_set_t {
-                // SAFETY: an all-zero cpu_set_t is the valid empty set, filled below.
-                let mut mask: libc::cpu_set_t = unsafe { std::mem::zeroed() };
-
-                // SAFETY: pid 0 is the calling thread; `mask` is a valid set of
-                // `CPU_SET_BYTES`.
-                let rc = unsafe { libc::sched_getaffinity(0, CPU_SET_BYTES, &mut mask) };
-                assert_eq!(rc, 0);
-                mask
+            fn current_mask() -> CpuSet {
+                thread_affinity().expect("affinity read failed")
             }
 
             /// The CPUs the calling thread may currently use.
             fn allowed_cpus() -> Vec<usize> {
                 let mask = current_mask();
                 (0..(libc::CPU_SETSIZE as usize))
-                    // SAFETY: cpu is within CPU_SETSIZE; the set is valid.
-                    .filter(|&cpu| unsafe { libc::CPU_ISSET(cpu, &mask) })
+                    .filter(|&cpu| mask.contains(cpu))
                     .collect()
             }
 
@@ -446,12 +467,9 @@ cfg_if::cfg_if! {
                 assert_ne!(topology.domain_of(0), topology.domain_of(4));
                 let d0 = topology.domain_of(0).unwrap() as usize;
                 for cpu in 0..4 {
-                    // SAFETY: cpu < CPU_SETSIZE; the set was built by from_lists.
-                    assert!(unsafe { libc::CPU_ISSET(cpu, &topology.domain_sets[d0]) });
+                    assert!(topology.domain_sets[d0].contains(cpu));
                 }
-
-                // SAFETY: as above.
-                assert!(!unsafe { libc::CPU_ISSET(4, &topology.domain_sets[d0]) });
+                assert!(!topology.domain_sets[d0].contains(4));
             }
 
             #[test]
@@ -507,9 +525,7 @@ cfg_if::cfg_if! {
                 assert_eq!(topology.domain_of(4), topology.domain_of(68));
                 assert_ne!(topology.domain_of(0), topology.domain_of(4));
                 let d0 = topology.domain_of(0).unwrap() as usize;
-
-                // SAFETY: cpu is within CPU_SETSIZE; the set was built by from_lists.
-                assert!(unsafe { libc::CPU_ISSET(64, &topology.domain_sets[d0]) });
+                assert!(topology.domain_sets[d0].contains(64));
             }
 
             #[test]
@@ -565,37 +581,24 @@ cfg_if::cfg_if! {
             fn pin_never_widens_a_restricted_mask() {
                 std::thread::spawn(|| {
                     // Restrict this thread to its current CPU only.
-                    // SAFETY: valid empty set, filled below.
-                    let mut only: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+                    let cpu = current_cpu().unwrap();
 
-                    // SAFETY: no arguments; returns a value.
-                    let cpu = unsafe { libc::sched_getcpu() };
-                    assert!(cpu >= 0);
-
-                    // The libc crate's CPU_SET is unguarded past CPU_SETSIZE; such ids also
-                    // mean the machine cannot pin at all (see from_lists), so there is
-                    // nothing to test.
-                    if cpu as usize >= libc::CPU_SETSIZE as usize {
+                    // CpuSet::set panics past CPU_SETSIZE; such ids also mean the machine
+                    // cannot pin at all (see from_lists), so there is nothing to test.
+                    if cpu >= libc::CPU_SETSIZE as usize {
                         return;
                     }
-
-                    // SAFETY: cpu was bounds-checked against CPU_SETSIZE above; valid set.
-                    unsafe { libc::CPU_SET(cpu as usize, &mut only) };
-
-                    // SAFETY: pid 0 = this thread, valid set.
-                    assert_eq!(unsafe { libc::sched_setaffinity(0, CPU_SET_BYTES, &only) }, 0);
+                    let mut only = CpuSet::empty();
+                    only.set(cpu);
+                    assert!(set_thread_affinity(&only));
 
                     // A one-CPU allowance leaves no room for the caller plus a job, so the
                     // pin must be skipped outright.
                     let guard = AffinityGuard::pin(spawn_domain());
                     assert!(guard.is_none());
 
-                    let now = current_mask();
-                    for c in 0..(libc::CPU_SETSIZE as usize) {
-                        // SAFETY: c < CPU_SETSIZE, valid sets.
-                        let (n, o) = unsafe { (libc::CPU_ISSET(c, &now), libc::CPU_ISSET(c, &only)) };
-                        assert!(!n || o, "pin widened the mask at cpu {c}");
-                    }
+                    // The mask must not have widened: still within the restriction.
+                    assert!(current_mask().is_subset_of(&only));
                 })
                 .join()
                 .unwrap();
@@ -615,16 +618,13 @@ cfg_if::cfg_if! {
                         // The pin narrows the mask to exactly the domain's allowed CPUs.
                         let now = current_mask();
                         for cpu in 0..(libc::CPU_SETSIZE as usize) {
-                            // SAFETY: cpu is within CPU_SETSIZE; the set is valid.
-                            let set = unsafe { libc::CPU_ISSET(cpu, &now) };
+                            let set = now.contains(cpu);
                             assert_eq!(set, half_a.contains(&cpu), "mask mismatch at cpu {cpu}");
                         }
                     }
 
                     // Dropping the guard restores the pre-pin mask exactly.
-                    let after = current_mask();
-                    // SAFETY: both sets are valid; CPU_EQUAL only compares their bits.
-                    assert!(unsafe { libc::CPU_EQUAL(&before, &after) });
+                    assert!(before.equals(&current_mask()));
                 })
                 .join()
                 .unwrap();
@@ -783,9 +783,7 @@ cfg_if::cfg_if! {
                     let _guard = AffinityGuard::pin(spawn_domain());
                 }
                 let after = current_mask();
-
-                // SAFETY: both sets are valid; CPU_EQUAL only compares their bits.
-                assert!(unsafe { libc::CPU_EQUAL(&before, &after) });
+                assert!(before.equals(&after));
             }
         }
     } else {
