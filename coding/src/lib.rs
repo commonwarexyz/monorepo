@@ -18,6 +18,10 @@ commonware_macros::stability_scope!(ALPHA {
     mod reed_solomon;
     pub use reed_solomon::{Error as ReedSolomonError, ReedSolomon};
 
+    // TODO: remove this once we have a full impl.
+    #[allow(dead_code)]
+    mod ocelot;
+
     /// Configuration common to all encoding schemes.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct Config {
