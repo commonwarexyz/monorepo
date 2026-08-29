@@ -4,15 +4,17 @@ use anyhow::{Context, Result, ensure};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use commonware_clearing::bajillion::{
     admission::{Committee, SealedDealing, Vote, assigned_slice_indices, bls12381, seal},
-    boundary::{DepositBatch, WithdrawalAction, WithdrawalBatch},
+    boundary::{DepositBatch, DepositRecord, WithdrawalAction, WithdrawalBatch},
+    challenge::HigherShardTipLookup,
     commitment::VectorRoot,
     credit::ShardSet,
     payment::{MAX_ENTRIES, PaymentContext, SignedReceipt, SignedSend, verify_acceptance},
     settlement::{EpochDeadlinePolicy, FinalizedBatch, SettlementChain, SettlementConfig},
-    state::{AccountRow, SettlementOutput, StateLeaf},
+    state::{AccountRow, AccountState, Prefix, SettlementOutput, StateLeaf},
     transition::{
-        Assignment, CloseContext, CloseLimits, EpochContext, ExternalPayoutClaim, Header,
-        PreparedClose, RootBundle, StateCache, WithdrawalClaim, prepare_close_with_strategy,
+        Assignment, ChallengeIndex, CloseContext, CloseLimits, EpochContext, ExternalPayoutClaim,
+        Header, PreparedClose, RootBundle, StateCache, WithdrawalClaim,
+        prepare_close_with_strategy,
     },
 };
 use commonware_codec::{
@@ -264,6 +266,18 @@ impl PreparedEpoch {
     #[cfg(test)]
     pub(crate) const fn epoch(&self) -> u64 {
         self.context.payment().epoch()
+    }
+
+    /// Returns the bound close context for committed-side evidence reconstruction.
+    pub(crate) const fn close_context(&self) -> &CloseContext<Key, Digest> {
+        &self.context
+    }
+
+    /// Returns the canonical prepared close for committed-side evidence reconstruction.
+    pub(crate) const fn close(
+        &self,
+    ) -> &commonware_clearing::bajillion::transition::Close<Key, Digest> {
+        self.prepared.close()
     }
 }
 
@@ -855,6 +869,122 @@ pub(crate) fn short_digest(digest: &Digest) -> String {
         .take(6)
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+/// A committed close that omits one recipient's credit, plus that recipient's held receipt.
+///
+/// This is the demo's fraud construction, kept out of the honest operator binary. The close
+/// credits a deposit to a bystander account, so the omitted recipient is absent from its change
+/// vector, mirroring how the challenge tests build an inconsistent close. The held pair is a
+/// valid operator-signed receipt crediting the recipient under the same epoch context, so it
+/// convicts the close with a `HigherShardTip` challenge.
+pub(crate) struct OmittingClose {
+    pub(crate) deposit: DepositEvent,
+    pub(crate) deposits: DepositBatch<Key>,
+    pub(crate) result: SettlementResult,
+    pub(crate) recipient: Key,
+    pub(crate) held_credit: u64,
+    pub(crate) held_pair: Payment,
+    pub(crate) held_lookup: HigherShardTipLookup<Key, Digest>,
+}
+
+/// Builds an omitting close over epoch 0: Alice's operator-signed receipt credits Bob, but the
+/// admitted close instead credits a deposit to Carol and omits Bob entirely.
+pub(crate) fn omitting_close<R: CryptoRng>(rng: &mut R) -> Result<OmittingClose> {
+    let protocol = Protocol::new(NonZeroUsize::MIN)?;
+    let wallets = wallets();
+    let payer = &wallets[0];
+    let recipient = wallets[1].public_key();
+    let bystander = wallets[2].public_key();
+    let held_credit = 5;
+
+    let mut predecessor = identities()
+        .into_iter()
+        .map(|identity| StateLeaf {
+            account: identity.key,
+            state: AccountState {
+                balance: INITIAL_BALANCE,
+                active: true,
+                ..AccountState::default()
+            },
+        })
+        .collect::<Vec<_>>();
+    predecessor.sort_unstable_by(|left, right| left.account.cmp(&right.account));
+    let state =
+        StateCache::new::<Sha256>(predecessor.clone()).context("commit fraud predecessor state")?;
+    let deposit = DepositEvent {
+        id: Sha256::hash(&[b"_COMMONWARE_EXAMPLES_TERMINAL_OMITTING_CLOSE"]),
+        account: bystander.clone(),
+        amount: 1,
+    };
+    let deposits = DepositBatch::new(vec![DepositRecord::new(bystander.clone(), 1)?])?;
+    let bystander_state = predecessor
+        .iter()
+        .find(|leaf| leaf.account == bystander)
+        .context("fraud bystander is not in genesis")?
+        .state;
+    let bystander_successor = AccountState {
+        balance: bystander_state.balance + 1,
+        ..bystander_state
+    };
+    let row = AccountRow {
+        account: bystander.clone(),
+        predecessor: bystander_state,
+        successor: bystander_successor,
+        outgoing: None,
+        output: SettlementOutput::None,
+        prefix: Prefix {
+            deposit: 1,
+            ..Prefix::default()
+        },
+    };
+    let mut successor = predecessor;
+    successor
+        .iter_mut()
+        .find(|leaf| leaf.account == bystander)
+        .context("fraud bystander is not in genesis")?
+        .state = bystander_successor;
+    let registration = protocol.registration(0, deposits.clone(), WithdrawalBatch::empty(), 400)?;
+    let prepared = protocol.prepare(
+        registration,
+        vec![deposit.clone()],
+        state.leaves().to_vec(),
+        vec![row],
+        vec![ShardSet::empty(0, bystander)],
+        successor,
+    )?;
+
+    // The omitting close excludes the recipient, so its composed lookup is an ordered absence.
+    let index = ChallengeIndex::new::<Sha256>(prepared.close_context(), prepared.close())
+        .context("index the omitting close")?;
+    let held_lookup = index
+        .higher_shard_tip_lookup::<Sha256>(&recipient, None, 0)
+        .context("compose the omitted recipient lookup")?;
+    let result = protocol.complete(prepared, rng)?;
+    let context = result.payment_context.clone();
+
+    // The recipient holds an operator-signed receipt crediting it under the same epoch context.
+    let send = SignedSend::sign_next(&context, payer.signer(), recipient.clone(), held_credit, 0)
+        .context("sign the omitted recipient's send")?;
+    let receipt = SignedReceipt::issue_next::<Sha256, _>(
+        &context,
+        &send,
+        &recipient,
+        0,
+        0,
+        0,
+        protocol.operator(),
+    )
+    .context("issue the omitted recipient's receipt")?;
+    Ok(OmittingClose {
+        deposit,
+        deposits,
+        result,
+        recipient,
+        held_credit,
+        held_pair: Payment::from_parts_unchecked(send, receipt),
+        held_lookup,
+    })
 }
 
 pub(crate) fn encoded_artifacts(result: &SettlementResult) -> (Vec<u8>, Vec<u8>, Vec<u8>) {

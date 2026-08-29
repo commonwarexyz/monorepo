@@ -1,6 +1,9 @@
 use commonware_clearing::bajillion::{
     boundary::{DepositBatch, WithdrawalBatch},
-    challenge::{Challenge, ChallengeKind, HigherShardTipLookup, Verdict, adjudicate},
+    challenge::{
+        AccountLookup, Challenge, ChallengeKind, HigherShardTipLookup, RangeLower,
+        ReceiptForkWitness, Verdict, adjudicate,
+    },
     credit::{CreditTipLookup, ShardHead, ShardSet},
     payment::{Entry, Payment, PaymentContext, PaymentWitness, SignedReceipt, SignedSend},
     state::{AccountRow, AccountState, Prefix, SettlementOutput, StateLeaf},
@@ -196,9 +199,36 @@ pub(crate) struct ChallengeFixture {
     pub(crate) context: CloseContext<VerifyingKey, Digest>,
     pub(crate) header: Header<Digest>,
     pub(crate) roots: RootBundle<Digest>,
-    pub(crate) challenge: Challenge<VerifyingKey, Digest>,
+    latest: Challenge<VerifyingKey, Digest>,
+    pub(crate) tip: Challenge<VerifyingKey, Digest>,
+    range: Challenge<VerifyingKey, Digest>,
+    fork: Challenge<VerifyingKey, Digest>,
     payer: SigningKey,
     challenged: VerifyingKey,
+}
+
+impl ChallengeFixture {
+    /// Returns one proven challenge per kind in [`ChallengeKind`] order.
+    pub(crate) const fn challenges(
+        &self,
+    ) -> [(ChallengeKind, &Challenge<VerifyingKey, Digest>); 4] {
+        [
+            (ChallengeKind::LatestAcknowledgedSend, &self.latest),
+            (ChallengeKind::HigherShardTip, &self.tip),
+            (ChallengeKind::InconsistentReceiptRange, &self.range),
+            (ChallengeKind::ReceiptFork, &self.fork),
+        ]
+    }
+}
+
+/// Short benchmark label for one challenge kind.
+pub(crate) const fn kind_label(kind: ChallengeKind) -> &'static str {
+    match kind {
+        ChallengeKind::LatestAcknowledgedSend => "latest",
+        ChallengeKind::HigherShardTip => "tip",
+        ChallengeKind::InconsistentReceiptRange => "range",
+        ChallengeKind::ReceiptFork => "fork",
+    }
 }
 
 fn predecessor_state() -> AccountState {
@@ -576,10 +606,143 @@ pub(crate) fn payment_fixture() -> PaymentFixture {
     PaymentFixture { context, payment }
 }
 
+fn assert_proven(
+    context: &CloseContext<VerifyingKey, Digest>,
+    header: &Header<Digest>,
+    roots: &RootBundle<Digest>,
+    challenge: &Challenge<VerifyingKey, Digest>,
+    kind: ChallengeKind,
+) {
+    assert_eq!(
+        adjudicate::<Sha256, _>(
+            context,
+            header,
+            roots,
+            context.challenge_deadline(),
+            challenge
+        )
+        .expect("benchmark challenge is well formed"),
+        Verdict::Proven(kind)
+    );
+}
+
+/// Signs the private evidence for the three non-tip contradiction kinds against one close.
+///
+/// The bench holds the operator and payer signers, so it can produce exactly the acknowledged
+/// pairs a cheating operator would have issued beyond the committed close. Each challenge is
+/// asserted to adjudicate to its proven kind.
+fn remaining_challenges(
+    fixture: &CloseFixture,
+    index: &ChallengeIndex<VerifyingKey, Digest>,
+    payer: &SigningKey,
+    forker: &SigningKey,
+    challenged: &SigningKey,
+) -> [Challenge<VerifyingKey, Digest>; 3] {
+    let operator = SigningKey::from_seed(OPERATOR_SEED);
+    let context = fixture.context.payment();
+    let header = fixture.prepared.close().header;
+    let roots = fixture.prepared.close().roots;
+    let row = fixture
+        .rows
+        .binary_search_by(|row| row.account.cmp(&payer.public_key()))
+        .expect("benchmark payer has a changed row");
+    let committed = fixture.rows[row].successor.cumulative_debit;
+    let next_debit = |offset: u64| {
+        committed
+            .checked_add(offset)
+            .expect("benchmark payer debit advances")
+    };
+
+    // A matching acknowledged pair one unit past the payer's public terminal debit marker,
+    // paired with the payer-row membership lookup (an unchanged payer would use the ordered
+    // absence arm instead).
+    let acknowledged = signed_payment(context, &operator, payer, challenged, 0, committed, 0, 0);
+    let lookup = index
+        .account_lookup(&fixture.cache, &payer.public_key())
+        .expect("benchmark payer lookup is aligned");
+    assert!(matches!(lookup, AccountLookup::Present(_)));
+    let latest = Challenge::LatestAcknowledgedSend {
+        payment: Box::new(PaymentWitness::from_payment(&acknowledged)),
+        payer: Box::new(lookup),
+    };
+    assert_proven(
+        &fixture.context,
+        &header,
+        &roots,
+        &latest,
+        ChallengeKind::LatestAcknowledgedSend,
+    );
+
+    // Two linked endpoints in one anchor, recipient, and shard at index distance one. Adjacent
+    // receipts must advance credit by exactly the upper amount, so the skipped credit unit is
+    // infeasible.
+    let lower = signed_payment(
+        context,
+        &operator,
+        payer,
+        challenged,
+        0,
+        next_debit(1),
+        0,
+        0,
+    );
+    let upper = signed_payment(
+        context,
+        &operator,
+        payer,
+        challenged,
+        0,
+        next_debit(2),
+        2,
+        1,
+    );
+    let range = Challenge::InconsistentReceiptRange {
+        upper: Box::new(PaymentWitness::from_payment(&upper)),
+        lower: RangeLower::from_payment(&lower),
+    };
+    assert_proven(
+        &fixture.context,
+        &header,
+        &roots,
+        &range,
+        ChallengeKind::InconsistentReceiptRange,
+    );
+
+    // Two distinct linked receipt bodies reusing one shard index. SameIndex is the canonical
+    // two-pair fork shape. The same-entry relation (SameSend) has the same two-pair shape with
+    // the send shared instead of the index scope.
+    let left = signed_payment(
+        context,
+        &operator,
+        payer,
+        challenged,
+        0,
+        next_debit(3),
+        0,
+        0,
+    );
+    let right = signed_payment(context, &operator, forker, challenged, 0, 0, 2, 0);
+    let fork = Challenge::receipt_fork(&left, &right);
+    assert!(matches!(
+        &fork,
+        Challenge::ReceiptFork { fork }
+            if matches!(fork.as_ref(), ReceiptForkWitness::SameIndex { .. })
+    ));
+    assert_proven(
+        &fixture.context,
+        &header,
+        &roots,
+        &fork,
+        ChallengeKind::ReceiptFork,
+    );
+
+    [latest, range, fork]
+}
+
 pub(crate) fn active_chain_fixture(
     profile: ActiveProfile,
     assignment: Assignment<Digest>,
-) -> (CloseFixture, Challenge<VerifyingKey, Digest>, SigningKey) {
+) -> (CloseFixture, ChallengeFixture, SigningKey) {
     let (fixture, accounts) = active_close_fixture_parts(profile, assignment);
     let claim_account = fixture
         .rows
@@ -670,22 +833,38 @@ pub(crate) fn active_chain_fixture(
         u32::try_from(profile.receive_shards_per_credited)
             .expect("benchmark shard count fits in u32")
     );
-    let challenge = Challenge::HigherShardTip {
+    let tip = Challenge::HigherShardTip {
         payment: Box::new(PaymentWitness::from_payment(&retained)),
         recipient: Box::new(recipient),
     };
-    assert_eq!(
-        adjudicate::<Sha256, _>(
-            &fixture.context,
-            &fixture.prepared.close().header,
-            &fixture.prepared.close().roots,
-            fixture.context.challenge_deadline(),
-            &challenge,
-        )
-        .expect("benchmark challenge is well formed"),
-        Verdict::Proven(ChallengeKind::HigherShardTip)
+    let header = fixture.prepared.close().header;
+    let roots = fixture.prepared.close().roots;
+    assert_proven(
+        &fixture.context,
+        &header,
+        &roots,
+        &tip,
+        ChallengeKind::HigherShardTip,
     );
-    (fixture, challenge, claim_signer)
+    let [latest, range, fork] = remaining_challenges(
+        &fixture,
+        &index,
+        &claim_signer,
+        &accounts[2].private,
+        &accounts[recipient_position].private,
+    );
+    let challenges = ChallengeFixture {
+        context: fixture.context.clone(),
+        header,
+        roots,
+        latest,
+        tip,
+        range,
+        fork,
+        payer: claim_signer.clone(),
+        challenged: fixture.rows[row_position].account.clone(),
+    };
+    (fixture, challenges, claim_signer)
 }
 
 /// Rebuilds the fixture's challenge witness as a batched send with `entries` recipients.
@@ -698,7 +877,7 @@ pub(crate) fn batched_challenge(
     entries: usize,
 ) -> Challenge<VerifyingKey, Digest> {
     const FILLER_SEED_START: u64 = 1_000_000;
-    let Challenge::HigherShardTip { recipient, .. } = &fixture.challenge else {
+    let Challenge::HigherShardTip { recipient, .. } = &fixture.tip else {
         unreachable!("the challenge fixture is a higher-shard-tip challenge")
     };
     let operator = SigningKey::from_seed(OPERATOR_SEED);
@@ -727,16 +906,12 @@ pub(crate) fn batched_challenge(
         payment: Box::new(PaymentWitness::from_payment(&payment)),
         recipient: recipient.clone(),
     };
-    assert_eq!(
-        adjudicate::<Sha256, _>(
-            &fixture.context,
-            &fixture.header,
-            &fixture.roots,
-            fixture.context.challenge_deadline(),
-            &challenge,
-        )
-        .expect("benchmark batched challenge is well formed"),
-        Verdict::Proven(ChallengeKind::HigherShardTip)
+    assert_proven(
+        &fixture.context,
+        &fixture.header,
+        &fixture.roots,
+        &challenge,
+        ChallengeKind::HigherShardTip,
     );
     challenge
 }
@@ -792,29 +967,35 @@ pub(crate) fn challenge_fixture(
             0,
         )
         .expect("benchmark recipient and shard lookup are aligned");
-    let challenge = Challenge::HigherShardTip {
+    let tip = Challenge::HigherShardTip {
         payment: Box::new(PaymentWitness::from_payment(&retained)),
         recipient: Box::new(recipient),
     };
     let context = fixture.context.clone();
     let header = fixture.prepared.close().header;
     let roots = fixture.prepared.close().roots;
-    assert_eq!(
-        adjudicate::<Sha256, _>(
-            &context,
-            &header,
-            &roots,
-            context.challenge_deadline(),
-            &challenge,
-        )
-        .expect("benchmark challenge is well formed"),
-        Verdict::Proven(ChallengeKind::HigherShardTip)
+    assert_proven(
+        &context,
+        &header,
+        &roots,
+        &tip,
+        ChallengeKind::HigherShardTip,
+    );
+    let [latest, range, fork] = remaining_challenges(
+        &fixture,
+        &index,
+        &accounts[1].private,
+        &accounts[2].private,
+        &accounts[0].private,
     );
     ChallengeFixture {
         context,
         header,
         roots,
-        challenge,
+        latest,
+        tip,
+        range,
+        fork,
         payer: accounts[1].private.clone(),
         challenged: accounts[0].public.clone(),
     }

@@ -6,23 +6,26 @@ Run `commonware-clearing` through three independently owned roles:
   recovery, and claim replay protection.
 - `terminal-operator` owns the SQLite ledger, accepts signed sends, issues receipts, and constructs
   closes.
-- `terminal-agent` owns one wallet key, verifies returned receipts, and provides the Ratatui UI.
+- `terminal-agent` owns one wallet key, verifies returned receipts, holds as a service provider
+  the pairs crediting it, reconciles them against admitted closes, and provides the Ratatui UI.
 
 The processes exchange one bounded request and response per connection using canonical
 `commonware-codec` messages over Commonware's runtime networking traits. There is no HTTP,
 protobuf, or generated RPC layer.
 
 The example is educational rather than a production operator or asset adapter. Wallet,
-operator, and validator keys are deterministically derived. The settlement process is intentionally
-in-memory; restarting it is unsupported, while the SQLite operator and its close queue survive
-restarts. Each wallet's cumulative debit, pending signed send, authenticated receipts, and the
-exact state-root openings observed before payment and withdrawal authorization are SQLite-backed.
+operator, and validator keys are deterministically derived. The settlement process applies every
+state-bearing input in memory and appends it to a SQLite log before responding, so a restarted
+settlement replays the log back into the identical state. The SQLite operator and its close queue
+also survive restarts. Each wallet's cumulative debit, pending signed send, authenticated
+receipts, and the exact state-root openings observed before payment and withdrawal authorization
+are SQLite-backed.
 Openings are retained by full root so a later hard fault can freeze an older finalized root.
 Deposit and withdrawal authorization retries remain process-local, so those
 workflows do not promise exactly-once behavior across an agent restart. Settlement keeps bounded
 in-memory replay windows for admission, challenge, terminal-state claims, and pending-deposit
 refunds. Successful finalized withdrawal and external-payout claims retain their exact results for
-the settlement process lifetime, allowing response-loss retries and mandatory operator
+the deployment lifetime, allowing response-loss retries and mandatory operator
 acknowledgements after any number of later valid claims. The returned releases model an asset
 adapter decision, not an external transfer. A production embedding must durably and atomically
 commit each transfer with its replay-protection mutation.
@@ -52,7 +55,10 @@ PAYMENT
    |
    +-- invalid or missing receipt => reject without advancing wallet-local debit
    +-- missing response => acceptance unknown; retry exact persisted S
-   +-- admitted close omits/conflicts with an accepted entry's pair => challenge by its deadline
+   +-- admitted close omits an accepted send => the payment did not happen and the payer's
+       funds stay, resolved by abandoning against the finalized endpoint. A payer can never be
+       over-debited: public validity certifies every committed debit against a payer-signed
+       send, so enforcing an omitted credit belongs to the harmed recipient, not the payer
 
  A send names one or more strictly recipient-sorted entries under one signature and one
  cumulative debit endpoint. The operator accepts or rejects the batch as a whole and
@@ -139,6 +145,26 @@ later epoch-predecessor state, because the current frozen root has no live payer
 Receipt challenges still require the exact linked send/receipt pair. The example supplies no
 data-availability network or third-party opening retrieval.
 
+Provider enforcement flow. A wallet that provides a service is the party an omitted credit harms,
+so it enforces its own preconfirmations. It fetches the pairs crediting it from the operator by a
+durable cursor, verifies each fully (payer send signature once per transaction, operator receipt
+signature, exact linkage, and its own recipient), and anchors the pair's `(epoch, anchor)` to the
+context settlement registered for that epoch. A receipt over an operator-chosen anchor with no
+settlement obligation is never reliance-grade. Only then does it durably hold the pair and gate
+service on it, so a moved quote balance is an observation, not reliance. In the background it
+reconciles held credits against the admitted close: settlement serves the batch identity and
+change root it admitted for the epoch, and operator-served committed-side evidence is trusted only
+when it matches that anchor exactly, so the operator can withhold a lookup but can never fabricate
+coverage. When a held receipt exceeds the anchored committed tip inside the admission-to-
+finalization window, the wallet convicts the close with one `HigherShardTip` challenge and stops,
+because one proven challenge invalidates the whole close. The operator is the pair-delivery
+channel, and withholding a pair only degrades to the acceptance gate: an unheld credit is never
+relied upon and so harms no one. Wallets file `HigherShardTip` only. `LatestAcknowledgedSend`
+exists for a holder whose credit has no receive-shard tip to point at, such as an unregistered
+external-payout recipient proving omission through the payer-row angle, and the receipt-range and
+receipt-fork families require operator equivocation the honest demo never produces. Settlement
+adjudicates all four.
+
 Registration confirmation is live rather than historical. A registered context remains
 confirmable while its matching close is challengeable, but finalization, expiry, or a proven fault
 ends that authority. A late receipt therefore cannot rely on an old registration merely because a
@@ -162,9 +188,9 @@ cargo run --release -p commonware-terminal --bin terminal-operator -- \
 cargo run --release -p commonware-terminal --bin terminal-agent -- --identity 0
 ```
 
-Settlement state dies with its process, so starting the demo over requires deleting
-`terminal-operator.sqlite` and every `terminal-agent-*.sqlite` (or passing fresh `--database`
-paths) before starting the trio again.
+Every role is durable, so starting the demo over requires deleting
+`terminal-settlement.sqlite`, `terminal-operator.sqlite`, and every `terminal-agent-*.sqlite`
+(or passing fresh `--database` paths) before starting the trio again.
 
 Agent identities are `0=Alice`, `1=Bob`, `2=Carol`, `3=Dave`, and `4=Eve (external)`. The first
 four are registered operator accounts. Eve demonstrates an unregistered recipient claiming an
@@ -174,7 +200,12 @@ choose an explicit wallet database path.
 
 The UI supports payments, deposits, direct pending-deposit refunds with `r`, exact withdrawals,
 amountless account Close authorizations, withdrawal claims, payer-state hard-fault recovery with
-`h`, and epoch closure. `p` pays the selected recipient the selected amount. `a` stages the
+`h`, and epoch closure. A per-wallet provider-ledger line shows the verified incoming credit and
+the last reconciled epoch, updated on the heartbeat, and enforcement events, convictions,
+reconciliations, and alarms, are logged into the activity feed as they happen. When a signed
+withdrawal cannot be carried because the operator is unreachable, `x` escalates the exact request
+to settlement, whose deadline then expires into hard-fault recovery. `p` pays the selected
+recipient the selected amount. `a` stages the
 selected entry into a draft batch and `b` pays every staged entry with one batched send. The
 batch is rejected or accepted as a whole, so a failed `b` retries the identical batch. A
 pending-deposit refund needs only the wallet account and settlement; it does not contact the
@@ -225,6 +256,11 @@ cargo run --release -p commonware-terminal --bin terminal-agent -- --scripted
 ```
 
 The walkthrough deposits, hands the operator a withdrawal to carry, pays an internal recipient,
-pays a two-recipient batch under one signature, pays an external recipient, starts an asynchronous
-close, opens the registered successor after finalization, and claims the finalized withdrawal and
-external payout.
+pays a two-recipient batch under one signature, and pays an external recipient. A recipient then
+durably intakes and settlement-anchors its incoming pairs and gates service on that held evidence
+before the epoch is cut, the walkthrough starts an asynchronous close, opens the registered
+successor after finalization, reconciles the recipient's finalized credit as evidence-backed, and
+claims the finalized withdrawal and external payout. It closes with a self-contained fraud arc:
+an assembled omitting close is admitted, the omitted recipient's held receipt convicts it with a
+proven `HigherShardTip` challenge through the real dispatch, and the fraudulent operator is fenced.
+The operator binary stays honest, and the fraud is assembled only in the scripted walkthrough.

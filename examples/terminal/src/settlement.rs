@@ -130,6 +130,29 @@ pub(crate) struct ClaimRoots {
     pub(crate) change: VectorRoot<Digest>,
 }
 
+/// What settlement holds for one epoch: the registered payment anchor, and the admitted
+/// close's identity and roots once a close is admitted.
+///
+/// This is the anchor for both intake and reconciliation. A recipient records a pair as
+/// reliance-grade only when its context anchor matches `anchor` here, and it decides coverage
+/// of a held receipt only against `admitted`, never against operator-claimed roots.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct EpochRoots {
+    /// The registered payment context anchor, present from registration onward.
+    pub(crate) anchor: Digest,
+    /// The admitted close, present once a close is admitted for the epoch.
+    pub(crate) admitted: Option<AdmittedRoots>,
+}
+
+/// The identity and change root of the close admitted for one epoch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct AdmittedRoots {
+    pub(crate) batch_id: BatchId<Digest>,
+    pub(crate) change: VectorRoot<Digest>,
+    /// Whether the close finalized. While false, its inclusive challenge window is open.
+    pub(crate) finalized: bool,
+}
+
 /// Whether settlement holds a custody record for one exact deposit event.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DepositPresence {
@@ -194,6 +217,15 @@ pub(crate) struct Settlement {
     /// claimable indefinitely and claimants verify operator-served evidence against these
     /// roots, so unlike the bounded replay caches this record is never evicted.
     finalized_batches: BTreeMap<BatchId<Digest>, ClaimRoots>,
+    /// The batch finalized for each epoch. Recipients anchor reconciliation by epoch, so
+    /// like the claim roots this record is never evicted.
+    finalized_epochs: BTreeMap<u64, BatchId<Digest>>,
+    /// The registered payment anchor of each epoch. Recipients anchor intake by epoch, so
+    /// this record is retained past registration and admission and is never evicted.
+    epoch_anchors: BTreeMap<u64, Digest>,
+    /// The admitted close of each epoch, retained past a proven challenge that clears the live
+    /// registration so a recipient can still anchor reconciliation on it. Never evicted.
+    admitted_epochs: BTreeMap<u64, (BatchId<Digest>, VectorRoot<Digest>)>,
     finalized_replays: ReplayCache<u64, FinalizedAdmission>,
     challenge_replays: ReplayCache<BatchId<Digest>, ProvenChallenge>,
     withdrawal_replays: BTreeMap<WithdrawalClaimKey, ClaimedWithdrawal>,
@@ -257,6 +289,9 @@ impl Settlement {
             registered: None,
             deposits: BTreeMap::new(),
             finalized_batches: BTreeMap::new(),
+            finalized_epochs: BTreeMap::new(),
+            epoch_anchors: BTreeMap::new(),
+            admitted_epochs: BTreeMap::new(),
             finalized_replays: ReplayCache::new(finalized_replays),
             challenge_replays: ReplayCache::new(challenge_replays),
             withdrawal_replays: BTreeMap::new(),
@@ -283,16 +318,14 @@ impl Settlement {
         });
     }
 
-    const fn advance_clock(&mut self, elapsed: Duration) -> bool {
-        let Some(clock) = &self.liveness_clock else {
-            return false;
-        };
-        let ticks = elapsed.as_secs() / LOGICAL_TICK.as_secs();
-        let observed = clock.logical_start.saturating_add(ticks);
-        if observed <= self.now {
+    const fn advance_to(&mut self, now: u64) -> bool {
+        if self.liveness_clock.is_none() {
             return false;
         }
-        self.now = observed;
+        if now <= self.now {
+            return false;
+        }
+        self.now = now;
         true
     }
 
@@ -326,13 +359,32 @@ impl Settlement {
                 change: submission.roots.change,
             },
         );
+        self.finalized_epochs
+            .insert(submission.epoch, finalized.batch_id);
         self.finalized_replays
             .insert(submission.epoch, (submission, finalized));
         Ok(true)
     }
 
-    fn observe_elapsed(&mut self, elapsed: Duration) -> Result<()> {
-        if !self.advance_clock(elapsed) {
+    /// Returns the logical time a call arriving now observes: the running liveness
+    /// clock's wall-clock reading, or the current time while no clock runs.
+    ///
+    /// Observation is split from application so the observed value can be recorded
+    /// before it takes effect. Startup replay feeds the recorded value back through
+    /// [`Self::observe_at`], which keeps fault timing bit-exact.
+    pub(crate) fn observe_now(&self) -> u64 {
+        let Some(clock) = &self.liveness_clock else {
+            return self.now;
+        };
+        let ticks = clock.started_at.elapsed().as_secs() / LOGICAL_TICK.as_secs();
+        self.now.max(clock.logical_start.saturating_add(ticks))
+    }
+
+    /// Applies one observed logical time. A call carrying `now` first observes every
+    /// liveness deadline, which can finalize an admitted close or record a permanent
+    /// fault before the call's own operation runs.
+    pub(crate) fn observe_at(&mut self, now: u64) -> Result<()> {
+        if !self.advance_to(now) {
             return Ok(());
         }
         if self.finalize_admitted_if_ready()? {
@@ -356,24 +408,41 @@ impl Settlement {
         Ok(())
     }
 
-    fn observe_time(&mut self) -> Result<()> {
-        let elapsed = self
-            .liveness_clock
-            .as_ref()
-            .map_or(Duration::ZERO, |clock| clock.started_at.elapsed());
-        self.observe_elapsed(elapsed)
+    /// Re-anchors the liveness clock after startup replay. Logical time advances only
+    /// while the process serves, so downtime never counts against a liveness deadline.
+    pub(crate) fn resume(&mut self) {
+        if self.liveness_clock.is_some() {
+            self.restart_liveness_clock();
+        }
+    }
+
+    pub(crate) const fn now(&self) -> u64 {
+        self.now
     }
 
     #[cfg(test)]
     pub(crate) fn advance_logical_time(&mut self, ticks: u64) -> Result<()> {
-        self.observe_elapsed(Duration::from_secs(
-            LOGICAL_TICK.as_secs().saturating_mul(ticks),
-        ))
+        let Some(target) = self
+            .liveness_clock
+            .as_ref()
+            .map(|clock| clock.logical_start.saturating_add(ticks))
+        else {
+            return Ok(());
+        };
+        self.observe_at(target)
+    }
+
+    /// Observed target `ticks` past the current time, or `None` while no liveness
+    /// clock runs. Relative to the current time rather than the clock anchor because
+    /// reopening a store re-anchors the clock.
+    #[cfg(test)]
+    pub(crate) fn tick_target(&self, ticks: u64) -> Option<u64> {
+        self.liveness_clock
+            .as_ref()
+            .map(|_| self.now.saturating_add(ticks))
     }
 
     pub(crate) fn status(&mut self) -> Result<SettlementStatus> {
-        self.observe_time()?;
-
         // The root and the finality horizon come from the chain's one coherent fact, so
         // the pair served to wallets can never desync.
         Ok(SettlementStatus {
@@ -392,12 +461,34 @@ impl Settlement {
     /// An unknown batch is an availability signal, never a verdict: the batch may simply
     /// not have finalized yet.
     pub(crate) fn claim_roots(&mut self, batch_id: BatchId<Digest>) -> Result<Option<ClaimRoots>> {
-        self.observe_time()?;
         Ok(self.finalized_batches.get(&batch_id).copied())
     }
 
+    /// Returns what settlement holds for one epoch: its registered payment anchor, and the
+    /// admitted close's identity and roots once a close is admitted.
+    ///
+    /// `None` means the epoch was never registered, an availability signal, never a verdict.
+    /// This read anchors both intake and reconciliation, so it serves only settlement's own
+    /// registration and admission record and never an operator claim.
+    pub(crate) fn epoch_roots(&mut self, epoch: u64) -> Result<Option<EpochRoots>> {
+        let Some(anchor) = self.epoch_anchors.get(&epoch).copied() else {
+            return Ok(None);
+        };
+
+        // The admitted record is retained by epoch, so it survives both finalization and a
+        // proven challenge that clears the live registration. Finalization is read separately.
+        let admitted = self
+            .admitted_epochs
+            .get(&epoch)
+            .map(|(batch_id, change)| AdmittedRoots {
+                batch_id: *batch_id,
+                change: *change,
+                finalized: self.finalized_epochs.contains_key(&epoch),
+            });
+        Ok(Some(EpochRoots { anchor, admitted }))
+    }
+
     pub(crate) fn deposit(&mut self, event: DepositEvent) -> Result<()> {
-        self.observe_time()?;
         ensure!(
             identities()
                 .iter()
@@ -438,7 +529,6 @@ impl Settlement {
     }
 
     pub(crate) fn confirm_deposit(&mut self, event: &DepositEvent) -> Result<DepositPresence> {
-        self.observe_time()?;
         ensure!(
             self.chain.hard_fault().is_none(),
             "settlement deployment is permanently hard-faulted"
@@ -464,7 +554,6 @@ impl Settlement {
         anchor: &Digest,
         state_root: &VectorRoot<Digest>,
     ) -> Result<()> {
-        self.observe_time()?;
         ensure!(
             self.chain.hard_fault().is_none(),
             "payment registration is no longer live"
@@ -486,7 +575,6 @@ impl Settlement {
         request: SignedWithdrawal<Key, Digest>,
         openings: Vec<StateOpening<Key, Digest>>,
     ) -> Result<()> {
-        self.observe_time()?;
         let pending = self.chain.pending_withdrawals();
         if let Some(existing) = pending.request_for(request.account()) {
             ensure!(
@@ -520,7 +608,6 @@ impl Settlement {
         withdrawals: WithdrawalBatch<Key, Digest>,
         openings: &[StateOpening<Key, Digest>],
     ) -> Result<()> {
-        self.observe_time()?;
         if let Some(existing) = self
             .registered
             .as_ref()
@@ -621,6 +708,7 @@ impl Settlement {
             withdrawals,
             admitted: None,
         });
+        self.epoch_anchors.insert(epoch, anchor);
         self.start_liveness_clock();
         Ok(())
     }
@@ -633,7 +721,6 @@ impl Settlement {
         &mut self,
         submission: SettlementSubmission,
     ) -> Result<AdmissionOutcome> {
-        self.observe_time()?;
         if let Some((existing, finalized)) = self.finalized_replays.get(&submission.epoch) {
             ensure!(
                 existing == &submission,
@@ -683,6 +770,16 @@ impl Settlement {
                     submission.certificate.clone(),
                 )
                 .context("admit certified close on settlement")?;
+            // Retain the admitted close by epoch so a recipient can still anchor on it after a
+            // proven challenge clears the live registration. This lets a wallet that crashed
+            // between a proven verdict and recording it re-mark from the idempotent resubmission.
+            self.admitted_epochs.insert(
+                submission.epoch,
+                (
+                    submission.header.batch_id::<Sha256>(),
+                    submission.roots.change,
+                ),
+            );
             self.registered
                 .as_mut()
                 .expect("the registered epoch was checked above")
@@ -723,7 +820,6 @@ impl Settlement {
         encoded: Bytes,
         maximum_bytes: usize,
     ) -> Result<Verdict> {
-        self.observe_time()?;
         if let Some((existing, verdict)) = self.challenge_replays.get(&batch_id) {
             ensure!(
                 existing == &encoded,
@@ -746,7 +842,6 @@ impl Settlement {
     pub(crate) fn begin_hard_fault_settlement(
         &mut self,
     ) -> Result<HardFaultSettlement<Key, Digest>> {
-        self.observe_time()?;
         if let Some(settlement) = &self.hard_fault_begin_replay {
             return Ok(settlement.clone());
         }
@@ -762,7 +857,6 @@ impl Settlement {
         &mut self,
         opening: &StateOpening<Key, Digest>,
     ) -> Result<HardFaultRelease<Key>> {
-        self.observe_time()?;
         let frozen_state_root = self
             .hard_fault_begin_replay
             .as_ref()
@@ -786,7 +880,6 @@ impl Settlement {
     }
 
     pub(crate) fn claim_pending_deposit(&mut self, account: &Key) -> Result<DepositRefund<Key>> {
-        self.observe_time()?;
         if let Some(refund) = self.deposit_refund_replays.get(account) {
             return Ok(refund.clone());
         }
@@ -804,7 +897,6 @@ impl Settlement {
         batch_id: BatchId<Digest>,
         claim: &WithdrawalClaim<Digest>,
     ) -> Result<ClaimOutcome<WithdrawalOutput>> {
-        self.observe_time()?;
         let key = (batch_id, claim.position());
         if let Some((existing, release)) = self.withdrawal_replays.get(&key) {
             if existing == claim {
@@ -829,7 +921,6 @@ impl Settlement {
         batch_id: BatchId<Digest>,
         claim: &ExternalPayoutClaim<Key, Digest>,
     ) -> Result<ClaimOutcome<ExternalPayout<Key>>> {
-        self.observe_time()?;
         let key = (batch_id, claim.position());
         if let Some((existing, payout)) = self.payout_replays.get(&key) {
             if existing == claim {

@@ -31,7 +31,10 @@ use std::{
 };
 use thiserror::Error;
 
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
+/// Bounds one page of incoming pairs served to a recipient. Each stored row is one linked
+/// [`Payment`] at most [`MAX_PAYMENT_BYTES`], so this page stays well under the RPC body limit.
+pub(crate) const MAX_INCOMING_PAGE: usize = 128;
 const MAX_CLAIM_BYTES: usize = 16 * 1024;
 const MAX_CLOSE_ERROR_BYTES: usize = 4 * 1024;
 pub(crate) const MAX_DESTINATION_BYTES: usize = 256;
@@ -184,6 +187,16 @@ pub(crate) struct StoredShardEndpoint {
     pub(crate) shard: u64,
     pub(crate) cumulative_credit: u64,
     pub(crate) receipt_index: u64,
+}
+
+/// One accepted linked pair crediting a recipient, with its stable acceptance-order cursor.
+///
+/// The cursor is the payment log's autoincrement sequence, so a recipient can fetch new
+/// credits incrementally by passing the highest sequence it already holds.
+pub(crate) struct IncomingPayment {
+    pub(crate) sequence: u64,
+    pub(crate) epoch: u64,
+    pub(crate) payment: Payment,
 }
 
 pub(crate) struct EpochData {
@@ -472,6 +485,8 @@ impl Store {
              );
              CREATE INDEX IF NOT EXISTS payments_epoch_sequence
                  ON payments(epoch, sequence);
+             CREATE INDEX IF NOT EXISTS payments_recipient_sequence
+                 ON payments(recipient, sequence);
 
              CREATE TABLE IF NOT EXISTS receive_shards (
                  epoch INTEGER NOT NULL CHECK (epoch >= 0),
@@ -1191,6 +1206,60 @@ impl Store {
         send: &SignedSend<Key, Digest>,
     ) -> Result<Option<AcceptedBatch>> {
         find_accepted_batch(&self.connection, send, &send.tx_id::<Sha256>())
+    }
+
+    /// Serves accepted linked pairs crediting `recipient` in acceptance order after `after`.
+    ///
+    /// Rows are stored as canonical [`Payment`] bytes keyed by `(tx_id, recipient)` on the
+    /// accept path, so this decodes and serves them directly. Every retained epoch is served:
+    /// the operator keeps its per-entry payment rows across finalization (only shadowed and
+    /// zero-balance account-state versions are pruned), so a recipient can fetch the credits of
+    /// the open epoch and every closed epoch this database still holds.
+    pub(crate) fn incoming_payments(
+        &self,
+        recipient: &Key,
+        after: u64,
+        limit: usize,
+    ) -> Result<Vec<IncomingPayment>> {
+        let limit = i64::try_from(limit.min(MAX_INCOMING_PAGE)).context("incoming page")?;
+        let mut statement = self.connection.prepare_cached(
+            "SELECT sequence, epoch, length(encoded), encoded
+             FROM payments
+             WHERE recipient = ?1 AND sequence > ?2
+             ORDER BY sequence
+             LIMIT ?3",
+        )?;
+        let rows = statement
+            .query_map(
+                params![
+                    recipient.as_ref(),
+                    sql_u64(after, "incoming cursor")?,
+                    limit
+                ],
+                |row| {
+                    let sequence =
+                        from_sql_u64(row.get(0)?, "payment sequence").map_err(to_sqlite_error)?;
+                    let epoch =
+                        from_sql_u64(row.get(1)?, "payment epoch").map_err(to_sqlite_error)?;
+                    let encoded =
+                        read_bounded_blob(row, 2, 3, MAX_PAYMENT_BYTES, "encoded payment")?;
+                    let payment = Payment::decode(encoded.as_slice()).map_err(|error| {
+                        to_sqlite_error(anyhow::anyhow!("decode incoming payment: {error}"))
+                    })?;
+                    Ok(IncomingPayment {
+                        sequence,
+                        epoch,
+                        payment,
+                    })
+                },
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Loads a specific retained epoch for committed-side evidence reconstruction.
+    pub(crate) fn load_at(&self, epoch: u64) -> Result<EpochData> {
+        Self::load_epoch(&self.connection, epoch)
     }
 
     pub(crate) fn stage_deposit(

@@ -1,7 +1,7 @@
 //! Runtime-owning service loops for the three terminal binaries.
 
 use crate::{
-    agent::Agent, operator::Operator, operator_rpc, rpc, settlement::Settlement, settlement_rpc, ui,
+    agent::Agent, operator::Operator, operator_rpc, rpc, settlement_rpc, settlement_store, ui,
 };
 use anyhow::{Context, Result, ensure};
 use commonware_runtime::{Clock, Listener, Network, Runner as _, tokio};
@@ -16,14 +16,13 @@ fn runtime() -> tokio::Runner {
     )
 }
 
-pub(crate) fn run_settlement(bind: SocketAddr) -> Result<()> {
+pub(crate) fn run_settlement(bind: SocketAddr, database: PathBuf) -> Result<()> {
     runtime().start(move |context| async move {
-        let mut settlement = Settlement::new().context("initialize settlement")?;
-        rpc::serve(&context, bind, |request| {
-            settlement_rpc::handle(&mut settlement, request)
-        })
-        .await
-        .context("serve settlement")
+        let mut settlement =
+            settlement_store::Store::open(&database).context("initialize SQLite settlement")?;
+        rpc::serve(&context, bind, |request| settlement.handle(request))
+            .await
+            .context("serve settlement")
     })
 }
 
@@ -207,6 +206,7 @@ mod tests {
     use crate::{
         agent::{DepositOutcome, WithdrawalOutcome},
         protocol::wallets,
+        settlement::Settlement,
         settlement_rpc,
     };
     use bytes::Bytes;

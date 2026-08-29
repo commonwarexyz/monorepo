@@ -46,6 +46,7 @@ pub(crate) const METHOD_CLAIM_HARD_FAULT: u8 = 11;
 pub(crate) const METHOD_CLAIM_PENDING_DEPOSIT: u8 = 12;
 pub(crate) const METHOD_CONFIRM_REGISTRATION: u8 = 13;
 pub(crate) const METHOD_CLAIM_ROOTS: u8 = 14;
+pub(crate) const METHOD_EPOCH_ROOTS: u8 = 15;
 
 const MAX_BATCH_ITEMS: usize = 1_024;
 const MAX_STATE_OPENINGS: usize = 5;
@@ -194,6 +195,117 @@ impl Read for ClaimRootsResponse {
         Ok(Self {
             withdrawal_outputs: VectorRoot::read(buf)?,
             change: VectorRoot::read(buf)?,
+        })
+    }
+}
+
+/// Requests the close settlement holds for one epoch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct EpochRootsRequest {
+    pub(crate) epoch: u64,
+}
+
+impl Write for EpochRootsRequest {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.epoch.write(buf);
+    }
+}
+
+impl EncodeSize for EpochRootsRequest {
+    fn encode_size(&self) -> usize {
+        self.epoch.encode_size()
+    }
+}
+
+impl Read for EpochRootsRequest {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+        Ok(Self {
+            epoch: u64::read(buf)?,
+        })
+    }
+}
+
+/// What settlement holds for one epoch: its registered payment anchor and, once a close is
+/// admitted, that close's identity and roots.
+///
+/// Recipients anchor intake against `anchor` and reconciliation against `admitted`, so
+/// operator-served committed-side evidence is trusted only when it matches this record.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct EpochRootsResponse {
+    pub(crate) anchor: Digest,
+    pub(crate) admitted: Option<AdmittedRootsResponse>,
+}
+
+/// The identity and change root of the close admitted for one epoch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct AdmittedRootsResponse {
+    pub(crate) batch_id: BatchId<Digest>,
+    pub(crate) change: VectorRoot<Digest>,
+    /// Whether the close finalized. While false, its inclusive challenge window is open.
+    pub(crate) finalized: bool,
+}
+
+impl From<crate::settlement::EpochRoots> for EpochRootsResponse {
+    fn from(roots: crate::settlement::EpochRoots) -> Self {
+        Self {
+            anchor: roots.anchor,
+            admitted: roots.admitted.map(|admitted| AdmittedRootsResponse {
+                batch_id: admitted.batch_id,
+                change: admitted.change,
+                finalized: admitted.finalized,
+            }),
+        }
+    }
+}
+
+impl Write for AdmittedRootsResponse {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.batch_id.write(buf);
+        self.change.write(buf);
+        self.finalized.write(buf);
+    }
+}
+
+impl EncodeSize for AdmittedRootsResponse {
+    fn encode_size(&self) -> usize {
+        self.batch_id.encode_size() + self.change.encode_size() + self.finalized.encode_size()
+    }
+}
+
+impl Read for AdmittedRootsResponse {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+        Ok(Self {
+            batch_id: BatchId::read(buf)?,
+            change: VectorRoot::read(buf)?,
+            finalized: bool::read(buf)?,
+        })
+    }
+}
+
+impl Write for EpochRootsResponse {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.anchor.write(buf);
+        self.admitted.write(buf);
+    }
+}
+
+impl EncodeSize for EpochRootsResponse {
+    fn encode_size(&self) -> usize {
+        self.anchor.encode_size() + self.admitted.encode_size()
+    }
+}
+
+impl Read for EpochRootsResponse {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+        Ok(Self {
+            anchor: Digest::read(buf)?,
+            admitted: Option::<AdmittedRootsResponse>::read(buf)?,
         })
     }
 }
@@ -1293,7 +1405,33 @@ impl Read for ClaimPendingDepositResponse {
     }
 }
 
-fn dispatch(settlement: &mut Settlement, request: rpc::Request) -> anyhow::Result<Bytes> {
+/// Whether a method can mutate settlement state beyond the time observation every
+/// dispatch performs.
+pub(crate) const fn mutates(method: u8) -> bool {
+    matches!(
+        method,
+        METHOD_DEPOSIT
+            | METHOD_QUEUE_WITHDRAWAL
+            | METHOD_REGISTER_EPOCH
+            | METHOD_ADMIT
+            | METHOD_CLAIM_WITHDRAWAL
+            | METHOD_CLAIM_EXTERNAL_PAYOUT
+            | METHOD_CHALLENGE
+            | METHOD_BEGIN_HARD_FAULT_SETTLEMENT
+            | METHOD_CLAIM_HARD_FAULT
+            | METHOD_CLAIM_PENDING_DEPOSIT
+    )
+}
+
+pub(crate) fn dispatch(
+    settlement: &mut Settlement,
+    now: u64,
+    request: rpc::Request,
+) -> anyhow::Result<Bytes> {
+    // A call carrying `now` first observes every liveness deadline. Live dispatch
+    // passes the wall-clock observation and startup replay passes the recorded value,
+    // so every state transition is a deterministic function of the dispatched inputs.
+    settlement.observe_at(now)?;
     match request.method {
         METHOD_STATUS => {
             StatusRequest::decode(request.body).context("decode status request")?;
@@ -1393,6 +1531,14 @@ fn dispatch(settlement: &mut Settlement, request: rpc::Request) -> anyhow::Resul
                 .context("look up finalized claim roots")?;
             Ok(roots.map(ClaimRootsResponse::from).encode())
         }
+        METHOD_EPOCH_ROOTS => {
+            let request =
+                EpochRootsRequest::decode(request.body).context("decode epoch-roots request")?;
+            let roots = settlement
+                .epoch_roots(request.epoch)
+                .context("look up epoch roots")?;
+            Ok(roots.map(EpochRootsResponse::from).encode())
+        }
         METHOD_CHALLENGE => {
             let request =
                 ChallengeRequest::decode(request.body).context("decode challenge request")?;
@@ -1429,8 +1575,15 @@ fn dispatch(settlement: &mut Settlement, request: rpc::Request) -> anyhow::Resul
     }
 }
 
+/// Serves one request against a bare in-memory settlement, observing the wall clock.
+///
+/// The live binary serves through the store's write-before-respond handler instead,
+/// which shares this exact dispatch. This entry remains for tests that stand up a
+/// settlement without persistence.
+#[cfg(test)]
 pub(crate) fn handle(settlement: &mut Settlement, request: rpc::Request) -> rpc::Response {
-    match dispatch(settlement, request) {
+    let now = settlement.observe_now();
+    match dispatch(settlement, now, request) {
         Ok(body) => rpc::Response::Success { body },
         Err(error) => rpc::error_response(format!("{error:#}")),
     }
@@ -1501,6 +1654,27 @@ pub(crate) async fn claim_roots<E: Network>(
     .context("decode finalized claim roots")
 }
 
+/// Looks up the close settlement holds for one epoch, or `None` while none is admitted.
+///
+/// This is the recipient's reconciliation anchor: coverage of a held receipt is decided
+/// only against settlement's own batch identity and change root.
+pub(crate) async fn epoch_roots<E: Network>(
+    network: &E,
+    address: SocketAddr,
+    epoch: u64,
+) -> Result<Option<EpochRootsResponse>> {
+    Option::<EpochRootsResponse>::decode(
+        invoke(
+            network,
+            address,
+            METHOD_EPOCH_ROOTS,
+            EpochRootsRequest { epoch }.encode(),
+        )
+        .await?,
+    )
+    .context("decode epoch roots")
+}
+
 pub(crate) async fn confirm_registration<E: Network>(
     network: &E,
     address: SocketAddr,
@@ -1518,8 +1692,9 @@ pub(crate) async fn confirm_registration<E: Network>(
 /// Queues one signed withdrawal directly at settlement.
 ///
 /// The demo agent hands withdrawals to the operator, which carries them into its next
-/// registered close. This client covers the censorship fallback in tests.
-#[cfg(test)]
+/// registered close. When the operator will not carry it, the wallet escalates the exact
+/// signed request here so its deadline becomes an on-chain obligation that expires into
+/// hard-fault recovery, which is the censorship-fallback exit.
 pub(crate) async fn queue_withdrawal<E: Network>(
     network: &E,
     address: SocketAddr,
@@ -1594,7 +1769,6 @@ pub(crate) async fn claim_external_payout<E: Network>(
     .context("decode external payout claim resolution")
 }
 
-#[allow(dead_code, reason = "the recovery client is an integration surface")]
 pub(crate) async fn challenge_encoded<E: Network>(
     network: &E,
     address: SocketAddr,
@@ -1970,6 +2144,42 @@ mod tests {
             request(METHOD_CLAIM_ROOTS, lookup.encode()),
         ));
         assert_eq!(Option::<ClaimRootsResponse>::decode(body).unwrap(), None);
+    }
+
+    #[test]
+    fn epoch_roots_round_trip_and_unadmitted_epoch_returns_absence() {
+        for response in [
+            None,
+            Some(EpochRootsResponse {
+                anchor: Sha256::hash(&[b"epoch-roots-anchor"]),
+                admitted: None,
+            }),
+            Some(EpochRootsResponse {
+                anchor: Sha256::hash(&[b"epoch-roots-anchor"]),
+                admitted: Some(AdmittedRootsResponse {
+                    batch_id: BatchId::new(Sha256::hash(&[b"epoch-roots-batch"])),
+                    change: VectorRoot {
+                        digest: Sha256::hash(&[b"epoch-roots-change"]),
+                    },
+                    finalized: true,
+                }),
+            }),
+        ] {
+            assert_eq!(
+                Option::<EpochRootsResponse>::decode(response.encode()).unwrap(),
+                response
+            );
+        }
+        let mut trailing = None::<EpochRootsResponse>.encode().to_vec();
+        trailing.push(0xff);
+        assert!(Option::<EpochRootsResponse>::decode(Bytes::from(trailing)).is_err());
+
+        let mut settlement = Settlement::new().unwrap();
+        let body = success_body(handle(
+            &mut settlement,
+            request(METHOD_EPOCH_ROOTS, EpochRootsRequest { epoch: 0 }.encode()),
+        ));
+        assert_eq!(Option::<EpochRootsResponse>::decode(body).unwrap(), None);
     }
 
     #[test]

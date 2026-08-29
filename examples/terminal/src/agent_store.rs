@@ -2,11 +2,17 @@
 //!
 //! Receipts remain durable because this example has no authenticated signal that their challenge
 //! windows closed. An embedding may prune them only after obtaining that signal.
+//!
+//! The provider's held incoming pairs follow the same discipline. Each is a self-verified
+//! (send, receipt) pair credited to this wallet, durably retained so a provider can enforce its
+//! preconfirmation. They are irreplaceable once the operator is gone, so like the recovery
+//! openings they are counterparty-death-surviving evidence, never an overwritable cache.
 
 use crate::{
     operator_rpc,
     protocol::{
         Acceptance, DepositEvent, Key, MAX_ACCEPTANCE_BYTES, MAX_ACCOUNTS, MAX_PAYMENT_BYTES,
+        Payment,
     },
     settlement_rpc,
     store::CommitUnknown,
@@ -23,7 +29,7 @@ use commonware_cryptography::{Sha256, sha256::Digest};
 use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
 use std::path::Path;
 
-const SCHEMA_VERSION: i64 = 9;
+const SCHEMA_VERSION: i64 = 11;
 const MAX_PENDING_CLAIM_BYTES: usize = 16 * 1024;
 const MIN_STATE_OPENING_BYTES: usize = Key::SIZE + AccountState::SIZE + u32::SIZE * 2 + 1;
 const MAX_STATE_OPENING_BYTES: usize =
@@ -63,6 +69,63 @@ pub(crate) struct AgentState {
     pub(crate) pending_withdrawal_claim: Option<PendingWithdrawalClaim>,
     pub(crate) pending_payout_claim: Option<PendingPayoutClaim>,
     pub(crate) receipt_count: u64,
+    /// Provider intake state: the durable fetch cursor and the verified-credit ledger summary.
+    pub(crate) incoming: IncomingSummary,
+    /// Highest epoch whose held credits were reconciled against the committed close.
+    pub(crate) last_reconciled_epoch: Option<u64>,
+}
+
+/// The provider's verified incoming ledger summary: total credited value, count of held
+/// pairs, and the durable fetch cursor.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct IncomingSummary {
+    pub(crate) total: u64,
+    pub(crate) count: u64,
+    pub(crate) cursor: u64,
+}
+
+/// One verified incoming pair ready to persist: its acceptance cursor, credited metadata,
+/// and the canonical [`Payment`] bytes.
+pub(crate) struct IncomingRecord {
+    pub(crate) tx_id: Digest,
+    pub(crate) payer: Key,
+    pub(crate) epoch: u64,
+    pub(crate) anchor: Digest,
+    pub(crate) shard: u64,
+    pub(crate) cumulative_shard_credit: u64,
+    pub(crate) receipt_index: u64,
+    pub(crate) amount: u64,
+    pub(crate) cursor: u64,
+    pub(crate) pair: Payment,
+}
+
+/// The wallet's highest held receipt in one receive shard of one epoch.
+pub(crate) struct HeldReceipt {
+    pub(crate) shard: u64,
+    pub(crate) cumulative_shard_credit: u64,
+    pub(crate) receipt_index: u64,
+    pub(crate) pair: Payment,
+}
+
+/// One held credit answering a provider's service-accounting query.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct IncomingCredit {
+    pub(crate) epoch: u64,
+    pub(crate) shard: u64,
+    pub(crate) amount: u64,
+}
+
+/// The durable outcome of reconciling one epoch's held credits.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(i64)]
+pub(crate) enum ReconcileOutcome {
+    /// The committed close's credit tip covered every held receipt.
+    Reconciled = 1,
+    /// A held receipt exceeded the committed tip and a proven challenge was submitted.
+    Challenged = 2,
+    /// An enforcement dead end: a finalized close understated a held receipt past the
+    /// challenge window, or a registered epoch's close never admitted and settlement faulted.
+    Unenforceable = 3,
 }
 
 #[derive(Clone, Copy)]
@@ -389,7 +452,7 @@ impl AgentStore {
         self.finish_mutation(result)
     }
 
-    fn ensure_usable(&self) -> Result<()> {
+    pub(crate) fn ensure_usable(&self) -> Result<()> {
         ensure!(
             !self.poisoned,
             "agent database is unusable after a failed mutation"
@@ -595,6 +658,147 @@ impl AgentStore {
         );
         self.finish_mutation(result)
     }
+
+    /// Durably records one verified intake page: the accepted pairs and the advanced cursor.
+    ///
+    /// The pairs and the cursor commit together, so a provider that observes the cursor
+    /// advance is guaranteed to hold every credit up to it. Insertion is idempotent per
+    /// transaction id, so a crash before this commit leaves the cursor unchanged and the
+    /// exact page refetches and reinserts without duplication. Only self-verified pairs
+    /// reach here: an invalid pair is never stored, yet the cursor still advances past it.
+    pub(crate) fn record_incoming(
+        &mut self,
+        records: &[IncomingRecord],
+        next_cursor: u64,
+    ) -> Result<IncomingSummary> {
+        self.ensure_usable()?;
+        for record in records {
+            let encoded = record.pair.encode();
+            ensure!(
+                !encoded.is_empty() && encoded.len() <= MAX_PAYMENT_BYTES,
+                "incoming pair encoding exceeds its bound"
+            );
+            sql_u64(record.cursor, "incoming cursor")?;
+        }
+        let result = record_incoming_transaction(&mut self.connection, records, next_cursor);
+        self.finish_mutation(result)?;
+        read_incoming_summary(&self.connection)
+    }
+
+    /// Answers the provider's service-accounting question: has `payer` paid this account under
+    /// transaction `tx_id`, and for how much? The payer chooses the transaction id by signing
+    /// its send, so it is the natural invoice reference.
+    pub(crate) fn paid(&self, payer: &Key, tx_id: &Digest) -> Result<Option<IncomingCredit>> {
+        self.ensure_usable()?;
+        self.connection
+            .query_row(
+                "SELECT epoch, shard, amount FROM agent_incoming
+                 WHERE payer = ?1 AND tx_id = ?2",
+                params![payer.as_ref(), tx_id.as_ref()],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .optional()?
+            .map(|(epoch, shard, amount)| {
+                Ok(IncomingCredit {
+                    epoch: from_sql_u64(epoch, "incoming epoch")?,
+                    shard: from_sql_u64(shard, "incoming shard")?,
+                    amount: from_sql_u64(amount, "incoming amount")?,
+                })
+            })
+            .transpose()
+    }
+
+    /// Returns the epochs holding incoming credits that reconciliation has not yet decided.
+    pub(crate) fn unreconciled_incoming_epochs(&self) -> Result<Vec<u64>> {
+        self.ensure_usable()?;
+        let mut statement = self.connection.prepare(
+            "SELECT DISTINCT epoch FROM agent_incoming
+             WHERE epoch NOT IN (SELECT epoch FROM agent_reconciled)
+             ORDER BY epoch",
+        )?;
+        let epochs = statement
+            .query_map([], |row| row.get::<_, i64>(0))?
+            .map(|value| from_sql_u64(value.map_err(anyhow::Error::from)?, "unreconciled epoch"))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(epochs)
+    }
+
+    /// Returns the wallet's highest held receipt in each receive shard of one epoch.
+    pub(crate) fn held_receipts(&self, epoch: u64, operator: &Key) -> Result<Vec<HeldReceipt>> {
+        self.ensure_usable()?;
+
+        // SQLite resolves the bare columns from the row selected by the single max() aggregate,
+        // so each group yields the terminal receipt of its shard.
+        let mut statement = self.connection.prepare(
+            "SELECT shard, MAX(cumulative_shard_credit), receipt_index, length(pair), pair
+             FROM agent_incoming WHERE epoch = ?1 GROUP BY shard ORDER BY shard",
+        )?;
+        let held = statement
+            .query_map([sql_u64(epoch, "epoch")?], |row| {
+                let shard = from_sql_u64(row.get(0)?, "held shard").map_err(to_sqlite_error)?;
+                let cumulative_shard_credit =
+                    from_sql_u64(row.get(1)?, "held credit").map_err(to_sqlite_error)?;
+                let receipt_index =
+                    from_sql_u64(row.get(2)?, "held index").map_err(to_sqlite_error)?;
+                let encoded = read_bounded_blob(row, 3, 4, MAX_PAYMENT_BYTES, "held pair")?;
+                let pair = Payment::decode(encoded.as_slice()).map_err(|error| {
+                    to_sqlite_error(anyhow::anyhow!("decode held pair: {error}"))
+                })?;
+                Ok(HeldReceipt {
+                    shard,
+                    cumulative_shard_credit,
+                    receipt_index,
+                    pair,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        // Re-verify each terminal pair against its own context before it can back a challenge.
+        for receipt in &held {
+            let context = context_for_send(receipt.pair.send(), operator);
+            receipt
+                .pair
+                .verify_linked::<Sha256>(&context)
+                .context("verify held incoming pair")?;
+            ensure!(
+                receipt.pair.recipient() == &self.account,
+                "held incoming pair credits another account"
+            );
+        }
+        Ok(held)
+    }
+
+    /// Durably records that an epoch's held credits reconciled cleanly with the committed close.
+    pub(crate) fn mark_reconciled(&mut self, epoch: u64) -> Result<()> {
+        self.record_outcome(epoch, ReconcileOutcome::Reconciled)
+    }
+
+    /// Durably records that a proven challenge was submitted for an understated epoch.
+    pub(crate) fn record_challenge(&mut self, epoch: u64) -> Result<()> {
+        self.record_outcome(epoch, ReconcileOutcome::Challenged)
+    }
+
+    /// Durably records an epoch whose held credit can no longer be enforced: a finalized close
+    /// understated it past the window, or its close never admitted and settlement faulted.
+    pub(crate) fn record_unenforceable(&mut self, epoch: u64) -> Result<()> {
+        self.record_outcome(epoch, ReconcileOutcome::Unenforceable)
+    }
+
+    fn record_outcome(&mut self, epoch: u64, outcome: ReconcileOutcome) -> Result<()> {
+        self.ensure_usable()?;
+        let result = record_reconcile_transaction(
+            &mut self.connection,
+            sql_u64(epoch, "reconciled epoch")?,
+            outcome as i64,
+        );
+        self.finish_mutation(result)
+    }
 }
 
 /// Verifies one acceptance owned by `account`: every entry pair is linked and in entry order.
@@ -618,6 +822,9 @@ fn schema_presence(connection: &Connection) -> Result<SchemaPresence> {
     let has_pending_deposit = table_exists(connection, "agent_pending_deposit")?;
     let has_pending_claims = table_exists(connection, "agent_pending_claims")?;
     let has_payments = table_exists(connection, "agent_payments")?;
+    let has_incoming_cursor = table_exists(connection, "agent_incoming_cursor")?;
+    let has_incoming = table_exists(connection, "agent_incoming")?;
+    let has_reconciled = table_exists(connection, "agent_reconciled")?;
     let has_unexpected: bool = connection.query_row(
         "SELECT EXISTS(
              SELECT 1 FROM sqlite_schema
@@ -626,12 +833,16 @@ fn schema_presence(connection: &Connection) -> Result<SchemaPresence> {
                     AND name NOT IN (
                         'agent_meta', 'agent_state_openings',
                         'agent_pending_payment', 'agent_pending_deposit',
-                        'agent_pending_claims', 'agent_payments'
+                        'agent_pending_claims', 'agent_payments',
+                        'agent_incoming_cursor', 'agent_incoming', 'agent_reconciled'
                     ))
                 OR type IN ('trigger', 'view')
                 OR (type = 'index'
                     AND name NOT LIKE 'sqlite_autoindex_%'
-                    AND name != 'agent_payments_settled')
+                    AND name NOT IN (
+                        'agent_payments_settled',
+                        'agent_incoming_payer_tx', 'agent_incoming_epoch_shard'
+                    ))
              LIMIT 1
          )",
         [],
@@ -644,6 +855,9 @@ fn schema_presence(connection: &Connection) -> Result<SchemaPresence> {
         && !has_pending_deposit
         && !has_pending_claims
         && !has_payments
+        && !has_incoming_cursor
+        && !has_incoming
+        && !has_reconciled
         && !has_unexpected
     {
         return Ok(SchemaPresence::Empty);
@@ -655,6 +869,9 @@ fn schema_presence(connection: &Connection) -> Result<SchemaPresence> {
             && has_pending_deposit
             && has_pending_claims
             && has_payments
+            && has_incoming_cursor
+            && has_incoming
+            && has_reconciled
             && !has_unexpected,
         "incompatible agent database schema"
     );
@@ -767,7 +984,32 @@ fn initialize_schema(
          );
 
          CREATE INDEX agent_payments_settled
-             ON agent_payments (state, cumulative_debit);",
+             ON agent_payments (state, cumulative_debit);
+
+         CREATE TABLE agent_incoming_cursor (
+             singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+             cursor INTEGER NOT NULL CHECK (cursor >= 0)
+         );
+
+         CREATE TABLE agent_incoming (
+             tx_id BLOB PRIMARY KEY CHECK (length(tx_id) = {digest_size}),
+             payer BLOB NOT NULL CHECK (length(payer) = {key_size}),
+             epoch INTEGER NOT NULL CHECK (epoch >= 0),
+             anchor BLOB NOT NULL CHECK (length(anchor) = {digest_size}),
+             shard INTEGER NOT NULL CHECK (shard >= 0),
+             cumulative_shard_credit INTEGER NOT NULL CHECK (cumulative_shard_credit >= 0),
+             receipt_index INTEGER NOT NULL CHECK (receipt_index >= 0),
+             amount INTEGER NOT NULL CHECK (amount >= 0),
+             cursor INTEGER NOT NULL CHECK (cursor > 0),
+             pair BLOB NOT NULL CHECK (length(pair) BETWEEN 1 AND {max_pair_size})
+         );
+         CREATE INDEX agent_incoming_payer_tx ON agent_incoming (payer, tx_id);
+         CREATE INDEX agent_incoming_epoch_shard ON agent_incoming (epoch, shard);
+
+         CREATE TABLE agent_reconciled (
+             epoch INTEGER PRIMARY KEY CHECK (epoch >= 0),
+             status INTEGER NOT NULL CHECK (status IN (1, 2, 3))
+         );",
         key_size = Key::SIZE,
         digest_size = Digest::SIZE,
         root_size = VectorRoot::<Digest>::SIZE,
@@ -776,6 +1018,7 @@ fn initialize_schema(
         min_opening_size = MIN_STATE_OPENING_BYTES,
         max_opening_size = MAX_STATE_OPENING_BYTES,
         max_claim_size = MAX_PENDING_CLAIM_BYTES,
+        max_pair_size = MAX_PAYMENT_BYTES,
         deposit_event_size = DEPOSIT_EVENT_BYTES,
     );
     let encoded_account = account.encode();
@@ -797,6 +1040,10 @@ fn initialize_schema(
             encoded_deployment.as_ref(),
             encoded_operator.as_ref(),
         ],
+    )?;
+    transaction.execute(
+        "INSERT INTO agent_incoming_cursor (singleton, cursor) VALUES (1, 0)",
+        [],
     )?;
     transaction
         .commit()
@@ -855,6 +1102,9 @@ fn read_state(connection: &Connection, account: &Key, operator: &Key) -> Result<
         )?;
     }
 
+    let incoming = read_incoming_summary(connection)?;
+    let last_reconciled_epoch = read_last_reconciled(connection)?;
+
     Ok(AgentState {
         cumulative_debit,
         pending_payment,
@@ -862,7 +1112,41 @@ fn read_state(connection: &Connection, account: &Key, operator: &Key) -> Result<
         pending_withdrawal_claim,
         pending_payout_claim,
         receipt_count,
+        incoming,
+        last_reconciled_epoch,
     })
+}
+
+fn read_incoming_summary(connection: &Connection) -> Result<IncomingSummary> {
+    let cursor = from_sql_u64(
+        connection.query_row(
+            "SELECT cursor FROM agent_incoming_cursor WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )?,
+        "incoming cursor",
+    )?;
+    let (total, count) = connection.query_row(
+        "SELECT COALESCE(SUM(amount), 0), COUNT(*) FROM agent_incoming",
+        [],
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+    )?;
+    Ok(IncomingSummary {
+        total: from_sql_u64(total, "incoming total")?,
+        count: from_sql_u64(count, "incoming count")?,
+        cursor,
+    })
+}
+
+fn read_last_reconciled(connection: &Connection) -> Result<Option<u64>> {
+    connection
+        .query_row(
+            "SELECT MAX(epoch) FROM agent_reconciled WHERE status = ?1",
+            [ReconcileOutcome::Reconciled as i64],
+            |row| row.get::<_, Option<i64>>(0),
+        )?
+        .map(|epoch| from_sql_u64(epoch, "reconciled epoch"))
+        .transpose()
 }
 
 fn read_receipt_state(
@@ -1499,6 +1783,81 @@ fn remove_deposit_transaction(
     transaction
         .commit()
         .map_err(|source| CommitUnknown::new(operation, source))?;
+    Ok(())
+}
+
+fn record_incoming_transaction(
+    connection: &mut Connection,
+    records: &[IncomingRecord],
+    next_cursor: u64,
+) -> Result<()> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .context("begin incoming intake record")?;
+    let current = from_sql_u64(
+        transaction.query_row(
+            "SELECT cursor FROM agent_incoming_cursor WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )?,
+        "incoming cursor",
+    )?;
+    {
+        let mut insert = transaction.prepare_cached(
+            "INSERT INTO agent_incoming (
+                 tx_id, payer, epoch, anchor, shard,
+                 cumulative_shard_credit, receipt_index, amount, cursor, pair
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(tx_id) DO NOTHING",
+        )?;
+        for record in records {
+            let encoded = record.pair.encode();
+            insert.execute(params![
+                record.tx_id.as_ref(),
+                record.payer.as_ref(),
+                sql_u64(record.epoch, "incoming epoch")?,
+                record.anchor.as_ref(),
+                sql_u64(record.shard, "incoming shard")?,
+                sql_u64(record.cumulative_shard_credit, "incoming credit")?,
+                sql_u64(record.receipt_index, "incoming index")?,
+                sql_u64(record.amount, "incoming amount")?,
+                sql_u64(record.cursor, "incoming cursor")?,
+                encoded.as_ref(),
+            ])?;
+        }
+    }
+
+    // The cursor never rewinds, so an out-of-order or duplicate page cannot lose ground.
+    let advanced = current.max(next_cursor);
+    transaction.execute(
+        "UPDATE agent_incoming_cursor SET cursor = ?1 WHERE singleton = 1",
+        [sql_u64(advanced, "incoming cursor")?],
+    )?;
+    transaction
+        .commit()
+        .map_err(|source| CommitUnknown::new("incoming intake record", source))?;
+    Ok(())
+}
+
+fn record_reconcile_transaction(
+    connection: &mut Connection,
+    epoch: i64,
+    status: i64,
+) -> Result<()> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .context("begin reconcile outcome record")?;
+
+    // The first recorded outcome for an epoch is durable: reconcile never reopens a decided
+    // epoch, so an idempotent re-run leaves it unchanged.
+    transaction.execute(
+        "INSERT INTO agent_reconciled (epoch, status) VALUES (?1, ?2)
+         ON CONFLICT(epoch) DO NOTHING",
+        params![epoch, status],
+    )?;
+    transaction
+        .commit()
+        .map_err(|source| CommitUnknown::new("reconcile outcome record", source))?;
     Ok(())
 }
 

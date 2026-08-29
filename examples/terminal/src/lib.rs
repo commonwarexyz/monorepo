@@ -14,16 +14,17 @@ mod rpc;
 mod service;
 mod settlement;
 mod settlement_rpc;
+mod settlement_store;
 mod store;
 mod ui;
 
 use anyhow::Result;
 use std::{net::SocketAddr, num::NonZeroUsize, path::PathBuf};
 
-/// Runs the settlement role.
+/// Runs the SQLite-backed settlement role.
 #[doc(hidden)]
-pub fn run_settlement(bind: SocketAddr) -> Result<()> {
-    service::run_settlement(bind)
+pub fn run_settlement(bind: SocketAddr, database: PathBuf) -> Result<()> {
+    service::run_settlement(bind, database)
 }
 
 /// Runs the SQLite-backed operator role.

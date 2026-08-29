@@ -2,13 +2,13 @@
 
 use crate::{
     agent_store::{
-        AgentState, AgentStore, PendingClaim, PendingPayment, PendingPayoutClaim,
-        PendingWithdrawalClaim,
+        AgentState, AgentStore, IncomingRecord, IncomingSummary, PendingClaim, PendingPayment,
+        PendingPayoutClaim, PendingWithdrawalClaim,
     },
     operator_rpc,
     protocol::{
-        AccountIdentity, DepositEvent, Key, Wallet, deployment, external_identity, external_wallet,
-        identities, operator_key, wallets,
+        AccountIdentity, DepositEvent, Key, Payment, Wallet, deployment, external_identity,
+        external_wallet, identities, operator_key, wallets,
     },
     settlement_rpc,
 };
@@ -16,8 +16,9 @@ use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
 use commonware_clearing::bajillion::{
     boundary::{SignedWithdrawal, WithdrawalAction},
+    challenge::{Challenge, ChallengeKind},
     commitment::{VectorKind, VectorRoot},
-    payment::{Entry, PaymentContext, SignedSend},
+    payment::{Entry, PaymentContext, PaymentWitness, SignedSend},
     transition::BatchId,
 };
 use commonware_codec::Encode as _;
@@ -58,13 +59,21 @@ pub(crate) enum WithdrawalOutcome {
 /// Durable state follows one discipline. It holds only what this wallet alone can
 /// produce: its signed sends, its signed withdrawal requests, and its deposit identities.
 /// The exceptions are proofs that must survive counterparty death, namely the frozen-root
-/// recovery openings and cached claim evidence. Everything the counterparty can reproduce
-/// is an overwritable cache and never gates progress.
+/// recovery openings, cached claim evidence, and the provider's held incoming pairs. A held
+/// incoming pair is a self-verified (send, receipt) crediting this wallet: like the recovery
+/// openings it is irreplaceable once the operator is gone, so it is retained, never an
+/// overwritable cache. Everything the counterparty can reproduce is a cache and never gates
+/// progress.
 ///
 /// Frozen-root recovery requires an opening retained at or refreshed to the last
 /// finalized root, which advances with every finalization by anyone. Openings refresh on
 /// every quote or balance poll, so only a wallet passive across the final finalization
 /// holds none, and it then depends on the operator's survival to serve one.
+///
+/// As a service provider, this wallet may rely on a payment exactly when its verified pair is
+/// durably held. A quote balance that moved is an observation, not reliance-grade: the
+/// enforceable preconfirmation is the held operator receipt, and reconciliation later proves
+/// every finalized credit was backed by one.
 pub(crate) struct Agent {
     wallet: Wallet,
     store: AgentStore,
@@ -78,6 +87,10 @@ pub(crate) struct Agent {
     pending_close_epoch: Option<u64>,
     cumulative_debit: u64,
     receipt_count: u64,
+    /// Provider intake ledger summary and durable fetch cursor.
+    incoming: IncomingSummary,
+    /// Highest epoch whose held credits reconciled cleanly against the committed close.
+    last_reconciled_epoch: Option<u64>,
 }
 
 const fn withdrawal_deadline(now: u64) -> u64 {
@@ -115,6 +128,40 @@ pub(crate) enum PaymentOutcome {
         /// Batch total the send debited.
         total: u64,
     },
+}
+
+/// What one reconciliation pass decided across the epochs it examined.
+///
+/// The heartbeat surfaces these as enforcement events, so the conviction arc is visible in the
+/// running wallet, not only in tests.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ReconcileSummary {
+    /// Epochs whose held credits the committed close covered, marked reconciled.
+    pub(crate) reconciled: Vec<u64>,
+    /// Epochs whose omitted credit was convicted with a proven `HigherShardTip` challenge.
+    pub(crate) convicted: Vec<u64>,
+    /// Epochs whose held credit can no longer be enforced: a finalized close understated it
+    /// past the window, or its close never admitted and settlement faulted.
+    pub(crate) unenforceable: Vec<u64>,
+}
+
+impl ReconcileSummary {
+    #[cfg(test)]
+    pub(crate) const fn is_empty(&self) -> bool {
+        self.reconciled.is_empty() && self.convicted.is_empty() && self.unenforceable.is_empty()
+    }
+}
+
+/// The verdict for one held receipt against the anchored committed close.
+enum ShardVerdict {
+    /// The committed tip covered the held receipt.
+    Covered,
+    /// Operator-served evidence was unavailable, unanchored, or unprovable: retry the epoch.
+    Refused,
+    /// The omission was convicted with a proven challenge.
+    Convicted,
+    /// A finalized close understated the held receipt past the challenge window.
+    Uncovered,
 }
 
 /// How the wallet resolved an already-staged pending send before submission.
@@ -493,6 +540,8 @@ impl Agent {
             pending_close_epoch: None,
             cumulative_debit: state.cumulative_debit,
             receipt_count: state.receipt_count,
+            incoming: state.incoming,
+            last_reconciled_epoch: state.last_reconciled_epoch,
         }
     }
 
@@ -523,6 +572,28 @@ impl Agent {
 
     pub(crate) const fn receipt_count(&self) -> u64 {
         self.receipt_count
+    }
+
+    /// Returns the provider's verified incoming ledger summary.
+    pub(crate) const fn incoming(&self) -> IncomingSummary {
+        self.incoming
+    }
+
+    /// Returns the highest epoch whose held credits reconciled with the committed close.
+    pub(crate) const fn last_reconciled_epoch(&self) -> Option<u64> {
+        self.last_reconciled_epoch
+    }
+
+    /// Answers the provider's service-accounting question: has `payer` paid this wallet under
+    /// transaction `tx_id`, and for how much? The payer chooses the transaction id by signing
+    /// its send, so it is the natural invoice reference. A hit means the credit's verified pair
+    /// is durably held, which is exactly the condition under which a provider may rely on it.
+    pub(crate) fn paid(
+        &self,
+        payer: &Key,
+        tx_id: &Digest,
+    ) -> Result<Option<crate::agent_store::IncomingCredit>> {
+        self.store.paid(payer, tx_id)
     }
 
     pub(crate) async fn operator_status<E: Network>(
@@ -1307,6 +1378,47 @@ impl Agent {
         })
     }
 
+    /// Escalates a signed withdrawal the operator would not carry directly to settlement.
+    ///
+    /// This is the censorship-fallback exit. When [`Self::withdraw`] returns
+    /// [`WithdrawalOutcome::Signed`] because the operator is unreachable, the wallet queues the
+    /// exact retained request and its head opening at settlement, where its deadline becomes an
+    /// on-chain obligation that expires into hard-fault recovery. Settlement deduplicates the
+    /// account's queued request, so a lost response replays it unchanged, and the retained
+    /// opening remains the durable evidence hard-fault recovery later releases against.
+    pub(crate) async fn escalate_withdrawal<E: Network>(
+        &mut self,
+        network: &E,
+        settlement: SocketAddr,
+    ) -> Result<SignedWithdrawal<Key, Digest>> {
+        let request = self
+            .pending_withdrawal
+            .clone()
+            .context("no signed withdrawal awaits escalation")?;
+        let root = VectorRoot {
+            digest: *request.body().state_root(),
+        };
+        let opening = self
+            .store
+            .recovery_opening(&root)?
+            .context("no retained head opening for the signed withdrawal")?;
+        settlement_rpc::queue_withdrawal(
+            network,
+            settlement,
+            settlement_rpc::QueueWithdrawalRequest {
+                request: request.clone(),
+                openings: vec![opening],
+            },
+        )
+        .await
+        .context("queue signed withdrawal at settlement")?;
+
+        // The request is now a settlement obligation. Hard-fault recovery drives the payout from
+        // here, using the retained opening, so the operator-carried claim slot is not opened.
+        self.pending_withdrawal = None;
+        Ok(request)
+    }
+
     /// Resolves this wallet's open claim of `C`'s kind through the shared claim driver.
     ///
     /// A held copy always gets its submission before any replacement, and the cache exists
@@ -1473,6 +1585,345 @@ impl Agent {
     ) -> Result<operator_rpc::PollCloseResponse> {
         operator_rpc::poll_close(network, operator, epoch).await
     }
+
+    /// Pulls, verifies, settlement-anchors, and durably persists the pairs newly crediting this
+    /// wallet.
+    ///
+    /// This is the provider's intake, folded into the balance heartbeat. A provider may rely on
+    /// a payment exactly when its verified pair is durably held: a moved quote balance is an
+    /// observation, not reliance-grade. Every fetched pair is fully verified, sends grouped by
+    /// transaction id and each distinct send verified once, then the operator receipt, its exact
+    /// linkage, and its recipient. It is then anchored: the pair's `(epoch, anchor)` must be the
+    /// context settlement registered for that epoch. A receipt over an operator-chosen anchor
+    /// with no settlement obligation has no close to adjudicate against and can never be
+    /// enforced, so it is not reliance-grade. Unverifiable and unanchored pairs are ignored and
+    /// never stored, yet the durable cursor still advances past them so a poisoned entry cannot
+    /// wedge intake. The pairs and the advanced cursor commit together, so reliance never
+    /// outruns durability, and a lost response refetches the exact page and reinserts it
+    /// idempotently.
+    pub(crate) async fn intake_incoming<E: Network>(
+        &mut self,
+        network: &E,
+        settlement: SocketAddr,
+        operator: SocketAddr,
+    ) -> Result<()> {
+        let page = operator_rpc::incoming_payments(
+            network,
+            operator,
+            operator_rpc::IncomingPaymentsRequest {
+                account: self.account(),
+                cursor: self.incoming.cursor,
+            },
+        )
+        .await
+        .context("fetch incoming payments")?;
+        if page.pairs.is_empty() {
+            return Ok(());
+        }
+
+        let account = self.account();
+        let operator_key = operator_key();
+        let mut verified_sends = std::collections::BTreeSet::<Digest>::new();
+        let mut anchors = std::collections::BTreeMap::<u64, Option<Digest>>::new();
+        let mut records = Vec::with_capacity(page.pairs.len());
+        for incoming in page.pairs {
+            let (send, receipt) = incoming.payment.into_parts();
+            let context = PaymentContext::new(
+                *send.body().anchor(),
+                send.body().epoch(),
+                operator_key.clone(),
+            );
+            let tx_id = send.tx_id::<Sha256>();
+            let tx_digest = *tx_id.digest();
+
+            // Verify each distinct send once, then the receipt, its linkage, and its recipient.
+            if !verified_sends.contains(&tx_digest) {
+                if send.verify(&context).is_err() {
+                    continue;
+                }
+                verified_sends.insert(tx_digest);
+            }
+            if receipt.verify(&context).is_err()
+                || !receipt.links(send.body(), &tx_id)
+                || receipt.body().recipient() != &account
+            {
+                continue;
+            }
+
+            // Anchor the context to settlement's registration. A settlement fetch failure
+            // aborts the whole intake so the cursor never advances past an unconfirmed pair. A
+            // definitive absence or mismatch skips the pair like an invalid one.
+            let epoch = send.body().epoch();
+            let anchor = *send.body().anchor();
+            let registered_anchor = match anchors.get(&epoch) {
+                Some(cached) => *cached,
+                None => {
+                    let fetched = settlement_rpc::epoch_roots(network, settlement, epoch)
+                        .await
+                        .context("read settlement registration anchor")?
+                        .map(|roots| roots.anchor);
+                    anchors.insert(epoch, fetched);
+                    fetched
+                }
+            };
+            if registered_anchor != Some(anchor) {
+                continue;
+            }
+            let body = receipt.body();
+            records.push(IncomingRecord {
+                tx_id: tx_digest,
+                payer: send.body().payer().clone(),
+                epoch,
+                anchor,
+                shard: body.shard(),
+                cumulative_shard_credit: body.cumulative_shard_credit(),
+                receipt_index: body.index(),
+                amount: body.amount(),
+                cursor: incoming.cursor,
+                pair: Payment::from_parts_unchecked(send, receipt),
+            });
+        }
+        self.incoming = self
+            .store
+            .record_incoming(&records, page.next_cursor)
+            .context("persist verified incoming pairs")?;
+        Ok(())
+    }
+
+    /// Reconciles held incoming credits against the committed close, convicting understatement.
+    ///
+    /// This is a background assurance loop that never gates payments or claims. For every epoch
+    /// holding credits, per receive shard, the committed close's public credit tip must be at or
+    /// above the wallet's highest held cumulative credit and receipt index. The trust story is
+    /// anchored: settlement serves the batch identity and change root of the close it admitted
+    /// for the epoch, and operator-served committed-side evidence is trusted only when it
+    /// matches that anchor exactly. Operator refusal, an unanchored or unprovable lookup, and a
+    /// per-epoch fault are all the documented availability dependence: that epoch stays
+    /// unreconciled and retries without shadowing the others, so the operator either serves the
+    /// real close, whose omitted tip convicts it, or stonewalls into settlement's clock. It can
+    /// never buy coverage with a fabricated root.
+    ///
+    /// The challenge window sits between admission and finalization. On the first held receipt
+    /// that exceeds the anchored committed tip while that window is open, the wallet convicts
+    /// the close with one [`Challenge::HigherShardTip`], records the conviction durably, and
+    /// stops, because one proven challenge invalidates the whole close. When the anchored tip
+    /// covers every held receipt and the epoch has finalized, the wallet marks the epoch
+    /// reconciled. The two enforcement dead ends, a finalized close that understated a held
+    /// receipt past the window and a registered epoch whose close never admitted before
+    /// settlement faulted, are recorded loudly rather than skipped.
+    pub(crate) async fn reconcile<E: Network>(
+        &mut self,
+        network: &E,
+        settlement: SocketAddr,
+        operator: SocketAddr,
+    ) -> Result<ReconcileSummary> {
+        let mut summary = ReconcileSummary::default();
+        let epochs = self
+            .store
+            .unreconciled_incoming_epochs()
+            .context("read unreconciled incoming epochs")?;
+        if epochs.is_empty() {
+            return Ok(summary);
+        }
+        let status = settlement_rpc::status(network, settlement)
+            .await
+            .context("read settlement reconciliation head")?;
+        ensure!(
+            status.deployment == deployment(),
+            "settlement status has an unexpected deployment"
+        );
+        let operator_key = operator_key();
+        for epoch in epochs {
+            // Isolate each epoch: a soft per-epoch failure retries next heartbeat and must not
+            // shadow the higher epochs, but a store fault poisons the wallet and is fatal.
+            if let Err(error) = self
+                .reconcile_epoch(
+                    network,
+                    settlement,
+                    operator,
+                    epoch,
+                    status.hard_faulted,
+                    &operator_key,
+                    &mut summary,
+                )
+                .await
+            {
+                self.store
+                    .ensure_usable()
+                    .context("reconciliation aborted by a store fault")?;
+                let _ = error;
+            }
+        }
+        Ok(summary)
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one reconcile step, one call site"
+    )]
+    async fn reconcile_epoch<E: Network>(
+        &mut self,
+        network: &E,
+        settlement: SocketAddr,
+        operator: SocketAddr,
+        epoch: u64,
+        hard_faulted: bool,
+        operator_key: &Key,
+        summary: &mut ReconcileSummary,
+    ) -> Result<()> {
+        let held = self
+            .store
+            .held_receipts(epoch, operator_key)
+            .context("read held receipts")?;
+        if held.is_empty() {
+            return Ok(());
+        }
+        let account = self.account();
+
+        // The anchor is settlement's own registration and admission record for this epoch. An
+        // unreachable settlement is a soft retry. An unregistered epoch is impossible here since
+        // intake only stored settlement-registered pairs.
+        let Ok(roots) = settlement_rpc::epoch_roots(network, settlement, epoch).await else {
+            return Ok(());
+        };
+        let Some(roots) = roots else {
+            return Ok(());
+        };
+        let Some(admitted) = roots.admitted else {
+            // No close admitted yet. If settlement faulted, this epoch's close never will, so
+            // its held credit is enforcement-dead: record it loudly rather than retry forever.
+            if hard_faulted {
+                self.store
+                    .record_unenforceable(epoch)
+                    .context("record unenforceable epoch")?;
+                summary.unenforceable.push(epoch);
+            }
+            return Ok(());
+        };
+
+        let mut uncovered = false;
+        for receipt in &held {
+            match self
+                .assess_shard_tip(
+                    network, settlement, operator, epoch, &admitted, &account, receipt,
+                )
+                .await
+            {
+                // One proven challenge invalidates the whole close, so record it immediately and
+                // stop: continuing would resubmit distinct evidence under the same batch and trip
+                // settlement's evidence-replay guard, aborting before the conviction is recorded.
+                ShardVerdict::Convicted => {
+                    self.store
+                        .record_challenge(epoch)
+                        .context("record challenge outcome")?;
+                    summary.convicted.push(epoch);
+                    return Ok(());
+                }
+                // Operator-served evidence was unavailable, unanchored, or unprovable: retry the
+                // whole epoch next heartbeat.
+                ShardVerdict::Refused => return Ok(()),
+                ShardVerdict::Uncovered => uncovered = true,
+                ShardVerdict::Covered => {}
+            }
+        }
+
+        if uncovered {
+            self.store
+                .record_unenforceable(epoch)
+                .context("record unenforceable epoch")?;
+            summary.unenforceable.push(epoch);
+        } else if admitted.finalized {
+            self.store
+                .mark_reconciled(epoch)
+                .context("record reconciled epoch")?;
+            summary.reconciled.push(epoch);
+            self.last_reconciled_epoch = Some(
+                self.last_reconciled_epoch
+                    .map_or(epoch, |last| last.max(epoch)),
+            );
+        }
+        Ok(())
+    }
+
+    /// Assesses one held receipt against the anchored committed close without mutating state.
+    ///
+    /// Every operator-served-evidence failure, an unavailable, unanchored, or unprovable lookup
+    /// and a non-proven verdict, is demoted to a soft refusal so it retries rather than aborting.
+    #[allow(clippy::too_many_arguments, reason = "one assessment, one call site")]
+    async fn assess_shard_tip<E: Network>(
+        &self,
+        network: &E,
+        settlement: SocketAddr,
+        operator: SocketAddr,
+        epoch: u64,
+        admitted: &settlement_rpc::AdmittedRootsResponse,
+        account: &Key,
+        receipt: &crate::agent_store::HeldReceipt,
+    ) -> ShardVerdict {
+        let Ok(tip) = operator_rpc::committed_shard_tip(
+            network,
+            operator,
+            operator_rpc::CommittedShardTipRequest {
+                account: account.clone(),
+                shard: receipt.shard,
+                epoch,
+            },
+        )
+        .await
+        else {
+            return ShardVerdict::Refused;
+        };
+
+        // Served evidence must be the anchored close before any coverage verdict: a fabricated
+        // batch or root could otherwise fake coverage through the window, or point a challenge at
+        // another close and burn the window on a worthless verdict.
+        if tip.batch_id != admitted.batch_id || tip.change_root != admitted.change {
+            return ShardVerdict::Refused;
+        }
+
+        // Resolving operator-served evidence is a cryptographic check on an untrusted party, so
+        // a failure is refusal, not a fatal error that would shadow the higher epochs.
+        let Ok(committed) = tip
+            .lookup
+            .resolve::<Sha256>(&admitted.change, account, receipt.shard)
+        else {
+            return ShardVerdict::Refused;
+        };
+        let (credit, index) = committed.map_or((0, 0), |tip| (tip.cumulative_credit, tip.index));
+        if credit >= receipt.cumulative_shard_credit && index >= receipt.receipt_index {
+            return ShardVerdict::Covered;
+        }
+        if admitted.finalized {
+            return ShardVerdict::Uncovered;
+        }
+        if !(receipt.cumulative_shard_credit > credit || receipt.receipt_index > index) {
+            return ShardVerdict::Refused;
+        }
+
+        // Dry-run passed the exact HigherShardTip condition, so submit and treat any non-proven
+        // outcome as a soft refusal.
+        let challenge = Challenge::HigherShardTip {
+            payment: Box::new(PaymentWitness::from_payment(&receipt.pair)),
+            recipient: Box::new(tip.lookup),
+        };
+        let Ok(verdict) = settlement_rpc::challenge_encoded(
+            network,
+            settlement,
+            settlement_rpc::ChallengeRequest {
+                batch_id: admitted.batch_id,
+                evidence: challenge.encode(),
+            },
+        )
+        .await
+        else {
+            return ShardVerdict::Refused;
+        };
+        if verdict == settlement_rpc::ChallengeVerdict::Proven(ChallengeKind::HigherShardTip) {
+            ShardVerdict::Convicted
+        } else {
+            ShardVerdict::Refused
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1482,7 +1933,7 @@ mod tests {
         operator::Operator,
         protocol::{Acceptance, AccountCache},
         rpc,
-        settlement::Settlement,
+        settlement::{Settlement, SettlementSubmission},
     };
     use commonware_clearing::bajillion::{
         boundary::{DepositBatch, WithdrawalBatch},
@@ -1494,6 +1945,7 @@ mod tests {
     use commonware_runtime::{
         Listener as _, Runner as _, Spawner as _, Supervisor as _, deterministic,
     };
+    use commonware_utils::TestRng;
     use std::{
         fs,
         num::{NonZeroU64, NonZeroUsize},
@@ -5472,6 +5924,887 @@ mod tests {
             assert_eq!(release.account, account);
             assert_eq!(release.released_custody, 100);
             server.await.unwrap();
+        });
+    }
+
+    /// Builds a deterministic omitting close: the admitted close credits a deposit to a bystander
+    /// and omits Bob, while Bob holds an operator-signed receipt crediting him.
+    fn omitting_close() -> crate::protocol::OmittingClose {
+        crate::protocol::omitting_close(&mut TestRng::new(7)).unwrap()
+    }
+
+    /// Registers and admits an omitting close so its challenge window is open.
+    fn admit_omitting(settlement: &mut Settlement, fixture: &crate::protocol::OmittingClose) {
+        settlement.deposit(fixture.deposit.clone()).unwrap();
+        let root = fixture.deposits.root::<Sha256>().unwrap();
+        settlement
+            .register_epoch(0, 400, root, root, WithdrawalBatch::empty(), &[])
+            .unwrap();
+        assert_eq!(
+            settlement
+                .admit_submission(SettlementSubmission::from(&fixture.result))
+                .unwrap(),
+            crate::settlement::AdmissionOutcome::Pending
+        );
+    }
+
+    /// The batch identity settlement anchors an admitted close on.
+    fn admitted_batch(fixture: &crate::protocol::OmittingClose) -> BatchId<Digest> {
+        fixture.result.header.batch_id::<Sha256>()
+    }
+
+    fn incoming_response(
+        pairs: &[(Payment<Key, Digest>, u64)],
+    ) -> operator_rpc::IncomingPaymentsResponse {
+        operator_rpc::IncomingPaymentsResponse {
+            next_cursor: pairs.last().map_or(0, |(_, cursor)| *cursor),
+            pairs: pairs
+                .iter()
+                .map(|(pair, cursor)| operator_rpc::IncomingPair {
+                    epoch: pair.send().body().epoch(),
+                    cursor: *cursor,
+                    payment: pair.clone(),
+                })
+                .collect(),
+        }
+    }
+
+    /// A held receipt in `shard` credited by Alice under the omitting close's epoch context.
+    fn held_in_shard(fixture: &crate::protocol::OmittingClose, shard: u64) -> Payment<Key, Digest> {
+        let context = fixture.result.payment_context.clone();
+        let alice = &wallets()[0];
+        let bob = wallets()[1].public_key();
+        let previous_debit = shard * 5;
+        let send = SignedSend::sign_next(&context, alice.signer(), bob.clone(), 5, previous_debit)
+            .unwrap();
+        let receipt = SignedReceipt::issue_next::<Sha256, _>(
+            &context,
+            &send,
+            &bob,
+            shard,
+            0,
+            0,
+            crate::protocol::Protocol::new(NonZeroUsize::MIN)
+                .unwrap()
+                .operator(),
+        )
+        .unwrap();
+        Payment::from_parts_unchecked(send, receipt)
+    }
+
+    /// (c) THE POINT: a recipient holding a verified receipt convicts a close that omits its
+    /// credit, end to end through the real settlement RPC dispatch, and the close is invalidated.
+    #[test]
+    fn omitted_credit_is_convicted_by_the_held_receipt() {
+        deterministic::Runner::default().start(|context| async move {
+            let fixture = omitting_close();
+            let bob_pair = fixture.held_pair.clone();
+            let batch_id = admitted_batch(&fixture);
+            let change_root = fixture.result.roots.change;
+            let bob_lookup = fixture.held_lookup.clone();
+
+            let mut settlement = Settlement::new().unwrap();
+            admit_omitting(&mut settlement, &fixture);
+            assert!(!settlement.status().unwrap().hard_faulted);
+
+            let mut settlement_listener = context
+                .bind(SocketAddr::from(([127, 0, 0, 1], 1)))
+                .await
+                .unwrap();
+            let settlement_address = settlement_listener.local_addr().unwrap();
+            let settlement_server = context.child("settlement").spawn(move |_| async move {
+                // Intake anchors on the epoch roots, reconciliation reads status then the epoch
+                // roots then submits the challenge, and the test then reads the faulted status.
+                for _ in 0..5 {
+                    respond_rpc(&mut settlement_listener, |request| {
+                        settlement_rpc::handle(&mut settlement, request)
+                    })
+                    .await;
+                }
+                settlement.status().unwrap().hard_faulted
+            });
+
+            let mut operator_listener = context
+                .bind(SocketAddr::from(([127, 0, 0, 1], 2)))
+                .await
+                .unwrap();
+            let operator_address = operator_listener.local_addr().unwrap();
+            let operator_server = context.child("operator").spawn(move |_| async move {
+                respond(&mut operator_listener, |request| {
+                    assert!(matches!(
+                        request,
+                        operator_rpc::OperatorRequest::IncomingPayments(_)
+                    ));
+                    rpc::Response::Success {
+                        body: incoming_response(&[(bob_pair, 1)]).encode(),
+                    }
+                })
+                .await;
+                respond(&mut operator_listener, move |request| {
+                    let operator_rpc::OperatorRequest::CommittedShardTip(request) = request else {
+                        panic!("expected a committed shard-tip request");
+                    };
+                    assert_eq!(request.shard, 0);
+                    assert_eq!(request.epoch, 0);
+                    rpc::Response::Success {
+                        body: operator_rpc::CommittedShardTipResponse {
+                            batch_id,
+                            change_root,
+                            lookup: bob_lookup,
+                        }
+                        .encode(),
+                    }
+                })
+                .await;
+            });
+
+            let mut bob = Agent::new(1).unwrap();
+            bob.intake_incoming(&context, settlement_address, operator_address)
+                .await
+                .unwrap();
+            let ledger = bob.incoming();
+            assert_eq!(ledger.count, 1);
+            assert_eq!(ledger.total, 5);
+
+            let summary = bob
+                .reconcile(&context, settlement_address, operator_address)
+                .await
+                .unwrap();
+            assert_eq!(summary.convicted, [0]);
+
+            // The proven challenge invalidated the close: settlement is hard-faulted, and Bob
+            // durably recorded the epoch as decided so it is no longer reconciled or retried.
+            let after = settlement_rpc::status(&context, settlement_address)
+                .await
+                .unwrap();
+            assert!(after.hard_faulted);
+            assert!(bob.store.unreconciled_incoming_epochs().unwrap().is_empty());
+            assert_eq!(bob.last_reconciled_epoch(), None);
+
+            assert!(settlement_server.await.unwrap());
+            operator_server.await.unwrap();
+        });
+    }
+
+    /// Item 1: a pair whose context anchor is not the one settlement registered has no close to
+    /// adjudicate against, so intake refuses it. It never becomes reliance-grade, and the durable
+    /// cursor still advances past it so a poisoned pair cannot wedge intake.
+    #[test]
+    fn fabricated_anchor_pair_is_refused_at_intake() {
+        deterministic::Runner::default().start(|context| async move {
+            // A sig-valid pair over an operator-chosen anchor with no settlement obligation.
+            let bogus = PaymentContext::new(
+                Sha256::hash(&[b"fabricated-unregistered-anchor"]),
+                0,
+                operator_key(),
+            );
+            let alice = &wallets()[0];
+            let bob = wallets()[1].public_key();
+            let payer = alice.public_key();
+            let send = SignedSend::sign_next(&bogus, alice.signer(), bob.clone(), 5, 0).unwrap();
+            let invoice = send.tx_id::<Sha256>().into_digest();
+            let receipt = crate::protocol::Protocol::new(NonZeroUsize::MIN).unwrap();
+            let receipt = SignedReceipt::issue_next::<Sha256, _>(
+                &bogus,
+                &send,
+                &bob,
+                0,
+                0,
+                0,
+                receipt.operator(),
+            )
+            .unwrap();
+            let pair = Payment::from_parts_unchecked(send, receipt);
+
+            // Settlement registered a different anchor for epoch 0 than the operator's forgery.
+            let registered = crate::protocol::epoch_context(
+                0,
+                &DepositBatch::empty(),
+                &WithdrawalBatch::empty(),
+                400,
+            )
+            .unwrap();
+            assert_ne!(registered.payment().anchor(), bogus.anchor());
+            let anchor = settlement_rpc::EpochRootsResponse {
+                anchor: *registered.payment().anchor(),
+                admitted: None,
+            };
+            let mut settlement_listener = context
+                .bind(SocketAddr::from(([127, 0, 0, 1], 1)))
+                .await
+                .unwrap();
+            let settlement_address = settlement_listener.local_addr().unwrap();
+            let settlement_server = context.child("settlement").spawn(move |_| async move {
+                respond_rpc(&mut settlement_listener, |request| {
+                    assert_eq!(request.method, settlement_rpc::METHOD_EPOCH_ROOTS);
+                    rpc::Response::Success {
+                        body: Some(anchor).encode(),
+                    }
+                })
+                .await;
+            });
+
+            let mut operator_listener = context
+                .bind(SocketAddr::from(([127, 0, 0, 1], 2)))
+                .await
+                .unwrap();
+            let operator_address = operator_listener.local_addr().unwrap();
+            let operator_server = context.child("operator").spawn(move |_| async move {
+                respond(&mut operator_listener, |request| {
+                    assert!(matches!(
+                        request,
+                        operator_rpc::OperatorRequest::IncomingPayments(_)
+                    ));
+                    rpc::Response::Success {
+                        body: incoming_response(&[(pair, 1)]).encode(),
+                    }
+                })
+                .await;
+            });
+
+            let mut bob = Agent::new(1).unwrap();
+            bob.intake_incoming(&context, settlement_address, operator_address)
+                .await
+                .unwrap();
+
+            // The forged pair is not stored, so it never reaches the service-accounting query, and
+            // the cursor advanced past it.
+            assert_eq!(
+                bob.incoming(),
+                crate::agent_store::IncomingSummary {
+                    total: 0,
+                    count: 0,
+                    cursor: 1,
+                }
+            );
+            assert_eq!(bob.paid(&payer, &invoice).unwrap(), None);
+
+            settlement_server.await.unwrap();
+            operator_server.await.unwrap();
+        });
+    }
+
+    /// Item 2A: one proven challenge invalidates the whole close, so a wallet holding understated
+    /// receipts in several shards convicts once and stops rather than resubmitting distinct
+    /// evidence under the same batch and tripping settlement's evidence-replay guard.
+    #[test]
+    fn multi_shard_understatement_convicts_once() {
+        deterministic::Runner::default().start(|context| async move {
+            let fixture = omitting_close();
+            let batch_id = admitted_batch(&fixture);
+            let change_root = fixture.result.roots.change;
+            let lookup = fixture.held_lookup.clone();
+            let shard_zero = fixture.held_pair.clone();
+            let shard_one = held_in_shard(&fixture, 1);
+
+            let mut settlement = Settlement::new().unwrap();
+            admit_omitting(&mut settlement, &fixture);
+
+            let mut settlement_listener = context
+                .bind(SocketAddr::from(([127, 0, 0, 1], 1)))
+                .await
+                .unwrap();
+            let settlement_address = settlement_listener.local_addr().unwrap();
+            let settlement_server = context.child("settlement").spawn(move |_| async move {
+                // Intake epoch-roots, reconcile status and epoch-roots, and exactly one challenge.
+                for _ in 0..4 {
+                    respond_rpc(&mut settlement_listener, |request| {
+                        settlement_rpc::handle(&mut settlement, request)
+                    })
+                    .await;
+                }
+                settlement.status().unwrap().hard_faulted
+            });
+
+            let mut operator_listener = context
+                .bind(SocketAddr::from(([127, 0, 0, 1], 2)))
+                .await
+                .unwrap();
+            let operator_address = operator_listener.local_addr().unwrap();
+            let operator_server = context.child("operator").spawn(move |_| async move {
+                respond(&mut operator_listener, |request| {
+                    assert!(matches!(
+                        request,
+                        operator_rpc::OperatorRequest::IncomingPayments(_)
+                    ));
+                    rpc::Response::Success {
+                        body: incoming_response(&[(shard_zero, 1), (shard_one, 2)]).encode(),
+                    }
+                })
+                .await;
+
+                // Only the first shard is ever fetched: a second committed-shard-tip request would
+                // block here forever, so completing proves the loop stopped after one conviction.
+                respond(&mut operator_listener, move |request| {
+                    let operator_rpc::OperatorRequest::CommittedShardTip(request) = request else {
+                        panic!("expected a committed shard-tip request");
+                    };
+                    assert_eq!(request.shard, 0);
+                    rpc::Response::Success {
+                        body: operator_rpc::CommittedShardTipResponse {
+                            batch_id,
+                            change_root,
+                            lookup,
+                        }
+                        .encode(),
+                    }
+                })
+                .await;
+            });
+
+            let mut bob = Agent::new(1).unwrap();
+            bob.intake_incoming(&context, settlement_address, operator_address)
+                .await
+                .unwrap();
+            assert_eq!(bob.incoming().count, 2);
+
+            let summary = bob
+                .reconcile(&context, settlement_address, operator_address)
+                .await
+                .unwrap();
+            assert_eq!(summary.convicted, [0]);
+            assert!(bob.store.unreconciled_incoming_epochs().unwrap().is_empty());
+            assert!(settlement_server.await.unwrap());
+            operator_server.await.unwrap();
+        });
+    }
+
+    /// Item 2B: a decodable tip whose batch and root match the anchor but whose lookup cannot be
+    /// cryptographically resolved is demoted to a soft per-epoch refusal, not a `?` that aborts
+    /// the reconcile pass. The epoch stays unreconciled and retries rather than shadowing others.
+    #[test]
+    fn unresolvable_lookup_is_a_soft_refusal_not_an_abort() {
+        deterministic::Runner::default().start(|context| async move {
+            let fixture = omitting_close();
+            let batch_id = admitted_batch(&fixture);
+            let change_root = fixture.result.roots.change;
+            let bob_pair = fixture.held_pair.clone();
+
+            // A lookup built against another close's root: it decodes and is served under the
+            // anchored batch and root, but it cannot resolve against this close's change root.
+            let mut foreign = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
+            foreign.pay(0, 1, 5).unwrap();
+            foreign.start_close(0).unwrap();
+            foreign.wait_for_closes().unwrap();
+            let foreign_lookup = foreign
+                .committed_shard_tip(&wallets()[1].public_key(), 0, 0)
+                .unwrap()
+                .lookup;
+            assert!(
+                foreign_lookup
+                    .resolve::<Sha256>(&change_root, &wallets()[1].public_key(), 0)
+                    .is_err()
+            );
+
+            let mut settlement = Settlement::new().unwrap();
+            admit_omitting(&mut settlement, &fixture);
+            let mut settlement_listener = context
+                .bind(SocketAddr::from(([127, 0, 0, 1], 1)))
+                .await
+                .unwrap();
+            let settlement_address = settlement_listener.local_addr().unwrap();
+            let settlement_server = context.child("settlement").spawn(move |_| async move {
+                // Intake epoch-roots, then reconcile status and epoch-roots. No challenge is sent.
+                for _ in 0..3 {
+                    respond_rpc(&mut settlement_listener, |request| {
+                        settlement_rpc::handle(&mut settlement, request)
+                    })
+                    .await;
+                }
+            });
+
+            let poison_body = operator_rpc::CommittedShardTipResponse {
+                batch_id,
+                change_root,
+                lookup: foreign_lookup,
+            }
+            .encode();
+            let mut operator_listener = context
+                .bind(SocketAddr::from(([127, 0, 0, 1], 2)))
+                .await
+                .unwrap();
+            let operator_address = operator_listener.local_addr().unwrap();
+            let operator_server = context.child("operator").spawn(move |_| async move {
+                respond(&mut operator_listener, |request| {
+                    assert!(matches!(
+                        request,
+                        operator_rpc::OperatorRequest::IncomingPayments(_)
+                    ));
+                    rpc::Response::Success {
+                        body: incoming_response(&[(bob_pair, 1)]).encode(),
+                    }
+                })
+                .await;
+                respond(&mut operator_listener, move |request| {
+                    assert!(matches!(
+                        request,
+                        operator_rpc::OperatorRequest::CommittedShardTip(_)
+                    ));
+                    rpc::Response::Success { body: poison_body }
+                })
+                .await;
+            });
+
+            let mut bob = Agent::new(1).unwrap();
+            bob.intake_incoming(&context, settlement_address, operator_address)
+                .await
+                .unwrap();
+
+            // The unresolvable lookup did not abort the pass with an error, and it neither
+            // convicted nor reconciled: the epoch stays unreconciled and retries.
+            let summary = bob
+                .reconcile(&context, settlement_address, operator_address)
+                .await
+                .unwrap();
+            assert!(summary.is_empty());
+            assert_eq!(bob.store.unreconciled_incoming_epochs().unwrap(), [0]);
+            settlement_server.await.unwrap();
+            operator_server.await.unwrap();
+        });
+    }
+
+    /// Item 2D: a finalized close that understated a held receipt past the challenge window is an
+    /// enforcement dead end, recorded loudly rather than silently skipped.
+    #[test]
+    fn finalized_understatement_alarms() {
+        deterministic::Runner::default().start(|context| async move {
+            let fixture = omitting_close();
+            let batch_id = admitted_batch(&fixture);
+            let change_root = fixture.result.roots.change;
+            let lookup = fixture.held_lookup.clone();
+            let bob_pair = fixture.held_pair.clone();
+            let anchor = *fixture.result.payment_context.anchor();
+
+            let finalized_roots = settlement_rpc::EpochRootsResponse {
+                anchor,
+                admitted: Some(settlement_rpc::AdmittedRootsResponse {
+                    batch_id,
+                    change: change_root,
+                    finalized: true,
+                }),
+            };
+            let mut settlement_listener = context
+                .bind(SocketAddr::from(([127, 0, 0, 1], 1)))
+                .await
+                .unwrap();
+            let settlement_address = settlement_listener.local_addr().unwrap();
+            let settlement_server = context.child("settlement").spawn(move |_| async move {
+                for _ in 0..3 {
+                    respond_rpc(&mut settlement_listener, |request| match request.method {
+                        settlement_rpc::METHOD_STATUS => rpc::Response::Success {
+                            body: settlement_status_response().encode(),
+                        },
+                        settlement_rpc::METHOD_EPOCH_ROOTS => rpc::Response::Success {
+                            body: Some(finalized_roots).encode(),
+                        },
+                        method => panic!("unexpected settlement method {method}"),
+                    })
+                    .await;
+                }
+            });
+
+            let mut operator_listener = context
+                .bind(SocketAddr::from(([127, 0, 0, 1], 2)))
+                .await
+                .unwrap();
+            let operator_address = operator_listener.local_addr().unwrap();
+            let operator_server = context.child("operator").spawn(move |_| async move {
+                respond(&mut operator_listener, |request| {
+                    assert!(matches!(
+                        request,
+                        operator_rpc::OperatorRequest::IncomingPayments(_)
+                    ));
+                    rpc::Response::Success {
+                        body: incoming_response(&[(bob_pair, 1)]).encode(),
+                    }
+                })
+                .await;
+                respond(&mut operator_listener, move |request| {
+                    assert!(matches!(
+                        request,
+                        operator_rpc::OperatorRequest::CommittedShardTip(_)
+                    ));
+                    rpc::Response::Success {
+                        body: operator_rpc::CommittedShardTipResponse {
+                            batch_id,
+                            change_root,
+                            lookup,
+                        }
+                        .encode(),
+                    }
+                })
+                .await;
+            });
+
+            let mut bob = Agent::new(1).unwrap();
+            bob.intake_incoming(&context, settlement_address, operator_address)
+                .await
+                .unwrap();
+            let summary = bob
+                .reconcile(&context, settlement_address, operator_address)
+                .await
+                .unwrap();
+
+            // The dead end is loud and terminal: recorded, surfaced, and never reconciled.
+            assert_eq!(summary.unenforceable, [0]);
+            assert!(summary.reconciled.is_empty() && summary.convicted.is_empty());
+            assert!(bob.store.unreconciled_incoming_epochs().unwrap().is_empty());
+            assert_eq!(bob.last_reconciled_epoch(), None);
+            settlement_server.await.unwrap();
+            operator_server.await.unwrap();
+        });
+    }
+
+    /// (a) Happy path: pairs are fetched incrementally, verified, persisted, survive restart,
+    /// and the finalized epoch reconciles cleanly and is durably marked. The committed-side
+    /// evidence is served by a real operator reconstructing the close from its retained log.
+    #[test]
+    fn verified_incoming_reconciles_and_survives_restart() {
+        deterministic::Runner::default().start(|context| async move {
+            let database = TempDatabase::new();
+            let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
+            operator.pay(0, 1, 5).unwrap();
+            operator.pay(0, 1, 3).unwrap();
+            operator.start_close(0).unwrap();
+            operator.wait_for_closes().unwrap();
+            let roots = operator.settlement_roots(0).unwrap();
+
+            // The reconstructed committed-side evidence matches the finalized roots, so the
+            // settlement anchor below names the exact close the operator serves lookups for.
+            let evidence = operator
+                .committed_shard_tip(&wallets()[1].public_key(), 0, 0)
+                .unwrap();
+            assert_eq!(evidence.change_root, roots.change);
+            let anchor_digest = *crate::protocol::epoch_context(
+                0,
+                &DepositBatch::empty(),
+                &WithdrawalBatch::empty(),
+                400,
+            )
+            .unwrap()
+            .payment()
+            .anchor();
+
+            let mut settlement_listener = context
+                .bind(SocketAddr::from(([127, 0, 0, 1], 1)))
+                .await
+                .unwrap();
+            let settlement_address = settlement_listener.local_addr().unwrap();
+            let mut status = settlement_status_response();
+            status.state_root = roots.successor;
+            status.last_finalized = Some(0);
+            let epoch_roots = settlement_rpc::EpochRootsResponse {
+                anchor: anchor_digest,
+                admitted: Some(settlement_rpc::AdmittedRootsResponse {
+                    batch_id: evidence.batch_id,
+                    change: roots.change,
+                    finalized: true,
+                }),
+            };
+            let settlement_server = context.child("settlement").spawn(move |_| async move {
+                for _ in 0..3 {
+                    respond_rpc(&mut settlement_listener, |request| match request.method {
+                        settlement_rpc::METHOD_STATUS => rpc::Response::Success {
+                            body: status.encode(),
+                        },
+                        settlement_rpc::METHOD_EPOCH_ROOTS => rpc::Response::Success {
+                            body: Some(epoch_roots).encode(),
+                        },
+                        method => panic!("unexpected settlement method {method}"),
+                    })
+                    .await;
+                }
+            });
+
+            let mut operator_listener = context
+                .bind(SocketAddr::from(([127, 0, 0, 1], 2)))
+                .await
+                .unwrap();
+            let operator_address = operator_listener.local_addr().unwrap();
+            let operator_server = context.child("operator").spawn(move |_| async move {
+                for _ in 0..3 {
+                    let (_, mut sink, mut stream) = operator_listener.accept().await.unwrap();
+                    let request = rpc::recv_request(&mut stream).await.unwrap();
+                    let request = operator_rpc::decode_request(request).unwrap();
+                    let response = operator_rpc::handle_decoded(&mut operator, request);
+                    rpc::send_response(&mut sink, &response).await.unwrap();
+                }
+            });
+
+            let mut bob = Agent::open(database.path(), 1).unwrap();
+            bob.intake_incoming(&context, settlement_address, operator_address)
+                .await
+                .unwrap();
+            let ledger = bob.incoming();
+            assert_eq!(ledger.count, 2);
+            assert_eq!(ledger.total, 8);
+            let cursor = ledger.cursor;
+
+            // A second intake is incremental: nothing new is fetched and the cursor holds.
+            bob.intake_incoming(&context, settlement_address, operator_address)
+                .await
+                .unwrap();
+            assert_eq!(bob.incoming(), ledger);
+            assert_eq!(bob.incoming().cursor, cursor);
+
+            let summary = bob
+                .reconcile(&context, settlement_address, operator_address)
+                .await
+                .unwrap();
+            assert_eq!(summary.reconciled, [0]);
+            assert_eq!(bob.last_reconciled_epoch(), Some(0));
+            drop(bob);
+
+            // The held pairs, cursor, and reconciled mark all survive a restart.
+            let recovered = Agent::open(database.path(), 1).unwrap();
+            assert_eq!(recovered.incoming().count, 2);
+            assert_eq!(recovered.incoming().total, 8);
+            assert_eq!(recovered.incoming().cursor, cursor);
+            assert_eq!(recovered.last_reconciled_epoch(), Some(0));
+            assert!(
+                recovered
+                    .store
+                    .unreconciled_incoming_epochs()
+                    .unwrap()
+                    .is_empty()
+            );
+
+            settlement_server.await.unwrap();
+            operator_server.await.unwrap();
+        });
+    }
+
+    /// (b) Crash windows: the cursor and pairs are durable before any reliance, and a refetch of
+    /// the same page is idempotent, so a lost response never duplicates or loses a credit.
+    #[test]
+    fn incoming_intake_is_durable_and_refetch_is_idempotent() {
+        deterministic::Runner::default().start(|context| async move {
+            let database = TempDatabase::new();
+            let anchor = Sha256::hash(&[b"intake-idempotent"]);
+            let context_root = PaymentContext::new(anchor, 4, operator_key());
+            let alice = &wallets()[0];
+            let bob = wallets()[1].public_key();
+            let send =
+                SignedSend::sign_next(&context_root, alice.signer(), bob.clone(), 5, 0).unwrap();
+            let receipt = SignedReceipt::issue_next::<Sha256, _>(
+                &context_root,
+                &send,
+                &bob,
+                0,
+                0,
+                0,
+                crate::protocol::Protocol::new(NonZeroUsize::MIN)
+                    .unwrap()
+                    .operator(),
+            )
+            .unwrap();
+            let pair = Payment::from_parts_unchecked(send, receipt);
+
+            let epoch_roots = settlement_rpc::EpochRootsResponse {
+                anchor,
+                admitted: None,
+            };
+            let mut settlement_listener = context
+                .bind(SocketAddr::from(([127, 0, 0, 1], 1)))
+                .await
+                .unwrap();
+            let settlement_address = settlement_listener.local_addr().unwrap();
+            let settlement_server = context.child("settlement").spawn(move |_| async move {
+                for _ in 0..2 {
+                    respond_rpc(&mut settlement_listener, |request| {
+                        assert_eq!(request.method, settlement_rpc::METHOD_EPOCH_ROOTS);
+                        rpc::Response::Success {
+                            body: Some(epoch_roots).encode(),
+                        }
+                    })
+                    .await;
+                }
+            });
+
+            let mut operator_listener = context
+                .bind(SocketAddr::from(([127, 0, 0, 1], 2)))
+                .await
+                .unwrap();
+            let operator_address = operator_listener.local_addr().unwrap();
+            let served = pair.clone();
+            let operator_server = context.child("operator").spawn(move |_| async move {
+                // Both intakes see the same page, standing in for a lost commit that refetches.
+                for _ in 0..2 {
+                    let served = served.clone();
+                    respond(&mut operator_listener, move |request| {
+                        assert!(matches!(
+                            request,
+                            operator_rpc::OperatorRequest::IncomingPayments(_)
+                        ));
+                        rpc::Response::Success {
+                            body: incoming_response(&[(served, 1)]).encode(),
+                        }
+                    })
+                    .await;
+                }
+            });
+
+            let mut bob = Agent::open(database.path(), 1).unwrap();
+            bob.intake_incoming(&context, settlement_address, operator_address)
+                .await
+                .unwrap();
+            assert_eq!(bob.incoming().count, 1);
+            assert_eq!(bob.incoming().total, 5);
+            drop(bob);
+
+            // The pair and cursor are durable before any reliance, so the reopened wallet holds
+            // them, and the provider service-accounting query answers from that held evidence.
+            let mut recovered = Agent::open(database.path(), 1).unwrap();
+            assert_eq!(recovered.incoming().count, 1);
+            assert_eq!(recovered.incoming().cursor, 1);
+            let credit = recovered
+                .paid(
+                    &alice.public_key(),
+                    &pair.send().tx_id::<Sha256>().into_digest(),
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!(credit.amount, 5);
+
+            // Refetching the exact page reinserts nothing and leaves the ledger unchanged.
+            recovered
+                .intake_incoming(&context, settlement_address, operator_address)
+                .await
+                .unwrap();
+            assert_eq!(recovered.incoming().count, 1);
+            assert_eq!(recovered.incoming().total, 5);
+            settlement_server.await.unwrap();
+            operator_server.await.unwrap();
+        });
+    }
+
+    /// Item 3: the censorship-fallback exit. When the operator will not carry a signed withdrawal,
+    /// the wallet escalates the exact retained request and its head opening directly to settlement,
+    /// where the demo's existing hard-fault recovery releases it.
+    #[test]
+    fn signed_withdrawal_escalates_to_settlement() {
+        deterministic::Runner::default().start(|context| async move {
+            let database = TempDatabase::new();
+            let mut settlement = Settlement::new().unwrap();
+            let genesis = settlement.status().unwrap();
+            let account = wallets()[0].public_key();
+
+            let mut agent = Agent::open(database.path(), 0).unwrap();
+            let mut settlement_listener = context
+                .bind(SocketAddr::from(([127, 0, 0, 1], 1)))
+                .await
+                .unwrap();
+            let settlement_address = settlement_listener.local_addr().unwrap();
+            let expected_account = account.clone();
+            let settlement_server = context.child("settlement").spawn(move |_| async move {
+                let mut queued = None;
+                for expected_method in [
+                    settlement_rpc::METHOD_STATUS,
+                    settlement_rpc::METHOD_QUEUE_WITHDRAWAL,
+                ] {
+                    respond_rpc(&mut settlement_listener, |request| {
+                        assert_eq!(request.method, expected_method);
+                        if request.method == settlement_rpc::METHOD_QUEUE_WITHDRAWAL {
+                            let request = settlement_rpc::QueueWithdrawalRequest::decode(
+                                request.body.clone(),
+                            )
+                            .unwrap();
+                            assert_eq!(request.request.account(), &expected_account);
+                            queued = Some(request.request.body().deadline());
+                        }
+                        settlement_rpc::handle(&mut settlement, request)
+                    })
+                    .await;
+                }
+                queued
+            });
+
+            // A vanished operator: it serves one head opening and then disappears, so the
+            // withdrawal application fails and returns Signed with the opening retained.
+            let opening = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN)
+                .unwrap()
+                .withdrawal_opening(&account)
+                .unwrap();
+            let opening_body = operator_rpc::WithdrawalOpeningResponse {
+                root: opening.root,
+                opening: opening.opening,
+            }
+            .encode();
+            let mut operator_listener = context
+                .bind(SocketAddr::from(([127, 0, 0, 1], 2)))
+                .await
+                .unwrap();
+            let operator_address = operator_listener.local_addr().unwrap();
+            let operator_server = context.child("operator").spawn(move |_| async move {
+                respond(&mut operator_listener, move |request| {
+                    assert!(matches!(
+                        request,
+                        operator_rpc::OperatorRequest::WithdrawalOpening(_)
+                    ));
+                    rpc::Response::Success { body: opening_body }
+                })
+                .await;
+            });
+
+            let outcome = agent
+                .withdraw(
+                    &context,
+                    settlement_address,
+                    operator_address,
+                    WithdrawalAction::Amount(NonZeroU64::new(7).unwrap()),
+                )
+                .await
+                .unwrap();
+            let WithdrawalOutcome::Signed { request, .. } = outcome else {
+                panic!("the vanished operator unexpectedly applied the withdrawal");
+            };
+            operator_server.await.unwrap();
+
+            // Escalation queues the exact retained request at settlement.
+            let escalated = agent
+                .escalate_withdrawal(&context, settlement_address)
+                .await
+                .unwrap();
+            assert_eq!(escalated, request);
+
+            let queued_deadline = settlement_server.await.unwrap().unwrap();
+            assert_eq!(queued_deadline, request.body().deadline());
+            assert_eq!(genesis.state_root.digest, *request.body().state_root());
+        });
+    }
+
+    /// (d) Payer regression guard: the provider intake and reconciliation are additive. A wallet
+    /// holding no incoming credits touches neither operator nor settlement during reconciliation,
+    /// and the empty provider ledger survives the schema across a restart.
+    #[test]
+    fn payer_flow_is_unaffected_by_provider_state() {
+        deterministic::Runner::default().start(|context| async move {
+            let database = TempDatabase::new();
+            let payer = Agent::open(database.path(), 0).unwrap();
+            assert_eq!(payer.incoming(), IncomingSummary::default());
+            assert_eq!(payer.last_reconciled_epoch(), None);
+            drop(payer);
+
+            // Reconciliation with no held credits is a pure no-op: the unreachable operator and
+            // settlement are never dialed, so the payer path can never be gated by it.
+            let mut payer = Agent::open(database.path(), 0).unwrap();
+            let summary = payer
+                .reconcile(
+                    &context,
+                    SocketAddr::from(([127, 0, 0, 1], 1)),
+                    SocketAddr::from(([127, 0, 0, 1], 2)),
+                )
+                .await
+                .unwrap();
+            assert!(summary.is_empty());
+            assert_eq!(payer.incoming(), IncomingSummary::default());
+            assert_eq!(payer.last_reconciled_epoch(), None);
+            drop(payer);
+
+            // The additive schema leaves the reopened payer's empty provider ledger intact.
+            let recovered = Agent::open(database.path(), 0).unwrap();
+            assert_eq!(recovered.incoming(), IncomingSummary::default());
+            assert_eq!(recovered.last_reconciled_epoch(), None);
         });
     }
 }

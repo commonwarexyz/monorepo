@@ -4,10 +4,20 @@ use crate::{
     agent::{Agent, DepositOutcome, PaymentOutcome, WithdrawalOutcome},
     operator::DEFAULT_AMOUNT,
     operator_rpc::{AcceptedBatchResponse, PollCloseResponse, StatusResponse as OperatorStatus},
+    protocol::omitting_close,
+    rpc,
+    settlement::{Settlement, SettlementSubmission},
+    settlement_rpc,
     settlement_rpc::StatusResponse as SettlementStatus,
 };
 use anyhow::{Context, Result};
-use commonware_clearing::bajillion::boundary::WithdrawalAction;
+use commonware_clearing::bajillion::{
+    boundary::{WithdrawalAction, WithdrawalBatch},
+    challenge::{Challenge, ChallengeKind},
+    payment::PaymentWitness,
+};
+use commonware_codec::{DecodeExt as _, Encode as _};
+use commonware_cryptography::Sha256;
 use commonware_macros::select;
 use commonware_runtime::{Clock, Network};
 use crossterm::{
@@ -270,12 +280,19 @@ pub(crate) async fn run<E: Clock + Network>(
                     }) => {
                         let deadline = request.body().deadline();
                         state.log(format!(
-                            "withdrawal signed through deadline {deadline}; operator carriage unknown; retry uses the same signed request: {error:#}"
+                            "withdrawal signed through deadline {deadline}; operator carriage unknown; press x to escalate to settlement, or retry with the same signed request: {error:#}"
                         ));
                     }
                     Err(error) => state.log(format!("withdrawal not confirmed: {error:#}")),
                 }
             }
+            KeyCode::Char('x') => match agent.escalate_withdrawal(network, settlement).await {
+                Ok(request) => state.log(format!(
+                    "withdrawal escalated to settlement through deadline {}; its expiry becomes an on-chain obligation recoverable via h",
+                    request.body().deadline()
+                )),
+                Err(error) => state.log(format!("withdrawal escalation rejected: {error:#}")),
+            },
             KeyCode::Char('c') => match agent.claim_withdrawal(network, settlement, operator).await
             {
                 Ok(release) => state.log(format!(
@@ -411,6 +428,29 @@ async fn refresh<E: Network>(
 
     // The verified balance poll also refreshes the wallet's frozen-root recovery opening.
     state.balance = agent.balance(network, settlement, operator).await.ok();
+
+    // Provider intake and its background assurance loop degrade silently like the rest of the
+    // heartbeat: a held pair is reliance-grade only once durably persisted and settlement-anchored
+    // here. Enforcement events are surfaced into the activity feed so the conviction arc is
+    // visible in the running wallet.
+    let _ = agent.intake_incoming(network, settlement, operator).await;
+    if let Ok(summary) = agent.reconcile(network, settlement, operator).await {
+        for epoch in summary.convicted {
+            state.log(format!(
+                "epoch {epoch} omission convicted via HigherShardTip; the close is invalidated"
+            ));
+        }
+        for epoch in summary.reconciled {
+            state.log(format!(
+                "epoch {epoch} reconciled: every held credit is evidence-backed"
+            ));
+        }
+        for epoch in summary.unenforceable {
+            state.log(format!(
+                "epoch {epoch} ALARM: a held credit can no longer be enforced (finalized understatement or a faulted unadmitted close)"
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -418,29 +458,39 @@ fn render(frame: &mut Frame<'_>, agent: &Agent, state: &UiState) {
     let sections = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
+            Constraint::Length(4),
             Constraint::Length(7),
             Constraint::Min(8),
             Constraint::Length(3),
         ])
         .split(frame.area());
 
-    let title = Paragraph::new(Line::from(vec![
-        Span::styled(
-            " Bajillion Agent ",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(format!(
-            "{}  balance {}  {} retained receipt(s)",
-            agent.name(),
-            state
-                .balance
-                .map_or_else(|| "?".to_string(), |value| value.to_string()),
-            agent.receipt_count()
+    let incoming = agent.incoming();
+    let reconciled = agent
+        .last_reconciled_epoch()
+        .map_or_else(|| "none".to_string(), |epoch| format!("epoch {epoch}"));
+    let title = Paragraph::new(vec![
+        Line::from(vec![
+            Span::styled(
+                " Bajillion Agent ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(format!(
+                "{}  balance {}  {} retained receipt(s)",
+                agent.name(),
+                state
+                    .balance
+                    .map_or_else(|| "?".to_string(), |value| value.to_string()),
+                agent.receipt_count()
+            )),
+        ]),
+        Line::raw(format!(
+            "Provider ledger: verified incoming {} across {} pair(s) | last reconciled {reconciled}",
+            incoming.total, incoming.count
         )),
-    ]))
+    ])
     .block(Block::default().borders(Borders::ALL));
     frame.render_widget(title, sections[0]);
 
@@ -504,7 +554,7 @@ fn render(frame: &mut Frame<'_>, agent: &Agent, state: &UiState) {
         )),
         Line::raw(staged),
         Line::raw(
-            "p pay  a stage  b pay batch  d deposit  r refund deposit  w withdraw  f Close  c claim  e payout  h recover state  s cut epoch",
+            "p pay  a stage  b pay batch  d deposit  r refund deposit  w withdraw  f Close  x escalate  c claim  e payout  h recover state  s cut epoch",
         ),
         Line::raw("Left/Right recipient  +/- amount  PgUp/PgDn +/-10"),
     ])
@@ -584,6 +634,11 @@ pub(crate) async fn scripted<E: Network>(
         "epoch {} accepted payment #{}",
         payment.epoch, payment.sequence
     );
+
+    // The payer chooses the transaction id by signing its send, so it is the invoice reference a
+    // recipient answers its service-accounting query against below.
+    let invoice = payment.acceptance.send.tx_id::<Sha256>().into_digest();
+    let payer_account = agent.account();
     let batch = accepted(
         agent
             .pay(network, settlement, operator, &[(2, 2), (3, 1)])
@@ -610,6 +665,33 @@ pub(crate) async fn scripted<E: Network>(
         "epoch {} accepted external payment #{}",
         external_payment.epoch, external_payment.sequence
     );
+
+    // Provider gate-before-service: the recipient durably intakes and settlement-anchors its
+    // incoming pairs BEFORE the epoch is cut, and only then relies on the payment. A moved quote
+    // balance is not reliance-grade, but the held, anchored receipt is.
+    let provider_database = std::env::temp_dir().join(format!(
+        "commonware-terminal-provider-{}.sqlite",
+        std::process::id()
+    ));
+    let mut recipient = Agent::open(&provider_database, 1)?;
+    recipient
+        .intake_incoming(network, settlement, operator)
+        .await?;
+    let ledger = recipient.incoming();
+    println!(
+        "recipient {} durably holds verified incoming {} across {} pair(s) before the close is cut",
+        recipient.name(),
+        ledger.total,
+        ledger.count
+    );
+    match recipient.paid(&payer_account, &invoice)? {
+        Some(credit) => println!(
+            "provider gate: releasing service, payer paid {} under the invoice in epoch {}",
+            credit.amount, credit.epoch
+        ),
+        None => println!("provider gate: no held evidence for the invoice, withholding service"),
+    }
+
     let close = agent.start_close(network, operator).await?;
     println!("epoch {} cut and closing asynchronously", close.epoch);
     loop {
@@ -643,11 +725,96 @@ pub(crate) async fn scripted<E: Network>(
         .claim_withdrawal(network, settlement, operator)
         .await?;
     println!("claimed withdrawal {}", release.amount);
+
+    // Provider reconciliation after finalization: every finalized credit is proven backed by the
+    // committed close, so the earlier service release was evidence-backed.
+    let summary = recipient.reconcile(network, settlement, operator).await?;
+    for epoch in &summary.reconciled {
+        println!("recipient reconciled epoch {epoch}: every held credit is evidence-backed");
+    }
+    let _ = std::fs::remove_file(&provider_database);
+    for suffix in ["-wal", "-shm"] {
+        let mut path = provider_database.clone().into_os_string();
+        path.push(suffix);
+        let _ = std::fs::remove_file(path);
+    }
+
     let mut external = Agent::new(4)?;
     let payout = external
         .claim_external_payout(network, settlement, operator)
         .await?;
     println!("claimed external payout {}", payout.amount);
+
+    fraud_arc()?;
+    Ok(())
+}
+
+/// Demonstrates the enforcement thesis live: an operator that omits a recipient's credit is
+/// convicted by the recipient's held receipt, and the close is invalidated.
+///
+/// The honest operator binary can never produce an inconsistent close, so the fraud is assembled
+/// here with the shared omitting-close machinery and adjudicated by a self-contained settlement
+/// through the real challenge dispatch. This mirrors what a recipient's reconciliation does on
+/// the wire: it holds an operator-signed receipt, resolves the committed tip that omits it, and
+/// files one `HigherShardTip` challenge that settlement proves.
+fn fraud_arc() -> Result<()> {
+    let fraud = omitting_close(&mut rand::rng())?;
+    let committed = fraud
+        .held_lookup
+        .resolve::<Sha256>(&fraud.result.roots.change, &fraud.recipient, 0)
+        .context("resolve the omitted committed tip")?
+        .map_or(0, |tip| tip.cumulative_credit);
+    println!(
+        "fraud: the operator's admitted close credits the omitted recipient {committed}, but it holds an operator-signed receipt for {}",
+        fraud.held_credit
+    );
+
+    let mut settlement = Settlement::new()?;
+    settlement.deposit(fraud.deposit.clone())?;
+    let deposits_root = fraud.deposits.root::<Sha256>()?;
+    settlement.register_epoch(
+        0,
+        400,
+        deposits_root,
+        deposits_root,
+        WithdrawalBatch::empty(),
+        &[],
+    )?;
+    settlement.admit_submission(SettlementSubmission::from(&fraud.result))?;
+
+    // The recipient files exactly the challenge its reconciliation would: its held pair against
+    // the committed lookup that omits it.
+    let challenge = Challenge::HigherShardTip {
+        payment: Box::new(PaymentWitness::from_payment(&fraud.held_pair)),
+        recipient: Box::new(fraud.held_lookup),
+    };
+    let batch_id = fraud.result.finalized.batch_id;
+    let now = settlement.observe_now();
+    let response = settlement_rpc::dispatch(
+        &mut settlement,
+        now,
+        rpc::Request {
+            method: settlement_rpc::METHOD_CHALLENGE,
+            body: settlement_rpc::ChallengeRequest {
+                batch_id,
+                evidence: challenge.encode(),
+            }
+            .encode(),
+        },
+    )
+    .context("adjudicate the fraud challenge")?;
+    let verdict =
+        settlement_rpc::ChallengeVerdict::decode(response).context("decode the fraud verdict")?;
+    anyhow::ensure!(
+        verdict == settlement_rpc::ChallengeVerdict::Proven(ChallengeKind::HigherShardTip),
+        "the fraud challenge did not prove"
+    );
+    println!("fraud: HigherShardTip proven; the omitting close is invalidated");
+    anyhow::ensure!(
+        settlement.status()?.hard_faulted,
+        "the proven challenge did not fault the deployment"
+    );
+    println!("fraud: settlement is hard-faulted, so the fraudulent operator is fenced");
     Ok(())
 }
 

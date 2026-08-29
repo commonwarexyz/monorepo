@@ -1,8 +1,8 @@
 use super::{
     admission_fixtures::{FAULTS, QUORUM, SLICE_BITS, SLICES, VALIDATORS, Validators},
     fixtures::{
-        ActiveProfile, CloseFixture, WORKERS, active_chain_fixture, selected_active_profiles,
-        strategy,
+        ActiveProfile, CloseFixture, WORKERS, active_chain_fixture, kind_label,
+        selected_active_profiles, strategy,
     },
 };
 use bytes::Bytes;
@@ -76,7 +76,7 @@ struct BlogChainFixture {
     commitment: CommitmentPayload,
     terminal_proof: TerminalProof<Digest>,
     verifier: bls12381::Scheme,
-    encoded_challenge: Bytes,
+    challenges: [(ChallengeKind, Bytes); 4],
     claims: [WithdrawalClaims; 2],
     metrics: Metrics,
 }
@@ -89,7 +89,7 @@ impl BlogChainFixture {
         assert_eq!(validators.committee().quorum(), QUORUM);
 
         let assignment = validators.assignment();
-        let (close, challenge, claim_signer) = active_chain_fixture(profile, assignment);
+        let (close, proven, claim_signer) = active_chain_fixture(profile, assignment);
         // Claim fixtures cover the single-output floor and a full withdrawal surge
         // in which every live account exits through one certified close.
         let surge = u32::try_from(profile.live_accounts)
@@ -147,7 +147,7 @@ impl BlogChainFixture {
             .terminal_proof()
             .expect("benchmark terminal proof is valid");
 
-        let challenge_recipient_lookup_bytes = match &challenge {
+        let challenge_recipient_lookup_bytes = match &proven.tip {
             Challenge::HigherShardTip { payment, recipient } => {
                 assert!(matches!(
                     recipient.as_ref(),
@@ -161,24 +161,24 @@ impl BlogChainFixture {
             }
             _ => unreachable!("the blog benchmark uses a higher-shard-tip challenge"),
         };
-        let encoded_challenge = challenge.encode();
-        let challenge_bytes = challenge.encode_size();
-        assert_eq!(encoded_challenge.len(), challenge_bytes);
-        assert_eq!(
-            decode_bounded::<VerifyingKey, Digest>(
-                encoded_challenge.as_ref(),
-                encoded_challenge.len(),
-            )
-            .expect("canonical benchmark challenge decodes"),
-            challenge
-        );
+        let challenge_bytes = proven.tip.encode_size();
+        let challenges = proven.challenges().map(|(kind, challenge)| {
+            let encoded = challenge.encode();
+            assert_eq!(encoded.len(), challenge.encode_size());
+            assert_eq!(
+                decode_bounded::<VerifyingKey, Digest>(encoded.as_ref(), encoded.len())
+                    .expect("canonical benchmark challenge decodes"),
+                *challenge
+            );
+            (kind, encoded)
+        });
 
         preflight_chain(
             &close,
             &validators,
             &commitment,
             &terminal_proof,
-            encoded_challenge.as_ref(),
+            &challenges,
         );
         seal::<Sha256, _, _, PaymentBatchVerifier, _>(
             &validator_scheme,
@@ -224,7 +224,7 @@ impl BlogChainFixture {
             commitment,
             terminal_proof,
             verifier,
-            encoded_challenge,
+            challenges,
             claims,
             metrics,
         }
@@ -291,12 +291,9 @@ impl BlogChainFixture {
     }
 
     // Repeatable bounded decode and adjudication performed by challenge_encoded.
-    fn check_challenge(&self) -> Verdict {
-        let challenge = decode_bounded::<VerifyingKey, Digest>(
-            self.encoded_challenge.as_ref(),
-            self.encoded_challenge.len(),
-        )
-        .expect("benchmark challenge decodes within its exact bound");
+    fn check_challenge(&self, encoded: &Bytes) -> Verdict {
+        let challenge = decode_bounded::<VerifyingKey, Digest>(encoded.as_ref(), encoded.len())
+            .expect("benchmark challenge decodes within its exact bound");
         adjudicate_with_strategy::<Sha256, _>(
             &self.close.context,
             &self.commitment.0,
@@ -488,52 +485,55 @@ fn preflight_chain(
     validators: &Validators,
     commitment: &CommitmentPayload,
     terminal_proof: &TerminalProof<Digest>,
-    encoded_challenge: &[u8],
+    challenges: &[(ChallengeKind, Bytes); 4],
 ) {
-    let mut chain = chain(close, validators);
-    chain
-        .register_close(
-            0,
-            close.context.clone(),
-            close.withdrawals.clone(),
-            &[],
-            |_| true,
-        )
-        .expect("benchmark close can be registered");
-    let batch = chain
-        .admit(
-            0,
-            commitment.0,
-            commitment.1,
-            terminal_proof.clone(),
-            commitment.2.clone(),
-        )
-        .expect("benchmark commitment can be admitted");
-    assert_eq!(batch, commitment.0.batch_id::<Sha256>());
-    let verdict = chain
-        .challenge_encoded_with_strategy(
-            close.context.challenge_deadline(),
-            batch,
-            encoded_challenge,
-            encoded_challenge.len(),
-            strategy(),
-        )
-        .expect("benchmark challenge can be checked");
-    assert_eq!(verdict, Verdict::Proven(ChallengeKind::HigherShardTip));
-    assert!(matches!(
-        chain.pending().map(|pending| &pending.status),
-        Some(BatchStatus::Challenged(ChallengeKind::HigherShardTip))
-    ));
-    assert_eq!(chain.invalid_from(), Some(batch));
-    assert_eq!(
-        chain.admission_fence_epoch(),
-        close.context.payment().epoch().checked_add(1)
-    );
-    assert!(matches!(
-        chain.hard_fault(),
-        Some(HardFaultReason::ProvenChallenge { batch_id, kind })
-            if *batch_id == batch && *kind == ChallengeKind::HigherShardTip
-    ));
+    // A proven challenge permanently faults the chain, so every kind preflights a fresh one.
+    for (kind, encoded) in challenges {
+        let mut chain = chain(close, validators);
+        chain
+            .register_close(
+                0,
+                close.context.clone(),
+                close.withdrawals.clone(),
+                &[],
+                |_| true,
+            )
+            .expect("benchmark close can be registered");
+        let batch = chain
+            .admit(
+                0,
+                commitment.0,
+                commitment.1,
+                terminal_proof.clone(),
+                commitment.2.clone(),
+            )
+            .expect("benchmark commitment can be admitted");
+        assert_eq!(batch, commitment.0.batch_id::<Sha256>());
+        let verdict = chain
+            .challenge_encoded_with_strategy(
+                close.context.challenge_deadline(),
+                batch,
+                encoded.as_ref(),
+                encoded.len(),
+                strategy(),
+            )
+            .expect("benchmark challenge can be checked");
+        assert_eq!(verdict, Verdict::Proven(*kind));
+        assert!(matches!(
+            chain.pending().map(|pending| &pending.status),
+            Some(BatchStatus::Challenged(challenged)) if *challenged == *kind
+        ));
+        assert_eq!(chain.invalid_from(), Some(batch));
+        assert_eq!(
+            chain.admission_fence_epoch(),
+            close.context.payment().epoch().checked_add(1)
+        );
+        assert!(matches!(
+            chain.hard_fault(),
+            Some(HardFaultReason::ProvenChallenge { batch_id, kind: proven })
+                if *batch_id == batch && *proven == *kind
+        ));
+    }
 }
 
 fn bench_blog_chain(c: &mut Criterion) {
@@ -564,6 +564,13 @@ fn bench_blog_chain(c: &mut Criterion) {
                 claims.total,
                 claims.amount.claim.encode_size(),
                 claims.close.claim.encode_size(),
+            );
+        }
+        for (kind, encoded) in &fixture.challenges {
+            eprintln!(
+                "clearing blog chain challenge metrics: profile={profile_index} kind={} challenge_bytes={}",
+                kind_label(*kind),
+                encoded.len(),
             );
         }
 
@@ -616,15 +623,19 @@ fn bench_blog_chain(c: &mut Criterion) {
                 b.iter(|| black_box(fixture.check_certified_commitment()));
             },
         );
-        c.bench_function(
-            &format!(
-                "{}/p={profile_index} op=check-challenge {labels}",
-                module_path!()
-            ),
-            |b| {
-                b.iter(|| black_box(fixture.check_challenge()));
-            },
-        );
+        for (kind, encoded) in &fixture.challenges {
+            assert_eq!(fixture.check_challenge(encoded), Verdict::Proven(*kind));
+            c.bench_function(
+                &format!(
+                    "{}/p={profile_index} op=check-challenge kind={} {labels}",
+                    module_path!(),
+                    kind_label(*kind)
+                ),
+                |b| {
+                    b.iter(|| black_box(fixture.check_challenge(encoded)));
+                },
+            );
+        }
         for claims in &fixture.claims {
             let total = claims.total;
             c.bench_function(

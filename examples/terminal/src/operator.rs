@@ -11,8 +11,8 @@ use crate::{
     settlement_rpc,
     store::{
         AcceptedBatch, CloseRejected, CommitUnknown, EpochData, ExternalPayoutEvidence,
-        MutationFailed, StagedDeposit, StagedWithdrawal, Store, StoreStatus, StoredCloseOutcome,
-        WithdrawalEvidence,
+        IncomingPayment, MutationFailed, StagedDeposit, StagedWithdrawal, Store, StoreStatus,
+        StoredCloseOutcome, WithdrawalEvidence,
     },
 };
 #[cfg(test)]
@@ -25,12 +25,12 @@ use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
 use commonware_clearing::bajillion::{
     boundary::{DepositBatch, DepositRecord, SignedWithdrawal, WithdrawalAction, WithdrawalBatch},
-    challenge::StateOpening,
+    challenge::{HigherShardTipLookup, StateOpening},
     commitment::VectorRoot,
     credit::{ShardHead, ShardSet},
     payment::{PaymentContext, SignedSend, TxId, verify_receipt_step},
     state::{AccountRow, AccountState, Prefix, SettlementOutput, StateLeaf},
-    transition::{BatchId, ExternalPayoutClaim, WithdrawalClaim},
+    transition::{BatchId, ChallengeIndex, ExternalPayoutClaim, WithdrawalClaim},
 };
 #[cfg(test)]
 use commonware_codec::EncodeSize as _;
@@ -74,6 +74,15 @@ pub(crate) struct PaymentQuote {
 pub(crate) struct WithdrawalOpening {
     pub(crate) root: VectorRoot<Digest>,
     pub(crate) opening: StateOpening<Key, Digest>,
+}
+
+/// Committed-side receive-shard evidence for one recipient, reconstructed from retained
+/// epoch data. A recipient resolves the lookup against `change_root` to read the close's
+/// public credit tip for its shard, then challenges when a held receipt exceeds it.
+pub(crate) struct CommittedShardTip {
+    pub(crate) batch_id: BatchId<Digest>,
+    pub(crate) change_root: VectorRoot<Digest>,
+    pub(crate) lookup: HigherShardTipLookup<Key, Digest>,
 }
 
 #[derive(Clone)]
@@ -331,6 +340,59 @@ impl Operator {
             "a storage fault blocks committed-batch reads until the operator restarts"
         );
         self.store.accepted_batch(send)
+    }
+
+    /// Serves accepted linked pairs crediting `recipient` after the caller's durable cursor.
+    ///
+    /// This is a plain durable read of committed payment rows, so it stays readable across the
+    /// operating fence and refuses only past a storage fault.
+    pub(crate) fn incoming_payments(
+        &self,
+        recipient: &Key,
+        after: u64,
+        limit: usize,
+    ) -> Result<Vec<IncomingPayment>> {
+        self.ensure_store_usable()?;
+        self.store.incoming_payments(recipient, after, limit)
+    }
+
+    /// Reconstructs one recipient's committed receive-shard evidence for a retained epoch.
+    ///
+    /// The close is rebuilt from the retained payment log with the same lookup constructor the
+    /// operator uses for withdrawal openings, so the served [`HigherShardTipLookup`] opens
+    /// against the reconstructed close's own change root. Retention is honest: once a finalized
+    /// epoch's account-state versions are pruned it may no longer reconstruct, which a recipient
+    /// treats as an availability signal and retries.
+    pub(crate) fn committed_shard_tip(
+        &self,
+        recipient: &Key,
+        shard: u64,
+        epoch: u64,
+    ) -> Result<CommittedShardTip> {
+        self.ensure_store_usable()?;
+        let data = self.store.load_at(epoch)?;
+        let registration = registration_for(&self.protocol, &data)?;
+        let prepared = prepare_epoch(&self.protocol, data, registration)
+            .context("reconstruct committed close for shard-tip evidence")?;
+        let close = prepared.close();
+        let index = ChallengeIndex::new::<Sha256>(prepared.close_context(), close)
+            .context("index committed close for shard-tip evidence")?;
+
+        // A recipient that received credit has a changed row and terminal shard set. An absent
+        // recipient has neither, and the lookup constructor requires the matching pairing.
+        let shards = close
+            .rows
+            .iter()
+            .position(|row| &row.account == recipient)
+            .map(|position| &close.shard_sets[position]);
+        let lookup = index
+            .higher_shard_tip_lookup::<Sha256>(recipient, shards, shard)
+            .context("compose committed shard-tip lookup")?;
+        Ok(CommittedShardTip {
+            batch_id: close.header.batch_id::<Sha256>(),
+            change_root: close.roots.change,
+            lookup,
+        })
     }
 
     pub(crate) fn accept_send(&mut self, send: SignedSend<Key, Digest>) -> Result<AcceptedBatch> {

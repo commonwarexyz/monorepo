@@ -3,7 +3,7 @@ title: "Keep the Change"
 description: "$0.000001 payments cost more to replicate, settle onchain, and index than they're worth. Yet your agent will need to make millions of them over the coming years."
 date: "August 19th, 2026"
 published-time: "2026-08-19T00:00:00Z"
-modified-time: "2026-08-27T00:00:00Z"
+modified-time: "2026-08-28T00:00:00Z"
 author: "Patrick O'Grady"
 author_twitter: "https://x.com/_patrickogrady"
 url: "https://commonware.xyz/blogs/clearing"
@@ -379,16 +379,16 @@ No payment count appears because none is needed: rows and shard tips carry fixed
     </tr>
     <tr>
       <td style="padding-left:20px;">prepare</td>
-      <td style="text-align:right;">0.668 ms</td>
-      <td style="text-align:right;">3.65 ms</td>
-      <td style="text-align:right;">34.3 ms</td>
-      <td style="text-align:right;">425 ms</td>
+      <td style="text-align:right;">0.855 ms</td>
+      <td style="text-align:right;">3.58 ms</td>
+      <td style="text-align:right;">29.3 ms</td>
+      <td style="text-align:right;">317 ms</td>
     </tr>
     <tr>
       <td style="padding-left:20px;">deal</td>
-      <td style="text-align:right;">0.141 ms</td>
-      <td style="text-align:right;">0.325 ms</td>
-      <td style="text-align:right;">3.51 ms</td>
+      <td style="text-align:right;">0.198 ms</td>
+      <td style="text-align:right;">0.313 ms</td>
+      <td style="text-align:right;">3.08 ms</td>
       <td style="text-align:right;">32.6 ms</td>
     </tr>
     <tr><th colspan="5" style="text-align:left;">Certification</th></tr>
@@ -401,10 +401,10 @@ No payment count appears because none is needed: rows and shard tips carry fixed
     </tr>
     <tr>
       <td style="padding-left:20px;">seal</td>
-      <td style="text-align:right;">2.42 ms</td>
-      <td style="text-align:right;">12.3 ms</td>
-      <td style="text-align:right;">97.4 ms</td>
-      <td style="text-align:right;">1.07 s</td>
+      <td style="text-align:right;">2.49 ms</td>
+      <td style="text-align:right;">12.5 ms</td>
+      <td style="text-align:right;">98.7 ms</td>
+      <td style="text-align:right;">1.12 s</td>
     </tr>
     <tr><th colspan="5" style="text-align:left;">Settlement</th></tr>
     <tr>
@@ -423,12 +423,19 @@ No payment count appears because none is needed: rows and shard tips carry fixed
     </tr>
     <tr>
       <td style="padding-left:20px;">check certified commitment</td>
-      <td style="text-align:right;"><strong>0.667 ms</strong></td>
-      <td style="text-align:right;"><strong>0.668 ms</strong></td>
-      <td style="text-align:right;"><strong>0.667 ms</strong></td>
-      <td style="text-align:right;"><strong>0.666 ms</strong></td>
+      <td style="text-align:right;"><strong>0.670 ms</strong></td>
+      <td style="text-align:right;"><strong>0.669 ms</strong></td>
+      <td style="text-align:right;"><strong>0.669 ms</strong></td>
+      <td style="text-align:right;"><strong>0.669 ms</strong></td>
     </tr>
     <tr><th colspan="5" style="text-align:left;">Dispute</th></tr>
+    <tr>
+      <td style="padding-left:20px;">LatestAcknowledgedSend challenge</td>
+      <td style="text-align:right;"><strong>669 B</strong></td>
+      <td style="text-align:right;"><strong>797 B</strong></td>
+      <td style="text-align:right;"><strong>893 B</strong></td>
+      <td style="text-align:right;"><strong>989 B</strong></td>
+    </tr>
     <tr>
       <td style="padding-left:20px;">HigherShardTip challenge</td>
       <td style="text-align:right;"><strong>663 B</strong></td>
@@ -437,18 +444,53 @@ No payment count appears because none is needed: rows and shard tips carry fixed
       <td style="text-align:right;"><strong>983 B</strong></td>
     </tr>
     <tr>
+      <td style="padding-left:20px;">InconsistentReceiptRange challenge</td>
+      <td style="text-align:right;"><strong>492 B</strong></td>
+      <td style="text-align:right;"><strong>492 B</strong></td>
+      <td style="text-align:right;"><strong>492 B</strong></td>
+      <td style="text-align:right;"><strong>492 B</strong></td>
+    </tr>
+    <tr>
+      <td style="padding-left:20px;">ReceiptFork challenge</td>
+      <td style="text-align:right;"><strong>484 B</strong></td>
+      <td style="text-align:right;"><strong>484 B</strong></td>
+      <td style="text-align:right;"><strong>484 B</strong></td>
+      <td style="text-align:right;"><strong>484 B</strong></td>
+    </tr>
+    <tr>
+      <td style="padding-left:20px;">check LatestAcknowledgedSend</td>
+      <td style="text-align:right;"><strong>0.301 ms</strong></td>
+      <td style="text-align:right;"><strong>0.306 ms</strong></td>
+      <td style="text-align:right;"><strong>0.299 ms</strong></td>
+      <td style="text-align:right;"><strong>0.314 ms</strong></td>
+    </tr>
+    <tr>
       <td style="padding-left:20px;">check HigherShardTip</td>
-      <td style="text-align:right;"><strong>0.294 ms</strong></td>
-      <td style="text-align:right;"><strong>0.298 ms</strong></td>
-      <td style="text-align:right;"><strong>0.302 ms</strong></td>
-      <td style="text-align:right;"><strong>0.293 ms</strong></td>
+      <td style="text-align:right;"><strong>0.297 ms</strong></td>
+      <td style="text-align:right;"><strong>0.303 ms</strong></td>
+      <td style="text-align:right;"><strong>0.306 ms</strong></td>
+      <td style="text-align:right;"><strong>0.305 ms</strong></td>
+    </tr>
+    <tr>
+      <td style="padding-left:20px;">check InconsistentReceiptRange</td>
+      <td style="text-align:right;"><strong>0.418 ms</strong></td>
+      <td style="text-align:right;"><strong>0.424 ms</strong></td>
+      <td style="text-align:right;"><strong>0.429 ms</strong></td>
+      <td style="text-align:right;"><strong>0.429 ms</strong></td>
+    </tr>
+    <tr>
+      <td style="padding-left:20px;">check ReceiptFork</td>
+      <td style="text-align:right;"><strong>0.422 ms</strong></td>
+      <td style="text-align:right;"><strong>0.419 ms</strong></td>
+      <td style="text-align:right;"><strong>0.428 ms</strong></td>
+      <td style="text-align:right;"><strong>0.425 ms</strong></td>
     </tr>
   </tbody>
 </table>
 </div>
 ```
 
-Withdrawal and external-payout claims scale with a different variable: the claimed close's own withdrawal count $W$, never $N$, because each claim opens only that close's withdrawal-output tree. Sizes are deterministic, 39 bytes plus one 32-byte sibling per doubling of $W$, and both the $\mathsf{Amount}$ and $\mathsf{Close}$ claims share the shape. Verification recomputes that one path, 0.311 µs at a single output on the same c8a.4xlarge, adding one hash per doubling of $W$.
+Withdrawal and external-payout claims scale with a different variable: the claimed close's own withdrawal count $W$, never $N$, because each claim opens only that close's withdrawal-output tree. Sizes are deterministic, 39 bytes plus one 32-byte sibling per doubling of $W$, and both the $\mathsf{Amount}$ and $\mathsf{Close}$ claims share the shape. Verification recomputes that one path, 0.313 µs at a single output on the same c8a.4xlarge, adding one hash per doubling of $W$.
 
 ```{=html}
 <div class="clearing-benchmark-table">
@@ -496,7 +538,7 @@ Even the largest validator dealing is 31.3–32.8% smaller than the complete pro
 
 The proof-slice corpus is constant for a profile, so accepted payments only divide it. Ten million payments spread the one-million-account profile's 582,907,548 bytes to 58.3 offchain bytes per payment; a billion spread it to 0.583 offchain bytes per payment. The certificate is one 48-byte aggregate signature plus a $\lceil n/8\rceil$-byte signer bitmap; proofs of possession were checked when the committee registered. With the 32-byte commitment and this encoding's eight-byte bitmap-length prefix, the external 100-validator certified package is 101 bytes total. If the Bajillion validators are also the settlement chain's validators, inclusion itself supplies the attestation and only the 32-byte commitment need be retained. The 128-byte $\mathsf{RootBundle}$ admission witness and terminal proof are not included in either commitment figure. Each figure likewise shrinks as $1/T$.
 
-The certified close itself queues no withdrawals. Separate fixtures use a 21-byte destination without adding the claims to certification, once with a single withdrawal output and once with a withdrawal surge in which all $N$ accounts exit through one close. The identical $\mathsf{Amount}$ and $\mathsf{Close}$ claim proofs carry only the validator-derived destination and amount plus one $\mathsf{WithdrawalOutputRoot}$ opening. At $W=1$ either claim is 39 bytes and verifies in 0.311 µs. The surge claim grows one 32-byte sibling per doubling of the withdrawal count, reaching 359 bytes when 1,024 accounts exit together and 679 bytes when one million do, and its verification grows only by the path hashes. The $\mathsf{HigherShardTip}$ challenge is 663–983 bytes as lookup depth grows and verifies in 0.293–0.302 ms. It retains both signatures for its represented payment. Challenge evidence embeds the whole signed send, so representing an entry of a larger batch adds 40 bytes per sibling entry while verification stays signature-dominated: the two signatures are checked once regardless of batch size, and only the hashed send bytes grow. Adjudicating the same contradiction measures within noise of a single entry at 16 entries and under 10% slower at the 256-entry protocol bound. Clean closes submit no fraud challenge at all, so average challenge traffic is smaller still. A challenge targets a commitment whose certificate was already checked at admission, so adjudication does not verify that certificate again.
+The certified close itself queues no withdrawals. Separate fixtures use a 21-byte destination without adding the claims to certification, once with a single withdrawal output and once with a withdrawal surge in which all $N$ accounts exit through one close. The identical $\mathsf{Amount}$ and $\mathsf{Close}$ claim proofs carry only the validator-derived destination and amount plus one $\mathsf{WithdrawalOutputRoot}$ opening. At $W=1$ either claim is 39 bytes and verifies in 0.313 µs. The surge claim grows one 32-byte sibling per doubling of the withdrawal count, reaching 359 bytes when 1,024 accounts exit together and 679 bytes when one million do, and its verification grows only by the path hashes. The $\mathsf{LatestAcknowledgedSend}$ and $\mathsf{HigherShardTip}$ challenges carry one acknowledged pair plus one changed-row opening, so they grow with lookup depth: 669–989 and 663–983 bytes across the matrix, checking in 0.297–0.314 ms. The $\mathsf{InconsistentReceiptRange}$ and $\mathsf{ReceiptFork}$ contradictions carry two acknowledged pairs and no state opening, so they hold at 492 and 484 bytes for every $N$ and check in 0.418–0.429 ms. Every represented payment retains both its signatures, and adjudication is signature-dominated: the pair contradictions verify four retained signatures where the lookup challenges verify two plus their Merkle openings. Challenge evidence embeds the whole signed send, so representing an entry of a larger batch adds 40 bytes per sibling entry, its signatures checked once regardless of batch size while only the hashed send bytes grow. Adjudicating the same contradiction measures within noise of a single entry at 16 entries and about 10% slower at the 256-entry protocol bound. Clean closes submit no fraud challenge at all, so average challenge traffic is smaller still. A challenge targets a commitment whose certificate was already checked at admission, so adjudication does not verify that certificate again.
 
 ```{=html}
 <img class="clearing-benchmark-plot" src="/imgs/clearing-bytes-per-payment.svg" alt="Two side-by-side log-log plots divide fixed per-epoch bytes by accepted payments from one million to one billion. The left shows proof-slice corpus bytes per payment for four live-account counts; the right shows the 101-byte external certified package. Every line falls as one over T.">
