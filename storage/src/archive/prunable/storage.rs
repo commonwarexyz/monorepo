@@ -180,6 +180,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
             value_partition: cfg.value_partition,
             index_page_cache: cfg.key_page_cache,
             index_write_buffer: cfg.key_write_buffer,
+            replay_buffer: cfg.replay_buffer,
             value_write_buffer: cfg.value_write_buffer,
             compression: cfg.compression,
             codec_config: cfg.codec_config,
