@@ -347,7 +347,7 @@ where
     /// [`crate::qmdb::verify_proof`].
     ///
     /// Nodes below this batch chain are read from `db`'s
-    /// [in-memory Merkle tier][crate::merkle::mem::Mem], which retains them at least until
+    /// [Merkle store][crate::merkle::mem::Mem], which retains them at least until
     /// this batch's changes are flushed (by a commit or sync after apply).
     pub fn proof<E, C, H>(&self, db: &Keyless<F, E, V, C, H, S>) -> Result<Proof<F, D>, Error<F>>
     where

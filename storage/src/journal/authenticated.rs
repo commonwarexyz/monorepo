@@ -675,7 +675,7 @@ where
     /// Inclusion proof for the items `batch` appends, anchored at the batch's speculative tip.
     ///
     /// Nodes below the batch chain are read from this journal's
-    /// [in-memory Merkle tier][crate::merkle::mem::Mem], which retains them at least until
+    /// [Merkle store][crate::merkle::mem::Mem], which retains them at least until
     /// the batch's changes are flushed.
     pub fn speculative_proof(
         &self,
