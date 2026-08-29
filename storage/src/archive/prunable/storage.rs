@@ -223,7 +223,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         let mut intervals = RMap::new();
         debug!("initializing archive from index journal");
         while let Some(result) = replay.next().await {
-            let (_, position, entry) = result?;
+            let (_, position, entry) = result.map_err(map_journal_error)?;
 
             // Index every retained occurrence by position, translated key, and range.
             match indices.entry(entry.index) {

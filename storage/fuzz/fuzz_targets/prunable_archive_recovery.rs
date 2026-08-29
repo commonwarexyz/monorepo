@@ -16,7 +16,7 @@ use commonware_storage::{
     rmap::RMap,
     translator::EightCap,
 };
-use commonware_storage_fuzz::faulted_recovery;
+use commonware_storage_fuzz::{faulted_recovery, release_oldest_pending_sync};
 use commonware_utils::{NZUsize, Probability, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 use std::{
@@ -147,14 +147,19 @@ async fn read_value(
     let end = record
         .value_offset
         .checked_add(u64::from(record.value_size))?;
-    let (blob, blob_size) = context.open(partition, &section.to_be_bytes()).await.ok()?;
+    // The value blob is created before any index bytes can exist, and reads are never
+    // fault-injected, so open and read failures here are real bugs, not crash shapes.
+    let (blob, blob_size) = context
+        .open(partition, &section.to_be_bytes())
+        .await
+        .expect("oracle value open failed");
     if end > blob_size {
         return None;
     }
     let frame = blob
         .read_at(record.value_offset, size, ReadOptions::default())
         .await
-        .ok()?
+        .expect("oracle value read failed")
         .coalesce();
     let data_len = size - VALUE_CHECKSUM_SIZE;
     let stored = u32::from_be_bytes(frame.as_ref()[data_len..].try_into().ok()?);
@@ -441,6 +446,7 @@ fn fuzz(input: FuzzInput) {
                     .expect("initial archive init failed");
             let mut held: Vec<(usize, Handle<()>)> = Vec::new();
             let mut durable = 0usize;
+            let total = first_phase_entries.len();
             let mut exempt_below = 0u64;
             let mut pruned = false;
             for (offset, entry) in first_phase_entries.into_iter().enumerate() {
@@ -550,39 +556,43 @@ fn fuzz(input: FuzzInput) {
             };
             match first_phase_input.final_op % 3 {
                 1 => {
-                    // Interrupt a blocking sync mid-flight: poll until it parks on a held
-                    // completion, then drop the future (the owner-consuming contract retires the
-                    // instance) so the crash lands between its internal barriers.
+                    // Interrupt a blocking sync mid-flight: each iteration releases the
+                    // oldest parked completion, advancing the sync one durability barrier
+                    // per poll, then drop the future (the owner-consuming contract retires
+                    // the instance) so the crash lands between its internal barriers. A
+                    // sync that runs to completion is an observed barrier: it must succeed
+                    // and every accepted write becomes durable.
                     let mut sync = Box::pin(archive.sync());
                     for _ in 0..usize::from(first_phase_input.final_op >> 2) % 8 + 1 {
-                        if futures::future::poll_immediate(sync.as_mut())
-                            .await
-                            .is_some()
-                        {
+                        if let Some(result) = futures::future::poll_immediate(sync.as_mut()).await {
+                            drop(result.expect("interrupted sync failed"));
+                            durable = durable.max(total);
                             break;
                         }
+                        release_oldest_pending_sync(&pending);
                     }
                     drop(sync);
                 }
                 2 => {
-                    // Interrupt a prune mid-flight: the armed gate parks it at its internal
-                    // durability barriers, starting with the marker-removal metadata sync, so the
-                    // crash lands between marker removal and section deletion. Markers must be
-                    // removed durably before any section storage disappears, so every cut point
-                    // must recover. Only indices below the section-rounded floor can disappear.
+                    // Interrupt a prune mid-flight: the armed gate parks it at the
+                    // marker-removal metadata sync (the only parking point, so a second
+                    // poll after the release runs the prune to completion). Markers must
+                    // be removed durably before any section storage disappears, so both
+                    // cut points must recover. Only indices below the section-rounded
+                    // floor can disappear.
                     let min = u64::from(first_phase_input.final_op >> 2);
                     let floor = (min / items_per_section) * items_per_section.get();
                     pruned |= floor > 0;
                     exempt_below = exempt_below.max(floor);
                     pending.arm();
                     let mut prune = Box::pin(archive.prune(min));
-                    for _ in 0..usize::from(first_phase_input.final_op >> 5) % 8 + 1 {
-                        if futures::future::poll_immediate(prune.as_mut())
-                            .await
-                            .is_some()
+                    for _ in 0..usize::from(first_phase_input.final_op >> 5) % 2 + 1 {
+                        if let Some(result) = futures::future::poll_immediate(prune.as_mut()).await
                         {
+                            drop(result.expect("interrupted prune failed"));
                             break;
                         }
+                        release_oldest_pending_sync(&pending);
                     }
                     drop(prune);
                 }

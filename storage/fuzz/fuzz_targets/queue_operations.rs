@@ -6,6 +6,7 @@ use commonware_storage::queue::{Config, Queue};
 use commonware_storage_fuzz::{
     bounded_buffer, bounded_items, bounded_page_cache_size, bounded_page_size,
 };
+use commonware_utils::NZUsize;
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::BTreeSet,
@@ -46,8 +47,6 @@ struct FuzzInput {
     /// Write buffer size.
     #[arbitrary(with = bounded_buffer)]
     write_buffer: usize,
-    #[arbitrary(with = bounded_buffer)]
-    replay_buffer: usize,
     /// Sequence of operations to execute.
     operations: Vec<QueueOperation>,
 }
@@ -146,7 +145,6 @@ fn fuzz(input: FuzzInput) {
     let page_cache_size = NonZeroUsize::new(input.page_cache_size).unwrap();
     let items_per_section = NonZeroU64::new(input.items_per_section).unwrap();
     let write_buffer = NonZeroUsize::new(input.write_buffer).unwrap();
-    let replay_buffer = NonZeroUsize::new(input.replay_buffer).unwrap();
 
     runner.start(|context| async move {
         let cfg = Config {
@@ -156,7 +154,9 @@ fn fuzz(input: FuzzInput) {
             codec_config: ((0usize..).into(), ()),
             page_cache: CacheRef::from_pooler(&context, page_size, page_cache_size),
             write_buffer,
-            replay_buffer,
+            // The queue is initialized once on an empty partition and never reopened,
+            // so replay never reads anything: fuzzing this knob adds no coverage.
+            replay_buffer: NZUsize!(1024),
         };
 
         let mut queue = Queue::<_, Vec<u8>>::init(context.child("storage"), cfg)

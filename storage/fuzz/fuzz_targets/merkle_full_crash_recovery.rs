@@ -1,6 +1,6 @@
 #![no_main]
 
-//! Fuzz test for Merkle Merkle crash recovery with fault injection.
+//! Fuzz test for persisted Merkle crash recovery with fault injection.
 //! Tests both MMR and MMB families.
 
 use arbitrary::Arbitrary;
@@ -34,6 +34,10 @@ enum MerkleOperation {
     Add { data: [u8; DATA_SIZE] },
     /// Sync to storage.
     Sync,
+    /// Flush cached nodes to the journal without a durability barrier.
+    Flush,
+    /// Begin a durable sync and abandon its completion handle.
+    StartSync,
     /// Prune leaves up to a location.
     PruneToLoc { loc: u64 },
     /// Prune all nodes.
@@ -142,6 +146,23 @@ async fn run_operations<F: MerkleFamily>(
                 }
             },
 
+            // Flushed nodes reach the journal without a durability barrier, so no
+            // expectation changes: only a completed sync raises the floor.
+            MerkleOperation::Flush => match merkle.flush().await {
+                Err(_) => break,
+                Ok(merkle) => merkle,
+            },
+
+            // The completion handle is dropped unobserved, so nothing is credited as
+            // durable: the abandoned sync may or may not have completed by the crash.
+            MerkleOperation::StartSync => match merkle.start_sync().await {
+                Err(_) => break,
+                Ok((merkle, handle)) => {
+                    drop(handle);
+                    merkle
+                }
+            },
+
             MerkleOperation::PruneToLoc { loc } => {
                 let leaves = *merkle.leaves();
                 let current_pruned = *merkle.bounds().start;
@@ -150,6 +171,9 @@ async fn run_operations<F: MerkleFamily>(
                 if safe_loc > current_pruned {
                     match merkle.prune(Location::new(safe_loc)).await {
                         Err(_) => {
+                            // The error is opaque: the prune may have failed before its
+                            // internal sync proved anything durable, so this ceiling is
+                            // conservative.
                             max_pruned = max_pruned.max(safe_loc);
                             break;
                         }
@@ -157,6 +181,13 @@ async fn run_operations<F: MerkleFamily>(
                             let pruned = merkle.bounds().start.as_u64();
                             min_pruned = pruned;
                             max_pruned = pruned;
+
+                            // Prune completes a full durable sync before touching
+                            // metadata, so it is also a size/leaves barrier.
+                            min_size = merkle.size().as_u64();
+                            min_leaves = merkle.leaves().as_u64();
+                            max_size = max_size.max(min_size);
+                            max_leaves = max_leaves.max(min_leaves);
                             merkle
                         }
                     }
@@ -179,6 +210,13 @@ async fn run_operations<F: MerkleFamily>(
                             let pruned = merkle.bounds().start.as_u64();
                             min_pruned = pruned;
                             max_pruned = pruned;
+
+                            // Prune completes a full durable sync before touching
+                            // metadata, so it is also a size/leaves barrier.
+                            min_size = merkle.size().as_u64();
+                            min_leaves = merkle.leaves().as_u64();
+                            max_size = max_size.max(min_size);
+                            max_leaves = max_leaves.max(min_leaves);
                             merkle
                         }
                     }

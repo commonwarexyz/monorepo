@@ -268,10 +268,13 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
     }
 
     /// Classify an invalid or missing boundary as committed corruption without hiding I/O errors.
-    fn boundary_error(section: u64, required: u64, err: RError) -> Error {
+    ///
+    /// `searched` is the extent the boundary read covered: the current section's logical
+    /// boundary size, or an earlier section's physical blob size.
+    fn boundary_error(section: u64, searched: u64, err: RError) -> Error {
         match err {
             RError::InvalidChecksum | RError::BlobInsufficientLength => Error::Corruption(format!(
-                "section {section} does not retain its {required}-byte durable boundary"
+                "section {section} does not retain a valid durable boundary within {searched} bytes"
             )),
             err => Error::Runtime(err),
         }

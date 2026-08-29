@@ -36,6 +36,12 @@ struct FuzzInput {
     path: WritePath,
     crash: CrashKind,
     retention: u8,
+    /// Let the first candidate write succeed (volatile) and fail the second,
+    /// so the failed-write cut can land past a pending update.
+    fail_second: bool,
+    /// Deepen the checkpointed baseline with filler puts and syncs that complete
+    /// a table resize and roll past one value section before the crash scenario.
+    deepen: bool,
 }
 
 /// Build the deterministic Freezer configuration used by the recovery scenario.
@@ -92,8 +98,9 @@ async fn assert_values<E: commonware_storage::Context>(
     freezer: &Freezer<E, Key, i32>,
     expected: &[(Key, i32)],
 ) {
-    let mut candidates = (0..3).map(baseline_key).collect::<Vec<_>>();
+    let mut candidates = (0..4).map(baseline_key).collect::<Vec<_>>();
     candidates.extend([candidate_key(), sentinel_key()]);
+    candidates.extend(expected.iter().map(|(key, _)| key.clone()));
     for key in candidates {
         let expected_value = expected
             .iter()
@@ -119,11 +126,36 @@ fn run(input: &FuzzInput, mode: PartialWriteMode) {
                 Freezer::<_, Key, i32>::init(context.child("freezer"), config(&context), None)
                     .await
                     .expect("initial freezer init failed");
-            let baseline_slots: &[u32] = match phase_input.path {
-                WritePath::Put => &[0],
-                WritePath::Resize => &[0, 1, 2],
-            };
             let mut baseline = Vec::new();
+
+            // Deepen the checkpointed state: mark every initial slot, then advance the
+            // bounded resize one chunk per sync until it completes (start plus three more
+            // advances for a four-entry table), doubling the table and resetting every
+            // slot's added count. Eight framed values also roll past one value section,
+            // so restore later trims a multi-section journal against a doubled table.
+            if phase_input.deepen {
+                for round in 0..8u32 {
+                    let key = key_for_slot(round % TABLE_SIZE, 0x30 + round as u8);
+                    let value = 300 + round as i32;
+                    (freezer, _) = freezer
+                        .put(key.clone(), value)
+                        .await
+                        .expect("filler put failed");
+                    baseline.push((key, value));
+                }
+                for _ in 0..4 {
+                    (freezer, _) = freezer.sync().await.expect("filler sync failed");
+                }
+            }
+
+            // A deepened resize scenario marks four slots: after the completed resize the
+            // threshold doubles, and the distinct low residues land in distinct slots of
+            // the doubled table, so the checkpoint sync leaves a fresh resize in progress.
+            let baseline_slots: &[u32] = match (phase_input.path, phase_input.deepen) {
+                (WritePath::Put, _) => &[0],
+                (WritePath::Resize, false) => &[0, 1, 2],
+                (WritePath::Resize, true) => &[0, 1, 2, 3],
+            };
             for &slot in baseline_slots {
                 let key = baseline_key(slot);
                 let value = 100 + slot as i32;
@@ -138,8 +170,14 @@ fn run(input: &FuzzInput, mode: PartialWriteMode) {
 
             // Failed writes retain selected submitted bytes immediately. Successful writes remain
             // unsynced by forcing the next durability operation to fail, after which the instance
-            // is dropped without further use.
+            // is dropped without further use. With `fail_second`, the first candidate write
+            // succeeds (volatile) and the failure is armed just before the second, so the cut
+            // lands past a pending update.
+            let fail_second = matches!(phase_input.path, WritePath::Put)
+                && matches!(phase_input.crash, CrashKind::FailedWrite)
+                && phase_input.fail_second;
             let failure_rate = match phase_input.crash {
+                CrashKind::FailedWrite if fail_second => Probability::new(0, 1).unwrap(),
                 CrashKind::FailedWrite => Probability::new(1, 1).unwrap(),
                 CrashKind::UnsyncedWrite => Probability::new(0, 1).unwrap(),
             };
@@ -147,7 +185,8 @@ fn run(input: &FuzzInput, mode: PartialWriteMode) {
                 CrashKind::FailedWrite => None,
                 CrashKind::UnsyncedWrite => Some(Probability::new(1, 1).unwrap()),
             };
-            *context.storage_fault_config().write() = deterministic::FaultConfig {
+            let fault_config = context.storage_fault_config();
+            *fault_config.write() = deterministic::FaultConfig {
                 write_rate: Some(WriteConfig {
                     failure_rate,
                     retention_rate: Probability::new(u64::from(phase_input.retention % 101), 100)
@@ -164,10 +203,22 @@ fn run(input: &FuzzInput, mode: PartialWriteMode) {
                     let (freezer, updated_cursor) = match updated {
                         Ok(result) => result,
                         Err(_) => {
-                            assert!(matches!(phase_input.crash, CrashKind::FailedWrite));
+                            // With fail_second the failure rate is still zero here, so
+                            // the first put has no legal way to fail.
+                            assert!(
+                                matches!(phase_input.crash, CrashKind::FailedWrite) && !fail_second
+                            );
                             return (freezer_checkpoint, baseline, Vec::new());
                         }
                     };
+                    if fail_second {
+                        fault_config
+                            .write()
+                            .write_rate
+                            .as_mut()
+                            .expect("write faults configured")
+                            .failure_rate = Probability::new(1, 1).unwrap();
+                    }
                     let inserted = freezer.put(candidate_key(), 901).await;
                     let (freezer, inserted_cursor) = match inserted {
                         Ok(result) => result,

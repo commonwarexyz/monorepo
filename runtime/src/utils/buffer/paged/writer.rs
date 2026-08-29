@@ -132,6 +132,11 @@ impl<B: Blob> Writer<B> {
     /// Wrap `blob` in a [Writer]. `blob` must already hold `original_blob_size` physical bytes;
     /// reads are cached through `cache_ref` and appends stage in a write buffer of capacity
     /// `capacity`. Rewinds the blob if necessary so it only contains checksum-validated data.
+    ///
+    /// The blob's tail-page contents must be durable (freshly opened after a crash, or synced
+    /// since the last partial-page rewrite): the discovered checksum slot seeds the writer's
+    /// durable-slot tracking, so wrapping a blob whose tail rewrite is still volatile would
+    /// let a later unsynced flush overwrite the only durable slot.
     pub async fn new(
         blob: B,
         original_blob_size: u64,

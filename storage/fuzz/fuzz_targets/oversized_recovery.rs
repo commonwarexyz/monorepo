@@ -16,7 +16,7 @@ use commonware_storage::journal::{
     Error as JournalError,
     segmented::oversized::{Config, Oversized, Record},
 };
-use commonware_storage_fuzz::faulted_recovery;
+use commonware_storage_fuzz::{faulted_recovery, release_oldest_pending_sync};
 use commonware_utils::{NZU16, NZUsize, Probability};
 use libfuzzer_sys::fuzz_target;
 use std::{
@@ -198,12 +198,16 @@ async fn frame_valid(
 /// through it, adopting earlier records whose frames were damaged (their reads must fail loud).
 /// Maps each section to `(id, value readable)` per retained position, asserting identity against
 /// the intended append stream since an in-model crash cut cannot forge a CRC-valid record.
+///
+/// Also returns each scanned section's terminal value end (zero when nothing is retained),
+/// which repair must truncate the glob to.
 async fn recover_expected(
     context: &deterministic::Context,
     intended: &BTreeMap<u64, Vec<u64>>,
-) -> BTreeMap<u64, Vec<(u64, bool)>> {
+) -> (BTreeMap<u64, Vec<(u64, bool)>>, BTreeMap<u64, u64>) {
     let page_size = usize::from(PAGE_SIZE.get());
     let physical_page_size = page_size + PAGE_CHECKSUM_RECORD_SIZE;
+    let mut value_ends = BTreeMap::new();
     let mut sections: BTreeMap<u64, Vec<(u64, bool)>> =
         (0..SECTIONS).map(|section| (section, Vec::new())).collect();
     for name in context
@@ -257,6 +261,13 @@ async fn recover_expected(
             .iter()
             .rposition(|&valid| valid)
             .map_or(0, |last| last + 1);
+        let value_end = records[..retained].last().map_or(0, |record| {
+            let (offset, size) = record.value_location();
+            offset
+                .checked_add(u64::from(size))
+                .expect("oracle value end overflow")
+        });
+        value_ends.insert(section, value_end);
 
         let intended = intended.get(&section).map_or(&[][..], Vec::as_slice);
         let mut expected = Vec::with_capacity(retained);
@@ -274,7 +285,7 @@ async fn recover_expected(
         }
         sections.insert(section, expected);
     }
-    sections
+    (sections, value_ends)
 }
 
 /// Assert the recovered journal serves exactly the expected view: identity for every retained
@@ -444,33 +455,41 @@ fn fuzz(input: FuzzInput) {
         };
         match first_phase_input.final_op % 3 {
             1 => {
-                // Interrupt a blocking sync of every section mid-flight: poll until it parks on
-                // a held completion, then drop the future, so the crash lands between its
-                // internal barriers with only a prefix of the sections flushed.
+                // Interrupt a blocking sync of every section behind the armed one-shot
+                // gate: the first barrier to arrive parks with its blob's flush left
+                // volatile while every other blob syncs durably. Releasing the gate and
+                // polling again instead completes the sync before the crash.
                 pending.arm();
                 let mut sync = Box::pin(oversized.sync_all());
-                for _ in 0..usize::from(first_phase_input.final_op >> 2) % 8 + 1 {
-                    if futures::future::poll_immediate(sync.as_mut())
-                        .await
-                        .is_some()
-                    {
+                for _ in 0..usize::from(first_phase_input.final_op >> 2) % 2 + 1 {
+                    if let Some(result) = futures::future::poll_immediate(sync.as_mut()).await {
+                        // A sync that ran to completion is an observed barrier: it must
+                        // succeed and every appended entry becomes durable.
+                        drop(result.expect("interrupted sync_all failed"));
+                        durable = counts.clone();
                         break;
                     }
+                    release_oldest_pending_sync(&pending);
                 }
                 drop(sync);
             }
             2 => {
-                // Interrupt a blocking sync of one section mid-flight.
+                // Interrupt a blocking sync of one section behind the armed gate, with
+                // the same parked-or-completed split as above.
                 pending.arm();
                 let section = u64::from(first_phase_input.final_op >> 2) % SECTIONS;
                 let mut sync = Box::pin(oversized.sync(section));
-                for _ in 0..usize::from(first_phase_input.final_op >> 5) % 8 + 1 {
-                    if futures::future::poll_immediate(sync.as_mut())
-                        .await
-                        .is_some()
-                    {
+                for _ in 0..usize::from(first_phase_input.final_op >> 5) % 2 + 1 {
+                    if let Some(result) = futures::future::poll_immediate(sync.as_mut()).await {
+                        // A completed section sync must succeed and makes that section's
+                        // appended entries durable.
+                        drop(result.expect("interrupted section sync failed"));
+                        if let Some(&count) = counts.get(&section) {
+                            durable.insert(section, count);
+                        }
                         break;
                     }
+                    release_oldest_pending_sync(&pending);
                 }
                 drop(sync);
             }
@@ -505,7 +524,7 @@ fn fuzz(input: FuzzInput) {
         .start_and_recover(move |context| async move {
             *context.storage_fault_config().write() = deterministic::FaultConfig::default();
             let cfg = config(&context);
-            let expected = recover_expected(&context, &recovery_appended).await;
+            let (expected, value_ends) = recover_expected(&context, &recovery_appended).await;
             let recovered: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("recovered"), cfg, None)
                     .await
@@ -537,6 +556,27 @@ fn fuzz(input: FuzzInput) {
             assert_view(&recovered, &expected, true).await;
             drop(recovered);
             let sizes = blob_sizes(&context).await;
+
+            // Repair must pair every index section with a glob truncated to the last
+            // retained entry's end and remove value sections with no index counterpart,
+            // so stale value bytes can never satisfy a later append's range.
+            for (&(is_index, section), &size) in &sizes {
+                if is_index {
+                    assert!(
+                        sizes.contains_key(&(false, section)),
+                        "index section {section} recovered without its value section"
+                    );
+                    continue;
+                }
+                assert!(
+                    sizes.contains_key(&(true, section)),
+                    "recovery kept an orphan value section {section}"
+                );
+                assert_eq!(
+                    size, value_ends[&section],
+                    "recovery left the wrong value size in section {section}"
+                );
+            }
             (expected, sizes)
         });
 
