@@ -3,49 +3,29 @@
 //! Fuzz test for Merkle Merkle crash recovery with fault injection.
 //! Tests both MMR and MMB families.
 
-use arbitrary::{Arbitrary, Result, Unstructured};
+use arbitrary::Arbitrary;
 use commonware_cryptography::{Sha256, sha256::Digest};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
     BufferPooler, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
 use commonware_storage::merkle::{
-    Bagging::ForwardFold, Family as MerkleFamily, Location, full::Config,
-    hasher::Standard as StandardHasher, mmb, mmr,
+    Bagging::ForwardFold, Family as MerkleFamily, Location, Position, full::Config,
+    hasher::Standard as StandardHasher, mem::Mem, mmb, mmr,
 };
-use commonware_utils::{NZU64, Probability, probability};
+use commonware_storage_fuzz::{
+    bounded_buffer, bounded_items, bounded_nonzero_rate, bounded_page_cache_size,
+    bounded_page_size, faulted_recovery,
+};
+use commonware_utils::{NZU64, Probability};
 use libfuzzer_sys::fuzz_target;
 use std::num::{NonZeroU16, NonZeroUsize};
 
 /// Data size for leaves.
 const DATA_SIZE: usize = 32;
 
-/// Maximum write buffer size.
-const MAX_WRITE_BUF: usize = 2048;
-
 type Merkle<F> =
     commonware_storage::merkle::full::Merkle<F, deterministic::Context, Digest, Sequential>;
-
-fn bounded_page_size(u: &mut Unstructured<'_>) -> Result<u16> {
-    u.int_in_range(1..=256)
-}
-
-fn bounded_page_cache_size(u: &mut Unstructured<'_>) -> Result<usize> {
-    u.int_in_range(1..=16)
-}
-
-fn bounded_items_per_blob(u: &mut Unstructured<'_>) -> Result<u64> {
-    u.int_in_range(1..=64)
-}
-
-fn bounded_write_buffer(u: &mut Unstructured<'_>) -> Result<usize> {
-    u.int_in_range(1..=MAX_WRITE_BUF)
-}
-
-fn bounded_nonzero_rate(u: &mut Unstructured<'_>) -> Result<Probability> {
-    let percent: u8 = u.int_in_range(1..=100)?;
-    Ok(probability!(u64::from(percent), 100))
-}
 
 /// Operations that can be performed on the Merkle structure.
 #[derive(Arbitrary, Debug, Clone)]
@@ -72,17 +52,19 @@ struct FuzzInput {
     #[arbitrary(with = bounded_page_cache_size)]
     page_cache_size: usize,
     /// Items per blob.
-    #[arbitrary(with = bounded_items_per_blob)]
+    #[arbitrary(with = bounded_items)]
     items_per_blob: u64,
     /// Write buffer size.
-    #[arbitrary(with = bounded_write_buffer)]
+    #[arbitrary(with = bounded_buffer)]
     write_buffer: usize,
+    /// Replay buffer size.
+    #[arbitrary(with = bounded_buffer)]
+    replay_buffer: usize,
     /// Failure rate for sync operations (0, 1].
     #[arbitrary(with = bounded_nonzero_rate)]
     sync_failure_rate: Probability,
-    /// Failure rate for write operations (0, 1].
-    #[arbitrary(with = bounded_nonzero_rate)]
-    write_failure_rate: Probability,
+    /// Failure and byte-retention configuration for write operations.
+    write_config: deterministic::WriteConfig,
     /// Sequence of operations to execute.
     operations: Vec<MerkleOperation>,
 }
@@ -94,13 +76,14 @@ fn merkle_config(
     page_cache_size: NonZeroUsize,
     items_per_blob: u64,
     write_buffer: NonZeroUsize,
+    replay_buffer: NonZeroUsize,
 ) -> Config<Sequential> {
     Config {
         journal_partition: format!("journal-{partition_suffix}"),
         metadata_partition: format!("metadata-{partition_suffix}"),
         items_per_blob: NZU64!(items_per_blob),
         write_buffer,
-        replay_buffer: commonware_utils::NZUsize!(4096),
+        replay_buffer,
         strategy: Sequential,
         page_cache: CacheRef::from_pooler(pooler, page_size, page_cache_size),
     }
@@ -114,6 +97,7 @@ struct ExpectedBounds {
     max_leaves: u64,
     min_pruned: u64,
     max_pruned: u64,
+    leaves: Vec<[u8; DATA_SIZE]>,
 }
 
 async fn run_operations<F: MerkleFamily>(
@@ -127,6 +111,7 @@ async fn run_operations<F: MerkleFamily>(
     let mut max_leaves = merkle.leaves().as_u64();
     let mut min_pruned = 0u64;
     let mut max_pruned = merkle.bounds().start.as_u64();
+    let mut leaves = Vec::new();
 
     // A failed operation breaks out of the loop.
     for op in operations.iter() {
@@ -135,6 +120,7 @@ async fn run_operations<F: MerkleFamily>(
                 let batch = merkle.new_batch().add(hasher, data);
                 let batch = merkle.with_mem(|mem| batch.merkleize(mem, hasher));
                 let merkle = merkle.apply_batch(&batch).unwrap();
+                leaves.push(*data);
                 max_size = max_size.max(merkle.size().as_u64());
                 max_leaves = max_leaves.max(merkle.leaves().as_u64());
                 merkle
@@ -210,24 +196,37 @@ async fn run_operations<F: MerkleFamily>(
         max_leaves,
         min_pruned,
         max_pruned,
+        leaves,
     }
 }
 
-fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
-    if input.operations.is_empty() {
-        return;
+fn build_reference<F: MerkleFamily>(
+    hasher: &StandardHasher<Sha256>,
+    leaves: &[[u8; DATA_SIZE]],
+    count: u64,
+) -> Mem<F, Digest> {
+    let mut reference = Mem::new();
+    let mut batch = reference.new_batch();
+    for data in leaves.iter().take(count as usize) {
+        batch = batch.add(hasher, data);
     }
+    let batch = batch.merkleize(&reference, hasher);
+    reference.apply_batch(&batch).unwrap();
+    reference
+}
 
+fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
     let page_size = NonZeroU16::new(input.page_size).unwrap();
     let page_cache_size = NonZeroUsize::new(input.page_cache_size).unwrap();
     let items_per_blob = input.items_per_blob;
     let write_buffer = NonZeroUsize::new(input.write_buffer).unwrap();
+    let replay_buffer = NonZeroUsize::new(input.replay_buffer).unwrap();
     let cfg = deterministic::Config::default().with_seed(input.seed);
     let partition_suffix = format!("crash-{suffix}-{}", input.seed);
     let runner = deterministic::Runner::new(cfg);
     let operations = input.operations.clone();
     let sync_failure_rate = input.sync_failure_rate;
-    let write_failure_rate = input.write_failure_rate;
+    let write_config = input.write_config;
 
     // Phase 1: Execute operations with fault injection until crash
     let (bounds, checkpoint) = runner.start_and_recover(|ctx| {
@@ -245,6 +244,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                     page_cache_size,
                     items_per_blob,
                     write_buffer,
+                    replay_buffer,
                 ),
             )
             .await
@@ -253,16 +253,31 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
             let storage_fault_cfg = ctx.storage_fault_config();
             *storage_fault_cfg.write() = deterministic::FaultConfig {
                 sync_rate: Some(sync_failure_rate),
-                write_rate: Some(deterministic::WriteConfig {
-                    failure_rate: write_failure_rate,
-                    retention_rate: probability!(0.0),
-                    mode: deterministic::PartialWriteMode::Prefix,
-                }),
+                write_rate: Some(write_config),
                 ..Default::default()
             };
 
             run_operations(merkle, &hasher, &operations).await
         }
+    });
+
+    let recovery_partition_suffix = partition_suffix.clone();
+    let checkpoint = faulted_recovery(checkpoint, input.seed, move |ctx| async move {
+        let hasher = StandardHasher::<Sha256>::new(ForwardFold);
+        Merkle::<F>::init(
+            ctx.child("faulted_recovery"),
+            &hasher,
+            merkle_config(
+                &recovery_partition_suffix,
+                &ctx,
+                page_size,
+                page_cache_size,
+                items_per_blob,
+                write_buffer,
+                replay_buffer,
+            ),
+        )
+        .await
     });
 
     // Phase 2: Recover and verify consistency
@@ -281,6 +296,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                 page_cache_size,
                 items_per_blob,
                 write_buffer,
+                replay_buffer,
             ),
         )
         .await
@@ -326,6 +342,43 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
             "pruned {} < min_pruned {}",
             pruned,
             bounds.min_pruned
+        );
+
+        // Scalar bounds select the allowed recovered prefix. Compare every readable node against
+        // a separately rebuilt tree so a same-size corruption cannot satisfy the recovery oracle.
+        let reference = build_reference::<F>(&hasher, &bounds.leaves, leaves);
+        if leaves > 0 {
+            assert_eq!(
+                merkle
+                    .root(&hasher, 0)
+                    .expect("recovered root should exist"),
+                reference
+                    .root(&hasher, 0)
+                    .expect("reference root should exist"),
+                "recovered root does not match the intended leaf prefix",
+            );
+        }
+        let prune_loc = Location::<F>::new(pruned);
+        let prune_pos = F::location_to_position(prune_loc);
+        let mut positions = F::nodes_to_pin(prune_loc).collect::<Vec<_>>();
+        positions.extend((prune_pos.as_u64()..size).map(Position::<F>::new));
+        positions.sort_unstable();
+        positions.dedup();
+        let expected_nodes = positions
+            .iter()
+            .map(|&position| {
+                reference
+                    .get_node(position)
+                    .expect("reference node should exist")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            merkle
+                .get_nodes(&positions)
+                .await
+                .expect("recovered nodes should remain readable"),
+            expected_nodes,
+            "recovered nodes do not match the intended leaf prefix",
         );
 
         // Verify we can add new data after recovery

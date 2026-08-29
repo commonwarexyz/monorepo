@@ -4,7 +4,7 @@ use arbitrary::Arbitrary;
 use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::{
     archive::{
-        Archive as _, Identifier,
+        Archive as _, Identifier, MultiArchive as _,
         prunable::{Archive, Config},
     },
     translator::EightCap,
@@ -17,6 +17,7 @@ type Key = FixedBytes<16>;
 type Value = FixedBytes<32>;
 type RawKey = [u8; 16];
 type RawValue = [u8; 32];
+type TestArchive = Archive<EightCap, deterministic::Context, Key, Value>;
 
 #[derive(Arbitrary, Debug, Clone, PartialEq)]
 enum ArchiveOperation {
@@ -25,7 +26,17 @@ enum ArchiveOperation {
         key_data: RawKey,
         value_data: RawValue,
     },
+    PutMulti {
+        section: u8,
+        slot: u8,
+        key_id: u8,
+        value_id: u8,
+    },
     GetByIndex(u64),
+    GetAll {
+        section: u8,
+        slot: u8,
+    },
     GetByKey(RawKey),
     HasByKey(RawKey),
     Prune(u64),
@@ -42,6 +53,86 @@ struct FuzzInput {
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(456);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(100);
+
+// Exact duplicate keys and translated-key collisions are otherwise vanishingly unlikely in
+// arbitrary byte strings. Use 16 exact keys spread across four EightCap translations so the
+// target composes both cases.
+fn canonical_key(raw: RawKey) -> RawKey {
+    let id = raw[0] & 0x0f;
+    let mut key = [0; 16];
+    key[0] = id & 0x03;
+    key[8] = id >> 2;
+    key
+}
+
+// Draw MultiArchive indices from a small domain spanning multiple sections. This makes exact
+// duplicate indices common enough to exercise position ordering while retaining cross-section
+// replay permutations.
+fn multi_index(section: u8, slot: u8, items_per_section: u64) -> u64 {
+    u64::from(section & 0x01) * items_per_section + u64::from(slot & 0x03)
+}
+
+/// Assert index lookup and `get_all` match the modeled values and insertion order.
+async fn assert_index_matches(
+    archive: &TestArchive,
+    items: &[(u64, RawKey, RawValue)],
+    index: u64,
+) {
+    let expected: Vec<Value> = items
+        .iter()
+        .filter_map(|(item_index, _, value)| (*item_index == index).then_some(Value::new(*value)))
+        .collect();
+    let actual = archive
+        .get(Identifier::Index(index))
+        .await
+        .unwrap_or_else(|err| panic!("get by index {index} failed: {err:?}"));
+    assert_eq!(
+        actual,
+        expected.first().cloned(),
+        "first value mismatch for index {index}",
+    );
+
+    let actual_all = archive
+        .get_all(index)
+        .await
+        .unwrap_or_else(|err| panic!("get_all for index {index} failed: {err:?}"));
+    let expected_all = (!expected.is_empty()).then_some(expected);
+    assert_eq!(
+        actual_all, expected_all,
+        "insertion order mismatch for index {index}",
+    );
+}
+
+/// Assert key lookup returns a modeled value, or no value when the key is absent.
+async fn assert_key_matches(
+    archive: &TestArchive,
+    items: &[(u64, RawKey, RawValue)],
+    key_data: RawKey,
+) {
+    let key = Key::new(key_data);
+    let actual = archive
+        .get(Identifier::Key(&key))
+        .await
+        .unwrap_or_else(|err| panic!("get by key {key_data:?} failed: {err:?}"));
+    let expected: Vec<_> = items
+        .iter()
+        .filter_map(|(_, key, value)| (*key == key_data).then_some(value))
+        .collect();
+
+    match actual {
+        Some(actual) => assert!(
+            expected.iter().any(|value| actual.as_ref() == *value),
+            "key {key_data:?} returned unmodeled value {:?}; expected one of {expected:?}",
+            actual.as_ref(),
+        ),
+        None => {
+            assert!(
+                expected.is_empty(),
+                "key {key_data:?} is unexpectedly missing"
+            )
+        }
+    }
+}
 
 fn fuzz(data: FuzzInput) {
     let runner = deterministic::Runner::default();
@@ -64,6 +155,7 @@ fn fuzz(data: FuzzInput) {
             compression: None,
             codec_config: (),
         };
+        let items_per_section = cfg.items_per_section.get();
 
         let mut archive = Archive::<_, _, Key, Value>::init(context.child("storage"), cfg.clone()).await.expect("init failed");
 
@@ -83,7 +175,8 @@ fn fuzz(data: FuzzInput) {
                     key_data,
                     value_data,
                 } => {
-                    let key = Key::new(*key_data);
+                    let key_data = canonical_key(*key_data);
+                    let key = Key::new(key_data);
                     let value = Value::new(*value_data);
 
                     // Put the item into the archive. A put below the prune floor is
@@ -94,103 +187,62 @@ fn fuzz(data: FuzzInput) {
 
                     // Only add if not already written (Archive doesn't allow overwrites)
                     if !below_floor && !written_indices.contains(index) {
-                        items.push((*index, *key_data, *value_data));
+                        items.push((*index, key_data, *value_data));
                         written_indices.insert(*index);
                     }
+
+                    assert_key_matches(&archive, &items, key_data).await;
+                    assert_index_matches(&archive, &items, *index).await;
+                }
+
+                ArchiveOperation::PutMulti {
+                    section,
+                    slot,
+                    key_id,
+                    value_id,
+                } => {
+                    let index = multi_index(*section, *slot, items_per_section);
+                    let key_data = canonical_key([*key_id; 16]);
+                    let value_data = [*value_id; 32];
+                    let key = Key::new(key_data);
+                    let value = Value::new(value_data);
+
+                    archive = archive
+                        .put_multi(index, key, value)
+                        .await
+                        .expect("put_multi failed");
+                    let below_floor = oldest_allowed.is_some_and(|min| index < min);
+                    if !below_floor {
+                        items.push((index, key_data, value_data));
+                        written_indices.insert(index);
+                    }
+
+                    assert_key_matches(&archive, &items, key_data).await;
+                    assert_index_matches(&archive, &items, index).await;
                 }
 
                 ArchiveOperation::GetByIndex(index) => {
-                    // Skip if we've pruned this index
-                    if let Some(already_pruned) = oldest_allowed
-                        && *index < already_pruned {
-                            continue;
-                        }
+                    assert_index_matches(&archive, &items, *index).await;
+                }
 
-                    let result = archive.get(Identifier::Index(*index)).await;
-
-                    if let Ok(Some(value)) = result {
-                        // Find the matching item in our tracked list
-                        if let Some((_, _, expected_value)) =
-                            items.iter().find(|(i, _, _)| *i == *index)
-                        {
-                            // Convert value to its raw form for comparison
-                            let value_bytes: &[u8; 32] = value.as_ref().try_into().unwrap();
-
-                            // Check that the value matches what we expect
-                            assert_eq!(
-                                value_bytes, expected_value,
-                                "Value mismatch for index {index}",
-                            );
-                        }
-                    } else {
-                        // then we also should not have that index
-                        assert!(!written_indices.contains(index));
-                    }
+                ArchiveOperation::GetAll { section, slot } => {
+                    let index = multi_index(*section, *slot, items_per_section);
+                    assert_index_matches(&archive, &items, index).await;
                 }
 
                 ArchiveOperation::GetByKey(key_data) => {
-                    let key = Key::new(*key_data);
-                    let result = archive.get(Identifier::Key(&key)).await;
-
-                    if let Ok(Some(value)) = result {
-                        // Find all items with this exact key that haven't been pruned
-                        let matching_items: Vec<_> = items.iter()
-                            .filter(|(idx, k, _)| {
-                                let not_pruned = if let Some(threshold) = oldest_allowed {
-                                    *idx >= threshold
-                                } else {
-                                    true
-                                };
-                                not_pruned && *k == *key_data
-                            })
-                            .collect();
-
-                        if matching_items.is_empty() {
-                            panic!("Got value for key {key_data:?} that we didn't insert or was pruned");
-                        }
-
-                        // Convert value to its raw form for comparison
-                        let value_bytes: &[u8; 32] = value.as_ref().try_into().unwrap();
-
-                        // Check if the returned value matches ANY of the values we inserted for this key
-                        let found_match = matching_items.iter().any(|(_, _, expected_value)| {
-                            value_bytes == expected_value
-                        });
-
-                        if !found_match {
-                            panic!(
-                                "Value mismatch for key {key_data:?}. Got {:?}, but expected one of: {:?}",
-                                value_bytes,
-                                matching_items.iter().map(|(idx, _, v)| (idx, v)).collect::<Vec<_>>()
-                            );
-                        }
-                    } else {
-                        // If archive doesn't have it, we shouldn't have it either (or it was pruned)
-                        let should_not_exist = !items.iter().any(|(idx, k, _)| {
-                            let not_pruned = if let Some(threshold) = oldest_allowed {
-                                *idx >= threshold
-                            } else {
-                                true
-                            };
-                            not_pruned && *k == *key_data
-                        });
-                        assert!(should_not_exist, "Archive should have key {key_data:?}");
-                    }
+                    assert_key_matches(&archive, &items, canonical_key(*key_data)).await;
                 }
 
                 ArchiveOperation::HasByKey(key_data) => {
-                    let key = Key::new(*key_data);
-                    let result = archive.has(Identifier::Key(&key)).await;
-                    let our_result = items.iter().find(|(_, k, _)| *k == *key);
-
-                    // Verify the result against our tracked items
-                    if let Ok(has) = result {
-                        if has {
-                            assert!(our_result.is_some(), "stub archive doesn't have key {key_data:?} that we added");
-                        } else {
-                            assert!(our_result.is_none(), "Archive doesn't have key {key_data:?} that we added");
-                        }
-                    }
+                    let key_data = canonical_key(*key_data);
+                    let key = Key::new(key_data);
+                    let actual = archive
+                        .has(Identifier::Key(&key))
+                        .await
+                        .unwrap_or_else(|err| panic!("has by key {key_data:?} failed: {err:?}"));
+                    let expected = items.iter().any(|(_, key, _)| *key == key_data);
+                    assert_eq!(actual, expected, "has mismatch for key {key_data:?}");
                 }
 
                 ArchiveOperation::Prune(min) => {
@@ -240,11 +292,23 @@ fn fuzz(data: FuzzInput) {
 
         archive = archive.sync().await.expect("final sync failed");
 
-        let total_items = items.len();
-        let total_written = written_indices.len();
-        assert_eq!(total_items, total_written, "Items count {total_items} doesn't match written indices count {total_written}");
+        let modeled_indices: std::collections::HashSet<_> =
+            items.iter().map(|(index, _, _)| *index).collect();
+        assert_eq!(modeled_indices, written_indices, "written-index model drifted");
 
-        archive.sync().await.expect("Archive sync failed");
+        drop(archive);
+        let archive = Archive::<_, _, Key, Value>::init(context.child("storage"), cfg)
+            .await
+            .expect("restart init failed");
+        for key_id in 0..16 {
+            let key = canonical_key([key_id; 16]);
+            assert_key_matches(&archive, &items, key).await;
+        }
+        let retained_indices: std::collections::BTreeSet<_> =
+            items.iter().map(|(index, _, _)| *index).collect();
+        for index in retained_indices {
+            assert_index_matches(&archive, &items, index).await;
+        }
     });
 }
 

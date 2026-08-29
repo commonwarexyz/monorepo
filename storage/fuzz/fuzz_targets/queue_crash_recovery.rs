@@ -8,42 +8,22 @@
 //! - Acknowledged items (once committed) may or may not be re-delivered after crash
 //! - Queue state is consistent after recovery
 
-use arbitrary::{Arbitrary, Result, Unstructured};
+use arbitrary::Arbitrary;
 use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::queue::{Config, Queue};
-use commonware_utils::{Probability, probability};
+use commonware_storage_fuzz::{
+    bounded_buffer, bounded_items, bounded_nonzero_rate, bounded_page_cache_size,
+    bounded_page_size, faulted_recovery,
+};
+use commonware_utils::Probability;
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::BTreeMap,
     num::{NonZeroU16, NonZeroU64, NonZeroUsize},
 };
 
-/// Maximum write buffer size.
-const MAX_WRITE_BUF: usize = 2048;
-
 /// Item size for queue entries (32 bytes like a hash digest).
 const ITEM_SIZE: usize = 32;
-
-fn bounded_page_size(u: &mut Unstructured<'_>) -> Result<u16> {
-    u.int_in_range(1..=256)
-}
-
-fn bounded_page_cache_size(u: &mut Unstructured<'_>) -> Result<usize> {
-    u.int_in_range(1..=16)
-}
-
-fn bounded_items_per_section(u: &mut Unstructured<'_>) -> Result<u64> {
-    u.int_in_range(1..=64)
-}
-
-fn bounded_write_buffer(u: &mut Unstructured<'_>) -> Result<usize> {
-    u.int_in_range(1..=MAX_WRITE_BUF)
-}
-
-fn bounded_nonzero_rate(u: &mut Unstructured<'_>) -> Result<Probability> {
-    let percent: u8 = u.int_in_range(1..=100)?;
-    Ok(probability!(u64::from(percent), 100))
-}
 
 /// Operations that can be performed on the queue.
 #[derive(Arbitrary, Debug, Clone)]
@@ -80,17 +60,18 @@ struct FuzzInput {
     #[arbitrary(with = bounded_page_cache_size)]
     page_cache_size: usize,
     /// Items per section.
-    #[arbitrary(with = bounded_items_per_section)]
+    #[arbitrary(with = bounded_items)]
     items_per_section: u64,
     /// Write buffer size.
-    #[arbitrary(with = bounded_write_buffer)]
+    #[arbitrary(with = bounded_buffer)]
     write_buffer: usize,
+    #[arbitrary(with = bounded_buffer)]
+    replay_buffer: usize,
     /// Failure rate for sync operations (0, 1].
     #[arbitrary(with = bounded_nonzero_rate)]
     sync_failure_rate: Probability,
-    /// Failure rate for write operations (0, 1].
-    #[arbitrary(with = bounded_nonzero_rate)]
-    write_failure_rate: Probability,
+    /// Failure and byte-retention configuration for write operations.
+    write_config: deterministic::WriteConfig,
     /// Sequence of operations to execute.
     operations: Vec<QueueOperation>,
 }
@@ -118,9 +99,7 @@ struct RecoveryState {
 
     /// Whether we observed a mutable storage error during the operation phase.
     ///
-    /// After mutable errors, the queue may be left in an inconsistent state until
-    /// restart. In that case recovery checks should only assert basic liveness,
-    /// not exact durability/accounting bounds.
+    /// The failed operation's suffix is uncertain, but earlier committed items remain durable.
     saw_mutable_error: bool,
 }
 
@@ -337,17 +316,68 @@ async fn run_operations(
     state
 }
 
-/// Verify recovery after a mutable error during the operation phase.
-///
-/// Mutable errors may leave storage temporarily inconsistent, so we only assert
-/// that the queue can be re-initialized and used again for basic operations.
-async fn verify_recovery_after_mutable_error(mut queue: Queue<deterministic::Context, Vec<u8>>) {
-    // Basic read-path sanity should not fail.
+async fn verify_recovered_items(
+    queue: &mut Queue<deterministic::Context, Vec<u8>>,
+    state: &RecoveryState,
+    size: u64,
+    ack_floor: u64,
+) {
+    queue.reset();
+    let mut dequeued_count = 0u64;
+    loop {
+        match queue.dequeue().await {
+            Ok(Some((pos, item))) => {
+                dequeued_count += 1;
+                if let Some(value) = state.committed.get(&pos) {
+                    assert_eq!(
+                        item,
+                        make_item(*value),
+                        "item at position {pos} has wrong content after recovery",
+                    );
+                }
+                assert!(
+                    dequeued_count <= size,
+                    "dequeued more items than queue size"
+                );
+            }
+            Ok(None) => break,
+            Err(err) => panic!(
+                "dequeue at position {} failed after recovery: {err} (size={size}, \
+                 ack_floor={ack_floor})",
+                ack_floor + dequeued_count,
+            ),
+        }
+    }
+    assert_eq!(
+        dequeued_count,
+        size - ack_floor,
+        "dequeued {dequeued_count} items but expected {} unacked (size={size}, \
+         ack_floor={ack_floor})",
+        size - ack_floor,
+    );
+}
+
+/// Verify the durable prefix and basic usability after a mutable operation failed.
+async fn verify_recovery_after_mutable_error(
+    mut queue: Queue<deterministic::Context, Vec<u8>>,
+    state: &RecoveryState,
+) {
     let size_before = queue.size();
-    queue
-        .dequeue()
-        .await
-        .expect("dequeue should not error after recovery");
+    let ack_floor = queue.ack_floor();
+    let durable_end = state
+        .committed
+        .last_key_value()
+        .map_or(0, |(&position, _)| position + 1);
+    assert!(
+        size_before >= durable_end,
+        "recovered size {size_before} lost committed positions through {durable_end}",
+    );
+    assert!(
+        ack_floor <= state.current_ack_floor,
+        "recovered ack floor {ack_floor} exceeds requested floor {}",
+        state.current_ack_floor,
+    );
+    verify_recovered_items(&mut queue, state, size_before, ack_floor).await;
 
     // Queue should remain writable after recovery.
     let (queue, new_pos) = queue
@@ -369,7 +399,7 @@ async fn verify_recovery_after_mutable_error(mut queue: Queue<deterministic::Con
 /// Verify the queue state after recovery.
 async fn verify_recovery(mut queue: Queue<deterministic::Context, Vec<u8>>, state: &RecoveryState) {
     if state.saw_mutable_error() {
-        verify_recovery_after_mutable_error(queue).await;
+        verify_recovery_after_mutable_error(queue, state).await;
         return;
     }
 
@@ -405,48 +435,7 @@ async fn verify_recovery(mut queue: Queue<deterministic::Context, Vec<u8>>, stat
         state.max_recovered_ack_floor()
     );
 
-    // Reset to re-read all unacked items from the beginning
-    queue.reset();
-
-    // Verify all unacked items can be dequeued and have correct content
-    let mut dequeued_count = 0u64;
-    loop {
-        match queue.dequeue().await {
-            Ok(Some((pos, item))) => {
-                dequeued_count += 1;
-
-                // Verify item content if we know what it should be
-                if let Some(value) = state.committed.get(&pos) {
-                    let expected = make_item(*value);
-                    assert_eq!(
-                        item, expected,
-                        "item at position {} has wrong content after recovery",
-                        pos
-                    );
-                }
-
-                // Prevent infinite loop
-                if dequeued_count > size {
-                    panic!("dequeued more items than queue size");
-                }
-            }
-            Ok(None) => break,
-            Err(e) => panic!(
-                "dequeue at position {} failed after recovery: {e} (size={}, ack_floor={})",
-                ack_floor + dequeued_count,
-                size,
-                ack_floor
-            ),
-        }
-    }
-
-    // The number of unacked items should be size - ack_floor
-    let expected_unacked = size - ack_floor;
-    assert_eq!(
-        dequeued_count, expected_unacked,
-        "dequeued {} items but expected {} unacked (size={}, ack_floor={})",
-        dequeued_count, expected_unacked, size, ack_floor
-    );
+    verify_recovered_items(&mut queue, state, size, ack_floor).await;
 
     // Verify we can enqueue new items after recovery
     let (_queue, new_pos) = queue.enqueue(make_item(0xFF)).await.unwrap();
@@ -458,11 +447,12 @@ fn fuzz(input: FuzzInput) {
     let page_cache_size = NonZeroUsize::new(input.page_cache_size).unwrap();
     let items_per_section = NonZeroU64::new(input.items_per_section).unwrap();
     let write_buffer = NonZeroUsize::new(input.write_buffer).unwrap();
+    let replay_buffer = NonZeroUsize::new(input.replay_buffer).unwrap();
     let cfg = deterministic::Config::default().with_seed(input.seed);
     let partition_name = format!("queue-crash-recovery-{}", input.seed);
     let operations = input.operations.clone();
     let sync_failure_rate = input.sync_failure_rate;
-    let write_failure_rate = input.write_failure_rate;
+    let write_config = input.write_config;
 
     let runner = deterministic::Runner::new(cfg);
 
@@ -477,7 +467,7 @@ fn fuzz(input: FuzzInput) {
                 codec_config: ((0usize..).into(), ()),
                 page_cache: CacheRef::from_pooler(&ctx, page_size, page_cache_size),
                 write_buffer,
-                replay_buffer: commonware_utils::NZUsize!(4096),
+                replay_buffer,
             };
 
             let queue = Queue::<_, Vec<u8>>::init(ctx.child("storage"), queue_cfg)
@@ -487,11 +477,7 @@ fn fuzz(input: FuzzInput) {
             // Enable fault injection
             let fault_config = deterministic::FaultConfig {
                 sync_rate: Some(sync_failure_rate),
-                write_rate: Some(deterministic::WriteConfig {
-                    failure_rate: write_failure_rate,
-                    retention_rate: probability!(0.0),
-                    mode: deterministic::PartialWriteMode::Prefix,
-                }),
+                write_rate: Some(write_config),
                 ..Default::default()
             };
             let faults = ctx.storage_fault_config();
@@ -499,6 +485,20 @@ fn fuzz(input: FuzzInput) {
 
             run_operations(queue, &operations).await
         }
+    });
+
+    let recovery_partition = partition_name.clone();
+    let checkpoint = faulted_recovery(checkpoint, input.seed, move |ctx| async move {
+        let queue_cfg = Config {
+            partition: recovery_partition,
+            items_per_section,
+            compression: None,
+            codec_config: ((0usize..).into(), ()),
+            page_cache: CacheRef::from_pooler(&ctx, page_size, page_cache_size),
+            write_buffer,
+            replay_buffer,
+        };
+        Queue::<_, Vec<u8>>::init(ctx.child("faulted_recovery"), queue_cfg).await
     });
 
     // Recovery phase - re-initialize queue from checkpoint
@@ -514,7 +514,7 @@ fn fuzz(input: FuzzInput) {
             codec_config: ((0usize..).into(), ()),
             page_cache: CacheRef::from_pooler(&ctx, page_size, page_cache_size),
             write_buffer,
-            replay_buffer: commonware_utils::NZUsize!(4096),
+            replay_buffer,
         };
 
         let queue = Queue::<_, Vec<u8>>::init(ctx.child("storage"), queue_cfg)

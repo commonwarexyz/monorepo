@@ -17,6 +17,9 @@
 //!   4. Drop the journal without a clean shutdown: the crash. Unsynchronized bytes survive
 //!      according to the configured write-retention policy.
 //!
+//! Between cycles, an ordinary recovery attempt runs under storage faults and crashes. The next
+//! clean `init()` verifies that checkpoint before operations continue.
+//!
 //! `Crash` markers split the op list into one `ops` list per cycle. Driving recovery repeatedly on
 //! the same journal is the point: watermark, pruning-metadata, and section-layout bugs often need a
 //! recover-then-mutate-then-recover sequence to appear, not just a single crash.
@@ -30,8 +33,8 @@
 //!
 //! # Faults
 //!
-//! The operation phase runs under write/sync/resize fault injection. `write_retention_rate`
-//! controls the prefix of a failed or unsynchronized write that survives, while
+//! The operation phase runs under write/sync/resize fault injection. `write_config` controls write
+//! failures and whether retained bytes form a prefix or arbitrary subset, while
 //! `partial_resize_rate` can stop a failed truncation at an intermediate length.
 //!
 //! # Positions
@@ -52,6 +55,9 @@ use commonware_storage::journal::{
         variable::{Config as VariableConfig, Journal as VariableJournal},
     },
 };
+use commonware_storage_fuzz::{
+    bounded_buffer, bounded_items, bounded_page_cache_size, bounded_page_size, faulted_recovery,
+};
 use commonware_utils::{NZU64, NZUsize, Probability, probability, sequence::FixedBytes};
 use futures::StreamExt;
 use libfuzzer_sys::fuzz_target;
@@ -67,37 +73,11 @@ const ITEM_SIZE: usize = 32;
 /// The journal item type.
 type Item = FixedBytes<ITEM_SIZE>;
 
-/// Maximum replay buffer size.
-const MAX_REPLAY_BUF: usize = 2048;
-
-/// Maximum write buffer size.
-const MAX_WRITE_BUF: usize = 2048;
-
 /// Buffer size used for internal verification replays.
 const VERIFY_REPLAY_BUF: usize = 1024;
 
 /// Maximum number of operations per fuzz input.
 const MAX_OPERATIONS: usize = 128;
-
-fn bounded_non_zero(u: &mut Unstructured<'_>) -> arbitrary::Result<usize> {
-    u.int_in_range(1..=MAX_REPLAY_BUF)
-}
-
-fn bounded_page_size(u: &mut Unstructured<'_>) -> arbitrary::Result<u16> {
-    u.int_in_range(1..=256)
-}
-
-fn bounded_page_cache_size(u: &mut Unstructured<'_>) -> arbitrary::Result<usize> {
-    u.int_in_range(1..=16)
-}
-
-fn bounded_items_per_section(u: &mut Unstructured<'_>) -> arbitrary::Result<u64> {
-    u.int_in_range(1..=64)
-}
-
-fn bounded_write_buffer(u: &mut Unstructured<'_>) -> arbitrary::Result<usize> {
-    u.int_in_range(1..=MAX_WRITE_BUF)
-}
 
 /// A fault rate in [0.0, 1.0]. Allows 0 so the fuzzer can disable individual fault types.
 fn bounded_rate(u: &mut Unstructured<'_>) -> arbitrary::Result<Probability> {
@@ -129,6 +109,8 @@ enum JournalOperation {
     Read { pos: u64 },
     /// Sync the journal to storage.
     Sync,
+    /// Capture and drop a snapshot reader, flushing buffered data without a durability barrier.
+    Snapshot,
     /// Commit the journal.
     Commit,
     /// Rewind the journal to a smaller size.
@@ -137,7 +119,7 @@ enum JournalOperation {
     Prune { min_pos: u64 },
     /// Replay items from the journal.
     Replay {
-        #[arbitrary(with = bounded_non_zero)]
+        #[arbitrary(with = bounded_buffer)]
         buffer: usize,
         start_pos: u64,
     },
@@ -159,17 +141,16 @@ struct FuzzInput {
     #[arbitrary(with = bounded_page_cache_size)]
     page_cache_size: usize,
     /// Items per section/blob.
-    #[arbitrary(with = bounded_items_per_section)]
+    #[arbitrary(with = bounded_items)]
     items_per_section: u64,
     /// Write buffer size.
-    #[arbitrary(with = bounded_write_buffer)]
+    #[arbitrary(with = bounded_buffer)]
     write_buffer: usize,
-    /// Failure rate for write operations.
-    #[arbitrary(with = bounded_rate)]
-    write_failure_rate: Probability,
-    /// Probability used to retain bytes from a failed or unsynchronized write.
-    #[arbitrary(with = bounded_rate)]
-    write_retention_rate: Probability,
+    /// Replay buffer size.
+    #[arbitrary(with = bounded_buffer)]
+    replay_buffer: usize,
+    /// Failure and byte-retention configuration for write operations.
+    write_config: deterministic::WriteConfig,
     /// Failure rate for sync operations.
     #[arbitrary(with = bounded_rate)]
     sync_failure_rate: Probability,
@@ -191,22 +172,19 @@ struct Params {
     page_cache_size: NonZeroUsize,
     items_per_section: u64,
     write_buffer: NonZeroUsize,
-    write_rate: Probability,
-    write_retention_rate: Probability,
+    replay_buffer: NonZeroUsize,
+    write_config: deterministic::WriteConfig,
     sync_rate: Probability,
     resize_rate: Probability,
     partial_resize_rate: Probability,
+    recovery_seed: u64,
 }
 
 impl Params {
     /// The fault config applied during the operation phase of each cycle.
     fn fault_config(&self) -> deterministic::FaultConfig {
         deterministic::FaultConfig {
-            write_rate: Some(deterministic::WriteConfig {
-                failure_rate: self.write_rate,
-                retention_rate: self.write_retention_rate,
-                mode: deterministic::PartialWriteMode::Prefix,
-            }),
+            write_rate: Some(self.write_config),
             sync_rate: Some(self.sync_rate),
             resize_rate: Some(deterministic::ResizeConfig {
                 failure_rate: self.resize_rate,
@@ -298,6 +276,7 @@ trait FuzzJournal: Sized {
     fn append(self, item: Item) -> impl Future<Output = Result<(Self, u64), Error>> + Send;
     fn read(&self, pos: u64) -> impl Future<Output = Result<Item, Error>> + Send;
     fn sync(self) -> impl Future<Output = Result<Self, Error>> + Send;
+    fn snapshot(self) -> impl Future<Output = Result<Self, Error>> + Send;
     fn commit(self) -> impl Future<Output = Result<Self, Error>> + Send;
     fn rewind(self, size: u64) -> impl Future<Output = Result<Self, Error>> + Send;
     fn prune(self, min_pos: u64) -> impl Future<Output = Result<(Self, bool), Error>> + Send;
@@ -341,7 +320,7 @@ impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
                 params.page_cache_size,
             ),
             write_buffer: params.write_buffer,
-            replay_buffer: commonware_utils::NZUsize!(4096),
+            replay_buffer: params.replay_buffer,
         }
     }
 
@@ -367,6 +346,12 @@ impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
 
     async fn sync(self) -> Result<Self, Error> {
         FixedJournal::sync(self).await
+    }
+
+    async fn snapshot(self) -> Result<Self, Error> {
+        let (journal, reader) = FixedJournal::snapshot(self).await?;
+        drop(reader);
+        Ok(journal)
     }
 
     async fn commit(self) -> Result<Self, Error> {
@@ -409,7 +394,7 @@ impl FuzzJournal for VariableJournal<deterministic::Context, Item> {
                 params.page_cache_size,
             ),
             write_buffer: params.write_buffer,
-            replay_buffer: commonware_utils::NZUsize!(4096),
+            replay_buffer: params.replay_buffer,
         }
     }
 
@@ -435,6 +420,12 @@ impl FuzzJournal for VariableJournal<deterministic::Context, Item> {
 
     async fn sync(self) -> Result<Self, Error> {
         VariableJournal::sync(self).await
+    }
+
+    async fn snapshot(self) -> Result<Self, Error> {
+        let (journal, reader) = VariableJournal::snapshot(self).await?;
+        drop(reader);
+        Ok(journal)
     }
 
     async fn rewind(self, size: u64) -> Result<Self, Error> {
@@ -664,6 +655,14 @@ async fn run_ops<J: FuzzJournal>(
                 Err(_) => return,
             },
 
+            // A snapshot flushes buffered data without a durability barrier, changing no
+            // durability expectation. It schedules unsynced partial-page rewrites for the
+            // next crash to cut.
+            JournalOperation::Snapshot => match journal.snapshot().await {
+                Ok(journal) => journal,
+                Err(_) => return,
+            },
+
             JournalOperation::Commit => match journal.commit().await {
                 Ok(journal) => {
                     expected.committed(journal.size().await);
@@ -805,6 +804,24 @@ where
     })
 }
 
+/// Attempt ordinary journal recovery under storage faults and return its crash checkpoint.
+fn faulted_restart<J: FuzzJournal + Send + 'static>(
+    checkpoint: deterministic::Checkpoint,
+    partition: String,
+    params: Params,
+) -> deterministic::Checkpoint
+where
+    J::Config: Send,
+{
+    faulted_recovery(checkpoint, params.recovery_seed, move |ctx| async move {
+        J::init(
+            ctx.child("faulted_recovery"),
+            J::config(&partition, &ctx, &params),
+        )
+        .await
+    })
+}
+
 /// Split the operation stream into one `ops` list per cycle, cutting at each `Crash` marker. Always
 /// returns at least one list (possibly empty), so a bare recovery is still exercised.
 fn split_into_cycles(ops: &[JournalOperation]) -> Vec<Vec<JournalOperation>> {
@@ -830,11 +847,12 @@ where
         page_cache_size: NonZeroUsize::new(input.page_cache_size).unwrap(),
         items_per_section: input.items_per_section,
         write_buffer: NonZeroUsize::new(input.write_buffer).unwrap(),
-        write_rate: input.write_failure_rate,
-        write_retention_rate: input.write_retention_rate,
+        replay_buffer: NonZeroUsize::new(input.replay_buffer).unwrap(),
+        write_config: input.write_config,
         sync_rate: input.sync_failure_rate,
         resize_rate: input.resize_failure_rate,
         partial_resize_rate: input.partial_resize_rate,
+        recovery_seed: input.seed,
     };
     let partition = format!("crash-recovery-{tag}-{}", input.seed);
     let cycles = split_into_cycles(&input.operations);
@@ -849,6 +867,7 @@ where
         partition.clone(),
         params,
     );
+    checkpoint = faulted_restart::<J>(checkpoint, partition.clone(), params);
 
     for ops in cycles.iter().skip(1) {
         let runner = deterministic::Runner::from(checkpoint);
@@ -859,6 +878,7 @@ where
             partition.clone(),
             params,
         );
+        checkpoint = faulted_restart::<J>(checkpoint, partition.clone(), params);
     }
 
     // Final fault-free phase: verify the last recovery, then append, sync, drop, and reopen a

@@ -21,6 +21,9 @@ libfuzzer-sys.workspace = true
 rand.workspace = true
 rand_core.workspace = true
 
+[lib]
+bench = false
+
 [[bin]]
 name = "qmdb_unordered_operations"
 path = "fuzz_targets/qmdb_unordered_operations.rs"
@@ -57,6 +60,27 @@ doc = false
 bench = false
 
 [[bin]]
+name = "segmented_variable_recovery"
+path = "fuzz_targets/segmented_variable_recovery.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "prunable_archive_recovery"
+path = "fuzz_targets/prunable_archive_recovery.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "immutable_archive_recovery"
+path = "fuzz_targets/immutable_archive_recovery.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "rmap_operations"
 path = "fuzz_targets/rmap_operations.rs"
 test = false
@@ -73,6 +97,13 @@ bench = false
 [[bin]]
 name = "metadata_operations"
 path = "fuzz_targets/metadata_operations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "metadata_recovery"
+path = "fuzz_targets/metadata_recovery.rs"
 test = false
 doc = false
 bench = false
@@ -108,6 +139,13 @@ bench = false
 [[bin]]
 name = "freezer_operations"
 path = "fuzz_targets/freezer_operations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "freezer_recovery"
+path = "fuzz_targets/freezer_recovery.rs"
 test = false
 doc = false
 bench = false
