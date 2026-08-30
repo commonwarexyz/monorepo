@@ -150,7 +150,7 @@ impl crate::Storage for Storage {
 
                     // Truncate to zero before writing, per the [Header::create] contract.
                     let (region, blob_version) =
-                        Header::create_for_layout(crate::storage::Layout::V1, &versions);
+                        Header::create(crate::storage::Layout::V1, &versions);
                     let data_offset = region.len() as u64;
                     file.set_len(0).await.map_err(|e| {
                         Error::BlobResizeFailed(err_partition.clone(), err_name.clone(), e.into())

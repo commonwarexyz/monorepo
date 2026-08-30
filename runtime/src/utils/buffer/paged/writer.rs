@@ -811,9 +811,10 @@ impl<B: Blob> Writer<B> {
             )
             .await?;
 
-        // Clear only the old slot's length bytes. Rewriting the whole footer here could tear across
-        // both slots and lose the already-durable shorter checksum. Once this lands, length 0 is
-        // never authoritative, so the shrunken slot wins.
+        // Clear the old slot entirely. The write stays within the old slot, so it cannot damage
+        // the already-durable shorter checksum, and zeroing the CRC alongside the length keeps a
+        // later torn rewrite of this page from reassembling the retired longer checksum over the
+        // pre-shrink bytes still on the page. Once this lands, the shrunken slot wins.
         let old_slot_offset = crc_start
             .checked_add(old_slot.offset() as u64)
             .ok_or(Error::OffsetOverflow)?;
@@ -821,7 +822,7 @@ impl<B: Blob> Writer<B> {
             .write_at(
                 &self.blob,
                 old_slot_offset,
-                Checksum::slot_len_bytes(0).to_vec(),
+                Checksum::slot_bytes(0, 0).to_vec(),
                 WriteOptions::SYNC | WriteOptions::DONT_CACHE,
             )
             .await?;
@@ -1321,10 +1322,7 @@ mod tests {
     use crate::{
         Buf, BufferPool, BufferPoolConfig, Handle, IoBufsMut, Runner as _, Spawner as _,
         Storage as _, Supervisor as _,
-        buffer::{
-            paged::{CHECKSUM_SLOT_LEN_SIZE, CHECKSUM_SLOT_SIZE},
-            tests::SyncTrackingBlob,
-        },
+        buffer::{paged::CHECKSUM_SLOT_SIZE, tests::SyncTrackingBlob},
         deterministic,
         mocks::{DelayedSyncBlob, RecordingContext, next_pending_sync},
         telemetry::metrics::Registry,
@@ -5095,6 +5093,55 @@ mod tests {
         });
     }
 
+    /// A torn tail-page rewrite after a durable shrink must not resurrect the retired slot:
+    /// the shrink zeroes the whole slot, so stale length bytes alone cannot reassemble a valid
+    /// checksum over the pre-shrink bytes still on the page.
+    #[test_traced("DEBUG")]
+    fn test_shrink_then_torn_rewrite_does_not_resurrect() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context
+                .open("test_partition", b"shrink_torn")
+                .await
+                .unwrap();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob.clone(), blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            // Commit 80 bytes into the first slot, then durably shrink the tail page to 50.
+            let data: Vec<u8> = (1u8..=80).collect();
+            writer.append(&data).await.unwrap();
+            writer.sync().await.unwrap();
+            writer.resize(50).await.unwrap();
+            drop(writer);
+
+            // Model a rewrite of the tail page back to 80 bytes torn down to only the retired
+            // slot's length bytes: the pre-shrink data still on the page must not revalidate.
+            let page_size = u64::from(PAGE_SIZE.get());
+            blob.write_at(
+                page_size,
+                80u16.to_be_bytes().to_vec(),
+                WriteOptions::default(),
+            )
+            .await
+            .unwrap();
+            blob.sync().await.unwrap();
+
+            let (blob, blob_size) = context
+                .open("test_partition", b"shrink_torn")
+                .await
+                .unwrap();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let recovered = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            assert_eq!(recovered.size(), 50);
+            let read = recovered.read_at(0, 50).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), &data[..50]);
+        });
+    }
+
     #[test]
     fn test_resize_same_page_shrink_survives_interrupted_crc_stage() {
         let executor = deterministic::Runner::default();
@@ -5408,10 +5455,7 @@ mod tests {
                 "old-slot length invalidation should fail"
             );
             assert_eq!(write_count.load(Ordering::SeqCst), 3);
-            assert_eq!(
-                failed_write_len.load(Ordering::SeqCst),
-                CHECKSUM_SLOT_LEN_SIZE
-            );
+            assert_eq!(failed_write_len.load(Ordering::SeqCst), CHECKSUM_SLOT_SIZE);
             drop(append);
 
             let (blob, size) = context

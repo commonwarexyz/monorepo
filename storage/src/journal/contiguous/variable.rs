@@ -1108,7 +1108,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             let valid = writer
                 .recoverable_prefix_len(
                     0,
-                    commonware_utils::NZUsize!(4096),
+                    super::RECOVERY_BUFFER,
                     commonware_runtime::ReadOptions::default(),
                 )
                 .await?;

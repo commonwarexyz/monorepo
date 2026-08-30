@@ -27,6 +27,10 @@ pub mod variable;
 #[cfg(test)]
 mod tests;
 
+/// Read-buffer size for recovery scans of suspect blobs.
+// TODO (#4615): replace with replay_buffer
+const RECOVERY_BUFFER: NonZeroUsize = commonware_utils::NZUsize!(4096);
+
 /// Return the number of items that can be written before crossing the current blob boundary.
 ///
 /// `position` is the next logical item position and `remaining` is the number of items left in the

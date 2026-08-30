@@ -84,6 +84,28 @@ impl Storage {
     pub(crate) fn from_snapshot(snapshot: Snapshot, pool: BufferPool) -> Self {
         Self::with_partitions(snapshot.0, pool)
     }
+}
+
+impl Storage {
+    /// Compute a SHA-256 digest of all blob contents.
+    pub fn audit(&self) -> [u8; 32] {
+        let partitions = self.partitions.lock();
+        let mut hasher = AuditHasher::new();
+        hasher.update(b"commonware-runtime-storage-audit-v1");
+
+        for (partition_name, blobs) in partitions.iter() {
+            for (blob_name, content) in blobs.iter() {
+                hasher.update(b"partition");
+                hasher.update(partition_name.as_bytes());
+                hasher.update(b"blob");
+                hasher.update(blob_name);
+                hasher.update(b"content");
+                hasher.update(content);
+            }
+        }
+
+        hasher.finalize()
+    }
 
     fn open_versioned_with_layout(
         &self,
@@ -111,7 +133,7 @@ impl Storage {
                 generations.get_or_insert(&key),
             ),
             None => {
-                let (region, blob_version) = Header::create_for_layout(layout, &versions);
+                let (region, blob_version) = Header::create(layout, &versions);
                 let data_offset = region.len() as u64;
                 content.clear();
                 content.extend_from_slice(&region);
@@ -132,28 +154,6 @@ impl Storage {
             logical_size,
             blob_version,
         ))
-    }
-}
-
-impl Storage {
-    /// Compute a SHA-256 digest of all blob contents.
-    pub fn audit(&self) -> [u8; 32] {
-        let partitions = self.partitions.lock();
-        let mut hasher = AuditHasher::new();
-        hasher.update(b"commonware-runtime-storage-audit-v1");
-
-        for (partition_name, blobs) in partitions.iter() {
-            for (blob_name, content) in blobs.iter() {
-                hasher.update(b"partition");
-                hasher.update(partition_name.as_bytes());
-                hasher.update(b"blob");
-                hasher.update(blob_name);
-                hasher.update(b"content");
-                hasher.update(content);
-            }
-        }
-
-        hasher.finalize()
     }
 
     /// Return a copy of a blob's durable raw contents without interpreting its container header.
@@ -184,6 +184,156 @@ impl Storage {
         versions: RangeInclusive<u16>,
     ) -> Result<(Blob, u64, u16), crate::Error> {
         self.open_versioned_with_layout(partition, name, Layout::V0, versions)
+    }
+}
+
+/// Shape of a blob creation interrupted mid-write.
+///
+/// Creation writes one canonical header region over an empty file, so a crash leaves a
+/// canonical prefix, a persisted length whose unwritten tail reads as zeros, and possibly
+/// zero holes where device writeback persisted bytes out of order. A hole can only zero a
+/// byte, never invent one: creation starts from an empty file, so unwritten storage reads
+/// as zeros.
+#[cfg(any(test, feature = "test-utils"))]
+#[derive(Clone, Copy, Debug)]
+pub struct TornCreation {
+    /// Length of the canonical prefix that reached the file, reduced modulo the region.
+    retained: u16,
+    /// Zero-filled bytes of persisted file length past the prefix, reduced modulo the region.
+    tail: u16,
+    /// Bit `i` zeroes byte `i` of the image: a hole torn by out-of-order writeback. The low
+    /// bits cover the parseable header; higher bits fall on padding or off the image.
+    holes: u16,
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl TornCreation {
+    /// Materialize the crash image this shape leaves over a canonical creation `region`.
+    pub fn image(&self, region: &[u8]) -> Vec<u8> {
+        let retained = usize::from(self.retained) % (region.len() + 1);
+        let persisted = retained + usize::from(self.tail) % (region.len() - retained + 1);
+        let mut image = vec![0u8; persisted];
+        image[..retained].copy_from_slice(&region[..retained]);
+        for bit in 0..u16::BITS as usize {
+            if self.holes & (1 << bit) != 0
+                && let Some(byte) = image.get_mut(bit)
+            {
+                *byte = 0;
+            }
+        }
+        image
+    }
+}
+
+#[cfg(all(any(test, feature = "test-utils"), feature = "arbitrary"))]
+impl<'a> arbitrary::Arbitrary<'a> for TornCreation {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            retained: u.arbitrary()?,
+            tail: u.arbitrary()?,
+            holes: u.arbitrary()?,
+        })
+    }
+
+    fn size_hint(_: usize) -> (usize, Option<usize>) {
+        (6, Some(6))
+    }
+}
+
+/// Required recovery outcome when a blob's raw contents are a creation crash image.
+#[cfg(any(test, feature = "test-utils"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CreationOutcome {
+    /// The open succeeds and recreates the canonical V1 region for the requested version.
+    Recreated,
+    /// The open succeeds against the intact header and leaves the contents unchanged.
+    Kept,
+    /// The open fails without mutating the contents.
+    Rejected,
+}
+
+/// Classify the required recovery outcome for a creation crash image.
+///
+/// Mirrors header resolution: a sub-prelude file is always recreated, a parseable
+/// header is honored before healing is considered (a blob version disagreement or nonzero
+/// padding on an intact region never heals), and only failures a torn write can produce
+/// fall through to the torn-creation classifier, which accepts a canonical prefix (with any
+/// blob version, the CRC binding the written prelude) followed by zeros.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn creation_outcome(image: &[u8], version: u16) -> CreationOutcome {
+    use commonware_cryptography::Crc32;
+
+    fn prefix(layout: Layout) -> [u8; 6] {
+        let mut bytes = [0u8; 6];
+        bytes[..4].copy_from_slice(&layout.magic());
+        bytes[4..6].copy_from_slice(&layout.runtime_version().to_be_bytes());
+        bytes
+    }
+
+    let prelude = Header::PRELUDE_SIZE;
+    let parse_len = Header::PARSE_LEN;
+    let region = Layout::V1.data_offset() as usize;
+
+    // Too short to hold any header: recreated as new regardless of content.
+    if image.len() < prelude {
+        return CreationOutcome::Recreated;
+    }
+    let stamped = u16::from_be_bytes([image[6], image[7]]);
+
+    // An intact V0 magic and runtime version parse as a legacy blob: the stamped version
+    // decides, and a mismatch is a genuine disagreement that never heals.
+    if image[..6] == prefix(Layout::V0) {
+        return if stamped == version {
+            CreationOutcome::Kept
+        } else {
+            CreationOutcome::Rejected
+        };
+    }
+
+    // A CRC-validated full V1 region parses: nonzero padding and a stamped version mismatch
+    // are corruption, not torn writes. A valid CRC over a truncated region still falls
+    // through to the torn-creation classifier.
+    if image[..6] == prefix(Layout::V1)
+        && image.len() >= parse_len
+        && image[prelude..parse_len] == Crc32::checksum(&image[..prelude]).to_be_bytes()
+        && image.len() >= region
+    {
+        if image[parse_len..region].iter().any(|&byte| byte != 0) {
+            return CreationOutcome::Rejected;
+        }
+        return if stamped == version {
+            CreationOutcome::Kept
+        } else {
+            CreationOutcome::Rejected
+        };
+    }
+
+    // Torn-creation classifier: the written prefix ends at the last nonzero byte, must match
+    // a canonical V1 region (blob version free, CRC bytes prefixing the CRC over the written
+    // prelude), and everything past it must be zero.
+    if image.len() > region {
+        return CreationOutcome::Rejected;
+    }
+    let head_len = image.len().min(parse_len);
+    if image[head_len..].iter().any(|&byte| byte != 0) {
+        return CreationOutcome::Rejected;
+    }
+    let head = &image[..head_len];
+    let written = head
+        .iter()
+        .rposition(|&byte| byte != 0)
+        .map_or(0, |i| i + 1);
+    let canonical = if written <= prelude {
+        head[..written.min(6)] == prefix(Layout::V1)[..written.min(6)]
+    } else {
+        head[..6] == prefix(Layout::V1)
+            && head[prelude..written]
+                == Crc32::checksum(&head[..prelude]).to_be_bytes()[..written - prelude]
+    };
+    if canonical {
+        CreationOutcome::Recreated
+    } else {
+        CreationOutcome::Rejected
     }
 }
 
@@ -436,12 +586,14 @@ impl crate::Blob for Blob {
         let offset: usize = offset
             .try_into()
             .map_err(|_| crate::Error::OffsetOverflow)?;
+        let end = offset
+            .checked_add(len)
+            .ok_or(crate::Error::OffsetOverflow)?;
         let content = self.content.read();
-        let content_len = content.len();
-        if offset + len > content_len {
+        if end > content.len() {
             return Err(crate::Error::BlobInsufficientLength);
         }
-        bufs.copy_from_slice(&content[offset..offset + len]);
+        bufs.copy_from_slice(&content[offset..end]);
         Ok(bufs)
     }
 
@@ -959,6 +1111,87 @@ mod tests {
         assert_ne!(storage_a.audit(), storage_b.audit());
     }
 
+    /// Pin one image per [CreationOutcome] arm so the classifier cannot drift from
+    /// [super::super::header::resolve] unnoticed.
+    #[test]
+    fn test_creation_outcome_arms() {
+        use super::{CreationOutcome::*, creation_outcome};
+        let (v1, _) = Header::create(Layout::V1, &(3..=3));
+        let (v0, _) = Header::create(Layout::V0, &(3..=3));
+
+        assert_eq!(creation_outcome(&[], 3), Recreated);
+        assert_eq!(creation_outcome(&v1[..7], 3), Recreated);
+        assert_eq!(creation_outcome(&v1[..100], 3), Recreated);
+        assert_eq!(creation_outcome(&v1, 3), Kept);
+        assert_eq!(creation_outcome(&v1, 4), Rejected);
+        assert_eq!(creation_outcome(&v0, 3), Kept);
+        assert_eq!(creation_outcome(&v0, 4), Rejected);
+
+        // A hole below persisted bytes is not a canonical prefix.
+        let mut holed = v1[..100].to_vec();
+        holed[1] = 0;
+        assert_eq!(creation_outcome(&holed, 3), Rejected);
+    }
+
+    /// Exhaustively verify recovery of every torn V0 creation image against the oracle: the
+    /// V0 prelude is 8 bytes, so the whole crash-image space (every persisted length, every
+    /// zero-hole subset) is enumerable. Recreated images must heal to the canonical V1
+    /// region, kept images must open unchanged, and everything else must fail without
+    /// mutation.
+    #[tokio::test]
+    async fn test_v0_creation_images_exhaustive() {
+        for version in [0u16, 3, 0x0100, 0xFFFF] {
+            let versions = version..=version;
+            let storage = Storage::new(test_pool());
+
+            let (blob, _, _) = storage
+                .open_versioned("partition", b"v1", versions.clone())
+                .await
+                .unwrap();
+            drop(blob);
+            let canonical_v1 = storage.raw_blob("partition", b"v1").unwrap();
+            let (blob, _, _) = storage
+                .open_versioned_v0("partition", b"v0", versions.clone())
+                .unwrap();
+            drop(blob);
+            let canonical_v0 = storage.raw_blob("partition", b"v0").unwrap();
+
+            for len in 0..=canonical_v0.len() {
+                for mask in 0u16..1 << len {
+                    let mut image = canonical_v0[..len].to_vec();
+                    for (bit, byte) in image.iter_mut().enumerate() {
+                        if mask & (1 << bit) != 0 {
+                            *byte = 0;
+                        }
+                    }
+                    storage.set_raw_blob("partition", b"v0", image.clone());
+                    let result = storage
+                        .open_versioned("partition", b"v0", versions.clone())
+                        .await;
+                    match creation_outcome(&image, version) {
+                        CreationOutcome::Recreated => {
+                            let (_, size, opened) =
+                                result.expect("torn creation image did not recover");
+                            assert_eq!(size, 0);
+                            assert_eq!(opened, version);
+                            assert_eq!(storage.raw_blob("partition", b"v0").unwrap(), canonical_v1);
+                        }
+                        CreationOutcome::Kept => {
+                            let (_, size, opened) = result.expect("intact image did not open");
+                            assert_eq!(size, 0);
+                            assert_eq!(opened, version);
+                            assert_eq!(storage.raw_blob("partition", b"v0").unwrap(), image);
+                        }
+                        CreationOutcome::Rejected => {
+                            assert!(result.is_err(), "non-canonical image was accepted");
+                            assert_eq!(storage.raw_blob("partition", b"v0").unwrap(), image);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     #[tokio::test]
     async fn test_blob_torn_creation_recovers() {
         let storage = Storage::new(test_pool());
@@ -966,7 +1199,7 @@ mod tests {
         // Manually insert a torn-creation leftover: a prefix of a canonical V1 header
         // region (the full state enumeration lives in the Layout::interrupted_creation
         // unit tables)
-        let (region, _) = Header::create(&(0..=0));
+        let (region, _) = Header::create(Layout::V1, &(0..=0));
         let states = [region[..10].to_vec()];
         for (i, state) in states.into_iter().enumerate() {
             let name = format!("torn_{i}").into_bytes();
