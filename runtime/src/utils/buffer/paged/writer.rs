@@ -941,7 +941,8 @@ impl<B: Blob> Writer<B> {
     ///
     /// `proven` is a logical byte offset already known valid (a durability watermark or a
     /// replay-validated prefix). Pages wholly below it are accepted without reading, and the
-    /// scan starts at the page containing it.
+    /// scan starts at the page containing it. A proof past the blob's content clamps to the
+    /// full pages that exist, so a partial tail is still read rather than credited as full.
     pub async fn recoverable_prefix_len(
         &self,
         proven: u64,
@@ -950,16 +951,57 @@ impl<B: Blob> Writer<B> {
     ) -> Result<u64, Error> {
         let logical_page_size = self.cache_ref.page_size();
         let total_pages = self.current_page + u64::from(self.partial_page_state.is_some());
-        let (recoverable, _) = Self::recoverable_prefix_len_from_pages(
-            &self.blob,
-            logical_page_size,
-            total_pages,
-            proven / logical_page_size,
-            buffer_size,
-            read_options,
-        )
-        .await?;
-        Ok(recoverable)
+        let physical_page_size = logical_page_size
+            .checked_add(CHECKSUM_SIZE)
+            .ok_or(Error::OffsetOverflow)?;
+        let physical_page_size_usize =
+            usize::try_from(physical_page_size).map_err(|_| Error::OffsetOverflow)?;
+        let max_batch_pages = u64::try_from((buffer_size.get() / physical_page_size_usize).max(1))
+            .map_err(|_| Error::OffsetOverflow)?;
+
+        // Pages below the proof are accepted without reading. An overshooting proof clamps to
+        // the full pages: a partial tail backs fewer logical bytes than a skipped page would
+        // credit, so it must always be read.
+        let start_page = (proven / logical_page_size).min(self.current_page);
+        let mut valid_len = start_page
+            .checked_mul(logical_page_size)
+            .ok_or(Error::OffsetOverflow)?;
+        let mut page = start_page;
+        while page < total_pages {
+            // Bound each read while deriving its physical range with checked arithmetic.
+            let batch_pages = max_batch_pages.min(total_pages - page);
+            let batch_end = page.checked_add(batch_pages).ok_or(Error::OffsetOverflow)?;
+            let physical_offset = page
+                .checked_mul(physical_page_size)
+                .ok_or(Error::OffsetOverflow)?;
+            let physical_len = batch_pages
+                .checked_mul(physical_page_size)
+                .ok_or(Error::OffsetOverflow)?;
+            let physical_len = usize::try_from(physical_len).map_err(|_| Error::OffsetOverflow)?;
+
+            // Coalesce once so each physical page can be checksum-validated in place.
+            let physical = self
+                .blob
+                .read_at(physical_offset, physical_len, read_options)
+                .await?
+                .coalesce();
+
+            // The first invalid page terminates the only recoverable contiguous prefix.
+            for physical_page in physical.as_ref().chunks_exact(physical_page_size_usize) {
+                let Some(checksum) = Checksum::validate_page(physical_page) else {
+                    return Ok(valid_len);
+                };
+                let len = u64::from(checksum.len);
+                valid_len = valid_len.checked_add(len).ok_or(Error::OffsetOverflow)?;
+
+                // A valid partial logical page ends the contiguous prefix wherever it appears.
+                if len < logical_page_size {
+                    return Ok(valid_len);
+                }
+            }
+            page = batch_end;
+        }
+        Ok(valid_len)
     }
 
     /// Read a logical range directly from a raw paged blob, validating every page it spans.
@@ -1081,112 +1123,6 @@ impl<B: Blob> Writer<B> {
         out.append(tail.slice(tail_start..));
         assert_eq!(out.len(), len);
         Ok((logical_size, out))
-    }
-
-    /// Return the contiguous recoverable prefix of a raw paged blob without mutating it.
-    ///
-    /// `physical_size` must be the blob's current size, and the blob must remain unchanged while
-    /// the scan runs.
-    ///
-    /// The boolean is true only when every physical byte belongs to a valid page in that prefix.
-    /// It is false when the scan stops at a short or invalid page, at a partial physical page, or
-    /// before a later physical page. `buffer_size` bounds each read with the same one-page minimum
-    /// as replay.
-    pub async fn recoverable_prefix_len_from_blob(
-        blob: &B,
-        physical_size: u64,
-        logical_page_size: NonZeroU16,
-        buffer_size: NonZeroUsize,
-        read_options: ReadOptions,
-    ) -> Result<(u64, bool), Error> {
-        let logical_page_size = u64::from(logical_page_size.get());
-        let physical_page_size = logical_page_size
-            .checked_add(CHECKSUM_SIZE)
-            .ok_or(Error::OffsetOverflow)?;
-        let total_pages = physical_size / physical_page_size;
-        let (recoverable, complete) = Self::recoverable_prefix_len_from_pages(
-            blob,
-            logical_page_size,
-            total_pages,
-            0,
-            buffer_size,
-            read_options,
-        )
-        .await?;
-        Ok((
-            recoverable,
-            complete && physical_size.is_multiple_of(physical_page_size),
-        ))
-    }
-
-    /// Scan complete physical pages in bounded batches and return their contiguous logical prefix.
-    ///
-    /// The boolean is true only when all requested pages were consumed, including any terminal
-    /// partial logical page.
-    async fn recoverable_prefix_len_from_pages(
-        blob: &B,
-        logical_page_size: u64,
-        total_pages: u64,
-        start_page: u64,
-        buffer_size: NonZeroUsize,
-        read_options: ReadOptions,
-    ) -> Result<(u64, bool), Error> {
-        let physical_page_size = logical_page_size
-            .checked_add(CHECKSUM_SIZE)
-            .ok_or(Error::OffsetOverflow)?;
-        let physical_page_size_usize =
-            usize::try_from(physical_page_size).map_err(|_| Error::OffsetOverflow)?;
-        let max_batch_pages = u64::try_from((buffer_size.get() / physical_page_size_usize).max(1))
-            .map_err(|_| Error::OffsetOverflow)?;
-
-        // Pages below the caller's proven prefix are accepted without reading.
-        let start_page = start_page.min(total_pages);
-        let mut valid_len = start_page
-            .checked_mul(logical_page_size)
-            .ok_or(Error::OffsetOverflow)?;
-        let mut page = start_page;
-        while page < total_pages {
-            // Bound each read while deriving its physical range with checked arithmetic.
-            let batch_pages = max_batch_pages.min(total_pages - page);
-            let batch_end = page.checked_add(batch_pages).ok_or(Error::OffsetOverflow)?;
-            let physical_offset = page
-                .checked_mul(physical_page_size)
-                .ok_or(Error::OffsetOverflow)?;
-            let physical_len = batch_pages
-                .checked_mul(physical_page_size)
-                .ok_or(Error::OffsetOverflow)?;
-            let physical_len = usize::try_from(physical_len).map_err(|_| Error::OffsetOverflow)?;
-
-            // Coalesce once so each physical page can be checksum-validated in place.
-            let physical = blob
-                .read_at(physical_offset, physical_len, read_options)
-                .await?
-                .coalesce();
-
-            // The first invalid page terminates the only recoverable contiguous prefix.
-            for (batch_page, physical_page) in physical
-                .as_ref()
-                .chunks_exact(physical_page_size_usize)
-                .enumerate()
-            {
-                let Some(checksum) = Checksum::validate_page(physical_page) else {
-                    return Ok((valid_len, false));
-                };
-                let len = u64::from(checksum.len);
-                valid_len = valid_len.checked_add(len).ok_or(Error::OffsetOverflow)?;
-
-                // A valid partial logical page is terminal only when it ends the scanned blob.
-                if len < logical_page_size {
-                    let scanned_pages = page
-                        .checked_add(batch_page as u64)
-                        .and_then(|page| page.checked_add(1))
-                        .ok_or(Error::OffsetOverflow)?;
-                    return Ok((valid_len, scanned_pages == total_pages));
-                }
-            }
-            page = batch_end;
-        }
-        Ok((valid_len, true))
     }
 
     /// Wait for any started sync to complete without starting a new sync.
@@ -1678,6 +1614,25 @@ mod tests {
                     .unwrap(),
                 4 * page
             );
+
+            // A partial tail is still read when the proof overshoots the blob: the clamp stops
+            // at the full pages, so the tail contributes its logical length, not a full page.
+            writer.append(&data[..20]).await.unwrap();
+            writer.sync().await.unwrap();
+            for proven in [4 * page + 20, 5 * page, 100 * page] {
+                assert_eq!(
+                    writer
+                        .recoverable_prefix_len(
+                            proven,
+                            NZUsize!(BUFFER_SIZE),
+                            ReadOptions::default()
+                        )
+                        .await
+                        .unwrap(),
+                    4 * page + 20,
+                    "proven {proven}"
+                );
+            }
         });
     }
 
@@ -1752,35 +1707,26 @@ mod tests {
 
             // A sub-page budget falls back to one page per read.
             recordings.clear();
-            let physical_page_size = PAGE_SIZE.get() as usize + CHECKSUM_SIZE as usize;
-            let physical_size = physical_page_size as u64 * 9;
-            let (recoverable, complete) = Writer::<_>::recoverable_prefix_len_from_blob(
-                &blob,
-                physical_size,
-                PAGE_SIZE,
-                NZUsize!(1),
-                ReadOptions::default(),
-            )
-            .await
-            .unwrap();
-            assert_eq!(recoverable, total as u64);
-            assert!(complete);
+            assert_eq!(
+                writer
+                    .recoverable_prefix_len(0, NZUsize!(1), ReadOptions::default())
+                    .await
+                    .unwrap(),
+                total as u64
+            );
             assert_eq!(recordings.snapshot().reads.len(), 9);
 
             // A three-page budget coalesces the same scan into three reads.
             recordings.clear();
+            let physical_page_size = PAGE_SIZE.get() as usize + CHECKSUM_SIZE as usize;
             let scan_buffer = NonZeroUsize::new(physical_page_size * 3).unwrap();
-            let (recoverable, complete) = Writer::<_>::recoverable_prefix_len_from_blob(
-                &blob,
-                physical_size,
-                PAGE_SIZE,
-                scan_buffer,
-                ReadOptions::default(),
-            )
-            .await
-            .unwrap();
-            assert_eq!(recoverable, total as u64);
-            assert!(complete);
+            assert_eq!(
+                writer
+                    .recoverable_prefix_len(0, scan_buffer, ReadOptions::default())
+                    .await
+                    .unwrap(),
+                total as u64
+            );
             assert_eq!(recordings.snapshot().reads.len(), 3);
         });
     }
@@ -3765,20 +3711,6 @@ mod tests {
             assert_eq!(checksum.len1, 3);
             assert_eq!(checksum.len2, 6);
 
-            // The protected slot proves exactly the previously committed boundary: the torn
-            // extension cannot make any later byte part of the recoverable prefix.
-            let (recoverable, complete) = Writer::<_>::recoverable_prefix_len_from_blob(
-                &blob,
-                physical_page_size as u64,
-                PAGE_SIZE,
-                NZUsize!(BUFFER_SIZE),
-                ReadOptions::default(),
-            )
-            .await
-            .unwrap();
-            assert_eq!(recoverable, 3);
-            assert!(complete);
-
             let (blob, blob_size) = context
                 .open("test_partition", b"torn_extension_footer")
                 .await
@@ -3788,6 +3720,16 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(recovered.size(), 3);
+
+            // The protected slot proves exactly the previously committed boundary: the torn
+            // extension cannot make any later byte part of the recoverable prefix.
+            assert_eq!(
+                recovered
+                    .recoverable_prefix_len(0, NZUsize!(BUFFER_SIZE), ReadOptions::default())
+                    .await
+                    .unwrap(),
+                3
+            );
             let data = recovered.read_at(0, 3).await.unwrap().coalesce();
             assert_eq!(data.as_ref(), b"abc");
         });
