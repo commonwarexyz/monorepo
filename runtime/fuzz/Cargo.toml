@@ -10,7 +10,8 @@ cargo-fuzz = true
 
 [dependencies]
 arbitrary = { workspace = true, features = ["derive"] }
-commonware-runtime = { workspace = true, features = ["arbitrary", "test-utils"] }
+commonware-cryptography.workspace = true
+commonware-runtime = { workspace = true, features = ["test-utils"] }
 commonware-utils.workspace = true
 libfuzzer-sys.workspace = true
 
