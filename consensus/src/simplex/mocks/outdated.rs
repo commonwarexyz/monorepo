@@ -13,7 +13,7 @@ use commonware_cryptography::{Hasher, certificate::Scheme};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, ContextCell, Handle, Spawner, spawn_cell};
 use rand_core::CryptoRng;
-use std::collections::HashMap;
+use commonware_utils::{hash_map, HashMap};
 use tracing::debug;
 
 pub struct Config<S: Scheme> {
@@ -40,7 +40,7 @@ where
             context: ContextCell::new(context),
             scheme: cfg.scheme,
 
-            history: HashMap::new(),
+            history: hash_map::new(),
             view_delta: cfg.view_delta,
         }
     }

@@ -613,9 +613,9 @@ mod tests {
         ed25519::{PrivateKey, PublicKey},
     };
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic, deterministic::Runner};
-    use commonware_utils::{channel::oneshot, non_empty_vec, sync::Mutex};
+    use commonware_utils::{channel::oneshot, HashMap, non_empty_vec, sync::Mutex};
     use std::{
-        collections::{HashMap, VecDeque},
+        collections::VecDeque,
         sync::{
             Arc,
             atomic::{AtomicU32, Ordering},

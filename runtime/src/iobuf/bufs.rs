@@ -1621,8 +1621,8 @@ mod tests {
     use super::{super::pool::BufferPoolConfig, *};
     use bytes::{Bytes, BytesMut};
     use commonware_codec::{Encode, types::lazy::Lazy};
-    use commonware_utils::range::NonEmptyRange;
-    use std::collections::{BTreeMap, HashMap};
+    use commonware_utils::{hash_map, range::NonEmptyRange, HashMap};
+    use std::collections::BTreeMap;
 
     fn test_pool() -> BufferPool {
         cfg_if::cfg_if! {
@@ -3655,7 +3655,7 @@ mod tests {
         btree.insert(1u8, Bytes::from(vec![0xEE; 48]));
         assert_encode_with_pool_matches_encode(&btree);
 
-        let mut hash = HashMap::new();
+        let mut hash = hash_map::new();
         hash.insert(2u8, Bytes::from(vec![0x11; 96]));
         hash.insert(1u8, Bytes::from(vec![0x22; 48]));
         assert_encode_with_pool_matches_encode(&hash);

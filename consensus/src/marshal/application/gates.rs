@@ -9,7 +9,8 @@ use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
     sync::Mutex,
 };
-use std::{collections::HashMap, future::Future, sync::Arc};
+use std::{future::Future, sync::Arc};
+use commonware_utils::{hash_map, HashMap};
 use tracing::debug;
 
 /// A proposal staged for its relay broadcast: the block and the ack that
@@ -68,8 +69,8 @@ impl<D: Digest, B> Gates<D, B> {
     pub(crate) fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(Inner {
-                certifications: HashMap::new(),
-                proposals: HashMap::new(),
+                certifications: hash_map::new(),
+                proposals: hash_map::new(),
             })),
         }
     }

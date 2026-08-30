@@ -7,11 +7,11 @@ use commonware_p2p::{
     Channel, Receiver as ReceiverTrait, Recipients, Sender as SenderTrait, simulated,
 };
 use commonware_runtime::{Clock, IoBuf, Quota, Runner, Supervisor as _, deterministic};
-use commonware_utils::{NZUsize, Probability};
+use commonware_utils::{NZUsize, Probability, hash_map, HashMap};
 use libfuzzer_sys::fuzz_target;
 use rand::RngExt as _;
 use std::{
-    collections::{HashMap, HashSet, VecDeque, hash_map},
+    collections::{HashSet, VecDeque},
     num::NonZeroU32,
     time::Duration,
 };
@@ -144,11 +144,11 @@ fn fuzz(input: FuzzInput) {
                 commonware_p2p::simulated::Sender<ed25519::PublicKey, deterministic::Context>,
                 commonware_p2p::simulated::Receiver<ed25519::PublicKey>,
             ),
-        > = HashMap::new();
+        > = hash_map::new();
 
         // Track expected messages: (to_idx, sender_pk, channel_id) -> queue of messages
         // Messages may be dropped (unreliable links) but those delivered must match expectations
-        let mut expected_msgs: HashMap<(usize, ed25519::PublicKey, u8), VecDeque<IoBuf>> = HashMap::new();
+        let mut expected_msgs: HashMap<(usize, ed25519::PublicKey, u8), VecDeque<IoBuf>> = hash_map::new();
 
         for op in input.operations.into_iter() {
             match op {

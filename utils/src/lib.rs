@@ -28,6 +28,8 @@ commonware_macros::stability_scope!(BETA {
 
     pub mod bitmap;
     pub mod cache;
+    pub mod hash_map;
+    pub use hash_map::{BuildHasher, HashMap, new, with_capacity};
     pub mod iter;
     pub mod ordered;
     pub mod probability;

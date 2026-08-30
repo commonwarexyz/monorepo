@@ -8,7 +8,7 @@ use commonware_storage::{
 };
 use commonware_utils::{NZU64, NZUsize, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
-use std::collections::HashMap;
+use commonware_utils::{hash_map, HashMap};
 
 #[derive(Debug, Clone)]
 enum OrdinalOperation {
@@ -88,8 +88,8 @@ fn fuzz(input: FuzzInput) {
         let mut restarts = 0usize;
 
         // Run operations
-        let mut expected_data: HashMap<u64, FixedBytes<32>> = HashMap::new();
-        let mut synced_data: HashMap<u64, FixedBytes<32>> = HashMap::new();
+        let mut expected_data: HashMap<u64, FixedBytes<32>> = hash_map::new();
+        let mut synced_data: HashMap<u64, FixedBytes<32>> = hash_map::new();
         for op in input.operations.iter() {
             match op {
                 OrdinalOperation::Put { index, value } => {

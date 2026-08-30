@@ -13,7 +13,8 @@ use commonware_cryptography::{
     sha256::Digest as Sha256Digest,
 };
 use rand_core::CryptoRng;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use commonware_utils::{hash_map, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 // Intentionally restates View::covers with independent integer arithmetic:
 // the fuzz oracle must not delegate to the production term predicates
@@ -203,7 +204,7 @@ pub fn check<P: Simplex>(
 
         // Invariant: no_conflicting_quorum_notarizations
         // In any view, there cannot be quorum notarizations for multiple digests.
-        let mut per_view: HashMap<u64, HashSet<Sha256Digest>> = HashMap::new();
+        let mut per_view: HashMap<u64, HashSet<Sha256Digest>> = hash_map::new();
         for (notarizations, _, _) in replicas.iter() {
             for (v, d) in notarizations {
                 let is_quorum = d.signature_count.is_none_or(|c| c >= threshold);
@@ -390,8 +391,8 @@ where
 mod tests {
     use super::*;
     use crate::{N4F1C3, N4F3C1, simplex::SimplexEd25519};
-    use commonware_utils::NZU32;
-    use std::{collections::HashMap, panic};
+    use commonware_utils::{hash_map, NZU32};
+    use std::panic;
 
     /// Runs `check` and returns the panic message, so each test can assert
     /// its named invariant fired (fixtures can violate more than one rule).
@@ -413,7 +414,7 @@ mod tests {
     #[test]
     fn same_term_nullification_blocks_later_finalization() {
         let payload = Sha256Digest::from([7u8; 32]);
-        let mut notarizations = HashMap::new();
+        let mut notarizations = hash_map::new();
         notarizations.insert(
             3,
             Notarization {
@@ -421,14 +422,14 @@ mod tests {
                 signature_count: Some(3),
             },
         );
-        let mut nullifications = HashMap::new();
+        let mut nullifications = hash_map::new();
         nullifications.insert(
             1,
             Nullification {
                 signature_count: Some(3),
             },
         );
-        let mut finalizations = HashMap::new();
+        let mut finalizations = hash_map::new();
         // Parent 2 keeps the ancestry rules satisfied so only the same-term
         // nullification invariant can fire.
         finalizations.insert(
@@ -455,7 +456,7 @@ mod tests {
     fn parent_mismatch_requires_honest_quorum() {
         let payload = Sha256Digest::from([9u8; 32]);
         let replica = |parent| {
-            let mut notarizations = HashMap::new();
+            let mut notarizations = hash_map::new();
             notarizations.insert(
                 3,
                 Notarization {
@@ -463,7 +464,7 @@ mod tests {
                     signature_count: Some(3),
                 },
             );
-            let mut finalizations = HashMap::new();
+            let mut finalizations = hash_map::new();
             finalizations.insert(
                 3,
                 Finalization {
@@ -472,7 +473,7 @@ mod tests {
                     signature_count: Some(3),
                 },
             );
-            (notarizations, HashMap::new(), finalizations)
+            (notarizations, hash_map::new(), finalizations)
         };
 
         // A Byzantine quorum can mint a certificate with a mutated parent
@@ -501,14 +502,14 @@ mod tests {
     #[test]
     fn same_term_nullification_requires_honest_quorum() {
         let payload = Sha256Digest::from([8u8; 32]);
-        let mut nullifications = HashMap::new();
+        let mut nullifications = hash_map::new();
         nullifications.insert(
             1,
             Nullification {
                 signature_count: Some(3),
             },
         );
-        let mut finalizations = HashMap::new();
+        let mut finalizations = hash_map::new();
         finalizations.insert(
             3,
             Finalization {
@@ -525,14 +526,14 @@ mod tests {
         check::<SimplexEd25519>(
             N4F3C1,
             TermLength::new(NZU32!(5)),
-            vec![(HashMap::new(), nullifications, finalizations)],
+            vec![(hash_map::new(), nullifications, finalizations)],
         );
     }
 
     #[test]
     fn finalization_between_parent_and_child_fires() {
-        let mut notarizations = HashMap::new();
-        let mut finalizations = HashMap::new();
+        let mut notarizations = hash_map::new();
+        let mut finalizations = hash_map::new();
         for (view, byte, parent) in [(2u64, 2u8, 1u64), (5, 5, 1)] {
             let payload = Sha256Digest::from([byte; 32]);
             notarizations.insert(
@@ -559,7 +560,7 @@ mod tests {
         let message = check_panics(
             N4F1C3,
             TermLength::ONE,
-            vec![(notarizations, HashMap::new(), finalizations)],
+            vec![(notarizations, hash_map::new(), finalizations)],
         );
         assert!(
             message.contains("finalized strictly between parent"),
@@ -571,7 +572,7 @@ mod tests {
     fn intra_term_parent_skip_fires() {
         let payload = Sha256Digest::from([4u8; 32]);
         let state = || {
-            let mut notarizations = HashMap::new();
+            let mut notarizations = hash_map::new();
             notarizations.insert(
                 4,
                 Notarization {
@@ -579,7 +580,7 @@ mod tests {
                     signature_count: Some(3),
                 },
             );
-            let mut finalizations = HashMap::new();
+            let mut finalizations = hash_map::new();
             finalizations.insert(
                 4,
                 Finalization {
@@ -588,7 +589,7 @@ mod tests {
                     signature_count: Some(3),
                 },
             );
-            vec![(notarizations, HashMap::new(), finalizations)]
+            vec![(notarizations, hash_map::new(), finalizations)]
         };
 
         // View 4 is not a term start, so it must build on view 3.
@@ -610,7 +611,7 @@ mod tests {
         // view 3 only if the terms it skips (containing views 4 and 6) were
         // nullified.
         let state = |nullified: &[u64]| {
-            let mut notarizations = HashMap::new();
+            let mut notarizations = hash_map::new();
             notarizations.insert(
                 11,
                 Notarization {
@@ -618,7 +619,7 @@ mod tests {
                     signature_count: Some(3),
                 },
             );
-            let mut nullifications = HashMap::new();
+            let mut nullifications = hash_map::new();
             for &view in nullified {
                 nullifications.insert(
                     view,
@@ -627,7 +628,7 @@ mod tests {
                     },
                 );
             }
-            let mut finalizations = HashMap::new();
+            let mut finalizations = hash_map::new();
             finalizations.insert(
                 11,
                 Finalization {
@@ -669,7 +670,7 @@ mod tests {
     #[test]
     fn parent_at_or_above_child_fires() {
         let payload = Sha256Digest::from([3u8; 32]);
-        let mut finalizations = HashMap::new();
+        let mut finalizations = hash_map::new();
         finalizations.insert(
             3,
             Finalization {
@@ -682,7 +683,7 @@ mod tests {
         let message = check_panics(
             N4F1C3,
             TermLength::new(NZU32!(5)),
-            vec![(HashMap::new(), HashMap::new(), finalizations)],
+            vec![(hash_map::new(), hash_map::new(), finalizations)],
         );
         assert!(
             message.contains("not strictly below it"),
@@ -695,7 +696,7 @@ mod tests {
         // Complements `same_term_nullification_requires_honest_quorum`, which
         // proves this check is suppressed without an honest quorum.
         let payload = Sha256Digest::from([10u8; 32]);
-        let mut finalizations = HashMap::new();
+        let mut finalizations = hash_map::new();
         finalizations.insert(
             3,
             Finalization {
@@ -708,7 +709,7 @@ mod tests {
         let message = check_panics(
             N4F1C3,
             TermLength::new(NZU32!(5)),
-            vec![(HashMap::new(), HashMap::new(), finalizations)],
+            vec![(hash_map::new(), hash_map::new(), finalizations)],
         );
         assert!(
             message.contains("finalization without notarization"),

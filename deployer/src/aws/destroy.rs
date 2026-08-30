@@ -9,9 +9,10 @@ use crate::aws::{
         is_no_such_bucket_error,
     },
 };
+use commonware_utils::{hash_map, HashMap};
 use futures::future::try_join_all;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     fs::File,
     path::PathBuf,
 };

@@ -28,6 +28,8 @@ use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_utils::{
     NZUsize, Probability, TryCollect,
     channel::{fallible::FallibleExt, mpsc, oneshot, ring},
+    hash_map,
+    HashMap,
     ordered::Set,
 };
 use either::Either;
@@ -35,7 +37,7 @@ use futures::{Sink, future};
 use rand::Rng;
 use rand_distr::{Distribution, Normal};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fmt::Debug,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     num::NonZeroUsize,
@@ -239,7 +241,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 next_addr,
                 ingress: oracle_receiver,
                 ingress_sender: oracle_mailbox.clone(),
-                links: HashMap::new(),
+                links: hash_map::new(),
                 peers: BTreeMap::new(),
                 peer_sets: BTreeMap::new(),
                 peer_ref_counts: BTreeMap::new(),
@@ -1314,7 +1316,7 @@ impl<P: PublicKey> Peer<P> {
         // Spawn router
         context.child("router").spawn(|context| async move {
             // Map of channels to mailboxes (senders to particular channels)
-            let mut mailboxes = HashMap::new();
+            let mut mailboxes = hash_map::new();
 
             // Continually listen for control messages and outbound messages
             select_loop! {

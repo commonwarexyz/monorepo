@@ -23,7 +23,8 @@ use commonware_parallel::Strategy;
 use commonware_runtime::{Handle, Spawner};
 use commonware_utils::bitmap;
 use core::num::{NonZeroU64, NonZeroUsize};
-use std::{collections::HashMap, sync::Arc};
+use commonware_utils::{hash_map, HashMap};
+use std::sync::Arc;
 
 /// One shard's output from the fused [`Db::get_many_map`] path: mapped results for the shard's
 /// keys plus `(global key index, position)` pairs for page-cache misses.
@@ -587,7 +588,7 @@ where
 
             let mut undos = Vec::with_capacity((current_size - rewind_size) as usize);
             let mut active_keys_delta = 0isize;
-            let mut prior_state_by_key: HashMap<U::Key, Option<Location<F>>> = HashMap::new();
+            let mut prior_state_by_key: HashMap<U::Key, Option<Location<F>>> = hash_map::new();
 
             // Reconstruct key state once in a single pass from the rewind floor.
             for loc in *rewind_floor..current_size {

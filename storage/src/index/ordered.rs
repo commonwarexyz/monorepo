@@ -15,9 +15,10 @@ use commonware_runtime::{
     Metrics,
     telemetry::metrics::{Counter, Gauge, MetricsExt as _},
 };
+use hashbrown::HashMap;
 use std::{
     collections::{
-        BTreeMap, HashMap,
+        BTreeMap,
         btree_map::{
             Entry as BTreeEntry, OccupiedEntry as BTreeOccupiedEntry,
             VacantEntry as BTreeVacantEntry,

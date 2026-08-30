@@ -168,11 +168,11 @@ pub(crate) mod test {
         Runner as _, Supervisor as _,
         deterministic::{self, Context},
     };
-    use commonware_utils::{NZU64, NZUsize, TestRng, probability, sequence::FixedBytes};
+    use commonware_utils::{NZU64, NZUsize, TestRng, hash_map, HashMap, probability, sequence::FixedBytes};
     use futures::StreamExt as _;
     use rand::{Rng, seq::IteratorRandom};
     use std::{
-        collections::{BTreeMap, HashMap},
+        collections::BTreeMap,
         sync::Arc,
     };
 
@@ -327,7 +327,7 @@ pub(crate) mod test {
                     }
                 }
                 // Dedup last-write-wins.
-                let mut m: HashMap<Digest, Option<Digest>> = HashMap::new();
+                let mut m: HashMap<Digest, Option<Digest>> = hash_map::new();
                 for (k, v) in out {
                     m.insert(k, v);
                 }

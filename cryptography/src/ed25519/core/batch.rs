@@ -226,7 +226,7 @@ impl Verifier {
 
         // Group the signatures by verification key. hashbrown's map with the
         // ahash hasher stands in for ahash::AHashMap, which wraps
-        // std::collections::HashMap and is unavailable in no_std builds.
+        // commonware_utils::HashMap and is unavailable in no_std builds.
         let mut key_indices: HashMap<&VerificationKeyBytes, usize, RandomState> =
             HashMap::with_capacity_and_hasher(n, RandomState::default());
         let mut A_coeffs: Vec<Scalar> = Vec::with_capacity(n);

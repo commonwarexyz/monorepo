@@ -161,12 +161,11 @@ pub(crate) mod test {
         mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs},
         reschedule,
     };
-    use commonware_utils::{NZU16, NZU64, NZUsize, TestRng, probability};
+    use commonware_utils::{NZU16, NZU64, NZUsize, TestRng, hash_map, HashMap, probability};
     use core::num::NonZeroUsize;
     use futures::{FutureExt as _, Stream};
     use rand::Rng;
     use std::{
-        collections::HashMap,
         future::{Future, ready},
         sync::Arc,
         time::Duration,
@@ -649,7 +648,7 @@ pub(crate) mod test {
             // pure function of the immutable log, so only a state check can catch a snapshot
             // rebuilt into the wrong index.
             let ops = create_test_ops(10_000);
-            let mut expected = HashMap::new();
+            let mut expected = hash_map::new();
             for op in &ops {
                 match op {
                     Operation::Update(Update(key, value)) => {
@@ -1180,7 +1179,7 @@ pub(crate) mod test {
                     }
                 }
                 // Dedup last-write-wins.
-                let mut m: HashMap<Digest, Option<Digest>> = HashMap::new();
+                let mut m: HashMap<Digest, Option<Digest>> = hash_map::new();
                 for (k, v) in out {
                     m.insert(k, v);
                 }

@@ -231,11 +231,10 @@ pub(crate) mod test {
     use commonware_runtime::{
         BufferPooler, Supervisor as _, buffer::paged::CacheRef, deterministic::Context,
     };
-    use commonware_utils::{NZU16, NZU64, NZUsize};
+    use commonware_utils::{NZU16, NZU64, NZUsize, hash_map};
     use core::{future::Future, pin::Pin};
     use std::{
-        collections::HashMap,
-        num::{NonZeroU16, NonZeroUsize},
+            num::{NonZeroU16, NonZeroUsize},
     };
 
     pub(crate) fn colliding_digest(prefix: u8, suffix: u64) -> Digest {
@@ -870,7 +869,7 @@ pub(crate) mod test {
 
         const ELEMENTS: u64 = 1000;
 
-        let mut map = HashMap::<Digest, V>::default();
+        let mut map = hash_map::new();
         {
             let mut batch = db.new_batch();
             for i in 0u64..ELEMENTS {
@@ -1263,7 +1262,7 @@ pub(crate) mod test {
         D: DbAny<F, Key = Digest, Value = V, Digest = Digest>,
         V: Clone + CodecShared + Eq + std::fmt::Debug,
     {
-        let mut map = HashMap::<Digest, V>::default();
+        let mut map = hash_map::new();
         const ELEMENTS: u64 = 10;
         let metadata_value = make_value(42);
         let key_at = |j: u64, i: u64| Sha256::hash(&[&(j * 1000 + i).to_be_bytes()]);

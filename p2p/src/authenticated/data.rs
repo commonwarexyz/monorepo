@@ -1,7 +1,7 @@
 use crate::Channel;
 use commonware_codec::{EncodeSize, Error, RangeCfg, Read, ReadExt as _, Write, varint::UInt};
 use commonware_runtime::{Buf, BufMut, BufferPool, IoBuf, IoBufs};
-use std::collections::HashMap;
+use commonware_utils::HashMap;
 
 /// Data is an arbitrary message sent between peers.
 #[derive(Clone, Debug, PartialEq)]

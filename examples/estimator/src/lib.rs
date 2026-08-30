@@ -10,9 +10,10 @@ use commonware_cryptography::{
     ed25519::{self, PublicKey},
 };
 use commonware_p2p::Recipients;
+use commonware_utils::{hash_map, HashMap};
 use reqwest::blocking::Client;
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet},
     time::Duration,
 };
 use tracing::debug;
@@ -178,7 +179,7 @@ fn parse_single_command(line: &str) -> Command {
     let id = args[0].parse::<u32>().expect("Invalid id");
 
     // Parse remaining arguments as key=value pairs
-    let mut parsed_args: HashMap<String, String> = HashMap::new();
+    let mut parsed_args: HashMap<String, String> = hash_map::new();
     for arg in &args[1..] {
         if let Some(eq_pos) = arg.find('=') {
             let key = arg[..eq_pos].trim().to_string();

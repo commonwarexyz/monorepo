@@ -132,13 +132,15 @@ mod tests {
             fallible::{FallibleExt, OneshotExt},
             mpsc, oneshot,
         },
+        hash_map,
+        HashMap,
         non_empty_vec,
         ordered::Set,
         probability,
         sync::Mutex,
     };
     use std::{
-        collections::{HashMap, VecDeque},
+        collections::VecDeque,
         num::{NonZeroU32, NonZeroUsize},
         sync::Arc,
         time::Duration,
@@ -2119,7 +2121,7 @@ mod tests {
             mailbox1.fetch(key3.clone()); // no targeting for key3
 
             // Collect all three events
-            let mut results = HashMap::new();
+            let mut results = hash_map::new();
             for _ in 0..3 {
                 let (key, value) = cons_out1.recv().await.unwrap();
                 results.insert(key, value);
@@ -3288,7 +3290,7 @@ mod tests {
             mailbox1.fetch(Key(1));
 
             // Collect results
-            let mut results = HashMap::new();
+            let mut results = hash_map::new();
             for _ in 0..2 {
                 let (key, value) = cons_out1.recv().await.unwrap();
                 results.insert(key.clone(), value);
@@ -3374,7 +3376,7 @@ mod tests {
             mailbox1.fetch(Key(3));
 
             // All 3 should eventually succeed (after rate limit resets)
-            let mut results = HashMap::new();
+            let mut results = hash_map::new();
             for _ in 0..3 {
                 let (key, value) = cons_out1.recv().await.unwrap();
                 results.insert(key.clone(), value);

@@ -12,8 +12,8 @@ use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
-use commonware_utils::{channel::oneshot, futures::Pool};
-use std::collections::{HashMap, HashSet};
+use commonware_utils::{channel::oneshot, futures::Pool, hash_map, HashMap};
+use std::collections::HashSet;
 use tracing::{debug, error};
 
 /// Engine that will disperse messages and collect responses.
@@ -83,7 +83,7 @@ where
                 monitor: cfg.monitor,
                 handler: cfg.handler,
                 mailbox: rx,
-                tracked: HashMap::new(),
+                tracked: hash_map::new(),
                 outstanding,
                 requests,
                 responses,

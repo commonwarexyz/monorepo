@@ -22,8 +22,9 @@ use aws_sdk_ec2::{
         VpcPeeringConnectionStateReasonCode,
     },
 };
+use commonware_utils::{hash_map, HashMap};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     time::Duration,
 };
 use tokio::time::sleep;
@@ -793,7 +794,7 @@ pub async fn wait_for_instances_running(
     instance_ids: &[String],
 ) -> Result<Vec<String>, Ec2Error> {
     // Track discovered IPs to avoid re-polling running instances
-    let mut discovered_ips: HashMap<String, String> = HashMap::new();
+    let mut discovered_ips: HashMap<String, String> = hash_map::new();
     let mut pending_ids: HashSet<String> = instance_ids.iter().cloned().collect();
     let mut attempt = 0u32;
     loop {

@@ -921,9 +921,9 @@ mod tests {
     };
     use bytes::Bytes;
     use commonware_parallel::Strategy as _;
+    use commonware_utils::{hash_map, HashMap};
     use std::{
         self,
-        collections::HashMap,
         net::{IpAddr, Ipv4Addr, Ipv6Addr},
         str::FromStr,
     };
@@ -1296,7 +1296,7 @@ mod tests {
             async fn read_headers<St: Stream>(
                 stream: &mut St,
             ) -> Result<HashMap<String, String>, Error> {
-                let mut headers = HashMap::new();
+                let mut headers = hash_map::new();
                 loop {
                     let line = read_line(stream).await?;
                     if line.is_empty() {

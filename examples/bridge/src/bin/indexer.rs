@@ -29,11 +29,13 @@ use commonware_stream::encrypted::{Config as StreamConfig, listen};
 use commonware_utils::{
     TryCollect,
     channel::{mpsc, oneshot},
+    hash_map,
+    HashMap,
     ordered::Set,
     union,
 };
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::BTreeMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     time::Duration,
 };
@@ -125,10 +127,10 @@ fn main() {
         .expect("public keys are unique");
 
     // Configure networks
-    let mut verifiers: HashMap<G2, Scheme> = HashMap::new();
-    let mut blocks: HashMap<G2, HashMap<Sha256Digest, BlockFormat<Sha256Digest>>> = HashMap::new();
+    let mut verifiers: HashMap<G2, Scheme> = hash_map::new();
+    let mut blocks: HashMap<G2, HashMap<Sha256Digest, BlockFormat<Sha256Digest>>> = hash_map::new();
     let mut finalizations: HashMap<G2, BTreeMap<View, Finalization<Scheme, Sha256Digest>>> =
-        HashMap::new();
+        hash_map::new();
     let networks = matches
         .get_many::<String>("networks")
         .expect("Please provide networks");
@@ -148,7 +150,7 @@ fn main() {
                 public,
                 bls12381_threshold::Scheme::certificate_verifier(&namespace, public),
             );
-            blocks.insert(public, HashMap::new());
+            blocks.insert(public, hash_map::new());
             finalizations.insert(public, BTreeMap::new());
         }
 

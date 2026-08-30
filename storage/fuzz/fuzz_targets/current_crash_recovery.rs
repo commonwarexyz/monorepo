@@ -20,10 +20,11 @@ use commonware_storage::{
     qmdb::current::{VariableConfig, unordered::variable::Db as Current},
     translator::TwoCap,
 };
-use commonware_utils::{NZU64, NZUsize, Probability, probability, sequence::FixedBytes};
+use commonware_utils::{
+    NZU64, NZUsize, Probability, hash_map, HashMap, probability, sequence::FixedBytes,
+};
 use libfuzzer_sys::fuzz_target;
 use std::{
-    collections::HashMap,
     num::{NonZeroU16, NonZeroUsize},
 };
 
@@ -238,9 +239,9 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
             };
 
             // Active KV pairs after the last successful commit.
-            let mut committed: HashMap<RawKey, RawValue> = HashMap::new();
+            let mut committed: HashMap<RawKey, RawValue> = hash_map::new();
             // Uncommitted changes since the last commit. None = delete, Some = upsert.
-            let mut pending: HashMap<RawKey, Option<RawValue>> = HashMap::new();
+            let mut pending: HashMap<RawKey, Option<RawValue>> = hash_map::new();
 
             // Accumulate writes until Commit, matching the intended
             // pending/committed separation.

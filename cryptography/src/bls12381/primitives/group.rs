@@ -1915,10 +1915,10 @@ mod tests {
     use commonware_macros::test_group;
     use commonware_math::algebra::{Random, test_suites};
     use commonware_parallel::{Rayon, Sequential};
-    use commonware_utils::test_rng;
+    use commonware_utils::{HashMap, test_rng};
     use rand_core::{TryCryptoRng, TryRng, utils::fill_bytes_via_next_word};
     use std::{
-        collections::{BTreeSet, HashMap},
+        collections::BTreeSet,
         convert::Infallible,
         num::NonZeroUsize,
     };

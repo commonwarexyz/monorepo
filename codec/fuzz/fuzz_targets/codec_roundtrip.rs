@@ -1,4 +1,5 @@
 #![no_main]
+#![allow(clippy::disallowed_types)]
 
 use arbitrary::Arbitrary;
 use bytes::{BufMut, Bytes};

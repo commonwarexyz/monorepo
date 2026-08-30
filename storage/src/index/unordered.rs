@@ -13,13 +13,13 @@ use commonware_runtime::{
     Metrics,
     telemetry::metrics::{Counter, Gauge, MetricsExt as _},
 };
-use std::collections::{
+use hashbrown::{
     HashMap,
     hash_map::{Entry, OccupiedEntry, VacantEntry},
 };
 
 /// Implementation of [IndexEntry] for [OccupiedEntry].
-impl<K: Send + Sync, V: Send + Sync> IndexEntry<V> for OccupiedEntry<'_, K, V> {
+impl<K: Send + Sync, V: Send + Sync, S: Send + Sync> IndexEntry<V> for OccupiedEntry<'_, K, V, S> {
     type Key = K;
 
     fn key(&self) -> &K {
@@ -36,7 +36,7 @@ impl<K: Send + Sync, V: Send + Sync> IndexEntry<V> for OccupiedEntry<'_, K, V> {
 }
 
 /// A [crate::index::Cursor] over the values associated with a translated key.
-pub type Cursor<'a, K, V, S> = CursorImpl<'a, K, V, OccupiedEntry<'a, K, V>, S>;
+pub type Cursor<'a, K, V, S> = CursorImpl<'a, K, V, OccupiedEntry<'a, K, V, S>, S>;
 
 /// A memory-efficient index that uses an unordered map internally to map translated keys to
 /// arbitrary values.
@@ -56,7 +56,7 @@ pub struct Index<T: Translator, V: Send + Sync> {
 
 impl<T: Translator, V: Send + Sync> Index<T, V> {
     /// Create a new entry in the index.
-    fn create(keys: &Gauge, items: &Gauge, vacant: VacantEntry<'_, T::Key, V>, v: V) {
+    fn create(keys: &Gauge, items: &Gauge, vacant: VacantEntry<'_, T::Key, V, T>, v: V) {
         keys.inc();
         items.inc();
         vacant.insert(v);

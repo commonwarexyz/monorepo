@@ -36,14 +36,15 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{
     Clock, IoBuf, Runner, Spawner, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
-use commonware_utils::{FuzzRng, NZU16, NZU32, NZUsize, channel::mpsc::Receiver, probability};
+use commonware_utils::{
+    FuzzRng, HashMap, NZU16, NZU32, NZUsize, channel::mpsc::Receiver, probability,
+};
 use futures::future::join_all;
 pub use simplex::{
     SimplexBls12381MinPk, SimplexBls12381MinSig, SimplexBls12381MultisigMinPk,
     SimplexBls12381MultisigMinSig, SimplexEd25519, SimplexSecp256r1,
 };
 use std::{
-    collections::HashMap,
     num::{NonZeroU16, NonZeroUsize},
     panic,
     sync::Arc,

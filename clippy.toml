@@ -1,5 +1,6 @@
 # Disallow futures::channel types - use commonware_utils::channel instead
 disallowed-types = [
+    { path = "std::collections::HashMap", reason = "prefer commonware_utils::HashMap", allow-invalid = true },
     { path = "std::sync::Condvar", reason = "prefer commonware_utils::sync", allow-invalid = true },
     { path = "std::sync::Mutex", reason = "prefer commonware_utils::sync", allow-invalid = true },
     { path = "std::sync::Once", reason = "prefer commonware_utils::sync", allow-invalid = true },

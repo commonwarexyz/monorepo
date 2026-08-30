@@ -25,8 +25,8 @@ pub trait Translator: Clone + BuildHasher + Send + Sync + 'static {
 /// A lightweight hasher for translated `uint` keys.
 ///
 /// Most users typically store keys that are **already hashed** (shortened by the [Translator]).
-/// Re-hashing them with SipHash (by [std::collections::HashMap]) would waste CPU, so we give
-/// [std::collections::HashMap] this custom hasher instead:
+/// Re-hashing them with SipHash (by [`std::collections::HashMap`]) would waste CPU, so we give
+/// [`commonware_utils::HashMap`] this custom hasher instead:
 ///
 /// * [Hasher::write_u8], [Hasher::write_u16], [Hasher::write_u32], [Hasher::write_u64] copies the
 ///   input into an internal field;
@@ -196,7 +196,7 @@ impl<const N: usize> BuildHasher for Cap<N> {
 ///
 /// Hashes the full key with a per-instance secret seed before delegating to the inner translator.
 /// This makes translated-key collisions unpredictable to an adversary who
-/// does not know the seed, similar to how [std::collections::HashMap] uses
+/// does not know the seed, similar to how [`commonware_utils::HashMap`] uses
 /// [std::collections::hash_map::RandomState] to prevent HashDoS attacks. It can also be used to
 /// ensure uniform distribution of skewed keyspaces when used by non-hashing structures such as
 /// [crate::index].

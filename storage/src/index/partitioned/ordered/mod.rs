@@ -56,8 +56,9 @@ use commonware_runtime::{
     Metrics,
     telemetry::metrics::{Counter, Gauge, MetricsExt as _},
 };
+use commonware_utils::{hash_map, HashMap};
 use std::{
-    collections::{BTreeMap, HashMap, btree_map, hash_map},
+    collections::{BTreeMap, btree_map},
     ops::Bound,
 };
 
@@ -119,7 +120,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
         Self {
             translator,
             partitions,
-            spilled: HashMap::new(),
+            spilled: hash_map::new(),
             threshold: SPILL_THRESHOLD,
             keys: ctx.gauge("keys", "Number of translated keys in the index"),
             items: ctx.gauge("items", "Number of items in the index"),
@@ -363,7 +364,7 @@ impl<T: Translator, V: Send + Sync + 'static, const P: usize> Partitioned for In
             index: Self {
                 translator: self.translator.clone(),
                 partitions,
-                spilled: HashMap::new(),
+                spilled: hash_map::new(),
                 threshold: self.threshold,
                 keys: self.keys.clone(),
                 items: self.items.clone(),

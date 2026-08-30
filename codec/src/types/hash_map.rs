@@ -2,6 +2,7 @@
 //!
 //! For portability and consistency between architectures,
 //! the size of the map must fit within a [u32].
+#![allow(clippy::disallowed_types)]
 
 use crate::{
     RangeCfg,

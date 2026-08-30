@@ -40,10 +40,11 @@ use prometheus_client::encoding::{
     text::{encode, encode_eof},
 };
 pub use registration::Registration;
+use commonware_utils::{hash_map, HashMap};
 use std::{
     any::Any,
     borrow::Cow,
-    collections::{BTreeMap, HashMap},
+    collections::BTreeMap,
     ops::Deref,
     sync::{Arc, Weak, atomic::Ordering},
 };
@@ -568,7 +569,7 @@ impl RegistryInner {
             metrics: Vec::new(),
             free_metric_ids: Vec::new(),
             families: BTreeMap::new(),
-            keys: HashMap::new(),
+            keys: hash_map::new(),
             next_metric_id: 0,
         }
     }

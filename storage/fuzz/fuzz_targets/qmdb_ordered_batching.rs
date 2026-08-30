@@ -17,10 +17,10 @@ use commonware_storage::{
     },
     translator::EightCap,
 };
-use commonware_utils::{NZU16, NZU64, NZUsize, sequence::FixedBytes};
+use commonware_utils::{NZU16, NZU64, NZUsize, hash_map, HashMap, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashSet},
     num::NonZeroU16,
     ops::Bound::{Excluded, Unbounded},
 };
@@ -123,7 +123,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
             // committed_state tracks state after apply_batch. pending_inserts/pending_deletes
             // track uncommitted mutations.
             let mut committed_state: BTreeMap<RawKey, RawValue> = BTreeMap::new();
-            let mut pending_inserts: HashMap<RawKey, RawValue> = HashMap::new();
+            let mut pending_inserts: HashMap<RawKey, RawValue> = hash_map::new();
             let mut pending_deletes: HashSet<RawKey> = HashSet::new();
             let mut all_keys: HashSet<RawKey> = HashSet::new();
 

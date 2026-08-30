@@ -21,8 +21,8 @@ use commonware_utils::{
     channel::{fallible::FallibleExt, mpsc},
     union,
 };
+use commonware_utils::{hash_map, HashMap};
 use rand::{Rng, seq::SliceRandom};
-use std::collections::HashMap;
 use tracing::debug;
 
 // Bytes to add to the namespace to prevent replay attacks.
@@ -117,7 +117,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             peer_gossip_max_count: cfg.peer_gossip_max_count,
             receiver,
             directory,
-            mailboxes: HashMap::new(),
+            mailboxes: hash_map::new(),
             subscribers: Vec::new(),
         };
 
