@@ -32,9 +32,9 @@ pub(crate) fn bench_encode_generic<S: PhasedScheme>(name: &str, c: &mut Criterio
                             },
                             |data| {
                                 if conc > 1 {
-                                    S::encode(b"", &config, data.as_slice(), &strategy).unwrap()
+                                    S::encode(b"", &config, data, &strategy).unwrap()
                                 } else {
-                                    S::encode(b"", &config, data.as_slice(), &Sequential).unwrap()
+                                    S::encode(b"", &config, data, &Sequential).unwrap()
                                 }
                             },
                             BatchSize::SmallInput,
@@ -71,9 +71,9 @@ pub(crate) fn bench_decode_generic<S: PhasedScheme>(name: &str, c: &mut Criterio
                                     rng.fill_bytes(&mut data);
 
                                     let (commitment, mut shards) = if conc > 1 {
-                                        S::encode(b"", &config, data.as_slice(), &strategy).unwrap()
+                                        S::encode(b"", &config, data, &strategy).unwrap()
                                     } else {
-                                        S::encode(b"", &config, data.as_slice(), &Sequential).unwrap()
+                                        S::encode(b"", &config, data, &Sequential).unwrap()
                                     };
 
                                     let my_shard = shards.pop().unwrap();
