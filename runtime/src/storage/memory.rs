@@ -988,6 +988,7 @@ mod tests {
                             *byte = 0;
                         }
                     }
+
                     // Expected outcome per the header spec: a sub-prelude file is always
                     // recreated, an intact prelude parses (the stamped version decides,
                     // and only the version bytes can differ once the first six match), and
@@ -1009,6 +1010,7 @@ mod tests {
                         Expect::Rejected
                     };
 
+                    // Install the image, reopen, and hold recovery to the expected outcome.
                     storage.set_raw_blob("partition", b"v0", image.clone());
                     let result = storage
                         .open_versioned("partition", b"v0", versions.clone())
