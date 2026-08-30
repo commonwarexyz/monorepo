@@ -633,8 +633,6 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
 
     /// Inclusion proof for the element at `loc` using `inactive_peaks` and the bagging carried by
     /// `hasher`.
-    ///
-    /// Nodes below this batch chain are read from `base`.
     pub fn proof(
         &self,
         base: &Mem<F, D>,
@@ -654,8 +652,6 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
 
     /// Inclusion proof for all elements in `range` using `inactive_peaks` and the bagging carried
     /// by `hasher`.
-    ///
-    /// Nodes below this batch chain are read from `base`.
     pub fn range_proof(
         &self,
         base: &Mem<F, D>,

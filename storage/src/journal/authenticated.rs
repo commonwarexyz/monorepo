@@ -181,8 +181,6 @@ impl<F: Family, D: Digest, Item: Send + Sync, S: Strategy> MerkleizedBatch<F, D,
     }
 
     /// Inclusion proof for the element at `loc`.
-    ///
-    /// Nodes below this batch chain are read from `base`.
     pub fn proof(
         &self,
         base: &Mem<F, D>,
@@ -194,8 +192,6 @@ impl<F: Family, D: Digest, Item: Send + Sync, S: Strategy> MerkleizedBatch<F, D,
     }
 
     /// Inclusion proof for all elements in `range`.
-    ///
-    /// Nodes below this batch chain are read from `base`.
     pub fn range_proof(
         &self,
         base: &Mem<F, D>,
