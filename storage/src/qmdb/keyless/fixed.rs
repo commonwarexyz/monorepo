@@ -458,6 +458,7 @@ mod tests {
         test_keyless_fixed_batch_speculative_root => run_batch_speculative_root, db;
         test_keyless_fixed_merkleized_batch_get => run_merkleized_batch_get, db;
         test_keyless_fixed_batch_chained => run_batch_chained, db;
+        test_keyless_fixed_operations_match_applied_log => run_operations_match_applied_log, db;
         test_keyless_fixed_batch_chained_apply_sequential => run_batch_chained_apply_sequential, db;
         test_keyless_fixed_batch_many_sequential => run_batch_many_sequential, db;
         test_keyless_fixed_batch_empty => run_batch_empty, db;

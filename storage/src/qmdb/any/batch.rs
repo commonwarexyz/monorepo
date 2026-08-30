@@ -7,7 +7,7 @@ use crate::{
         authenticated,
         contiguous::{Contiguous, Mutable},
     },
-    merkle::{Family, Location},
+    merkle::{Family, Location, Proof},
     qmdb::{
         any::{
             ValueEncoding,
@@ -2548,6 +2548,16 @@ impl<F: Family, D: Digest, U: update::Update, S: Strategy> MerkleizedBatch<F, D,
         &self.bounds
     }
 
+    /// Return the operations this batch appends to the log and the location of the first.
+    ///
+    /// Includes floor-raise moves and the trailing commit.
+    pub fn operations(&self) -> (Location<F>, Arc<Vec<Operation<F, U>>>) {
+        (
+            self.bounds.base.size,
+            Arc::clone(self.journal_batch.items()),
+        )
+    }
+
     /// Iterate over ancestor batches (parent first, then grandparent, etc.). Stops when a
     /// Weak ref fails to upgrade (ancestor was freed).
     pub(crate) fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> + use<F, D, U, S> {
@@ -2588,6 +2598,29 @@ where
             mutations: BTreeMap::new(),
             base: Base::Child(Arc::clone(self)),
         }
+    }
+
+    /// Inclusion proof for the operations returned by [`Self::operations`], anchored at
+    /// this batch's tip. The pair verifies against [`Self::root`] via
+    /// [`crate::qmdb::verify_proof`].
+    ///
+    /// Nodes below this batch chain are read from `db`'s
+    /// [Merkle store][crate::merkle::mem::Mem], which retains them at least until
+    /// this batch's changes are flushed (by a commit or sync after apply).
+    pub fn proof<E, C, I, H, const N: usize>(
+        &self,
+        db: &Db<F, E, C, I, H, U, N, S>,
+    ) -> Result<Proof<F, D>, crate::qmdb::Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = Location<F>>,
+        H: Hasher<Digest = D>,
+    {
+        let inactive_peaks = F::inactive_peaks(self.bounds.tip.size, self.bounds.inactivity_floor);
+        db.log
+            .speculative_proof(&self.journal_batch, inactive_peaks)
+            .map_err(Into::into)
     }
 
     /// Read through: local diff -> parent chain -> committed DB.
@@ -3578,6 +3611,118 @@ mod tests {
         // Mutation unchanged.
         assert_eq!(mutations.len(), 1);
         assert!(mutations.contains_key(&1));
+    }
+
+    /// `operations()` must cover exactly the batch's own applied range and match the
+    /// operations a post-apply `historical_proof` recovers from the log, including
+    /// floor-raise moves and the trailing commit, for a db-based batch and for a chained
+    /// batch applied after its ancestor.
+    #[test]
+    fn operations_match_applied_log() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            type TestDb = UnorderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+
+            let config = fixed_db_config::<OneCap>("operations-match-applied-log", &context);
+            let db = TestDb::init(context, config).await.unwrap();
+
+            let key_a = Sha256::hash(&[b"operations-a"]);
+            let key_b = Sha256::hash(&[b"operations-b"]);
+
+            let seed = db
+                .new_batch()
+                .write(key_a, Some(Sha256::hash(&[b"seed-a"])))
+                .write(key_b, Some(Sha256::hash(&[b"seed-b"])))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (seed_start, seed_ops) = seed.operations();
+            let seed_root = seed.root();
+            let seed_proof = seed.proof(&db).unwrap();
+            let (db, seed_range) = db.apply_batch(seed).await.unwrap();
+            assert_eq!(seed_start, seed_range.start);
+            assert_eq!(*seed_start + seed_ops.len() as u64, *seed_range.end);
+
+            // A chained batch's operations are its own suffix only, even though it was
+            // merkleized on top of a pending ancestor.
+            let parent = db
+                .new_batch()
+                .write(key_a, Some(Sha256::hash(&[b"parent-a"])))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let child = parent
+                .new_batch::<Sha256>()
+                .write(key_b, Some(Sha256::hash(&[b"child-b"])))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (parent_start, parent_ops) = parent.operations();
+            let (child_start, child_ops) = child.operations();
+            let (parent_root, child_root) = (parent.root(), child.root());
+            let (parent_proof, child_proof) =
+                (parent.proof(&db).unwrap(), child.proof(&db).unwrap());
+            let (db, parent_range) = db.apply_batch(parent).await.unwrap();
+            let (db, child_range) = db.apply_batch(child).await.unwrap();
+            assert_eq!(parent_start, parent_range.start);
+            assert_eq!(*parent_start + parent_ops.len() as u64, *parent_range.end);
+            assert_eq!(child_start, child_range.start);
+            assert_eq!(*child_start + child_ops.len() as u64, *child_range.end);
+
+            // A write-free batch still captures its commit-only suffix.
+            let empty = db.new_batch().merkleize(&db, None).await.unwrap();
+            let (empty_start, empty_ops) = empty.operations();
+            let (empty_root, empty_proof) = (empty.root(), empty.proof(&db).unwrap());
+            let (db, empty_range) = db.apply_batch(empty).await.unwrap();
+            assert_eq!(empty_start, empty_range.start);
+            assert_eq!(*empty_start + empty_ops.len() as u64, *empty_range.end);
+
+            // Every captured delta and proof must match what the log recovers for its
+            // range, and verify against the batch's own root.
+            for (start, ops, proof, root) in [
+                (seed_start, seed_ops, seed_proof, seed_root),
+                (parent_start, parent_ops, parent_proof, parent_root),
+                (child_start, child_ops, child_proof, child_root),
+                (empty_start, empty_ops, empty_proof, empty_root),
+            ] {
+                let len = core::num::NonZeroU64::new(ops.len() as u64).unwrap();
+                let end = Location::new(*start + ops.len() as u64);
+                let (log_proof, log_ops) = db.historical_proof(end, start, len).await.unwrap();
+                assert_eq!(log_ops, *ops);
+                assert_eq!(log_proof, proof);
+                assert!(crate::qmdb::verify_proof::<Sha256, _, _>(
+                    &proof, start, &ops, &root
+                ));
+            }
+
+            // After the batch's changes are flushed, proof is a verifying proof or an
+            // error, never a wrong proof.
+            let late = db
+                .new_batch()
+                .write(key_a, Some(Sha256::hash(&[b"late-a"])))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (late_start, late_ops) = late.operations();
+            let late_root = late.root();
+            let (db, _) = db.apply_batch(Arc::clone(&late)).await.unwrap();
+            let db = db.commit().await.unwrap();
+            if let Ok(proof) = late.proof(&db) {
+                assert!(crate::qmdb::verify_proof::<Sha256, _, _>(
+                    &proof, late_start, &late_ops, &late_root
+                ));
+            }
+
+            db.destroy().await.unwrap();
+        });
     }
 
     #[test]

@@ -525,6 +525,7 @@ mod tests {
         test_fixed_proof_verify => run_proof_verify, open;
         test_fixed_prune => run_prune, open;
         test_fixed_batch_chain => run_batch_chain, open;
+        test_fixed_operations_match_applied_log => run_operations_match_applied_log, open;
         test_fixed_build_and_authenticate => run_build_and_authenticate, open;
         test_fixed_recovery_from_failed_merkle_sync => run_recovery_from_failed_merkle_sync, open;
         test_fixed_recovery_from_failed_log_sync => run_recovery_from_failed_log_sync, open;
