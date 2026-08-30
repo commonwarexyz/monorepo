@@ -315,8 +315,8 @@
 //! partial.
 //!
 //! The canonical root is returned by [Db](db::Db)`::`[root()](db::Db::root). The ops root is
-//! returned by the `sync::Database` trait's `root()` method, since the sync engine verifies batches
-//! against the ops root, not the canonical root.
+//! returned by [ops_root()](db::Db::ops_root) and is the root of the `sync::Database` target,
+//! since the sync engine verifies batches against the ops root, not the canonical root.
 //!
 //! For state sync, the sync engine targets the ops root and verifies each batch against it. Callers
 //! verifying ops proofs directly should use [`crate::qmdb::verify_proof`]. After sync, the bitmap
@@ -510,6 +510,7 @@ pub mod tests {
                 traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
             },
             store::tests::{TestKey, TestValue},
+            sync::MerkleizedBatch as _,
             verify_proof,
         },
         translator::Translator,
@@ -2439,6 +2440,24 @@ pub mod tests {
                 .await;
             }
 
+            // The batch and the database agree on the chunk-aligned sync target.
+            let merkleized = db
+                .new_batch()
+                .write(key(0), Some(val(1)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let expected = merkleized.target().unwrap();
+            (db, _) = db.apply_batch(merkleized).await.unwrap();
+            assert_eq!(
+                <UnorderedVariableDb as crate::qmdb::sync::Database>::target(&db),
+                expected
+            );
+            assert!(
+                *expected.range.start() > 0,
+                "expected a non-zero sync boundary"
+            );
+
             let prune_boundary = db.sync_boundary();
             let db = db.prune(prune_boundary).await.unwrap();
 
@@ -2949,6 +2968,36 @@ pub mod tests {
             assert_eq!(reopened.get(&key1).await.unwrap(), target_key1);
 
             reopened.destroy().await.unwrap();
+        });
+    }
+
+    /// Rewinding to a size whose last operation is not a commit fails.
+    #[test_traced("INFO")]
+    fn test_current_rewind_to_non_commit_errors() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let ctx = context.child("db");
+            let db: UnorderedVariableDb = UnorderedVariableDb::init(
+                ctx.child("storage"),
+                variable_config::<OneCap>("current-rewind-non-commit", &ctx),
+            )
+            .await
+            .unwrap();
+            let (db, _) = commit_writes_with_metadata(
+                db,
+                [(key(0), Some(val(0))), (key(1), Some(val(1)))],
+                None,
+            )
+            .await;
+
+            let size = db.size();
+            let Err(err) = db.rewind(size - 1).await else {
+                panic!("expected rewind to a non-commit size to fail");
+            };
+            assert!(
+                matches!(err, Error::UnexpectedData(loc) if loc == size - 2),
+                "unexpected rewind error: {err:?}"
+            );
         });
     }
 

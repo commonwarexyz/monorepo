@@ -11,13 +11,14 @@ use crate::{
         batch_chain::{self, Bounds, Commitment},
         immutable::operation::Operation,
         operation::Key,
+        sync::{self, Target},
     },
     translator::Translator,
 };
 use commonware_codec::EncodeShared;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
-use commonware_utils::iter::zip_eq;
+use commonware_utils::{iter::zip_eq, range::NonEmptyRange};
 use std::{
     collections::BTreeMap,
     sync::{Arc, Weak},
@@ -311,6 +312,35 @@ where
                 inactivity_floor,
             },
         })
+    }
+}
+
+impl<F: Family, D: Digest, K: Key, V: ValueEncoding, S: Strategy> sync::MerkleizedBatch
+    for MerkleizedBatch<F, D, K, V, S>
+where
+    Operation<F, K, V>: EncodeShared,
+{
+    type Family = F;
+    type Digest = D;
+    type Unmerkleized<H: Hasher<Digest = D>> = UnmerkleizedBatch<F, H, K, V, S>;
+
+    fn root(&self) -> D {
+        self.root()
+    }
+
+    fn target(&self) -> Result<Target<F, D>, Error<F>> {
+        let floor = self.bounds.inactivity_floor;
+        let size = self.bounds.tip.size;
+        NonEmptyRange::new(floor..size)
+            .map(|range| Target {
+                root: self.root(),
+                range,
+            })
+            .map_err(|_| Error::FloorBeyondSize(floor, size - 1))
+    }
+
+    fn new_batch<H: Hasher<Digest = D>>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, K, V, S> {
+        self.new_batch::<H>()
     }
 }
 

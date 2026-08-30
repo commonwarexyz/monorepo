@@ -13,7 +13,7 @@ use crate::{
     merkle::{Family, Location, Proof},
     qmdb::{
         Error, batch_chain::Commitment, bitmap::Shared, delete_known_loc, metrics::Metrics,
-        operation::Floored as _, update_known_loc,
+        update_known_loc,
     },
 };
 use commonware_codec::{Codec, CodecShared};
@@ -511,7 +511,9 @@ where
         }
 
         let inactivity_floor =
-            crate::qmdb::find_inactivity_floor_at::<F, _>(&self.log, historical_size).await?;
+            crate::qmdb::find_inactivity_floor_at::<F, _>(&self.log, historical_size)
+                .await?
+                .ok_or(Error::HistoricalFloorPruned(historical_size))?;
         let inactive_peaks = self.inactive_peaks(historical_size, inactivity_floor);
         self.log
             .historical_proof(historical_size, start_loc, max_ops, inactive_peaks)
@@ -571,16 +573,9 @@ where
         // Read everything needed for rewind before mutating storage.
         let (rewind_floor, undos, active_keys_delta) = {
             let bounds = self.log.bounds();
-            let rewind_last_loc = Location::new(rewind_size - 1);
-            if rewind_size <= bounds.start {
-                return Err(Error::<F>::Journal(JournalError::ItemPruned(
-                    *rewind_last_loc,
-                )));
-            }
-            let rewind_last_op = self.log.read(*rewind_last_loc).await?;
-            let Some(rewind_floor) = rewind_last_op.has_floor() else {
-                return Err(Error::UnexpectedData(rewind_last_loc));
-            };
+            let rewind_floor = crate::qmdb::find_inactivity_floor_at::<F, _>(&self.log, size)
+                .await?
+                .ok_or(Error::UnexpectedData(size - 1))?;
             if *rewind_floor < bounds.start {
                 return Err(Error::<F>::Journal(JournalError::ItemPruned(*rewind_floor)));
             }
@@ -743,7 +738,8 @@ where
             );
             let inactivity_floor_loc =
                 crate::qmdb::find_inactivity_floor_at::<F, _>(&*log, Location::new(bounds.end))
-                    .await?;
+                    .await?
+                    .ok_or(Error::HistoricalFloorPruned(Location::new(bounds.end)))?;
 
             // Build the snapshot, collecting each replayed location's activity status.
             let (active_keys, activity) = index

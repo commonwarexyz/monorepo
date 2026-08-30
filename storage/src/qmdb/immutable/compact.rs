@@ -38,7 +38,7 @@ use crate::{
             witness::{self, VerifiedWitness},
         },
         operation::Key,
-        sync::{CompactTarget, FeedbackTx, Request, Response, Source},
+        sync::{self, FeedbackTx, Request, Response, Source, Target},
     },
 };
 use commonware_codec::{Encode, EncodeShared, Read};
@@ -46,6 +46,7 @@ use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_runtime::Handle;
+use commonware_utils::non_empty_range;
 use core::marker::PhantomData;
 use std::{
     collections::BTreeMap,
@@ -121,6 +122,32 @@ where
     pub(super) parent: Option<Weak<Self>>,
     pub(super) bounds: batch_chain::Bounds<F, D>,
     pub(super) _key: PhantomData<K>,
+}
+
+impl<F: Family, D: Digest, K: Key, V: ValueEncoding, S: Strategy> sync::MerkleizedBatch
+    for MerkleizedBatch<F, D, K, V, S>
+where
+    Operation<F, K, V>: EncodeShared,
+{
+    type Family = F;
+    type Digest = D;
+    type Unmerkleized<H: Hasher<Digest = D>> = UnmerkleizedBatch<F, H, K, V, S>;
+
+    fn root(&self) -> D {
+        self.root()
+    }
+
+    fn target(&self) -> Result<Target<F, D>, Error<F>> {
+        let tip = self.bounds.tip;
+        Ok(Target {
+            root: tip.root,
+            range: non_empty_range!(tip.size - 1, tip.size),
+        })
+    }
+
+    fn new_batch<H: Hasher<Digest = D>>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, K, V, S> {
+        self.new_batch::<H>()
+    }
 }
 
 impl<F: Family, D: Digest, K: Key, V: ValueEncoding, S: Strategy> MerkleizedBatch<F, D, K, V, S>
@@ -283,6 +310,18 @@ where
     Operation<F, K, V>: Read<Cfg = C>,
     C: Clone + Send + Sync + 'static,
 {
+    /// Returns a [Db] initialized from `cfg`.
+    pub async fn init(context: E, cfg: Config<C, S>) -> Result<Self, Error<F>> {
+        let merkle = compact_merkle::Merkle::new(cfg.strategy);
+        Self::init_from_merkle(
+            merkle,
+            context.child("witness"),
+            cfg.witness,
+            cfg.commit_codec_config,
+        )
+        .await
+    }
+
     fn encode_commit_op(metadata: Option<V::Value>, inactivity_floor_loc: Location<F>) -> Vec<u8> {
         Operation::<F, K, V>::Commit(metadata, inactivity_floor_loc)
             .encode()
@@ -306,7 +345,11 @@ where
         let Operation::Commit(last_commit_metadata, inactivity_floor_loc) = last_commit_op else {
             return Err(Error::UnexpectedData(last_commit_loc));
         };
-        witness::validate_inactivity_floor(inactivity_floor_loc, last_commit_loc)?;
+        if inactivity_floor_loc > last_commit_loc {
+            return Err(Error::DataCorrupted(
+                "inactivity floor exceeds commit location",
+            ));
+        }
 
         let op_bytes = Self::encode_commit_op(last_commit_metadata.clone(), inactivity_floor_loc);
         let merkle =
@@ -352,9 +395,6 @@ where
             journal,
             &mut merkle,
             &commit_codec_config,
-            Operation::<F, K, V>::Commit(None, Location::new(0))
-                .encode()
-                .to_vec(),
         )
         .await?;
         let Operation::Commit(last_commit_metadata, inactivity_floor_loc) = last_commit_op else {
@@ -405,11 +445,11 @@ where
         self.last_commit_metadata.clone()
     }
 
-    /// Return the compact-sync target described by the current witness.
+    /// Return the sync target described by the current witness.
     ///
     /// This reflects the most recently applied batch. The target remains non-durable until a
     /// covering [`Self::commit`], [`Self::sync`], or [`Self::start_sync`] completes.
-    pub fn target(&self) -> CompactTarget<F, H::Digest> {
+    pub fn target(&self) -> Target<F, H::Digest> {
         self.witness.with(VerifiedWitness::target)
     }
 
@@ -642,7 +682,7 @@ mod tests {
     use super::*;
     use crate::{
         merkle::mmr,
-        qmdb::{any::value::FixedEncoding, compact::witness},
+        qmdb::{any::value::FixedEncoding, compact::witness, sync::MerkleizedBatch as _},
     };
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::test_traced;
@@ -1149,6 +1189,33 @@ mod tests {
     }
 
     #[test_traced("INFO")]
+    fn test_compact_merkleized_batch_target() {
+        deterministic::Runner::default().start(|context| async move {
+            let db = open_db::<mmr::Family>(context.child("db"), "immutable-batch-target").await;
+            let batch = db
+                .new_batch()
+                .set(Sha256::hash(&[&[1]]), Sha256::fill(1))
+                .merkleize(&db, None, Location::new(0))
+                .await;
+
+            // A compact batch's target covers only its commit.
+            let size = batch.bounds().tip.size;
+            let target = batch.target().unwrap();
+            assert_eq!(
+                target,
+                Target {
+                    root: batch.root(),
+                    range: non_empty_range!(size - 1, size),
+                }
+            );
+            assert_eq!(target.range.start(), size - 1);
+            assert_eq!(target.range.end(), size);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
     fn test_compact_rewind_restores_commit_metadata_and_floor() {
         deterministic::Runner::default().start(|context| async move {
             let db = open_db::<mmr::Family>(context.child("db"), "immutable-rewind-meta").await;
@@ -1379,7 +1446,7 @@ mod tests {
                 .await;
             let (db, _) = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
-            let rewind_target = db.target().size;
+            let rewind_target = db.target().range.end();
             let batch = db
                 .new_batch()
                 .set(Sha256::hash(&[&[2]]), Sha256::fill(2u8))
@@ -1501,7 +1568,9 @@ mod tests {
             .await;
             assert!(matches!(
                 reopened,
-                Err(Error::DataCorrupted("invalid compact witness"))
+                Err(Error::DataCorrupted(
+                    "inactivity floor exceeds commit location"
+                ))
             ));
         });
     }

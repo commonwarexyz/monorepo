@@ -52,13 +52,11 @@ use commonware_storage::{
     qmdb::{
         any::{FixedConfig, unordered::fixed},
         immutable,
-        sync::{CompactTarget, Target},
+        sync::Target,
     },
     translator::TwoCap,
 };
-use commonware_utils::{
-    NZDuration, NZU64, NZUsize, non_empty_range, range::NonEmptyRange, sync::Mutex, test_rng,
-};
+use commonware_utils::{NZDuration, NZU64, NZUsize, range::NonEmptyRange, sync::Mutex, test_rng};
 use futures::StreamExt;
 use rand_core::Rng;
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
@@ -303,16 +301,14 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         let parent = ancestry.next().await?;
         let height = Height::new(parent.height().get() + 1);
         let (merkleized_a, merkleized_b) = Self::execute(height, batches).await;
-        let bounds_a = merkleized_a.bounds();
-        let bounds_b = merkleized_b.bounds();
         let block = Block {
             context: context.1.clone(),
             parent: parent.digest(),
             height,
             root_a: merkleized_a.root(),
-            range_a: non_empty_range!(bounds_a.inactivity_floor, bounds_a.tip.size),
+            range_a: merkleized_a.target().range,
             root_b: merkleized_b.root(),
-            range_b: non_empty_range!(bounds_b.inactivity_floor, bounds_b.tip.size),
+            range_b: merkleized_b.target().range,
         };
         Some(Proposed {
             block,
@@ -329,12 +325,10 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         let mut ancestry = Box::pin(ancestry);
         let tip = ancestry.next().await?;
         let (merkleized_a, merkleized_b) = Self::execute(tip.height(), batches).await;
-        let bounds_a = merkleized_a.bounds();
-        let bounds_b = merkleized_b.bounds();
-        let matches_a = merkleized_a.root() == tip.root_a
-            && non_empty_range!(bounds_a.inactivity_floor, bounds_a.tip.size) == tip.range_a;
-        let matches_b = merkleized_b.root() == tip.root_b
-            && non_empty_range!(bounds_b.inactivity_floor, bounds_b.tip.size) == tip.range_b;
+        let matches_a =
+            merkleized_a.root() == tip.root_a && merkleized_a.target().range == tip.range_a;
+        let matches_b =
+            merkleized_b.root() == tip.root_b && merkleized_b.target().range == tip.range_b;
         if !matches_a || !matches_b {
             return None;
         }
@@ -352,10 +346,13 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
 
     fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {
         (
-            Target::new(block.root_a, block.range_a.clone()),
-            CompactTarget {
+            Target {
+                root: block.root_a,
+                range: block.range_a.clone(),
+            },
+            Target {
                 root: block.root_b,
-                size: block.range_b.end(),
+                range: block.range_b.clone(),
             },
         )
     }
@@ -530,7 +527,7 @@ impl EngineDefinition for MultiDbEngine {
             initial_a.root,
             initial_a.range,
             initial_b.root,
-            non_empty_range!(Location::new(0), initial_b.size),
+            initial_b.range,
         );
 
         let stateful_startup_context = context.child("stateful_startup");

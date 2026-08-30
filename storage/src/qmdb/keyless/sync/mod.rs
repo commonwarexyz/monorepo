@@ -1,9 +1,6 @@
 use crate::{
     Context,
-    journal::{
-        authenticated,
-        contiguous::{Contiguous as _, Mutable},
-    },
+    journal::{authenticated, contiguous::Contiguous as _},
     merkle::{
         Family, Location,
         full::{self, Merkle},
@@ -25,9 +22,10 @@ impl<F, E, V, C, H, S> sync::Database for Keyless<F, E, V, C, H, S>
 where
     F: Family,
     E: Context,
-    V: ValueEncoding + Codec,
-    C: Mutable<Item = Operation<F, V>> + sync::Journal<F, Context = E, Op = Operation<F, V>>,
-    C::Config: Clone + Send,
+    V: ValueEncoding,
+    C: sync::Journal<F, Context = E, Op = Operation<F, V>>
+        + authenticated::Backing<E, Item = Operation<F, V>, Config = <C as sync::Journal<F>>::Config>,
+    <C as sync::Journal<F>>::Config: Clone + Send,
     H: Hasher,
     S: Strategy,
     Operation<F, V>: EncodeShared,
@@ -36,7 +34,7 @@ where
     type Op = Operation<F, V>;
     type Journal = C;
     type Hasher = H;
-    type Config = super::Config<C::Config, S>;
+    type Config = super::Config<<C as sync::Journal<F>>::Config, S>;
     type Digest = H::Digest;
     type Context = E;
 
@@ -91,8 +89,11 @@ where
                 .ok_or(qmdb::Error::HistoricalFloorPruned(Location::new(
                     bounds.end,
                 )))?;
-            let floor =
-                qmdb::find_inactivity_floor_at::<F, _>(&journal, Location::new(bounds.end)).await?;
+            let floor = qmdb::find_inactivity_floor_at::<F, _>(&journal, Location::new(bounds.end))
+                .await?
+                .ok_or(qmdb::Error::HistoricalFloorPruned(Location::new(
+                    bounds.end,
+                )))?;
             (Location::new(loc), floor)
         };
         let inactive_peaks = F::inactive_peaks(last_commit_loc + 1, inactivity_floor_loc);
@@ -109,6 +110,10 @@ where
         db.update_metrics();
 
         db.sync().await
+    }
+
+    async fn init(context: E, config: Self::Config) -> Result<Self, qmdb::Error<F>> {
+        Self::init(context, config).await
     }
 
     async fn persist_sync_result(self) -> Result<Self, qmdb::Error<F>> {
@@ -129,8 +134,9 @@ where
 
         // The inactivity floor is carried by the last commit operation rather than being
         // the target range's start.
-        let inactivity_floor =
-            qmdb::find_inactivity_floor_at::<F, _>(journal, target.range.end()).await?;
+        let inactivity_floor = qmdb::find_inactivity_floor_at::<F, _>(journal, target.range.end())
+            .await?
+            .ok_or(qmdb::Error::HistoricalFloorPruned(target.range.end()))?;
 
         sync::local_pinned_nodes::<F, _, H, S>(
             context,
@@ -141,8 +147,11 @@ where
         .await
     }
 
-    fn root(&self) -> Self::Digest {
-        self.root()
+    fn target(&self) -> sync::Target<F, H::Digest> {
+        sync::Target {
+            root: self.root(),
+            range: commonware_utils::non_empty_range!(self.sync_boundary(), self.bounds().end),
+        }
     }
 }
 
@@ -184,6 +193,10 @@ where
         .await
     }
 
+    async fn init(context: E, config: Self::Config) -> Result<Self, qmdb::Error<F>> {
+        Self::init(context, config).await
+    }
+
     async fn persist_sync_result(self) -> Result<Self, qmdb::Error<F>> {
         self.sync().await
     }
@@ -197,8 +210,14 @@ where
         Ok(None)
     }
 
-    fn root(&self) -> Self::Digest {
-        self.root()
+    fn target(&self) -> sync::Target<F, H::Digest> {
+        self.target()
+    }
+
+    fn validate_target(
+        target: &sync::Target<F, H::Digest>,
+    ) -> Result<(), sync::EngineError<F, H::Digest>> {
+        qmdb::compact::validate_target(target)
     }
 }
 

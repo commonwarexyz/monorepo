@@ -25,7 +25,6 @@ use crate::{
             grafting,
             proof::{OperationProof, OpsRootWitness, RangeProof, RangeProofSpec},
         },
-        operation::Floored as _,
     },
 };
 use commonware_codec::{Codec, CodecShared, DecodeExt};
@@ -647,11 +646,9 @@ where
         // to a commit with floor below `pruned_bits` would require bitmap chunks we've already
         // discarded.
         {
-            let rewind_last_loc = Location::<F>::new(rewind_size - 1);
-            let rewind_last_op = self.any.log.read(*rewind_last_loc).await?;
-            let Some(rewind_floor) = rewind_last_op.has_floor() else {
-                return Err(Error::<F>::UnexpectedData(rewind_last_loc));
-            };
+            let rewind_floor = crate::qmdb::find_inactivity_floor_at::<F, _>(&self.any.log, size)
+                .await?
+                .ok_or(Error::UnexpectedData(size - 1))?;
             if *rewind_floor < pruned_bits {
                 return Err(Error::<F>::Journal(JournalError::ItemPruned(*rewind_floor)));
             }

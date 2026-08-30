@@ -93,7 +93,7 @@ use crate::{
             unordered::{Update, variable::Operation},
         },
         build_snapshot_from_log, delete_key,
-        operation::{Committable as _, Floored as _, Key},
+        operation::{Committable as _, Key},
         update_key,
     },
     translator::Translator,
@@ -386,41 +386,32 @@ where
         let (mut log, size) = log.rewind_to(|op| op.is_commit()).await?;
         if size == 0 {
             warn!("Log is empty, initializing new db");
-            (log, _) = log
-                .append(&Operation::CommitFloor(None, Location::new(0)))
-                .await?;
+            (log, _) = log.append(&Operation::initial_commit()).await?;
         }
 
         // Sync the log to avoid having to repeat any recovery that may have been performed on next
         // startup.
         let log = log.sync().await?;
 
-        let last_commit_loc =
-            Location::new(log.size().checked_sub(1).expect("commit should exist"));
+        let size = Location::new(log.size());
+        let inactivity_floor_loc = crate::qmdb::find_inactivity_floor_at(&log, size)
+            .await?
+            .ok_or(Error::UnexpectedData(size - 1))?;
+        let last_commit_loc = size - 1;
 
         // Build the snapshot.
         let cache_size = cfg.init_cache_size;
         let init_buffer = cfg.init_buffer;
         let mut snapshot = Index::new(context.child("snapshot"), cfg.translator);
-        let (inactivity_floor_loc, active_keys) = {
-            let op = log.read(*last_commit_loc).await?;
-            let inactivity_floor_loc = op.has_floor().expect("last op should be a commit");
-            if inactivity_floor_loc > last_commit_loc {
-                return Err(crate::qmdb::Error::DataCorrupted(
-                    "inactivity floor exceeds last commit",
-                ));
-            }
-            let active_keys = build_snapshot_from_log(
-                inactivity_floor_loc,
-                &log,
-                &mut snapshot,
-                init_buffer,
-                cache_size,
-                |_, _| {},
-            )
-            .await?;
-            (inactivity_floor_loc, active_keys)
-        };
+        let active_keys = build_snapshot_from_log(
+            inactivity_floor_loc,
+            &log,
+            &mut snapshot,
+            init_buffer,
+            cache_size,
+            |_, _| {},
+        )
+        .await?;
 
         Ok(Self {
             log,

@@ -888,6 +888,7 @@ pub(crate) mod test {
                         Location::new(log.bounds().end),
                     )
                     .await
+                    .unwrap()
                     .unwrap();
                     let log = Arc::new(log);
                     let mut index =
