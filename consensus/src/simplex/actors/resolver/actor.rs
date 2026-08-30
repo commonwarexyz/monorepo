@@ -148,7 +148,6 @@ impl<
                 producer: handler,
                 mailbox_size: self.mailbox_size,
                 me,
-                initial: self.fetch_timeout / 2,
                 timeout: self.fetch_timeout,
                 fetch_retry_timeout: self.fetch_timeout,
                 priority_requests: true,

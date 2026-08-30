@@ -30,9 +30,6 @@ where
     /// The size of the request mailbox backlog.
     pub mailbox_size: NonZeroUsize,
 
-    /// Initial expected performance for new participants.
-    pub initial: Duration,
-
     /// Timeout for requests.
     pub timeout: Duration,
 
@@ -75,7 +72,6 @@ where
             producer: handler,
             mailbox_size: config.mailbox_size,
             me: Some(config.public_key),
-            initial: config.initial,
             timeout: config.timeout,
             fetch_retry_timeout: config.fetch_retry_timeout,
             priority_requests: config.priority_requests,
