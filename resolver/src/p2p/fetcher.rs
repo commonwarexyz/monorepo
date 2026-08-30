@@ -60,9 +60,6 @@ pub struct Config<P: PublicKey> {
     pub me: Option<P>,
 
     /// Timeout for requests.
-    ///
-    /// A request that times out delivered nothing, so it is scored as zero
-    /// throughput, the same as missing data or a failed send.
     pub timeout: Duration,
 
     /// How long fetches remain in the pending queue before being retried.
