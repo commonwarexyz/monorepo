@@ -55,9 +55,6 @@ where
     /// Local node identity if available.
     pub me: Option<P>,
 
-    /// Initial expected performance for new peers.
-    pub initial: Duration,
-
     /// Request timeout.
     pub timeout: Duration,
 
@@ -166,7 +163,6 @@ where
                 producer: handler,
                 mailbox_size: self.config.mailbox_size,
                 me: self.config.me.clone(),
-                initial: self.config.initial,
                 timeout: self.config.timeout,
                 fetch_retry_timeout: self.config.fetch_retry_timeout,
                 priority_requests: self.config.priority_requests,
@@ -444,7 +440,6 @@ mod tests {
             database,
             mailbox_size: NZUsize!(16),
             me: None,
-            initial: Duration::from_millis(10),
             timeout: Duration::from_millis(10),
             fetch_retry_timeout: Duration::from_millis(10),
             max_serve_ops: NZU64!(16),

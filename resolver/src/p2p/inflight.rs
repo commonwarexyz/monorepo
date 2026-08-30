@@ -2,6 +2,7 @@ use crate::{
     Consumer, Delivery, Outcome,
     delivery::{Completion, Tracker},
 };
+use bytes::Bytes;
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, telemetry::metrics::histogram};
 use futures::future::Aborted;
@@ -10,8 +11,7 @@ use std::time::Duration;
 /// Tracks all in-flight fetch state.
 pub(super) struct Inflight<Con, P>
 where
-    Con: Consumer,
-    Con::Value: Clone + Send + 'static,
+    Con: Consumer<Value = Bytes>,
     P: PublicKey,
 {
     /// Resolver-agnostic delivery state shared with non-P2P resolver implementations.
@@ -20,8 +20,7 @@ where
 
 impl<Con, P> Inflight<Con, P>
 where
-    Con: Consumer,
-    Con::Value: Clone + Send + 'static,
+    Con: Consumer<Value = Bytes>,
     P: PublicKey,
 {
     pub(super) fn new(consumer: Con) -> Self {
@@ -80,11 +79,10 @@ where
         delivery: Delivery<Con::Key, Con::Subscriber>,
         peer: P,
         elapsed: Duration,
-        bytes: usize,
         value: Con::Value,
     ) {
         self.deliveries
-            .deliver(delivery, (peer, elapsed, bytes), value);
+            .deliver(delivery, (peer, elapsed, value.len()), value);
     }
 
     /// Begin another consumer delivery for an already received response.
@@ -114,7 +112,16 @@ where
     /// Clears the entry's delivery aborter so the slot is available for a retry.
     pub(super) async fn next_delivery(
         &mut self,
-    ) -> Result<(P, Duration, usize, Delivery<Con::Key, Con::Subscriber>, Outcome), Aborted> {
+    ) -> Result<
+        (
+            P,
+            Duration,
+            usize,
+            Delivery<Con::Key, Con::Subscriber>,
+            Outcome,
+        ),
+        Aborted,
+    > {
         let Completion {
             context,
             delivery,
@@ -278,7 +285,6 @@ mod tests {
                 delivery(key.clone()),
                 peer.clone(),
                 Duration::from_millis(17),
-                value.len(),
                 value.clone(),
             );
 
@@ -312,7 +318,6 @@ mod tests {
                 delivery(key.clone()),
                 peer,
                 Duration::ZERO,
-                1,
                 Bytes::from("v"),
             );
 
@@ -339,7 +344,6 @@ mod tests {
                 delivery(key.clone()),
                 peer,
                 Duration::ZERO,
-                1,
                 Bytes::from("v"),
             );
 
@@ -369,7 +373,6 @@ mod tests {
                 delivery(key.clone()),
                 peer,
                 Duration::ZERO,
-                1,
                 Bytes::from("v"),
             );
 
@@ -393,7 +396,7 @@ mod tests {
             let key = MockKey(1);
 
             inflight.insert(key.clone(), timed.timer(&context));
-            inflight.deliver(delivery(key), peer, Duration::ZERO, 1, Bytes::from("v"));
+            inflight.deliver(delivery(key), peer, Duration::ZERO, Bytes::from("v"));
 
             assert_eq!(inflight.drain(), 1);
 

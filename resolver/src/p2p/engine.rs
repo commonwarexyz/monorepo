@@ -117,7 +117,6 @@ where
             context.child("fetcher"),
             FetcherConfig {
                 me: cfg.me,
-                initial: cfg.initial,
                 timeout: cfg.timeout,
                 retry_timeout: cfg.fetch_retry_timeout,
                 priority_requests: cfg.priority_requests,
@@ -420,9 +419,7 @@ where
         let delivery = Delivery { key, subscribers };
 
         // The peer had the data, so deliver it to the consumer without blocking the engine.
-        let bytes = response.len();
-        self.inflight
-            .deliver(delivery, peer, elapsed, bytes, response);
+        self.inflight.deliver(delivery, peer, elapsed, response);
     }
 
     /// Handle completed delivery to the consumer.
