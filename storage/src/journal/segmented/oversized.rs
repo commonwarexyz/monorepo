@@ -177,12 +177,14 @@ impl<E: Context> Tracking<E> {
     }
 
     /// Observe an in-flight marker without blocking and discard proofs it published.
-    fn observe_marker_sync(&mut self) -> Result<Option<SyncCompletion>, Error> {
-        let Some(completion) = self.marker_sync_pending.clone() else {
-            return Ok(None);
+    ///
+    /// Returns whether a marker generation is still in flight.
+    fn observe_marker_sync(&mut self) -> Result<bool, Error> {
+        let Some(completion) = self.marker_sync_pending.as_mut() else {
+            return Ok(false);
         };
-        let Some(result) = completion.clone().now_or_never() else {
-            return Ok(Some(completion));
+        let Some(result) = completion.now_or_never() else {
+            return Ok(true);
         };
         result.map_err(|err| Error::Metadata(crate::metadata::Error::Runtime(err)))?;
         self.marker_sync_pending = None;
@@ -197,7 +199,7 @@ impl<E: Context> Tracking<E> {
                 .unwrap_or(0);
             barrier.boundary() > published || !barrier.settled()
         });
-        Ok(None)
+        Ok(false)
     }
 }
 
@@ -829,7 +831,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
             .tracking
             .take()
             .expect("tracked sync preserves its recovery state");
-        let pending_marker = tracking.observe_marker_sync()?;
+        let marker_pending = tracking.observe_marker_sync()?;
         let lengths = sections
             .iter()
             .map(|&section| Ok((section, self.index.section_len(section)?)))
@@ -854,7 +856,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
 
         // Do not mutate Metadata while its prior generation is in flight. Completed barriers stay
         // as debt and are published when their section is no longer active, or on an empty flush.
-        if pending_marker.is_none() {
+        if !marker_pending {
             let publish = tracking
                 .barriers
                 .iter_mut()

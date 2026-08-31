@@ -29,10 +29,10 @@ impl Barrier {
 
     /// Observe the outcome of the last started sync without blocking.
     fn observe(&mut self) {
-        let Some((boundary, completion)) = &self.pending else {
+        let Some((boundary, completion)) = &mut self.pending else {
             return;
         };
-        let Some(result) = completion.clone().now_or_never() else {
+        let Some(result) = completion.now_or_never() else {
             return;
         };
         if result.is_ok() {
