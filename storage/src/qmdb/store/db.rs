@@ -454,7 +454,6 @@ where
         let start_loc = self.size();
         let (diff, metadata) = batch.into_parts();
 
-        // Steps to raise the inactivity floor by; each step moves one active operation to tip.
         let mut steps = 0u64;
         for (key, value) in diff {
             if let Some(value) = value {
