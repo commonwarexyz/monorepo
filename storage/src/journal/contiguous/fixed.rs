@@ -491,10 +491,9 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
                 continue;
             }
 
-            // The repair below may only ever shrink a blob: an accepted prefix past the
-            // physical end means the acknowledged pages do not exist, and `recover_bounds`
-            // would reject the result anyway. Both comparisons use sizes already in hand.
-            if valid > writer.size() || valid < acknowledged {
+            // Acknowledged pages that do not exist surface as `valid < acknowledged`: the
+            // scan clamps to the pages physically present, so it can never exceed the size.
+            if valid < acknowledged {
                 return Err(Error::Corruption(format!(
                     "blob {blob} no longer backs acknowledged items: well-formed prefix {valid} \
                      of size {}",
@@ -4076,6 +4075,79 @@ mod tests {
         });
     }
 
+    /// A hole strictly between a mid-blob watermark and the blob's end truncates to whole
+    /// items above the acknowledged prefix: acknowledged < recoverable floor < size, so the
+    /// scan must start at the watermark rather than zero or the blob's end.
+    #[test_traced]
+    fn test_fixed_recovery_truncates_above_mid_blob_watermark() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            const LOGICAL_PAGE_SIZE: u64 = 5;
+            let cfg = Config {
+                partition: "fixed-truncate-above-watermark".into(),
+                items_per_blob: NZU64!(10),
+                page_cache: CacheRef::from_pooler(
+                    &context,
+                    NZU16!(LOGICAL_PAGE_SIZE as u16),
+                    NZUsize!(4),
+                ),
+                write_buffer: NZUsize!(128),
+                replay_buffer: NZUsize!(128),
+            };
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for value in [11u64, 22] {
+                (journal, _) = journal.append(&value).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+
+            // Persist two more items past the watermark, then tear one page beneath the
+            // acknowledged prefix (the proof must skip it) and one strictly above it:
+            // acknowledged (16) < recoverable floor (24) < size (32).
+            let partition = blob_partition(&cfg);
+            let (blob, size) = context.open(&partition, &0u64.to_be_bytes()).await.unwrap();
+            let mut writer = Writer::new(blob, size, 128, cfg.page_cache.clone())
+                .await
+                .unwrap();
+            assert_eq!(writer.size(), 16);
+            let mut bytes = Vec::new();
+            for value in [33u64, 44] {
+                bytes.extend_from_slice(&value.to_be_bytes());
+            }
+            writer.append(&bytes).await.unwrap();
+            writer.sync().await.unwrap();
+            drop(writer);
+            corrupt_page(
+                &context,
+                &partition,
+                &0u64.to_be_bytes(),
+                1,
+                LOGICAL_PAGE_SIZE,
+            )
+            .await;
+            corrupt_page(
+                &context,
+                &partition,
+                &0u64.to_be_bytes(),
+                5,
+                LOGICAL_PAGE_SIZE,
+            )
+            .await;
+
+            // The acknowledged tear is adopted (its items fail lazily at read) while the hole
+            // above the watermark truncates the unacknowledged fourth item.
+            let journal = Journal::<_, u64>::init(context.child("recover"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 0..3);
+            assert!(journal.read(0).await.is_err());
+            assert!(journal.read(1).await.is_err());
+            assert_eq!(journal.read(2).await.unwrap(), 33);
+            journal.destroy().await.unwrap();
+        });
+    }
+
     /// A crash during the rollover fsync can persist a valid last page above a lost interior
     /// page, which `Writer::new`'s backward scan cannot see. Recovery must forward-validate the
     /// suspect blob and truncate at the hole.
@@ -4226,13 +4298,14 @@ mod tests {
         });
     }
 
-    /// A clean reopen skips fully acknowledged blobs outright. The floor blob's scan start is
-    /// pinned separately by the mid-blob adoption test.
+    /// Blobs wholly below the floor's blob are skipped by the interior-hole scan: a torn
+    /// page in a fully acknowledged blob is adopted at init and surfaces as read errors on
+    /// the affected items. The floor blob's covered prefix is pinned separately by the
+    /// mid-blob adoption test.
     #[test_traced]
-    fn test_fixed_recovery_skips_watermark_covered_pages() {
+    fn test_fixed_recovery_skips_watermark_covered_blobs() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (context, recordings) = RecordingContext::new(context);
             let cfg = test_cfg(&context, NZU64!(10));
             let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
                 .await
@@ -4242,15 +4315,24 @@ mod tests {
             }
             journal.sync().await.unwrap();
 
-            recordings.clear();
+            // Tear an interior page of the fully acknowledged blob 0: recovery must adopt the
+            // blob without scanning it, or it would truncate acknowledged items.
+            corrupt_page(
+                &context,
+                &blob_partition(&cfg),
+                &0u64.to_be_bytes(),
+                2,
+                u64::from(PAGE_SIZE.get()),
+            )
+            .await;
+
             let journal = Journal::<_, Digest>::init(context.child("second"), cfg)
                 .await
                 .unwrap();
-
-            // Two `Writer::new` tail reads, the dual-copy checkpoint reads, and one batched
-            // scan of the floor blob. Scanning the fully acknowledged older blob as well
-            // would add another read.
-            assert_eq!(recordings.snapshot().reads.len(), 5);
+            assert_eq!(journal.bounds(), 0..15);
+            assert_eq!(journal.read(0).await.unwrap(), test_digest(0));
+            assert!(journal.read(2).await.is_err());
+            assert_eq!(journal.read(14).await.unwrap(), test_digest(14));
             journal.destroy().await.unwrap();
         });
     }

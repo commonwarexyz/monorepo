@@ -1084,7 +1084,8 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         let suspects: Vec<u64> = pending.keys().rev().take(2).copied().collect();
         for blob in suspects {
             // Blobs wholly below the floor's blob are covered by a completed fsync, so
-            // in-model holes are impossible there and any later damage surfaces lazily at read.
+            // in-model holes are impossible there. Later damage surfaces lazily at read, except
+            // in the blob `align` replays to rebuild offsets, where it fails init loudly.
             // Above the floor, truncate to the last well-formed page (replay in `align` repairs
             // a mid-frame cut like torn trailing junk).
             if blob < floor_blob {

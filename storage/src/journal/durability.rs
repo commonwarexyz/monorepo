@@ -52,14 +52,11 @@ impl Barrier {
         }
     }
 
-    /// Track a sync started at `boundary`, returning the proof established without observing its
-    /// completion.
-    pub(crate) fn record(&mut self, boundary: u64, completion: SyncCompletion) -> u64 {
+    /// Track a sync started at `boundary` without observing its completion.
+    pub(crate) fn record(&mut self, boundary: u64, completion: SyncCompletion) {
         // Preserve a completed prior proof before replacing its observer.
         self.observe();
-        let previous = self.boundary;
         self.pending = Some((boundary, completion));
-        previous
     }
 
     /// Lower the proven boundary after storage moves backward.
