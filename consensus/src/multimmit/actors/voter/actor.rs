@@ -1137,6 +1137,40 @@ pub(super) fn round_timeout_span(parent: &Span, round: Round) -> Span {
     )
 }
 
+/// Protocol admission captured once for one runtime arbitration pass.
+#[derive(Copy, Clone)]
+struct RuntimeAdmission {
+    persistence: bool,
+    completion: bool,
+    timer: bool,
+    resolution: bool,
+    observation: bool,
+    inspection: bool,
+}
+
+impl RuntimeAdmission {
+    fn allows(self, source: usize, excluded_lane: Option<Lane>) -> bool {
+        match source {
+            ReadinessCursor::PERSISTENCE => {
+                excluded_lane != Some(Lane::PersistenceCompletion) && self.persistence
+            }
+            ReadinessCursor::COMPLETION => {
+                excluded_lane != Some(Lane::LocalCompletion) && self.completion
+            }
+            ReadinessCursor::TIMER => excluded_lane != Some(Lane::Timer) && self.timer,
+            ReadinessCursor::RESOLUTION => {
+                excluded_lane != Some(Lane::ResolverResult) && self.resolution
+            }
+            ReadinessCursor::OBSERVATION => {
+                excluded_lane != Some(Lane::PeerObservation) && self.observation
+            }
+            ReadinessCursor::INSPECTION => self.inspection,
+            ReadinessCursor::PUBLICATION | ReadinessCursor::HEARTBEAT => true,
+            _ => false,
+        }
+    }
+}
+
 /// Rotation among runtime sources that are simultaneously ready.
 #[derive(Default)]
 struct ReadinessCursor {
@@ -1146,9 +1180,35 @@ struct ReadinessCursor {
 }
 
 impl ReadinessCursor {
+    const PERSISTENCE: usize = 0;
+    const COMPLETION: usize = 1;
+    const TIMER: usize = 2;
+    const RESOLUTION: usize = 3;
+    const OBSERVATION: usize = 4;
+    const PUBLICATION: usize = 5;
+    const HEARTBEAT: usize = 6;
+    const INSPECTION: usize = 7;
     const SOURCES: usize = 8;
 
-    const fn advance(&mut self, source: usize) {
+    const fn record<P: PublicKey, V: Variant, D: Digest>(
+        &mut self,
+        source: usize,
+        event: &RuntimeEvent<P, V, D>,
+    ) {
+        match event {
+            RuntimeEvent::Verification(_) => self.completion_cursor = 1,
+            RuntimeEvent::Application(_) => self.completion_cursor = 2,
+            RuntimeEvent::Crypto(_) => self.completion_cursor = 0,
+            RuntimeEvent::ViewTimer => self.timer_cursor = 1,
+            RuntimeEvent::ProductionTimer => self.timer_cursor = 0,
+            _ => {}
+        }
+        if source < Self::SOURCES {
+            self.advance_source(source);
+        }
+    }
+
+    const fn advance_source(&mut self, source: usize) {
         self.source = (source + 1) % Self::SOURCES;
     }
 }
@@ -1253,6 +1313,19 @@ where
     S2: Sender<PublicKey = P>,
     S3: Sender<PublicKey = P>,
 {
+    fn runtime_admission(&self) -> RuntimeAdmission {
+        let authority = !self.checkpoint_fenced();
+        RuntimeAdmission {
+            persistence: self.can_admit(Lane::PersistenceCompletion)
+                && !self.journal_responses.is_empty(),
+            completion: self.can_admit(Lane::LocalCompletion),
+            timer: authority && self.can_admit(Lane::Timer),
+            resolution: authority && self.can_admit(Lane::ResolverResult),
+            observation: authority && self.can_admit(Lane::PeerObservation),
+            inspection: !self.machine.has_runnable_work() && self.pending_inspection.is_none(),
+        }
+    }
+
     /// Selects one ready runtime source without owning protocol service policy.
     async fn next_runtime_event(
         &mut self,
@@ -1297,21 +1370,13 @@ where
             return None;
         }
 
-        let admit_authority = !self.checkpoint_fenced();
-        let admit_local = self.can_admit(Lane::LocalCompletion);
-        let admit_persistence =
-            self.can_admit(Lane::PersistenceCompletion) && !self.journal_responses.is_empty();
-        let admit_timer = admit_authority && self.can_admit(Lane::Timer);
-        let admit_resolver = admit_authority && self.can_admit(Lane::ResolverResult);
-        let admit_peer = admit_authority && self.can_admit(Lane::PeerObservation);
+        let admission = self.runtime_admission();
         let journal_idle = self.journal_responses.is_empty();
-        let receive_inspection =
-            !self.machine.has_runnable_work() && self.pending_inspection.is_none();
         let (source, event) = select! {
             result = next_journal_response(
-                admit_persistence,
+                admission.allows(ReadinessCursor::PERSISTENCE, None),
                 &mut self.journal_responses,
-            ) => (0, RuntimeEvent::Persistence(result)),
+            ) => (ReadinessCursor::PERSISTENCE, RuntimeEvent::Persistence(result)),
             result = wait_for_journal_monitor(&mut self.journal_monitor) => {
                 (ReadinessCursor::SOURCES, RuntimeEvent::JournalMonitor(result))
             },
@@ -1327,68 +1392,60 @@ where
                 (ReadinessCursor::SOURCES, RuntimeEvent::Prune(result))
             },
             result = async {
-                if !admit_local {
+                if !admission.allows(ReadinessCursor::COMPLETION, None) {
                     return pending_forever().await;
                 }
                 self.jobs.next_completed().await
-            } => (1, RuntimeEvent::Application(result)),
+            } => (ReadinessCursor::COMPLETION, RuntimeEvent::Application(result)),
             result = async {
-                if !admit_local {
+                if !admission.allows(ReadinessCursor::COMPLETION, None) {
                     return pending_forever().await;
                 }
                 self.crypto.next_completed().await
-            } => (1, RuntimeEvent::Crypto(result)),
+            } => (ReadinessCursor::COMPLETION, RuntimeEvent::Crypto(result)),
             () = wait_until(
                 &self.context,
-                admit_timer
+                admission
+                    .allows(ReadinessCursor::TIMER, None)
                     .then(|| self.view_timer.as_ref().map(|(_, at)| *at))
                     .flatten(),
-            ) => (2, RuntimeEvent::ViewTimer),
+            ) => (ReadinessCursor::TIMER, RuntimeEvent::ViewTimer),
             () = wait_until(
                 &self.context,
-                admit_timer
+                admission
+                    .allows(ReadinessCursor::TIMER, None)
                     .then(|| self.production_timer.as_ref().map(|(_, at, _)| *at))
                     .flatten(),
-            ) => (2, RuntimeEvent::ProductionTimer),
+            ) => (ReadinessCursor::TIMER, RuntimeEvent::ProductionTimer),
             () = wait_until(&self.context, self.egress.next_attempt()) => {
-                (5, RuntimeEvent::Publication)
+                (ReadinessCursor::PUBLICATION, RuntimeEvent::Publication)
             },
             () = wait_until(&self.context, Some(self.heartbeat_at)) => {
-                (6, RuntimeEvent::Heartbeat)
+                (ReadinessCursor::HEARTBEAT, RuntimeEvent::Heartbeat)
             },
             completed = async {
-                if !admit_local {
+                if !admission.allows(ReadinessCursor::COMPLETION, None) {
                     return pending_forever().await;
                 }
                 completions.recv().await
-            } => (1, completed.map_or(RuntimeEvent::InputClosed, RuntimeEvent::Verification)),
+            } => (ReadinessCursor::COMPLETION, completed.map_or(RuntimeEvent::InputClosed, RuntimeEvent::Verification)),
             message = async {
-                if !admit_resolver {
+                if !admission.allows(ReadinessCursor::RESOLUTION, None) {
                     return pending_forever().await;
                 }
                 mailbox.recv().await
-            } => (3, message.map_or(RuntimeEvent::InputClosed, RuntimeEvent::Resolution)),
-            query = receive_query(queries, receive_inspection) => {
-                (7, RuntimeEvent::Inspection(query))
+            } => (ReadinessCursor::RESOLUTION, message.map_or(RuntimeEvent::InputClosed, RuntimeEvent::Resolution)),
+            query = receive_query(queries, admission.allows(ReadinessCursor::INSPECTION, None)) => {
+                (ReadinessCursor::INSPECTION, RuntimeEvent::Inspection(query))
             },
             observed = async {
-                if !admit_peer {
+                if !admission.allows(ReadinessCursor::OBSERVATION, None) {
                     return pending_forever().await;
                 }
                 observations.recv().await
-            } => (4, observed.map_or(RuntimeEvent::InputClosed, RuntimeEvent::Observation)),
+            } => (ReadinessCursor::OBSERVATION, observed.map_or(RuntimeEvent::InputClosed, RuntimeEvent::Observation)),
         };
-        match &event {
-            RuntimeEvent::Verification(_) => readiness.completion_cursor = 1,
-            RuntimeEvent::Application(_) => readiness.completion_cursor = 2,
-            RuntimeEvent::Crypto(_) => readiness.completion_cursor = 0,
-            RuntimeEvent::ViewTimer => readiness.timer_cursor = 1,
-            RuntimeEvent::ProductionTimer => readiness.timer_cursor = 0,
-            _ => {}
-        }
-        if source < ReadinessCursor::SOURCES {
-            readiness.advance(source);
-        }
+        readiness.record(source, &event);
         Some(event)
     }
 
@@ -1420,12 +1477,14 @@ where
         if let Some(result) = wait_for_prune(self.pending_prune.as_mut()).now_or_never() {
             return Some(RuntimeEvent::Prune(result));
         }
+        let admission = self.runtime_admission();
         for offset in 0..ReadinessCursor::SOURCES {
             let source = (readiness.source + offset) % ReadinessCursor::SOURCES;
+            if !admission.allows(source, excluded_lane) {
+                continue;
+            }
             let event = match source {
-                0 if excluded_lane != Some(Lane::PersistenceCompletion)
-                    && self.can_admit(Lane::PersistenceCompletion) =>
-                {
+                ReadinessCursor::PERSISTENCE => {
                     let ready = self
                         .journal_responses
                         .front_mut()
@@ -1448,9 +1507,7 @@ where
                         None => None,
                     }
                 }
-                1 if excluded_lane != Some(Lane::LocalCompletion)
-                    && self.can_admit(Lane::LocalCompletion) =>
-                {
+                ReadinessCursor::COMPLETION => {
                     let mut completion = None;
                     for inner in 0..3 {
                         let source = (readiness.completion_cursor + inner) % 3;
@@ -1468,16 +1525,12 @@ where
                                 .map(RuntimeEvent::Crypto),
                         };
                         if completion.is_some() {
-                            readiness.completion_cursor = (source + 1) % 3;
                             break;
                         }
                     }
                     completion
                 }
-                2 if excluded_lane != Some(Lane::Timer)
-                    && !self.checkpoint_fenced()
-                    && self.can_admit(Lane::Timer) =>
-                {
+                ReadinessCursor::TIMER => {
                     let now = self.context.current();
                     let mut timer = None;
                     for inner in 0..2 {
@@ -1496,37 +1549,32 @@ where
                             _ => None,
                         };
                         if timer.is_some() {
-                            readiness.timer_cursor = (source + 1) % 2;
                             break;
                         }
                     }
                     timer
                 }
-                3 if excluded_lane != Some(Lane::ResolverResult)
-                    && !self.checkpoint_fenced()
-                    && self.can_admit(Lane::ResolverResult) =>
-                {
+                ReadinessCursor::RESOLUTION => {
                     mailbox.try_recv().ok().map(RuntimeEvent::Resolution)
                 }
-                4 if excluded_lane != Some(Lane::PeerObservation)
-                    && !self.checkpoint_fenced()
-                    && self.can_admit(Lane::PeerObservation) =>
-                {
+                ReadinessCursor::OBSERVATION => {
                     observations.try_recv().ok().map(RuntimeEvent::Observation)
                 }
-                5 => self
+                ReadinessCursor::PUBLICATION => self
                     .egress
                     .next_attempt()
                     .is_some_and(|at| at <= self.context.current())
                     .then_some(RuntimeEvent::Publication),
-                6 if self.heartbeat_at <= self.context.current() => Some(RuntimeEvent::Heartbeat),
-                7 if !self.machine.has_runnable_work() && self.pending_inspection.is_none() => {
+                ReadinessCursor::HEARTBEAT if self.heartbeat_at <= self.context.current() => {
+                    Some(RuntimeEvent::Heartbeat)
+                }
+                ReadinessCursor::INSPECTION => {
                     queries.try_recv().ok().map(RuntimeEvent::Inspection)
                 }
                 _ => None,
             };
             if let Some(event) = event {
-                readiness.advance(source);
+                readiness.record(source, &event);
                 return Some(event);
             }
         }
@@ -1669,7 +1717,7 @@ where
             if self.pending_inspection.is_none()
                 && let Ok(query) = queries.try_recv()
             {
-                readiness.advance(7);
+                readiness.advance_source(ReadinessCursor::INSPECTION);
                 self.handle_runtime_event(RuntimeEvent::Inspection(query))?;
                 break;
             }
@@ -2749,7 +2797,7 @@ mod tests {
         mocks::Committee,
     };
     use commonware_cryptography::{
-        Sha256, bls12381::primitives::variant::MinPk, sha256::Digest as Sha256Digest,
+        Sha256, bls12381::primitives::variant::MinPk, ed25519, sha256::Digest as Sha256Digest,
     };
     use commonware_macros::test_traced;
     use commonware_parallel::{Rayon, Sequential};
@@ -2763,6 +2811,62 @@ mod tests {
     };
     use tracing::{Id, Subscriber};
     use tracing_subscriber::{Layer, layer::Context, prelude::*, registry::LookupSpan};
+
+    #[test]
+    fn runtime_admission_applies_canonical_lane_gates() {
+        let open = RuntimeAdmission {
+            persistence: true,
+            completion: true,
+            timer: true,
+            resolution: true,
+            observation: true,
+            inspection: true,
+        };
+        for (source, lane) in [
+            (ReadinessCursor::PERSISTENCE, Lane::PersistenceCompletion),
+            (ReadinessCursor::COMPLETION, Lane::LocalCompletion),
+            (ReadinessCursor::TIMER, Lane::Timer),
+            (ReadinessCursor::RESOLUTION, Lane::ResolverResult),
+            (ReadinessCursor::OBSERVATION, Lane::PeerObservation),
+        ] {
+            assert!(open.allows(source, None));
+            assert!(!open.allows(source, Some(lane)));
+        }
+        assert!(open.allows(ReadinessCursor::PUBLICATION, Some(Lane::Timer)));
+        assert!(open.allows(ReadinessCursor::HEARTBEAT, Some(Lane::Timer)));
+        assert!(open.allows(ReadinessCursor::INSPECTION, Some(Lane::Timer)));
+        assert!(!open.allows(ReadinessCursor::SOURCES, None));
+
+        let closed = RuntimeAdmission {
+            persistence: false,
+            completion: false,
+            timer: false,
+            resolution: false,
+            observation: false,
+            inspection: false,
+        };
+        for source in 0..=ReadinessCursor::OBSERVATION {
+            assert!(!closed.allows(source, None));
+        }
+        assert!(!closed.allows(ReadinessCursor::INSPECTION, None));
+    }
+
+    #[test]
+    fn readiness_cursor_records_source_and_timer_rotation() {
+        type Event = RuntimeEvent<ed25519::PublicKey, MinPk, Sha256Digest>;
+
+        let mut readiness = ReadinessCursor::default();
+        readiness.record(ReadinessCursor::TIMER, &Event::ViewTimer);
+        assert_eq!(readiness.source, ReadinessCursor::RESOLUTION);
+        assert_eq!(readiness.timer_cursor, 1);
+
+        readiness.record(ReadinessCursor::TIMER, &Event::ProductionTimer);
+        assert_eq!(readiness.timer_cursor, 0);
+        readiness.record(ReadinessCursor::OBSERVATION, &Event::InputClosed);
+        assert_eq!(readiness.source, ReadinessCursor::PUBLICATION);
+        readiness.advance_source(ReadinessCursor::INSPECTION);
+        assert_eq!(readiness.source, ReadinessCursor::PERSISTENCE);
+    }
 
     #[test]
     fn block_arrivals_keep_first_stamp_and_evict_oldest() {
