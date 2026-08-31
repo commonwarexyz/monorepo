@@ -543,6 +543,7 @@ mod tests {
                 context.child("seed_notarized"),
                 prunable::Config {
                     translator: TwoCap,
+                    metadata_partition: format!("{cache_prefix}-cache-{epoch}-notarized-metadata"),
                     key_partition: format!("{cache_prefix}-cache-{epoch}-notarized-key"),
                     key_page_cache: page_cache,
                     value_partition: format!("{cache_prefix}-cache-{epoch}-notarized-value"),
@@ -6263,8 +6264,10 @@ mod tests {
 
     #[test_traced("WARN")]
     fn test_standard_finalized_delivery_verifies_with_verify_only_scope() {
+        const PARTITION_PREFIX: &str = "finalized-delivery-verify-only";
+
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
+        let (fixture, checkpoint) = runner.start_and_recover(|mut context| async move {
             let Fixture { schemes, .. } =
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
@@ -6273,12 +6276,14 @@ mod tests {
             let block = make_raw_block(Sha256::hash(&[b""]), height, 100);
             let proposal = Proposal::new(round, View::zero(), StandardHarness::commitment(&block));
             let finalization = StandardHarness::make_finalization(proposal, &schemes, QUORUM);
+            let verifier = schemes[0].clone();
+            let application = Application::<B>::manual_ack();
 
-            let (_mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+            let (mailbox, _buffer, resolver, actor_handle) = start_standard_actor(
                 context.child("validator"),
-                "finalized-delivery-verify-only",
-                VerifierProvider::new(schemes[0].clone()),
-                Application::<B>::default(),
+                PARTITION_PREFIX,
+                VerifierProvider::new(verifier.clone()),
+                application.clone(),
                 Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
@@ -6297,7 +6302,7 @@ mod tests {
                                 tracing::Span::none(),
                             )),
                         },
-                        value: (finalization, block).encode(),
+                        value: (finalization.clone(), block.clone()).encode(),
                         response,
                     })
                     .accepted()
@@ -6306,6 +6311,40 @@ mod tests {
                 response_rx.await.expect("delivery response missing"),
                 "finalization verified through a verify-only scope should be accepted"
             );
+            assert_eq!(application.acknowledged().await, Height::zero());
+            assert_eq!(application.acknowledged().await, height);
+            assert_eq!(
+                application.blocks().get(&height).unwrap().digest(),
+                block.digest()
+            );
+
+            actor_handle.abort();
+            drop(mailbox);
+            (verifier, block, finalization)
+        });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let (verifier, block, finalization) = fixture;
+            let (mailbox, _buffer, _resolver, _actor_handle) = start_standard_actor(
+                context.child("recovered"),
+                PARTITION_PREFIX,
+                VerifierProvider::new(verifier),
+                Application::<B>::default(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+            )
+            .await;
+
+            let recovered_block = mailbox
+                .get_block(Height::new(1))
+                .await
+                .expect("delivered finalized block must be durable");
+            assert_eq!(recovered_block.digest(), block.digest());
+            let recovered_finalization = mailbox
+                .get_finalization(Height::new(1))
+                .await
+                .expect("delivered finalization must be durable");
+            assert_eq!(recovered_finalization.proposal, finalization.proposal);
         });
     }
 
@@ -6955,6 +6994,7 @@ mod tests {
                 context.child("finalizations_by_height"),
                 prunable::Config {
                     translator: EightCap,
+                    metadata_partition: format!("{partition_prefix}-fbh-metadata"),
                     key_partition: format!("{partition_prefix}-fbh-key"),
                     key_page_cache: page_cache.clone(),
                     value_partition: format!("{partition_prefix}-fbh-value"),
@@ -6972,6 +7012,7 @@ mod tests {
                 context.child("finalized_blocks"),
                 prunable::Config {
                     translator: EightCap,
+                    metadata_partition: format!("{partition_prefix}-fb-metadata"),
                     key_partition: format!("{partition_prefix}-fb-key"),
                     key_page_cache: page_cache,
                     value_partition: format!("{partition_prefix}-fb-value"),
@@ -7298,6 +7339,7 @@ mod tests {
             context.child("finalizations_by_height"),
             prunable::Config {
                 translator: EightCap,
+                metadata_partition: format!("{partition_prefix}-fbh-metadata"),
                 key_partition: format!("{partition_prefix}-fbh-key"),
                 key_page_cache: page_cache.clone(),
                 value_partition: format!("{partition_prefix}-fbh-value"),
@@ -7315,6 +7357,7 @@ mod tests {
             context.child("finalized_blocks"),
             prunable::Config {
                 translator: EightCap,
+                metadata_partition: format!("{partition_prefix}-fb-metadata"),
                 key_partition: format!("{partition_prefix}-fb-key"),
                 key_page_cache: page_cache,
                 value_partition: format!("{partition_prefix}-fb-value"),
