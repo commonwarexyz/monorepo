@@ -4755,6 +4755,113 @@ fn vqc_anchor_does_not_nullify_its_own_view() {
 }
 
 #[test]
+fn proposal_anchor_prefers_more_accounted_messages() {
+    let participants = 6;
+    let role = Role::Validator(LeaderSchedule::round_robin(participants).leader(View::new(2)));
+    let profile = profile_for(role, participants, 2);
+    let (mut machine, _) = start_profile(profile.clone());
+    let config = machine.profile().protocol().codec_config();
+    let proposed = leader(&machine, 1);
+
+    let votes = (0..4)
+        .map(|signer| view_vote(&machine, &proposed, signer))
+        .collect::<Vec<_>>();
+    let tally = Tally::from_votes::<MinPk, Sha256, _>(
+        &proposed,
+        votes
+            .iter()
+            .map(|vote| (vote.signer(), vote.body().clone())),
+        config,
+    )
+    .unwrap();
+    let fuller = Vqc::new(
+        proposed.clone(),
+        tally,
+        Signers::from(config.participants(), [Participant::new(4), Participant::new(5)]),
+        Vec::new(),
+        aggregate::Signature::<MinPk>::zero(),
+        config,
+    )
+    .unwrap();
+
+    let votes = (0..3)
+        .map(|signer| view_vote(&machine, &proposed, signer))
+        .collect::<Vec<_>>();
+    let tally = Tally::from_votes::<MinPk, Sha256, _>(
+        &proposed,
+        votes
+            .iter()
+            .map(|vote| (vote.signer(), vote.body().clone())),
+        config,
+    )
+    .unwrap();
+    let conflicting_leader = LeaderBlock::new(
+        proposed.round(),
+        CertificateId::new(digest(b"anchor conflicting parent")),
+        proposed.history(),
+        proposed.proposals().to_vec(),
+        config,
+    )
+    .unwrap();
+    let conflicting = (3..5)
+        .map(|signer| {
+            let vote = view_vote(&machine, &conflicting_leader, signer);
+            ConflictingVote::new(
+                vote.signer(),
+                vote.body().leader(),
+                vote.body().positions().to_vec(),
+                vote.body().extensions().to_vec(),
+                config,
+            )
+            .unwrap()
+        })
+        .collect();
+    let smaller = Vqc::new(
+        proposed,
+        tally,
+        Signers::from(config.participants(), []),
+        conflicting,
+        aggregate::Signature::<MinPk>::zero(),
+        config,
+    )
+    .unwrap();
+
+    let fuller_certificate = fuller.clone();
+    let fuller = Arc::new(Artifact::Vqc(fuller));
+    let smaller = Arc::new(Artifact::Vqc(smaller));
+    machine
+        .views
+        .retain_vqc_parent::<Sha256>(&fuller, &profile)
+        .unwrap();
+    machine
+        .views
+        .retain_vqc_parent::<Sha256>(&smaller, &profile)
+        .unwrap();
+
+    let nullification = symbolic_nullification(&machine, View::new(1), 0);
+    let nullification = observe(&mut machine, Artifact::Nullification(nullification));
+    let forwarding = machine
+        .step(Input::Verified(VerificationCompletion::new(
+            nullification.id(),
+            nullification.generation(),
+            vec![Verdict::new(nullification.items()[0].ticket(), true)],
+        )))
+        .unwrap();
+    let forwarding = settle(&mut machine, forwarding);
+    let forwarded = persist(&mut machine, &persist_job(&forwarding));
+    let entered = persist(&mut machine, &persist_job(&forwarded));
+    let sign = sign_job(&entered);
+    let SignRequest::LeaderBlock(request) = sign_request(&sign) else {
+        panic!("the view-two leader must reserve a proposal");
+    };
+    assert_eq!(
+        request.parent().exact().map(Arc::as_ref),
+        Some(&fuller_certificate)
+    );
+    assert!(request.attach_parent());
+}
+
+#[test]
 fn proposal_frontier_survives_retention_and_restart() {
     let target = View::new(6);
     let signer = LeaderSchedule::round_robin(6).leader(target);

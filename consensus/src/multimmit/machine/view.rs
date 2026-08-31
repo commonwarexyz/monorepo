@@ -2770,7 +2770,7 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
             certificate: Some(Arc::clone(artifact)),
             tips,
             messages: certificate.tally().signers().count()
-                + certificate.novoters().len()
+                + certificate.novoters().count()
                 + certificate.conflicting_votes().len(),
         };
         if let Some(existing) = self.parents.get(&id) {
