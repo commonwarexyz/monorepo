@@ -468,8 +468,8 @@ impl CacheRef {
             return Ok(());
         }
         trace!(pages = page_nums.len(), blob_id, "bulk page fault");
-        let physical_page_size = self
-            .page_size
+        let page_size_u64: u64 = self.page_size.widen();
+        let physical_page_size = page_size_u64
             .checked_add(CHECKSUM_SIZE)
             .ok_or(Error::OffsetOverflow)?;
 
@@ -492,7 +492,7 @@ impl CacheRef {
         // page's checksum, and admits the wave under one lock acquisition. The bound caps the
         // scratch buffers held in flight, the concurrent blob reads dispatched, and how long one
         // admission blocks concurrent readers on the cache lock.
-        let page_size = self.page_size as usize;
+        let page_size: usize = self.page_size.widen();
         for wave in runs.chunks(MAX_FAULT_WAVE_RUNS) {
             let fetched = try_join_all(wave.iter().map(|&(start, len)| async move {
                 let offset = start
@@ -515,10 +515,10 @@ impl CacheRef {
 
                     // Only full logical pages are cacheable. A non-last page falling back to a
                     // partial CRC indicates corruption, mirroring the single-page fetch path.
-                    if checksum.len as u64 != self.page_size {
+                    if u64::from(checksum.len) != page_size_u64 {
                         error!(
                             page_num = start + i as u64,
-                            expected = self.page_size,
+                            expected = page_size_u64,
                             actual = checksum.len,
                             "attempted to fetch partial page from blob"
                         );
