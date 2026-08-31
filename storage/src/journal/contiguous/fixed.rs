@@ -6103,12 +6103,12 @@ mod tests {
             drop(reader);
 
             // A pruned position is trimmed from the prefix rather than reaching offset
-            // derivation, and the valid remainder is still served.
+            // derivation, and the valid single-page remainder is still served.
             (journal, _) = journal.prune(8).await.unwrap();
             let reader;
             (journal, reader) = journal.snapshot().await.unwrap();
-            reader.read_many(&[9]).await.unwrap();
-            let served = reader.try_read_many_sync(&[3, 9]);
+            reader.read_many(&[8]).await.unwrap();
+            let served = reader.try_read_many_sync(&[3, 8]);
             assert!(served[0].is_none());
             assert!(served[1].is_some());
             drop(served);

@@ -95,8 +95,8 @@ impl Drop for PageFetchGuard {
 /// A single page cache can be used to cache data from multiple blobs by assigning a unique id to
 /// each.
 ///
-/// Eviction uses the [cache::Clock] replacement policy. All page buffers are pre-allocated from
-/// `pool` at construction and reused in place, so caching never allocates page buffers after
+/// Eviction uses the [cache::Clock2QPlus] replacement policy. All page buffers are pre-allocated
+/// from `pool` at construction and reused in place, so caching never allocates page buffers after
 /// construction.
 ///
 /// Reads first resolve pages through `hints`, a fixed-size direct-mapped array from
@@ -109,7 +109,7 @@ impl Drop for PageFetchGuard {
 /// them.
 struct Cache {
     /// Maps each (blob id, page number) to its logical page buffer.
-    cache: cache::Cache<(u64, u64), IoBufMut>,
+    cache: cache::Cache<(u64, u64), IoBufMut, cache::Clock2QPlus<(u64, u64)>>,
 
     /// Direct-mapped [cache::Cache] slot hints, indexed by [Self::hint_index]. Initialized
     /// out-of-range so untouched entries read as misses. The length is a power of two so
@@ -477,7 +477,7 @@ impl Cache {
     /// `page_size` bytes.
     pub fn new(pool: BufferPool, page_size: NonZeroU16, capacity: NonZeroUsize) -> Self {
         let page_size = page_size.get() as usize;
-        let mut cache = cache::Cache::new(capacity);
+        let mut cache = cache::Cache::<_, _, cache::Clock2QPlus<_>>::new(capacity);
         cache.prefill(|| pool.alloc_zeroed(page_size));
         let hints = capacity.get().saturating_mul(2).next_power_of_two();
         Self {
@@ -1421,10 +1421,9 @@ mod tests {
 
     #[test_traced]
     fn test_read_cached_many_stale_hint_after_eviction() {
-        // Insert one page past capacity so the CLOCK evicts page 0 and reuses its slot for
-        // page 2. Page 0's hint now points at a slot holding page 2's key, so the batched
-        // read must report page 0 as a miss (never page 2's bytes) while still serving the
-        // live pages.
+        // Insert one page past capacity so page 0 is evicted and its slot is reused for page 2.
+        // Page 0's hint now points at a slot holding page 2's key, so the batched read must report
+        // page 0 as a miss (never page 2's bytes) while still serving the live pages.
         let pool = test_pool();
         let cache_ref = CacheRef::new(pool, PAGE_SIZE, NZUsize!(2));
         let blob_id = cache_ref.next_id();
