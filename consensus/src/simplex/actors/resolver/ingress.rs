@@ -147,10 +147,12 @@ impl<S: Scheme, D: Digest> Policy for MailboxMessage<S, D> {
             return;
         }
 
-        // Ignore the message if it is a duplicate
+        // Ignore duplicate work. Resolve requests for the same ancestry share
+        // one network fetch, whose peer scope must remain as wide as any
+        // duplicate requested.
         if overflow
             .messages
-            .iter()
+            .iter_mut()
             .any(|old_message| match (&message, old_message) {
                 (
                     Self::Certificate {
@@ -178,14 +180,21 @@ impl<S: Scheme, D: Digest> Policy for MailboxMessage<S, D> {
                     Self::Resolve {
                         proposal: new_proposal,
                         view: new_view,
+                        target: new_target,
                         ..
                     },
                     Self::Resolve {
                         proposal: old_proposal,
                         view: old_view,
+                        target: old_target,
                         ..
                     },
-                ) => new_proposal == old_proposal && new_view == old_view,
+                ) if new_proposal == old_proposal && new_view == old_view => {
+                    if new_target.is_none() {
+                        *old_target = None;
+                    }
+                    true
+                }
                 _ => false,
             })
         {
@@ -470,6 +479,20 @@ mod tests {
         }
     }
 
+    fn unrestricted_resolve_msg(
+        proposal: View,
+        view: View,
+        kind: Kind,
+    ) -> MailboxMessage<TestScheme, Sha256Digest> {
+        MailboxMessage::Resolve {
+            span: Span::none(),
+            proposal,
+            view,
+            kind,
+            target: None,
+        }
+    }
+
     #[test]
     fn handler_drain_skips_closed_responses() {
         let mut overflow = HandlerPending::default();
@@ -587,6 +610,42 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn resolve_widens_duplicate_to_unrestricted() {
+        let proposal = View::new(10);
+        let view = View::new(3);
+        for unrestricted_first in [false, true] {
+            let messages = if unrestricted_first {
+                [
+                    unrestricted_resolve_msg(proposal, view, Kind::Notarization),
+                    resolve_msg(proposal, view, Kind::Notarization),
+                ]
+            } else {
+                [
+                    resolve_msg(proposal, view, Kind::Notarization),
+                    unrestricted_resolve_msg(proposal, view, Kind::Notarization),
+                ]
+            };
+            let mut overflow = Pending::default();
+            for message in messages {
+                MailboxMessage::handle(&mut overflow, message);
+            }
+
+            let mut overflow = drain(overflow);
+            assert_eq!(overflow.len(), 1);
+            assert!(matches!(
+                overflow.pop_front(),
+                Some(MailboxMessage::Resolve {
+                    proposal: actual_proposal,
+                    view: actual_view,
+                    kind: Kind::Notarization,
+                    target: None,
+                    ..
+                }) if actual_proposal == proposal && actual_view == view
+            ));
+        }
     }
 
     #[test]

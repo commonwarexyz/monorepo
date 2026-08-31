@@ -4036,9 +4036,8 @@ mod tests {
             // Deliver notarization(3), skipping notarization(2): the voter
             // observed the certificate broadcast for view 3 but missed the one
             // for view 2. Certifying view 3 requires view 2's exact-view
-            // certificate, so the voter must fetch it. The certificate update
-            // must reach the resolver first: it opens unrestricted background
-            // repair that a later leader target cannot narrow.
+            // certificate, so the voter must fetch it from any peer that may
+            // have retained it.
             mailbox.recovered(Certificate::Notarization(notarization_3));
             assert!(matches!(
                 resolver_receiver.recv().await.unwrap(),
@@ -4062,7 +4061,7 @@ mod tests {
                         assert_eq!(proposal, View::new(3));
                         assert_eq!(view, View::new(2));
                         assert!(matches!(kind, crate::simplex::actors::Kind::Notarization));
-                        assert!(target.is_some(), "certification repair should retain leader affinity");
+                        assert!(target.is_none(), "certification repair must ask any peer");
                         break;
                     },
                     _ = context.sleep(Duration::from_secs(20)) => {
