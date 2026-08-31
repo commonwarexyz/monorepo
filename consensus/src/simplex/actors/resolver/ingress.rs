@@ -147,10 +147,14 @@ impl<S: Scheme, D: Digest> Policy for MailboxMessage<S, D> {
             return;
         }
 
-        // Ignore the message if it is a duplicate
+        // Ignore duplicate work. Resolve requests for the same certificate
+        // share one network fetch, whose peer scope must remain as wide as any
+        // duplicate requested. Requests for different kinds at the same views
+        // are distinct work: neither certificate substitutes for the other
+        // (see [Kind]).
         if overflow
             .messages
-            .iter()
+            .iter_mut()
             .any(|old_message| match (&message, old_message) {
                 (
                     Self::Certificate {
@@ -178,14 +182,26 @@ impl<S: Scheme, D: Digest> Policy for MailboxMessage<S, D> {
                     Self::Resolve {
                         proposal: new_proposal,
                         view: new_view,
+                        kind: new_kind,
+                        target: new_target,
                         ..
                     },
                     Self::Resolve {
                         proposal: old_proposal,
                         view: old_view,
+                        kind: old_kind,
+                        target: old_target,
                         ..
                     },
-                ) => new_proposal == old_proposal && new_view == old_view,
+                ) if new_proposal == old_proposal
+                    && new_view == old_view
+                    && new_kind == old_kind =>
+                {
+                    if new_target.is_none() {
+                        *old_target = None;
+                    }
+                    true
+                }
                 _ => false,
             })
         {
@@ -471,6 +487,20 @@ mod tests {
         }
     }
 
+    fn unrestricted_resolve_msg(
+        proposal: View,
+        view: View,
+        kind: Kind,
+    ) -> MailboxMessage<TestScheme, Sha256Digest> {
+        MailboxMessage::Resolve {
+            span: Span::none(),
+            proposal,
+            view,
+            kind,
+            target: None,
+        }
+    }
+
     #[test]
     fn handler_drain_skips_closed_responses() {
         let mut overflow = HandlerPending::default();
@@ -570,7 +600,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_deduplicates_by_proposal_and_requested_view() {
+    fn resolve_deduplicates_by_proposal_view_and_kind() {
         let mut overflow = Pending::default();
         for kind in [Kind::Nullification, Kind::Nullification, Kind::Notarization] {
             MailboxMessage::handle(
@@ -580,7 +610,7 @@ mod tests {
         }
 
         let overflow = drain(overflow);
-        assert_eq!(overflow.len(), 1);
+        assert_eq!(overflow.len(), 2);
         assert!(matches!(
             &overflow[0],
             MailboxMessage::Resolve {
@@ -588,6 +618,87 @@ mod tests {
                 ..
             }
         ));
+        assert!(matches!(
+            &overflow[1],
+            MailboxMessage::Resolve {
+                kind: Kind::Notarization,
+                ..
+            }
+        ));
+    }
+
+    /// Regression: an unrestricted request must not widen or swallow a pending
+    /// request of the other kind, whose certificate it cannot substitute for.
+    #[test]
+    fn resolve_retains_target_across_kinds() {
+        let proposal = View::new(10);
+        let view = View::new(3);
+        let mut overflow = Pending::default();
+        MailboxMessage::handle(
+            &mut overflow,
+            resolve_msg(proposal, view, Kind::Nullification),
+        );
+        MailboxMessage::handle(
+            &mut overflow,
+            unrestricted_resolve_msg(proposal, view, Kind::Notarization),
+        );
+
+        let mut overflow = drain(overflow);
+        assert_eq!(overflow.len(), 2);
+        assert!(matches!(
+            overflow.pop_front(),
+            Some(MailboxMessage::Resolve {
+                kind: Kind::Nullification,
+                target: Some(_),
+                ..
+            })
+        ));
+        assert!(matches!(
+            overflow.pop_front(),
+            Some(MailboxMessage::Resolve {
+                kind: Kind::Notarization,
+                target: None,
+                ..
+            })
+        ));
+    }
+
+    /// Regression: a duplicate request must leave the pending request as wide
+    /// as either copy asked, whichever order they arrive in.
+    #[test]
+    fn resolve_widens_duplicate_to_unrestricted() {
+        let proposal = View::new(10);
+        let view = View::new(3);
+        for unrestricted_first in [false, true] {
+            let messages = if unrestricted_first {
+                [
+                    unrestricted_resolve_msg(proposal, view, Kind::Notarization),
+                    resolve_msg(proposal, view, Kind::Notarization),
+                ]
+            } else {
+                [
+                    resolve_msg(proposal, view, Kind::Notarization),
+                    unrestricted_resolve_msg(proposal, view, Kind::Notarization),
+                ]
+            };
+            let mut overflow = Pending::default();
+            for message in messages {
+                MailboxMessage::handle(&mut overflow, message);
+            }
+
+            let mut overflow = drain(overflow);
+            assert_eq!(overflow.len(), 1);
+            assert!(matches!(
+                overflow.pop_front(),
+                Some(MailboxMessage::Resolve {
+                    proposal: actual_proposal,
+                    view: actual_view,
+                    kind: Kind::Notarization,
+                    target: None,
+                    ..
+                }) if actual_proposal == proposal && actual_view == view
+            ));
+        }
     }
 
     #[test]

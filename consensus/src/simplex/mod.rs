@@ -782,6 +782,13 @@ mod tests {
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
+    type TestChannel = (
+        Sender<PublicKey, deterministic::Context>,
+        Receiver<PublicKey>,
+    );
+    type TestRegistration = (TestChannel, TestChannel, TestChannel);
+    type TestRegistrations = HashMap<PublicKey, TestRegistration>;
+
     /// Builds a [Lookahead] with a term length of 5.
     fn test_lookahead(optimistic_views: u64) -> Lookahead {
         Lookahead {
@@ -872,20 +879,7 @@ mod tests {
     async fn register_validator(
         oracle: &mut Oracle<PublicKey, deterministic::Context>,
         validator: PublicKey,
-    ) -> (
-        (
-            Sender<PublicKey, deterministic::Context>,
-            Receiver<PublicKey>,
-        ),
-        (
-            Sender<PublicKey, deterministic::Context>,
-            Receiver<PublicKey>,
-        ),
-        (
-            Sender<PublicKey, deterministic::Context>,
-            Receiver<PublicKey>,
-        ),
-    ) {
+    ) -> TestRegistration {
         let control = oracle.control(validator.clone());
         let (vote_sender, vote_receiver) = control.register(0, TEST_QUOTA).await.unwrap();
         let (certificate_sender, certificate_receiver) =
@@ -902,23 +896,7 @@ mod tests {
     async fn register_validators(
         oracle: &mut Oracle<PublicKey, deterministic::Context>,
         validators: &[PublicKey],
-    ) -> HashMap<
-        PublicKey,
-        (
-            (
-                Sender<PublicKey, deterministic::Context>,
-                Receiver<PublicKey>,
-            ),
-            (
-                Sender<PublicKey, deterministic::Context>,
-                Receiver<PublicKey>,
-            ),
-            (
-                Sender<PublicKey, deterministic::Context>,
-                Receiver<PublicKey>,
-            ),
-        ),
-    > {
+    ) -> TestRegistrations {
         let mut registrations = HashMap::new();
         for validator in validators.iter() {
             let registration = register_validator(oracle, validator.clone()).await;
@@ -6314,6 +6292,154 @@ mod tests {
 
     test_for_all_fixtures!(split_views_no_lockup);
 
+    type CertifiedSplitReporter<S, L> =
+        mocks::reporter::Reporter<deterministic::Context, S, L, Sha256Digest>;
+
+    struct CertifiedSplitEngineConfig<'a, S, L> {
+        oracle: &'a Oracle<PublicKey, deterministic::Context>,
+        participants: &'a [PublicKey],
+        schemes: &'a [S],
+        registrations: &'a mut TestRegistrations,
+        silent: usize,
+        elector: &'a L,
+        epoch: Epoch,
+        view_retention: ViewDelta,
+        skip_timeout: Duration,
+    }
+
+    /// Registers a non-committee peer that can preload certificates while
+    /// validators are partitioned from one another.
+    async fn start_certificate_injector(
+        context: &deterministic::Context,
+        oracle: &mut Oracle<PublicKey, deterministic::Context>,
+        participants: &[PublicKey],
+        link: &Link,
+    ) -> Sender<PublicKey, deterministic::Context> {
+        let injector = PrivateKey::from_seed(1_000_000).public_key();
+        let (sender, _receiver) = oracle
+            .control(injector.clone())
+            .register(1, TEST_QUOTA)
+            .await
+            .unwrap();
+        for participant in participants {
+            oracle
+                .add_link(injector.clone(), participant.clone(), link.clone())
+                .await
+                .unwrap();
+        }
+        oracle.manager().track(
+            1,
+            TrackedPeers::new(
+                Set::from_iter_dedup(participants.iter().cloned()),
+                Set::from_iter_dedup(std::iter::once(injector)),
+            ),
+        );
+        context.sleep(Duration::from_millis(10)).await;
+        sender
+    }
+
+    /// Starts every validator except `silent`, whose network registration is
+    /// dropped.
+    fn start_certified_split_engines<S, L>(
+        context: &deterministic::Context,
+        cfg: CertifiedSplitEngineConfig<'_, S, L>,
+    ) -> HashMap<usize, CertifiedSplitReporter<S, L>>
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        L: elector::Config<S>,
+    {
+        let CertifiedSplitEngineConfig {
+            oracle,
+            participants,
+            schemes,
+            registrations,
+            silent,
+            elector,
+            epoch,
+            view_retention,
+            skip_timeout,
+        } = cfg;
+        let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
+        let mut reporters = HashMap::new();
+
+        for (idx, validator) in participants.iter().enumerate() {
+            let registration = registrations
+                .remove(validator)
+                .expect("validator should be registered");
+            if idx == silent {
+                drop(registration);
+                continue;
+            }
+
+            let reporter_config = mocks::reporter::Config {
+                participants: participants.to_vec().try_into().unwrap(),
+                scheme: schemes[idx].clone(),
+                elector: elector.clone(),
+            };
+            let reporter = mocks::reporter::Reporter::new(
+                context
+                    .child("reporter")
+                    .with_attribute("public_key", validator),
+                reporter_config,
+            );
+            reporters.insert(idx, reporter.clone());
+
+            let application_cfg = mocks::application::Config::<Sha256, _> {
+                relay: relay.clone(),
+                me: validator.clone(),
+                propose_latency: (250.0, 50.0),
+                verify_latency: (10.0, 5.0),
+                certify_latency: (10.0, 5.0),
+                should_certify: mocks::application::Certifier::Always,
+            };
+            let (actor, application) = mocks::application::Application::new(
+                context
+                    .child("application")
+                    .with_attribute("public_key", validator),
+                application_cfg,
+            );
+            actor.start();
+
+            let cfg = config::Config {
+                scheme: schemes[idx].clone(),
+                elector: elector.clone(),
+                blocker: oracle.control(validator.clone()),
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter: reporter.clone(),
+                strategy: Sequential,
+                partition: validator.to_string(),
+                mailbox_size: NZUsize!(1024),
+                epoch,
+                floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
+                leader_timeout: Duration::from_secs(10),
+                certification_timeout: Duration::from_secs(11),
+                timeout_retry: Duration::from_secs(10),
+                fetch_timeout: Duration::from_secs(1),
+                view_retention,
+                skip: SkipPolicy::Enabled {
+                    timeout: skip_timeout,
+                    budget: SkipBudget::Participants,
+                },
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
+                page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                forward: ForwardPolicy::Disabled,
+                track_historical_votes: false,
+            };
+            let engine = Engine::new(
+                context
+                    .child("engine")
+                    .with_attribute("public_key", validator),
+                cfg,
+            );
+            let (pending, recovered, resolver) = registration;
+            engine.start(pending, recovered, resolver);
+        }
+
+        reporters
+    }
+
     /// Heals a certified-notarization/nullification split in a group-led view.
     ///
     /// One honest validator certifies Notarization(3), two hold Nullification(3), and
@@ -6394,31 +6520,13 @@ mod tests {
             let b3_notarization = build_notarization(&proposal_b3);
             let null_3 = build_nullification(3);
 
-            let injector_pk = PrivateKey::from_seed(1_000_000).public_key();
-            let (mut injector_sender, _inj_certificate_receiver) = oracle
-                .control(injector_pk.clone())
-                .register(1, TEST_QUOTA)
-                .await
-                .unwrap();
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(0),
                 success_rate: probability!(1.0),
             };
-            for p in participants.iter() {
-                oracle
-                    .add_link(injector_pk.clone(), p.clone(), link.clone())
-                    .await
-                    .unwrap();
-            }
-            oracle.manager().track(
-                1,
-                TrackedPeers::new(
-                    Set::from_iter_dedup(participants.iter().cloned()),
-                    Set::from_iter_dedup(std::slice::from_ref(&injector_pk).iter().cloned()),
-                ),
-            );
-            context.sleep(Duration::from_millis(10)).await;
+            let mut injector_sender =
+                start_certificate_injector(&context, &mut oracle, &participants, &link).await;
 
             // Split the view-3 certificates by role and share all other evidence.
             let msg = Certificate::<_, D>::Notarization(b2_notarization).encode();
@@ -6441,82 +6549,20 @@ mod tests {
             }
 
             // Start honest engines before GST so preload rebroadcasts are lost.
-            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
-            let mut honest_reporters = HashMap::new();
-            for (idx, validator) in participants.iter().enumerate() {
-                let (pending, recovered, resolver) = registrations
-                    .remove(validator)
-                    .expect("validator should be registered");
-                if idx == byzantine {
-                    drop(pending);
-                    drop(recovered);
-                    drop(resolver);
-                    continue;
-                }
-                let reporter_config = mocks::reporter::Config {
-                    participants: participants.clone().try_into().unwrap(),
-                    scheme: schemes[idx].clone(),
-                    elector: elector.clone(),
-                };
-                let reporter = mocks::reporter::Reporter::new(
-                    context
-                        .child("reporter")
-                        .with_attribute("public_key", validator),
-                    reporter_config,
-                );
-                honest_reporters.insert(idx, reporter.clone());
-
-                let application_cfg = mocks::application::Config::<Sha256, _> {
-                    relay: relay.clone(),
-                    me: validator.clone(),
-                    propose_latency: (250.0, 50.0), // ensure we process certificates first
-                    verify_latency: (10.0, 5.0),
-                    certify_latency: (10.0, 5.0),
-                    should_certify: mocks::application::Certifier::Always,
-                };
-                let (actor, application) = mocks::application::Application::new(
-                    context
-                        .child("application")
-                        .with_attribute("public_key", validator),
-                    application_cfg,
-                );
-                actor.start();
-                let blocker = oracle.control(validator.clone());
-                let cfg = config::Config {
-                    scheme: schemes[idx].clone(),
-                    elector: elector.clone(),
-                    blocker,
-                    automaton: application.clone(),
-                    relay: application.clone(),
-                    reporter: reporter.clone(),
-                    strategy: Sequential,
-                    partition: validator.to_string(),
-                    mailbox_size: NZUsize!(1024),
+            let mut honest_reporters = start_certified_split_engines(
+                &context,
+                CertifiedSplitEngineConfig {
+                    oracle: &oracle,
+                    participants: &participants,
+                    schemes: &schemes,
+                    registrations: &mut registrations,
+                    silent: byzantine,
+                    elector: &elector,
                     epoch,
-                    floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
-                    leader_timeout: Duration::from_secs(10),
-                    certification_timeout: Duration::from_secs(11),
-                    timeout_retry: Duration::from_secs(10),
-                    fetch_timeout: Duration::from_secs(1),
                     view_retention,
-                    skip: SkipPolicy::Enabled {
-                        timeout: skip_timeout,
-                        budget: SkipBudget::Participants,
-                    },
-                    replay_buffer: NZUsize!(1024 * 1024),
-                    write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                    forward: ForwardPolicy::Disabled,
-                    track_historical_votes: false,
-                };
-                let engine = Engine::new(
-                    context
-                        .child("engine")
-                        .with_attribute("public_key", validator),
-                    cfg,
-                );
-                engine.start(pending, recovered, resolver);
-            }
+                    skip_timeout,
+                },
+            );
 
             // Drain the preload before checking the split.
             context.sleep(Duration::from_secs(2)).await;
@@ -6684,31 +6730,13 @@ mod tests {
             let b3_notarization = build_notarization(&proposal_b3);
             let null_3 = build_nullification(3);
 
-            let injector_pk = PrivateKey::from_seed(1_000_000).public_key();
-            let (mut injector_sender, _inj_certificate_receiver) = oracle
-                .control(injector_pk.clone())
-                .register(1, TEST_QUOTA)
-                .await
-                .unwrap();
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(0),
                 success_rate: probability!(1.0),
             };
-            for p in participants.iter() {
-                oracle
-                    .add_link(injector_pk.clone(), p.clone(), link.clone())
-                    .await
-                    .unwrap();
-            }
-            oracle.manager().track(
-                1,
-                TrackedPeers::new(
-                    Set::from_iter_dedup(participants.iter().cloned()),
-                    Set::from_iter_dedup(std::slice::from_ref(&injector_pk).iter().cloned()),
-                ),
-            );
-            context.sleep(Duration::from_millis(10)).await;
+            let mut injector_sender =
+                start_certificate_injector(&context, &mut oracle, &participants, &link).await;
 
             // Split the view-3 certificates by role and share all other evidence.
             let msg = Certificate::<_, D>::Notarization(b2_notarization).encode();
@@ -6731,82 +6759,20 @@ mod tests {
             }
 
             // Start honest engines before GST so preload rebroadcasts are lost.
-            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
-            let mut honest_reporters = HashMap::new();
-            for (idx, validator) in participants.iter().enumerate() {
-                let (pending, recovered, resolver) = registrations
-                    .remove(validator)
-                    .expect("validator should be registered");
-                if idx == byzantine {
-                    drop(pending);
-                    drop(recovered);
-                    drop(resolver);
-                    continue;
-                }
-                let reporter_config = mocks::reporter::Config {
-                    participants: participants.clone().try_into().unwrap(),
-                    scheme: schemes[idx].clone(),
-                    elector: elector.clone(),
-                };
-                let reporter = mocks::reporter::Reporter::new(
-                    context
-                        .child("reporter")
-                        .with_attribute("public_key", validator),
-                    reporter_config,
-                );
-                honest_reporters.insert(idx, reporter.clone());
-
-                let application_cfg = mocks::application::Config::<Sha256, _> {
-                    relay: relay.clone(),
-                    me: validator.clone(),
-                    propose_latency: (250.0, 50.0), // ensure we process certificates first
-                    verify_latency: (10.0, 5.0),
-                    certify_latency: (10.0, 5.0),
-                    should_certify: mocks::application::Certifier::Always,
-                };
-                let (actor, application) = mocks::application::Application::new(
-                    context
-                        .child("application")
-                        .with_attribute("public_key", validator),
-                    application_cfg,
-                );
-                actor.start();
-                let blocker = oracle.control(validator.clone());
-                let cfg = config::Config {
-                    scheme: schemes[idx].clone(),
-                    elector: elector.clone(),
-                    blocker,
-                    automaton: application.clone(),
-                    relay: application.clone(),
-                    reporter: reporter.clone(),
-                    strategy: Sequential,
-                    partition: validator.to_string(),
-                    mailbox_size: NZUsize!(1024),
+            let mut honest_reporters = start_certified_split_engines(
+                &context,
+                CertifiedSplitEngineConfig {
+                    oracle: &oracle,
+                    participants: &participants,
+                    schemes: &schemes,
+                    registrations: &mut registrations,
+                    silent: byzantine,
+                    elector: &elector,
                     epoch,
-                    floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
-                    leader_timeout: Duration::from_secs(10),
-                    certification_timeout: Duration::from_secs(11),
-                    timeout_retry: Duration::from_secs(10),
-                    fetch_timeout: Duration::from_secs(1),
                     view_retention,
-                    skip: SkipPolicy::Enabled {
-                        timeout: skip_timeout,
-                        budget: SkipBudget::Participants,
-                    },
-                    replay_buffer: NZUsize!(1024 * 1024),
-                    write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                    forward: ForwardPolicy::Disabled,
-                    track_historical_votes: false,
-                };
-                let engine = Engine::new(
-                    context
-                        .child("engine")
-                        .with_attribute("public_key", validator),
-                    cfg,
-                );
-                engine.start(pending, recovered, resolver);
-            }
+                    skip_timeout,
+                },
+            );
 
             // Drain the preload before checking the split.
             context.sleep(Duration::from_secs(2)).await;
@@ -6978,31 +6944,13 @@ mod tests {
             let b2_finalization = build_finalization(&proposal_b2);
             let b5_notarization = build_notarization(&proposal_b5);
 
-            let injector_pk = PrivateKey::from_seed(1_000_000).public_key();
-            let (mut injector_sender, _inj_certificate_receiver) = oracle
-                .control(injector_pk.clone())
-                .register(1, TEST_QUOTA)
-                .await
-                .unwrap();
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(0),
                 success_rate: probability!(1.0),
             };
-            for p in participants.iter() {
-                oracle
-                    .add_link(injector_pk.clone(), p.clone(), link.clone())
-                    .await
-                    .unwrap();
-            }
-            oracle.manager().track(
-                1,
-                TrackedPeers::new(
-                    Set::from_iter_dedup(participants.iter().cloned()),
-                    Set::from_iter_dedup(std::slice::from_ref(&injector_pk).iter().cloned()),
-                ),
-            );
-            context.sleep(Duration::from_millis(10)).await;
+            let mut injector_sender =
+                start_certificate_injector(&context, &mut oracle, &participants, &link).await;
 
             // Split view-5 notarization from nullifications 3 through 5.
             let msg = Certificate::<_, D>::Notarization(b2_notarization).encode();
@@ -7027,82 +6975,20 @@ mod tests {
             }
 
             // Start honest engines before GST so preload rebroadcasts are lost.
-            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
-            let mut honest_reporters = HashMap::new();
-            for (idx, validator) in participants.iter().enumerate() {
-                let (pending, recovered, resolver) = registrations
-                    .remove(validator)
-                    .expect("validator should be registered");
-                if idx == byzantine {
-                    drop(pending);
-                    drop(recovered);
-                    drop(resolver);
-                    continue;
-                }
-                let reporter_config = mocks::reporter::Config {
-                    participants: participants.clone().try_into().unwrap(),
-                    scheme: schemes[idx].clone(),
-                    elector: elector.clone(),
-                };
-                let reporter = mocks::reporter::Reporter::new(
-                    context
-                        .child("reporter")
-                        .with_attribute("public_key", validator),
-                    reporter_config,
-                );
-                honest_reporters.insert(idx, reporter.clone());
-
-                let application_cfg = mocks::application::Config::<Sha256, _> {
-                    relay: relay.clone(),
-                    me: validator.clone(),
-                    propose_latency: (250.0, 50.0), // ensure we process certificates first
-                    verify_latency: (10.0, 5.0),
-                    certify_latency: (10.0, 5.0),
-                    should_certify: mocks::application::Certifier::Always,
-                };
-                let (actor, application) = mocks::application::Application::new(
-                    context
-                        .child("application")
-                        .with_attribute("public_key", validator),
-                    application_cfg,
-                );
-                actor.start();
-                let blocker = oracle.control(validator.clone());
-                let cfg = config::Config {
-                    scheme: schemes[idx].clone(),
-                    elector: elector.clone(),
-                    blocker,
-                    automaton: application.clone(),
-                    relay: application.clone(),
-                    reporter: reporter.clone(),
-                    strategy: Sequential,
-                    partition: validator.to_string(),
-                    mailbox_size: NZUsize!(1024),
+            let mut honest_reporters = start_certified_split_engines(
+                &context,
+                CertifiedSplitEngineConfig {
+                    oracle: &oracle,
+                    participants: &participants,
+                    schemes: &schemes,
+                    registrations: &mut registrations,
+                    silent: byzantine,
+                    elector: &elector,
                     epoch,
-                    floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
-                    leader_timeout: Duration::from_secs(10),
-                    certification_timeout: Duration::from_secs(11),
-                    timeout_retry: Duration::from_secs(10),
-                    fetch_timeout: Duration::from_secs(1),
                     view_retention,
-                    skip: SkipPolicy::Enabled {
-                        timeout: skip_timeout,
-                        budget: SkipBudget::Participants,
-                    },
-                    replay_buffer: NZUsize!(1024 * 1024),
-                    write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                    forward: ForwardPolicy::Disabled,
-                    track_historical_votes: false,
-                };
-                let engine = Engine::new(
-                    context
-                        .child("engine")
-                        .with_attribute("public_key", validator),
-                    cfg,
-                );
-                engine.start(pending, recovered, resolver);
-            }
+                    skip_timeout,
+                },
+            );
 
             // Drain the preload before checking the split.
             context.sleep(Duration::from_secs(2)).await;
@@ -7236,7 +7122,7 @@ mod tests {
         let view_retention = ViewDelta::new(10);
         let skip_timeout = Duration::from_secs(12);
         let namespace = b"consensus".to_vec();
-        let executor = deterministic::Runner::timed(Duration::from_secs(120));
+        let executor = deterministic::Runner::timed(Duration::from_secs(300));
         executor.start(|mut context| async move {
             let Fixture {
                 participants,
@@ -7270,6 +7156,8 @@ mod tests {
                 c,
                 "view-26 leader must hold certification 22"
             );
+            // The halt detector below waits for the next Byzantine-led term.
+            assert_eq!(leader_of(41), offline, "term 9 must return to offline");
 
             let build_notarization =
                 |proposal: &Proposal<D>, signers: [usize; 3]| -> TNotarization<_, D> {
@@ -7307,31 +7195,13 @@ mod tests {
             let proposal_22 =
                 Proposal::new(Round::new(epoch, View::new(22)), View::new(21), payload_22);
 
-            let injector_pk = PrivateKey::from_seed(1_000_000).public_key();
-            let (mut injector_sender, _inj_certificate_receiver) = oracle
-                .control(injector_pk.clone())
-                .register(1, TEST_QUOTA)
-                .await
-                .unwrap();
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(0),
                 success_rate: probability!(1.0),
             };
-            for p in participants.iter() {
-                oracle
-                    .add_link(injector_pk.clone(), p.clone(), link.clone())
-                    .await
-                    .unwrap();
-            }
-            oracle.manager().track(
-                1,
-                TrackedPeers::new(
-                    Set::from_iter_dedup(participants.iter().cloned()),
-                    Set::from_iter_dedup(std::slice::from_ref(&injector_pk).iter().cloned()),
-                ),
-            );
-            context.sleep(Duration::from_millis(10)).await;
+            let mut injector_sender =
+                start_certificate_injector(&context, &mut oracle, &participants, &link).await;
 
             {
                 let mut send_to = |certificate: Certificate<S, D>, targets: &[usize]| {
@@ -7396,82 +7266,20 @@ mod tests {
 
             // Start honest engines before GST. The partition drops their
             // preload broadcasts.
-            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
-            let mut honest_reporters = HashMap::new();
-            for (idx, validator) in participants.iter().enumerate() {
-                let (pending, recovered, resolver) = registrations
-                    .remove(validator)
-                    .expect("validator should be registered");
-                if idx == offline {
-                    drop(pending);
-                    drop(recovered);
-                    drop(resolver);
-                    continue;
-                }
-                let reporter_config = mocks::reporter::Config {
-                    participants: participants.clone().try_into().unwrap(),
-                    scheme: schemes[idx].clone(),
-                    elector: elector.clone(),
-                };
-                let reporter = mocks::reporter::Reporter::new(
-                    context
-                        .child("reporter")
-                        .with_attribute("public_key", validator),
-                    reporter_config,
-                );
-                honest_reporters.insert(idx, reporter.clone());
-
-                let application_cfg = mocks::application::Config::<Sha256, _> {
-                    relay: relay.clone(),
-                    me: validator.clone(),
-                    propose_latency: (250.0, 50.0),
-                    verify_latency: (10.0, 5.0),
-                    certify_latency: (10.0, 5.0),
-                    should_certify: mocks::application::Certifier::Always,
-                };
-                let (actor, application) = mocks::application::Application::new(
-                    context
-                        .child("application")
-                        .with_attribute("public_key", validator),
-                    application_cfg,
-                );
-                actor.start();
-                let blocker = oracle.control(validator.clone());
-                let cfg = config::Config {
-                    scheme: schemes[idx].clone(),
-                    elector: elector.clone(),
-                    blocker,
-                    automaton: application.clone(),
-                    relay: application.clone(),
-                    reporter: reporter.clone(),
-                    strategy: Sequential,
-                    partition: validator.to_string(),
-                    mailbox_size: NZUsize!(1024),
+            let mut honest_reporters = start_certified_split_engines(
+                &context,
+                CertifiedSplitEngineConfig {
+                    oracle: &oracle,
+                    participants: &participants,
+                    schemes: &schemes,
+                    registrations: &mut registrations,
+                    silent: offline,
+                    elector: &elector,
                     epoch,
-                    floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
-                    leader_timeout: Duration::from_secs(10),
-                    certification_timeout: Duration::from_secs(11),
-                    timeout_retry: Duration::from_secs(10),
-                    fetch_timeout: Duration::from_secs(1),
                     view_retention,
-                    skip: SkipPolicy::Enabled {
-                        timeout: skip_timeout,
-                        budget: SkipBudget::Participants,
-                    },
-                    replay_buffer: NZUsize!(1024 * 1024),
-                    write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                    forward: ForwardPolicy::Disabled,
-                    track_historical_votes: false,
-                };
-                let engine = Engine::new(
-                    context
-                        .child("engine")
-                        .with_attribute("public_key", validator),
-                    cfg,
-                );
-                engine.start(pending, recovered, resolver);
-            }
+                    skip_timeout,
+                },
+            );
 
             // Drain the preload before checking the split.
             context.sleep(Duration::from_secs(2)).await;
@@ -7513,7 +7321,32 @@ mod tests {
                         }),
                 );
             }
-            join_all(finalizers).await;
+            // Reaching the next Byzantine-led term proves every honest
+            // participant led a full term without finalizing: protocol
+            // progress without recovery, not a stalled executor.
+            let progress_reporters: Vec<_> = honest_reporters.values().cloned().collect();
+            let next_byzantine_term =
+                context
+                    .child("next_byzantine_term")
+                    .spawn(move |context| async move {
+                        loop {
+                            let reached = progress_reporters.iter().all(|reporter| {
+                                reporter
+                                    .nullifications
+                                    .lock()
+                                    .keys()
+                                    .any(|view| *view >= View::new(41))
+                            });
+                            if reached {
+                                return;
+                            }
+                            context.sleep(Duration::from_secs(1)).await;
+                        }
+                    });
+            let finalized = select! {
+                _ = join_all(finalizers) => true,
+                _ = next_byzantine_term => false,
+            };
 
             for reporter in honest_reporters.values() {
                 reporter.assert_no_faults();
@@ -7521,6 +7354,25 @@ mod tests {
             }
             let blocked = oracle.blocked().await.unwrap();
             assert!(blocked.is_empty(), "blocked peers: {blocked:?}");
+
+            if !finalized {
+                // Diagnose the halt: each deprived validator fetched the
+                // proposal parent from an honest proposer but could not
+                // certify it without the pinned previous view.
+                let a_reporter = &honest_reporters[&a];
+                assert!(a_reporter.notarizations.lock().contains_key(&View::new(2)));
+                assert!(!a_reporter.notarizations.lock().contains_key(&View::new(1)));
+                assert!(!a_reporter.certifications.lock().contains_key(&View::new(2)));
+
+                let c_reporter = &honest_reporters[&c];
+                assert!(c_reporter.notarizations.lock().contains_key(&View::new(22)));
+                assert!(!c_reporter.notarizations.lock().contains_key(&View::new(21)));
+                assert!(!c_reporter.certifications.lock().contains_key(&View::new(22)));
+
+                panic!(
+                    "all honest leaders exhausted a term, but recursive parent repair never finalized"
+                );
+            }
             for (idx, reporter) in honest_reporters.iter() {
                 assert!(
                     reporter
