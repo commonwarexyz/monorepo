@@ -1208,9 +1208,9 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// Initialize a new `Journal` instance.
     ///
     /// All backing blobs are opened during initialization. Recovery scans the two newest blobs,
-    /// skipping blobs and pages the checkpoint watermark already acknowledges, to establish
-    /// their contiguous valid-page prefixes without decoding journal items. The `replay` method
-    /// can be used to iterate over all items in the `Journal`.
+    /// skipping blobs and pages the checkpoint watermark already acknowledges, and truncates
+    /// each to the whole items backed by valid pages. The `replay` method can be used to
+    /// iterate over all items in the `Journal`.
     pub async fn init(context: E, cfg: Config) -> Result<Self, Error> {
         Ok(Self(Box::new(Inner::init(context, cfg).await?)))
     }
