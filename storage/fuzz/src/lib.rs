@@ -5,7 +5,8 @@ use commonware_runtime::{
     deterministic::{self, PartialWriteMode},
     mocks::PendingSyncs,
 };
-use commonware_utils::{Probability, probability};
+use commonware_utils::{Probability, TestRng, probability};
+use rand::{Rng as _, RngExt as _};
 use std::future::Future;
 
 /// Complete the oldest parked durability completion, if any.
@@ -66,29 +67,40 @@ fn recovery_fault_config(seed: u64) -> deterministic::FaultConfig {
     config
 }
 
-/// Run one ordinary recovery attempt with a mutable storage fault enabled, then crash.
+/// Run a chain of 1..=4 recovery attempts, each with a mutable storage fault enabled and
+/// each crashing into the next, then return the final crash image.
 ///
-/// `fault_seed` selects the mutation, failure and retention rates, and partial-write mode.
+/// `fault_seed` seeds an rng that draws the chain depth and a fresh fault selector per
+/// attempt (mutation, failure and retention rates, and partial-write mode). Chaining
+/// interrupts the recovery of an already-interrupted recovery, so images reachable only
+/// through repeated repair interruption are also explored.
 ///
-/// The recovered object or error is discarded because mutable-operation errors retire the
-/// instance. The fault config is cleared before the crash (retention policies bind when a
-/// write is issued), so the returned checkpoint recovers fault-free.
+/// Each attempt's recovered object or error is discarded because mutable-operation errors
+/// retire the instance. The fault config is cleared before each crash (retention policies
+/// bind when a write is issued), so the returned checkpoint recovers fault-free.
 pub fn faulted_recovery<F, Fut, T, E>(
-    checkpoint: deterministic::Checkpoint,
+    mut checkpoint: deterministic::Checkpoint,
     fault_seed: u64,
     recover: F,
 ) -> deterministic::Checkpoint
 where
-    F: FnOnce(deterministic::Context) -> Fut,
+    F: Fn(deterministic::Context) -> Fut + Clone,
     Fut: Future<Output = Result<T, E>>,
 {
-    let (_, checkpoint) =
-        deterministic::Runner::from(checkpoint).start_and_recover(move |context| async move {
-            let config = context.storage_fault_config();
-            *config.write() = recovery_fault_config(fault_seed);
-            drop(recover(context).await);
-            *config.write() = deterministic::FaultConfig::default();
-        });
+    let mut rng = TestRng::new(fault_seed);
+    let depth = rng.random_range(1..=4);
+    for _ in 0..depth {
+        let seed = rng.next_u64();
+        let recover = recover.clone();
+        let (_, next) =
+            deterministic::Runner::from(checkpoint).start_and_recover(move |context| async move {
+                let config = context.storage_fault_config();
+                *config.write() = recovery_fault_config(seed);
+                drop(recover(context).await);
+                *config.write() = deterministic::FaultConfig::default();
+            });
+        checkpoint = next;
+    }
     checkpoint
 }
 

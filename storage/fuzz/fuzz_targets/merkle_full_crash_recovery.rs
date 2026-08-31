@@ -300,22 +300,25 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
     });
 
     let recovery_partition_suffix = partition_suffix.clone();
-    let checkpoint = faulted_recovery(checkpoint, input.seed, move |ctx| async move {
-        let hasher = StandardHasher::<Sha256>::new(ForwardFold);
-        Merkle::<F>::init(
-            ctx.child("faulted_recovery"),
-            &hasher,
-            merkle_config(
-                &recovery_partition_suffix,
-                &ctx,
-                page_size,
-                page_cache_size,
-                items_per_blob,
-                write_buffer,
-                replay_buffer,
-            ),
-        )
-        .await
+    let checkpoint = faulted_recovery(checkpoint, input.seed, move |ctx| {
+        let recovery_partition_suffix = recovery_partition_suffix.clone();
+        async move {
+            let hasher = StandardHasher::<Sha256>::new(ForwardFold);
+            Merkle::<F>::init(
+                ctx.child("faulted_recovery"),
+                &hasher,
+                merkle_config(
+                    &recovery_partition_suffix,
+                    &ctx,
+                    page_size,
+                    page_cache_size,
+                    items_per_blob,
+                    write_buffer,
+                    replay_buffer,
+                ),
+            )
+            .await
+        }
     });
 
     // Phase 2: Recover and verify consistency

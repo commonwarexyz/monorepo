@@ -521,17 +521,20 @@ fn fuzz(input: FuzzInput) {
     });
 
     let recovery_partition = partition_name.clone();
-    let checkpoint = faulted_recovery(checkpoint, input.seed, move |ctx| async move {
-        let queue_cfg = Config {
-            partition: recovery_partition,
-            items_per_section,
-            compression: None,
-            codec_config: ((0usize..).into(), ()),
-            page_cache: CacheRef::from_pooler(&ctx, page_size, page_cache_size),
-            write_buffer,
-            replay_buffer,
-        };
-        Queue::<_, Vec<u8>>::init(ctx.child("faulted_recovery"), queue_cfg).await
+    let checkpoint = faulted_recovery(checkpoint, input.seed, move |ctx| {
+        let recovery_partition = recovery_partition.clone();
+        async move {
+            let queue_cfg = Config {
+                partition: recovery_partition,
+                items_per_section,
+                compression: None,
+                codec_config: ((0usize..).into(), ()),
+                page_cache: CacheRef::from_pooler(&ctx, page_size, page_cache_size),
+                write_buffer,
+                replay_buffer,
+            };
+            Queue::<_, Vec<u8>>::init(ctx.child("faulted_recovery"), queue_cfg).await
+        }
     });
 
     // Recovery phase - re-initialize queue from checkpoint

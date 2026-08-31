@@ -961,18 +961,17 @@ fn faulted_restart<J: FuzzJournal + Send + 'static>(
 where
     J::Config: Send,
 {
-    faulted_recovery(
-        checkpoint,
-        params.recovery_seed ^ cycle,
-        move |ctx| async move {
+    faulted_recovery(checkpoint, params.recovery_seed ^ cycle, move |ctx| {
+        let partition = partition.clone();
+        async move {
             let cfg = J::config(&partition, &ctx, &params);
             let ctx = ctx.child("faulted_recovery");
             match reset {
                 Some(target) => J::init_at_size(ctx, cfg, target).await,
                 None => J::init(ctx, cfg).await,
             }
-        },
-    )
+        }
+    })
 }
 
 /// Split the operation stream into one [Cycle] per crash, cutting at each `Crash` or `Reset`

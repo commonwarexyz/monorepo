@@ -327,12 +327,15 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
     });
 
     let recovery_suffix = suffix.clone();
-    let checkpoint = faulted_recovery(checkpoint, input.seed, move |ctx| async move {
-        Db::<F>::init(
-            ctx.child("faulted_recovery"),
-            make_config(&ctx, &recovery_suffix, params),
-        )
-        .await
+    let checkpoint = faulted_recovery(checkpoint, input.seed, move |ctx| {
+        let recovery_suffix = recovery_suffix.clone();
+        async move {
+            Db::<F>::init(
+                ctx.child("faulted_recovery"),
+                make_config(&ctx, &recovery_suffix, params),
+            )
+            .await
+        }
     });
 
     // Phase 2: Recover and verify consistency.
