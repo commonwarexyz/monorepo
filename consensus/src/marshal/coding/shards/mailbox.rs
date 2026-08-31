@@ -172,6 +172,7 @@ where
     }
 }
 
+/// Retains overflowed messages in FIFO order.
 impl<B, C, H, P> Policy for Message<B, C, H, P>
 where
     B: CertifiableBlock,
@@ -347,5 +348,54 @@ where
     /// Digest subscriptions remain open, and later consensus notifications may recreate state.
     pub fn retire(&self, update: Retirement<Commitment<B, C, H>>) {
         let _ = self.sender.enqueue(Message::Retire { update });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        marshal::{coding::types::coding_config_for_participants, mocks::block::EmptyBlock},
+        types::{Epoch, Height, View},
+    };
+    use commonware_coding::ReedSolomon;
+    use commonware_cryptography::{
+        Committable, Digest as _, Sha256, ed25519, sha256::Digest as Sha256Digest,
+    };
+    use commonware_parallel::Sequential;
+
+    type B = EmptyBlock<Sha256>;
+    type H = Sha256;
+    type C = ReedSolomon<H>;
+    type TestMessage = Message<B, C, H, ed25519::PublicKey>;
+
+    #[test]
+    fn policy_drains_fifo() {
+        let block = CodedBlock::<B, C, H>::new(
+            B::new(Sha256Digest::EMPTY, Height::new(1), 1),
+            coding_config_for_participants(4),
+            &Sequential,
+        );
+        let commitment = block.commitment();
+        let round = Round::new(Epoch::zero(), View::new(1));
+
+        let mut overflow = Pending::default();
+        <TestMessage as Policy>::handle(&mut overflow, Message::Notarized { commitment, round });
+        let (response, _get_rx) = oneshot::channel();
+        <TestMessage as Policy>::handle(
+            &mut overflow,
+            Message::GetByCommitment {
+                commitment,
+                response,
+            },
+        );
+        let mut drained = Vec::new();
+        overflow.drain(|message| {
+            drained.push(message);
+            None
+        });
+        assert_eq!(drained.len(), 2);
+        assert!(matches!(&drained[0], TestMessage::Notarized { .. }));
+        assert!(matches!(&drained[1], TestMessage::GetByCommitment { .. }));
     }
 }

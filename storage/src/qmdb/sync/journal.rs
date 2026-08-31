@@ -241,6 +241,7 @@ mod tests {
             items_per_blob: NZU64!(5),
             page_cache: CacheRef::from_pooler(pooler, NZU16!(44), NZUsize!(3)),
             write_buffer: NZUsize!(2048),
+            replay_buffer: NZUsize!(2048),
         }
     }
 
@@ -251,6 +252,7 @@ mod tests {
             compression: None,
             codec_config: (),
             write_buffer: NZUsize!(2048),
+            replay_buffer: NZUsize!(2048),
             page_cache: CacheRef::from_pooler(pooler, NZU16!(44), NZUsize!(3)),
         }
     }

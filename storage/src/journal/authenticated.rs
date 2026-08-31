@@ -183,21 +183,23 @@ impl<F: Family, D: Digest, Item: Send + Sync, S: Strategy> MerkleizedBatch<F, D,
     /// Inclusion proof for the element at `loc`.
     pub fn proof(
         &self,
+        base: &Mem<F, D>,
         hasher: &impl merkle::hasher::Hasher<F, Digest = D>,
         loc: Location<F>,
         inactive_peaks: usize,
     ) -> Result<Proof<F, D>, merkle::Error<F>> {
-        self.inner.proof(hasher, loc, inactive_peaks)
+        self.inner.proof(base, hasher, loc, inactive_peaks)
     }
 
     /// Inclusion proof for all elements in `range`.
     pub fn range_proof(
         &self,
+        base: &Mem<F, D>,
         hasher: &impl merkle::hasher::Hasher<F, Digest = D>,
         range: core::ops::Range<Location<F>>,
         inactive_peaks: usize,
     ) -> Result<Proof<F, D>, merkle::Error<F>> {
-        self.inner.range_proof(hasher, range, inactive_peaks)
+        self.inner.range_proof(base, hasher, range, inactive_peaks)
     }
 
     /// The items added in this batch.
@@ -666,6 +668,25 @@ where
             .await
     }
 
+    /// Inclusion proof for the items `batch` appends, anchored at the batch's speculative tip.
+    ///
+    /// Nodes below the batch chain are read from this journal's
+    /// [Merkle store][crate::merkle::mem::Mem], which retains them at least until
+    /// the batch's changes are flushed.
+    pub fn speculative_proof(
+        &self,
+        batch: &MerkleizedBatch<F, H::Digest, C::Item, S>,
+        inactive_peaks: usize,
+    ) -> Result<Proof<F, H::Digest>, Error<F>> {
+        let end = batch.size();
+        let start = Location::new(end - batch.items().len() as u64);
+        self.merkle
+            .with_mem(|mem| {
+                batch.range_proof(mem, &self.hasher, start..Location::new(end), inactive_peaks)
+            })
+            .map_err(Error::Merkle)
+    }
+
     /// Generate a historical proof with respect to the state of the Merkle structure when it had
     /// `historical_leaves` leaves.
     ///
@@ -1132,6 +1153,7 @@ mod tests {
             metadata_partition: format!("mmr-metadata-{suffix}"),
             items_per_blob: NZU64!(11),
             write_buffer: NZUsize!(1024),
+            replay_buffer: NZUsize!(1024),
             strategy,
             page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         }
@@ -1148,6 +1170,7 @@ mod tests {
             partition: format!("journal-{suffix}"),
             items_per_blob: NZU64!(7),
             write_buffer: NZUsize!(1024),
+            replay_buffer: NZUsize!(1024),
             page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }

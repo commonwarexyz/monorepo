@@ -12,6 +12,7 @@ use core::num::{NonZeroU16, NonZeroUsize};
 use rand::RngExt as _;
 
 const WRITE_BUFFER: NonZeroUsize = NZUsize!(1024);
+const REPLAY_BUFFER: NonZeroUsize = NZUsize!(1024);
 const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
@@ -36,7 +37,7 @@ impl StorageWorkload for FreezerWorkload {
             table_initial_size: 4,
             table_resize_frequency: 1,
             table_resize_chunk_size: 4,
-            table_replay_buffer: WRITE_BUFFER,
+            table_replay_buffer: REPLAY_BUFFER,
             codec_config: (),
         };
         let mut freezer =
