@@ -1236,6 +1236,7 @@ dependencies = [
  "commonware-cryptography",
  "commonware-macros",
  "commonware-p2p",
+ "commonware-parallel",
  "commonware-runtime",
  "commonware-utils",
  "thiserror 2.0.18",

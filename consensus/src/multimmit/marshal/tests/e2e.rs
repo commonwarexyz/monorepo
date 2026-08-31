@@ -201,6 +201,8 @@ async fn start_attached_marshal(
             priority: false,
             codec_config: (),
             peer_provider: oracle.manager(),
+            blocker: control.clone(),
+            strategy: Sequential,
         },
     );
     let broadcast = broadcast_engine.start(broadcast_network);
@@ -517,6 +519,8 @@ impl Harness {
                 priority: false,
                 codec_config: (),
                 peer_provider: self.oracle.manager(),
+                blocker: control.clone(),
+                strategy: Sequential,
             },
         );
         let broadcast = broadcast_engine.start(broadcast_network);

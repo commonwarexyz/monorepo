@@ -567,6 +567,11 @@ fn main() {
         network.start();
 
         // Start complete-block broadcast, durable marshal storage, and exact peer backfill.
+        // Body decode embeds the full-body digest check, so inbound bodies are decoded on the
+        // shared verification pool instead of the broadcast engine's event loop.
+        let compute_threads =
+            NonZeroUsize::new(config.compute_threads).expect("compute threads must be non-zero");
+        let strategy = Rayon::new(compute_threads).expect("verification pool starts");
         let identity = committee.identities[index].clone();
         let (broadcast_engine, buffer) = buffered::Engine::new(
             context.child("body_broadcast"),
@@ -577,6 +582,8 @@ fn main() {
                 priority: false,
                 codec_config: application::Body::codec_config(config.body_size),
                 peer_provider: oracle.clone(),
+                blocker: oracle.clone(),
+                strategy: strategy.clone(),
             },
         );
         let broadcast_handle = broadcast_engine.start(marshal_broadcast);
@@ -654,9 +661,6 @@ fn main() {
             preferred_resolver_peers,
         );
         let resolver_handle = resolver_engine.start(marshal_resolver);
-        let compute_threads =
-            NonZeroUsize::new(config.compute_threads).expect("compute threads must be non-zero");
-        let strategy = Rayon::new(compute_threads).expect("verification pool starts");
         let application_context = context.child("application");
         let application_reporter = gui.as_ref().map_or(
             ApplicationReporter::Headless(application::NoopReporter),
