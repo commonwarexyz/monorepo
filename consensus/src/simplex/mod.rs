@@ -7201,28 +7201,26 @@ mod tests {
         );
     }
 
-    /// Two dead-leader terms leave the honest floors split across different
-    /// terms. Recovery requires fetching each missing parent notarization from
-    /// an honest validator instead of the unavailable term leader.
+    /// Two terms led by an offline validator give the honest validators
+    /// different certified floors. Progress requires a missing parent
+    /// notarization from an available validator.
     ///
     /// Terms are five views long and the offline participant leads term 1
     /// (views 1..=5) and term 5 (views 21..=25).
     ///
-    /// Pre-GST state (built with an injector while all validator links are
-    /// down):
+    /// An injector builds this pre-GST state while validator links are down:
     /// - `b` and `c` certify views 1 and 2 (term 1). `a` never sees them.
     /// - `a` and `b` certify views 21 and 22 (term 5). `c` never sees them.
     /// - Terms 2..=4 are nullified at their term starts for everyone.
     ///
-    /// After GST the offline participant is silent, so quorum is exactly the
-    /// three honest participants. Every honest proposal names the proposer's
-    /// own highest certified view, which sits in a term one of the other honest
-    /// participants never certified.
+    /// After GST, the three honest participants form the only quorum. Each
+    /// proposal names its proposer's highest certified view. One other honest
+    /// participant has not certified that term.
     ///
-    /// `suppress_backfill` decides where the deprived participant's covering
-    /// nullification sits. At the term start it hides the whole term from the
-    /// untargeted background backfill; one view later the backfill can still
-    /// see (and repair) the term's head.
+    /// `suppress_backfill` selects the deprived participant's covering
+    /// nullification. A term-start nullification suppresses background repair
+    /// for the term. A nullification one view later permits repair of the term
+    /// head.
     fn stable_leader_cross_term_certified_split<S, F, L>(
         mut fixture: F,
         elector: L,
@@ -7253,7 +7251,7 @@ mod tests {
             .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
-            // Pick an epoch that makes the same participant lead terms 1 and 5.
+            // Choose an epoch where the same participant leads terms 1 and 5.
             let epoch = Epoch::new(2);
             let participant_set: Set<PublicKey> = participants.clone().try_into().unwrap();
             let schedule = elector.clone().build(&participant_set);
@@ -7294,8 +7292,8 @@ mod tests {
             let proposal_2 =
                 Proposal::new(Round::new(epoch, View::new(2)), View::new(1), payload_2);
             // Term 5 chain (views 21 and 22), certified by `a` and `b`. The
-            // parent is genesis so `a`, which never certified term 1, could
-            // have voted for it.
+            // view-21 proposal names genesis, so `a` can vote without
+            // certifying term 1.
             let payload_21 = Sha256::hash(&[b"V21"]);
             let proposal_21 =
                 Proposal::new(Round::new(epoch, View::new(21)), View::new(0), payload_21);
@@ -7390,7 +7388,8 @@ mod tests {
                 );
             }
 
-            // Start honest engines before GST so preload rebroadcasts are lost.
+            // Start honest engines before GST. The partition drops their
+            // preload broadcasts.
             let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut honest_reporters = HashMap::new();
             for (idx, validator) in participants.iter().enumerate() {
@@ -7492,8 +7491,7 @@ mod tests {
             // End the partition (GST).
             link_validators(&mut oracle, &participants, Action::Link(link.clone()), None).await;
 
-            // Wait until every honest validator finalizes in the first
-            // post-GST term.
+            // Wait until every honest validator finalizes after GST.
             let target = View::new(26);
             let mut finalizers = Vec::new();
             for (idx, reporter) in honest_reporters.iter_mut() {
@@ -7524,7 +7522,7 @@ mod tests {
                         .lock()
                         .keys()
                         .any(|view| *view >= target),
-                    "reporter {idx} never finalized the post-GST term"
+                    "reporter {idx} never finalized after GST"
                 );
             }
             let c_certifications = honest_reporters[&c].certifications.lock();

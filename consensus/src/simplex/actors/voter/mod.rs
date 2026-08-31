@@ -4034,11 +4034,10 @@ mod tests {
             }
             while resolver_receiver.recv().now_or_never().flatten().is_some() {}
 
-            // Deliver notarization(3), skipping notarization(2): the voter
-            // observed the certificate broadcast for view 3 but missed the one
-            // for view 2. Certifying view 3 requires view 2's exact-view
-            // certificate, so the voter must fetch it. Certification recovery
-            // is untargeted because any validator may hold the certificate.
+            // Deliver notarization(3) without notarization(2). The voter saw
+            // the certificate for view 3 but missed the one for view 2.
+            // Certifying view 3 requires the exact certificate for view 2, so
+            // the voter asks any validator for it.
             mailbox.recovered(Certificate::Notarization(notarization_3));
             assert!(matches!(
                 resolver_receiver.recv().await.unwrap(),
@@ -4072,7 +4071,7 @@ mod tests {
             }
 
             // Deliver the fetched parent. The voter must certify the parent
-            // before its already-held child, then resume finalize voting.
+            // before the child and then resume finalize voting.
             while batcher_receiver.recv().now_or_never().flatten().is_some() {}
             mailbox.recovered(Certificate::Notarization(notarization_2));
             let mut certified = Vec::new();

@@ -978,8 +978,8 @@ mod tests {
         assert_targeted_fetch_does_not_restrict_existing_backfill(0);
     }
 
-    /// Certification recovery can fetch a missing mid-term parent from any
-    /// validator that holds it while the old leader is unavailable.
+    /// Certification recovery fetches a missing mid-term parent from an
+    /// available holder when the term leader is unavailable.
     #[test_async]
     async fn untargeted_parent_fetch_uses_available_holder() {
         let runtime = deterministic::Runner::timed(Duration::from_secs(10));
@@ -1089,13 +1089,12 @@ mod tests {
                 );
                 holder_mailbox.updated(Certificate::Notarization(parent.clone()));
                 holder_mailbox.certified(parent.view(), true);
-                // A holder exits when its mailbox closes, so keep the handles
-                // alive until the fetch completes.
+                // Keep the holder and its mailboxes alive until the fetch completes.
                 holders.push((handle, holder_mailbox, voter_receiver));
             }
 
-            // The certification request must not depend on the disconnected
-            // old leader. The voter-side regression supplies the held child.
+            // Request the parent without targeting the disconnected term
+            // leader. The voter test covers the child that triggers this request.
             context.sleep(Duration::from_millis(10)).await;
             requester_mailbox.resolve(View::new(3), View::new(2), Kind::Notarization, None);
 

@@ -1202,10 +1202,10 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             return None;
         }
 
-        // Certification exempts term starts, so the candidate and its parent
-        // sit mid-term. The fetch is untargeted: a resolver target is
-        // exclusive, and validators other than the term's leader (which may
-        // be unreachable) hold the parent's notarization.
+        // Only mid-term candidates require the previous view as their parent,
+        // so the candidate and parent are in the same term. Keep this fetch
+        // untargeted because resolver targets are exclusive and any validator
+        // can hold the parent's notarization.
         Some(CertificateFetch {
             proposal: *proposal_view,
             view: *parent_view,
@@ -3693,8 +3693,7 @@ mod tests {
             assert_eq!(fetches[0].proposal, View::new(6));
             assert_eq!(fetches[0].view, View::new(5));
             assert!(matches!(fetches[0].kind, Kind::Notarization));
-            // A same-term round still records the old leader, but
-            // certification recovery must not depend on that peer.
+            // Confirm that a same-term round records the old leader.
             assert!(state.leader_index(View::new(2)).is_some());
 
             // Repair cascades one view at a time: delivering notarization(5)
