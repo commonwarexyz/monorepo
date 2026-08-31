@@ -408,6 +408,9 @@ where
     /// Panics if the key is already pending.
     pub fn add_retry(&mut self, key: Key) {
         assert!(!self.pending.contains(&key));
+        // Delayed retries begin a new availability sweep. Only add_missing_retry preserves the
+        // peers already tried while immediately walking the current sweep.
+        self.missing_peers.remove(&key);
         // A previous pending key may have pushed the waiter far into the future
         // because no eligible peer could serve it. Clear the stale global waiter
         // so this retry can drive pending processing again.
@@ -2299,6 +2302,47 @@ mod tests {
             context.sleep(Duration::from_millis(100)).await;
             fetcher.fetch(&mut sender);
             assert!(attempted.contains(&active_peer(&fetcher, &key)));
+        });
+    }
+
+    #[test]
+    fn missing_then_invalid_starts_a_new_missing_cycle() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            let me = PrivateKey::from_seed(0).public_key();
+            let missing = PrivateKey::from_seed(1).public_key();
+            let invalid = PrivateKey::from_seed(2).public_key();
+            let mut fetcher = create_test_fetcher_with_preferred::<SuccessMockSender>(
+                context.child("fetcher"),
+                [missing.clone()],
+            );
+            fetcher.reconcile(&[me, missing.clone(), invalid.clone()]);
+            let mut sender = WrappedSender::new(
+                context.network_buffer_pool().clone(),
+                SuccessMockSender::default(),
+            );
+            let key = MockKey(1);
+
+            fetcher.add_ready(key.clone());
+            fetcher.fetch(&mut sender);
+            assert_eq!(active_peer(&fetcher, &key), missing);
+
+            let id = *fetcher.key_to_id.get(&key).unwrap();
+            assert_eq!(fetcher.pop_missing(id, &missing), Some(key.clone()));
+            fetcher.add_missing_retry(key.clone());
+            fetcher.fetch(&mut sender);
+            assert_eq!(active_peer(&fetcher, &key), invalid);
+
+            let id = *fetcher.key_to_id.get(&key).unwrap();
+            let (response, elapsed) = fetcher.pop_response(id, &invalid).unwrap();
+            assert_eq!(response, key);
+            fetcher.record_response(&invalid, elapsed);
+            fetcher.block(invalid);
+            fetcher.add_retry(key.clone());
+
+            context.sleep(Duration::from_millis(100)).await;
+            fetcher.fetch(&mut sender);
+            assert_eq!(active_peer(&fetcher, &key), missing);
         });
     }
 
