@@ -17,14 +17,6 @@ use commonware_utils::Array;
 use std::collections::{BTreeMap, BTreeSet, btree_map};
 use tracing::debug;
 
-/// Preserve the archive's error classification for journal-owned metadata operations.
-fn map_journal_error(error: crate::journal::Error) -> Error {
-    match error {
-        crate::journal::Error::Metadata(error) => Error::Metadata(error),
-        error => Error::Journal(error),
-    }
-}
-
 /// Index entry for the archive.
 #[derive(Debug, Clone, PartialEq)]
 struct Record<K: Array> {
@@ -212,8 +204,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
             metadata_partition,
             commonware_runtime::ReadOptions::default(),
         )
-        .await
-        .map_err(map_journal_error)?;
+        .await?;
 
         // Rebuild every lookup view from the single retained prefix selected by oversized
         // recovery.
@@ -237,7 +228,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
             keys.insert(&entry.key, entry.index);
             intervals.insert(entry.index);
         }
-        let oversized = replay.finish_tracked().await.map_err(map_journal_error)?;
+        let oversized = replay.finish_tracked().await?;
         debug!("archive initialized");
 
         // Initialize metrics
@@ -392,11 +383,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         let section = self.section(index);
         let entry = Record::new(index, key.clone(), 0, 0);
         let position;
-        (self.oversized, position, _, _) = self
-            .oversized
-            .append(section, entry, &data)
-            .await
-            .map_err(map_journal_error)?;
+        (self.oversized, position, _, _) = self.oversized.append(section, entry, &data).await?;
 
         // Store index location
         match self.indices.entry(index) {
@@ -439,7 +426,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         debug!(min, "pruning archive");
 
         // Prune the section's index, values, and recovery markers together.
-        (self.oversized, _) = self.oversized.prune(min).await.map_err(map_journal_error)?;
+        (self.oversized, _) = self.oversized.prune(min).await?;
 
         // Discard synchronization state owned by pruned sections.
         self.pending = self.pending.split_off(&min);
@@ -494,8 +481,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         self.oversized = self
             .oversized
             .sync_tracked(&self.requested, &active)
-            .await
-            .map_err(map_journal_error)?;
+            .await?;
         self.requested.clear();
         Ok(self)
     }
@@ -513,8 +499,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         (self.oversized, handle) = self
             .oversized
             .start_sync_tracked(&self.requested, &active)
-            .await
-            .map_err(map_journal_error)?;
+            .await?;
         Ok((self, handle))
     }
 
@@ -550,8 +535,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
 
     /// See [crate::archive::Archive::destroy].
     async fn destroy(self) -> Result<(), Error> {
-        self.oversized.destroy().await.map_err(map_journal_error)?;
-        Ok(())
+        Ok(self.oversized.destroy().await?)
     }
 
     /// See [crate::archive::MultiArchive::get_all].
@@ -631,11 +615,8 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> std::fmt::Debug for Ar
 impl<T: Translator, E: Context, K: Array, V: CodecShared> Archive<T, E, K, V> {
     /// Initialize a new `Archive` instance.
     ///
-    /// The in-memory index is populated by replaying the index journal. Value frames not covered by
-    /// a durable validation marker are CRC-validated before this returns.
-    ///
-    /// Recovery relies on the runtime's startup durability guarantee. Before reopening the same
-    /// storage within a running process, synchronize the previous owner before dropping it.
+    /// Replays the index journal to rebuild the in-memory index, CRC-validating every value
+    /// above its section's durable marker.
     pub async fn init(context: E, cfg: Config<T, V::Cfg>) -> Result<Self, Error> {
         Ok(Self(Box::new(Inner::init(context, cfg).await?)))
     }

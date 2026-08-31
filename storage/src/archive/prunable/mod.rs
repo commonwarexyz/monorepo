@@ -221,7 +221,7 @@ mod tests {
     use super::*;
     use crate::{
         archive::{Archive as _, Error, Identifier, MultiArchive as _},
-        journal::Error as JournalError,
+        journal::{Error as JournalError, segmented::glob::corrupt_frame},
         translator::{FourCap, TwoCap},
     };
     use commonware_codec::{DecodeExt, Error as CodecError, FixedSize};
@@ -281,29 +281,10 @@ mod tests {
         }
     }
 
-    const I32_VALUE_FRAME_SIZE: u64 = 8;
-
-    async fn corrupt_value_frame(
-        context: &deterministic::Context,
-        partition: &str,
-        section: u64,
-        position: u64,
-    ) {
-        let offset = position * I32_VALUE_FRAME_SIZE;
-        let (blob, size) = context
-            .open(partition, &section.to_be_bytes())
-            .await
-            .unwrap();
-        assert!(offset < size);
-        let byte = blob
-            .read_at(offset, 1, ReadOptions::default())
-            .await
-            .unwrap()
-            .coalesce();
-        blob.write_at(offset, vec![byte.as_ref()[0] ^ 0xFF], WriteOptions::SYNC)
-            .await
-            .unwrap();
-    }
+    /// Physical size of one uncompressed i32 value frame in the value journal, per the
+    /// glob's frame layout (encoded value followed by its CRC32).
+    const I32_VALUE_FRAME_SIZE: u64 =
+        (i32::SIZE + crate::journal::segmented::glob::CHECKSUM_SIZE) as u64;
 
     #[test_traced]
     fn test_put_after_start_sync_is_accepted_before_handle_completes() {
@@ -440,12 +421,18 @@ mod tests {
             let archive = Archive::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
+
+            // Raise the prune floor above index 0, then buffer an unsynced write to retained
+            // section 2.
             let archive = archive.prune(1).await.expect("Failed to set prune floor");
             let archive = archive
                 .put(2, test_key("pending"), 20)
                 .await
                 .expect("Failed to buffer retained write");
 
+            // The below-floor put stores nothing, yet the returned handle must cover every
+            // previously accepted write. The two parked operations are section 2's index and
+            // value syncs.
             assert!(pending.lock().is_empty());
             let (archive, handle) = archive
                 .put_start_sync(0, test_key("pruned"), 0)
@@ -457,6 +444,8 @@ mod tests {
                 "the sync combinator must cover writes accepted before its below-floor put"
             );
 
+            // Releasing the parked syncs completes the handle, proving the covered write
+            // durable while the below-floor index stays absent.
             release_pending_syncs(&pending);
             handle.await.expect("covering sync should complete");
             assert_eq!(archive.get(Identifier::Index(2)).await.unwrap(), Some(20));
@@ -477,12 +466,17 @@ mod tests {
             let archive = Archive::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
+
+            // Raise the prune floor above index 0, then buffer an unsynced write to retained
+            // section 2.
             let archive = archive.prune(1).await.expect("Failed to set prune floor");
             let archive = archive
                 .put_multi(2, test_key("pending"), 20)
                 .await
                 .expect("Failed to buffer retained write");
 
+            // Run the blocking combinator in a spawned task so the test can observe whether it
+            // returns while the covering sync is still parked.
             pending.arm();
             let completed = Arc::new(AtomicUsize::new(0));
             let completed_clone = completed.clone();
@@ -495,6 +489,8 @@ mod tests {
                 commonware_runtime::reschedule().await;
             }
 
+            // The below-floor put stores nothing, yet the blocking call must not return before
+            // the previously buffered write is durable.
             assert_eq!(
                 completed.load(Ordering::Relaxed),
                 0,
@@ -506,6 +502,8 @@ mod tests {
                 .await
                 .expect("put_multi_sync task failed")
                 .expect("put_multi_sync failed");
+
+            // The covered write survives while the below-floor index stays absent.
             assert_eq!(archive.get_all(2).await.unwrap(), Some(vec![20]));
             assert_eq!(archive.get_all(0).await.unwrap(), None);
         });
@@ -933,6 +931,9 @@ mod tests {
             for (name, bad_position, retained) in [("first", 0, 0), ("middle", 1, 1)] {
                 let cfg = test_config(&context, &format!("invalid-{name}"), NZU64!(4));
 
+                // Seed three values in one section. The sync leaves them durable with no marker
+                // (the active section's boundary stays debt), so reopen must CRC-validate every
+                // frame from position 0.
                 let mut archive = Archive::init(context.child(name), cfg.clone())
                     .await
                     .unwrap();
@@ -945,7 +946,14 @@ mod tests {
                 archive = archive.sync().await.unwrap();
                 drop(archive);
 
-                corrupt_value_frame(&context, &cfg.value_partition, 0, bad_position).await;
+                corrupt_frame(
+                    &context,
+                    &cfg.value_partition,
+                    &0u64.to_be_bytes(),
+                    bad_position,
+                    I32_VALUE_FRAME_SIZE,
+                )
+                .await;
 
                 // Every frame after the first invalid one belongs to the same uncommitted suffix,
                 // even if its own CRC is valid:
@@ -973,6 +981,8 @@ mod tests {
                 }
                 drop(archive);
 
+                // The truncation was made durable before the first reopen returned: a second
+                // reopen observes the same retained prefix.
                 let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child(name), cfg)
                     .await
                     .unwrap();
@@ -987,6 +997,8 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let cfg = test_config(&context, "empty-rewind", NZU64!(4));
 
+            // Seed one durable value, then drop the sidecar so startup cannot consult markers
+            // and must reconcile the journals alone.
             let archive = Archive::init(context.child("seed"), cfg.clone())
                 .await
                 .unwrap();
@@ -1058,6 +1070,9 @@ mod tests {
             }
             pending.unblock();
             let archive = task.await.unwrap().unwrap();
+
+            // The repaired empty section accepts a fresh write at the reclaimed offsets, and
+            // the write survives reopen.
             let archive = archive.put(0, test_key("new"), 20).await.unwrap();
             let archive = archive.sync().await.unwrap();
             drop(archive);
@@ -1081,6 +1096,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = test_config(&context, "marker-skip", NZU64!(4));
 
+            // Seed two durable values with no published marker.
             let mut archive = Archive::init(context.child("seed"), cfg.clone())
                 .await
                 .unwrap();
@@ -1113,6 +1129,8 @@ mod tests {
             assert_eq!(archive.get(Identifier::Index(0)).await.unwrap(), Some(10));
             assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), Some(20));
 
+            // Append a third value above the marker. Its boundary stays debt, so the third open
+            // must validate the suffix and adopt the covered pair into one contiguous range.
             let archive = archive.put(2, test_key("two"), 30).await.unwrap();
             let archive = archive.sync().await.unwrap();
             drop(archive);
@@ -1140,13 +1158,22 @@ mod tests {
                 .unwrap();
             let archive = archive.put(0, test_key("zero"), 10).await.unwrap();
             let archive = archive.put(1, test_key("one"), 20).await.unwrap();
+
+            // The first sync proves the data durable. The second publishes the resulting marker.
             let archive = archive.sync().await.unwrap();
             let archive = archive.sync().await.unwrap();
             drop(archive);
 
             // Damage only the covered interior frame. Initialization succeeds because the marker
             // skips it, while a direct read still exposes its invalid checksum.
-            corrupt_value_frame(&context, &cfg.value_partition, 0, 0).await;
+            corrupt_frame(
+                &context,
+                &cfg.value_partition,
+                &0u64.to_be_bytes(),
+                0,
+                I32_VALUE_FRAME_SIZE,
+            )
+            .await;
             let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("reopen"), cfg)
                 .await
                 .unwrap();
@@ -1168,6 +1195,9 @@ mod tests {
         }
 
         deterministic::Runner::default().start(|context| async move {
+            // Every shape damages data at or below a published marker. Marked bytes were proven
+            // durable before publication, so startup must treat their loss as corruption (or
+            // leave it to lazy reads) without mutating either journal.
             for (name, damage) in [
                 ("missing_index", Damage::MissingIndex),
                 ("missing_values", Damage::MissingValues),
@@ -1179,6 +1209,8 @@ mod tests {
                 let case = context.child(name);
                 let cfg = test_config(&case, name, NZU64!(4));
 
+                // Seed one marked item: the blocking put proves it durable and the trailing
+                // sync publishes its marker.
                 let archive = Archive::init(case.child("seed"), cfg.clone())
                     .await
                     .unwrap();
@@ -1268,6 +1300,8 @@ mod tests {
                     continue;
                 }
 
+                // Failed startups must be byte-stable across repeated opens: rejection happens
+                // before any repair could mutate the marked section.
                 for child in ["first", "second"] {
                     let result =
                         Archive::<_, _, FixedBytes<64>, i32>::init(case.child(child), cfg.clone())
@@ -1310,6 +1344,8 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let cfg = test_config(&context, "floor-order", NZU64!(4));
 
+            // Seed one marked item: the blocking put proves it durable and the trailing sync
+            // publishes its marker.
             let archive =
                 Archive::<_, _, FixedBytes<64>, i32>::init(context.child("seed"), cfg.clone())
                     .await
@@ -1318,6 +1354,8 @@ mod tests {
             let archive = archive.sync().await.unwrap();
             drop(archive);
 
+            // Append trailing junk past the index tail. Alone, this is repairable damage that
+            // suffix repair would truncate on the next open.
             let (index, index_size) = context
                 .open(&cfg.key_partition, &0u64.to_be_bytes())
                 .await
@@ -1346,6 +1384,8 @@ mod tests {
                 .coalesce();
             drop(index);
 
+            // Repeated failed opens must leave the section byte-identical, junk included: the
+            // floor check rejects the section before suffix repair can truncate anything.
             for child in ["first", "second"] {
                 let result =
                     Archive::<_, _, FixedBytes<64>, i32>::init(context.child(child), cfg.clone())
@@ -1382,6 +1422,14 @@ mod tests {
             // Publish a marker for one record while its index occupies only part of the first page.
             let archive = archive.put_sync(0, test_key("zero"), 10).await.unwrap();
             let archive = archive.sync().await.unwrap();
+
+            // A physical page is the logical page plus a two-slot trailer, where each slot is a
+            // two-byte length and a four-byte checksum over that length's prefix of the page:
+            //
+            //   [ records ... pad ......][len0 crc0][len1 crc1]
+            //   0               page_size         +6        +12
+            //
+            // The first write filled slot 0 for one record and left slot 1 zeroed.
             let page_size = usize::from(PAGE_SIZE.get());
             let physical_page_size = page_size + 12;
             let record_size = u64::SIZE + FixedBytes::<64>::SIZE + u64::SIZE + u32::SIZE;
@@ -1433,6 +1481,12 @@ mod tests {
             assert_eq!(new_len, 2 * record_size);
             assert_eq!(new_crc, Crc32::checksum(&new_page[..new_len]));
 
+            // Restore the one-record image, then replay the extended image only through slot
+            // 1's length. The stored page now holds both records' data, a valid slot 0 covering
+            // one record, and a slot 1 that advertises two records with a stale zero checksum:
+            //
+            //   [ record 0 | record 1 | pad ][len0 crc0][len1 crc1]
+            //     persisted prefix ends after len1 --------------^
             index
                 .write_at(0, old_page.clone(), WriteOptions::SYNC)
                 .await
@@ -1462,6 +1516,8 @@ mod tests {
             assert_ne!(torn_crc, Crc32::checksum(&torn_page[..new_len]));
             drop(index);
 
+            // Both value frames survive the torn index write, leaving recovery to decide which
+            // bytes are orphaned.
             let (_, value_size) = context
                 .open(&cfg.value_partition, &0u64.to_be_bytes())
                 .await
@@ -1506,6 +1562,8 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let cfg = test_config(&context, "startup-order", NZU64!(4));
 
+            // Seed one durable value with no published marker, so the next startup must
+            // validate it and derive the marker itself.
             let archive = Archive::init(context.child("seed"), cfg.clone())
                 .await
                 .unwrap();
@@ -1513,6 +1571,8 @@ mod tests {
             let archive = archive.sync().await.unwrap();
             drop(archive);
 
+            // Reopen through the armed wrapper to count every durability operation startup
+            // issues.
             let pending = PendingSyncs::default();
             let delayed = DelayedSyncContext {
                 inner: context.child("delayed"),
@@ -1553,6 +1613,7 @@ mod tests {
             assert_eq!(archive.get(Identifier::Index(0)).await.unwrap(), Some(10));
             drop(archive);
 
+            // The published marker must leave a reopenable archive.
             Archive::<_, _, FixedBytes<64>, i32>::init(context.child("marker_reopen"), cfg)
                 .await
                 .unwrap()
@@ -1567,6 +1628,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let cfg = test_config(&context, "startup-marker-failure", NZU64!(4));
 
+            // Seed one durable value with no published marker, so reopen must derive one.
             let archive = Archive::init(context.child("seed"), cfg.clone())
                 .await
                 .unwrap();
@@ -1574,6 +1636,8 @@ mod tests {
             let archive = archive.sync().await.unwrap();
             drop(archive);
 
+            // Reopen with the armed wrapper. The only durability operation startup issues is
+            // the derived marker sync, left parked.
             let pending = PendingSyncs::default();
             let delayed = DelayedSyncContext {
                 inner: context.child("delayed"),
@@ -1585,6 +1649,8 @@ mod tests {
                 .unwrap();
             assert_eq!(pending.lock().len(), 1);
 
+            // A marker sync failure must not vanish: the next sync call observes the completed
+            // generation and surfaces the failure as a metadata error.
             fail_pending_syncs(&pending);
             assert!(matches!(archive.sync().await, Err(Error::Metadata(_))));
         });
@@ -1626,6 +1692,8 @@ mod tests {
             second.await.unwrap();
             drop(archive);
 
+            // Reopen adopts section 0 through its published marker and validates section 4
+            // above its absent one. Both items must survive.
             let archive = Archive::<_, _, FixedBytes<64>, i32>::init(
                 context.child("first_reopen"),
                 cfg.clone(),
@@ -1659,6 +1727,7 @@ mod tests {
                 .await
                 .unwrap();
 
+            // Prove section 0's single item durable so its boundary becomes publishable debt.
             let (archive, first) = archive
                 .put_start_sync(0, test_key("zero"), 10)
                 .await
@@ -1667,6 +1736,7 @@ mod tests {
             release_pending_syncs(&pending);
             first.await.unwrap();
 
+            // Buffer section 4 and park its blocking sync behind the armed gate.
             let archive = archive.put(4, test_key("four"), 40).await.unwrap();
             pending.arm();
             let completed = Arc::new(AtomicUsize::new(0));
@@ -1716,6 +1786,8 @@ mod tests {
             let archive = task.await.unwrap();
             drop(archive);
 
+            // Both items survive reopen: the published marker adopts section 0 and validation
+            // covers section 4.
             let archive = Archive::<_, _, FixedBytes<64>, i32>::init(
                 delayed.inner.child("first_reopen"),
                 cfg.clone(),
@@ -1739,6 +1811,7 @@ mod tests {
     fn test_sync_delays_immediately_ready_durable_boundary() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            // Started durability operations complete immediately and are only counted.
             let pending = PendingSyncs::default();
             pending.unblock();
             let immediate = DelayedSyncContext {
@@ -1772,6 +1845,7 @@ mod tests {
     fn test_sync_batches_markers_by_active_section() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            // Started durability operations complete immediately and are only counted.
             let pending = PendingSyncs::default();
             pending.unblock();
             let immediate = DelayedSyncContext {
@@ -1843,7 +1917,8 @@ mod tests {
             // The next request observes the completed marker generation and retires caught-up
             // barriers. It must not manufacture a durability proof for section 4: publishing
             // its unproven length as a marker would let a crash that keeps the marker but
-            // loses the in-flight items make every reopen fail.
+            // loses the in-flight items make every reopen fail. The two operations started
+            // here are section 8's index and value syncs.
             let archive = archive.put(8, test_key("eight"), 80).await.unwrap();
             let before = pending.starts();
             let (archive, third) = archive.start_sync().await.unwrap();
@@ -1882,6 +1957,9 @@ mod tests {
             let archive = Archive::init(delayed.child("archive"), cfg.clone())
                 .await
                 .unwrap();
+
+            // Three items land in three single-item sections, each through its own blocking
+            // sync.
             let archive = drive_pending_syncs(&pending, archive.put_sync(0, test_key("zero"), 10))
                 .await
                 .unwrap();
@@ -1936,6 +2014,8 @@ mod tests {
             let archive = Archive::init(delayed.child("archive"), cfg.clone())
                 .await
                 .unwrap();
+
+            // Seed one durable item. The two starts are section 0's index and value syncs.
             let archive = drive_pending_syncs(&pending, archive.put_sync(0, test_key("zero"), 10))
                 .await
                 .unwrap();
@@ -1999,6 +2079,8 @@ mod tests {
             assert_eq!(pending.starts(), 9);
             drop(archive);
 
+            // The recreated barrier's final marker covers section 0's full two-item prefix, so
+            // a reopen sees every value.
             let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("reopen"), cfg)
                 .await
                 .unwrap();
@@ -2014,6 +2096,10 @@ mod tests {
         executor.start(|context| async move {
             let cfg = test_config(&context, "marker-reuse", NZU64!(2));
 
+            // Seed one marked item in section 0 (the trailing sync publishes its marker), then
+            // prune the section away. Prune must remove the durable marker along with the data:
+            // a surviving marker would make the next init fail by claiming a marked section
+            // with no journals.
             let archive = Archive::init(context.child("seed"), cfg.clone())
                 .await
                 .unwrap();

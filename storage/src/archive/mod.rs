@@ -28,7 +28,7 @@ pub enum Identifier<'a, K: Array> {
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("journal error: {0}")]
-    Journal(#[from] crate::journal::Error),
+    Journal(crate::journal::Error),
     #[error("ordinal error: {0}")]
     Ordinal(#[from] crate::ordinal::Error),
     #[error("metadata error: {0}")]
@@ -39,6 +39,16 @@ pub enum Error {
     RecordCorrupted,
     #[error("record too large")]
     RecordTooLarge,
+}
+
+// Preserve the archive's error classification for journal-owned metadata operations.
+impl From<crate::journal::Error> for Error {
+    fn from(error: crate::journal::Error) -> Self {
+        match error {
+            crate::journal::Error::Metadata(error) => Self::Metadata(error),
+            error => Self::Journal(error),
+        }
+    }
 }
 
 /// A write-once key-value store addressed by both an index and a key.
