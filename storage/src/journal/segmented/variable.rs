@@ -478,7 +478,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         let replay = Replay {
             journal: self,
             sections,
-            fully_replayed_from: if start_offset == 0 {
+            recovered_from: if start_offset == 0 {
                 Some(start_section)
             } else {
                 start_section.checked_add(1)
@@ -490,6 +490,9 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
             repairing: false,
         };
 
+        // A start offset beyond the front section's apparent tail can never resolve to an
+        // item boundary. Reject it up front rather than yielding a silently empty replay:
+        // the offset is caller-supplied and unvalidated, so it must never be adopted.
         if let Some(current) = replay.sections.front()
             && current.section == start_section
             && start_offset > current.reader.blob_size()
@@ -655,7 +658,9 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
 pub struct Replay<E: Storage + Metrics, V: Codec> {
     journal: Journal<E, V>,
     sections: VecDeque<SectionReplay<E::Blob>>,
-    fully_replayed_from: Option<u64>,
+    /// The first section this replay fully covers: [Replay::finish] marks it and every
+    /// later section recovered.
+    recovered_from: Option<u64>,
     buffer: NonZeroUsize,
     read_options: ReadOptions,
     finished: bool,
@@ -932,7 +937,7 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
         if self.errored || !self.finished {
             return Err(Error::ReplayFailed);
         }
-        if let Some(start) = self.fully_replayed_from {
+        if let Some(start) = self.recovered_from {
             self.journal
                 .0
                 .unrecovered
