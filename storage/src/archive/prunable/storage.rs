@@ -174,34 +174,21 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
 
     /// See [Archive::init].
     async fn init(context: E, cfg: Config<T, V::Cfg>) -> Result<Self, Error> {
-        let Config {
-            translator,
-            metadata_partition,
-            key_partition,
-            key_page_cache,
-            value_partition,
-            compression,
-            codec_config,
-            items_per_section,
-            key_write_buffer,
-            value_write_buffer,
-            replay_buffer,
-        } = cfg;
-        let items_per_section = items_per_section.get();
+        let items_per_section = cfg.items_per_section.get();
         let oversized_cfg = OversizedConfig {
-            index_partition: key_partition,
-            value_partition,
-            index_page_cache: key_page_cache,
-            index_write_buffer: key_write_buffer,
-            value_write_buffer,
-            replay_buffer,
-            compression,
-            codec_config,
+            index_partition: cfg.key_partition,
+            value_partition: cfg.value_partition,
+            index_page_cache: cfg.key_page_cache,
+            index_write_buffer: cfg.key_write_buffer,
+            value_write_buffer: cfg.value_write_buffer,
+            replay_buffer: cfg.replay_buffer,
+            compression: cfg.compression,
+            codec_config: cfg.codec_config,
         };
         let mut replay = Oversized::<E, Record<K>, V>::init_with_metadata(
             &context,
             oversized_cfg,
-            metadata_partition,
+            cfg.metadata_partition,
             commonware_runtime::ReadOptions::default(),
         )
         .await?;
@@ -210,7 +197,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         // recovery.
         let mut indices: BTreeMap<u64, u64> = BTreeMap::new();
         let mut extra_indices: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
-        let mut keys = Index::new(context.child("index"), translator);
+        let mut keys = Index::new(context.child("index"), cfg.translator);
         let mut intervals = RMap::new();
         debug!("initializing archive from index journal");
         while let Some(result) = replay.next().await {
