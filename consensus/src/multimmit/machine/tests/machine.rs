@@ -11662,6 +11662,67 @@ fn vote_body_pass_ignores_later_da_choices() {
 }
 
 #[test]
+fn terminal_height_rescue_vote_matches_ordinary_vote() {
+    let machine = active_machine(Role::Validator(Participant::new(0)));
+    let profile = machine.profile().clone();
+    let protocol = profile.protocol();
+    let proposals = (0..protocol.codec_config().chains())
+        .map(|index| {
+            let chain = ChainId::new(index as u32);
+            ChainProposal::new(
+                chain,
+                Anchor::Tip(BlockRef::new(
+                    chain,
+                    Height::new(u64::MAX),
+                    digest(format!("terminal anchor {index}").as_bytes()),
+                )),
+                Vec::new(),
+                protocol.codec_config().pipeline_depth(),
+            )
+            .unwrap()
+        })
+        .collect();
+    let leader = LeaderBlock::new(
+        Round::new(protocol.epoch(), View::new(1)),
+        protocol.genesis().vqc(),
+        genesis_tip_history(protocol),
+        proposals,
+        protocol.codec_config(),
+    )
+    .unwrap();
+
+    let mut pass = machine
+        .chain
+        .begin_vote_body_pass(&profile, leader.clone());
+    let ordinary = loop {
+        match machine
+            .chain
+            .resume_vote_body_pass::<Sha256>(&profile, &mut pass)
+            .unwrap()
+        {
+            VoteBodyProgress::Pending => {}
+            VoteBodyProgress::Complete(body) => break body,
+        }
+    };
+    let SignRequest::Vote(rescue) = machine
+        .views
+        .rescue_vote::<Sha256>(&profile, &machine.chain, &leader)
+        .unwrap()
+    else {
+        unreachable!("rescue_vote always returns a vote request")
+    };
+
+    assert_eq!(rescue.body(), &ordinary);
+    assert!(
+        ordinary
+            .positions()
+            .iter()
+            .all(|position| *position == Position::new(0))
+    );
+    assert!(ordinary.extensions().iter().all(Extension::is_empty));
+}
+
+#[test]
 fn completed_ordinary_vote_survives_da_observation_until_reserved() {
     let participants = 6;
     let probe = profile_for(Role::Observer, participants, 2);

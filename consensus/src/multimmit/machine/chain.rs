@@ -2435,7 +2435,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
 
             for payload in proposal.payloads() {
                 let Some(height) = parent.height().get().checked_add(1).map(Height::new) else {
-                    return Err(ChainError::HeightOverflow);
+                    break;
                 };
                 let Some(choice) = votes.get(&height) else {
                     break;
@@ -2455,7 +2455,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             let mut payloads = Vec::with_capacity(config.extension_bound());
             for _ in 0..config.extension_bound() {
                 let Some(height) = parent.height().get().checked_add(1).map(Height::new) else {
-                    return Err(ChainError::HeightOverflow);
+                    break;
                 };
                 let Some(choice) = votes.get(&height) else {
                     break;
