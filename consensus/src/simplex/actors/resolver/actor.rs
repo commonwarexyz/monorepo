@@ -378,7 +378,8 @@ impl<
         });
     }
 
-    /// Fetches missing proposal ancestry, preferring `target` when provided.
+    /// Fetches missing proposal ancestry. A provided `target` restricts the
+    /// fetch to that peer: the resolver never falls back to other peers.
     fn resolve<R>(
         &self,
         resolver: &mut R,

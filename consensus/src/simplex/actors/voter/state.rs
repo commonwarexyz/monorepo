@@ -99,10 +99,8 @@ pub enum Verify<S: Scheme<D>, D: Digest> {
 pub struct CertificateFetch {
     /// View of the candidate that exposed the missing certificate.
     pub proposal: View,
-    /// View whose certificate is needed.
+    /// View whose notarization is needed.
     pub view: View,
-    /// Kind of certificate that is needed.
-    pub kind: Kind,
 }
 
 /// Configuration for initializing [`State`].
@@ -1187,7 +1185,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// certificate once, and the candidate's own certificate proves the votes
     /// that could form it have stopped circulating. The certificate must be
     /// fetched, or the voter can never certify another view in the term.
-    fn certification_fetch(&mut self, err: &ParentPayloadError) -> Option<CertificateFetch> {
+    fn certification_fetch(&self, err: &ParentPayloadError) -> Option<CertificateFetch> {
         let ParentPayloadError::ParentNotCertified {
             proposal_view,
             parent_view,
@@ -1198,10 +1196,12 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         if self.notarization(*parent_view).is_some() {
             return None;
         }
-        if !self.views.get_mut(proposal_view)?.request(*parent_view) {
-            return None;
-        }
 
+        // Verification may have requested this parent from the proposal's
+        // leader. Bypass its request latch so the resolver removes the target
+        // from the in-flight fetch. The candidate remains dormant until its
+        // parent arrives, so this request does not repeat.
+        //
         // Only mid-term candidates require the previous view as their parent,
         // so the candidate and parent are in the same term. Keep this fetch
         // untargeted because resolver targets are exclusive and any validator
@@ -1209,7 +1209,6 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         Some(CertificateFetch {
             proposal: *proposal_view,
             view: *parent_view,
-            kind: Kind::Notarization,
         })
     }
 
@@ -3580,35 +3579,52 @@ mod tests {
         });
     }
 
-    /// Regression: a candidate blocked on a parent notarization we never
-    /// received must produce a fetch. Waiting cannot heal it: peers broadcast
-    /// a certificate once. Without the fetch the voter never certifies
-    /// another view in the term.
+    /// Regression: certification must widen a targeted verification fetch for
+    /// the same missing parent so any peer can answer it.
     #[test]
-    fn certify_candidates_fetches_missed_parent_notarization() {
+    fn certification_fetch_widens_targeted_verification_request() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let (
                 Fixture {
-                    schemes, verifier, ..
+                    participants,
+                    schemes,
+                    verifier,
+                    ..
                 },
                 mut state,
             ) = setup_state_with(
                 &mut context,
                 4,
-                2,
+                1,
                 9,
                 10,
                 TermLength::new(NZU32!(5)),
-                ViewDelta::new(2),
+                ViewDelta::new(0),
                 4,
             );
 
             certify_first_view(&mut state, &verifier, &schemes);
 
-            // Receive notarization(3) without notarization(2): certification
-            // of view 3 is blocked and the missing certificate is fetched.
+            // Receive proposal(3) without notarization(2). Verification first
+            // requests the parent only from the stable leader.
             let p3 = fetch_proposal(3, 2, 103);
+            state.set_leader(View::new(3), None);
+            assert!(state.set_proposal(View::new(3), p3.clone()));
+            assert!(matches!(
+                state.try_verify(),
+                Verify::Resolve {
+                    proposal,
+                    view,
+                    kind: Kind::Notarization,
+                    target,
+                } if proposal == View::new(3)
+                    && view == View::new(2)
+                    && target == participants[2]
+            ));
+
+            // Notarization(3) makes certification request the same parent
+            // without a target, widening the in-flight resolver fetch.
             assert!(
                 state
                     .add_notarization(build_notarization(&verifier, &schemes, &p3))
@@ -3619,7 +3635,6 @@ mod tests {
             assert_eq!(fetches.len(), 1);
             assert_eq!(fetches[0].proposal, View::new(3));
             assert_eq!(fetches[0].view, View::new(2));
-            assert!(matches!(fetches[0].kind, Kind::Notarization));
 
             // The blocked candidate is dormant, so another pass emits nothing.
             let (ready, fetches) = state.certify_candidates();
@@ -3692,7 +3707,6 @@ mod tests {
             assert_eq!(fetches.len(), 1);
             assert_eq!(fetches[0].proposal, View::new(6));
             assert_eq!(fetches[0].view, View::new(5));
-            assert!(matches!(fetches[0].kind, Kind::Notarization));
             // Confirm that a same-term round records the old leader.
             assert!(state.leader_index(View::new(2)).is_some());
 
@@ -3709,7 +3723,6 @@ mod tests {
             assert_eq!(fetches.len(), 1);
             assert_eq!(fetches[0].proposal, View::new(5));
             assert_eq!(fetches[0].view, View::new(4));
-            assert!(matches!(fetches[0].kind, Kind::Notarization));
         });
     }
 
@@ -3754,7 +3767,6 @@ mod tests {
             assert_eq!(fetches.len(), 1);
             assert_eq!(fetches[0].proposal, View::new(10));
             assert_eq!(fetches[0].view, View::new(9));
-            assert!(matches!(fetches[0].kind, Kind::Notarization));
         });
     }
 

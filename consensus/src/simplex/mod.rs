@@ -7219,8 +7219,8 @@ mod tests {
     ///
     /// `suppress_backfill` selects the deprived participant's covering
     /// nullification. A term-start nullification suppresses background repair
-    /// for the term. A nullification one view later permits repair of the term
-    /// head.
+    /// for the term. A nullification one view past the notarized head (views 3
+    /// and 23) leaves the head visible to repair.
     fn stable_leader_cross_term_certified_split<S, F, L>(
         mut fixture: F,
         elector: L,
@@ -7264,6 +7264,13 @@ mod tests {
             for view in [6u64, 11, 16, 26, 31, 36] {
                 assert_ne!(leader_of(view), offline, "term start must be honest");
             }
+            // The final assertions expect the first post-GST proposal to build
+            // on view 22, so its leader must have certified term 5.
+            assert_ne!(
+                leader_of(26),
+                c,
+                "view-26 leader must hold certification 22"
+            );
 
             let build_notarization =
                 |proposal: &Proposal<D>, signers: [usize; 3]| -> TNotarization<_, D> {

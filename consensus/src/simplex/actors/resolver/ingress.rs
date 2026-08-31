@@ -231,7 +231,8 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
         });
     }
 
-    /// Requests missing proposal ancestry, preferring `target` when provided.
+    /// Requests missing proposal ancestry. A provided `target` restricts the
+    /// fetch to that peer, with no fallback to others.
     pub(crate) fn resolve(
         &mut self,
         proposal: View,
