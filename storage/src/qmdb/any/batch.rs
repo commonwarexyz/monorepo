@@ -5285,10 +5285,9 @@ mod tests {
             let (db, _) = db.apply_batch(initial).await.unwrap();
             let db = db.commit().await.unwrap();
 
-            // Parent: a no-op delete and a live delete in bucket 3, plus a create in bucket 1.
+            // Parent: delete the bucket-3 key and create in bucket 1.
             let parent = db
                 .new_batch()
-                .write(colliding_digest(3, 11), None)
                 .write(colliding_digest(3, 31), None)
                 .write(colliding_digest(1, 9), Some(v(2)))
                 .merkleize(&db, None)
@@ -5321,6 +5320,101 @@ mod tests {
                 pending_child.root(),
                 committed_child.root(),
                 "child root depended on pending-vs-applied parent path"
+            );
+            assert_eq!(
+                pending_child.total_active_keys,
+                committed_child.total_active_keys
+            );
+
+            let (db, _) = db.apply_batch(pending_child).await.unwrap();
+            assert_eq!(
+                db.root(),
+                committed_child.root(),
+                "applied pending child root diverged"
+            );
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// A stale prev-candidate can also enter through the mutation classifier's own read set:
+    /// the child's sibling update pulls the parent-deleted key's committed location into
+    /// `gather_existing_locations`, so the classifier loop must not contribute candidates for
+    /// the op it skips. Otherwise `find_prev_key`'s wrap-around lands on the stale key, its
+    /// rewrite is skipped as batch-created, and the true predecessor's rewrite is emitted at
+    /// a different stream position than on the committed path.
+    #[test]
+    fn ordered_stale_classifier_candidates_root_matches() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            type TestDb = OrderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+
+            let config = fixed_db_config::<OneCap>("ordered-stale-classifier", &context);
+            let db = TestDb::init(context, config).await.unwrap();
+
+            let v = |n| colliding_digest(0xB0, n);
+            let initial = db
+                .new_batch()
+                .write(colliding_digest(1, 9), Some(v(0)))
+                .write(colliding_digest(3, 10), Some(v(1)))
+                .write(colliding_digest(3, 20), Some(v(2)))
+                .write(colliding_digest(3, 31), Some(v(3)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(initial).await.unwrap();
+            let db = db.commit().await.unwrap();
+
+            // Parent: delete the last key of bucket 3.
+            let parent = db
+                .new_batch()
+                .write(colliding_digest(3, 31), None)
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            // Child: update a colliding sibling (pulling the deleted key's stale committed
+            // location into the classifier's read set), re-create the deleted key, and
+            // create keys whose predecessor searches consult the candidate sets.
+            let pending_child = parent
+                .new_batch::<Sha256>()
+                .write(colliding_digest(3, 10), Some(v(4)))
+                .write(colliding_digest(3, 31), Some(v(5)))
+                .write(colliding_digest(1, 20), Some(v(6)))
+                .write(colliding_digest(0, 0), Some(v(7)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            let (db, _) = db.apply_batch(parent).await.unwrap();
+            let db = db.commit().await.unwrap();
+
+            let committed_child = db
+                .new_batch()
+                .write(colliding_digest(3, 10), Some(v(4)))
+                .write(colliding_digest(3, 31), Some(v(5)))
+                .write(colliding_digest(1, 20), Some(v(6)))
+                .write(colliding_digest(0, 0), Some(v(7)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            assert_eq!(
+                pending_child.root(),
+                committed_child.root(),
+                "child root depended on pending-vs-committed parent path"
+            );
+            assert_eq!(
+                pending_child.total_active_keys,
+                committed_child.total_active_keys
             );
 
             let (db, _) = db.apply_batch(pending_child).await.unwrap();
