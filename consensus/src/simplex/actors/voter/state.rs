@@ -99,15 +99,13 @@ pub enum Verify<S: Scheme<D>, D: Digest> {
 
 /// A certificate fetch justified by a blocked certification (see
 /// [`State::certify_candidates`]).
-pub struct CertificateFetch<P> {
+pub struct CertificateFetch {
     /// View of the candidate that exposed the missing certificate.
     pub proposal: View,
     /// View whose certificate is needed.
     pub view: View,
     /// Kind of certificate that is needed.
     pub kind: Kind,
-    /// Peer to query, or `None` to ask any peer.
-    pub target: Option<P>,
 }
 
 /// Configuration for initializing [`State`].
@@ -1141,7 +1139,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// certificates (see [`Self::certification_fetch`]).
     pub fn certify_candidates(
         &mut self,
-    ) -> (Vec<Proposal<D>>, Vec<CertificateFetch<S::PublicKey>>) {
+    ) -> (Vec<Proposal<D>>, Vec<CertificateFetch>) {
         let candidates = take(&mut self.certification_candidates);
         let mut ready = Vec::new();
         let mut fetches = Vec::new();
@@ -1197,7 +1195,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     fn certification_fetch(
         &self,
         err: &ParentPayloadError,
-    ) -> Option<CertificateFetch<S::PublicKey>> {
+    ) -> Option<CertificateFetch> {
         let ParentPayloadError::ParentNotCertified {
             proposal_view,
             parent_view,
@@ -1217,7 +1215,6 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             proposal: *proposal_view,
             view: *parent_view,
             kind: Kind::Notarization,
-            target: None,
         })
     }
 
@@ -3628,7 +3625,6 @@ mod tests {
             assert_eq!(fetches[0].proposal, View::new(3));
             assert_eq!(fetches[0].view, View::new(2));
             assert!(matches!(fetches[0].kind, Kind::Notarization));
-            assert!(fetches[0].target.is_none());
 
             // The blocked candidate is dormant, so another pass emits nothing.
             let (ready, fetches) = state.certify_candidates();
@@ -3716,7 +3712,6 @@ mod tests {
             assert_eq!(fetches[0].proposal, View::new(3));
             assert_eq!(fetches[0].view, View::new(2));
             assert!(matches!(fetches[0].kind, Kind::Notarization));
-            assert!(fetches[0].target.is_none());
         });
     }
 
@@ -3767,7 +3762,6 @@ mod tests {
             assert_eq!(fetches[0].proposal, View::new(6));
             assert_eq!(fetches[0].view, View::new(5));
             assert!(matches!(fetches[0].kind, Kind::Notarization));
-            assert!(fetches[0].target.is_none());
 
             // Repair cascades one view at a time: delivering notarization(5)
             // exposes the next gap, again from a leaderless round.
@@ -3783,7 +3777,6 @@ mod tests {
             assert_eq!(fetches[0].proposal, View::new(5));
             assert_eq!(fetches[0].view, View::new(4));
             assert!(matches!(fetches[0].kind, Kind::Notarization));
-            assert!(fetches[0].target.is_none());
         });
     }
 
@@ -3829,7 +3822,6 @@ mod tests {
             assert_eq!(fetches[0].proposal, View::new(10));
             assert_eq!(fetches[0].view, View::new(9));
             assert!(matches!(fetches[0].kind, Kind::Notarization));
-            assert!(fetches[0].target.is_none());
         });
     }
 
