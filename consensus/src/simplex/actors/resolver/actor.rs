@@ -378,8 +378,8 @@ impl<
         });
     }
 
-    /// Fetches missing proposal ancestry. A provided `target` restricts the
-    /// fetch to that peer: the resolver never falls back to other peers.
+    /// Fetches missing proposal ancestry. If `target` is provided, the resolver
+    /// queries only that peer.
     fn resolve<R>(
         &self,
         resolver: &mut R,
@@ -1094,8 +1094,8 @@ mod tests {
                 holders.push((handle, holder_mailbox, voter_receiver));
             }
 
-            // Request the parent without targeting the disconnected term
-            // leader. The voter test covers the child that triggers this request.
+            // Request the parent from any peer. The voter test covers the child
+            // that triggers this request.
             context.sleep(Duration::from_millis(10)).await;
             requester_mailbox.resolve(View::new(3), View::new(2), Kind::Notarization, None);
 

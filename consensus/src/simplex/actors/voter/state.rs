@@ -1197,15 +1197,15 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             return None;
         }
 
-        // Verification may have requested this parent from the proposal's
-        // leader. Bypass its request latch so the resolver removes the target
-        // from the in-flight fetch. The candidate remains dormant until its
-        // parent arrives, so this request does not repeat.
+        // Verification can request this parent only from the proposal's leader.
+        // Certification bypasses that request latch. If the fetch is in flight,
+        // the resolver removes its target. The candidate remains dormant until
+        // its parent arrives, so this request does not repeat.
         //
         // Only mid-term candidates require the previous view as their parent,
-        // so the candidate and parent are in the same term. Keep this fetch
-        // untargeted because resolver targets are exclusive and any validator
-        // can hold the parent's notarization.
+        // so the candidate and parent are in the same term. Any validator can
+        // hold the parent's notarization, so certification sends this request
+        // without a target.
         Some(CertificateFetch {
             proposal: *proposal_view,
             view: *parent_view,
@@ -3623,8 +3623,8 @@ mod tests {
                     && target == participants[2]
             ));
 
-            // Notarization(3) makes certification request the same parent
-            // without a target, widening the in-flight resolver fetch.
+            // Notarization(3) triggers an untargeted request for the same
+            // parent. This widens the in-flight resolver fetch.
             assert!(
                 state
                     .add_notarization(build_notarization(&verifier, &schemes, &p3))

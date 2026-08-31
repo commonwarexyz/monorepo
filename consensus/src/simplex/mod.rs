@@ -7214,13 +7214,13 @@ mod tests {
     /// - Terms 2..=4 are nullified at their term starts for everyone.
     ///
     /// After GST, the three honest participants form the only quorum. Each
-    /// proposal names its proposer's highest certified view. One other honest
-    /// participant has not certified that term.
+    /// proposal names its proposer's highest certified view. One honest peer
+    /// lacks the named chain.
     ///
-    /// `suppress_backfill` selects the deprived participant's covering
-    /// nullification. A term-start nullification suppresses background repair
-    /// for the term. A nullification one view past the notarized head (views 3
-    /// and 23) leaves the head visible to repair.
+    /// If `suppress_backfill` is true, the deprived participants receive
+    /// term-start nullifications that suppress background repair. Otherwise,
+    /// the nullifications occur one view past the notarized heads (views 3 and
+    /// 23), so repair can see each head.
     fn stable_leader_cross_term_certified_split<S, F, L>(
         mut fixture: F,
         elector: L,
@@ -7264,8 +7264,7 @@ mod tests {
             for view in [6u64, 11, 16, 26, 31, 36] {
                 assert_ne!(leader_of(view), offline, "term start must be honest");
             }
-            // The final assertions expect the first post-GST proposal to build
-            // on view 22, so its leader must have certified term 5.
+            // The view-26 leader must have certified view 22.
             assert_ne!(
                 leader_of(26),
                 c,

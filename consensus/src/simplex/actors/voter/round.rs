@@ -161,12 +161,11 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.proposal.request_verify()
     }
 
-    /// Records the ancestry view that verification requested from the
-    /// proposal's leader. Returns `false` for a repeated request.
+    /// Records the ancestry view that proposal verification requested from the
+    /// leader. Returns `false` for a repeated request.
     ///
-    /// Certification repair does not consult this latch: its untargeted fetch
-    /// must reach the resolver even when verification already requested the
-    /// same view from the leader.
+    /// Certification repair bypasses this latch so an untargeted request can
+    /// widen the resolver fetch.
     pub fn request(&mut self, view: View) -> bool {
         if self.last_ancestry_request == Some(view) {
             return false;
