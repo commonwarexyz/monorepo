@@ -1,4 +1,4 @@
-use commonware_utils::cache::{Cache, Clock2QPlus, Policy};
+use commonware_utils::cache::{Cache, Clock2QPlus, Policy, Sieve};
 use criterion::{BatchSize, Criterion, criterion_group};
 use std::{hint::black_box, num::NonZeroUsize};
 
@@ -45,6 +45,12 @@ fn bench_insert(c: &mut Criterion) {
             "clock2q-plus",
             capacity.get(),
             Cache::<u64, u64, Clock2QPlus<u64>>::new(capacity),
+        );
+        bench(
+            c,
+            "sieve",
+            capacity.get(),
+            Cache::<u64, u64, Sieve>::new(capacity),
         );
     }
 }
