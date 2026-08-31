@@ -190,7 +190,7 @@ fn fuzz(input: FuzzInput) {
 
         // Phase 1: Create valid data
         let mut oversized: Oversized<_, TestEntry, TestValue> =
-            Oversized::init(context.child("initial"), cfg.clone(), None)
+            Oversized::init(context.child("initial"), cfg.clone())
                 .await
                 .expect("Failed to init");
 
@@ -314,7 +314,7 @@ fn fuzz(input: FuzzInput) {
 
         // Phase 3: Recovery - this should not panic
         let mut recovered: Oversized<_, TestEntry, TestValue> =
-            match Oversized::init(context.child("recovered"), cfg.clone(), None).await {
+            match Oversized::init(context.child("recovered"), cfg.clone()).await {
                 Ok(recovered) => recovered,
                 // Existing-byte overwrites in the paged index can invalidate fixed-journal
                 // integrity checks before oversized recovery has a chance to inspect entries.

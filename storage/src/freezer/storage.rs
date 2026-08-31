@@ -675,14 +675,17 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
             compression: config.value_compression,
             codec_config: config.codec_config,
         };
-        let oversized: Oversized<E, Record<K>, V> = Oversized::init(
-            context.child("oversized"),
-            oversized_cfg,
-            checkpoint
-                .filter(|checkpoint| !checkpoint.is_empty())
-                .map(|checkpoint| (checkpoint.section, checkpoint.oversized_size)),
-        )
-        .await?;
+        let oversized_context = context.child("oversized");
+        let oversized: Oversized<E, Record<K>, V> = match checkpoint
+            .filter(|checkpoint| !checkpoint.is_empty())
+            .map(|checkpoint| (checkpoint.section, checkpoint.oversized_size))
+        {
+            Some(checkpoint) => {
+                Oversized::init_with_checkpoint(oversized_context, oversized_cfg, checkpoint)
+                    .await?
+            }
+            None => Oversized::init(oversized_context, oversized_cfg).await?,
+        };
 
         // Open table blob
         let (table, table_len) = context
