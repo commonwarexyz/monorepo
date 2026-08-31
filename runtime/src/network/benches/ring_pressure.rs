@@ -67,7 +67,7 @@ pub fn bench(c: &mut Criterion) {
                 Backend::Tokio => "na".to_string(),
             };
             let name = format!(
-                "runtime={} ring_size={ring_size} pending_receive_fanout={width} bytes_per_connection=1",
+                "runtime={} ring_size={ring_size} pending_receive_fanout={width}",
                 backend.name()
             );
             match backend {
