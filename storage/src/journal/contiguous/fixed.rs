@@ -1762,14 +1762,14 @@ impl<E: Context, A: CodecFixedShared> authenticated::Backing<E> for Journal<E, A
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::journal::{contiguous::Contiguous as _, utils::corrupt_page};
+    use crate::journal::contiguous::Contiguous as _;
     use commonware_codec::FixedSize;
     use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
     use commonware_macros::test_traced;
     use commonware_runtime::{
         Blob, BufferPooler, Error as RuntimeError, Metrics as _, Runner, Spawner as _, Storage,
         Supervisor as _, WriteOptions,
-        buffer::paged::Writer,
+        buffer::paged::{Writer, corrupt_page},
         deterministic::{self, Context},
         mocks::{
             DelayedSyncContext, PendingSyncs, RecordingContext, WriteFaultContext, WriteFaults,
@@ -3987,7 +3987,14 @@ mod tests {
             // page 4 to preserve bytes 20..24 and rewrite its partial-page checksum, so it cannot
             // perform that truncation. Forward validation instead stops at 20, rounds down to 16,
             // and safely resizes within valid page 3.
-            corrupt_page(&context, &partition, 0, 4, LOGICAL_PAGE_SIZE).await;
+            corrupt_page(
+                &context,
+                &partition,
+                &0u64.to_be_bytes(),
+                4,
+                LOGICAL_PAGE_SIZE,
+            )
+            .await;
 
             let journal = Journal::<_, u64>::init(context.child("recover"), cfg)
                 .await
@@ -4059,7 +4066,7 @@ mod tests {
             corrupt_page(
                 &context,
                 &blob_partition(&cfg),
-                0,
+                &0u64.to_be_bytes(),
                 3,
                 PAGE_SIZE.get() as u64,
             )
@@ -4099,7 +4106,7 @@ mod tests {
             corrupt_page(
                 &context,
                 &blob_partition(&cfg),
-                1,
+                &1u64.to_be_bytes(),
                 1,
                 PAGE_SIZE.get() as u64,
             )
@@ -4140,7 +4147,7 @@ mod tests {
             corrupt_page(
                 &context,
                 &blob_partition(&cfg),
-                0,
+                &0u64.to_be_bytes(),
                 3,
                 PAGE_SIZE.get() as u64,
             )
@@ -4238,7 +4245,7 @@ mod tests {
             corrupt_page(
                 &context,
                 &blob_partition(&cfg),
-                1,
+                &1u64.to_be_bytes(),
                 1,
                 PAGE_SIZE.get() as u64,
             )

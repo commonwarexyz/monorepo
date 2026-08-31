@@ -42,6 +42,8 @@
 //! full or partial. A partial page's durable prefix remains recoverable while it is rewritten.
 
 use crate::{Blob, Buf, BufMut, Error, IoBuf, ReadOptions};
+#[cfg(any(test, feature = "test-utils"))]
+use crate::{Storage, WriteOptions};
 use commonware_codec::{EncodeFixed, FixedSize, Read as CodecRead, ReadExt, Write};
 use commonware_cryptography::{Crc32, crc32};
 use std::num::NonZeroU16;
@@ -112,6 +114,41 @@ pub const fn page_size(physical_page_size: u32) -> NonZeroU16 {
 #[cfg(test)]
 pub(crate) fn validate_page_for_tests(page: &[u8]) -> bool {
     Checksum::validate_page(page).is_some()
+}
+
+/// Flip one byte inside physical page `page` of the blob at `name`, leaving every other page
+/// valid. Models a torn interior page: a crash during an in-flight fsync can lose an interior
+/// page while later pages persist. Physical pages are the logical page plus the checksum record.
+#[cfg(any(test, feature = "test-utils"))]
+pub async fn corrupt_page(
+    storage: &impl Storage,
+    partition: &str,
+    name: &[u8],
+    page: u64,
+    logical_page_size: u64,
+) {
+    // Every valid checksum slot covers byte zero, including a shorter fallback slot.
+    let physical_page_size = logical_page_size + CHECKSUM_SIZE;
+    let offset = page * physical_page_size;
+    let (blob, size) = storage.open(partition, name).await.unwrap();
+    assert!(
+        size.checked_sub(physical_page_size)
+            .is_some_and(|remaining| offset < remaining),
+        "corruption target must be an interior page"
+    );
+    let byte = blob
+        .read_at(offset, 1, ReadOptions::default())
+        .await
+        .unwrap()
+        .coalesce();
+    blob.write_at(
+        offset,
+        vec![byte.as_ref()[0] ^ 0xFF],
+        WriteOptions::default(),
+    )
+    .await
+    .unwrap();
+    blob.sync().await.unwrap();
 }
 
 /// Ensure every requested range lies within the blob's size.
@@ -455,6 +492,15 @@ impl arbitrary::Arbitrary<'_> for Checksum {
 mod tests {
     use super::*;
     use rstest::rstest;
+
+    #[test]
+    #[should_panic(expected = "corruption target must be an interior page")]
+    fn test_corrupt_page_rejects_short_blob() {
+        use crate::Runner as _;
+        crate::deterministic::Runner::default().start(|context| async move {
+            corrupt_page(&context, "short-blob", b"blob", 0, 64).await;
+        });
+    }
 
     enum ValidationExpectation {
         Ok,

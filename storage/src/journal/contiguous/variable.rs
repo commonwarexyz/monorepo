@@ -1081,12 +1081,13 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         // (each rollover fsyncs the just-sealed blob and awaits the previous rollover's fsync),
         // and a crash during an in-flight fsync can lose an interior page while later pages
         // survive. `Writer::new` sizes a blob by its last valid page, so it cannot see such a
-        // hole. Blobs wholly below the floor's blob are covered by a completed fsync, so
-        // in-model holes are impossible there and any later damage surfaces lazily at read.
-        // Above the floor, truncate to the last well-formed page (replay in `align` repairs a
-        // mid-frame cut like torn trailing junk).
+        // hole.
         let suspects: Vec<u64> = pending.keys().rev().take(2).copied().collect();
         for blob in suspects {
+            // Blobs wholly below the floor's blob are covered by a completed fsync, so
+            // in-model holes are impossible there and any later damage surfaces lazily at read.
+            // Above the floor, truncate to the last well-formed page (replay in `align` repairs
+            // a mid-frame cut like torn trailing junk).
             if blob < floor_blob {
                 continue;
             }
@@ -2568,11 +2569,11 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::journal::{contiguous::tests::run_contiguous_tests, utils::corrupt_page};
+    use crate::journal::contiguous::tests::run_contiguous_tests;
     use commonware_macros::test_traced;
     use commonware_runtime::{
         Metrics as _, ReadOptions, Runner, Spawner as _, Storage, Supervisor as _, WriteOptions,
-        buffer::paged::{CacheRef, Writer},
+        buffer::paged::{CacheRef, Writer, corrupt_page},
         deterministic,
         mocks::{
             DelayedSyncContext, PendingSyncs, RecordingContext, drive_pending_syncs,
@@ -4672,7 +4673,7 @@ mod tests {
             journal.commit().await.unwrap();
 
             // Data blob 0 holds 30 9-byte frames (270 bytes) across 5 pages; tear page 2.
-            corrupt_page(&context, &cfg.data_partition(), 0, 2, 64).await;
+            corrupt_page(&context, &cfg.data_partition(), &0u64.to_be_bytes(), 2, 64).await;
 
             // Pages 0-1 hold 128 bytes = 14 whole frames; the 2 leftover bytes are torn junk
             // and the gap makes blob 1 unreachable.
@@ -4714,7 +4715,7 @@ mod tests {
             journal.commit().await.unwrap();
 
             // Data blob 1 holds 20 9-byte frames (180 bytes) across 3 pages; tear page 1.
-            corrupt_page(&context, &cfg.data_partition(), 1, 1, 64).await;
+            corrupt_page(&context, &cfg.data_partition(), &1u64.to_be_bytes(), 1, 64).await;
 
             // Blob 1 keeps page 0 only: 64 bytes = 7 whole frames after blob 0's 30.
             let mut journal = Journal::<_, u64>::init(context.child("second"), cfg)
@@ -4758,7 +4759,7 @@ mod tests {
             journal.sync().await.unwrap();
 
             // Data blob 0 holds 30 9-byte frames (270 bytes) across 5 pages; tear page 2.
-            corrupt_page(&context, &cfg.data_partition(), 0, 2, 64).await;
+            corrupt_page(&context, &cfg.data_partition(), &0u64.to_be_bytes(), 2, 64).await;
             let (_, size_before) = context
                 .open(&cfg.data_partition(), &0u64.to_be_bytes())
                 .await
@@ -4928,7 +4929,7 @@ mod tests {
             journal.sync().await.unwrap();
 
             // Tear page 1 (bytes 64..128), beneath the acknowledged frames ending at byte 180.
-            corrupt_page(&context, &cfg.data_partition(), 0, 1, 64).await;
+            corrupt_page(&context, &cfg.data_partition(), &0u64.to_be_bytes(), 1, 64).await;
             let (_, size_before) = context
                 .open(&cfg.data_partition(), &0u64.to_be_bytes())
                 .await

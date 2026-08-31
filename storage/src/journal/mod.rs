@@ -15,8 +15,6 @@ pub mod segmented;
 
 #[cfg(all(test, feature = "arbitrary"))]
 mod conformance;
-#[cfg(test)]
-mod utils;
 
 /// Errors that can occur when interacting with `Journal`.
 #[derive(Debug, Error)]
