@@ -33,7 +33,7 @@ use commonware_utils::NZUsize;
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     marker::PhantomData,
-    num::{NonZeroU16, NonZeroUsize},
+    num::NonZeroUsize,
 };
 use tracing::{trace, warn};
 
@@ -113,17 +113,6 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
     const CHUNK_SIZE: usize = A::SIZE;
     const CHUNK_SIZE_U64: u64 = Self::CHUNK_SIZE as u64;
 
-    /// Logical page size shared by all index blobs in this journal.
-    fn page_size(cfg: &Config) -> NonZeroU16 {
-        NonZeroU16::new(
-            cfg.page_cache
-                .page_size()
-                .try_into()
-                .expect("page cache size must fit in u16"),
-        )
-        .expect("page cache size must be non-zero")
-    }
-
     /// Return canonical section names in numeric order without opening writers.
     async fn stored(context: &E, cfg: &Config) -> Result<BTreeMap<u64, Vec<u8>>, Error> {
         // Recovery relies on numeric section order for checkpoint coverage and reverse deletion.
@@ -142,7 +131,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         minimum_items: &BTreeMap<u64, u64>,
     ) -> Result<RecoveryPreflight<E, A>, Error> {
         let stored = Self::stored(&context, &cfg).await?;
-        let page_size = Self::page_size(&cfg);
+        let page_size = cfg.page_cache.page_size();
         let mut floor_sizes = BTreeMap::new();
         let mut boundaries = BTreeMap::new();
 
@@ -212,7 +201,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
             )));
         }
 
-        let page_size = Self::page_size(&cfg);
+        let page_size = cfg.page_cache.page_size();
         let mut boundaries = BTreeMap::new();
         let mut floors = BTreeMap::new();
 

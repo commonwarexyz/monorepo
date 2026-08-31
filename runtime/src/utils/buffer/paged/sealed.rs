@@ -14,6 +14,7 @@
 
 use super::{CHECKSUM_SIZE, CacheRef, Replay, read::PageReader, view::View};
 use crate::{Blob, Error, IoBuf, IoBufMut, IoBufs, ReadOptions};
+use commonware_utils::Widen;
 use std::{
     num::{NonZeroU16, NonZeroUsize},
     sync::Arc,
@@ -179,7 +180,7 @@ impl<B: Blob> Sealed<B> {
         buffer_size: NonZeroUsize,
         read_options: ReadOptions,
     ) -> Result<Replay<B>, Error> {
-        let page_size = self.inner.cache_ref.page_size();
+        let page_size: u64 = self.inner.cache_ref.page_size().widen();
         let page_size_nz = NonZeroU16::new(page_size as u16).expect("page_size is non-zero");
         let physical_page_size = page_size
             .checked_add(CHECKSUM_SIZE)
