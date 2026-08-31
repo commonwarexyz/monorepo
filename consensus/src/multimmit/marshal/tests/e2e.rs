@@ -41,7 +41,9 @@ use commonware_runtime::{
     buffer::paged::CacheRef, deterministic, telemetry::metrics::count_running_tasks,
 };
 use commonware_storage::translator::TwoCap;
-use commonware_utils::{Acknowledgement as _, NZU16, NZU64, NZUsize, sync::Mutex};
+use commonware_utils::{
+    Acknowledgement as _, NZU16, NZU64, NZUsize, channel::oneshot, sync::Mutex,
+};
 use futures::{StreamExt as _, stream::FuturesUnordered};
 use std::{
     num::{NonZeroU32, NonZeroU64, NonZeroUsize},
@@ -251,7 +253,7 @@ async fn start_attached_marshal(
     let resolver_handle = resolver_engine.start(resolver_network);
     let (mailbox, marshal) = service.start(
         resolver,
-        CommitteeVerifier(committee.verifier.clone()),
+        CommitteeVerifier::new(committee.verifier.clone()),
         reporter,
     );
     AttachedMarshal {
@@ -263,7 +265,22 @@ async fn start_attached_marshal(
 }
 
 #[derive(Clone)]
-struct CommitteeVerifier(TestScheme);
+struct VerificationGate {
+    started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+    release: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
+}
+
+#[derive(Clone)]
+struct CommitteeVerifier {
+    scheme: TestScheme,
+    gate: Option<VerificationGate>,
+}
+
+impl CommitteeVerifier {
+    const fn new(scheme: TestScheme) -> Self {
+        Self { scheme, gate: None }
+    }
+}
 
 impl LqcVerifier<Sha256, MinPk> for CommitteeVerifier {
     type Error = &'static str;
@@ -273,15 +290,24 @@ impl LqcVerifier<Sha256, MinPk> for CommitteeVerifier {
         proof: &Lqc<MinPk, Sha256Digest>,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send {
         let valid = self
-            .0
+            .scheme
             .verify_lqc::<_, Sha256, _>(&mut commonware_utils::test_rng(), proof, &Sequential)
             .is_some();
+        let gate = self.gate.take().map(|gate| {
+            (
+                gate.started.lock().take().expect("verification gate starts once"),
+                gate.release.lock().take().expect("verification gate releases once"),
+            )
+        });
         async move {
-            if valid {
-                Ok(())
-            } else {
-                Err("committee rejected LQC")
+            if !valid {
+                return Err("committee rejected LQC");
             }
+            if let Some((started, release)) = gate {
+                let _ = started.send(());
+                release.await.map_err(|_| "verification gate closed")?;
+            }
+            Ok(())
         }
     }
 }
@@ -414,6 +440,7 @@ struct Harness {
     max_commit_outputs: NonZeroUsize,
     max_hot_block_bytes: NonZeroUsize,
     max_pending_acks: NonZeroUsize,
+    verification_gate: Option<VerificationGate>,
 }
 
 impl Harness {
@@ -450,6 +477,7 @@ impl Harness {
             max_commit_outputs: NZUsize!(8),
             max_hot_block_bytes: NZUsize!(512 * 1024 * 1024),
             max_pending_acks: NZUsize!(128),
+            verification_gate: None,
         }
     }
 
@@ -552,7 +580,10 @@ impl Harness {
         let resolver_handle = resolver_engine.start(resolver_network);
         let (mailbox, marshal) = service.start(
             resolver,
-            CommitteeVerifier(self.committee.verifier.clone()),
+            CommitteeVerifier {
+                scheme: self.committee.verifier.clone(),
+                gate: self.verification_gate.take(),
+            },
             self.reporters[index].clone(),
         );
         self.nodes[index] = Some(Node {
@@ -2351,6 +2382,90 @@ fn delivery_materializes_only_the_cold_prefix_before_a_retained_hot_output() {
         ] {
             assert_eq!(metric_total(&metrics, metric), expected, "{metrics}");
         }
+        harness.shutdown().await;
+    });
+}
+
+#[test]
+fn canceled_floor_install_still_retires_certified_requests() {
+    runner(133).start(|context| async move {
+        let mut harness = Harness::new(context, 133, [true, true]).await;
+        let (started, mut started_rx) = oneshot::channel();
+        let (release, release_rx) = oneshot::channel();
+        harness.verification_gate = Some(VerificationGate {
+            started: Arc::new(Mutex::new(Some(started))),
+            release: Arc::new(Mutex::new(Some(release_rx))),
+        });
+        harness.start(0).await;
+
+        let floor = certify(
+            &harness.committee,
+            1,
+            initial_history(&harness.committee),
+            harness.committee.config.genesis().tips(),
+            vec![vec![body(133)], vec![body(134)]],
+        );
+        let header = floor.blocks[0][0].header().clone();
+        let votes = (0..harness.committee.codec().da_quorum())
+            .map(|signer| harness.committee.da_vote(signer, header.clone()))
+            .collect::<Vec<_>>();
+        let certificate = harness
+            .committee
+            .verifier
+            .assemble_da_certificate(&votes, &Sequential)
+            .unwrap();
+        let artifact = Arc::new(Artifact::DaCertificate(certificate));
+        let mailbox = harness.mailbox(0);
+        let mut reporter = mailbox.clone();
+        assert_eq!(
+            reporter.report(Activity::ProtocolAccepted {
+                artifact_id: artifact.id::<Sha256>(),
+                artifact,
+            }),
+            Feedback::Ok
+        );
+        for _ in 0..WAIT_STEPS {
+            if metric_total(&harness.context.encode(), "resolver_pending_requests") == 1.0 {
+                break;
+            }
+            harness.context.sleep(WAIT_STEP).await;
+        }
+        assert_eq!(
+            metric_total(&harness.context.encode(), "resolver_pending_requests"),
+            1.0
+        );
+
+        let floor_id = floor.id();
+        let mut installation = Box::pin(mailbox.install_floor(FloorCheckpoint::new(
+            floor_id,
+            Arc::clone(&floor.proof),
+            Arc::clone(&floor.history),
+            floor.tips(),
+        )));
+        commonware_macros::select! {
+            result = &mut started_rx => result.unwrap(),
+            result = &mut installation => panic!("floor installation completed before verification paused: {result:?}"),
+        }
+        drop(installation);
+        harness.context.sleep(WAIT_STEP).await;
+        release.send(()).unwrap();
+        harness
+            .wait_progress(0, |progress| {
+                progress.generation == 1 && progress.floor == floor_id
+            })
+            .await;
+
+        for _ in 0..WAIT_STEPS {
+            if metric_total(&harness.context.encode(), "resolver_pending_requests") == 0.0 {
+                break;
+            }
+            harness.context.sleep(WAIT_STEP).await;
+        }
+        assert_eq!(
+            metric_total(&harness.context.encode(), "resolver_pending_requests"),
+            0.0,
+            "installed floor left its certified resolver request active"
+        );
         harness.shutdown().await;
     });
 }
