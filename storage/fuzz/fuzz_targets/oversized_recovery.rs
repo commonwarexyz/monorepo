@@ -174,7 +174,7 @@ fn test_cfg(pooler: &impl BufferPooler) -> Config<()> {
         index_partition: INDEX_PARTITION.into(),
         value_partition: VALUE_PARTITION.into(),
         index_page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
-        replay_buffer: commonware_utils::NZUsize!(4096),
+        replay_buffer: NZUsize!(4096),
         index_write_buffer: NZUsize!(512),
         value_write_buffer: NZUsize!(512),
         compression: None,
