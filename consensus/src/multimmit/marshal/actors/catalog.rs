@@ -7027,6 +7027,152 @@ mod tests {
     }
 
     #[test]
+    fn archive_ahead_lqc_ordinal_is_skipped_after_reopen() {
+        deterministic::Runner::default().start(|context| async move {
+            let committee = Committee::<MinPk>::new_with_namespace_and_producers(
+                68,
+                b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_LQC_ORDINAL_CRASH",
+                6,
+                (0..4).map(Participant::new).collect(),
+                Limits::new(2, 2).unwrap(),
+            );
+
+            for (mode, label, delayed_label, reopen_label) in [
+                (
+                    ArchiveMode::Prunable,
+                    "prunable",
+                    "prunable_delayed",
+                    "prunable_reopen",
+                ),
+                (
+                    ArchiveMode::Immutable,
+                    "immutable",
+                    "immutable_delayed",
+                    "immutable_reopen",
+                ),
+            ] {
+                let configure = || {
+                    let mut config = config(&context, &committee);
+                    config.partition_prefix = format!("catalog_lqc_ordinal_crash_{label}");
+                    config.finalized_lqc = mode;
+                    config
+                };
+                let first = Arc::new(lqc(&committee, 1, 0..5));
+                let second = Arc::new(lqc(&committee, 1, 1..6));
+                let first_id = first.id::<Sha256>();
+                let second_id = second.id::<Sha256>();
+                assert_ne!(first_id, second_id);
+
+                let syncs = PendingSyncs::default();
+                let delayed = DelayedSyncContext {
+                    inner: context.child(delayed_label),
+                    pending: syncs.clone(),
+                };
+                let (client, handle, _delivery) =
+                    spawn_catalog(configure(), delayed.child("catalog")).await;
+                let current = client.checkpoint().await.unwrap();
+                let record = Arc::new(
+                    TipRecord::new(
+                        current.history(),
+                        committee.config.genesis().tips().to_vec(),
+                    )
+                    .unwrap(),
+                );
+                let history = record.commitment::<Sha256>();
+                assert_eq!(first.leader().history(), history);
+                let checkpoint = |floor| {
+                    Checkpoint::new(
+                        current.epoch(),
+                        current.generation(),
+                        current.archive_layout(),
+                        floor,
+                        history,
+                        Some(0),
+                        current.ordered().to_vec(),
+                        current.emitted().to_vec(),
+                        current.committed(),
+                    )
+                    .unwrap()
+                };
+
+                syncs.arm();
+                let token = client
+                    .start_commit(
+                        Commit {
+                            selected: vec![SelectedLqc {
+                                view: first.view(),
+                                id: first_id,
+                                proof: Arc::clone(&first),
+                            }],
+                            history: vec![HistoryOpening {
+                                commitment: history,
+                                record: Arc::clone(&record),
+                            }],
+                            outputs: Vec::new(),
+                            checkpoint: checkpoint(first_id),
+                        },
+                        Vec::new(),
+                    )
+                    .await
+                    .unwrap();
+                let archive_syncs = syncs.calls();
+                assert!(archive_syncs > 0);
+                let mut publication = Box::pin(token.wait());
+                release_next_pending_syncs(&syncs, archive_syncs);
+                for _ in 0..100 {
+                    if syncs.calls() > archive_syncs {
+                        break;
+                    }
+                    commonware_macros::select! {
+                        result = &mut publication => {
+                            panic!("commit published before checkpoint sync: {result:?}")
+                        },
+                        _ = context.sleep(std::time::Duration::from_millis(1)) => {},
+                    }
+                }
+                assert!(
+                    syncs.calls() > archive_syncs,
+                    "checkpoint durability did not start after the archive cut"
+                );
+                drop(publication);
+                handle.abort();
+                drop(client);
+                let _ = handle.await;
+
+                let (client, handle, _delivery) =
+                    spawn_catalog(configure(), context.child(reopen_label)).await;
+                assert_eq!(client.progress().await.unwrap().floor, current.floor());
+                client
+                    .commit(Commit {
+                        selected: vec![SelectedLqc {
+                            view: second.view(),
+                            id: second_id,
+                            proof: Arc::clone(&second),
+                        }],
+                        history: vec![HistoryOpening {
+                            commitment: history,
+                            record: Arc::clone(&record),
+                        }],
+                        outputs: Vec::new(),
+                        checkpoint: checkpoint(second_id),
+                    })
+                    .await
+                    .unwrap();
+                assert!(client.final_lqc(first_id).await.unwrap());
+                assert!(client.final_lqc(second_id).await.unwrap());
+                client.prune(0).await.unwrap();
+                assert_eq!(
+                    client.final_lqc(first_id).await.unwrap(),
+                    mode == ArchiveMode::Immutable
+                );
+                assert!(client.final_lqc(second_id).await.unwrap());
+                drop(client);
+                assert!(handle.await.is_ok());
+            }
+        });
+    }
+
+    #[test]
     fn commit_block_byte_bound_rejects_multi_block_overshoot_but_allows_a_single_block() {
         deterministic::Runner::default().start(|context| async move {
             let committee = Committee::<MinPk>::new_with_namespace_and_producers(
@@ -7307,6 +7453,7 @@ mod tests {
                 .begin(
                     target.clone(),
                     proof.view(),
+                    None,
                     prune.clone(),
                     commonware_codec::Encode::encode(proof.as_ref()),
                     commonware_codec::Encode::encode(record.as_ref()),

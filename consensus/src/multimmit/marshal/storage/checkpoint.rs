@@ -269,9 +269,9 @@ enum CatalogPhase<D: Digest> {
 /// after both steps complete. A commit-cleanup phase instead marks an already-current ordinary
 /// checkpoint whose exact temporary prune may have been interrupted. It records only the selected
 /// LQC view because finalized body cleanup is independently derived from a durable immutable
-/// promotion cursor or explicit application pruning. The LQC index is the inclusive high-water
-/// mark of the finalized proof archive, whose ordinal indexing preserves distinct exact
-/// certificates at the same view.
+/// promotion cursor or explicit application pruning. The LQC index is the inclusive archive
+/// ordinal attached to the published checkpoint or pending install. Ordinal indexing preserves
+/// distinct exact certificates at the same view.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::multimmit::marshal) struct CatalogState<D: Digest> {
     checkpoint: Checkpoint<D>,
@@ -329,18 +329,20 @@ impl<D: Digest> CatalogState<D> {
         &self,
         checkpoint: Checkpoint<D>,
         proof_view: View,
+        lqc_predecessor: Option<u64>,
         prune: Prune,
         proof: Bytes,
         history: Bytes,
     ) -> Option<Self> {
         if matches!(self.phase, CatalogPhase::Install(_))
+            || lqc_predecessor < self.lqc_index
             || proof.is_empty()
             || history.is_empty()
             || !valid_install(&self.checkpoint, &checkpoint, &prune)
         {
             return None;
         }
-        let lqc_index = next_lqc_index(self.lqc_index, proof_view)?;
+        let lqc_index = next_lqc_index(lqc_predecessor, proof_view)?;
         Some(Self {
             checkpoint: self.checkpoint.clone(),
             lqc_index: Some(lqc_index),
@@ -765,6 +767,7 @@ mod tests {
             .begin(
                 target.clone(),
                 View::new(11),
+                Some(7),
                 install_prune(),
                 Bytes::from_static(b"proof"),
                 Bytes::from_static(b"history"),
@@ -1060,6 +1063,7 @@ mod tests {
                     .begin(
                         target,
                         View::new(seed),
+                        Some(seed % u64::MAX),
                         prune,
                         Bytes::copy_from_slice(&seed.to_be_bytes()),
                         Bytes::copy_from_slice(&seed.wrapping_add(1).to_be_bytes()),

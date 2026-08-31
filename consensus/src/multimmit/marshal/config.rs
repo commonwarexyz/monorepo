@@ -669,6 +669,7 @@ where
                         .begin(
                             checkpoint.clone(),
                             floor.proof.view(),
+                            None,
                             Prune {
                                 pending_lqc: View::new(0),
                                 pending_history: View::new(0),
@@ -1252,6 +1253,7 @@ mod tests {
                 .begin(
                     checkpoint.clone(),
                     original.view(),
+                    None,
                     Prune {
                         pending_lqc: View::new(0),
                         pending_history: View::new(0),

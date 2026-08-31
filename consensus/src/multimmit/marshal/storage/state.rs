@@ -189,6 +189,7 @@ where
     pending_blocks: Option<PendingBlocks<T, E, H, B>>,
     metadata: Option<Metadata<E, Unit, CatalogState<H::Digest>>>,
     accepted_lqc_index: Option<u64>,
+    allocated_lqc_index: Option<u64>,
     accepted_cleanup_selected: Option<View>,
     /// Prunable finalized rows retain their bodies in temporary custody until application pruning.
     prunable_blocks: bool,
@@ -227,6 +228,7 @@ where
             ));
         }
         let accepted_lqc_index = metadata.get(&Unit).and_then(CatalogState::lqc_index);
+        let allocated_lqc_index = accepted_lqc_index.max(final_lqc.last_index());
         let accepted_cleanup_selected = metadata
             .get(&Unit)
             .and_then(CatalogState::commit_cleanup)
@@ -246,6 +248,7 @@ where
             pending_blocks: Some(pending_blocks),
             metadata: Some(metadata),
             accepted_lqc_index,
+            allocated_lqc_index,
             accepted_cleanup_selected,
             prunable_blocks,
             codec_config,
@@ -828,14 +831,16 @@ where
         } = batch;
         let selected_view = selected.last().map(|selected| selected.view);
         let cleanup_selected = self.accepted_cleanup_selected.max(selected_view);
-        let current_lqc_index = self.accepted_lqc_index;
-        let mut lqc_index = current_lqc_index;
+        let mut allocated_lqc_index = self.allocated_lqc_index;
         for selected in &selected {
-            lqc_index = Some(
-                next_lqc_index(lqc_index, selected.view)
+            allocated_lqc_index = Some(
+                next_lqc_index(allocated_lqc_index, selected.view)
                     .ok_or(Error::Invalid("finalized LQC index overflow"))?,
             );
         }
+        let lqc_index = selected_view
+            .map(|_| allocated_lqc_index)
+            .unwrap_or(self.accepted_lqc_index);
         let state = self
             .metadata
             .as_ref()
@@ -861,7 +866,7 @@ where
             )
         };
         let mut lqc = self.final_lqc.take().expect("catalog owns finalized LQCs");
-        let mut index = current_lqc_index;
+        let mut index = self.allocated_lqc_index;
         for selected in selected {
             index = Some(
                 next_lqc_index(index, selected.view).expect("finalized LQC range was validated"),
@@ -911,6 +916,7 @@ where
         self.final_history = Some(histories);
         self.final_blocks = Some(blocks);
         self.accepted_lqc_index = lqc_index;
+        self.allocated_lqc_index = allocated_lqc_index;
         self.accepted_cleanup_selected = cleanup_selected;
         let cleanup = PendingCleanup {
             selected: state
@@ -1202,9 +1208,19 @@ where
             .expect("catalog owns metadata")
             .get(&Unit)
             .ok_or(Error::Invalid("catalog has no checkpoint"))?
-            .begin(checkpoint, proof_view, prune, proof, history)
+            .begin(
+                checkpoint,
+                proof_view,
+                self.allocated_lqc_index,
+                prune,
+                proof,
+                history,
+            )
             .ok_or(Error::Invalid("floor install intent is not canonical"))?;
-        self.sync_state(state).await
+        let lqc_index = state.lqc_index();
+        self.sync_state(state).await?;
+        self.allocated_lqc_index = lqc_index;
+        Ok(())
     }
 
     pub(in crate::multimmit::marshal) async fn archive_install(
@@ -1276,6 +1292,7 @@ where
         let lqc_index = state.lqc_index();
         self.sync_state(state).await?;
         self.accepted_lqc_index = lqc_index;
+        self.allocated_lqc_index = lqc_index;
         self.accepted_cleanup_selected = None;
         Ok(())
     }
