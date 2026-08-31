@@ -356,13 +356,13 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
             page_cache: cfg.index_page_cache,
             write_buffer: cfg.index_write_buffer,
         };
+        let index_context = context.child("index");
         let value_cfg = GlobConfig {
             partition: cfg.value_partition,
             compression: cfg.compression,
             codec_config: cfg.codec_config,
             write_buffer: cfg.value_write_buffer,
         };
-        let index_context = context.child("index");
         let value_context = context.child("values");
 
         let (index, values) = match recovery {
