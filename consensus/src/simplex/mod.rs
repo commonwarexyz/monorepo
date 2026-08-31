@@ -7156,7 +7156,7 @@ mod tests {
                 c,
                 "view-26 leader must hold certification 22"
             );
-            // The halt detector below waits for the next Byzantine-led term.
+            // The halt detector ends when term 9 returns to the offline validator.
             assert_eq!(leader_of(41), offline, "term 9 must return to offline");
 
             let build_notarization =
@@ -7321,9 +7321,8 @@ mod tests {
                         }),
                 );
             }
-            // Reaching the next Byzantine-led term proves every honest
-            // participant led a full term without finalizing: protocol
-            // progress without recovery, not a stalled executor.
+            // Reaching the next offline-led term proves each honest validator
+            // led a full term without finalizing.
             let progress_reporters: Vec<_> = honest_reporters.values().cloned().collect();
             let next_byzantine_term =
                 context
@@ -7356,9 +7355,9 @@ mod tests {
             assert!(blocked.is_empty(), "blocked peers: {blocked:?}");
 
             if !finalized {
-                // Diagnose the halt: each deprived validator fetched the
-                // proposal parent from an honest proposer but could not
-                // certify it without the pinned previous view.
+                // Each deprived validator fetched the proposal parent from an
+                // honest proposer but lacks the preceding notarization needed
+                // to certify it.
                 let a_reporter = &honest_reporters[&a];
                 assert!(a_reporter.notarizations.lock().contains_key(&View::new(2)));
                 assert!(!a_reporter.notarizations.lock().contains_key(&View::new(1)));

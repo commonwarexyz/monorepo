@@ -147,11 +147,10 @@ impl<S: Scheme, D: Digest> Policy for MailboxMessage<S, D> {
             return;
         }
 
-        // Ignore duplicate work. Resolve requests for the same certificate
-        // share one network fetch, whose peer scope must remain as wide as any
-        // duplicate requested. Requests for different kinds at the same views
-        // are distinct work: neither certificate substitutes for the other
-        // (see [Kind]).
+        // Ignore duplicate work. Resolve requests with the same proposal,
+        // requested view, and kind share one network fetch. An unrestricted
+        // duplicate removes the target. Different kinds remain distinct
+        // because their certificates are not interchangeable.
         if overflow
             .messages
             .iter_mut()
@@ -627,8 +626,8 @@ mod tests {
         ));
     }
 
-    /// Regression: an unrestricted request must not widen or swallow a pending
-    /// request of the other kind, whose certificate it cannot substitute for.
+    /// An unrestricted request must not modify a pending request for another
+    /// certificate kind.
     #[test]
     fn resolve_retains_target_across_kinds() {
         let proposal = View::new(10);
@@ -663,8 +662,8 @@ mod tests {
         ));
     }
 
-    /// Regression: a duplicate request must leave the pending request as wide
-    /// as either copy asked, whichever order they arrive in.
+    /// An unrestricted duplicate must widen the pending request regardless of
+    /// arrival order.
     #[test]
     fn resolve_widens_duplicate_to_unrestricted() {
         let proposal = View::new(10);
