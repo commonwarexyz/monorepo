@@ -1028,7 +1028,7 @@ impl<B: Blob> Writer<B> {
     ///
     /// Returns [Error::BlobInsufficientLength] when valid page contents do not cover the whole
     /// range, and [Error::OffsetOverflow] when its end or page offsets overflow.
-    pub async fn read(
+    pub async fn read_range(
         blob: &B,
         logical_page_size: NonZeroU16,
         offset: u64,
@@ -1073,7 +1073,7 @@ impl<B: Blob> Writer<B> {
     ///
     /// The blob must contain only complete physical pages. The last page is validated first to
     /// determine the logical end. If `len` crosses a page boundary, preceding pages are validated
-    /// with [Self::read].
+    /// with [Self::read_range].
     pub async fn read_tail(
         blob: &B,
         physical_size: u64,
@@ -1113,7 +1113,7 @@ impl<B: Blob> Writer<B> {
         let mut out = if offset < page_start {
             let prefix_len =
                 usize::try_from(page_start - offset).map_err(|_| Error::OffsetOverflow)?;
-            Self::read(blob, logical_page_size, offset, prefix_len, read_options).await?
+            Self::read_range(blob, logical_page_size, offset, prefix_len, read_options).await?
         } else {
             IoBufs::default()
         };

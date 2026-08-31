@@ -253,7 +253,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         section: u64,
         size: u64,
     ) -> Result<A, Error> {
-        let entry = Writer::<E::Blob>::read(
+        let entry = Writer::<E::Blob>::read_range(
             blob,
             page_size,
             size - Self::CHUNK_SIZE_U64,
