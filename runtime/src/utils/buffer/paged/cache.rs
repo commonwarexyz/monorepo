@@ -4,7 +4,7 @@
 use super::{CHECKSUM_SIZE, STORAGE_PAGE_SIZE, get_page_from_blob};
 use crate::{Blob, BufferPool, BufferPooler, Error, IoBuf, IoBufMut, ReadOptions};
 use ahash::AHashMap;
-use commonware_utils::{cache::Clock, sync::RwLock};
+use commonware_utils::{cache, sync::RwLock};
 use futures::{FutureExt, future::Shared};
 use std::{
     collections::hash_map::Entry,
@@ -95,24 +95,23 @@ impl Drop for PageFetchGuard {
 /// A single page cache can be used to cache data from multiple blobs by assigning a unique id to
 /// each.
 ///
-/// Eviction is delegated to a [Clock], which uses the Clock (second-chance) replacement
-/// policy, a lightweight approximation of LRU. All page buffers are pre-allocated from `pool` at
-/// construction (via [Clock::prefill]) and reused in place, so caching never allocates after
+/// Eviction uses the [cache::Clock] replacement policy. All page buffers are pre-allocated from
+/// `pool` at construction and reused in place, so caching never allocates page buffers after
 /// construction.
 ///
 /// Reads first resolve pages through `hints`, a fixed-size direct-mapped array from
-/// [Self::hint_index] to the [Clock] slot the page was last cached in: a lookup is one array
+/// [Self::hint_index] to the [cache::Cache] slot the page was last cached in: a lookup is one array
 /// load instead of a hash-table probe chain, which the out-of-order core cannot overlap across
-/// items. Hints are best-effort, never truth: [Clock::get_at] only resolves a slot that still
-/// holds the page's key live, so entries staled by eviction, invalidation, or hint collisions
-/// read as misses and fall back to the [Clock]'s own lookup. Hints need no maintenance on
-/// eviction or invalidation, and their memory is fixed at construction, so no blob offset can
-/// grow them.
+/// items. Hints are best-effort, never truth: [cache::Cache::get_at] only resolves a slot that
+/// still holds the page's key live, so entries staled by eviction, invalidation, or hint collisions
+/// read as misses and fall back to the [cache::Cache]'s own lookup. Hints need no maintenance on
+/// eviction or invalidation, and their memory is fixed at construction, so no blob offset can grow
+/// them.
 struct Cache {
     /// Maps each (blob id, page number) to its logical page buffer.
-    cache: Clock<(u64, u64), IoBufMut>,
+    cache: cache::Cache<(u64, u64), IoBufMut>,
 
-    /// Direct-mapped [Clock] slot hints, indexed by [Self::hint_index]. Initialized
+    /// Direct-mapped [cache::Cache] slot hints, indexed by [Self::hint_index]. Initialized
     /// out-of-range so untouched entries read as misses. The length is a power of two so
     /// [Self::hint_index] can wrap with a mask instead of a division, and at least twice the
     /// cache capacity: a full cache has one live page per `capacity`, so sizing at capacity
@@ -478,7 +477,7 @@ impl Cache {
     /// `page_size` bytes.
     pub fn new(pool: BufferPool, page_size: NonZeroU16, capacity: NonZeroUsize) -> Self {
         let page_size = page_size.get() as usize;
-        let mut cache = Clock::new(capacity);
+        let mut cache = cache::Cache::new(capacity);
         cache.prefill(|| pool.alloc_zeroed(page_size));
         let hints = capacity.get().saturating_mul(2).next_power_of_two();
         Self {
@@ -543,7 +542,7 @@ impl Cache {
         (salted & (self.hints.len() as u64 - 1)) as usize
     }
 
-    /// Look up a page, preferring its direct-mapped slot hint over the [Clock]'s own lookup.
+    /// Look up a page, preferring its direct-mapped slot hint over the [cache::Cache]'s own lookup.
     #[inline]
     fn get_page(&self, blob_id: u64, page_num: u64) -> Option<&IoBufMut> {
         let key = (blob_id, page_num);
@@ -1456,9 +1455,9 @@ mod tests {
     #[test_traced]
     fn test_read_cached_many_cross_blob_hint_collision() {
         // Two blobs whose salted ranges overlap share a hint entry, and the later insert
-        // overwrites the earlier blob's hint. The hint only proposes a slot: [Clock::get_at]
-        // validates the full (blob, page) key, so each blob reads back its own bytes (the
-        // clobbered one through the fallback lookup), never the other's.
+        // overwrites the earlier blob's hint. The hint only proposes a [cache::Cache] slot.
+        // [cache::Cache::get_at] validates the full (blob, page) key, so each blob reads back its
+        // own bytes (the clobbered one through the fallback lookup), never the other's.
         let pool = test_pool();
         let cache_ref = CacheRef::new(pool, PAGE_SIZE, NZUsize!(4));
         let blob_a = cache_ref.next_id();
