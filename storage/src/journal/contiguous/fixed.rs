@@ -511,25 +511,6 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             writer.sync().await?;
         }
 
-        // With the suspect pages resolved, truncate any trailing non-chunk-aligned bytes on every
-        // blob. Items are fixed size, so a blob ending in fewer than `CHUNK_SIZE` trailing bytes is
-        // junk from an incomplete write. The truncation is synced before `recover_bounds` queries
-        // lengths.
-        for (&blob, writer) in &mut pending {
-            let size = writer.size();
-            let valid_size = Self::items_to_bytes(size / Self::CHUNK_SIZE_U64)?;
-            if valid_size != size {
-                warn!(
-                    blob,
-                    invalid_size = size,
-                    new_size = valid_size,
-                    "trailing bytes detected: truncating"
-                );
-                writer.resize(valid_size).await?;
-                writer.sync().await?;
-            }
-        }
-
         let RecoveredBounds {
             size,
             recovery_watermark,
@@ -4046,6 +4027,51 @@ mod tests {
             assert_eq!(journal.bounds(), 7..9);
             assert_eq!(journal.read(7).await.unwrap(), 11);
             assert_eq!(journal.read(8).await.unwrap(), 22);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// A torn item write can persist a partial item on the tail with every page valid. The
+    /// suspect scan owns the whole-item floor: recovery must truncate the fragment and leave
+    /// the tail aligned for future appends.
+    #[test_traced]
+    fn test_fixed_recovery_truncates_partial_item_tail() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(10));
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for value in [11u64, 22, 33] {
+                (journal, _) = journal.append(&value).await.unwrap();
+            }
+            journal = journal.sync().await.unwrap();
+            drop(journal);
+
+            // Persist three bytes of a fourth item directly on the tail blob: every page stays
+            // valid, only the item boundary is torn.
+            let partition = blob_partition(&cfg);
+            let (blob, size) = context.open(&partition, &0u64.to_be_bytes()).await.unwrap();
+            let mut writer =
+                Writer::new(blob, size, cfg.write_buffer.get(), cfg.page_cache.clone())
+                    .await
+                    .unwrap();
+            assert_eq!(writer.size(), 24);
+            writer.append(&44u64.to_be_bytes()[..3]).await.unwrap();
+            writer.sync().await.unwrap();
+            drop(writer);
+
+            // Recovery floors to whole items and the journal appends aligned afterward.
+            let mut journal = Journal::<_, u64>::init(context.child("recover"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 0..3);
+            assert_eq!(journal.read(2).await.unwrap(), 33);
+            let position;
+            (journal, position) = journal.append(&44u64).await.unwrap();
+            assert_eq!(position, 3);
+            let journal = journal.sync().await.unwrap();
+            assert_eq!(journal.read(3).await.unwrap(), 44);
             journal.destroy().await.unwrap();
         });
     }
