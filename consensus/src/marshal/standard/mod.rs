@@ -93,7 +93,7 @@ mod tests {
     use commonware_resolver::{Consumer, Delivery, Fetch, Resolver, TargetedResolver};
     use commonware_runtime::{
         Clock, Metrics, Quota, Runner, Spawner, Supervisor as _, buffer::paged::CacheRef,
-        deterministic,
+        deterministic, telemetry::metrics::has_metric_value,
     };
     use commonware_storage::{
         archive::{Archive as _, immutable, prunable},
@@ -7155,15 +7155,16 @@ mod tests {
         });
     }
 
-    /// A finalized-store wrapper that delays durability by `pace` of
-    /// deterministic time to model a slow sync: `sync` blocks the caller for
-    /// the pace, while `start_sync` returns immediately with a handle that
-    /// completes after the pace (like an archive with a non-blocking sync
-    /// path, e.g. [`prunable::Archive`]).
+    /// A finalized-store wrapper that delays operations by deterministic time
+    /// to model a slow store: `sync` blocks the caller for `sync_pace`,
+    /// `start_sync` returns immediately with a handle that completes after it
+    /// (like an archive with a non-blocking sync path, e.g.
+    /// [`prunable::Archive`]), and every `get` sleeps `read_pace`.
     struct PacedStore<T> {
         inner: T,
         context: deterministic::Context,
-        pace: Duration,
+        sync_pace: Duration,
+        read_pace: Duration,
     }
 
     impl<T: crate::marshal::store::Blocks> crate::marshal::store::Blocks for PacedStore<T> {
@@ -7176,7 +7177,7 @@ mod tests {
         }
 
         async fn sync(mut self) -> Result<Self, Self::Error> {
-            self.context.sleep(self.pace).await;
+            self.context.sleep(self.sync_pace).await;
             self.inner = self.inner.sync().await?;
             Ok(self)
         }
@@ -7186,7 +7187,7 @@ mod tests {
         ) -> Result<(Self, commonware_runtime::Handle<()>), Self::Error> {
             let handle;
             (self.inner, handle) = self.inner.start_sync().await?;
-            let sleep = self.context.sleep(self.pace);
+            let sleep = self.context.sleep(self.sync_pace);
             Ok((
                 self,
                 commonware_runtime::Handle::from_future(async move {
@@ -7200,6 +7201,9 @@ mod tests {
             &self,
             id: commonware_storage::archive::Identifier<'_, <Self::Block as Digestible>::Digest>,
         ) -> Result<Option<Self::Block>, Self::Error> {
+            if !self.read_pace.is_zero() {
+                self.context.sleep(self.read_pace).await;
+            }
             self.inner.get(id).await
         }
 
@@ -7238,7 +7242,7 @@ mod tests {
         }
 
         async fn sync(mut self) -> Result<Self, Self::Error> {
-            self.context.sleep(self.pace).await;
+            self.context.sleep(self.sync_pace).await;
             self.inner = self.inner.sync().await?;
             Ok(self)
         }
@@ -7248,7 +7252,7 @@ mod tests {
         ) -> Result<(Self, commonware_runtime::Handle<()>), Self::Error> {
             let handle;
             (self.inner, handle) = self.inner.start_sync().await?;
-            let sleep = self.context.sleep(self.pace);
+            let sleep = self.context.sleep(self.sync_pace);
             Ok((
                 self,
                 commonware_runtime::Handle::from_future(async move {
@@ -7262,6 +7266,9 @@ mod tests {
             &self,
             id: commonware_storage::archive::Identifier<'_, Self::BlockDigest>,
         ) -> Result<Option<Finalization<Self::Scheme, Self::Commitment>>, Self::Error> {
+            if !self.read_pace.is_zero() {
+                self.context.sleep(self.read_pace).await;
+            }
             self.inner.get(id).await
         }
 
@@ -7288,7 +7295,8 @@ mod tests {
     async fn paced_finalized_stores(
         context: &deterministic::Context,
         partition_prefix: &str,
-        pace: Duration,
+        sync_pace: Duration,
+        read_pace: Duration,
     ) -> (
         PacedStore<prunable::Archive<EightCap, deterministic::Context, D, Finalization<S, D>>>,
         PacedStore<prunable::Archive<EightCap, deterministic::Context, D, B>>,
@@ -7332,12 +7340,14 @@ mod tests {
             PacedStore {
                 inner: finalizations_by_height,
                 context: context.child("finalizations_pacer"),
-                pace,
+                sync_pace,
+                read_pace,
             },
             PacedStore {
                 inner: finalized_blocks,
                 context: context.child("blocks_pacer"),
-                pace,
+                sync_pace,
+                read_pace,
             },
         )
     }
@@ -7380,7 +7390,8 @@ mod tests {
                 strategy: Sequential,
             };
             let (finalizations_by_height, finalized_blocks) =
-                paced_finalized_stores(&context, "paced-finalized-sync", PACE).await;
+                paced_finalized_stores(&context, "paced-finalized-sync", PACE, Duration::ZERO)
+                    .await;
             let (actor, mut mailbox, _) = Actor::init(
                 context.child("actor"),
                 finalizations_by_height,
@@ -7467,6 +7478,237 @@ mod tests {
         });
     }
 
+    /// A slow backfill read must not stall the actor loop: the backfill
+    /// task performs it while marshal keeps answering unrelated mailbox messages.
+    #[test_traced("WARN")]
+    fn test_standard_paced_serve_does_not_block_mailbox() {
+        const READ_PACE: Duration = Duration::from_millis(100);
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let config = Config {
+                provider: ConstantProvider::new(schemes[0].clone()),
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                start: Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                mailbox_size: NZUsize!(100),
+                view_retention: ViewDelta::new(10),
+                max_repair: NZUsize!(10),
+                max_pending_acks: NZUsize!(1),
+                block_codec_config: (),
+                partition_prefix: "paced-serve".to_string(),
+                prunable_items_per_section: NZU64!(10),
+                replay_buffer: NZUsize!(1024),
+                key_write_buffer: NZUsize!(1024),
+                value_write_buffer: NZUsize!(1024),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                strategy: Sequential,
+            };
+
+            // Syncs are instant, but every store read sleeps READ_PACE.
+            let (finalizations_by_height, finalized_blocks) =
+                paced_finalized_stores(&context, "paced-serve", Duration::ZERO, READ_PACE).await;
+            let (actor, mut mailbox, _) = Actor::init(
+                context.child("actor"),
+                finalizations_by_height,
+                finalized_blocks,
+                config,
+            )
+            .await;
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let application = Application::<B>::default();
+            let _actor_handle =
+                actor.start_unbuffered(application.clone(), (resolver_rx, resolver.clone()));
+            wait_until(
+                &context,
+                Duration::from_secs(5),
+                "genesis dispatched",
+                || application.blocks().contains_key(&Height::zero()),
+            )
+            .await;
+
+            // Finalize a block so there is something to serve.
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let block = make_raw_block(genesis.digest(), Height::new(1), 100);
+            assert!(mailbox.verified(round, block.clone()).await);
+            let finalization = StandardHarness::make_finalization(
+                Proposal::new(round, View::zero(), StandardHarness::commitment(&block)),
+                &schemes,
+                QUORUM,
+            );
+            StandardHarness::report_finalization(&mut mailbox, finalization.clone()).await;
+
+            // Let the write settle: dispatch and the ack tail perform paced reads of their
+            // own, so wait them out and the backfill read is the only slow work in flight
+            // when the measurement starts.
+            wait_until(
+                &context,
+                Duration::from_secs(5),
+                "height 1 dispatched",
+                || application.blocks().contains_key(&Height::new(1)),
+            )
+            .await;
+            context.sleep(READ_PACE * 4).await;
+
+            // Ask for it: the backfill task's two reads run joined, costing READ_PACE.
+            // Meanwhile marshal must keep answering from its (unpaced) cache.
+            let (response, response_rx) = oneshot::channel();
+            resolver.enqueue(handler::Message::Produce {
+                key: handler::Key::Finalized {
+                    height: Height::new(1),
+                },
+                response,
+            });
+            context.sleep(Duration::from_millis(1)).await;
+            let requested_at = context.current();
+            let verified = mailbox.get_verified(round).await;
+            let elapsed = context
+                .current()
+                .duration_since(requested_at)
+                .expect("time went backwards");
+            assert_eq!(
+                verified.expect("verified block missing").digest(),
+                block.digest()
+            );
+            assert!(
+                elapsed < READ_PACE,
+                "get_verified queued behind the backfill read: took {elapsed:?}"
+            );
+
+            // The serve itself completes with the identical wire encoding.
+            let served = response_rx.await.expect("finalized height must be served");
+            assert_eq!(served, (finalization, block).encode());
+            let encoded = context.encode();
+            assert!(has_metric_value(&encoded, "served_total", 1));
+        });
+    }
+
+    /// A flood of backfill requests must not stall writes: every request
+    /// resolves, and a height finalized mid-flood is dispatched long before the
+    /// flood alone would finish. Drops on a full submission channel are covered at the module boundary
+    /// (see `core::finalized::tests`): the actor performs paced reads of its own
+    /// between forwards, so end-to-end the channel drains before it fills.
+    #[test_traced("WARN")]
+    fn test_standard_backfill_flood_preserves_write_liveness() {
+        const READ_PACE: Duration = Duration::from_millis(100);
+        // The submission channel holds `max_repair` requests.
+        const CAPACITY: usize = 2;
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let config = Config {
+                provider: ConstantProvider::new(schemes[0].clone()),
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                start: Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                mailbox_size: NZUsize!(100),
+                view_retention: ViewDelta::new(10),
+                max_repair: NZUsize!(CAPACITY),
+                max_pending_acks: NZUsize!(1),
+                block_codec_config: (),
+                partition_prefix: "saturated-backfill".to_string(),
+                prunable_items_per_section: NZU64!(10),
+                replay_buffer: NZUsize!(1024),
+                key_write_buffer: NZUsize!(1024),
+                value_write_buffer: NZUsize!(1024),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                strategy: Sequential,
+            };
+            let (finalizations_by_height, finalized_blocks) =
+                paced_finalized_stores(&context, "saturated-backfill", Duration::ZERO, READ_PACE)
+                    .await;
+            let (actor, mut mailbox, _) = Actor::init(
+                context.child("actor"),
+                finalizations_by_height,
+                finalized_blocks,
+                config,
+            )
+            .await;
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let application = Application::<B>::default();
+            let _actor_handle =
+                actor.start_unbuffered(application.clone(), (resolver_rx, resolver.clone()));
+            wait_until(
+                &context,
+                Duration::from_secs(5),
+                "genesis dispatched",
+                || application.blocks().contains_key(&Height::zero()),
+            )
+            .await;
+
+            // Finalize height 1, then flood the submission channel asking for it.
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let block = make_raw_block(genesis.digest(), Height::new(1), 100);
+            assert!(mailbox.verified(round, block.clone()).await);
+            let finalization = StandardHarness::make_finalization(
+                Proposal::new(round, View::zero(), StandardHarness::commitment(&block)),
+                &schemes,
+                QUORUM,
+            );
+            StandardHarness::report_finalization(&mut mailbox, finalization).await;
+
+            // Settle before flooding: dispatch and the ack tail perform paced reads of their
+            // own, and a busy loop would space the resolver batches far enough apart to drain
+            // the channel without ever filling it.
+            wait_until(
+                &context,
+                Duration::from_secs(5),
+                "height 1 dispatched",
+                || application.blocks().contains_key(&Height::new(1)),
+            )
+            .await;
+            context.sleep(READ_PACE * 4).await;
+
+            const FLOOD: usize = 6;
+            let mut responses = Vec::new();
+            for _ in 0..FLOOD {
+                let (response, response_rx) = oneshot::channel();
+                resolver.enqueue(handler::Message::Produce {
+                    key: handler::Key::Finalized {
+                        height: Height::new(1),
+                    },
+                    response,
+                });
+                responses.push(response_rx);
+            }
+
+            // While the flood drains (each serve costs READ_PACE, its reads joined),
+            // finalize another height. The write waits behind at most the serve in flight,
+            // so it must complete and dispatch without waiting for the whole flood.
+            let round2 = Round::new(Epoch::zero(), View::new(2));
+            let block2 = make_raw_block(block.digest(), Height::new(2), 200);
+            assert!(mailbox.verified(round2, block2.clone()).await);
+            let finalization2 = StandardHarness::make_finalization(
+                Proposal::new(round2, View::new(1), StandardHarness::commitment(&block2)),
+                &schemes,
+                QUORUM,
+            );
+            StandardHarness::report_finalization(&mut mailbox, finalization2).await;
+            wait_until(
+                &context,
+                // Liveness bound: the write and its dispatch reads interleave between
+                // serves, each of which costs READ_PACE (its two reads run joined).
+                READ_PACE * 8,
+                "height 2 dispatched during the flood",
+                || application.blocks().contains_key(&Height::new(2)),
+            )
+            .await;
+
+            // Every response resolves or closes: nothing hangs.
+            let mut answered = 0usize;
+            for response in responses {
+                if response.await.is_ok() {
+                    answered += 1;
+                }
+            }
+            assert!(answered >= 1, "no serve completed");
+            let encoded = context.encode();
+            assert!(has_metric_value(&encoded, "served_total", answered));
+        });
+    }
+
     /// A buffered finalized-archive write must freeze dispatch even when a
     /// stale floor anchor triggers dispatch before the batch's sync starts.
     ///
@@ -7515,7 +7757,7 @@ mod tests {
                 strategy: Sequential,
             };
             let (finalizations_by_height, finalized_blocks) =
-                paced_finalized_stores(&context, "stale-floor-anchor", PACE).await;
+                paced_finalized_stores(&context, "stale-floor-anchor", PACE, Duration::ZERO).await;
             let (actor, mut mailbox, _) = Actor::init(
                 context.child("actor"),
                 finalizations_by_height,
@@ -7726,8 +7968,13 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 strategy: Sequential,
             };
-            let (finalizations_by_height, finalized_blocks) =
-                paced_finalized_stores(&context, "overlapping-finalized-syncs", PACE).await;
+            let (finalizations_by_height, finalized_blocks) = paced_finalized_stores(
+                &context,
+                "overlapping-finalized-syncs",
+                PACE,
+                Duration::ZERO,
+            )
+            .await;
             let (actor, mut mailbox, _) = Actor::init(
                 context.child("actor"),
                 finalizations_by_height,

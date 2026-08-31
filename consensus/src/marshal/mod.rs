@@ -40,6 +40,10 @@
 //! knowledge of finalized blocks, it will request the missing blocks from its peers. This ensures
 //! that the actor can catch up to the rest of the network if it falls behind.
 //!
+//! The finalized block and certificate storage sit behind a fair read/write lock shared with a
+//! task serving backfill requests. These peer requests are handed to the task which answers them
+//! off the actor loop.
+//!
 //! ## Storage
 //!
 //! The actor uses a combination of internal and external ([`store::Certificates`], [`store::Blocks`]) storage
