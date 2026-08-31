@@ -1,5 +1,7 @@
 //! Mock implementations of runtime primitives for testing.
 
+#[cfg(any(test, feature = "test-utils"))]
+pub use crate::storage::memory::Storage as MemoryStorage;
 use crate::{
     Blob, BufMut, BufferPool, BufferPooler, Clock, Error, Handle, IoBufs, IoBufsMut, Metrics, Name,
     ReadOptions, Spawner, Storage, Supervisor, WriteOptions,

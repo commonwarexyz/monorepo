@@ -1105,7 +1105,13 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         let suspects: Vec<u64> = pending.keys().rev().take(2).copied().collect();
         for blob in suspects {
             let writer = pending.get_mut(&blob).expect("suspect blob is present");
-            let valid = writer.recoverable_prefix_len().await?;
+            let valid = writer
+                .recoverable_prefix_len(
+                    0,
+                    super::RECOVERY_BUFFER,
+                    commonware_runtime::ReadOptions::default(),
+                )
+                .await?;
             if valid == writer.size() {
                 continue;
             }
