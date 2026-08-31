@@ -19,7 +19,6 @@ use crate::{
 };
 use bytes::Bytes;
 use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
-use core::iter::once;
 use std::{
     collections::{BTreeMap, BTreeSet, BinaryHeap},
     ops::Bound::{Excluded, Unbounded},
@@ -654,6 +653,11 @@ struct PreparedNullification<V: Variant> {
 enum PreparedCertificate<V: Variant, D: Digest> {
     Vqc(PreparedVqc<V, D>),
     Nullification(PreparedNullification<V>),
+}
+
+struct ForwardCandidates<V: Variant, D: Digest> {
+    vqc: Option<(Observation, Arc<Artifact<V, D>>)>,
+    nullification: Option<(Observation, Arc<Artifact<V, D>>)>,
 }
 
 #[derive(Clone, Debug)]
@@ -1632,12 +1636,23 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
     }
 
     pub(crate) fn next_forward(&self) -> Option<Arc<Artifact<V, D>>> {
-        let vqc = self.forwardable_vqcs.first().and_then(|view| {
-            self.forward_vqc(self.config, *view, !self.nullification_forwarded(*view))
-        });
-        let nullification = self.forwardable_nullifications.first().and_then(|view| {
-            self.forward_nullification(self.config, *view, !self.vqc_forwarded(*view))
-        });
+        let vqc_view = self.forwardable_vqcs.first().copied();
+        let nullification_view = self.forwardable_nullifications.first().copied();
+        let (vqc, nullification) = match (vqc_view, nullification_view) {
+            (Some(vqc), Some(nullification)) if vqc == nullification => {
+                let candidates = self.forward_candidates(vqc);
+                (candidates.vqc, candidates.nullification)
+            }
+            (Some(vqc), Some(nullification)) => (
+                self.forward_candidates(vqc).vqc,
+                self.forward_candidates(nullification).nullification,
+            ),
+            (Some(vqc), None) => (self.forward_candidates(vqc).vqc, None),
+            (None, Some(nullification)) => {
+                (None, self.forward_candidates(nullification).nullification)
+            }
+            (None, None) => (None, None),
+        };
         match (vqc, nullification) {
             (Some((left_observation, left)), Some((right_observation, right))) => {
                 Some(if left_observation.cohort() <= right_observation.cohort() {
@@ -1742,6 +1757,14 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
             nullification: None,
             phase: CertificateScanPhase::CountSupport { cursor: None },
         }
+    }
+
+    fn complete_certificate_scan(&self, view: View) -> CertificateScan<V, D> {
+        let mut scan = self.start_certificate_scan(view);
+        while !matches!(scan.phase, CertificateScanPhase::Complete) {
+            self.advance_certificate_scan(&mut scan);
+        }
+        scan
     }
 
     /// Advances exactly one retained participant or target boundary.
@@ -2221,22 +2244,19 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
         // First forwarding is a per-view rule, and a retired view no longer keeps the fact that
         // enforces it. A certificate resolved for such a view is finality input only.
         let live = view > self.retired_transitions;
-        let vqc = live
-            && !self.vqc_forwarded(view)
-            && self
-                .forward_vqc(self.config, view, !self.nullification_forwarded(view))
-                .is_some();
+        let candidates = live.then(|| self.forward_candidates(view));
+        let vqc = candidates
+            .as_ref()
+            .is_some_and(|candidates| candidates.vqc.is_some());
         if vqc {
             self.forwardable_vqcs.insert(view);
         } else {
             self.forwardable_vqcs.remove(&view);
         }
 
-        let nullification = live
-            && !self.nullification_forwarded(view)
-            && self
-                .forward_nullification(self.config, view, !self.vqc_forwarded(view))
-                .is_some();
+        let nullification = candidates
+            .as_ref()
+            .is_some_and(|candidates| candidates.nullification.is_some());
         if nullification {
             self.forwardable_nullifications.insert(view);
         } else {
@@ -2947,108 +2967,6 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
             })
     }
 
-    fn vqc_candidate(&self, config: CodecConfig, view: View) -> Option<VqcCandidate<D>> {
-        let pool = self.sticky_messages.get(&view)?;
-        let pending = self
-            .message_claim_cohorts
-            .get(&view)
-            .and_then(|cohorts| cohorts.first_key_value())
-            .map(|(cohort, _)| *cohort);
-        let mut support = BTreeMap::<D, usize>::new();
-        for record in pool.values() {
-            if pending.is_some_and(|pending| record.observation.cohort() >= pending) {
-                continue;
-            }
-            if let MessageRef::Vote(vote) = record.message() {
-                *support.entry(vote.body().leader()).or_default() += 1;
-            }
-        }
-        support
-            .into_iter()
-            .filter(|(_, count)| *count >= config.designation_quorum())
-            .filter_map(|(target, _)| {
-                let leader = self.leaders.get(&(view, target))?;
-                if !leader.retain_transition() {
-                    return None;
-                }
-                self.vqc_candidate_for(pool, pending, target, leader, config)
-            })
-            .min_by_key(|candidate| (candidate.observation, candidate.target))
-    }
-
-    fn vqc_candidate_for(
-        &self,
-        pool: &BTreeMap<Participant, MessageRecord<V, D>>,
-        pending: Option<u64>,
-        target: D,
-        leader: &LeaderRecord<V, D>,
-        config: CodecConfig,
-    ) -> Option<VqcCandidate<D>> {
-        let mut message_cohorts = Vec::with_capacity(pool.len());
-        let mut target_cohorts = Vec::with_capacity(config.designation_quorum());
-        for record in pool.values() {
-            if pending.is_some_and(|pending| record.observation.cohort() >= pending) {
-                continue;
-            }
-            let Some(eligibility) = record.vqc_eligibility(target, leader.block()) else {
-                continue;
-            };
-            message_cohorts.push(record.observation.cohort());
-            if matches!(eligibility, VqcEligibility::Target) {
-                target_cohorts.push(record.observation.cohort());
-            }
-        }
-        if message_cohorts.len() < config.view_quorum()
-            || target_cohorts.len() < config.designation_quorum()
-        {
-            return None;
-        }
-        message_cohorts.select_nth_unstable(config.view_quorum() - 1);
-        target_cohorts.select_nth_unstable(config.designation_quorum() - 1);
-        let cohort = message_cohorts[config.view_quorum() - 1]
-            .max(target_cohorts[config.designation_quorum() - 1])
-            .max(leader.observation().cohort());
-        let limit = if self
-            .longest_assembled_vqc(leader.block().view(), target)
-            .is_some()
-        {
-            message_cohorts.len()
-        } else {
-            config.view_quorum()
-        };
-        let selected = select_vqc_messages(
-            pool,
-            target,
-            leader.block(),
-            if limit == message_cohorts.len() {
-                u64::MAX
-            } else {
-                cohort
-            },
-            pending,
-            config,
-            limit,
-        )?;
-        let observation = selected
-            .iter()
-            .map(|record| record.observation)
-            .chain(once(leader.observation()))
-            .max()?;
-        let transcript = VqcTranscript {
-            view: leader.block().view(),
-            target,
-            messages: selected.iter().map(|record| record.id).collect(),
-        };
-        if !self.vqc_transcript_is_new(&transcript) {
-            return None;
-        }
-        Some(VqcCandidate {
-            target,
-            observation,
-            transcript,
-        })
-    }
-
     fn longest_assembled_vqc(&self, view: View, target: D) -> Option<&VqcTranscript<D>> {
         self.assembled_vqcs
             .iter()
@@ -3086,84 +3004,80 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
             })
     }
 
-    fn nullification_candidate(&self, view: View, quorum: usize) -> Option<Observation> {
-        let shares = self.nullify_shares.get(&view)?;
-        let pending = self
-            .nullify_claim_cohorts
-            .get(&view)
-            .and_then(|cohorts| cohorts.first_key_value())
-            .map(|(cohort, _)| *cohort);
-        let mut cohorts = shares
-            .values()
-            .filter(|record| pending.is_none_or(|pending| record.observation.cohort() < pending))
-            .map(|record| record.observation.cohort())
-            .collect::<Vec<_>>();
-        if cohorts.len() < quorum {
-            return None;
+    fn forward_candidates(&self, view: View) -> ForwardCandidates<V, D> {
+        let mut vqc = (!self.vqc_forwarded(view))
+            .then(|| {
+                let records = self.vqcs.get(&view)?;
+                let earliest = records.first()?.observation.cohort();
+                records
+                    .iter()
+                    .filter(|record| record.observation.cohort() == earliest)
+                    .min_by_key(|record| record.id)
+                    .map(|record| (record.observation, Arc::clone(&record.artifact)))
+            })
+            .flatten();
+        let mut nullification = (!self.nullification_forwarded(view))
+            .then(|| {
+                let records = self.nullifications.get(&view)?;
+                let earliest = records.first()?.observation.cohort();
+                records
+                    .iter()
+                    .filter(|record| record.observation.cohort() == earliest)
+                    .min_by_key(|record| record.id)
+                    .map(|record| (record.observation, Arc::clone(&record.artifact)))
+            })
+            .flatten();
+
+        let wait_for_vqc = !self.vqc_forwarded(view);
+        let wait_for_nullification = !self.nullification_forwarded(view);
+        vqc = vqc.filter(|(observation, _)| {
+            !self.unresolved_exit_blocks(
+                view,
+                (observation.cohort(), 0),
+                true,
+                wait_for_nullification,
+            )
+        });
+        nullification = nullification.filter(|(observation, _)| {
+            !self.unresolved_exit_blocks(
+                view,
+                (observation.cohort(), 1),
+                wait_for_vqc,
+                true,
+            )
+        });
+        if vqc.is_none() && nullification.is_none() {
+            return ForwardCandidates {
+                vqc,
+                nullification,
+            };
         }
-        cohorts.select_nth_unstable(quorum - 1);
-        let cohort = cohorts[quorum - 1];
-        self.select_nullification_shares(view, quorum, cohort)?
-            .into_iter()
-            .map(|record| record.observation)
-            .max()
-    }
 
-    fn select_nullification_shares(
-        &self,
-        view: View,
-        quorum: usize,
-        cohort: u64,
-    ) -> Option<Vec<&NullifyRecord<V, D>>> {
-        let selected = self
-            .nullify_shares
-            .get(&view)?
-            .values()
-            .filter(|record| record.observation.cohort() <= cohort)
-            .take(quorum)
-            .collect::<Vec<_>>();
-        (selected.len() == quorum).then_some(selected)
-    }
-
-    fn forward_vqc(
-        &self,
-        config: CodecConfig,
-        view: View,
-        wait_for_nullification: bool,
-    ) -> Option<(Observation, Arc<Artifact<V, D>>)> {
-        let records = self.vqcs.get(&view)?;
-        let earliest = records.first()?.observation.cohort();
-        if self.exit_frontier_blocks(config, view, (earliest, 0), true, wait_for_nullification) {
-            return None;
+        let scan = self.complete_certificate_scan(view);
+        vqc = vqc.filter(|(observation, _)| {
+            !self.local_exit_blocks(
+                &scan,
+                (observation.cohort(), 0),
+                true,
+                wait_for_nullification,
+            )
+        });
+        nullification = nullification.filter(|(observation, _)| {
+            !self.local_exit_blocks(
+                &scan,
+                (observation.cohort(), 1),
+                wait_for_vqc,
+                true,
+            )
+        });
+        ForwardCandidates {
+            vqc,
+            nullification,
         }
-        let record = records
-            .iter()
-            .filter(|record| record.observation.cohort() == earliest)
-            .min_by_key(|record| record.id)?;
-        Some((record.observation, Arc::clone(&record.artifact)))
     }
 
-    fn forward_nullification(
+    fn unresolved_exit_blocks(
         &self,
-        config: CodecConfig,
-        view: View,
-        wait_for_vqc: bool,
-    ) -> Option<(Observation, Arc<Artifact<V, D>>)> {
-        let records = self.nullifications.get(&view)?;
-        let earliest = records.first()?.observation.cohort();
-        if self.exit_frontier_blocks(config, view, (earliest, 1), wait_for_vqc, true) {
-            return None;
-        }
-        let record = records
-            .iter()
-            .filter(|record| record.observation.cohort() == earliest)
-            .min_by_key(|record| record.id)?;
-        Some((record.observation, Arc::clone(&record.artifact)))
-    }
-
-    fn exit_frontier_blocks(
-        &self,
-        config: CodecConfig,
         view: View,
         candidate: (u64, u8),
         wait_for_vqc: bool,
@@ -3176,12 +3090,7 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
                 || self
                     .pending_vqcs
                     .get(&view)
-                    .is_some_and(|observation| (observation.cohort(), 0) <= candidate)
-                || (!self.pending_vqcs.contains_key(&view)
-                    && self.vqc_candidate(config, view).is_some_and(|local| {
-                        !self.assembled_vqcs.contains(&local.transcript)
-                            && (local.observation.cohort(), 0) <= candidate
-                    })))
+                    .is_some_and(|observation| (observation.cohort(), 0) <= candidate))
         {
             return true;
         }
@@ -3191,12 +3100,32 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
                 || self
                     .pending_nullifications
                     .get(&view)
-                    .is_some_and(|observation| (observation.cohort(), 1) <= candidate)
-                || (!self.assembled_nullifications.contains(&view)
-                    && !self.pending_nullifications.contains_key(&view)
-                    && self
-                        .nullification_candidate(view, config.nullification_quorum())
-                        .is_some_and(|local| (local.cohort(), 1) <= candidate)))
+                    .is_some_and(|observation| (observation.cohort(), 1) <= candidate))
+    }
+
+    fn local_exit_blocks(
+        &self,
+        scan: &CertificateScan<V, D>,
+        candidate: (u64, u8),
+        wait_for_vqc: bool,
+        wait_for_nullification: bool,
+    ) -> bool {
+        if wait_for_vqc
+            && !self.pending_vqcs.contains_key(&scan.view)
+            && scan.best_vqc.as_ref().is_some_and(|local| {
+                !self.assembled_vqcs.contains(&local.candidate.transcript)
+                    && (local.candidate.observation.cohort(), 0) <= candidate
+            })
+        {
+            return true;
+        }
+        wait_for_nullification
+            && !self.assembled_nullifications.contains(&scan.view)
+            && !self.pending_nullifications.contains_key(&scan.view)
+            && scan
+                .nullification
+                .as_ref()
+                .is_some_and(|local| (local.observation.cohort(), 1) <= candidate)
     }
 
     fn claim_at_or_before(&self, claim: Claim, candidate: (u64, u8), priority: u8) -> bool {
@@ -3368,60 +3297,6 @@ fn remove_cohort<K: Copy + Ord>(
     if cohorts.is_empty() {
         index.remove(&key);
     }
-}
-
-fn select_vqc_messages<'a, V: Variant, D: Digest>(
-    pool: &'a BTreeMap<Participant, MessageRecord<V, D>>,
-    target: D,
-    leader: &LeaderBlock<V, D>,
-    cohort: u64,
-    pending: Option<u64>,
-    config: CodecConfig,
-    limit: usize,
-) -> Option<Vec<&'a MessageRecord<V, D>>> {
-    let eligible = pool.values().filter(|message| {
-        message.observation.cohort() <= cohort
-            && pending.is_none_or(|pending| message.observation.cohort() < pending)
-            && message.vqc_eligibility(target, leader).is_some()
-    });
-    let eligible_len = eligible.clone().count();
-    if eligible_len < config.view_quorum() {
-        return None;
-    }
-    if limit < config.view_quorum() || limit > eligible_len {
-        return None;
-    }
-    let mut selected = Vec::with_capacity(limit);
-    let mut target_count = 0usize;
-    let mut remaining_targets = eligible
-        .clone()
-        .filter(|message| {
-            matches!(
-                message.vqc_eligibility(target, leader),
-                Some(VqcEligibility::Target)
-            )
-        })
-        .count();
-    for (index, message) in eligible.enumerate() {
-        if selected.len() == limit {
-            break;
-        }
-        let is_target = matches!(
-            message.vqc_eligibility(target, leader),
-            Some(VqcEligibility::Target)
-        );
-        remaining_targets -= usize::from(is_target);
-        let slots_after = limit - selected.len() - 1;
-        let enough_entries = eligible_len - index > slots_after;
-        let enough_targets =
-            target_count + usize::from(is_target) + remaining_targets.min(slots_after)
-                >= config.designation_quorum();
-        if enough_entries && enough_targets {
-            selected.push(message);
-            target_count += usize::from(is_target);
-        }
-    }
-    (selected.len() == limit && target_count >= config.designation_quorum()).then_some(selected)
 }
 
 fn next_map_entry<D: Digest>(
