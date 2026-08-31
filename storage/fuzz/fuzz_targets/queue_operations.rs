@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
-use commonware_storage::queue::{Config, Queue};
+use commonware_storage::queue::{Config, Error, Queue};
 use commonware_storage_fuzz::{
     bounded_buffer, bounded_items, bounded_page_cache_size, bounded_page_size,
 };
@@ -200,12 +200,14 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 QueueOperation::Ack { pos_offset } => {
-                    let size = queue.size();
-                    if size == 0 {
-                        continue;
-                    }
-                    // Map offset to a valid position range
-                    let pos = (*pos_offset as u64) % size;
+                    let size = reference.size();
+                    // Map offset with slack past size so out-of-range positions
+                    // stay reachable while in-range remains the common case
+                    let pos = (*pos_offset as u64) % (size + size / 4 + 1);
+
+                    // Snapshot ack state to pin that a rejected ack is a no-op
+                    let floor_before = queue.ack_floor();
+                    let read_before = queue.read_position();
 
                     let result = queue.ack(pos);
                     let ref_result = reference.ack(pos);
@@ -215,13 +217,34 @@ fn fuzz(input: FuzzInput) {
                         ref_result,
                         "ack result mismatch for pos {pos}"
                     );
+                    if let Err(err) = result {
+                        // Out-of-range positions must fail with the documented error
+                        assert!(
+                            matches!(err, Error::PositionOutOfRange(p, s) if p == pos && s == size),
+                            "unexpected ack error for pos {pos} size {size}: {err:?}"
+                        );
+
+                        // A rejected ack must not mutate ack state
+                        assert_eq!(queue.ack_floor(), floor_before, "rejected ack moved floor");
+                        assert_eq!(
+                            queue.read_position(),
+                            read_before,
+                            "rejected ack moved read position"
+                        );
+                        assert!(!queue.is_acked(pos), "rejected ack marked pos {pos} acked");
+                    }
                     queue
                 }
 
                 QueueOperation::AckUpTo { pos_offset } => {
-                    let size = queue.size();
-                    // Map offset to valid range [0, size]
-                    let up_to = (*pos_offset as u64) % (size + 1);
+                    let size = reference.size();
+                    // Map offset with slack past size + 1 so out-of-range values
+                    // stay reachable while in-range remains the common case
+                    let up_to = (*pos_offset as u64) % (size + size / 4 + 2);
+
+                    // Snapshot ack state to pin that a rejected ack_up_to is a no-op
+                    let floor_before = queue.ack_floor();
+                    let read_before = queue.read_position();
 
                     let result = queue.ack_up_to(up_to);
                     let ref_result = reference.ack_up_to(up_to);
@@ -231,6 +254,25 @@ fn fuzz(input: FuzzInput) {
                         ref_result,
                         "ack_up_to result mismatch for up_to {up_to}"
                     );
+                    if let Err(err) = result {
+                        // Out-of-range values must fail with the documented error
+                        assert!(
+                            matches!(err, Error::PositionOutOfRange(p, s) if p == up_to && s == size),
+                            "unexpected ack_up_to error for up_to {up_to} size {size}: {err:?}"
+                        );
+
+                        // A rejected ack_up_to must not mutate ack state
+                        assert_eq!(
+                            queue.ack_floor(),
+                            floor_before,
+                            "rejected ack_up_to moved floor"
+                        );
+                        assert_eq!(
+                            queue.read_position(),
+                            read_before,
+                            "rejected ack_up_to moved read position"
+                        );
+                    }
                     queue
                 }
 

@@ -24,6 +24,10 @@
 //! the same journal is the point: watermark, pruning-metadata, and section-layout bugs often need a
 //! recover-then-mutate-then-recover sequence to appear, not just a single crash.
 //!
+//! `Reset` markers also end a cycle, but route the next recovery through `init_at_size`: the
+//! between-cycle faulted attempt runs the reset itself so its staged clear can crash anywhere,
+//! and the cycle's clean recovery then checks the staged-clear contract (see [Recovery]).
+//!
 //! # Expected
 //!
 //! A crash can land anywhere in a range, so `Expected` tracks conservative bounds (a
@@ -79,6 +83,10 @@ const VERIFY_REPLAY_BUF: usize = 1024;
 /// Maximum number of operations per fuzz input.
 const MAX_OPERATIONS: usize = 128;
 
+/// Reset targets are taken modulo this bound, keeping `Expected::values` and per-recovery scans
+/// small while still spanning multiple sections at every `items_per_section`.
+const MAX_RESET_SIZE: u64 = 256;
+
 /// A fault rate in [0.0, 1.0]. Allows 0 so the fuzzer can disable individual fault types.
 fn bounded_rate(u: &mut Unstructured<'_>) -> arbitrary::Result<Probability> {
     let percent: u8 = u.int_in_range(0..=100)?;
@@ -125,6 +133,8 @@ enum JournalOperation {
     },
     /// End the current cycle: drop the journal without a clean sync and recover in the next cycle.
     Crash,
+    /// End the current cycle and recover through an `init_at_size` reset (see [Recovery::Reset]).
+    Reset { size: u64, complete: bool },
 }
 
 /// Fuzz input containing fault injection parameters and operations.
@@ -215,6 +225,19 @@ struct Expected {
 }
 
 impl Expected {
+    /// State after a completed `init_at_size(target)`: fully pruned at `target` with no items.
+    /// `values` can stay empty because content is only checked on `[boundary, durable_len)`,
+    /// an empty range here.
+    fn reset(target: u64) -> Self {
+        Self {
+            durable_len: target,
+            max_size: target,
+            durable_prune: target,
+            max_prune: target,
+            values: Vec::new(),
+        }
+    }
+
     /// Successful append: not durable until the next sync/commit, so only raise the ceiling.
     fn appended(&mut self, item: Item) {
         self.values.push(item);
@@ -234,7 +257,8 @@ impl Expected {
         self.max_prune = bounds.start;
     }
 
-    /// Commit pins the size but not the pruning boundary.
+    /// A completed data barrier (commit, or the sync inside a successful prune) pins size and
+    /// content but not the pruning boundary.
     fn committed(&mut self, size: u64) {
         self.durable_len = size;
         self.max_size = size;
@@ -268,6 +292,12 @@ trait FuzzJournal: Sized {
     fn init(
         ctx: deterministic::Context,
         cfg: Self::Config,
+    ) -> impl Future<Output = Result<Self, Error>> + Send;
+
+    fn init_at_size(
+        ctx: deterministic::Context,
+        cfg: Self::Config,
+        size: u64,
     ) -> impl Future<Output = Result<Self, Error>> + Send;
 
     fn size(&self) -> impl Future<Output = u64> + Send;
@@ -326,6 +356,14 @@ impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
 
     async fn init(ctx: deterministic::Context, cfg: Self::Config) -> Result<Self, Error> {
         FixedJournal::init(ctx, cfg).await
+    }
+
+    async fn init_at_size(
+        ctx: deterministic::Context,
+        cfg: Self::Config,
+        size: u64,
+    ) -> Result<Self, Error> {
+        FixedJournal::init_at_size(ctx, cfg, size).await
     }
 
     async fn size(&self) -> u64 {
@@ -400,6 +438,14 @@ impl FuzzJournal for VariableJournal<deterministic::Context, Item> {
 
     async fn init(ctx: deterministic::Context, cfg: Self::Config) -> Result<Self, Error> {
         VariableJournal::init(ctx, cfg).await
+    }
+
+    async fn init_at_size(
+        ctx: deterministic::Context,
+        cfg: Self::Config,
+        size: u64,
+    ) -> Result<Self, Error> {
+        VariableJournal::init_at_size(ctx, cfg, size).await
     }
 
     async fn size(&self) -> u64 {
@@ -733,10 +779,32 @@ async fn run_ops<J: FuzzJournal>(
 
             JournalOperation::Prune { min_pos } => {
                 // Raw position: `prune` caps it to size internally, covering prune-past-size.
-                let size = journal.size().await;
+                let Range {
+                    start: boundary,
+                    end: size,
+                } = journal.bounds();
                 match journal.prune(*min_pos).await {
-                    Ok((journal, _)) => {
-                        expected.pruned(journal.bounds().start);
+                    Ok((journal, pruned)) => {
+                        // The boundary only moves forward, and the returned bool's contract
+                        // (true iff items were pruned) must match the observed move.
+                        let new_boundary = journal.bounds().start;
+                        assert!(
+                            new_boundary >= boundary,
+                            "prune moved boundary backward {boundary} -> {new_boundary}"
+                        );
+                        assert_eq!(
+                            pruned,
+                            new_boundary != boundary,
+                            "prune returned {pruned} with boundary {boundary} -> {new_boundary}"
+                        );
+
+                        // A completed prune syncs and awaits all buffered data before removing
+                        // any blob, so it pins the pre-prune size and content like a commit. A
+                        // no-op prune performs no sync and earns no credit.
+                        if pruned {
+                            expected.committed(size);
+                        }
+                        expected.pruned(new_boundary);
                         journal
                     }
                     Err(err) => {
@@ -785,18 +853,39 @@ async fn run_ops<J: FuzzJournal>(
                 journal
             }
 
-            // `split_into_cycles` strips `Crash`; a stray one defensively ends the cycle.
-            JournalOperation::Crash => return,
+            // `split_into_cycles` strips the cycle markers; a stray one defensively ends the
+            // cycle.
+            JournalOperation::Crash | JournalOperation::Reset { .. } => return,
         };
     }
 }
 
-/// Run one crash cycle: recover, check against `expected`, run the ops under faults, then crash
-/// (drop). Returns the `Expected` and checkpoint for the next cycle.
+/// How a cycle's clean recovery reopens the crashed journal.
+#[derive(Clone, Copy)]
+enum Recovery {
+    /// Ordinary `init` of whatever the crash left.
+    Init,
+    /// The between-cycle faulted attempt ran `init_at_size(target)`, so a staged clear may have
+    /// crashed anywhere. With `complete`, the recovery reruns `init_at_size(target)` and must
+    /// land at exactly `target..target`. Otherwise it runs `init`, which must observe either
+    /// the prior state (the clear intent never became durable) or the completed reset (a
+    /// durable intent finished during `init`), never a mix.
+    Reset { target: u64, complete: bool },
+}
+
+/// One crash cycle: how to recover the crashed journal and the ops to run before the next crash.
+#[derive(Clone)]
+struct Cycle {
+    recovery: Recovery,
+    ops: Vec<JournalOperation>,
+}
+
+/// Run one crash cycle: recover per `cycle.recovery`, check the recovered state, run the ops under
+/// faults, then crash (drop). Returns the `Expected` and checkpoint for the next cycle.
 fn run_cycle<J: FuzzJournal + Send + 'static>(
     runner: deterministic::Runner,
     expected: Expected,
-    ops: Vec<JournalOperation>,
+    cycle: Cycle,
     partition: String,
     params: Params,
 ) -> (Expected, deterministic::Checkpoint)
@@ -807,29 +896,67 @@ where
         // Recover with faults disabled to obtain clean ground truth.
         *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
         let cfg = J::config(&partition, &ctx, &params);
-        let journal = J::init(ctx.child("journal"), cfg)
-            .await
-            .expect("recovery should succeed without panic");
-        assert_matches_expected(&journal, &expected).await;
+        let journal = match cycle.recovery {
+            Recovery::Init => {
+                let journal = J::init(ctx.child("journal"), cfg)
+                    .await
+                    .expect("recovery should succeed without panic");
+                assert_matches_expected(&journal, &expected).await;
+                journal
+            }
+
+            // A clean reset lands at exactly `target..target` no matter what the crashed
+            // `init_at_size` attempt left behind.
+            Recovery::Reset {
+                target,
+                complete: true,
+            } => {
+                let journal = J::init_at_size(ctx.child("journal"), cfg, target)
+                    .await
+                    .expect("clean init_at_size should succeed");
+                assert_matches_expected(&journal, &Expected::reset(target)).await;
+                journal
+            }
+
+            // Ordinary `init` after the crashed `init_at_size` attempt: the staged-clear
+            // contract allows exactly the prior state or the completed reset.
+            Recovery::Reset {
+                target,
+                complete: false,
+            } => {
+                let journal = J::init(ctx.child("journal"), cfg)
+                    .await
+                    .expect("recovery should succeed without panic");
+                if journal.bounds() == (target..target) {
+                    assert_matches_expected(&journal, &Expected::reset(target)).await;
+                } else {
+                    assert_matches_expected(&journal, &expected).await;
+                }
+                journal
+            }
+        };
 
         let mut expected = to_expected(&journal).await;
 
         // Faults on for the operation phase; returning drops the journal (the crash).
         *ctx.storage_fault_config().write() = params.fault_config();
-        run_ops(journal, &mut expected, &ops, params).await;
+        run_ops(journal, &mut expected, &cycle.ops, params).await;
         expected
     })
 }
 
-/// Attempt ordinary journal recovery under storage faults and return its crash checkpoint.
+/// Attempt journal recovery under storage faults and return its crash checkpoint.
 ///
 /// `cycle` varies the fault selectors per restart, so a multi-cycle run can hit a different
-/// mutation class (write, sync, resize, or remove) at each recovery.
+/// mutation class (write, sync, resize, or remove) at each recovery. With `reset`, the attempt
+/// runs `init_at_size(target)` instead of `init`, planting a staged clear that the crash can
+/// interrupt anywhere: before the intent is durable, mid-clear, or after completion.
 fn faulted_restart<J: FuzzJournal + Send + 'static>(
     checkpoint: deterministic::Checkpoint,
     partition: String,
     params: Params,
     cycle: u64,
+    reset: Option<u64>,
 ) -> deterministic::Checkpoint
 where
     J::Config: Send,
@@ -838,28 +965,46 @@ where
         checkpoint,
         params.recovery_seed ^ cycle,
         move |ctx| async move {
-            J::init(
-                ctx.child("faulted_recovery"),
-                J::config(&partition, &ctx, &params),
-            )
-            .await
+            let cfg = J::config(&partition, &ctx, &params);
+            let ctx = ctx.child("faulted_recovery");
+            match reset {
+                Some(target) => J::init_at_size(ctx, cfg, target).await,
+                None => J::init(ctx, cfg).await,
+            }
         },
     )
 }
 
-/// Split the operation stream into one `ops` list per cycle, cutting at each `Crash` marker. Always
-/// returns at least one list (possibly empty), so a bare recovery is still exercised.
-fn split_into_cycles(ops: &[JournalOperation]) -> Vec<Vec<JournalOperation>> {
+/// Split the operation stream into one [Cycle] per crash, cutting at each `Crash` or `Reset`
+/// marker. A `Reset` marker selects `init_at_size` recovery for the cycle that follows it.
+/// Always returns at least one cycle (possibly with no ops), so a bare recovery is still
+/// exercised.
+fn split_into_cycles(ops: &[JournalOperation]) -> Vec<Cycle> {
     let mut cycles = Vec::new();
     let mut current = Vec::new();
+    let mut recovery = Recovery::Init;
     for op in ops {
-        if matches!(op, JournalOperation::Crash) {
-            cycles.push(std::mem::take(&mut current));
-        } else {
-            current.push(op.clone());
-        }
+        let next = match op {
+            JournalOperation::Crash => Recovery::Init,
+            JournalOperation::Reset { size, complete } => Recovery::Reset {
+                target: size % MAX_RESET_SIZE,
+                complete: *complete,
+            },
+            _ => {
+                current.push(op.clone());
+                continue;
+            }
+        };
+        cycles.push(Cycle {
+            recovery,
+            ops: std::mem::take(&mut current),
+        });
+        recovery = next;
     }
-    cycles.push(current);
+    cycles.push(Cycle {
+        recovery,
+        ops: current,
+    });
     cycles
 }
 
@@ -884,31 +1029,28 @@ where
 
     // First cycle starts from a fresh runtime and recovers an empty journal, so the expectation is
     // empty too.
-    let runner = deterministic::Runner::new(deterministic::Config::default().with_seed(input.seed));
-    let (mut expected, mut checkpoint) = run_cycle::<J>(
-        runner,
-        Expected::default(),
-        cycles[0].clone(),
-        partition.clone(),
-        params,
-    );
-    checkpoint = faulted_restart::<J>(checkpoint, partition.clone(), params, 0);
+    let mut runner =
+        deterministic::Runner::new(deterministic::Config::default().with_seed(input.seed));
+    let mut expected = Expected::default();
+    for (i, cycle) in cycles.iter().enumerate() {
+        let (next, checkpoint) =
+            run_cycle::<J>(runner, expected, cycle.clone(), partition.clone(), params);
+        expected = next;
 
-    for (cycle, ops) in cycles.iter().enumerate().skip(1) {
-        let runner = deterministic::Runner::from(checkpoint);
-        (expected, checkpoint) = run_cycle::<J>(
-            runner,
-            expected.clone(),
-            ops.clone(),
-            partition.clone(),
-            params,
-        );
-        checkpoint = faulted_restart::<J>(checkpoint, partition.clone(), params, cycle as u64);
+        // The faulted attempt before a reset cycle runs the reset itself, so its staged clear
+        // can crash at any point.
+        let reset = match cycles.get(i + 1).map(|cycle| cycle.recovery) {
+            Some(Recovery::Reset { target, .. }) => Some(target),
+            _ => None,
+        };
+        let checkpoint =
+            faulted_restart::<J>(checkpoint, partition.clone(), params, i as u64, reset);
+        runner = deterministic::Runner::from(checkpoint);
     }
 
     // Final fault-free phase: verify the last recovery, then append, sync, drop, and reopen a
     // sentinel to prove the synced state survives restart.
-    deterministic::Runner::from(checkpoint).start(move |ctx| async move {
+    runner.start(move |ctx| async move {
         *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
         let journal = J::init(
             ctx.child("journal_final"),

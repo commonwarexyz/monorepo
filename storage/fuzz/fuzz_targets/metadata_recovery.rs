@@ -7,7 +7,7 @@ use commonware_codec::Read;
 use commonware_runtime::{
     Runner, Supervisor as _,
     deterministic::{self, PartialWriteMode, WriteConfig},
-    mocks::{DelayedSyncContext, PendingSyncs},
+    mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs},
 };
 use commonware_storage::metadata::{Config, Metadata};
 use commonware_storage_fuzz::faulted_recovery;
@@ -29,6 +29,7 @@ enum WritePath {
 enum CrashKind {
     FailedWrite,
     UnsyncedWrite,
+    AckedSync,
 }
 
 #[derive(Arbitrary, Clone, Debug)]
@@ -120,9 +121,10 @@ fn run(input: &FuzzInput, mode: PartialWriteMode) {
 
             // A failed write may retain some submitted bytes immediately. An unsynced write
             // reaches the delayed durability barrier and is then cut by the runtime crash.
+            // An acked sync completes that barrier first, so the cut must find nothing volatile.
             let failure_rate = match phase_input.crash {
                 CrashKind::FailedWrite => Probability::new(1, 1).unwrap(),
-                CrashKind::UnsyncedWrite => Probability::new(0, 1).unwrap(),
+                CrashKind::UnsyncedWrite | CrashKind::AckedSync => Probability::new(0, 1).unwrap(),
             };
             let retention = Probability::new(u64::from(phase_input.retention % 101), 100).unwrap();
             *fault_config.write() = deterministic::FaultConfig {
@@ -148,6 +150,20 @@ fn run(input: &FuzzInput, mode: PartialWriteMode) {
                         .expect("fault-free writes must reach start_sync");
                     assert_eq!(pending.lock().len(), 1, "metadata sync must remain pending");
                     drop(handle);
+                }
+                CrashKind::AckedSync => {
+                    let (_metadata, handle) = metadata
+                        .start_sync()
+                        .await
+                        .expect("fault-free writes must reach start_sync");
+                    assert_eq!(
+                        pending.lock().len(),
+                        1,
+                        "metadata sync must park before release"
+                    );
+                    drive_pending_syncs(&pending, handle)
+                        .await
+                        .expect("a released fault-free sync must complete");
                 }
             }
 
@@ -175,6 +191,15 @@ fn run(input: &FuzzInput, mode: PartialWriteMode) {
             recovered == baseline || recovered == candidate,
             "metadata recovered a mixed state: {recovered:?}"
         );
+
+        // An acknowledged sync is a durability guarantee: the acked candidate copy must survive
+        // the crash cut exactly, for every write path, retention rate, and cut mode.
+        if matches!(crash, CrashKind::AckedSync) {
+            assert_eq!(
+                recovered, candidate,
+                "crash after an acked sync lost acked data"
+            );
+        }
 
         if matches!(crash, CrashKind::UnsyncedWrite) && retention_percent == 0 {
             assert_eq!(

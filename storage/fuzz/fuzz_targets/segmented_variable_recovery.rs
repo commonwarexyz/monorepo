@@ -7,7 +7,9 @@
 //! unit tests, which a panic-aborting fuzz target cannot probe). This target reconstructs each
 //! section's expected item prefix directly from the post-recovery-crash image (the contiguous
 //! valid-page prefix, cut at the last whole frame), drains a full replay against that prefix,
-//! and reopens the repaired result.
+//! and reopens the repaired result. A section whose blob holds no valid page recovers to
+//! logical size zero and skips the gate, so when the image contains one the target appends a
+//! probe item to it before the replay to catch an init that over-blocks.
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Crc32;
@@ -119,12 +121,17 @@ fn read_varint(bytes: &[u8]) -> Option<(usize, usize)> {
 /// header followed by the item's codec bytes) until the first incomplete frame. Maps each
 /// section to the byte length of that whole-frame prefix, which recovery must retain, and to
 /// the item payloads decoded from it in append order.
+///
+/// Also returns the smallest section whose blob holds no valid page. Init derives a section's
+/// logical size from its last valid page, so such a section recovers to size zero and must
+/// accept appends without a prior replay.
 async fn recover_expected(
     context: &deterministic::Context,
     partition: &str,
-) -> BTreeMap<u64, (u64, Vec<Vec<u8>>)> {
+) -> (BTreeMap<u64, (u64, Vec<Vec<u8>>)>, Option<u64>) {
     let physical_page_size = PAGE_SIZE + PAGE_CHECKSUM_RECORD_SIZE;
     let mut sections = BTreeMap::new();
+    let mut empty: Option<u64> = None;
     for name in context.scan(partition).await.expect("oracle scan failed") {
         let section = u64::from_be_bytes(name.as_slice().try_into().expect("invalid section name"));
         let (blob, size) = context
@@ -132,8 +139,16 @@ async fn recover_expected(
             .await
             .expect("oracle open failed");
         let pages = usize::try_from(size).expect("oracle size overflow") / physical_page_size;
+
+        // Init sizes the section by the last valid page, so past the end of the valid
+        // prefix the scan only needs to learn whether any later page validates.
         let mut logical = Vec::with_capacity(pages * PAGE_SIZE);
+        let mut prefix_open = true;
+        let mut any_valid = false;
         for page in 0..pages {
+            if !prefix_open && any_valid {
+                break;
+            }
             let physical = blob
                 .read_at(
                     (page * physical_page_size) as u64,
@@ -143,12 +158,17 @@ async fn recover_expected(
                 .await
                 .expect("oracle read failed")
                 .coalesce();
-            let Some(len) = valid_page_len(physical.as_ref()) else {
-                break;
-            };
-            logical.extend_from_slice(&physical.as_ref()[..len]);
-            if len < PAGE_SIZE {
-                break;
+            match valid_page_len(physical.as_ref()) {
+                Some(len) => {
+                    any_valid = true;
+                    if prefix_open {
+                        logical.extend_from_slice(&physical.as_ref()[..len]);
+                        if len < PAGE_SIZE {
+                            prefix_open = false;
+                        }
+                    }
+                }
+                None => prefix_open = false,
             }
         }
 
@@ -176,9 +196,12 @@ async fn recover_expected(
             offset = end;
         }
 
+        if !any_valid {
+            empty = Some(empty.map_or(section, |current| current.min(section)));
+        }
         sections.insert(section, (offset as u64, frames));
     }
-    sections
+    (sections, empty)
 }
 
 /// Drain a full replay, asserting it yields exactly the expected frames in order.
@@ -311,7 +334,7 @@ fn fuzz(input: FuzzInput) {
 
     deterministic::Runner::from(checkpoint).start(move |context| async move {
         *context.storage_fault_config().write() = deterministic::FaultConfig::default();
-        let expected = recover_expected(&context, "segmented-variable-recovery").await;
+        let (mut expected, empty) = recover_expected(&context, "segmented-variable-recovery").await;
 
         // Under the crash model every legal image is a per-section prefix of the
         // scripted items (retention keeps subsets of submitted bytes, and a stale
@@ -360,9 +383,25 @@ fn fuzz(input: FuzzInput) {
 
         // A full replay repairs the torn suffix, matches the image-derived prefix exactly, and
         // unlocks appends.
-        let journal = Journal::init(context.child("journal"), config(&context))
+        let mut journal = Journal::init(context.child("journal"), config(&context))
             .await
             .expect("recovery init failed");
+
+        // A section recovered at logical size zero must stay outside the append gate: the
+        // probe append must succeed without a replay and land at offset zero. The replay
+        // below flushes and yields buffered items, so the probe frame (one outer varint,
+        // one inner varint, five payload bytes) joins the section's expected outcome.
+        if let Some(section) = empty {
+            let offset;
+            (journal, offset, _) = journal
+                .append(section, &vec![0xAB; 5])
+                .await
+                .expect("append to a zero-size recovered section failed");
+            assert_eq!(offset, 0, "zero-size section resumed at a nonzero offset");
+            let entry = expected.get_mut(&section).unwrap();
+            entry.0 = 7;
+            entry.1.push(vec![0xAB; 5]);
+        }
         let mut journal = assert_replay(journal, &expected).await;
         let mut sentinels = expected.clone();
         for (&section, (size, _)) in &expected {
