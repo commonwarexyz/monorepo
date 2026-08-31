@@ -210,8 +210,7 @@ where
                         }
                         let timing = SigningTiming {
                             ready_to_sign_at: self.context.current(),
-                            application: self
-                                .take_application_timing(core::slice::from_ref(&request)),
+                            application: self.take_application_timing(&request),
                         };
                         let scheme = Arc::clone(&self.scheme);
                         let operation = move |_| {
@@ -245,7 +244,10 @@ where
                         }
                         let timing = SigningTiming {
                             ready_to_sign_at: self.context.current(),
-                            application: self.take_application_timing(&requests),
+                            application: requests
+                                .iter()
+                                .filter_map(|request| self.take_application_timing(request))
+                                .collect(),
                         };
                         // The batch is all-or-nothing and order preserving; any failure is fatal
                         // before a completion is constructed. Signatures are independent, so the
@@ -662,22 +664,14 @@ where
 
     fn take_application_timing(
         &mut self,
-        requests: &[SignRequest<V, H::Digest>],
+        request: &SignRequest<V, H::Digest>,
     ) -> Option<AppCompletionTiming> {
-        for request in requests {
-            let Some(key) = application_completion_key::<H, V>(request) else {
-                continue;
-            };
-            let position = self
-                .pending_applications
-                .iter()
-                .position(|(pending, _)| pending == &key);
-            let Some(position) = position else {
-                continue;
-            };
-            return Some(self.pending_applications.swap_remove(position).1);
-        }
-        None
+        let key = application_completion_key::<H, V>(request)?;
+        let position = self
+            .pending_applications
+            .iter()
+            .position(|(pending, _)| pending == &key)?;
+        Some(self.pending_applications.swap_remove(position).1)
     }
 
     /// Appends one exact barrier and stages its durability completion.
@@ -1106,21 +1100,25 @@ where
         Ok(())
     }
 
-    fn observe_sign_ready(&self, timing: SigningTiming) -> SystemTime {
+    fn observe_sign_ready(
+        &self,
+        timing: SigningTiming<impl IntoIterator<Item = AppCompletionTiming>>,
+    ) -> SystemTime {
         let sign_ready_at = self.context.current();
         self.metrics
             .ready_to_sign_latency
             .observe_between(timing.ready_to_sign_at, sign_ready_at);
-        match timing.application {
-            Some(AppCompletionTiming::Propose(completed_at)) => self
-                .metrics
-                .propose_to_sign_ready_latency
-                .observe_between(completed_at, sign_ready_at),
-            Some(AppCompletionTiming::Verify(completed_at)) => self
-                .metrics
-                .verify_to_sign_ready_latency
-                .observe_between(completed_at, sign_ready_at),
-            None => {}
+        for application in timing.application {
+            match application {
+                AppCompletionTiming::Propose(completed_at) => self
+                    .metrics
+                    .propose_to_sign_ready_latency
+                    .observe_between(completed_at, sign_ready_at),
+                AppCompletionTiming::Verify(completed_at) => self
+                    .metrics
+                    .verify_to_sign_ready_latency
+                    .observe_between(completed_at, sign_ready_at),
+            }
         }
         sign_ready_at
     }

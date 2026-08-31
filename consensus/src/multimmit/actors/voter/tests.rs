@@ -2012,6 +2012,14 @@ fn same_chain_validations_overlap_without_voting_past_pending_parent() {
             [parent_header.height(), child_header.height()],
             "DA authority advances only across the contiguous valid prefix",
         );
+        assert_eq!(
+            metric_sample(
+                &context.encode(),
+                "same_chain_validation_pipeline_voter_verify_to_sign_ready_latency_count",
+            ),
+            2.0,
+            "each application validation in the signing batch contributes a timing sample",
+        );
     });
 }
 
