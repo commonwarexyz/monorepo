@@ -2,21 +2,25 @@
 
 use super::store::{
     AcceptedBatch, CloseRejected, EpochData, ExternalPayoutEvidence, IncomingPayment,
-    MutationFailed, StagedDeposit, StagedWithdrawal, Store, StoreStatus, StoredCloseOutcome,
-    WithdrawalEvidence,
+    MutationFailed, StagedDeposit, StagedWithdrawal, Staging, Store, StoreStatus,
+    StoredCloseOutcome, WithdrawalEvidence,
 };
 #[cfg(test)]
 use super::store::{AccountView, StoreSnapshot};
 #[cfg(test)]
 use crate::protocol::{MAX_DESTINATION_BYTES, Wallet, wallets};
 use crate::{
+    chain::{
+        node::Pipeline,
+        state::RegistrationRecord,
+        tx::{AdmitRequest, RegisterEpochRequest},
+    },
     protocol::{
         AccountCache, AccountIdentity, DepositEvent, EpochRegistration, INITIAL_BALANCE, Key,
         Payment, PreparedEpoch, Protocol, SettlementResult, ensure_amount_withdrawal_horizon,
         ensure_balance_intake_horizon, ensure_close_horizon, external_identity, identities,
         openable_epoch_after, short_digest,
     },
-    settlement::{SettlementSubmission, rpc as settlement_rpc},
     store::CommitUnknown,
 };
 use anyhow::{Context, Result, ensure};
@@ -40,9 +44,10 @@ use commonware_cryptography::{Sha256, sha256::Digest};
 use std::num::NonZeroU64;
 #[cfg(test)]
 use std::sync::mpsc::SyncSender;
+#[cfg(test)]
+use std::time::Duration;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    net::SocketAddr,
     num::NonZeroUsize,
     path::Path,
     sync::{
@@ -50,7 +55,7 @@ use std::{
         mpsc::{self, Receiver, TryRecvError},
     },
     thread::{self, JoinHandle},
-    time::Duration,
+    time::Instant,
 };
 
 pub(crate) const DEFAULT_AMOUNT: u64 = 5;
@@ -70,6 +75,34 @@ pub(crate) struct PaymentHead {
     pub(crate) opening: StateOpening<Key, Digest>,
 }
 
+/// The operator's verdict on one submitted send.
+pub(crate) enum SendOutcome {
+    /// The send, or its exact replay, is committed with its receipts.
+    Accepted(AcceptedBatch),
+    /// Corrective rejection: the send binds a payment context this operator has moved
+    /// past, so its exact bytes can never be accepted. The verdict carries the live
+    /// context and the payer's current cumulative debit endpoint as this operator sees
+    /// it, so the payer can re-sign the same intent locally instead of re-reading the
+    /// head. The claim is unauthenticated by design: a payer signs cumulative debit
+    /// endpoints, and two sends at one endpoint under different contexts can never both
+    /// debit, so adopting a false context only produces a send that never commits.
+    Stale {
+        context: PaymentContext<Key, Digest>,
+        cumulative_debit: u64,
+    },
+}
+
+#[cfg(test)]
+impl SendOutcome {
+    /// Unwraps the accepted batch, panicking on a corrective rejection.
+    pub(crate) fn into_accepted(self) -> AcceptedBatch {
+        match self {
+            Self::Accepted(accepted) => accepted,
+            Self::Stale { .. } => panic!("the send was rejected with a corrective context"),
+        }
+    }
+}
+
 pub(crate) struct WithdrawalOpening {
     pub(crate) root: VectorRoot<Digest>,
     pub(crate) opening: StateOpening<Key, Digest>,
@@ -82,23 +115,6 @@ pub(crate) struct CommittedShardTip {
     pub(crate) batch_id: BatchId<Digest>,
     pub(crate) change_root: VectorRoot<Digest>,
     pub(crate) lookup: HigherShardTipLookup<Key, Digest>,
-}
-
-#[derive(Clone)]
-pub(crate) struct SettlementRegistration {
-    pub(crate) epoch: u64,
-    pub(crate) predecessor_liability: u64,
-    pub(crate) deposits_root: VectorRoot<Digest>,
-    /// Root of the full staged deposit set, deferred aggregates included. Settlement
-    /// checks it against its own custody record, because a deferral hides its account
-    /// from both derived boundaries and the boundary roots alone cannot see a deposit the
-    /// operator never credited.
-    pub(crate) staged_root: VectorRoot<Digest>,
-    pub(crate) withdrawals: WithdrawalBatch<Key, Digest>,
-    /// One predecessor-root opening per withdrawal in batch order. Settlement uses them to
-    /// prove each operator-carried request certifiable before it registers the close.
-    pub(crate) openings: Vec<StateOpening<Key, Digest>>,
-    pub(crate) signature: commonware_cryptography_curve25519::signing::Signature,
 }
 
 pub(crate) struct CloseFinished {
@@ -139,7 +155,9 @@ pub(crate) struct Operator {
     #[cfg(test)]
     wallets: Vec<Wallet>,
     external: AccountIdentity,
-    settlement_address: Option<SocketAddr>,
+    /// Close pipeline over the operator node's DA channel and local chain
+    /// backend. `None` runs the in-process harness certification instead.
+    pipeline: Option<Pipeline>,
     genesis_root: VectorRoot<Digest>,
     registration: EpochRegistration,
     /// Predecessor state commitment retained for the current epoch.
@@ -165,33 +183,42 @@ impl Operator {
     pub(crate) fn open(path: &Path, workers: NonZeroUsize) -> Result<Self> {
         let identities = identities();
         let store = Store::open(path, &identities)?;
-        Self::from_store(store, identities, workers, None)
+        Self::from_store(store, identities, Protocol::new(workers)?, None)
     }
 
+    /// Opens the operator over its follower node's close `pipeline`, signing
+    /// as `clearing`: the deployment this operator runs derives from that
+    /// clearing identity.
     pub(crate) fn open_remote(
         path: &Path,
         workers: NonZeroUsize,
-        settlement_address: SocketAddr,
+        pipeline: Pipeline,
+        clearing: commonware_cryptography_curve25519::signing::SigningKey,
     ) -> Result<Self> {
         let identities = identities();
         let store = Store::open(path, &identities)?;
-        Self::from_store(store, identities, workers, Some(settlement_address))
+        Self::from_store(
+            store,
+            identities,
+            Protocol::with_signer(workers, clearing)?,
+            Some(pipeline),
+        )
     }
 
     #[cfg(test)]
     fn in_memory(workers: NonZeroUsize) -> Result<Self> {
         let identities = identities();
         let store = Store::in_memory(&identities)?;
-        Self::from_store(store, identities, workers, None)
+        Self::from_store(store, identities, Protocol::new(workers)?, None)
     }
 
     fn from_store(
         mut store: Store,
         identities: Vec<AccountIdentity>,
-        workers: NonZeroUsize,
-        settlement_address: Option<SocketAddr>,
+        protocol: Protocol,
+        pipeline: Option<Pipeline>,
     ) -> Result<Self> {
-        let protocol = Arc::new(Protocol::new(workers)?);
+        let protocol = Arc::new(protocol);
         let configured_genesis_root = genesis_root(&protocol, &identities)?;
         let current = store.load_current()?;
         let registration = registration_for(&protocol, &current)?;
@@ -243,7 +270,7 @@ impl Operator {
             #[cfg(test)]
             wallets: wallets(),
             external: external_identity(),
-            settlement_address,
+            pipeline,
             genesis_root: configured_genesis_root,
             registration,
             predecessor,
@@ -298,7 +325,13 @@ impl Operator {
             head.state.cumulative_debit,
         )
         .context("sign payment request")?;
-        self.accept_send(send)
+        match self.accept_send(send)? {
+            SendOutcome::Accepted(accepted) => Ok(accepted),
+
+            // Mutations are serialized on `&mut self`, so the context cannot move
+            // between the head read above and this acceptance.
+            SendOutcome::Stale { .. } => unreachable!("the live context moved under one borrow"),
+        }
     }
 
     pub(crate) fn payment_head(&self, account: &Key) -> Result<PaymentHead> {
@@ -394,7 +427,7 @@ impl Operator {
         })
     }
 
-    pub(crate) fn accept_send(&mut self, send: SignedSend<Key, Digest>) -> Result<AcceptedBatch> {
+    pub(crate) fn accept_send(&mut self, send: SignedSend<Key, Digest>) -> Result<SendOutcome> {
         self.ensure_operating()?;
         self.validate_receivers(&send)?;
 
@@ -402,7 +435,27 @@ impl Operator {
         // validates a new send before any mutation, so validating here too would repeat
         // the same signature checks on every accepted payment.
         if let Some(accepted) = self.store.accepted_batch(&send)? {
-            return Ok(accepted);
+            return Ok(SendOutcome::Accepted(accepted));
+        }
+
+        // A send bound to a context this operator moved past can never be accepted, so
+        // it earns the corrective rejection instead of an opaque error: the live context
+        // and the payer's endpoint let an optimistic payer re-sign the same intent from
+        // its local state instead of re-reading the head.
+        let context = self.registration.context.payment();
+        if send.body().epoch() != context.epoch() || send.body().anchor() != context.anchor() {
+            let payer = self
+                .store
+                .current_account(send.body().payer())?
+                .context("payer is not in the current live state")?;
+            ensure!(
+                payer.current.active,
+                "payer is not in the current live state"
+            );
+            return Ok(SendOutcome::Stale {
+                context: context.clone(),
+                cumulative_debit: payer.current.cumulative_debit,
+            });
         }
         self.ensure_balance_intake_horizon()?;
         let result = self.store.accept_send(
@@ -411,24 +464,28 @@ impl Operator {
             send,
             0,
         );
-        self.guard_store(result)
+        self.guard_store(result).map(SendOutcome::Accepted)
     }
 
     /// Reports whether accepting this send must first register the epoch with settlement.
     ///
-    /// This probe keeps the full validation of a new send: registering an epoch starts
-    /// settlement's liveness clock, so only a payer-authorized send may trigger it.
+    /// This probe keeps the full validation of a new live-context send: registering an
+    /// epoch starts settlement's liveness clock, so only a payer-authorized send may
+    /// trigger it. A stale-context send short-circuits to `false` instead, because
+    /// acceptance answers it with the corrective rejection and admits nothing.
     pub(crate) fn send_requires_epoch_registration(
         &self,
         send: &SignedSend<Key, Digest>,
     ) -> Result<bool> {
         self.ensure_operating()?;
         self.validate_receivers(send)?;
-        let required = self.store.payment_requires_epoch_registration(
-            self.registration.context.payment(),
-            send,
-            0,
-        )?;
+        let context = self.registration.context.payment();
+        if send.body().epoch() != context.epoch() || send.body().anchor() != context.anchor() {
+            return Ok(false);
+        }
+        let required = self
+            .store
+            .payment_requires_epoch_registration(context, send, 0)?;
         if required {
             self.ensure_balance_intake_horizon()?;
         }
@@ -460,43 +517,65 @@ impl Operator {
             account: identity.key.clone(),
             amount,
         };
-        self.apply_deposit(event)
+        let mut staged = self.observe(std::slice::from_ref(&event))?;
+        Ok(staged.pop().expect("one observed event stages one credit"))
     }
 
-    pub(crate) fn apply_deposit(&mut self, event: DepositEvent) -> Result<StagedDeposit> {
+    /// Stages chain-confirmed deposit events observed from one finalized
+    /// block, the operator's only deposit intake.
+    ///
+    /// The staged row keyed by deposit id is the idempotence key, so the
+    /// at-least-once observation stream (marshal re-delivers any block whose
+    /// acknowledgement was not durable) never double-credits: an event whose
+    /// id is already staged is verified against its row and skipped. Every
+    /// new event of the block commits in one transaction together with the
+    /// boundary context the events chain to, so a crash stages either the
+    /// whole block or none of it. Settlement already holds custody for each
+    /// event, so no shape may be refused here: an aggregate exactly
+    /// offsetting the carried withdrawal defers to the successor epoch
+    /// instead, mirroring the chain's boundary rule. Returns the newly
+    /// staged credits in event order.
+    pub(crate) fn observe(&mut self, events: &[DepositEvent]) -> Result<Vec<StagedDeposit>> {
         self.ensure_operating()?;
-        if let Some(staged) = self.store.staged_deposit(&event.id)? {
-            ensure!(
-                staged.account == event.account && staged.amount == event.amount,
-                "deposit id is bound to another event"
-            );
-            return Ok(staged);
+        let mut registration = self.registration.clone();
+        let mut batch = Vec::new();
+        for event in events {
+            if let Some(staged) = self.store.staged_deposit(&event.id)? {
+                ensure!(
+                    staged.account == event.account && staged.amount == event.amount,
+                    "deposit id is bound to another event"
+                );
+                continue;
+            }
+            let identity = self
+                .identities
+                .iter()
+                .find(|identity| identity.key == event.account)
+                .context("deposit account is not a configured operator identity")?
+                .clone();
+            let replacement = registration_with_deposit(
+                &self.protocol,
+                &registration,
+                identity.key.clone(),
+                event.amount,
+            )
+            .context("prospective deposit does not fit the epoch anchor")?;
+            batch.push(Staging {
+                identity,
+                event: event.clone(),
+                replacement: replacement.context.payment().clone(),
+            });
+            registration = replacement;
+        }
+        if batch.is_empty() {
+            return Ok(Vec::new());
         }
         self.ensure_balance_intake_horizon()?;
-        let identity = self
-            .identities
-            .iter()
-            .find(|identity| identity.key == event.account)
-            .context("deposit account is not a configured operator identity")?;
-
-        // Settlement already holds custody for this event, so no shape may be refused
-        // here: an aggregate exactly offsetting the carried withdrawal defers to the
-        // successor epoch instead, mirroring the chain's boundary rule.
-        let replacement = registration_with_deposit(
-            &self.protocol,
-            &self.registration,
-            identity.key.clone(),
-            event.amount,
-        )
-        .context("prospective deposit does not fit the epoch anchor")?;
-        let result = self.store.stage_deposit(
-            identity,
-            &event,
-            self.registration.context.payment(),
-            replacement.context.payment(),
-        );
+        let result = self
+            .store
+            .stage_deposits(self.registration.context.payment(), &batch);
         let staged = self.guard_store(result)?;
-        self.registration = replacement;
+        self.registration = registration;
         Ok(staged)
     }
 
@@ -786,15 +865,6 @@ impl Operator {
     }
 
     #[cfg(test)]
-    pub(crate) fn settlement_roots(
-        &self,
-        epoch: u64,
-    ) -> Result<commonware_clearing::bajillion::transition::RootBundle<Digest>> {
-        self.ensure_store_usable()?;
-        self.store.settlement_roots(epoch)
-    }
-
-    #[cfg(test)]
     pub(crate) fn snapshot(&self) -> Result<StoreSnapshot> {
         self.ensure_store_usable()?;
         let mut snapshot = self.store.snapshot()?;
@@ -817,7 +887,12 @@ impl Operator {
         Ok(snapshot)
     }
 
-    pub(crate) fn settlement_registration(&self) -> Result<SettlementRegistration> {
+    /// Builds the signed chain registration for the live epoch, without
+    /// mutating anything. The signature covers exactly the boundary material
+    /// (execution assigns the deadlines at inclusion), so retries resubmit
+    /// these exact bytes and a lost response replays into the permanent
+    /// applied outcome.
+    pub(crate) fn signed_registration(&self) -> Result<RegisterEpochRequest> {
         self.ensure_operating()?;
         self.next_openable_epoch()?;
         let epoch = self.registration.context.payment().epoch();
@@ -845,14 +920,15 @@ impl Operator {
         let staged_root = staged_deposits(&self.registration)?
             .root::<Sha256>()
             .context("commit registration staged deposits")?;
-        let signature = self.protocol.sign_registration(
+        let signature = self.protocol.sign_chain_registration(
             epoch,
             predecessor_liability,
             &deposits_root,
             &staged_root,
             &withdrawals,
         );
-        Ok(SettlementRegistration {
+        Ok(RegisterEpochRequest {
+            deployment: self.protocol.deployment(),
             epoch,
             predecessor_liability,
             deposits_root,
@@ -861,6 +937,57 @@ impl Operator {
             openings,
             signature,
         })
+    }
+
+    /// Adopts the chain-assigned registration for the live epoch from its
+    /// certified record: rebuilds the epoch context at the assigned deadlines
+    /// (moving the payment anchor with it), persists them with the context
+    /// transition, and swaps the live registration. Payers signed under the
+    /// placeholder context learn the move from the corrective rejection.
+    ///
+    /// Idempotent for a record already adopted, so a restart between the
+    /// registration's submission and this read-back recovers by re-reading
+    /// the same certified record.
+    pub(crate) fn adopt_registration(&mut self, record: &RegistrationRecord) -> Result<()> {
+        self.ensure_operating()?;
+        let epoch = self.registration.context.payment().epoch();
+        ensure!(
+            record.epoch == epoch,
+            "the certified registration record is not the live epoch"
+        );
+        if let Some(adopted) = self.store.chain_deadlines(epoch)? {
+            ensure!(
+                adopted == (record.admission_deadline, record.challenge_deadline),
+                "the adopted deadlines diverged from the certified registration"
+            );
+            ensure!(
+                self.registration.context.payment().anchor() == &record.anchor,
+                "the adopted context diverged from the certified registration"
+            );
+            return Ok(());
+        }
+        let replacement = self.protocol.registration_at(
+            epoch,
+            staged_deposits(&self.registration)?,
+            self.registration.withdrawals.clone(),
+            self.registration.context.predecessor_liability(),
+            record.admission_deadline,
+            record.challenge_deadline,
+        )?;
+        ensure!(
+            replacement.context.payment().anchor() == &record.anchor,
+            "the rebuilt context does not match the certified registration"
+        );
+        let adopted = self.store.adopt_deadlines(
+            epoch,
+            self.registration.context.payment(),
+            replacement.context.payment(),
+            record.admission_deadline,
+            record.challenge_deadline,
+        );
+        self.guard_store(adopted)?;
+        self.registration = replacement;
+        Ok(())
     }
 
     /// Rebuilds the retained predecessor commitment after the durable epoch advanced.
@@ -960,7 +1087,7 @@ impl Operator {
         let epoch = payment_context.epoch();
         let protocol = Arc::clone(&self.protocol);
         let reader = self.store.epoch_reader();
-        let settlement_address = self.settlement_address;
+        let pipeline = self.pipeline.clone();
         #[cfg(test)]
         let close_gate = self.close_gate.take();
         #[cfg(test)]
@@ -993,25 +1120,43 @@ impl Operator {
                 #[cfg(not(test))]
                 let mut rng = rand::rng();
                 let result = prepared
-                    .and_then(|prepared| protocol.complete(prepared, &mut rng))
-                    .and_then(|result| {
-                        let Some(address) = settlement_address else {
-                            return Ok(result);
+                    .and_then(|prepared| {
+                        // Without a pipeline (the test and harness path) the
+                        // close certifies through the in-process simulation
+                        // and completes locally.
+                        let Some(pipeline) = &pipeline else {
+                            return protocol.complete(prepared, &mut rng);
                         };
-                        let submission = SettlementSubmission::from(&result);
-                        let finalized = admit_until_known(
-                            || settlement_rpc::admit_blocking(address, &submission),
-                            Duration::from_millis(100),
+
+                        // Distributed certification: assemble and disseminate
+                        // the per-validator dealings over the DA channel,
+                        // assemble the exact-quorum certificate from the
+                        // returned votes, then submit the certified close and
+                        // complete once the local certified state finalized
+                        // the exact batch.
+                        let deal_start = Instant::now();
+                        let slices = protocol.slices(&prepared)?;
+                        let dealings = protocol.dealings(&prepared, &slices)?;
+                        let deal_micros = deal_start.elapsed().as_micros();
+                        let seal_start = Instant::now();
+                        let dealing_slices = dealings.iter().map(Vec::len).sum();
+                        let header = prepared.close().header;
+                        let roots = prepared.close().roots;
+                        let certificate = pipeline.certify(epoch, header, roots, dealings)?;
+                        let seal_micros = seal_start.elapsed().as_micros();
+                        let result = protocol.certify(
+                            prepared,
+                            slices.len(),
+                            dealing_slices,
+                            certificate,
+                            deal_micros,
+                            seal_micros,
                         )?;
-                        ensure!(
-                            finalized.batch_id == result.finalized.batch_id
-                                && finalized.epoch == result.finalized.epoch
-                                && finalized.successor_root == result.finalized.successor_root
-                                && finalized.withdrawal_total == result.finalized.withdrawal_total
-                                && finalized.payout_total == result.finalized.payout_total
-                                && finalized.custody_balance == result.finalized.custody_balance,
-                            "settlement finalized a different close"
-                        );
+                        pipeline.admit(
+                            AdmitRequest::from(&result),
+                            result.finalized,
+                            result.roots.change,
+                        )?;
                         Ok(result)
                     })
                     .map(|mut result| {
@@ -1143,6 +1288,35 @@ impl Operator {
         Ok(())
     }
 
+    /// Test-only synchronous close pipeline: prepares the live epoch's close,
+    /// rotates to the successor, completes and records the close, and returns
+    /// the result for chain admission by the caller.
+    #[cfg(test)]
+    pub(crate) fn complete_close(&mut self, seed: u64) -> Result<SettlementResult> {
+        let epoch = self.registration.context.payment().epoch();
+        let data = self.store.load_current()?;
+        let prepared = prepare_epoch(&self.protocol, data, self.registration.clone())?;
+        let next_epoch = self.next_openable_epoch()?;
+        let successor = self.protocol.registration(
+            next_epoch,
+            self.registration.deferred.clone(),
+            WithdrawalBatch::empty(),
+            self.store.successor_liability()?,
+        )?;
+        self.store.rotate_epoch(
+            epoch,
+            self.registration.context.payment(),
+            &successor.context,
+        )?;
+        self.registration = successor;
+        self.reload_predecessor()?;
+        let result = self
+            .protocol
+            .complete(prepared, &mut commonware_utils::TestRng::new(seed))?;
+        self.store.finish_close(&result, self.genesis_root)?;
+        Ok(result)
+    }
+
     #[cfg(test)]
     fn finish_prepared<R: rand_core::CryptoRng>(
         &mut self,
@@ -1163,23 +1337,6 @@ impl Operator {
             deal_micros: result.deal_micros,
             seal_micros: result.seal_micros,
         })
-    }
-}
-
-fn admit_until_known<T>(
-    mut attempt: impl FnMut() -> std::result::Result<T, settlement_rpc::AdmitError>,
-    retry_delay: Duration,
-) -> Result<T> {
-    loop {
-        match attempt() {
-            Ok(value) => return Ok(value),
-            Err(settlement_rpc::AdmitError::Rejected(error)) => {
-                anyhow::bail!("settlement rejected admission: {error}")
-            }
-            Err(settlement_rpc::AdmitError::Pending | settlement_rpc::AdmitError::Unknown(_)) => {
-                thread::sleep(retry_delay)
-            }
-        }
     }
 }
 
@@ -1245,12 +1402,23 @@ fn registration_for(protocol: &Protocol, data: &EpochData) -> Result<EpochRegist
             .map(|stored| stored.request.clone())
             .collect(),
     )?;
-    let registration = protocol.registration(
-        data.epoch,
-        staged,
-        withdrawals,
-        predecessor_liability(data)?,
-    )?;
+
+    // An epoch that registered on the chain rebuilds under the chain-assigned
+    // absolute deadlines it adopted from the certified registration record.
+    // An epoch that never registered rebuilds under the deterministic
+    // placeholder deadlines its contexts were staged with.
+    let liability = predecessor_liability(data)?;
+    let registration = match data.deadlines {
+        Some((admission_deadline, challenge_deadline)) => protocol.registration_at(
+            data.epoch,
+            staged,
+            withdrawals,
+            liability,
+            admission_deadline,
+            challenge_deadline,
+        )?,
+        None => protocol.registration(data.epoch, staged, withdrawals, liability)?,
+    };
 
     // Storage keeps every epoch normalized: its rows and account state carry exactly its
     // boundary-included deposits, and deferred aggregates live as parked rows. The
@@ -1284,11 +1452,16 @@ fn registration_with_deposit(
             .map(|(account, amount)| DepositRecord::new(account, amount))
             .collect::<Result<Vec<_>, _>>()?,
     )?;
-    protocol.registration(
+
+    // Boundary moves preserve the context's deadlines: only the chain
+    // assigns them, at the registration's inclusion height.
+    protocol.registration_at(
         current.context.payment().epoch(),
         staged,
         current.withdrawals.clone(),
         current.context.predecessor_liability(),
+        current.context.admission_deadline(),
+        current.context.challenge_deadline(),
     )
 }
 
@@ -1300,11 +1473,16 @@ fn registration_with_withdrawal(
     let mut requests = current.withdrawals.requests().to_vec();
     requests.push(request);
     let withdrawals = WithdrawalBatch::new(requests)?;
-    protocol.registration(
+
+    // Boundary moves preserve the context's deadlines: only the chain
+    // assigns them, at the registration's inclusion height.
+    protocol.registration_at(
         current.context.payment().epoch(),
         staged_deposits(current)?,
         withdrawals,
         current.context.predecessor_liability(),
+        current.context.admission_deadline(),
+        current.context.challenge_deadline(),
     )
 }
 

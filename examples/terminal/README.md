@@ -2,35 +2,90 @@
 
 Run `commonware-clearing` through three independently owned roles:
 
-- `terminal-settlement` owns custody, close admission, challenge timing, finalization, hard-fault
-  recovery, and claim replay protection.
-- `terminal-operator` owns the SQLite ledger, accepts signed sends, issues receipts, and constructs
-  closes.
-- `terminal-agent` owns one wallet key, verifies returned receipts, holds as a receiver
-  the pairs crediting it, reconciles them against admitted closes, and provides the Ratatui UI.
+- `terminal-agent` runs the wallet agents: p2p-less light clients speaking codec RPC to the
+  validators' query servers. Every read they rely on is certified, and every mutation is
+  submit-then-prove. Each agent owns one wallet key, verifies returned receipts, holds as a
+  receiver the pairs crediting it, reconciles them against certified admitted closes, and
+  provides the Ratatui UI.
+- `terminal-operator` owns one SQLite ledger, accepts signed sends, issues receipts, and
+  constructs closes. It runs the validator stack without a consensus engine, as a registered
+  p2p secondary of the committee: settlement reads come from its own verified finalized state,
+  transaction submission goes out on the settlement transaction channel, and its close pipeline
+  disseminates dealings, collects votes, and assembles the admission certificate over the
+  settlement DA channel. Several operators run concurrently, each owning one DEPLOYMENT (its
+  clearing identity's own accounts, epochs, custody, and fault domain) on the shared chain.
+- `terminal-chain` runs the settlement chain: a static committee of validators executing one
+  clearing `SettlementChain` per configured deployment as a `glue::stateful` application, with
+  block height as the only timer. Execution routes every transaction to exactly one
+  deployment's machine and no transaction reads or writes another deployment's records, so one
+  operator's fault never touches another's epochs. Each validator seals the dealings it
+  receives from any configured operator over the DA channel durably before voting back to that
+  operator, and serves deployment-scoped certified reads over its applied state.
 
-The processes exchange one bounded request and response per connection using canonical
-`commonware-codec` messages over Commonware's runtime networking traits. There is no HTTP,
-protobuf, or generated RPC layer.
+Agents exchange one bounded request and response per connection using canonical
+`commonware-codec` messages over Commonware's runtime networking traits, with no p2p stack of
+their own. The operator and the committee share one authenticated discovery network, where
+consensus, block broadcast and backfill, transaction gossip, and settlement DA each ride a
+numbered channel. There is no HTTP, protobuf, or generated RPC layer.
 
-The example is educational rather than a production operator or asset adapter. Wallet,
-operator, and validator keys are deterministically derived. The settlement process applies every
-state-bearing input in memory and appends it to a SQLite log before responding, so a restarted
-settlement replays the log back into the identical state. The SQLite operator and its close queue
-also survive restarts. Each wallet's cumulative debit, pending signed send, authenticated
-receipts, and the exact state-root openings observed before payment and withdrawal authorization
-are SQLite-backed.
-Openings are retained by full root so a later hard fault can freeze an older finalized root.
-A staged deposit survives an agent restart and is retried with the same event id, which
-settlement and the operator both deduplicate. Withdrawal authorization retries remain
+## Trust
+
+The chain has one trusted constant: the genesis threshold identity dealt to the committee at
+setup. Everything a wallet or an operator relies on is proven against it. The genesis also
+fixes the deployment list (one operator clearing key with its configured accounts and initial
+balances per deployment; each deployment's digest derives from its operator key) and one
+chain-wide epoch timing policy applied to every deployment.
+
+- Every settlement read is a certified read: a finalization certificate over a block, the block
+  bytes, and a presence or exclusion proof against that block's canonical state root, verified
+  client-side. Absence is a verdict, not a shrug.
+- Every block carries a timestamp covered by its digest, so recency is certified too and one
+  verified read from a single validator suffices. Window-critical reads (the status height that
+  deadline decisions anchor on, and the anchor and admitted records reconciliation adjudicates
+  against) reject a read whose certified timestamp lags the client's own clock beyond a shared
+  recency threshold, sized from the block cadence plus the bounded timestamp drift validators
+  vote under. The client's clock is the recency reference, deadlines remain block heights, and
+  a stalled chain is detected as staleness rather than misread as a live tip.
+- Mutations are submit-then-prove-by-effect: submission acceptance and the typed dry-run
+  advice it carries are both advisory, and a transaction completes only on a certified read
+  of its effect record (a deposit's custody record, the registration record, the admitted
+  record, a claim's release record, the fault record). Domain-keyed effects are provable;
+  rejections are effect-free and diagnosed via the advisory dry-run, so an effect-free
+  rejection is indistinguishable from not-yet-included and clients retry the exact bytes
+  until the effect appears or a bounded budget ends.
+- The operator's follower node verifies every finalization itself before applying it, so its
+  local reads carry the same guarantee and its own tip is an honest tip.
+
+Block height is the settlement clock. Every deadline is an absolute block height opened by
+the chain at the inclusion of the operator submission that triggers it: a registration's
+inclusion assigns its admission and challenge deadlines, an admission opens the challenge
+window and the successor epoch's registration eligibility, and deposits and withdrawals carry
+their signed deadlines in height units. The registration deadline geometry is fixed at
+deployment creation in `genesis.json` (admission offset and challenge duration), execution
+assigns the instance heights at inclusion, and the operator chooses nothing about timing,
+only when to submit, so it can never squeeze the enforcement window per epoch. A deadline
+bounds lateness only, so satisfying an obligation early is always allowed, while finalization
+still waits for real heights past the inclusive challenge deadline. An idle deployment has no
+live obligations and can never fault by idling. Block timestamps never feed a deadline: they
+serve query recency and display alone.
+
+The example is educational rather than a production operator or asset adapter. Wallet keys,
+the operator's clearing key, and the validators' clearing committee keys are deterministically
+derived demo identities, and setup generates fresh network keys. The SQLite operator and its
+close queue survive restarts. Each wallet's cumulative debit, pending signed send,
+authenticated receipts, cached payment context, and the exact state-root openings observed on
+head reads and before withdrawal authorization are SQLite-backed. Openings are retained by
+full root so a later hard fault can freeze an older finalized root. A staged deposit survives
+an agent restart and is retried with the same event id, which the chain's custody record
+consumes exactly once, so no second custody can move. Withdrawal authorization retries remain
 process-local, so that workflow alone does not promise exactly-once behavior across an agent
-restart. Settlement keeps bounded
-in-memory replay windows for admission, challenge, terminal-state claims, and pending-deposit
-refunds. Successful finalized withdrawal and external-payout claims retain their exact results for
-the deployment lifetime, allowing response-loss retries and mandatory operator
-acknowledgements after any number of later valid claims. The returned releases model an asset
-adapter decision, not an external transfer. A production embedding must durably and atomically
-commit each transfer with its replay-protection mutation.
+restart. Replay protection is domain state rather than a history of transaction hashes: every
+transaction carries a natural idempotence key (a deposit id, an account queue slot, an epoch,
+a claim position), so no account nonces exist, a duplicate inclusion lands on its variant's
+guard as a no-op or typed conflict, and response-loss retries complete on the same effect
+record. The returned releases model an asset adapter decision, not an external transfer. A
+production embedding must durably and atomically commit each transfer with its
+replay-protection mutation.
 
 ## User flows
 
@@ -38,23 +93,35 @@ commit each transfer with its replay-protection mutation.
 PAYMENT
 
  wallet                    operator                         settlement
-   |-- read payer head ------->|                                 |
-   |<-- context, state root, StateOpening                        |
-   |-- read status --------------------------------------------->|
-   |<-- deployment, exact finalized state root, fault status ----|
-   | verify live payer opening; persist exact root + opening      |
-   | sign and persist (root, SignedSend S)                        |
+   | sign from local SQL alone: the cached (epoch, anchor), the wallet's own
+   | durable cumulative debit as the endpoint, affordability prechecked against
+   | the cached Merkle-verified floor (a lower bound on spendable balance)
+   | persist (root, SignedSend S)                                 |
    |-------------------------->|                                 |
    |                           | first payment for epoch:        |
-   |                           | register exact context -------->|
-   |                           |<------------------------- accept|
+   |                           | registration tx, certified ---->|
+   |                           |<-- registration record (effect) |
    |                           | sign one linked receipt per entry|
    |<--------------------------|                                 |
    | verify S and every receipt                                   |
-   |-- confirm (epoch, anchor, predecessor root) ---------------->|
-   |<--------------------------- exact live registration or reject|
+   |-- certified anchor read for the epoch ---------------------->|
+   |<----------- proven anchor equals the send's context, or reject|
    | atomically persist (root, receipts); advance wallet-local debit|
    |
+   +-- no cached context (fresh wallet, or invalidated by a withdrawal) => one head
+       read: context, live state, and a StateOpening verified against settlement's
+       exact finalized root, then cached. this fallback also covers a local floor
+       that cannot prove affordability, and its live-balance precheck refuses a truly
+       unaffordable send before anything is staged
+   +-- stale context => typed corrective rejection carrying the operator's live
+       (epoch, anchor) and the payer's endpoint as the operator sees it. the wallet
+       adopts the corrected context, re-signs the exact intent at its own endpoint,
+       and retries once. both sends authorize the same cumulative debit interval, so
+       at most one ever debits: a Byzantine "rejection" that keeps the old bytes
+       cannot double-pay
+   +-- corrective endpoint differs from the wallet's own => never adopted. it is the
+       lost-acceptance signal, resolved from settlement's finalized endpoint before
+       any retry
    +-- invalid or missing receipt => reject without advancing wallet-local debit
    +-- missing response => acceptance unknown; retry exact persisted S
    +-- admitted close omits an accepted send => the payment did not happen and the payer's
@@ -69,10 +136,14 @@ PAYMENT
 
 DEPOSIT OR WITHDRAWAL AUTHORIZATION
 
- deposit: wallet -> settlement custody -> operator credit -> next exact close boundary
+ deposit: wallet -> settlement custody -> operator observes the finalized record
+          -> next exact close boundary
 
-          once settlement accepts custody, operator loss returns a pending outcome;
-          retry uses the exact event, and timeout recovery refunds the settlement account
+          the wallet's flow ends at the certified custody record. the operator is a
+          chain follower and stages every finalized deposit itself, so no wallet report
+          exists and a deposit staged by any third party rides the next close. a lost
+          chain response retries the exact staged event, and timeout recovery refunds
+          the settlement account if no close ever includes the credit
 
  withdrawal: read settlement's configured, non-faulted finalized root
              -> select the exact retained opening, or fetch, verify, and persist that root
@@ -96,7 +167,7 @@ CLEAN CLOSE
 operator prepare -> deal -> validators seal every assigned proof slice
           -> certificate -> settlement admit
           -> PENDING through the inclusive challenge deadline
-          -> any later settlement request observes now > deadline
+          -> the deadline passes when the chain finalizes a block past it
           -> FINALIZED
                 |
                 +-- withdrawal output + one opening -> destination, amount
@@ -135,9 +206,10 @@ OPERATOR FAULT
  Exact retries return the original result; conflicting replays fail closed.
 ```
 
-Recovery does not recreate unavailable evidence. Before staging each new payment or fresh
-withdrawal, the agent retains its payer opening against settlement's exact finalized root;
-recovery uses it only when that full root is later frozen. A carried withdrawal is invisible to
+Recovery does not recreate unavailable evidence. On every verified head read, balance poll,
+and fresh withdrawal, the agent retains its payer opening against settlement's exact finalized
+root, and each optimistically staged payment pins one retained opening as its recovery
+evidence. Recovery uses an opening only when its full root is later frozen. A carried withdrawal is invisible to
 settlement until its close registers, so it gains the deadline-fault guarantee only once that close
 is admitted. If the operator disappears or censors first, the signer queues the exact signed
 request at settlement instead. The next registered close must then carry the queued request
@@ -146,7 +218,7 @@ recovery. This covers roots the agent observed while online, not an unobserved r
 it was offline. An account reactivated by a current-epoch deposit cannot pay until it appears in a
 later epoch-predecessor state, because the current frozen root has no live payer leaf to retain.
 Receipt challenges still require the exact linked send/receipt pair. The example supplies no
-data-availability network or third-party opening retrieval.
+third-party opening retrieval.
 
 Receiver enforcement flow. A wallet that provides a service is the party an omitted credit harms,
 so it enforces its own preconfirmations. It fetches the pairs crediting it from the operator by a
@@ -171,38 +243,105 @@ proving the omission through the payer-row angle instead, and the receipt-range 
 families require operator equivocation the honest demo never produces. Settlement adjudicates
 all four.
 
-Registration confirmation is live rather than historical. A registered context remains
-confirmable while its matching close is challengeable, but finalization, expiry, or a proven fault
-ends that authority. A late receipt therefore cannot rely on an old registration merely because a
-later epoch has the same state root; accepting after finalization would require authenticated
-inclusion evidence, which this example does not provide.
+Registration confirmation is a certified anchor read. The anchor commits the entire epoch
+context, the boundary, the predecessor liability, and the chain-assigned absolute deadlines,
+and anchor records persist for the life of the deployment, so a certified anchor equal to the
+send's context proves settlement registered exactly that payment context. A receipt whose
+context the chain never registered has no close to adjudicate against and is never recorded.
+
+## Close certification and data availability
+
+Distributed certification runs over the settlement DA channel. An operator sends each
+validator exactly its assigned proof slices, and the validator routes the dealing by the
+sending operator's network identity to the deployment that operator runs and seals it with
+clearing `seal` against THAT deployment's chain-registered close from its own applied state,
+never against operator-supplied context material. The sealed dealing lands in that
+deployment's own prunable archive (the partition folds the deployment digest, so two
+deployments' closes never contend for one deadline slot), keyed by the close's batch id
+(deployment-unique by construction: the header commits the payment anchor, which folds the
+deployment digest) and sectioned by its challenge deadline height, and it is synced there
+before the vote returns to the sending operator: the vote attests to availability the
+validator must be able to honor, so a validator killed between seal and vote still holds its
+dealing on restart. Sections are pruned only when they lie strictly below the certified
+finalized height, where every challenge window they cover is closed, never on wall clock. A
+record is never overwritten: a replayed dealing re-votes from the stored bytes, and a
+conflicting dealing for an occupied slot is refused. Dealings and votes are recoverable
+off-chain traffic, resent until quorum, and only the finalized admission is durable protocol
+state. The operator verifies every returned vote, assembles the exact-quorum certificate,
+submits the admission transaction, and completes only once its own certified state finalized
+the exact batch.
+
+## Keys
+
+| Key | Held by | Purpose |
+| --- | --- | --- |
+| Consensus threshold share (BLS) | each validator's `node.json` | signs simplex votes and certificates under the genesis threshold identity every certified read verifies against |
+| Clearing committee key (BLS) | each validator's `node.json` | seals dealings and signs close-admission votes |
+| Operator network key (ed25519) | each `operator-<index>/node.json` | authenticates that operator as a registered p2p secondary |
+| Operator clearing key (curve25519) | each `operator-<index>/node.json` (a fixed demo protocol constant) | signs that operator's receipts and epoch registrations, and its digest names the deployment the operator runs |
+| Wallet key (curve25519) | one per agent | signs sends and withdrawal authorizations, and names the account custody and claims resolve to |
 
 ## Run
 
-Start each role in its own terminal:
+Generate the fixed committee and the operators' node directories, then start each role in its
+own terminal. Setup writes `./data/validator-0` through `./data/validator-3` (the committee
+size must equal the fixed clearing committee) plus one directory per operator,
+`./data/operator-0` and `./data/operator-1` by default (`--operators` chooses the count, one
+deployment each):
 
 ```bash
-cargo run --release -p commonware-terminal --bin terminal-settlement
+cargo run --release -p commonware-terminal --bin terminal-chain -- setup
+mprocs "cargo run --release -p commonware-terminal --bin terminal-chain -- validator --node-dir ./data/validator-0" \
+       "cargo run --release -p commonware-terminal --bin terminal-chain -- validator --node-dir ./data/validator-1" \
+       "cargo run --release -p commonware-terminal --bin terminal-chain -- validator --node-dir ./data/validator-2" \
+       "cargo run --release -p commonware-terminal --bin terminal-chain -- validator --node-dir ./data/validator-3"
 ```
+
+Start both operators, each on its own RPC address and SQLite database:
 
 ```bash
 cargo run --release -p commonware-terminal --bin terminal-operator -- \
-  --database terminal-operator.sqlite
+  --node-dir ./data/operator-0 --bind 127.0.0.1:7001 \
+  --database terminal-operator-0.sqlite
+cargo run --release -p commonware-terminal --bin terminal-operator -- \
+  --node-dir ./data/operator-1 --bind 127.0.0.1:7002 \
+  --database terminal-operator-1.sqlite
 ```
+
+Each agent binds one operator and its deployment at startup: `--operator` names the operator's
+RPC address and `--deployment` resolves that operator's deployment from the genesis list
+(operator N runs deployment N):
 
 ```bash
-cargo run --release -p commonware-terminal --bin terminal-agent -- --identity 0
+cargo run --release -p commonware-terminal --bin terminal-agent -- --identity 0 \
+  --operator 127.0.0.1:7001 --deployment 0 \
+  --genesis data/validator-0/genesis.json \
+  --query 127.0.0.1:3200 --query 127.0.0.1:3201
+cargo run --release -p commonware-terminal --bin terminal-agent -- --identity 0 \
+  --operator 127.0.0.1:7002 --deployment 1 \
+  --genesis data/validator-0/genesis.json \
+  --query 127.0.0.1:3200 --query 127.0.0.1:3201
 ```
 
-Every role is durable, so starting the demo over requires deleting
-`terminal-settlement.sqlite`, `terminal-operator.sqlite`, and every `terminal-agent-*.sqlite`
-(or passing fresh `--database` paths) before starting the trio again.
+Each operator's node directory carries its network key, its clearing key, and the shared
+network and genesis files, and its follower state lives under
+`data/operator-<index>/runtime`. The genesis file carries the committee's threshold identity,
+which every certified read is verified against, plus the chain creation timestamp, the
+deployment list, and the chain-wide epoch timing policy applied to every deployment. The query
+addresses name the validators' certified query servers: one suffices, since recency rides the
+certified block timestamp, and extra addresses only give failover rotation past stale or
+unreachable validators. Every role
+is durable, so starting the demo over requires deleting the chain's `./data` directory
+(validator and operator storage), every `terminal-operator-*.sqlite`, and every
+`terminal-agent-*.sqlite` (or passing fresh paths) before starting again.
 
 Agent identities are `0=Alice`, `1=Bob`, `2=Carol`, `3=Dave`, and `4=Eve (external)`. The first
-four are registered operator accounts. Eve demonstrates an unregistered receiver claiming an
-external payout. Run more agent processes with different identities to exercise independently
-owned wallets. Each identity defaults to `terminal-agent-<identity>.sqlite`; pass `--database` to
-choose an explicit wallet database path.
+four are registered accounts in every deployment (setup writes the same demo account set into
+each deployment's genesis, but every deployment's balances, epochs, custody, and fault domain
+are its own). Eve demonstrates an unregistered receiver claiming an external payout. Run more
+agent processes with different identities and deployments to exercise independently owned
+wallets. Each identity defaults to `terminal-agent-<deployment>-<identity>.sqlite`; pass
+`--database` to choose an explicit wallet database path.
 
 The UI supports payments, deposits, direct pending-deposit refunds with `r`, exact withdrawals,
 amountless account Close authorizations, withdrawal claims, payer-state hard-fault recovery with
@@ -216,10 +355,21 @@ the deadline expiring into hard-fault recovery is the backstop if the operator s
 selected entry into a draft batch and `b` pays every staged entry with one batched send. The
 batch is rejected or accepted as a whole, so a failed `b` retries the identical batch. A
 pending-deposit refund needs only the wallet account and settlement; it does not contact the
-operator. A deposit is placed at settlement, the only ramp in: settlement takes custody and
-records a refund path, and the operator then loads the balance, crediting only after settlement
-reports the deposit recorded. A withdrawal is authorized against the settlement state root,
-carried by the operator, and included in an epoch close.
+operator. A deposit is one step, placed at settlement, the only ramp in: the chain takes custody
+and records a refund path, and the wallet is done. The operator observes the chain like a real
+ramp: its follower surfaces every finalized block's deposit transactions, confirms each against
+the applied custody record, and stages the credit durably before acknowledging the block, so a
+crash between finalization and staging re-delivers the block and the deposit-id dedupe makes the
+replay a no-op. Nothing depends on the depositor telling the operator anything, which also
+removes the unreported-mint griefing lever: a third party's deposit to a configured account is
+staged automatically and rides the next close's boundary instead of wedging the registration.
+Demo deposits are effectively mints: the chain models the custody ledger but no funding asset,
+so a `Deposit` transaction conjures custody for one of the four configured identities (any other
+account is chain-rejected), no faucet is needed, and crediting an account can only help it, so
+permissionless submission is harmless. In a real deployment this arm is where the asset ramp
+plugs in: a deposit becomes the execution environment's observation of an actual transfer into
+the deployment's custody rather than a self-declared credit. A withdrawal is authorized against
+the settlement state root, carried by the operator, and included in an epoch close.
 Deposits and fresh withdrawal authorizations are accepted only while no payment context is
 registered: the epoch's first payment registers the context, and later requests are rejected
 until the successor epoch opens after the close finalizes. Every validator derives the exact
@@ -233,42 +383,74 @@ Payments to an absent identity become claimable external payouts rather than rec
 settlement output. This includes Eve and a configured account removed by Close until a later
 deposit reactivates it. Each receiver claims independently with `e`.
 
-Before returning an epoch's first operator-signed receipt, the operator sends settlement an
-operator-signed registration containing the exact epoch, predecessor liability, deposit boundary, and
-withdrawal boundary. Settlement derives and registers that exact payment context. Registration is
-one-shot rather than a heartbeat: an idle open slot has no deadline, but an activated context must
-admit its matching certified close by its inclusive admission deadline or the deployment
-permanently hard-faults. For the demo, one logical settlement time unit is 30 seconds of monotonic
-process time. A registered context has ten admission ticks, and an admitted close remains pending
-for one inclusive challenge tick. Settlement observes elapsed time on later requests and status
-reads; it need not run a background heartbeat to make an expired obligation permanent. Deposit and
-withdrawal deadlines are independent: if one expires while a clean admitted close remains
-challengeable, the fault is recorded, the clean FIFO front still finalizes after its window, and
-terminal recovery preserves both its claim reserves and its successor state.
+Before returning an epoch's first operator-signed receipt, the operator submits an
+operator-signed registration transaction containing exactly the boundary material it
+legitimately chooses: the epoch, predecessor liability, deposit boundary, and withdrawal
+boundary. Execution assigns the absolute block-height deadlines from the registration's
+inclusion height under the genesis timing policy and derives the payment anchor itself, so
+the operator learns both by reading its own certified registration record back before any
+receipt is issued. Adopting the assigned deadlines moves the payment anchor, so the send that
+triggered the registration earns one corrective rejection and is re-signed, which the
+wallet's bounded corrective retry already handles. Registration is one-shot rather than a
+heartbeat: an idle open slot has no deadline, but an activated context must admit its matching
+certified close by its inclusive admission-deadline height or the deployment permanently
+hard-faults. A registered context has a ten-block admission runway from its inclusion height
+and an admitted close remains pending for one inclusive challenge block; block production
+itself observes every deadline, so no heartbeat is needed to make an expired obligation
+permanent.
+Deposit and withdrawal deadlines are independent: if one expires while a clean admitted close
+remains challengeable, the fault is recorded, the clean FIFO front still finalizes after its
+window, and terminal recovery preserves both its claim reserves and its successor state.
 
 SQLite atomically derives every pending Close tail, projects those historical rows inactive at zero
 balance while retaining their counters and payment evidence, adjusts live liability, records the
 close job, and opens the successor under a root-independent payment context. The cut is proportional
 to Close authorizations rather than all accounts, and unchanged account versions remain
-copy-on-write. A background worker rebuilds the predecessor BMTs, deals proof slices, has validators
-seal their dealings, and submits the certificate to settlement. This educational adapter registers
-only one context at a time, so a successor's first payment retries until its predecessor finalizes;
-the Bajillion settlement primitive itself supports a bounded admitted pipeline. Close retries remain
+copy-on-write. A background worker rebuilds the predecessor BMTs, deals each validator its proof
+slices over the DA channel, collects the committee's votes into the exact-quorum certificate, and
+submits the certified close to settlement. The chain opens the successor epoch's registration
+window at the predecessor's admission, while that close's challenge window still runs, so a
+successor's first payment retries only until the predecessor's close is admitted; the Bajillion
+settlement primitive itself supports a bounded admitted pipeline. Close retries remain
 bound to their original epoch, so a lost response cannot cut the active successor. Finalization
 prunes balance versions that are no longer challengeable.
 
-For a terminal-free walkthrough, start settlement and operator as above, then run:
+For a terminal-free walkthrough, start the validators and operators as above, then run (the
+scripted walkthrough stays on operator-0 and deployment 0; pass `--operator 127.0.0.1:7002
+--deployment 1` to run the same arc on operator-1's deployment instead):
 
 ```bash
-cargo run --release -p commonware-terminal --bin terminal-agent -- --scripted
+cargo run --release -p commonware-terminal --bin terminal-agent -- --scripted \
+  --operator 127.0.0.1:7001 \
+  --genesis data/validator-0/genesis.json \
+  --query 127.0.0.1:3200 --query 127.0.0.1:3201
 ```
 
-The walkthrough deposits, hands the operator a withdrawal to carry, pays an internal receiver,
+The walkthrough deposits and waits for the operator's observed credit to show in the verified
+balance, hands the operator a withdrawal to carry, pays an internal receiver,
 pays a two-receiver batch under one signature, and pays an external receiver. A receiver then
 durably intakes and settlement-anchors its incoming pairs and gates service on that held evidence
-before the epoch is cut, the walkthrough starts an asynchronous close, opens the registered
-successor after finalization, reconciles the receiver's finalized credit as evidence-backed, and
-claims the finalized withdrawal and external payout. It closes with a self-contained fraud arc:
-an assembled omitting close is admitted, the omitted receiver's held receipt convicts it with a
-proven `HigherShardTip` challenge through the real dispatch, and the fraudulent operator is fenced.
-The operator binary stays honest, and the fraud is assembled only in the scripted walkthrough.
+before the epoch is cut, the walkthrough starts an asynchronous close certified by the live
+committee, claims the finalized withdrawal and external payout, and reconciles the receiver's
+finalized credit as evidence-backed. It then opens the registered successor with one payment,
+closes that epoch inside its admission runway, and proves with a certified read that no live
+obligation outlasts the run, so the deployment idles safely afterward. It ends with a
+self-contained fraud arc on a throwaway in-process single-validator chain with locally
+simulated certification: the assembled omitting close is registered and admitted as real
+transactions, the omitted receiver's held receipt convicts it with a real `HigherShardTip`
+challenge transaction, and the proven verdict, the fault record, and the hard-faulted status are
+read back certified through the light client. The operator binary stays honest, and the fraud is
+assembled only in the scripted walkthrough.
+
+## Limits
+
+The demo cuts corners a production deployment must not:
+
+- Setup is a trusted dealer writing plaintext threshold shares and clearing keys into
+  `node.json`, which is demo-grade key handling. Continuous resharing and a real DKG bootstrap
+  are drop-ins from the reshare example: replace the constant scheme provider and the direct
+  simplex engine with its orchestrator, probe, and reshare actors.
+- Peer QMDB state sync is a documented no-op pending a glue extension: a late joiner replays
+  finalized blocks through marshal backfill, and the reshare example's qmdb resolver actor is
+  the drop-in server.
+- Marshal's finalization and block archives are never pruned.

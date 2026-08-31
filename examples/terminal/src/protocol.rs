@@ -13,7 +13,7 @@ use commonware_clearing::bajillion::{
     state::{AccountRow, AccountState, Prefix, SettlementOutput, StateLeaf},
     transition::{
         Assignment, ChallengeIndex, CloseContext, CloseLimits, EpochContext, ExternalPayoutClaim,
-        Header, PreparedClose, RootBundle, StateCache, WithdrawalClaim,
+        Header, PreparedClose, ProofSlice, RootBundle, StateCache, WithdrawalClaim,
         prepare_close_with_strategy,
     },
 };
@@ -45,10 +45,29 @@ pub(crate) type Payment = commonware_clearing::bajillion::payment::Payment<Key, 
 pub(crate) type AccountCache = StateCache<Key, Digest>;
 
 const DEPLOYMENT_NAMESPACE: &[u8] = b"_COMMONWARE_EXAMPLES_TERMINAL_DEPLOYMENT";
-const REGISTRATION_SIGNATURE_NAMESPACE: &[u8] = b"_COMMONWARE_EXAMPLES_TERMINAL_EPOCH_REGISTRATION";
+
+/// The deployment digest of one operator clearing key: the deployment
+/// namespace folded with the operator identity, so every configured
+/// deployment's digest is unique and self-describing. One settlement chain
+/// hosts one deployment per operator.
+pub(crate) fn deployment_of(operator: &Key) -> Digest {
+    Sha256::hash(&[DEPLOYMENT_NAMESPACE, &operator.encode()])
+}
+
+/// Namespace for chain registrations. The signed payload is the boundary
+/// material alone (epoch, predecessor liability, deposit and staged roots,
+/// withdrawal batch): execution assigns the absolute block-height deadlines
+/// at the registration's inclusion height, so the operator has nothing about
+/// timing to commit.
+const CHAIN_REGISTRATION_SIGNATURE_NAMESPACE: &[u8] =
+    b"_COMMONWARE_EXAMPLES_TERMINAL_CHAIN_REGISTRATION";
 const VALIDATOR_SEED_START: u64 = 10_000;
 const VALIDATORS: usize = 4;
 const SLICE_BITS: u8 = 2;
+
+/// Maximum proof slices one close partitions into, and so the most slices one
+/// validator dealing can carry.
+pub(crate) const MAX_SLICES: usize = 1 << SLICE_BITS;
 pub(crate) const MAX_ACCOUNTS: usize = 1_024;
 /// Maximum accepted payments in one epoch, counting one per batched-send entry.
 pub(crate) const MAX_ACCEPTED_PAYMENTS: usize = 1_024;
@@ -71,13 +90,55 @@ const DEPOSIT_INCLUSION_TIMEOUT: u64 = 100;
 const MINIMUM_WITHDRAWAL_NOTICE: u64 = 4;
 const MAXIMUM_WITHDRAWAL_NOTICE: u64 = 100;
 
-// Each epoch gets ten admission ticks and one inclusive challenge tick. The next epoch begins on
-// the first tick at which its predecessor can finalize. Deposit and withdrawal deadlines remain
-// independent obligations and may permanently fault an admitted close before that point.
+// The default deadline geometry, in blocks: a registration gets a ten-block
+// admission runway from its inclusion height and one inclusive challenge
+// block. Setup writes these defaults into a new chain's genesis, where the
+// timing policy is fixed for the chain's life and applied to every
+// configured deployment. On the chain-facing
+// flow that genesis policy is the authority end to end: execution assigns
+// each registration's deadlines from it and the close worker's rehearsal
+// derives its challenge duration from the adopted pair, so the consts bind
+// only the deterministic placeholder grid that pre-registration contexts are
+// staged under and the fixture harness that runs on that grid. Deposit and
+// withdrawal deadlines remain independent obligations and may permanently
+// fault an admitted close before that point.
 const ADMISSION_OFFSET: u64 = 10;
 const CHALLENGE_DURATION: u64 = 1;
 const CHALLENGE_OFFSET: u64 = ADMISSION_OFFSET + CHALLENGE_DURATION;
 const EPOCH_STRIDE: u64 = CHALLENGE_OFFSET + 1;
+
+/// Genesis-fixed epoch timing policy, in blocks.
+///
+/// The policy is fixed once at chain creation (setup writes it into
+/// `genesis.json`) and applied to every configured deployment, rather than
+/// chosen per epoch or per operator: such a choice would let an operator
+/// pick a challenge window too short for anyone to enforce in. Forced
+/// withdrawal remains the escape from a badly configured chain, not a
+/// substitute for a sane window.
+///
+/// The genesis fixes the policy and the chain assigns the instance: every
+/// window opens at the inclusion of the operator submission that triggers
+/// it. A registration's inclusion assigns its admission and challenge
+/// deadlines from this policy, and an admission opens the challenge window
+/// and the successor epoch's registration eligibility. An operator never
+/// chooses timing, only when to submit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct Timing {
+    /// Maximum blocks from a registration's inclusion height to its admission
+    /// deadline.
+    pub(crate) admission_offset: u64,
+    /// Exact blocks between a registration's admission deadline and its
+    /// challenge deadline.
+    pub(crate) challenge_duration: u64,
+}
+
+impl Timing {
+    /// The compiled defaults setup writes into a new chain's genesis.
+    pub(crate) const DEFAULT: Self = Self {
+        admission_offset: ADMISSION_OFFSET,
+        challenge_duration: CHALLENGE_DURATION,
+    };
+}
 
 #[cfg(test)]
 pub(crate) const TERMINAL_EPOCH: u64 = (u64::MAX - CHALLENGE_OFFSET) / EPOCH_STRIDE;
@@ -144,7 +205,7 @@ pub(crate) fn external_identity() -> AccountIdentity {
 
 /// One accepted send: the signed batch and one operator receipt per entry, in entry order.
 ///
-/// This is the shape the wire and both SQLite stores share. The send is carried once; per-entry
+/// This is the shape the wire and both SQLite stores share. The send is carried once. Per-entry
 /// [`Payment`] pairs are reassembled where linked evidence is needed.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Acceptance {
@@ -303,6 +364,8 @@ pub(crate) struct SettlementResult {
     pub(crate) rows: usize,
     pub(crate) slices: usize,
     pub(crate) dealing_slices: usize,
+    /// Sealed dealings retained by the in-process harness simulation. The
+    /// distributed flow leaves this empty: each validator retains its own.
     dealings: Vec<SealedDealing<Key, Digest>>,
     pub(crate) prepare_micros: u128,
     pub(crate) deal_micros: u128,
@@ -348,6 +411,11 @@ impl Validators {
             .context("construct operator slice assignment")
     }
 
+    /// The dealt signing scheme of one committee validator.
+    ///
+    /// Holding every committee key is the in-process simulation: only the
+    /// deterministic harness and the fraud fixture seal through it. A real
+    /// validator holds exactly its own [`clearing_private`] key.
     fn signer(&self, validator: Participant) -> Result<bls12381::Scheme> {
         let private = self
             .private_keys
@@ -359,15 +427,97 @@ impl Validators {
     }
 }
 
+/// The default deployment digest: the compiled seed-1 operator's deployment.
+///
+/// The fixture and harness paths run this single deployment. The chain path
+/// reads its configured deployment set from genesis instead.
 pub(crate) fn deployment() -> Digest {
-    Sha256::hash(&[DEPLOYMENT_NAMESPACE])
+    deployment_of(&operator_key())
+}
+
+/// The clearing signing key of demo operator `index`.
+///
+/// Operator clearing keys are demo protocol constants like the wallet seeds:
+/// setup writes operator `index`'s key into `operator-<index>/node.json` and
+/// its public key into the genesis deployment list.
+pub(crate) fn operator_signer(index: u64) -> SigningKey {
+    SigningKey::from_seed(
+        index
+            .checked_add(1)
+            .expect("the demo operator index fits the seed space"),
+    )
 }
 
 pub(crate) fn operator_key() -> Key {
-    SigningKey::from_seed(1).public_key()
+    operator_signer(0).public_key()
 }
 
-fn registration_message(
+/// One configured account of a deployment's genesis machine.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Account {
+    pub(crate) key: Key,
+    pub(crate) balance: u64,
+}
+
+/// One configured deployment: an operator clearing identity and the account
+/// set its genesis machine opens with. The epoch timing policy is not part
+/// of it: one chain-wide genesis policy applies to every deployment.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Deployment {
+    digest: Digest,
+    pub(crate) operator: Key,
+    pub(crate) accounts: Vec<Account>,
+}
+
+impl Deployment {
+    pub(crate) fn new(operator: Key, accounts: Vec<Account>) -> Self {
+        Self {
+            digest: deployment_of(&operator),
+            operator,
+            accounts,
+        }
+    }
+
+    /// The deployment digest, derived from the operator clearing key.
+    pub(crate) const fn digest(&self) -> &Digest {
+        &self.digest
+    }
+}
+
+/// The compiled demo account set: the four wallets at the initial balance,
+/// which setup writes into every generated deployment's genesis.
+pub(crate) fn accounts() -> Vec<Account> {
+    identities()
+        .into_iter()
+        .map(|identity| Account {
+            key: identity.key,
+            balance: INITIAL_BALANCE,
+        })
+        .collect()
+}
+
+/// The compiled default deployment set: the seed-1 operator alone, the
+/// configuration the fixture and harness paths run under.
+pub(crate) fn deployments() -> Vec<Deployment> {
+    vec![Deployment::new(operator_key(), accounts())]
+}
+
+/// Digest committing to the whole configured deployment set in genesis
+/// order: the chain identity the genesis block's parent field carries.
+pub(crate) fn chain_id(deployments: &[Deployment]) -> Digest {
+    let digests = deployments
+        .iter()
+        .map(|deployment| deployment.digest().as_ref())
+        .collect::<Vec<_>>();
+    Sha256::hash(&digests)
+}
+
+/// The chain registration message: the named deployment plus exactly the
+/// boundary material the operator legitimately chooses, so the signature
+/// binds the deployment it registers under. The deadlines are not part of it
+/// because execution assigns them at the inclusion height.
+fn chain_registration_message(
+    deployment: &Digest,
     epoch: u64,
     predecessor_liability: u64,
     deposits_root: &VectorRoot<Digest>,
@@ -375,12 +525,14 @@ fn registration_message(
     withdrawals: &WithdrawalBatch<Key, Digest>,
 ) -> Bytes {
     let mut message = BytesMut::with_capacity(
-        epoch.encode_size()
+        deployment.encode_size()
+            + epoch.encode_size()
             + predecessor_liability.encode_size()
             + deposits_root.encode_size()
             + staged_root.encode_size()
             + withdrawals.encode_size(),
     );
+    deployment.write(&mut message);
     epoch.write(&mut message);
     predecessor_liability.write(&mut message);
     deposits_root.write(&mut message);
@@ -389,7 +541,11 @@ fn registration_message(
     message.freeze()
 }
 
-pub(crate) fn verify_registration_signature(
+/// Verifies a chain registration against one configured deployment: the
+/// signature must be the deployment's operator's, over a message naming the
+/// deployment's own digest.
+pub(crate) fn verify_chain_registration_signature(
+    deployment: &Deployment,
     epoch: u64,
     predecessor_liability: u64,
     deposits_root: &VectorRoot<Digest>,
@@ -397,9 +553,10 @@ pub(crate) fn verify_registration_signature(
     withdrawals: &WithdrawalBatch<Key, Digest>,
     signature: &Signature,
 ) -> bool {
-    operator_key().verify(
-        REGISTRATION_SIGNATURE_NAMESPACE,
-        &registration_message(
+    deployment.operator.verify(
+        CHAIN_REGISTRATION_SIGNATURE_NAMESPACE,
+        &chain_registration_message(
+            deployment.digest(),
             epoch,
             predecessor_liability,
             deposits_root,
@@ -418,13 +575,68 @@ pub(crate) fn assignment() -> Result<Assignment<Digest>> {
     Validators::new()?.assignment()
 }
 
-pub(crate) const fn settlement_config() -> SettlementConfig {
+/// The clearing committee BLS private key dealt to validator `index`.
+///
+/// The clearing committee is the same machines as the consensus committee
+/// under separate key material: these fixed seeded keys are demo protocol
+/// constants like the wallet seeds, distributed to the validator directories
+/// by setup and committed to genesis state through [`committee`].
+pub(crate) fn clearing_private(index: usize) -> Result<Private> {
+    ensure!(index < VALIDATORS, "index is not a clearing validator");
+    let offset = u64::try_from(index).context("validator index fits in u64")?;
+    Ok(Private::new(Scalar::from(
+        VALIDATOR_SEED_START + offset + 1,
+    )))
+}
+
+/// Committee participant index of the clearing key dealt to validator `index`.
+///
+/// Setup deals key `index` to validator directory `index`, but the committee
+/// orders participants by public key, so the two indices differ in general.
+pub(crate) fn dealt_participant(index: usize) -> Result<Participant> {
+    let committee = committee()?;
+    let public = compute_public::<MinSig>(&clearing_private(index)?);
+    committee
+        .index_of(&public)
+        .context("dealt key is not in the clearing committee")
+}
+
+/// The anchor-bound close resource limits shared by every epoch context.
+pub(crate) const fn limits() -> CloseLimits {
+    CloseLimits::new(
+        MAX_ACCOUNTS as u64,
+        MAX_ROWS,
+        MAX_ACCOUNTS as u64,
+        MAX_SHARDS,
+        MAX_SHARDS,
+        SQLITE_U64_MAX,
+        SQLITE_U64_MAX,
+        SQLITE_U64_MAX,
+    )
+}
+
+/// Settlement chain configuration under `timing`.
+///
+/// The chain's own epoch deadline policy is derived from the genesis-fixed
+/// timing: the admission delay mirrors the stride shape (offset plus duration
+/// plus one) so pipelined admission monotonicity keeps its one-block slack,
+/// and the challenge duration is exact. Execution assigns registration
+/// deadlines from the inclusion height ([`crate::chain::state`]), so the
+/// assigned instances satisfy this policy by construction.
+pub(crate) fn settlement_config(timing: &Timing) -> SettlementConfig {
+    let delay = timing
+        .admission_offset
+        .checked_add(timing.challenge_duration)
+        .and_then(|delay| delay.checked_add(1))
+        .expect("the deployment timing policy fits the epoch clock");
     SettlementConfig::new(
         NonZeroUsize::new(4).expect("pipeline bound is nonzero"),
         EpochDeadlinePolicy::new(
-            NonZeroU64::new(EPOCH_STRIDE).expect("admission delay is nonzero"),
-            NonZeroU64::new(CHALLENGE_DURATION).expect("minimum challenge duration is nonzero"),
-            NonZeroU64::new(CHALLENGE_DURATION).expect("maximum challenge duration is nonzero"),
+            NonZeroU64::new(delay).expect("admission delay is nonzero"),
+            NonZeroU64::new(timing.challenge_duration)
+                .expect("every timing source keeps the challenge duration nonzero"),
+            NonZeroU64::new(timing.challenge_duration)
+                .expect("every timing source keeps the challenge duration nonzero"),
         ),
         NonZeroU64::new(DEPOSIT_INCLUSION_TIMEOUT).expect("deposit timeout is nonzero"),
         NonZeroU64::new(MINIMUM_WITHDRAWAL_NOTICE).expect("notice is nonzero"),
@@ -434,6 +646,7 @@ pub(crate) const fn settlement_config() -> SettlementConfig {
     )
 }
 
+#[cfg(test)]
 pub(crate) fn epoch_context(
     epoch: u64,
     deposits: &DepositBatch<Key>,
@@ -441,20 +654,40 @@ pub(crate) fn epoch_context(
     predecessor_liability: u64,
 ) -> Result<EpochContext<Key, Digest>> {
     let (admission_deadline, challenge_deadline) = deadlines(epoch)?;
-    let limits = CloseLimits::new(
-        MAX_ACCOUNTS as u64,
-        MAX_ROWS,
-        MAX_ACCOUNTS as u64,
-        MAX_SHARDS,
-        MAX_SHARDS,
-        SQLITE_U64_MAX,
-        SQLITE_U64_MAX,
-        SQLITE_U64_MAX,
-    );
-    EpochContext::new::<Sha256>(
+    epoch_context_at(
         deployment(),
-        epoch,
         operator_key(),
+        epoch,
+        deposits,
+        withdrawals,
+        predecessor_liability,
+        admission_deadline,
+        challenge_deadline,
+    )
+}
+
+/// Builds the epoch context for explicit absolute deadlines: the
+/// chain-assigned block-height deadlines execution derives from a
+/// registration's inclusion height, and the deadlines an operator adopts
+/// from the certified registration record. Pre-registration placeholder
+/// contexts derive deterministic grid deadlines through
+/// [`Protocol::registration`] instead.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn epoch_context_at(
+    deployment: Digest,
+    operator: Key,
+    epoch: u64,
+    deposits: &DepositBatch<Key>,
+    withdrawals: &WithdrawalBatch<Key, Digest>,
+    predecessor_liability: u64,
+    admission_deadline: u64,
+    challenge_deadline: u64,
+) -> Result<EpochContext<Key, Digest>> {
+    let limits = limits();
+    EpochContext::new::<Sha256>(
+        deployment,
+        epoch,
+        operator,
         deposits,
         withdrawals,
         predecessor_liability,
@@ -475,10 +708,18 @@ pub(crate) struct Protocol {
 }
 
 impl Protocol {
+    /// Protocol machinery for the compiled default deployment (the seed-0
+    /// demo operator): the fixture and harness path.
     pub(crate) fn new(workers: NonZeroUsize) -> Result<Self> {
+        Self::with_signer(workers, operator_signer(0))
+    }
+
+    /// Protocol machinery for the deployment `operator` runs: the deployment
+    /// digest derives from the signing identity.
+    pub(crate) fn with_signer(workers: NonZeroUsize, operator: SigningKey) -> Result<Self> {
         Ok(Self {
-            deployment: deployment(),
-            operator: SigningKey::from_seed(1),
+            deployment: deployment_of(&operator.public_key()),
+            operator,
             validators: Validators::new()?,
             strategy: Rayon::new(workers).context("create clearing worker pool")?,
         })
@@ -496,7 +737,10 @@ impl Protocol {
         &self.operator
     }
 
-    pub(crate) fn sign_registration(
+    /// Signs a chain registration over exactly the boundary material.
+    /// Execution assigns the deadlines at the inclusion height, so the
+    /// signature commits nothing about timing.
+    pub(crate) fn sign_chain_registration(
         &self,
         epoch: u64,
         predecessor_liability: u64,
@@ -505,8 +749,9 @@ impl Protocol {
         withdrawals: &WithdrawalBatch<Key, Digest>,
     ) -> Signature {
         self.operator.sign(
-            REGISTRATION_SIGNATURE_NAMESPACE,
-            &registration_message(
+            CHAIN_REGISTRATION_SIGNATURE_NAMESPACE,
+            &chain_registration_message(
+                &self.deployment,
                 epoch,
                 predecessor_liability,
                 deposits_root,
@@ -522,6 +767,31 @@ impl Protocol {
         staged: DepositBatch<Key>,
         withdrawals: WithdrawalBatch<Key, Digest>,
         predecessor_liability: u64,
+    ) -> Result<EpochRegistration> {
+        let (admission_deadline, challenge_deadline) = deadlines(epoch)?;
+        self.registration_at(
+            epoch,
+            staged,
+            withdrawals,
+            predecessor_liability,
+            admission_deadline,
+            challenge_deadline,
+        )
+    }
+
+    /// Builds a registration for explicit absolute deadlines, the registered
+    /// path: the chain assigns the deadlines at inclusion and the operator
+    /// adopts them from the certified registration record.
+    /// [`Self::registration`] instead derives deterministic placeholder grid
+    /// deadlines for contexts that have not registered on the chain yet.
+    pub(crate) fn registration_at(
+        &self,
+        epoch: u64,
+        staged: DepositBatch<Key>,
+        withdrawals: WithdrawalBatch<Key, Digest>,
+        predecessor_liability: u64,
+        admission_deadline: u64,
+        challenge_deadline: u64,
     ) -> Result<EpochRegistration> {
         // Mirror the chain's boundary rule: a staged aggregate exactly offset by a batch
         // withdrawal defers whole to the successor epoch, so the sealed context commits
@@ -546,7 +816,16 @@ impl Protocol {
         }
         let deposits = DepositBatch::new(deposits).context("split included deposit boundary")?;
         let deferred = DepositBatch::new(deferred).context("split deferred deposit boundary")?;
-        let context = epoch_context(epoch, &deposits, &withdrawals, predecessor_liability)?;
+        let context = epoch_context_at(
+            self.deployment,
+            self.operator.public_key(),
+            epoch,
+            &deposits,
+            &withdrawals,
+            predecessor_liability,
+            admission_deadline,
+            challenge_deadline,
+        )?;
         ensure!(
             context.deployment() == &self.deployment
                 && context.payment().operator() == &self.operator.public_key()
@@ -621,26 +900,63 @@ impl Protocol {
         })
     }
 
+    /// Assembles the canonical proof slices of a prepared close.
+    ///
+    /// The distributed close worker disseminates these per-validator over the
+    /// settlement DA channel. The harness seals them in process instead.
+    pub(crate) fn slices(&self, epoch: &PreparedEpoch) -> Result<Vec<ProofSlice<Key, Digest>>> {
+        epoch
+            .prepared
+            .assemble_slices(&epoch.predecessor, &self.strategy)
+            .context("assemble proof slices")
+    }
+
+    /// Splits assembled slices into each committee member's exact dealing, in
+    /// committee participant order.
+    pub(crate) fn dealings(
+        &self,
+        epoch: &PreparedEpoch,
+        slices: &[ProofSlice<Key, Digest>],
+    ) -> Result<Vec<Vec<ProofSlice<Key, Digest>>>> {
+        (0..self.validators.committee.members().len())
+            .map(|index| {
+                let validator = Participant::from_usize(index);
+                let assigned = assigned_slice_indices::<Sha256, _>(
+                    &self.validators.committee,
+                    epoch.context.assignment(),
+                    validator,
+                )
+                .context("derive validator dealing")?;
+                assigned
+                    .iter()
+                    .map(|slice| {
+                        slices
+                            .get(usize::from(*slice))
+                            .cloned()
+                            .context("assigned slice is missing from the assembled set")
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Verify-only clearing scheme over the fixed committee, for vote and
+    /// certificate verification.
+    pub(crate) fn verifier(&self) -> bls12381::Scheme {
+        bls12381::Scheme::verifier(self.validators.committee.clone())
+    }
+
+    /// Completes one prepared close in process, simulating every committee
+    /// validator with its dealt key, for the deterministic harness and the
+    /// fraud fixture. The operator binary certifies over the settlement DA
+    /// channel and completes with [`Self::certify`] instead.
     pub(crate) fn complete<R: CryptoRng>(
         &self,
         epoch: PreparedEpoch,
         rng: &mut R,
     ) -> Result<SettlementResult> {
-        let PreparedEpoch {
-            context,
-            deposits,
-            withdrawals,
-            deposit_events,
-            predecessor,
-            prepared,
-            prepare_micros,
-        } = epoch;
-        let epoch = context.payment().epoch();
-
         let deal_start = Instant::now();
-        let slices = prepared
-            .assemble_slices(&predecessor, &self.strategy)
-            .context("assemble proof slices")?;
+        let slices = self.slices(&epoch)?;
         let deal_micros = deal_start.elapsed().as_micros();
 
         let seal_start = Instant::now();
@@ -652,7 +968,7 @@ impl Protocol {
             let scheme = self.validators.signer(validator)?;
             let assigned = assigned_slice_indices::<Sha256, _>(
                 &self.validators.committee,
-                context.assignment(),
+                epoch.context.assignment(),
                 validator,
             )
             .context("derive validator dealing")?;
@@ -662,11 +978,11 @@ impl Protocol {
                 .collect();
             let (vote, sealed) = seal::<Sha256, _, _, PaymentBatchVerifier, _>(
                 &scheme,
-                &context,
-                &deposits,
-                &withdrawals,
-                &prepared.close().header,
-                &prepared.close().roots,
+                &epoch.context,
+                &epoch.deposits,
+                &epoch.withdrawals,
+                &epoch.prepared.close().header,
+                &epoch.prepared.close().roots,
                 dealing,
                 rng,
                 &self.strategy,
@@ -679,12 +995,49 @@ impl Protocol {
         let certificate = assembler
             .assemble_exact(votes)
             .context("assemble exact-quorum certificate")?;
-        let verifier = bls12381::Scheme::verifier(self.validators.committee.clone());
+        let seal_micros = seal_start.elapsed().as_micros();
+
+        let dealing_slices = dealings.iter().map(|dealing| dealing.slices().len()).sum();
+        let mut result = self.certify(
+            epoch,
+            slices.len(),
+            dealing_slices,
+            certificate,
+            deal_micros,
+            seal_micros,
+        )?;
+        result.dealings = dealings;
+        Ok(result)
+    }
+
+    /// Completes a prepared close from an exact-quorum certificate: verifies
+    /// the certificate over the close header, assembles the terminal proof
+    /// and claims, and rehearses the exact settlement transition before
+    /// anything is published.
+    pub(crate) fn certify(
+        &self,
+        epoch: PreparedEpoch,
+        slices: usize,
+        dealing_slices: usize,
+        certificate: bls12381::Certificate,
+        deal_micros: u128,
+        seal_micros: u128,
+    ) -> Result<SettlementResult> {
+        let PreparedEpoch {
+            context,
+            deposits,
+            withdrawals,
+            deposit_events,
+            predecessor,
+            prepared,
+            prepare_micros,
+        } = epoch;
+        let epoch = context.payment().epoch();
         ensure!(
-            verifier.verify_exact(&prepared.close().header, &certificate),
+            self.verifier()
+                .verify_exact(&prepared.close().header, &certificate),
             "assembled certificate failed verification"
         );
-        let seal_micros = seal_start.elapsed().as_micros();
 
         let terminal_proof = prepared
             .terminal_proof()
@@ -728,7 +1081,21 @@ impl Protocol {
 
         // Rehearse the exact settlement transition before publishing it. The authoritative
         // settlement repeats this bounded check and controls whether the result becomes durable.
-        let config = settlement_config();
+        // The rehearsal policy must accept the context's exact deadline spacing, so its
+        // challenge duration comes from the deadlines themselves. On the chain path they are
+        // the pair execution assigned from the genesis policy, adopted from the certified
+        // registration record, so the derived duration is the deployment's own. On the
+        // fixture grid they are spaced by the compiled default. The context constructor
+        // rejects an admission deadline at or after the challenge deadline, so the
+        // difference is nonzero.
+        let challenge_duration = context
+            .challenge_deadline()
+            .checked_sub(context.admission_deadline())
+            .expect("the epoch context orders its deadlines");
+        let config = settlement_config(&Timing {
+            admission_offset: ADMISSION_OFFSET,
+            challenge_duration,
+        });
         let mut chain = SettlementChain::<Sha256, Key>::new(
             self.deployment,
             self.operator.public_key(),
@@ -738,7 +1105,15 @@ impl Protocol {
             config,
         )
         .context("construct settlement chain")?;
-        let now = epoch_start(epoch)?;
+
+        // Rehearse at a registration height within the compiled admission
+        // offset of the admission deadline. The policy above bounds the
+        // admission delay by at least that offset, so the rehearsal accepts
+        // both grid placeholders and chain-assigned deadlines whatever the
+        // deployment's genesis admission offset.
+        let now = context
+            .admission_deadline()
+            .saturating_sub(ADMISSION_OFFSET);
         for event in &deposit_events {
             chain
                 .record_deposit(now, event.id, event.account.clone(), event.amount)
@@ -797,7 +1172,6 @@ impl Protocol {
         let header = prepared.close().header;
         let roots = prepared.close().roots;
         let rows = prepared.close().rows.len();
-        let dealing_slices = dealings.iter().map(|dealing| dealing.slices().len()).sum();
         Ok(SettlementResult {
             epoch,
             predecessor_root: *context.predecessor_root(),
@@ -813,9 +1187,9 @@ impl Protocol {
             withdrawal_claims,
             finalized,
             rows,
-            slices: slices.len(),
+            slices,
             dealing_slices,
-            dealings,
+            dealings: Vec::new(),
             prepare_micros,
             deal_micros,
             seal_micros,
@@ -823,6 +1197,9 @@ impl Protocol {
     }
 }
 
+/// The deterministic placeholder grid pair for `epoch`, from the compiled
+/// default geometry. Pre-registration staging and the fixture harness run on
+/// this grid: a registered epoch adopts the chain-assigned deadlines instead.
 fn deadlines(epoch: u64) -> Result<(u64, u64)> {
     let base = epoch_start(epoch)?;
     Ok((
@@ -882,8 +1259,6 @@ pub(crate) fn short_digest(digest: &Digest) -> String {
 /// valid operator-signed receipt crediting the receiver under the same epoch context, so it
 /// convicts the close with a `HigherShardTip` challenge.
 pub(crate) struct OmittingClose {
-    pub(crate) deposit: DepositEvent,
-    pub(crate) deposits: DepositBatch<Key>,
     pub(crate) result: SettlementResult,
     pub(crate) receiver: Key,
     pub(crate) held_credit: u64,
@@ -891,9 +1266,29 @@ pub(crate) struct OmittingClose {
     pub(crate) held_lookup: HigherShardTipLookup<Key, Digest>,
 }
 
-/// Builds an omitting close over epoch 0: Alice's operator-signed receipt credits Bob, but the
-/// admitted close instead credits a deposit to Carol and omits Bob entirely.
-pub(crate) fn omitting_close<R: CryptoRng>(rng: &mut R) -> Result<OmittingClose> {
+/// The omitting close's boundary: the bystander deposit event and its
+/// canonical batch, exposed so the fraud arcs can register the boundary on
+/// the chain and learn the assigned deadlines before building the close.
+pub(crate) fn omitting_boundary() -> Result<(DepositEvent, DepositBatch<Key>)> {
+    let bystander = wallets()[2].public_key();
+    let deposit = DepositEvent {
+        id: Sha256::hash(&[b"_COMMONWARE_EXAMPLES_TERMINAL_OMITTING_CLOSE"]),
+        account: bystander.clone(),
+        amount: 1,
+    };
+    let deposits = DepositBatch::new(vec![DepositRecord::new(bystander, 1)?])?;
+    Ok((deposit, deposits))
+}
+
+/// Builds an omitting close over epoch 0 at explicit absolute deadlines (the
+/// chain-assigned pair read back from the registered record): Alice's
+/// operator-signed receipt credits Bob, but the admitted close instead
+/// credits a deposit to Carol and omits Bob entirely.
+pub(crate) fn omitting_close<R: CryptoRng>(
+    rng: &mut R,
+    admission_deadline: u64,
+    challenge_deadline: u64,
+) -> Result<OmittingClose> {
     let protocol = Protocol::new(NonZeroUsize::MIN)?;
     let wallets = wallets();
     let payer = &wallets[0];
@@ -915,12 +1310,7 @@ pub(crate) fn omitting_close<R: CryptoRng>(rng: &mut R) -> Result<OmittingClose>
     predecessor.sort_unstable_by(|left, right| left.account.cmp(&right.account));
     let state =
         StateCache::new::<Sha256>(predecessor.clone()).context("commit fraud predecessor state")?;
-    let deposit = DepositEvent {
-        id: Sha256::hash(&[b"_COMMONWARE_EXAMPLES_TERMINAL_OMITTING_CLOSE"]),
-        account: bystander.clone(),
-        amount: 1,
-    };
-    let deposits = DepositBatch::new(vec![DepositRecord::new(bystander.clone(), 1)?])?;
+    let (deposit, deposits) = omitting_boundary()?;
     let bystander_state = predecessor
         .iter()
         .find(|leaf| leaf.account == bystander)
@@ -947,10 +1337,17 @@ pub(crate) fn omitting_close<R: CryptoRng>(rng: &mut R) -> Result<OmittingClose>
         .find(|leaf| leaf.account == bystander)
         .context("fraud bystander is not in genesis")?
         .state = bystander_successor;
-    let registration = protocol.registration(0, deposits.clone(), WithdrawalBatch::empty(), 400)?;
+    let registration = protocol.registration_at(
+        0,
+        deposits,
+        WithdrawalBatch::empty(),
+        400,
+        admission_deadline,
+        challenge_deadline,
+    )?;
     let prepared = protocol.prepare(
         registration,
-        vec![deposit.clone()],
+        vec![deposit],
         state.leaves().to_vec(),
         vec![row],
         vec![ShardSet::empty(0, bystander)],
@@ -980,8 +1377,6 @@ pub(crate) fn omitting_close<R: CryptoRng>(rng: &mut R) -> Result<OmittingClose>
     )
     .context("issue the omitted receiver's receipt")?;
     Ok(OmittingClose {
-        deposit,
-        deposits,
         result,
         receiver,
         held_credit,

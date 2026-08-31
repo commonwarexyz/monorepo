@@ -17,26 +17,39 @@ workspace = true
 anyhow.workspace = true
 bytes.workspace = true
 clap = { workspace = true, features = ["derive"] }
+commonware-actor.workspace = true
+commonware-broadcast.workspace = true
 commonware-clearing = { workspace = true, features = ["std"] }
 commonware-codec = { workspace = true, features = ["std"] }
+commonware-consensus.workspace = true
 commonware-cryptography = { workspace = true, features = ["bls12381", "std"] }
 commonware-cryptography-curve25519 = { workspace = true, features = ["std"] }
+commonware-formatting.workspace = true
+commonware-glue.workspace = true
 commonware-macros.workspace = true
+commonware-math.workspace = true
+commonware-p2p.workspace = true
 commonware-parallel = { workspace = true, features = ["std"] }
 commonware-runtime.workspace = true
+commonware-storage.workspace = true
 commonware-stream.workspace = true
 commonware-utils = { workspace = true, features = ["std"] }
 crossterm.workspace = true
-rand = { workspace = true, features = ["thread_rng"] }
+futures.workspace = true
+rand = { workspace = true, features = ["std_rng", "thread_rng"] }
 rand_core.workspace = true
 ratatui.workspace = true
 rusqlite = { workspace = true, features = ["cache"] }
+serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 
-[[bin]]
-name = "terminal-settlement"
-path = "src/bin/settlement.rs"
-bench = false
+[dev-dependencies]
+commonware-consensus = { workspace = true, features = ["mocks"] }
+commonware-cryptography = { workspace = true, features = ["mocks"] }
+commonware-glue = { workspace = true, features = ["test-utils"] }
+commonware-p2p = { workspace = true, features = ["mocks"] }
 
 [[bin]]
 name = "terminal-operator"
@@ -46,4 +59,9 @@ bench = false
 [[bin]]
 name = "terminal-agent"
 path = "src/bin/agent.rs"
+bench = false
+
+[[bin]]
+name = "terminal-chain"
+path = "src/bin/chain.rs"
 bench = false

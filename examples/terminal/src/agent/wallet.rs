@@ -3,17 +3,17 @@
 use super::{
     custody::initial_deposit_nonce,
     store::{
-        IncomingCredit, IncomingSummary, PendingPayment, PendingPayoutClaim,
+        ContextCache, IncomingCredit, IncomingSummary, PendingPayment, PendingPayoutClaim,
         PendingWithdrawalClaim, State, Store,
     },
 };
 use crate::{
+    chain::client::{Chain, Client, Env},
     operator::rpc as operator_rpc,
     protocol::{
-        AccountIdentity, DepositEvent, Key, Wallet, deployment, external_identity, external_wallet,
-        identities, operator_key, wallets,
+        AccountIdentity, DepositEvent, Key, Wallet, deployment_of, external_identity,
+        external_wallet, identities, wallets,
     },
-    settlement::rpc as settlement_rpc,
 };
 use anyhow::{Context, Result, ensure};
 use commonware_clearing::bajillion::boundary::SignedWithdrawal;
@@ -32,6 +32,15 @@ use std::{collections::BTreeSet, net::SocketAddr, path::Path};
 /// overwritable cache. Everything the counterparty can reproduce is a cache and never gates
 /// progress.
 ///
+/// The cached signing context follows the cache rule and exists precisely so that
+/// ordinary payments need nothing beyond local SQL. The wallet's own durable cumulative
+/// debit is the authoritative signing endpoint, the cached `(epoch, anchor)` is the
+/// claimed context to bind, and the cached verified floor lower-bounds affordability.
+/// When the operator has moved to a new context, the wallet learns it from the typed
+/// corrective rejection its next send earns, never from a routine head read. The cache
+/// steers only what gets signed: settlement's registration confirmation after
+/// acceptance remains the trust anchor before anything is recorded.
+///
 /// Frozen-root recovery requires an opening retained at or refreshed to the last
 /// finalized root, which advances with every finalization by anyone. Openings refresh on
 /// every head read or balance poll, so only a wallet passive across the final finalization
@@ -43,9 +52,19 @@ use std::{collections::BTreeSet, net::SocketAddr, path::Path};
 /// reconciliation later proves every finalized credit was backed by one.
 pub(crate) struct Agent {
     pub(super) wallet: Wallet,
+    /// The clearing key of the one operator this agent is bound to. The
+    /// bound deployment digest derives from it.
+    pub(super) operator: Key,
+    /// The deployment this agent transacts on: every settlement expectation
+    /// (status deployment, payment-context operator, deposit naming) is
+    /// checked against it.
+    pub(super) deployment: Digest,
     pub(super) store: Store,
     pub(super) receivers: Vec<AccountIdentity>,
     pub(super) deposit_nonce: u64,
+    /// Durable optimistic signing state: the cached operator-served context and its
+    /// verified affordability floor. Absent for a fresh wallet and after invalidation.
+    pub(super) cache: Option<ContextCache>,
     pub(super) pending_payment: Option<PendingPayment>,
     pub(super) pending_deposit: Option<DepositEvent>,
     pub(super) pending_withdrawal: Option<SignedWithdrawal<Key, Digest>>,
@@ -64,12 +83,22 @@ pub(crate) struct Agent {
 }
 
 impl Agent {
+    /// An in-memory agent bound to the compiled default deployment.
+    #[cfg(test)]
     pub(crate) fn new(identity: usize) -> Result<Self> {
+        Self::new_for(identity, crate::protocol::operator_key())
+    }
+
+    /// An in-memory agent bound to `operator`'s deployment.
+    pub(crate) fn new_for(identity: usize, operator: Key) -> Result<Self> {
         let (wallet, receivers) = Self::identity(identity)?;
         let account = wallet.public_key();
-        let (store, state) = Store::in_memory(&account, &deployment(), &operator_key())?;
+        let deployment = deployment_of(&operator);
+        let (store, state) = Store::in_memory(&account, &deployment, &operator)?;
         Ok(Self::from_state(
             wallet,
+            operator,
+            deployment,
             receivers,
             store,
             state,
@@ -77,12 +106,23 @@ impl Agent {
         ))
     }
 
+    /// A durable agent bound to the compiled default deployment.
+    #[cfg(test)]
     pub(crate) fn open(path: &Path, identity: usize) -> Result<Self> {
+        Self::open_for(path, identity, crate::protocol::operator_key())
+    }
+
+    /// A durable agent bound to `operator`'s deployment. The store pins the
+    /// binding, so reopening under another operator fails.
+    pub(crate) fn open_for(path: &Path, identity: usize, operator: Key) -> Result<Self> {
         let (wallet, receivers) = Self::identity(identity)?;
         let account = wallet.public_key();
-        let (store, state) = Store::open(path, &account, &deployment(), &operator_key())?;
+        let deployment = deployment_of(&operator);
+        let (store, state) = Store::open(path, &account, &deployment, &operator)?;
         Ok(Self::from_state(
             wallet,
+            operator,
+            deployment,
             receivers,
             store,
             state,
@@ -105,6 +145,8 @@ impl Agent {
 
     fn from_state(
         wallet: Wallet,
+        operator: Key,
+        deployment: Digest,
         receivers: Vec<AccountIdentity>,
         store: Store,
         state: State,
@@ -112,9 +154,12 @@ impl Agent {
     ) -> Self {
         Self {
             wallet,
+            operator,
+            deployment,
             store,
             receivers,
             deposit_nonce,
+            cache: state.cache,
             pending_payment: state.pending_payment,
             pending_deposit: state.pending_deposit,
             pending_withdrawal: None,
@@ -135,6 +180,11 @@ impl Agent {
 
     pub(crate) fn account(&self) -> Key {
         self.wallet.public_key()
+    }
+
+    /// The clearing key of the operator this agent is bound to.
+    pub(crate) fn operator(&self) -> Key {
+        self.operator.clone()
     }
 
     pub(crate) const fn receiver_count(&self) -> usize {
@@ -184,27 +234,22 @@ impl Agent {
         operator_rpc::status(network, operator).await
     }
 
-    pub(crate) async fn settlement_status<E: Network>(
-        &self,
-        network: &E,
-        settlement: SocketAddr,
-    ) -> Result<settlement_rpc::StatusResponse> {
-        settlement_rpc::status(network, settlement).await
-    }
-
-    /// Reads the live account head and verifies it against settlement's exact state root.
+    /// Reads the live account head and verifies it against the certified state root.
     ///
     /// Polling doubles as the passive wallet's retention heartbeat: the verified head
     /// opening is retained through [`Self::verify_head`], so a wallet that only
-    /// watches its balance still refreshes its frozen-root recovery evidence.
-    pub(crate) async fn balance<E: Network>(
+    /// watches its balance still refreshes its frozen-root recovery evidence and
+    /// re-anchors its optimistic signing state. This read is off the payment hot path:
+    /// payments sign from the cached context and learn a moved context from the
+    /// operator's corrective rejection instead.
+    pub(crate) async fn balance<E: Env>(
         &mut self,
-        network: &E,
-        settlement: SocketAddr,
+        ctx: &E,
+        chain: &mut Client,
         operator: SocketAddr,
     ) -> Result<u64> {
         let head = operator_rpc::payment_head(
-            network,
+            ctx,
             operator,
             operator_rpc::PaymentHeadRequest {
                 account: self.account(),
@@ -212,16 +257,22 @@ impl Agent {
         )
         .await
         .context("read payer state")?;
-        let settlement_status = settlement_rpc::status(network, settlement)
+        ensure!(
+            head.context.operator() == &self.operator,
+            "payment context has an unexpected operator"
+        );
+        let status = chain
+            .status(ctx)
             .await
             .context("read settlement balance head")?;
         ensure!(
-            settlement_status.deployment == deployment(),
+            status.deployment == self.deployment,
             "settlement status has an unexpected deployment"
         );
-        self.verify_head(&head, &settlement_status)?;
+        self.verify_head(&head, &status)?;
         Ok(head.state.balance)
     }
+
     pub(crate) async fn start_close<E: Network>(
         &mut self,
         network: &E,
@@ -245,7 +296,7 @@ impl Agent {
     }
 
     pub(crate) async fn poll_close<E: Network>(
-        &self,
+        &mut self,
         network: &E,
         operator: SocketAddr,
         epoch: u64,

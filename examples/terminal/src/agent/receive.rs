@@ -2,9 +2,13 @@
 
 use super::{Agent, store::IncomingRecord};
 use crate::{
+    chain::{
+        client::{Chain, Client, EFFECT_ATTEMPTS, Env, POLL},
+        state::{AdmittedRootsResponse, FaultRecord, HardFaultReasonResponse},
+        tx::{ChallengeRequest, SettlementTx},
+    },
     operator::rpc as operator_rpc,
-    protocol::{Key, Payment, deployment, operator_key},
-    settlement::rpc as settlement_rpc,
+    protocol::{Key, Payment},
 };
 use anyhow::{Context, Result, ensure};
 use commonware_clearing::bajillion::{
@@ -13,7 +17,6 @@ use commonware_clearing::bajillion::{
 };
 use commonware_codec::Encode as _;
 use commonware_cryptography::{Sha256, sha256::Digest};
-use commonware_runtime::Network;
 use std::net::SocketAddr;
 
 /// What one reconciliation pass decided across the epochs it examined.
@@ -66,21 +69,23 @@ impl Agent {
     /// operator's head is an observation, not reliance-grade. Every fetched pair is fully
     /// verified, sends grouped by transaction id and each distinct send verified once, then the
     /// operator receipt, its exact linkage, and its recipient. It is then anchored: the pair's
-    /// `(epoch, anchor)` must be the context settlement registered for that epoch. A receipt
-    /// over an operator-chosen anchor with no settlement obligation has no close to adjudicate
-    /// against and can never be enforced, so it is not reliance-grade. Unverifiable and
-    /// unanchored pairs are ignored and never stored, yet the durable cursor still advances past
-    /// them so a poisoned entry cannot wedge intake. The pairs and the advanced cursor commit
-    /// together, so reliance never outruns durability, and a lost response refetches the exact
-    /// page and reinserts it idempotently.
-    pub(crate) async fn intake_incoming<E: Network>(
+    /// `(epoch, anchor)` must be the anchor the chain certifiably registered for that epoch,
+    /// read with the recency bound so a proven absence holds at a certified tip no older than
+    /// the recency threshold. A receipt over an operator-chosen anchor with no settlement
+    /// obligation has no
+    /// close to adjudicate against and can never be enforced, so it is not reliance-grade.
+    /// Unverifiable and unanchored pairs are ignored and never stored, yet the durable cursor
+    /// still advances past them so a poisoned entry cannot wedge intake. The pairs and the
+    /// advanced cursor commit together, so reliance never outruns durability, and a lost
+    /// response refetches the exact page and reinserts it idempotently.
+    pub(crate) async fn intake_incoming<E: Env>(
         &mut self,
-        network: &E,
-        settlement: SocketAddr,
+        ctx: &E,
+        chain: &mut Client,
         operator: SocketAddr,
     ) -> Result<()> {
         let page = operator_rpc::incoming_payments(
-            network,
+            ctx,
             operator,
             operator_rpc::IncomingPaymentsRequest {
                 account: self.account(),
@@ -94,7 +99,7 @@ impl Agent {
         }
 
         let account = self.account();
-        let operator_key = operator_key();
+        let operator_key = self.operator.clone();
         let mut verified_sends = std::collections::BTreeSet::<Digest>::new();
         let mut anchors = std::collections::BTreeMap::<u64, Option<Digest>>::new();
         let mut records = Vec::with_capacity(page.pairs.len());
@@ -122,18 +127,18 @@ impl Agent {
                 continue;
             }
 
-            // Anchor the context to settlement's registration. A settlement fetch failure
-            // aborts the whole intake so the cursor never advances past an unconfirmed pair. A
-            // definitive absence or mismatch skips the pair like an invalid one.
+            // Anchor the context to the chain's certified registration. A read failure
+            // aborts the whole intake so the cursor never advances past an unconfirmed pair.
+            // A proven absence or mismatch skips the pair like an invalid one.
             let epoch = send.body().epoch();
             let anchor = *send.body().anchor();
             let registered_anchor = match anchors.get(&epoch) {
                 Some(cached) => *cached,
                 None => {
-                    let fetched = settlement_rpc::epoch_roots(network, settlement, epoch)
+                    let fetched = chain
+                        .anchor(ctx, epoch)
                         .await
-                        .context("read settlement registration anchor")?
-                        .map(|roots| roots.anchor);
+                        .context("read settlement registration anchor")?;
                     anchors.insert(epoch, fetched);
                     fetched
                 }
@@ -167,11 +172,13 @@ impl Agent {
     /// This is a background assurance loop that never gates payments or claims. For every epoch
     /// holding credits, per receive shard, the committed close's public credit tip must be at or
     /// above the wallet's highest held cumulative credit and receipt index. The trust story is
-    /// anchored: settlement serves the batch identity and change root of the close it admitted
-    /// for the epoch, and operator-served committed-side evidence is trusted only when it
-    /// matches that anchor exactly. Operator refusal, an unanchored or unprovable lookup, and a
-    /// per-epoch fault are all the documented availability dependence: that epoch stays
-    /// unreconciled and retries without shadowing the others. The operator can never buy
+    /// anchored: the chain certifies the batch identity and change root of the close it admitted
+    /// for the epoch (read with the recency bound, so the admitted-or-absent verdict holds at a
+    /// certified tip no older than the recency threshold), and operator-served committed-side
+    /// evidence is trusted
+    /// only when it matches that anchor exactly. Operator refusal, an unanchored or unprovable
+    /// lookup, and a per-epoch fault are all the documented availability dependence: that epoch
+    /// stays unreconciled and retries without shadowing the others. The operator can never buy
     /// coverage with a fabricated root, but conviction and the understatement alarm both need
     /// the operator-served lookup, and an admitted close has no settlement-clock backstop for
     /// serving it. An epoch that finalizes while that evidence is still withheld is therefore
@@ -180,16 +187,17 @@ impl Agent {
     ///
     /// The challenge window sits between admission and finalization. On the first held receipt
     /// that exceeds the anchored committed tip while that window is open, the wallet convicts
-    /// the close with one [`Challenge::HigherShardTip`], records the conviction durably, and
-    /// stops, because one proven challenge invalidates the whole close. When the anchored tip
-    /// covers every held receipt and the epoch has finalized, the wallet marks the epoch
-    /// reconciled. The two enforcement dead ends, a finalized close that understated a held
-    /// receipt past the window and a registered epoch whose close never admitted before
-    /// settlement faulted, are recorded loudly rather than skipped.
-    pub(crate) async fn reconcile<E: Network>(
+    /// the close with one [`Challenge::HigherShardTip`] transaction whose proven outcome is
+    /// read back certified, records the conviction durably, and stops, because one proven
+    /// challenge invalidates the whole close. When the anchored tip covers every held receipt
+    /// and the epoch has finalized, the wallet marks the epoch reconciled. The two enforcement
+    /// dead ends, a finalized close that understated a held receipt past the window and a
+    /// registered epoch whose close never admitted before settlement faulted, are recorded
+    /// loudly rather than skipped.
+    pub(crate) async fn reconcile<E: Env>(
         &mut self,
-        network: &E,
-        settlement: SocketAddr,
+        ctx: &E,
+        chain: &mut Client,
         operator: SocketAddr,
     ) -> Result<ReconcileSummary> {
         let mut summary = ReconcileSummary::default();
@@ -200,21 +208,22 @@ impl Agent {
         if epochs.is_empty() {
             return Ok(summary);
         }
-        let status = settlement_rpc::status(network, settlement)
+        let status = chain
+            .status(ctx)
             .await
             .context("read settlement reconciliation head")?;
         ensure!(
-            status.deployment == deployment(),
+            status.deployment == self.deployment,
             "settlement status has an unexpected deployment"
         );
-        let operator_key = operator_key();
+        let operator_key = self.operator.clone();
         for epoch in epochs {
             // Isolate each epoch: a soft per-epoch failure retries next heartbeat and must not
             // shadow the higher epochs, but a store fault poisons the wallet and is fatal.
             if let Err(error) = self
                 .reconcile_epoch(
-                    network,
-                    settlement,
+                    ctx,
+                    chain,
                     operator,
                     epoch,
                     status.hard_faulted,
@@ -236,10 +245,10 @@ impl Agent {
         clippy::too_many_arguments,
         reason = "one reconcile step, one call site"
     )]
-    async fn reconcile_epoch<E: Network>(
+    async fn reconcile_epoch<E: Env>(
         &mut self,
-        network: &E,
-        settlement: SocketAddr,
+        ctx: &E,
+        chain: &mut Client,
         operator: SocketAddr,
         epoch: u64,
         hard_faulted: bool,
@@ -255,16 +264,13 @@ impl Agent {
         }
         let account = self.account();
 
-        // The anchor is settlement's own registration and admission record for this epoch. An
-        // unreachable settlement is a soft retry. An unregistered epoch is impossible here since
-        // intake only stored settlement-registered pairs.
-        let Ok(roots) = settlement_rpc::epoch_roots(network, settlement, epoch).await else {
+        // The anchor is the chain's own admission record for this epoch, recency-bounded.
+        // An unreachable or lagging chain is a soft retry. Intake only stored
+        // chain-registered pairs, so registration itself needs no re-check here.
+        let Ok(admitted) = chain.admitted(ctx, epoch).await else {
             return Ok(());
         };
-        let Some(roots) = roots else {
-            return Ok(());
-        };
-        let Some(admitted) = roots.admitted else {
+        let Some(admitted) = admitted else {
             // No close admitted yet. If settlement faulted, this epoch's close never will, so
             // its held credit is enforcement-dead: record it loudly rather than retry forever.
             if hard_faulted {
@@ -279,14 +285,12 @@ impl Agent {
         let mut uncovered = false;
         for receipt in &held {
             match self
-                .assess_shard_tip(
-                    network, settlement, operator, epoch, &admitted, &account, receipt,
-                )
+                .assess_shard_tip(ctx, chain, operator, epoch, &admitted, &account, receipt)
                 .await
             {
                 // One proven challenge invalidates the whole close, so record it immediately and
                 // stop: continuing would resubmit distinct evidence under the same batch and trip
-                // settlement's evidence-replay guard, aborting before the conviction is recorded.
+                // the chain's evidence-replay guard, aborting before the conviction is recorded.
                 ShardVerdict::Convicted => {
                     self.store
                         .record_challenge(epoch)
@@ -336,18 +340,18 @@ impl Agent {
     /// Every operator-served-evidence failure, an unavailable, unanchored, or unprovable lookup
     /// and a non-proven verdict, is demoted to a soft refusal so it retries rather than aborting.
     #[allow(clippy::too_many_arguments, reason = "one assessment, one call site")]
-    async fn assess_shard_tip<E: Network>(
-        &self,
-        network: &E,
-        settlement: SocketAddr,
+    async fn assess_shard_tip<E: Env>(
+        &mut self,
+        ctx: &E,
+        chain: &mut Client,
         operator: SocketAddr,
         epoch: u64,
-        admitted: &settlement_rpc::AdmittedRootsResponse,
+        admitted: &AdmittedRootsResponse,
         account: &Key,
         receipt: &super::store::HeldReceipt,
     ) -> ShardVerdict {
         let Ok(tip) = operator_rpc::committed_shard_tip(
-            network,
+            ctx,
             operator,
             operator_rpc::CommittedShardTipRequest {
                 account: account.clone(),
@@ -386,28 +390,44 @@ impl Agent {
             return ShardVerdict::Refused;
         }
 
-        // Dry-run passed the exact HigherShardTip condition, so submit and treat any non-proven
-        // outcome as a soft refusal.
+        // The local adjudication above dry-ran the exact HigherShardTip
+        // condition, so an honest wallet never submits a no-contradiction
+        // challenge. Submit and complete on the transaction's effect: the
+        // certified fault record naming the proven challenge over exactly
+        // this batch. Rejections are effect-free, so a challenge that never
+        // earns the fault record is a soft refusal that retries.
         let challenge = Challenge::HigherShardTip {
             payment: Box::new(PaymentWitness::from_payment(&receipt.pair)),
             recipient: Box::new(tip.lookup),
         };
-        let Ok(verdict) = settlement_rpc::challenge_encoded(
-            network,
-            settlement,
-            settlement_rpc::ChallengeRequest {
-                batch_id: admitted.batch_id,
-                evidence: challenge.encode(),
-            },
-        )
-        .await
-        else {
+        let tx = SettlementTx::Challenge(ChallengeRequest {
+            batch_id: admitted.batch_id,
+            evidence: challenge.encode(),
+        });
+        if chain.deliver(ctx, &tx).await.is_err() {
             return ShardVerdict::Refused;
-        };
-        if verdict == settlement_rpc::ChallengeVerdict::Proven(ChallengeKind::HigherShardTip) {
-            ShardVerdict::Convicted
-        } else {
-            ShardVerdict::Refused
         }
+        for _ in 0..EFFECT_ATTEMPTS {
+            let Ok(fault) = chain.fault(ctx).await else {
+                return ShardVerdict::Refused;
+            };
+            if let Some(fault) = fault {
+                let reason = match fault {
+                    FaultRecord::Faulted(reason) => reason,
+                    FaultRecord::Settling(settlement) => settlement.reason,
+                };
+                return if matches!(
+                    reason,
+                    HardFaultReasonResponse::ProvenChallenge { batch_id, kind }
+                        if batch_id == admitted.batch_id && kind == ChallengeKind::HigherShardTip
+                ) {
+                    ShardVerdict::Convicted
+                } else {
+                    ShardVerdict::Refused
+                };
+            }
+            ctx.sleep(POLL).await;
+        }
+        ShardVerdict::Refused
     }
 }

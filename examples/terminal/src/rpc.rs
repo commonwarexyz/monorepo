@@ -5,7 +5,9 @@ use bytes::Bytes;
 use commonware_codec::{
     BufsMut, Decode, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
 };
-use commonware_runtime::{Buf, BufMut, Clock, Listener, Network, Sink, Stream};
+use commonware_runtime::{Buf, BufMut, Network, Sink, Stream};
+#[cfg(test)]
+use commonware_runtime::{Clock, Listener};
 use commonware_stream::{
     encrypted::Error,
     utils::codec::{recv_frame, send_frame},
@@ -223,27 +225,9 @@ pub(crate) async fn invoke<E: Network>(
     }
 }
 
-/// Serves one bounded request at a time until the process exits.
-///
-/// Sequential ownership keeps mutable role state single-threaded and establishes a hard
-/// one-connection admission bound for this local terminal. Runtime read/write deadlines
-/// bound a peer that stops mid-frame. The runtime folds every accept failure into one
-/// error class, so a failed accept is logged and retried after a short pause: exiting
-/// instead would destroy the in-memory role state behind this listener.
-pub(crate) async fn serve<E, F>(
-    network: &E,
-    address: std::net::SocketAddr,
-    handle: F,
-) -> anyhow::Result<()>
-where
-    E: Clock + Network,
-    F: FnMut(Request) -> Response,
-{
-    let listener = network.bind(address).await?;
-    listen(network, listener, handle).await
-}
-
-/// Serves an established listener, retrying failed accepts.
+/// Serves an established listener one bounded request at a time, retrying
+/// failed accepts: exiting instead would destroy the role state behind it.
+#[cfg(test)]
 async fn listen<C, L, F>(clock: &C, mut listener: L, mut handle: F) -> anyhow::Result<()>
 where
     C: Clock,

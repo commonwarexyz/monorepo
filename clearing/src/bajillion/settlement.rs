@@ -7,7 +7,9 @@
 //! custody effects atomically and idempotently. Every public mutation that accepts `now` first
 //! observes expired liveness deadlines. That permanent fence can be the method's only state
 //! change even when the requested operation returns an error. Callers must therefore provide one
-//! authenticated, monotonic clock and persist mutation-on-error results.
+//! authenticated, monotonic clock and persist mutation-on-error results. [`SettlementChain`]
+//! implements the codec traits for that persistence, and its [`Read`] impl states the decode
+//! integrity contract the embedding must establish.
 //!
 //! Queued deposits can be returned directly to their fixed accounts after a permanent fault,
 //! without a surviving-state witness. Terminal settlement freezes the last finalized state root.
@@ -25,18 +27,21 @@ use crate::bajillion::{
     },
     challenge::{self, Challenge, ChallengeError, ChallengeKind, StateOpening, Verdict},
     commitment::{self, VectorRoot},
+    payment::PaymentContext,
     transition::{
-        self, BatchId, CloseContext, EpochContext, ExternalPayout, ExternalPayoutClaim, Header,
-        RootBundle, StateCache, TerminalProof, TransitionError, WithdrawalClaim, WithdrawalOutput,
-        verify_terminal_proof_after_header,
+        self, Assignment, BatchId, CloseContext, CloseLimits, EpochContext, ExternalPayout,
+        ExternalPayoutClaim, Header, RootBundle, StateCache, TerminalProof, TransitionError,
+        WithdrawalClaim, WithdrawalOutput, verify_terminal_proof_after_header,
     },
 };
 use alloc::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     vec::Vec,
 };
-use bytes::{Bytes, BytesMut};
-use commonware_codec::{Encode, EncodeSize, RangeCfg, Read, Write};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
+use commonware_codec::{
+    Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt as _, Write,
+};
 use commonware_cryptography::{Digest, Hasher, PublicKey};
 use commonware_parallel::{Sequential, Strategy};
 use core::{
@@ -288,6 +293,19 @@ struct RegisteredClose<P: PublicKey, D: Digest> {
     withdrawal_deadline: Option<(u64, P)>,
 }
 
+/// The live registered close: the bound context with the exact boundary
+/// batches it committed at registration. Served by
+/// [`SettlementChain::registered`] for the certification window.
+#[derive(Debug)]
+pub struct Registered<'a, P: PublicKey, D: Digest> {
+    /// The registered close context bound to the pipeline head.
+    pub context: &'a CloseContext<P, D>,
+    /// The exact deposit boundary the context commits.
+    pub deposits: &'a DepositBatch<P>,
+    /// The exact withdrawal batch the context commits.
+    pub withdrawals: &'a WithdrawalBatch<P, D>,
+}
+
 // Admitted boundary records are retained as one allocation plus copy-only offsets. Finalization
 // can therefore release their storage without running one destructor per recipient, while a hard
 // fault can still reconstruct the exact records that were admitted.
@@ -407,7 +425,7 @@ struct PipelineEntry<P: PublicKey, D: Digest> {
     batch: PendingBatch<D>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct ClaimableBatch<D: Digest> {
     change_root: VectorRoot<D>,
     withdrawal_outputs: VectorRoot<D>,
@@ -1896,6 +1914,25 @@ where
         self.claimable_balance
     }
 
+    /// Returns the live registered close: the bound context with the exact
+    /// boundary batches it committed.
+    ///
+    /// A close is registered from [`Self::register_close`] until it is
+    /// admitted or its admission deadline expires, which is exactly the
+    /// certification window. Any hard fault retires the slot early, and an
+    /// expired deadline is observed at the next mutating call that accepts
+    /// `now`, so an already-expired registration may still be served until
+    /// then. Validators seal dealings against this registration instead of
+    /// any operator-supplied context.
+    #[must_use]
+    pub fn registered(&self) -> Option<Registered<'_, P, H::Digest>> {
+        self.registered.as_ref().map(|registered| Registered {
+            context: &registered.context,
+            deposits: &registered.deposits,
+            withdrawals: &registered.withdrawals,
+        })
+    }
+
     /// Returns the admitted pipeline front.
     #[must_use]
     pub fn pending(&self) -> Option<&PendingBatch<H::Digest>> {
@@ -1941,6 +1978,960 @@ where
     #[must_use]
     pub const fn hard_fault_is_settled(&self) -> bool {
         self.fault_settled
+    }
+}
+
+/// Decode bounds for one persisted [`SettlementChain`].
+///
+/// Every bound must dominate the deployment maxima its collections can
+/// reach, or state the chain honestly persisted fails to decode at restart.
+/// `items` must be at least [`SettlementConfig::max_deposit_ids`] (consumed
+/// identifiers and unfinalized deposit records),
+/// [`SettlementConfig::max_pending_epochs`] (pipeline entries and claimable
+/// batches), and the deployment's account cardinality (per-account pending
+/// deposit and withdrawal maps). `destination` must be at least
+/// [`SettlementConfig::max_destination_bytes`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Bounds {
+    /// Maximum committee members.
+    pub committee: usize,
+    /// Maximum elements decoded into any one retained collection.
+    pub items: usize,
+    /// Maximum bytes in one withdrawal destination.
+    pub destination: usize,
+}
+
+impl Write for PendingDeposit {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.amount.write(buf);
+        self.deadline.write(buf);
+    }
+}
+
+impl EncodeSize for PendingDeposit {
+    fn encode_size(&self) -> usize {
+        self.amount.encode_size() + self.deadline.encode_size()
+    }
+}
+
+impl Read for PendingDeposit {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+        Ok(Self {
+            amount: u64::read(buf)?,
+            deadline: u64::read(buf)?,
+        })
+    }
+}
+
+impl<D: Digest> Write for ClaimableBatch<D> {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.change_root.write(buf);
+        self.withdrawal_outputs.write(buf);
+        self.claimed_withdrawals.write(buf);
+        self.claimed_payouts.write(buf);
+        self.withdrawal_remaining.write(buf);
+        self.payout_remaining.write(buf);
+    }
+}
+
+impl<D: Digest> EncodeSize for ClaimableBatch<D> {
+    fn encode_size(&self) -> usize {
+        self.change_root.encode_size()
+            + self.withdrawal_outputs.encode_size()
+            + self.claimed_withdrawals.encode_size()
+            + self.claimed_payouts.encode_size()
+            + self.withdrawal_remaining.encode_size()
+            + self.payout_remaining.encode_size()
+    }
+}
+
+impl<D: Digest> Read for ClaimableBatch<D> {
+    /// Maximum claimed positions retained per direction.
+    type Cfg = RangeCfg<usize>;
+
+    fn read_cfg(buf: &mut impl Buf, positions: &Self::Cfg) -> Result<Self, CodecError> {
+        Ok(Self {
+            change_root: VectorRoot::read(buf)?,
+            withdrawal_outputs: VectorRoot::read(buf)?,
+            claimed_withdrawals: BTreeSet::<u32>::read_cfg(buf, &(*positions, ()))?,
+            claimed_payouts: BTreeSet::<u32>::read_cfg(buf, &(*positions, ()))?,
+            withdrawal_remaining: u64::read(buf)?,
+            payout_remaining: u64::read(buf)?,
+        })
+    }
+}
+
+/// Codec helpers over the chain's retained shapes. The public nested types
+/// deliberately do not implement the codec traits themselves: their encodings
+/// exist only inside a persisted [`SettlementChain`].
+impl<H, P> SettlementChain<H, P>
+where
+    H: Hasher,
+    P: PublicKey,
+{
+    fn write_config(config: &SettlementConfig, buf: &mut impl BufMut) {
+        (config.max_pending_epochs.get() as u64).write(buf);
+        config.epoch_deadlines.max_admission_delay.write(buf);
+        config.epoch_deadlines.minimum_challenge_duration.write(buf);
+        config.epoch_deadlines.maximum_challenge_duration.write(buf);
+        config.deposit_inclusion_timeout.write(buf);
+        config.minimum_withdrawal_notice.write(buf);
+        config.maximum_withdrawal_notice.write(buf);
+        (config.max_destination_bytes as u64).write(buf);
+        (config.max_deposit_ids.get() as u64).write(buf);
+    }
+
+    const fn size_config(_: &SettlementConfig) -> usize {
+        9 * u64::SIZE
+    }
+
+    fn read_config(buf: &mut impl Buf) -> Result<SettlementConfig, CodecError> {
+        const CONTEXT: &str = "clearing::SettlementConfig";
+        let bounded = |value: u64| -> Result<NonZeroUsize, CodecError> {
+            usize::try_from(value)
+                .ok()
+                .and_then(NonZeroUsize::new)
+                .ok_or(CodecError::Invalid(
+                    CONTEXT,
+                    "bound is zero or unrepresentable",
+                ))
+        };
+        let max_pending_epochs = bounded(u64::read(buf)?)?;
+        let epoch_deadlines = EpochDeadlinePolicy::new(
+            NonZeroU64::read(buf)?,
+            NonZeroU64::read(buf)?,
+            NonZeroU64::read(buf)?,
+        );
+        let deposit_inclusion_timeout = NonZeroU64::read(buf)?;
+        let minimum_withdrawal_notice = NonZeroU64::read(buf)?;
+        let maximum_withdrawal_notice = NonZeroU64::read(buf)?;
+        let max_destination_bytes = usize::try_from(u64::read(buf)?)
+            .map_err(|_| CodecError::Invalid(CONTEXT, "destination bound is unrepresentable"))?;
+        let max_deposit_ids = bounded(u64::read(buf)?)?;
+        Ok(SettlementConfig::new(
+            max_pending_epochs,
+            epoch_deadlines,
+            deposit_inclusion_timeout,
+            minimum_withdrawal_notice,
+            maximum_withdrawal_notice,
+            max_destination_bytes,
+            max_deposit_ids,
+        ))
+    }
+
+    fn write_context(context: &CloseContext<P, H::Digest>, buf: &mut impl BufMut) {
+        context.payment().write(buf);
+        context.deployment().write(buf);
+        context.deposit_root().write(buf);
+        context.withdrawal_root().write(buf);
+        context.predecessor_liability().write(buf);
+        context.admission_deadline().write(buf);
+        context.challenge_deadline().write(buf);
+        context.limits().write(buf);
+        context.assignment().write(buf);
+        context.predecessor_root().write(buf);
+    }
+
+    fn size_context(context: &CloseContext<P, H::Digest>) -> usize {
+        context.payment().encode_size()
+            + context.deployment().encode_size()
+            + context.deposit_root().encode_size()
+            + context.withdrawal_root().encode_size()
+            + 3 * u64::SIZE
+            + context.limits().encode_size()
+            + context.assignment().encode_size()
+            + context.predecessor_root().encode_size()
+    }
+
+    fn read_context(buf: &mut impl Buf) -> Result<CloseContext<P, H::Digest>, CodecError> {
+        let payment = PaymentContext::read(buf)?;
+        let deployment = H::Digest::read(buf)?;
+        let deposit_root = VectorRoot::read(buf)?;
+        let withdrawal_root = VectorRoot::read(buf)?;
+        let predecessor_liability = u64::read(buf)?;
+        let admission_deadline = u64::read(buf)?;
+        let challenge_deadline = u64::read(buf)?;
+        let limits = CloseLimits::read(buf)?;
+        let assignment = Assignment::read(buf)?;
+        let predecessor_root = VectorRoot::read(buf)?;
+        Ok(CloseContext::from_parts(
+            EpochContext::from_parts(
+                payment,
+                deployment,
+                deposit_root,
+                withdrawal_root,
+                predecessor_liability,
+                admission_deadline,
+                challenge_deadline,
+                limits,
+                assignment,
+            ),
+            predecessor_root,
+        ))
+    }
+
+    const fn challenge_kind_tag(kind: ChallengeKind) -> u8 {
+        match kind {
+            ChallengeKind::LatestAcknowledgedSend => 0,
+            ChallengeKind::HigherShardTip => 1,
+            ChallengeKind::InconsistentReceiptRange => 2,
+            ChallengeKind::ReceiptFork => 3,
+        }
+    }
+
+    const fn challenge_kind_from_tag(tag: u8) -> Result<ChallengeKind, CodecError> {
+        Ok(match tag {
+            0 => ChallengeKind::LatestAcknowledgedSend,
+            1 => ChallengeKind::HigherShardTip,
+            2 => ChallengeKind::InconsistentReceiptRange,
+            3 => ChallengeKind::ReceiptFork,
+            tag => return Err(CodecError::InvalidEnum(tag)),
+        })
+    }
+
+    fn write_status(status: &BatchStatus<H::Digest>, buf: &mut impl BufMut) {
+        match status {
+            BatchStatus::Pending => 0_u8.write(buf),
+            BatchStatus::Challenged(kind) => {
+                1_u8.write(buf);
+                Self::challenge_kind_tag(*kind).write(buf);
+            }
+            BatchStatus::Invalidated(batch_id) => {
+                2_u8.write(buf);
+                batch_id.write(buf);
+            }
+        }
+    }
+
+    fn size_status(status: &BatchStatus<H::Digest>) -> usize {
+        1 + match status {
+            BatchStatus::Pending => 0,
+            BatchStatus::Challenged(_) => 1,
+            BatchStatus::Invalidated(batch_id) => batch_id.encode_size(),
+        }
+    }
+
+    fn read_status(buf: &mut impl Buf) -> Result<BatchStatus<H::Digest>, CodecError> {
+        match u8::read(buf)? {
+            0 => Ok(BatchStatus::Pending),
+            1 => Ok(BatchStatus::Challenged(Self::challenge_kind_from_tag(
+                u8::read(buf)?,
+            )?)),
+            2 => Ok(BatchStatus::Invalidated(BatchId::read(buf)?)),
+            tag => Err(CodecError::InvalidEnum(tag)),
+        }
+    }
+
+    fn write_reason(reason: &HardFaultReason<P, H::Digest>, buf: &mut impl BufMut) {
+        match reason {
+            HardFaultReason::ProvenChallenge { batch_id, kind } => {
+                0_u8.write(buf);
+                batch_id.write(buf);
+                Self::challenge_kind_tag(*kind).write(buf);
+            }
+            HardFaultReason::ExpiredDeposit {
+                account,
+                expired_at,
+            } => {
+                1_u8.write(buf);
+                account.write(buf);
+                expired_at.write(buf);
+            }
+            HardFaultReason::ExpiredWithdrawal {
+                account,
+                expired_at,
+            } => {
+                2_u8.write(buf);
+                account.write(buf);
+                expired_at.write(buf);
+            }
+            HardFaultReason::ExpiredRegistration {
+                anchor,
+                epoch,
+                expired_at,
+            } => {
+                3_u8.write(buf);
+                anchor.write(buf);
+                epoch.write(buf);
+                expired_at.write(buf);
+            }
+        }
+    }
+
+    fn size_reason(reason: &HardFaultReason<P, H::Digest>) -> usize {
+        1 + match reason {
+            HardFaultReason::ProvenChallenge { batch_id, .. } => batch_id.encode_size() + 1,
+            HardFaultReason::ExpiredDeposit { account, .. }
+            | HardFaultReason::ExpiredWithdrawal { account, .. } => {
+                account.encode_size() + u64::SIZE
+            }
+            HardFaultReason::ExpiredRegistration { anchor, .. } => {
+                anchor.encode_size() + 2 * u64::SIZE
+            }
+        }
+    }
+
+    fn read_reason(buf: &mut impl Buf) -> Result<HardFaultReason<P, H::Digest>, CodecError> {
+        match u8::read(buf)? {
+            0 => Ok(HardFaultReason::ProvenChallenge {
+                batch_id: BatchId::read(buf)?,
+                kind: Self::challenge_kind_from_tag(u8::read(buf)?)?,
+            }),
+            1 => Ok(HardFaultReason::ExpiredDeposit {
+                account: P::read(buf)?,
+                expired_at: u64::read(buf)?,
+            }),
+            2 => Ok(HardFaultReason::ExpiredWithdrawal {
+                account: P::read(buf)?,
+                expired_at: u64::read(buf)?,
+            }),
+            3 => Ok(HardFaultReason::ExpiredRegistration {
+                anchor: H::Digest::read(buf)?,
+                epoch: u64::read(buf)?,
+                expired_at: u64::read(buf)?,
+            }),
+            tag => Err(CodecError::InvalidEnum(tag)),
+        }
+    }
+
+    /// Writes packed withdrawals as a count followed by the packed bytes.
+    ///
+    /// The packed bytes are the concatenated canonical request encodings, so
+    /// the reader recovers them by decoding that many requests in order.
+    fn write_packed_withdrawals(packed: &PackedWithdrawals<P, H::Digest>, buf: &mut impl BufMut) {
+        packed.index.len().write(buf);
+        buf.put_slice(&packed.encoded);
+    }
+
+    fn size_packed_withdrawals(packed: &PackedWithdrawals<P, H::Digest>) -> usize {
+        packed.index.len().encode_size() + packed.encoded.len()
+    }
+
+    /// Reads packed withdrawals, returning the rebuilt pack and the earliest
+    /// signed deadline among the requests.
+    #[allow(clippy::type_complexity)]
+    fn read_packed_withdrawals(
+        buf: &mut impl Buf,
+        bounds: &Bounds,
+    ) -> Result<(PackedWithdrawals<P, H::Digest>, Option<(u64, P)>), CodecError> {
+        let count = usize::read_cfg(buf, &RangeCfg::new(0..=bounds.items))?;
+        let mut requests = Vec::with_capacity(count.min(buf.remaining()));
+        for _ in 0..count {
+            requests.push(SignedWithdrawal::<P, H::Digest>::read_cfg(
+                buf,
+                &RangeCfg::new(0..=bounds.destination),
+            )?);
+        }
+        let deadline = requests
+            .iter()
+            .map(|request| (request.body().deadline(), request.account().clone()))
+            .min();
+        Ok((PackedWithdrawals::new(&requests), deadline))
+    }
+
+    fn write_pipeline_entry(entry: &PipelineEntry<P, H::Digest>, buf: &mut impl BufMut) {
+        Self::write_context(&entry.admitted.context, buf);
+        buf.put_slice(&entry.admitted.deposits.encoded);
+        Self::write_packed_withdrawals(&entry.admitted.withdrawals, buf);
+        entry.admitted.withdrawal_total.write(buf);
+        entry.admitted.payout_total.write(buf);
+        entry.batch.header.write(buf);
+        entry.batch.roots.write(buf);
+        entry.batch.certificate.write(buf);
+        entry.batch.successor_liability.write(buf);
+        Self::write_status(&entry.batch.status, buf);
+    }
+
+    fn size_pipeline_entry(entry: &PipelineEntry<P, H::Digest>) -> usize {
+        Self::size_context(&entry.admitted.context)
+            + entry.admitted.deposits.encoded.len()
+            + Self::size_packed_withdrawals(&entry.admitted.withdrawals)
+            + 2 * u64::SIZE
+            + entry.batch.header.encode_size()
+            + entry.batch.roots.encode_size()
+            + entry.batch.certificate.encode_size()
+            + u64::SIZE
+            + Self::size_status(&entry.batch.status)
+    }
+
+    fn read_pipeline_entry(
+        buf: &mut impl Buf,
+        bounds: &Bounds,
+        committee: usize,
+    ) -> Result<PipelineEntry<P, H::Digest>, CodecError> {
+        let context = Self::read_context(buf)?;
+        let deposits = DepositBatch::<P>::read_cfg(buf, &RangeCfg::new(0..=bounds.items))?;
+        let (withdrawals, withdrawal_deadline) = Self::read_packed_withdrawals(buf, bounds)?;
+        let withdrawal_total = u64::read(buf)?;
+        let payout_total = u64::read(buf)?;
+        let admitted = AdmittedClose {
+            context,
+            deposit_total: deposits.total(),
+            deposits: PackedDeposits::new(&deposits),
+            withdrawals,
+            withdrawal_total,
+            withdrawal_deadline,
+            payout_total,
+        };
+        let batch = PendingBatch {
+            header: Header::read(buf)?,
+            roots: RootBundle::read(buf)?,
+            certificate: bls12381::Certificate::read_cfg(buf, &committee)?,
+            successor_liability: u64::read(buf)?,
+            status: Self::read_status(buf)?,
+        };
+        Ok(PipelineEntry { admitted, batch })
+    }
+
+    fn write_registered(registered: &RegisteredClose<P, H::Digest>, buf: &mut impl BufMut) {
+        Self::write_context(&registered.context, buf);
+        registered.deposits.write(buf);
+        registered.withdrawals.write(buf);
+    }
+
+    fn size_registered(registered: &RegisteredClose<P, H::Digest>) -> usize {
+        Self::size_context(&registered.context)
+            + registered.deposits.encode_size()
+            + registered.withdrawals.encode_size()
+    }
+
+    fn read_registered(
+        buf: &mut impl Buf,
+        bounds: &Bounds,
+    ) -> Result<RegisteredClose<P, H::Digest>, CodecError> {
+        let context = Self::read_context(buf)?;
+        let deposits = DepositBatch::<P>::read_cfg(buf, &RangeCfg::new(0..=bounds.items))?;
+        let withdrawals = WithdrawalBatch::<P, H::Digest>::read_cfg(
+            buf,
+            &(
+                RangeCfg::new(0..=bounds.items),
+                RangeCfg::new(0..=bounds.destination),
+            ),
+        )?;
+        let withdrawal_deadline = withdrawals
+            .requests()
+            .iter()
+            .map(|request| (request.body().deadline(), request.account().clone()))
+            .min();
+        Ok(RegisteredClose {
+            context,
+            deposits,
+            withdrawals,
+            withdrawal_deadline,
+        })
+    }
+
+    fn write_claims(claims: &HardFaultClaims<P, H::Digest>, buf: &mut impl BufMut) {
+        claims.frozen_state_root.write(buf);
+        claims.state_liability.write(buf);
+        claims.remaining_state_liability.write(buf);
+        claims.unfinalized_deposit_total.write(buf);
+        claims.custody_balance.write(buf);
+        claims.deposits.write(buf);
+        claims.pending_withdrawals.write(buf);
+        claims.admitted_withdrawals.len().write(buf);
+        for admitted in &claims.admitted_withdrawals {
+            Self::write_packed_withdrawals(admitted, buf);
+        }
+        claims.claimed_positions.write(buf);
+    }
+
+    fn size_claims(claims: &HardFaultClaims<P, H::Digest>) -> usize {
+        claims.frozen_state_root.encode_size()
+            + 4 * u64::SIZE
+            + claims.deposits.encode_size()
+            + claims.pending_withdrawals.encode_size()
+            + claims.admitted_withdrawals.len().encode_size()
+            + claims
+                .admitted_withdrawals
+                .iter()
+                .map(Self::size_packed_withdrawals)
+                .sum::<usize>()
+            + claims.claimed_positions.encode_size()
+    }
+
+    fn read_claims(
+        buf: &mut impl Buf,
+        bounds: &Bounds,
+    ) -> Result<HardFaultClaims<P, H::Digest>, CodecError> {
+        let frozen_state_root = VectorRoot::read(buf)?;
+        let state_liability = u64::read(buf)?;
+        let remaining_state_liability = u64::read(buf)?;
+        let unfinalized_deposit_total = u64::read(buf)?;
+        let custody_balance = u64::read(buf)?;
+        let deposits =
+            BTreeMap::<P, u64>::read_cfg(buf, &(RangeCfg::new(0..=bounds.items), ((), ())))?;
+        let pending_withdrawals = BTreeMap::<P, SignedWithdrawal<P, H::Digest>>::read_cfg(
+            buf,
+            &(
+                RangeCfg::new(0..=bounds.items),
+                ((), RangeCfg::new(0..=bounds.destination)),
+            ),
+        )?;
+        let admitted = usize::read_cfg(buf, &RangeCfg::new(0..=bounds.items))?;
+        let mut admitted_withdrawals = Vec::with_capacity(admitted.min(buf.remaining()));
+        for _ in 0..admitted {
+            admitted_withdrawals.push(Self::read_packed_withdrawals(buf, bounds)?.0);
+        }
+        let claimed_positions =
+            BTreeSet::<u32>::read_cfg(buf, &(RangeCfg::new(0..=bounds.items), ()))?;
+        Ok(HardFaultClaims {
+            frozen_state_root,
+            state_liability,
+            remaining_state_liability,
+            unfinalized_deposit_total,
+            custody_balance,
+            deposits,
+            pending_withdrawals,
+            admitted_withdrawals,
+            claimed_positions,
+        })
+    }
+}
+
+impl<H, P> Write for SettlementChain<H, P>
+where
+    H: Hasher,
+    P: PublicKey,
+{
+    fn write(&self, buf: &mut impl BufMut) {
+        self.deployment.write(buf);
+        self.operator.write(buf);
+        self.certificate_scheme.committee().write(buf);
+        self.current_state_root.write(buf);
+        self.current_liability.write(buf);
+        self.custody_balance.write(buf);
+        self.claimable_balance.write(buf);
+        self.claimable_batches.write(buf);
+        self.consumed_deposit_ids.write(buf);
+        self.withdrawal_replay_expiries.write(buf);
+        self.pending_deposits.write(buf);
+        self.unfinalized_deposit_total.write(buf);
+        self.pending_withdrawals.write(buf);
+        Self::write_config(&self.config, buf);
+        self.expected_epoch.write(buf);
+        match &self.registered {
+            None => 0_u8.write(buf),
+            Some(registered) => {
+                1_u8.write(buf);
+                Self::write_registered(registered, buf);
+            }
+        }
+        self.pipeline.len().write(buf);
+        for entry in &self.pipeline {
+            Self::write_pipeline_entry(entry, buf);
+        }
+        match &self.hard_fault {
+            None => 0_u8.write(buf),
+            Some(reason) => {
+                1_u8.write(buf);
+                Self::write_reason(reason, buf);
+            }
+        }
+        self.admission_fence_epoch.write(buf);
+        self.invalid_from.write(buf);
+        match &self.hard_fault_claims {
+            None => 0_u8.write(buf),
+            Some(claims) => {
+                1_u8.write(buf);
+                Self::write_claims(claims, buf);
+            }
+        }
+        self.fault_settled.write(buf);
+    }
+}
+
+impl<H, P> EncodeSize for SettlementChain<H, P>
+where
+    H: Hasher,
+    P: PublicKey,
+{
+    fn encode_size(&self) -> usize {
+        self.deployment.encode_size()
+            + self.operator.encode_size()
+            + self.certificate_scheme.committee().encode_size()
+            + self.current_state_root.encode_size()
+            + 3 * u64::SIZE
+            + self.claimable_batches.encode_size()
+            + self.consumed_deposit_ids.encode_size()
+            + self.withdrawal_replay_expiries.encode_size()
+            + self.pending_deposits.encode_size()
+            + u64::SIZE
+            + self.pending_withdrawals.encode_size()
+            + Self::size_config(&self.config)
+            + u64::SIZE
+            + 1
+            + self.registered.as_ref().map_or(0, Self::size_registered)
+            + self.pipeline.len().encode_size()
+            + self
+                .pipeline
+                .iter()
+                .map(Self::size_pipeline_entry)
+                .sum::<usize>()
+            + 1
+            + self.hard_fault.as_ref().map_or(0, Self::size_reason)
+            + self.admission_fence_epoch.encode_size()
+            + self.invalid_from.encode_size()
+            + 1
+            + self.hard_fault_claims.as_ref().map_or(0, Self::size_claims)
+            + self.fault_settled.encode_size()
+    }
+}
+
+impl<H, P> Read for SettlementChain<H, P>
+where
+    H: Hasher,
+    P: PublicKey,
+{
+    type Cfg = Bounds;
+
+    /// Decodes a chain persisted by [`Write`].
+    ///
+    /// Decoding is structural: collections are bounded by [`Bounds`] and every
+    /// nested codec validates its own shape, but the semantic invariants that
+    /// [`SettlementChain::new`] and each mutation maintain (custody equations,
+    /// anchor derivations, pipeline ancestry) are not re-proven. The caller
+    /// must therefore only decode encodings whose integrity is established
+    /// externally, for example bytes committed under a certified state root.
+    /// Derived lookup structures are rebuilt from the decoded authoritative
+    /// state, so `encode(decode(bytes)) == bytes` for accepted inputs.
+    fn read_cfg(buf: &mut impl Buf, bounds: &Self::Cfg) -> Result<Self, CodecError> {
+        let deployment = H::Digest::read(buf)?;
+        let operator = P::read(buf)?;
+        let committee = Committee::read_cfg(buf, &bounds.committee)?;
+        let committee_len = committee.members().len();
+        let committee_commitment = committee.commitment::<H>();
+        let certificate_scheme = bls12381::Scheme::verifier(committee);
+        let current_state_root = VectorRoot::read(buf)?;
+        let current_liability = u64::read(buf)?;
+        let custody_balance = u64::read(buf)?;
+        let claimable_balance = u64::read(buf)?;
+        let claimable_batches =
+            BTreeMap::<BatchId<H::Digest>, ClaimableBatch<H::Digest>>::read_cfg(
+                buf,
+                &(
+                    RangeCfg::new(0..=bounds.items),
+                    ((), RangeCfg::new(0..=bounds.items)),
+                ),
+            )?;
+        let consumed_deposit_ids =
+            BTreeSet::<H::Digest>::read_cfg(buf, &(RangeCfg::new(0..=bounds.items), ()))?;
+        let withdrawal_replay_expiries = BTreeSet::<(u64, WithdrawalId<H::Digest>)>::read_cfg(
+            buf,
+            &(RangeCfg::new(0..=bounds.items), ((), ())),
+        )?;
+        let consumed_withdrawal_ids = withdrawal_replay_expiries
+            .iter()
+            .map(|(_, request_id)| *request_id)
+            .collect();
+        let pending_deposits = BTreeMap::<P, PendingDeposit>::read_cfg(
+            buf,
+            &(RangeCfg::new(0..=bounds.items), ((), ())),
+        )?;
+        let pending_deposit_deadlines = pending_deposits
+            .iter()
+            .map(|(account, deposit)| (deposit.deadline, account.clone()))
+            .collect();
+        let unfinalized_deposit_total = u64::read(buf)?;
+        let pending_withdrawals = BTreeMap::<P, SignedWithdrawal<P, H::Digest>>::read_cfg(
+            buf,
+            &(
+                RangeCfg::new(0..=bounds.items),
+                ((), RangeCfg::new(0..=bounds.destination)),
+            ),
+        )?;
+        let pending_withdrawal_deadlines = pending_withdrawals
+            .iter()
+            .map(|(account, request)| (request.body().deadline(), account.clone()))
+            .collect();
+        let config = Self::read_config(buf)?;
+        let expected_epoch = u64::read(buf)?;
+        let registered = match u8::read(buf)? {
+            0 => None,
+            1 => Some(Self::read_registered(buf, bounds)?),
+            tag => return Err(CodecError::InvalidEnum(tag)),
+        };
+        let entries = usize::read_cfg(buf, &RangeCfg::new(0..=bounds.items))?;
+        let mut pipeline = VecDeque::with_capacity(entries.min(buf.remaining()));
+        for _ in 0..entries {
+            pipeline.push_back(Self::read_pipeline_entry(buf, bounds, committee_len)?);
+        }
+        let hard_fault = match u8::read(buf)? {
+            0 => None,
+            1 => Some(Self::read_reason(buf)?),
+            tag => return Err(CodecError::InvalidEnum(tag)),
+        };
+        let admission_fence_epoch = Option::<u64>::read(buf)?;
+        let invalid_from = Option::<BatchId<H::Digest>>::read(buf)?;
+        let hard_fault_claims = match u8::read(buf)? {
+            0 => None,
+            1 => Some(Self::read_claims(buf, bounds)?),
+            tag => return Err(CodecError::InvalidEnum(tag)),
+        };
+        let fault_settled = bool::read(buf)?;
+        Ok(Self {
+            deployment,
+            operator,
+            certificate_scheme,
+            committee_commitment,
+            current_state_root,
+            current_liability,
+            custody_balance,
+            claimable_balance,
+            claimable_batches,
+            consumed_deposit_ids,
+            consumed_withdrawal_ids,
+            withdrawal_replay_expiries,
+            pending_deposits,
+            pending_deposit_deadlines,
+            unfinalized_deposit_total,
+            pending_withdrawals,
+            pending_withdrawal_deadlines,
+            config,
+            expected_epoch,
+            registered,
+            pipeline,
+            hard_fault,
+            admission_fence_epoch,
+            invalid_from,
+            hard_fault_claims,
+            fault_settled,
+            _hasher: PhantomData,
+        })
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<H, P> arbitrary::Arbitrary<'_> for SettlementChain<H, P>
+where
+    H: Hasher,
+    H::Digest: for<'a> arbitrary::Arbitrary<'a>,
+    P: PublicKey + for<'a> arbitrary::Arbitrary<'a>,
+    P::Signature: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        fn small(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<usize> {
+            u.int_in_range(0..=2)
+        }
+        fn kind(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<ChallengeKind> {
+            u.choose(&[
+                ChallengeKind::LatestAcknowledgedSend,
+                ChallengeKind::HigherShardTip,
+                ChallengeKind::InconsistentReceiptRange,
+                ChallengeKind::ReceiptFork,
+            ])
+            .copied()
+        }
+        fn reason<H, P>(
+            u: &mut arbitrary::Unstructured<'_>,
+        ) -> arbitrary::Result<HardFaultReason<P, H::Digest>>
+        where
+            H: Hasher,
+            H::Digest: for<'a> arbitrary::Arbitrary<'a>,
+            P: PublicKey + for<'a> arbitrary::Arbitrary<'a>,
+        {
+            Ok(match u.int_in_range(0..=3)? {
+                0 => HardFaultReason::ProvenChallenge {
+                    batch_id: u.arbitrary()?,
+                    kind: kind(u)?,
+                },
+                1 => HardFaultReason::ExpiredDeposit {
+                    account: u.arbitrary()?,
+                    expired_at: u.arbitrary()?,
+                },
+                2 => HardFaultReason::ExpiredWithdrawal {
+                    account: u.arbitrary()?,
+                    expired_at: u.arbitrary()?,
+                },
+                _ => HardFaultReason::ExpiredRegistration {
+                    anchor: u.arbitrary()?,
+                    epoch: u.arbitrary()?,
+                    expired_at: u.arbitrary()?,
+                },
+            })
+        }
+        fn packed<H, P>(
+            u: &mut arbitrary::Unstructured<'_>,
+        ) -> arbitrary::Result<(PackedWithdrawals<P, H::Digest>, Option<(u64, P)>)>
+        where
+            H: Hasher,
+            H::Digest: for<'a> arbitrary::Arbitrary<'a>,
+            P: PublicKey + for<'a> arbitrary::Arbitrary<'a>,
+            P::Signature: for<'a> arbitrary::Arbitrary<'a>,
+        {
+            let requests = (0..small(u)?)
+                .map(|_| u.arbitrary::<SignedWithdrawal<P, H::Digest>>())
+                .collect::<arbitrary::Result<Vec<_>>>()?;
+            let deadline = requests
+                .iter()
+                .map(|request| (request.body().deadline(), request.account().clone()))
+                .min();
+            Ok((PackedWithdrawals::new(&requests), deadline))
+        }
+
+        let committee: Committee = u.arbitrary()?;
+        let committee_commitment = committee.commitment::<H>();
+        let certificate_scheme = bls12381::Scheme::verifier(committee);
+
+        let mut claimable_batches = BTreeMap::new();
+        for _ in 0..small(u)? {
+            claimable_batches.insert(
+                u.arbitrary::<BatchId<H::Digest>>()?,
+                ClaimableBatch {
+                    change_root: u.arbitrary()?,
+                    withdrawal_outputs: u.arbitrary()?,
+                    claimed_withdrawals: u.arbitrary()?,
+                    claimed_payouts: u.arbitrary()?,
+                    withdrawal_remaining: u.arbitrary()?,
+                    payout_remaining: u.arbitrary()?,
+                },
+            );
+        }
+        let withdrawal_replay_expiries: BTreeSet<(u64, WithdrawalId<H::Digest>)> = u.arbitrary()?;
+        let consumed_withdrawal_ids = withdrawal_replay_expiries
+            .iter()
+            .map(|(_, request_id)| *request_id)
+            .collect();
+        let mut pending_deposits = BTreeMap::new();
+        for _ in 0..small(u)? {
+            pending_deposits.insert(
+                u.arbitrary::<P>()?,
+                PendingDeposit {
+                    amount: u.arbitrary()?,
+                    deadline: u.arbitrary()?,
+                },
+            );
+        }
+        let pending_deposit_deadlines = pending_deposits
+            .iter()
+            .map(|(account, deposit)| (deposit.deadline, account.clone()))
+            .collect();
+        let mut pending_withdrawals = BTreeMap::new();
+        for _ in 0..small(u)? {
+            let request: SignedWithdrawal<P, H::Digest> = u.arbitrary()?;
+            pending_withdrawals.insert(request.account().clone(), request);
+        }
+        let pending_withdrawal_deadlines = pending_withdrawals
+            .iter()
+            .map(|(account, request)| (request.body().deadline(), account.clone()))
+            .collect();
+        let nonzero_u64 = |u: &mut arbitrary::Unstructured<'_>| -> arbitrary::Result<NonZeroU64> {
+            Ok(NonZeroU64::new(u.arbitrary::<u64>()?.max(1)).expect("value is at least one"))
+        };
+        let config = SettlementConfig::new(
+            NonZeroUsize::new(u.int_in_range(2..=1_024)?).expect("range starts above zero"),
+            EpochDeadlinePolicy::new(nonzero_u64(u)?, nonzero_u64(u)?, nonzero_u64(u)?),
+            nonzero_u64(u)?,
+            nonzero_u64(u)?,
+            nonzero_u64(u)?,
+            u.int_in_range(0..=1_024)?,
+            NonZeroUsize::new(u.int_in_range(1..=1_024)?).expect("range starts above zero"),
+        );
+        let registered = if u.arbitrary()? {
+            let deposits: DepositBatch<P> = u.arbitrary()?;
+            let withdrawals: WithdrawalBatch<P, H::Digest> = u.arbitrary()?;
+            let withdrawal_deadline = withdrawals
+                .requests()
+                .iter()
+                .map(|request| (request.body().deadline(), request.account().clone()))
+                .min();
+            Some(RegisteredClose {
+                context: u.arbitrary()?,
+                deposits,
+                withdrawals,
+                withdrawal_deadline,
+            })
+        } else {
+            None
+        };
+        let mut pipeline = VecDeque::new();
+        for _ in 0..small(u)? {
+            let deposits: DepositBatch<P> = u.arbitrary()?;
+            let (withdrawals, withdrawal_deadline) = packed::<H, P>(u)?;
+            let status = match u.int_in_range(0..=2)? {
+                0 => BatchStatus::Pending,
+                1 => BatchStatus::Challenged(kind(u)?),
+                _ => BatchStatus::Invalidated(u.arbitrary()?),
+            };
+            pipeline.push_back(PipelineEntry {
+                admitted: AdmittedClose {
+                    context: u.arbitrary()?,
+                    deposit_total: deposits.total(),
+                    deposits: PackedDeposits::new(&deposits),
+                    withdrawals,
+                    withdrawal_total: u.arbitrary()?,
+                    withdrawal_deadline,
+                    payout_total: u.arbitrary()?,
+                },
+                batch: PendingBatch {
+                    header: u.arbitrary()?,
+                    roots: u.arbitrary()?,
+                    certificate: u.arbitrary()?,
+                    successor_liability: u.arbitrary()?,
+                    status,
+                },
+            });
+        }
+        let hard_fault = if u.arbitrary()? {
+            Some(reason::<H, P>(u)?)
+        } else {
+            None
+        };
+        let hard_fault_claims = if u.arbitrary()? {
+            let mut admitted_withdrawals = Vec::new();
+            for _ in 0..small(u)? {
+                admitted_withdrawals.push(packed::<H, P>(u)?.0);
+            }
+            let mut pending_withdrawals = BTreeMap::new();
+            for _ in 0..small(u)? {
+                let request: SignedWithdrawal<P, H::Digest> = u.arbitrary()?;
+                pending_withdrawals.insert(request.account().clone(), request);
+            }
+            Some(HardFaultClaims {
+                frozen_state_root: u.arbitrary()?,
+                state_liability: u.arbitrary()?,
+                remaining_state_liability: u.arbitrary()?,
+                unfinalized_deposit_total: u.arbitrary()?,
+                custody_balance: u.arbitrary()?,
+                deposits: u.arbitrary()?,
+                pending_withdrawals,
+                admitted_withdrawals,
+                claimed_positions: u.arbitrary()?,
+            })
+        } else {
+            None
+        };
+        Ok(Self {
+            deployment: u.arbitrary()?,
+            operator: u.arbitrary()?,
+            certificate_scheme,
+            committee_commitment,
+            current_state_root: u.arbitrary()?,
+            current_liability: u.arbitrary()?,
+            custody_balance: u.arbitrary()?,
+            claimable_balance: u.arbitrary()?,
+            claimable_batches,
+            consumed_deposit_ids: u.arbitrary()?,
+            consumed_withdrawal_ids,
+            withdrawal_replay_expiries,
+            pending_deposits,
+            pending_deposit_deadlines,
+            unfinalized_deposit_total: u.arbitrary()?,
+            pending_withdrawals,
+            pending_withdrawal_deadlines,
+            config,
+            expected_epoch: u.arbitrary()?,
+            registered,
+            pipeline,
+            hard_fault,
+            admission_fence_epoch: u.arbitrary()?,
+            invalid_from: u.arbitrary()?,
+            hard_fault_claims,
+            fault_settled: u.arbitrary()?,
+            _hasher: PhantomData,
+        })
     }
 }
 
@@ -3894,6 +4885,10 @@ mod tests {
         ));
         assert_eq!(fixture.chain.finalize(6).unwrap().epoch, 1);
 
+        // Pin the registered() accessor to the certification window: absent
+        // before registration, the exact bound context and boundary batches
+        // while the slot is live, and absent again once the slot retires.
+        assert!(fixture.chain.registered().is_none());
         let registered = context(
             fixture.deployment,
             &fixture.operator,
@@ -3908,8 +4903,15 @@ mod tests {
         let registered_anchor = *registered.payment().anchor();
         fixture
             .chain
-            .register_close(7, registered, withdrawals, &[], |_| true)
+            .register_close(7, registered.clone(), withdrawals.clone(), &[], |_| true)
             .unwrap();
+        let live = fixture
+            .chain
+            .registered()
+            .expect("the slot is live through its admission deadline");
+        assert_eq!(live.context, &registered);
+        assert_eq!(live.deposits, &deposits);
+        assert_eq!(live.withdrawals, &withdrawals);
         assert!(matches!(
             fixture.chain.fault_expired(7),
             Err(SettlementError::DeadlineNotReached)
@@ -3922,6 +4924,7 @@ mod tests {
                 expired_at: 7,
             }
         );
+        assert!(fixture.chain.registered().is_none());
     }
 
     #[test]
@@ -8501,6 +9504,188 @@ mod tests {
             ),
             Err(SettlementError::EpochOverflow)
         ));
+    }
+
+    const CODEC_BOUNDS: Bounds = Bounds {
+        committee: 4,
+        items: 1_024,
+        destination: 1_024,
+    };
+
+    /// Asserts one encode -> decode -> encode round trip and returns the
+    /// decoded chain for behavioral comparison.
+    fn round_trip(chain: &TestChain) -> TestChain {
+        let encoded = chain.encode();
+        assert_eq!(encoded.len(), chain.encode_size());
+        let decoded =
+            TestChain::decode_cfg(encoded.clone(), &CODEC_BOUNDS).expect("persisted chain decodes");
+        assert_eq!(
+            decoded.encode(),
+            encoded,
+            "decoded chain re-encodes identically"
+        );
+        decoded
+    }
+
+    #[test]
+    fn codec_round_trips_and_preserves_behavior() {
+        let mut fixture = harness(&[10, 10]);
+        let signer = fixture.accounts[0].clone();
+        round_trip(&fixture.chain);
+
+        // Stage a deposit and a queued withdrawal.
+        fixture
+            .chain
+            .record_deposit(
+                1,
+                Sha256::hash(&[b"round-trip-deposit"]),
+                fixture.accounts[1].public_key(),
+                3,
+            )
+            .unwrap();
+        let request = withdrawal(
+            fixture.deployment,
+            fixture.cache.root(),
+            &signer,
+            b"exit",
+            amount_action(4),
+            9,
+        );
+        let opening = fixture.cache.opening(&signer.public_key()).unwrap();
+        fixture
+            .chain
+            .queue_withdrawal(1, request, core::slice::from_ref(&opening), |_| true)
+            .unwrap();
+        round_trip(&fixture.chain);
+
+        // Build a certified close over the staged boundary and register it.
+        let withdrawals = fixture.chain.pending_withdrawals();
+        let deposits = fixture.chain.boundary_deposits(&withdrawals);
+        let close_context = context(
+            fixture.deployment,
+            &fixture.operator,
+            fixture.committee,
+            0,
+            &fixture.cache,
+            &deposits,
+            &withdrawals,
+            6,
+            7,
+        );
+        let (close, _) = boundary_close(&fixture.cache, &close_context, &deposits, &withdrawals);
+        let claim = assemble_withdrawal_claim::<Sha256, _, _>(
+            &close,
+            &withdrawals,
+            &signer.public_key(),
+            &Sequential,
+        )
+        .unwrap();
+        let certificate = certificate(
+            &fixture.signer,
+            &close_context,
+            &deposits,
+            &withdrawals,
+            &close,
+        );
+        let terminal_proof = assemble_terminal_proof::<Sha256, _, _>(
+            &close_context,
+            &deposits,
+            &withdrawals,
+            &close,
+            &Sequential,
+        )
+        .unwrap();
+        fixture
+            .chain
+            .register_close(2, close_context, withdrawals, &[], |_| true)
+            .unwrap();
+        let mut decoded = round_trip(&fixture.chain);
+
+        // Admission, finalization, and the certified claim behave identically
+        // on the original and the decoded chain, and their encodings stay in
+        // lockstep.
+        let batch_id = fixture
+            .chain
+            .admit(
+                2,
+                close.header,
+                close.roots,
+                terminal_proof.clone(),
+                certificate.clone(),
+            )
+            .unwrap();
+        assert_eq!(
+            decoded
+                .admit(2, close.header, close.roots, terminal_proof, certificate)
+                .unwrap(),
+            batch_id
+        );
+        assert_eq!(decoded.encode(), fixture.chain.encode());
+        round_trip(&fixture.chain);
+
+        let finalized = fixture.chain.finalize(8).unwrap();
+        assert_eq!(decoded.finalize(8).unwrap(), finalized);
+        let released = fixture.chain.claim_withdrawal(batch_id, &claim).unwrap();
+        assert_eq!(
+            decoded.claim_withdrawal(batch_id, &claim).unwrap(),
+            released
+        );
+        assert_eq!(decoded.encode(), fixture.chain.encode());
+        assert_eq!(
+            decoded.current_state_root(),
+            fixture.chain.current_state_root()
+        );
+        assert_eq!(decoded.expected_epoch(), fixture.chain.expected_epoch());
+        assert_eq!(decoded.custody_balance(), fixture.chain.custody_balance());
+        assert_eq!(
+            decoded.claimable_balance(),
+            fixture.chain.claimable_balance()
+        );
+        round_trip(&fixture.chain);
+    }
+
+    #[test]
+    fn codec_round_trips_a_hard_faulted_chain() {
+        let mut fixture = harness(&[10]);
+        let account = fixture.accounts[0].public_key();
+        fixture
+            .chain
+            .record_deposit(
+                1,
+                Sha256::hash(&[b"round-trip-expiring"]),
+                account.clone(),
+                2,
+            )
+            .unwrap();
+
+        // The deposit deadline (1 + 1_000) expires and permanently faults.
+        assert!(matches!(
+            fixture.chain.fault_expired(1_001),
+            Ok(HardFaultReason::ExpiredDeposit { .. })
+        ));
+        let mut decoded = round_trip(&fixture.chain);
+
+        // Terminal settlement and every terminal claim behave identically on
+        // the original and the decoded chain.
+        let settlement = fixture.chain.begin_hard_fault_settlement().unwrap();
+        assert_eq!(decoded.begin_hard_fault_settlement().unwrap(), settlement);
+        assert_eq!(decoded.encode(), fixture.chain.encode());
+        decoded = round_trip(&fixture.chain);
+
+        let releases = claim_frozen_state(&mut fixture.chain, &fixture.cache);
+        assert_eq!(claim_frozen_state(&mut decoded, &fixture.cache), releases);
+        let refund = fixture
+            .chain
+            .claim_pending_deposit(1_002, &account)
+            .unwrap();
+        assert_eq!(
+            decoded.claim_pending_deposit(1_002, &account).unwrap(),
+            refund
+        );
+        assert!(fixture.chain.hard_fault_is_settled());
+        assert!(decoded.hard_fault_is_settled());
+        assert_eq!(decoded.encode(), fixture.chain.encode());
+        round_trip(&fixture.chain);
     }
 
     mod refinement {

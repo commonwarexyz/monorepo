@@ -4,11 +4,19 @@ use super::{
     Agent,
     store::{PendingClaim, PendingPayoutClaim, PendingWithdrawalClaim, Store},
 };
-use crate::{operator::rpc as operator_rpc, settlement::rpc as settlement_rpc};
+use crate::{
+    chain::{
+        client::{Chain, Client, EFFECT_ATTEMPTS, Env, POLL},
+        state::{ClaimRootsResponse, ExternalPayoutResponse, WithdrawalResponse},
+        tx::{ExternalPayoutClaimRequest, SettlementTx, WithdrawalClaimRequest},
+    },
+    operator::rpc as operator_rpc,
+    protocol::Key,
+};
 use anyhow::{Context, Result, ensure};
 use commonware_clearing::bajillion::transition::BatchId;
-use commonware_cryptography::{Sha256, sha256::Digest};
-use commonware_runtime::Network;
+use commonware_codec::Encode as _;
+use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
 use std::net::SocketAddr;
 
 /// One claim kind's wiring for the shared claim driver.
@@ -27,11 +35,7 @@ trait ClaimChannel {
 
     /// Binds operator-supplied evidence to this wallet by full local verification against
     /// the claim roots of the finalized batch the evidence names, before it may be cached.
-    fn bind(
-        agent: &Agent,
-        evidence: &Self::Evidence,
-        roots: &settlement_rpc::ClaimRootsResponse,
-    ) -> Result<()>;
+    fn bind(agent: &Agent, evidence: &Self::Evidence, roots: &ClaimRootsResponse) -> Result<()>;
 
     /// Confirms a settlement release pays what the bound evidence certifies.
     fn verify_release(
@@ -40,26 +44,26 @@ trait ClaimChannel {
         release: &Self::Release,
     ) -> Result<()>;
 
-    async fn fetch<E: Network>(
-        agent: &Agent,
-        network: &E,
-        operator: SocketAddr,
-    ) -> Result<Self::Evidence>;
+    async fn fetch<E: Env>(account: Key, ctx: &E, operator: SocketAddr) -> Result<Self::Evidence>;
 
-    async fn submit<E: Network>(
-        network: &E,
-        settlement: SocketAddr,
+    /// The claim transaction for `evidence`.
+    fn tx(evidence: &Self::Evidence) -> SettlementTx;
+
+    /// Reads the certified release the applied claim produced, verifying it
+    /// consumed exactly this evidence.
+    async fn release<E: Env>(
+        ctx: &E,
+        chain: &mut Client,
         evidence: &Self::Evidence,
-    ) -> Result<settlement_rpc::ClaimResponse<Self::Release>>;
+    ) -> Result<Option<Self::Release>>;
 
-    async fn acknowledge<E: Network>(
-        network: &E,
+    async fn acknowledge<E: Env>(
+        ctx: &E,
         operator: SocketAddr,
         evidence: &Self::Evidence,
     ) -> Result<()>;
 
     fn cache(store: &mut Store, evidence: &Self::Evidence) -> Result<()>;
-    fn drop_evidence(store: &mut Store, evidence: &Self::Evidence) -> Result<()>;
     fn record(store: &mut Store, evidence: &Self::Evidence, release: &Self::Release) -> Result<()>;
     fn complete(
         store: &mut Store,
@@ -72,7 +76,7 @@ struct WithdrawalChannel;
 
 impl ClaimChannel for WithdrawalChannel {
     type Evidence = operator_rpc::WithdrawalEvidenceResponse;
-    type Release = settlement_rpc::WithdrawalResponse;
+    type Release = WithdrawalResponse;
 
     const NOUN: &'static str = "withdrawal";
 
@@ -93,11 +97,7 @@ impl ClaimChannel for WithdrawalChannel {
     /// destination this wallet signs into every withdrawal. The output amount is
     /// deliberately unchecked: the batch may have finalized the withdrawal degraded to a
     /// zero release, and it is still the one batch that settles this claim.
-    fn bind(
-        agent: &Agent,
-        evidence: &Self::Evidence,
-        roots: &settlement_rpc::ClaimRootsResponse,
-    ) -> Result<()> {
+    fn bind(agent: &Agent, evidence: &Self::Evidence, roots: &ClaimRootsResponse) -> Result<()> {
         let output = evidence
             .claim
             .verify::<Sha256>(&roots.withdrawal_outputs)
@@ -122,44 +122,47 @@ impl ClaimChannel for WithdrawalChannel {
         Ok(())
     }
 
-    async fn fetch<E: Network>(
-        agent: &Agent,
-        network: &E,
-        operator: SocketAddr,
-    ) -> Result<Self::Evidence> {
+    async fn fetch<E: Env>(account: Key, ctx: &E, operator: SocketAddr) -> Result<Self::Evidence> {
         operator_rpc::withdrawal_evidence(
-            network,
+            ctx,
             operator,
-            operator_rpc::WithdrawalEvidenceRequest {
-                account: agent.account(),
-            },
+            operator_rpc::WithdrawalEvidenceRequest { account },
         )
         .await
     }
 
-    async fn submit<E: Network>(
-        network: &E,
-        settlement: SocketAddr,
+    fn tx(evidence: &Self::Evidence) -> SettlementTx {
+        SettlementTx::ClaimWithdrawal(WithdrawalClaimRequest {
+            batch_id: evidence.batch_id,
+            claim: evidence.claim.clone(),
+        })
+    }
+
+    async fn release<E: Env>(
+        ctx: &E,
+        chain: &mut Client,
         evidence: &Self::Evidence,
-    ) -> Result<settlement_rpc::ClaimResponse<Self::Release>> {
-        settlement_rpc::claim_withdrawal(
-            network,
-            settlement,
-            settlement_rpc::WithdrawalClaimRequest {
-                batch_id: evidence.batch_id,
-                claim: evidence.claim.clone(),
-            },
-        )
-        .await
+    ) -> Result<Option<Self::Release>> {
+        let Some(record) = chain
+            .withdrawal_release(ctx, evidence.batch_id, evidence.claim.position())
+            .await?
+        else {
+            return Ok(None);
+        };
+        ensure!(
+            record.claim == Sha256::hash(&[&evidence.claim.encode()]),
+            "the released withdrawal position consumed other evidence"
+        );
+        Ok(Some(record.released))
     }
 
-    async fn acknowledge<E: Network>(
-        network: &E,
+    async fn acknowledge<E: Env>(
+        ctx: &E,
         operator: SocketAddr,
         evidence: &Self::Evidence,
     ) -> Result<()> {
         operator_rpc::acknowledge_withdrawal(
-            network,
+            ctx,
             operator,
             operator_rpc::AcknowledgeWithdrawalRequest {
                 batch_id: evidence.batch_id,
@@ -172,10 +175,6 @@ impl ClaimChannel for WithdrawalChannel {
 
     fn cache(store: &mut Store, evidence: &Self::Evidence) -> Result<()> {
         store.cache_withdrawal_claim(evidence)
-    }
-
-    fn drop_evidence(store: &mut Store, evidence: &Self::Evidence) -> Result<()> {
-        store.drop_withdrawal_claim_evidence(evidence)
     }
 
     fn record(store: &mut Store, evidence: &Self::Evidence, release: &Self::Release) -> Result<()> {
@@ -195,7 +194,7 @@ struct PayoutChannel;
 
 impl ClaimChannel for PayoutChannel {
     type Evidence = operator_rpc::ExternalPayoutEvidenceResponse;
-    type Release = settlement_rpc::ExternalPayoutResponse;
+    type Release = ExternalPayoutResponse;
 
     const NOUN: &'static str = "external payout";
 
@@ -213,11 +212,7 @@ impl ClaimChannel for PayoutChannel {
 
     /// Binding is full local verification: the claim must open against the finalized
     /// batch's own change root and certify this wallet as the receiver settlement pays.
-    fn bind(
-        agent: &Agent,
-        evidence: &Self::Evidence,
-        roots: &settlement_rpc::ClaimRootsResponse,
-    ) -> Result<()> {
+    fn bind(agent: &Agent, evidence: &Self::Evidence, roots: &ClaimRootsResponse) -> Result<()> {
         let payout = evidence
             .claim
             .verify::<Sha256>(&roots.change)
@@ -237,44 +232,47 @@ impl ClaimChannel for PayoutChannel {
         Ok(())
     }
 
-    async fn fetch<E: Network>(
-        agent: &Agent,
-        network: &E,
-        operator: SocketAddr,
-    ) -> Result<Self::Evidence> {
+    async fn fetch<E: Env>(account: Key, ctx: &E, operator: SocketAddr) -> Result<Self::Evidence> {
         operator_rpc::external_payout_evidence(
-            network,
+            ctx,
             operator,
-            operator_rpc::ExternalPayoutEvidenceRequest {
-                account: agent.account(),
-            },
+            operator_rpc::ExternalPayoutEvidenceRequest { account },
         )
         .await
     }
 
-    async fn submit<E: Network>(
-        network: &E,
-        settlement: SocketAddr,
+    fn tx(evidence: &Self::Evidence) -> SettlementTx {
+        SettlementTx::ClaimExternalPayout(ExternalPayoutClaimRequest {
+            batch_id: evidence.batch_id,
+            claim: evidence.claim.clone(),
+        })
+    }
+
+    async fn release<E: Env>(
+        ctx: &E,
+        chain: &mut Client,
         evidence: &Self::Evidence,
-    ) -> Result<settlement_rpc::ClaimResponse<Self::Release>> {
-        settlement_rpc::claim_external_payout(
-            network,
-            settlement,
-            settlement_rpc::ExternalPayoutClaimRequest {
-                batch_id: evidence.batch_id,
-                claim: evidence.claim.clone(),
-            },
-        )
-        .await
+    ) -> Result<Option<Self::Release>> {
+        let Some(record) = chain
+            .payout_release(ctx, evidence.batch_id, evidence.claim.position())
+            .await?
+        else {
+            return Ok(None);
+        };
+        ensure!(
+            record.claim == Sha256::hash(&[&evidence.claim.encode()]),
+            "the released payout position consumed other evidence"
+        );
+        Ok(Some(record.released))
     }
 
-    async fn acknowledge<E: Network>(
-        network: &E,
+    async fn acknowledge<E: Env>(
+        ctx: &E,
         operator: SocketAddr,
         evidence: &Self::Evidence,
     ) -> Result<()> {
         operator_rpc::acknowledge_external_payout(
-            network,
+            ctx,
             operator,
             operator_rpc::AcknowledgeExternalPayoutRequest {
                 batch_id: evidence.batch_id,
@@ -286,10 +284,6 @@ impl ClaimChannel for PayoutChannel {
 
     fn cache(store: &mut Store, evidence: &Self::Evidence) -> Result<()> {
         store.cache_payout_claim(evidence)
-    }
-
-    fn drop_evidence(store: &mut Store, evidence: &Self::Evidence) -> Result<()> {
-        store.drop_payout_claim_evidence(evidence)
     }
 
     fn record(store: &mut Store, evidence: &Self::Evidence, release: &Self::Release) -> Result<()> {
@@ -312,13 +306,22 @@ impl Agent {
     /// to protect a finalized reserve against the operator vanishing after finalization.
     /// Only self-verified evidence ever enters it: each attempt without a held copy
     /// fetches fresh evidence, looks up the claim roots of the finalized batch that
-    /// evidence names, and verifies the claim locally against those roots before caching.
-    /// Every cached copy is therefore releasable, so poisoning and epoch lies are
-    /// structurally impossible.
-    async fn drive_claim<C: ClaimChannel, E: Network>(
+    /// evidence names through a certified read, and verifies the claim locally against
+    /// those roots before caching. Every cached copy is therefore releasable, so
+    /// poisoning and epoch lies are structurally impossible.
+    ///
+    /// Claims complete on the certified release record at the claim's (batch,
+    /// position), which must have consumed exactly this evidence: that record is the
+    /// transaction's effect and the only authoritative answer. A missing release is
+    /// not a verdict (the batch may not be claimable yet, the claim may not be
+    /// included yet, and a rejection is effect-free), so the exact claim retries
+    /// later with the last advisory dry-run answer surfaced for diagnosis. Local
+    /// verification at bind means a cached copy is always releasable against its
+    /// finalized batch.
+    async fn drive_claim<C: ClaimChannel, E: Env>(
         &mut self,
-        network: &E,
-        settlement: SocketAddr,
+        ctx: &E,
+        chain: &mut Client,
         operator: SocketAddr,
     ) -> Result<C::Release> {
         let pending = C::pending(self)
@@ -328,14 +331,15 @@ impl Agent {
         let evidence = match pending.evidence.clone() {
             Some(evidence) => evidence,
             None => {
-                let fresh = C::fetch(self, network, operator)
+                let fresh = C::fetch(self.account(), ctx, operator)
                     .await
                     .with_context(|| format!("fetch {} evidence", C::NOUN))?;
 
-                // An unknown batch is an availability signal, never a verdict: the batch
-                // may simply not have finalized yet, so nothing is cached and the exact
-                // claim retries later.
-                let roots = settlement_rpc::claim_roots(network, settlement, C::batch(&fresh))
+                // A proven-absent batch is an availability signal, never a
+                // verdict: the batch may simply not have finalized yet, so
+                // nothing is cached and the exact claim retries later.
+                let roots = chain
+                    .claim_roots(ctx, C::batch(&fresh))
                     .await
                     .with_context(|| format!("look up the {} claim batch", C::NOUN))?
                     .with_context(|| {
@@ -354,36 +358,32 @@ impl Agent {
                 fresh
             }
         };
-        let release = match C::submit(network, settlement, &evidence)
+        let advice = chain
+            .deliver(ctx, &C::tx(&evidence))
             .await
-            .with_context(|| format!("claim settlement {}", C::NOUN))?
-        {
-            settlement_rpc::ClaimResponse::Released(release) => release,
-            settlement_rpc::ClaimResponse::Unavailable => {
-                // The batch may not be claimable at this instant. Nothing is dropped: the
-                // exact claim retries later.
-                anyhow::bail!("{} batch is not claimable yet", C::NOUN)
+            .with_context(|| format!("claim settlement {}", C::NOUN))?;
+        // A read error (an unavailable snapshot, a briefly stale validator)
+        // clears with time, so the effect poll keeps polling through it. A
+        // release record consumed by other bytes fails inside C::release and
+        // is likewise retried until the budget ends: it can only appear
+        // through evidence this wallet did not submit.
+        let mut released = None;
+        for _ in 0..EFFECT_ATTEMPTS {
+            if let Ok(Some(release)) = C::release(ctx, chain, &evidence).await {
+                released = Some(release);
+                break;
             }
-            settlement_rpc::ClaimResponse::Invalid => {
-                // Adjudicated against an immutable finalized batch, so this exact copy can
-                // never succeed. Local verification at bind makes this arm unreachable for
-                // cached copies, but it stays as the honest fallback: drop only the cache
-                // and keep the intent open. Evidence with a recorded release is never
-                // dropped: settlement already paid it and only the operator
-                // acknowledgement is outstanding.
-                ensure!(
-                    recorded.is_none(),
-                    "settlement rejected a {} claim it already released",
-                    C::NOUN
-                );
-                C::drop_evidence(&mut self.store, &evidence)
-                    .with_context(|| format!("drop rejected {} evidence", C::NOUN))?;
-                *C::pending_mut(self) = Some(PendingClaim {
-                    evidence: None,
-                    result: None,
-                });
-                anyhow::bail!("settlement rejected the cached {} evidence", C::NOUN)
-            }
+            ctx.sleep(POLL).await;
+        }
+        let Some(release) = released else {
+            // Not claimable yet, not included yet, or rejected without an
+            // effect: indistinguishable by design, so nothing is dropped and
+            // the exact claim retries later.
+            anyhow::bail!(
+                "the {} claim earned no certified release yet; the exact claim retries \
+                 (dry-run advice: {advice:?})",
+                C::NOUN
+            )
         };
         C::verify_release(self, &evidence, &release)?;
         if let Some(expected) = &recorded {
@@ -400,7 +400,7 @@ impl Agent {
                 result: Some(release.clone()),
             });
         }
-        C::acknowledge(network, operator, &evidence)
+        C::acknowledge(ctx, operator, &evidence)
             .await
             .with_context(|| format!("acknowledge claimed {}", C::NOUN))?;
         C::complete(&mut self.store, &evidence, &release)
@@ -409,13 +409,13 @@ impl Agent {
         Ok(release)
     }
 
-    pub(crate) async fn claim_withdrawal<E: Network>(
+    pub(crate) async fn claim_withdrawal<E: Env>(
         &mut self,
-        network: &E,
-        settlement: SocketAddr,
+        ctx: &E,
+        chain: &mut Client,
         operator: SocketAddr,
-    ) -> Result<settlement_rpc::WithdrawalResponse> {
-        self.drive_claim::<WithdrawalChannel, E>(network, settlement, operator)
+    ) -> Result<WithdrawalResponse> {
+        self.drive_claim::<WithdrawalChannel, E>(ctx, chain, operator)
             .await
     }
 
@@ -423,12 +423,12 @@ impl Agent {
     ///
     /// The receiver needs no out-of-band provenance: fetched evidence names its batch
     /// and is verified locally against that batch's own claim roots.
-    pub(crate) async fn claim_external_payout<E: Network>(
+    pub(crate) async fn claim_external_payout<E: Env>(
         &mut self,
-        network: &E,
-        settlement: SocketAddr,
+        ctx: &E,
+        chain: &mut Client,
         operator: SocketAddr,
-    ) -> Result<settlement_rpc::ExternalPayoutResponse> {
+    ) -> Result<ExternalPayoutResponse> {
         if self.pending_payout_claim.is_none() {
             self.store
                 .open_payout_claim()
@@ -438,7 +438,7 @@ impl Agent {
                 result: None,
             });
         }
-        self.drive_claim::<PayoutChannel, E>(network, settlement, operator)
+        self.drive_claim::<PayoutChannel, E>(ctx, chain, operator)
             .await
     }
 }

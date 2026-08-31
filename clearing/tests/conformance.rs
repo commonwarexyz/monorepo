@@ -20,6 +20,7 @@ use commonware_clearing::bajillion::{
         Entry, Payment, PaymentContext, PaymentWitness, ReceiptBody, SendBody, SignedReceipt,
         SignedSend, TxId,
     },
+    settlement::SettlementChain,
     state::{
         AccountChange, AccountRow, AccountState, ChangeGuard, ChangeValue, ChangeValueCore, Prefix,
         SettlementOutput, StateLeaf,
@@ -31,7 +32,7 @@ use commonware_clearing::bajillion::{
     },
 };
 use commonware_codec::conformance::CodecConformance;
-use commonware_cryptography::sha256::Digest as Sha256Digest;
+use commonware_cryptography::{Sha256, sha256::Digest as Sha256Digest};
 use commonware_cryptography_curve25519::signing::StrictVerifyingKey as VerifyingKey;
 
 commonware_conformance::conformance_tests! {
@@ -104,4 +105,5 @@ commonware_conformance::conformance_tests! {
     CodecConformance<WithdrawalClaim<Sha256Digest>> => 256,
     CodecConformance<ProofSlice<VerifyingKey, Sha256Digest>> => 256,
     CodecConformance<Close<VerifyingKey, Sha256Digest>> => 256,
+    CodecConformance<SettlementChain<Sha256, VerifyingKey>> => 256,
 }

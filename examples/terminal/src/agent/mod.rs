@@ -9,6 +9,6 @@ mod store;
 mod tests;
 mod wallet;
 
-pub(crate) use custody::{DepositOutcome, WithdrawalOutcome};
+pub(crate) use custody::WithdrawalOutcome;
 pub(crate) use pay::PaymentOutcome;
 pub(crate) use wallet::Agent;

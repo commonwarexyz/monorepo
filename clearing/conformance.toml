@@ -174,6 +174,10 @@ hash = "9a7959166c145beb5738f1dd5832b09c265aacf0c1cdddf49191ee21c0759c4e"
 n_cases = 1024
 hash = "91aa4af84dbe8724da8ac23573ad0d587cbb52f4484721e1f8d27b12321698dc"
 
+["conformance::CodecConformance<SettlementChain<Sha256,VerifyingKey>>"]
+n_cases = 256
+hash = "ba08bbf2bbb168bced5527826af965656c01a4192d983644f57000b7d633ff3b"
+
 ["conformance::CodecConformance<SettlementOutput>"]
 n_cases = 65536
 hash = "2d398eee206d7e4f9353ba1f57981b8f59c8c3cb5c321949e0d539af04b57a86"

@@ -256,6 +256,9 @@ debug = "line-tables-only"
 [profile.test.package.curve25519-dalek]
 opt-level = 3
 
+[profile.test.package.commonware-cryptography-curve25519]
+opt-level = 3
+
 [profile.test.package.aws-lc-rs]
 opt-level = 3
 

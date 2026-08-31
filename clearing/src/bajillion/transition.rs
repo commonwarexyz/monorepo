@@ -585,6 +585,58 @@ impl<P: PublicKey, D: Digest> EpochContext<P, D> {
     pub const fn assignment(&self) -> &Assignment<D> {
         &self.assignment
     }
+
+    /// Reassembles a context from parts retained by an earlier construction.
+    ///
+    /// No boundary validation or anchor recomputation happens here, so the
+    /// parts must come from an [`EpochContext`] that was constructed and
+    /// authenticated through [`Self::new`] (for example one persisted by the
+    /// settlement chain codec).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) const fn from_parts(
+        payment: PaymentContext<P, D>,
+        deployment: D,
+        deposit_root: VectorRoot<D>,
+        withdrawal_root: VectorRoot<D>,
+        predecessor_liability: u64,
+        admission_deadline: Deadline,
+        challenge_deadline: Deadline,
+        limits: CloseLimits,
+        assignment: Assignment<D>,
+    ) -> Self {
+        Self {
+            payment,
+            deployment,
+            deposit_root,
+            withdrawal_root,
+            predecessor_liability,
+            admission_deadline,
+            challenge_deadline,
+            limits,
+            assignment,
+        }
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<P, D> arbitrary::Arbitrary<'_> for EpochContext<P, D>
+where
+    P: PublicKey + for<'a> arbitrary::Arbitrary<'a>,
+    D: Digest + for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            payment: PaymentContext::new(u.arbitrary()?, u.arbitrary()?, u.arbitrary()?),
+            deployment: u.arbitrary()?,
+            deposit_root: u.arbitrary()?,
+            withdrawal_root: u.arbitrary()?,
+            predecessor_liability: u.arbitrary()?,
+            admission_deadline: u.arbitrary()?,
+            challenge_deadline: u.arbitrary()?,
+            limits: u.arbitrary()?,
+            assignment: u.arbitrary()?,
+        })
+    }
 }
 
 /// Chain-known epoch registration bound to one exact predecessor state root.
@@ -592,6 +644,20 @@ impl<P: PublicKey, D: Digest> EpochContext<P, D> {
 pub struct CloseContext<P: PublicKey, D: Digest> {
     epoch: EpochContext<P, D>,
     predecessor_root: VectorRoot<D>,
+}
+
+#[cfg(feature = "arbitrary")]
+impl<P, D> arbitrary::Arbitrary<'_> for CloseContext<P, D>
+where
+    P: PublicKey + for<'a> arbitrary::Arbitrary<'a>,
+    D: Digest + for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            epoch: u.arbitrary()?,
+            predecessor_root: u.arbitrary()?,
+        })
+    }
 }
 
 impl<P: PublicKey, D: Digest> CloseContext<P, D> {
@@ -648,6 +714,19 @@ impl<P: PublicKey, D: Digest> CloseContext<P, D> {
     /// Returns the authenticated committee and deterministic slice partition.
     pub const fn assignment(&self) -> &Assignment<D> {
         self.epoch.assignment()
+    }
+
+    /// Reassembles a bound context from parts retained by an earlier binding.
+    ///
+    /// See [`EpochContext::from_parts`] for the provenance requirement.
+    pub(crate) const fn from_parts(
+        epoch: EpochContext<P, D>,
+        predecessor_root: VectorRoot<D>,
+    ) -> Self {
+        Self {
+            epoch,
+            predecessor_root,
+        }
     }
 }
 

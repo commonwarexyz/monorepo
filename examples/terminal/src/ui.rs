@@ -1,28 +1,27 @@
 //! Ratatui presentation for one independently owned agent wallet.
 
 use crate::{
-    agent::{Agent, DepositOutcome, PaymentOutcome, WithdrawalOutcome},
+    agent::{Agent, PaymentOutcome, WithdrawalOutcome},
+    chain::{
+        client::{Chain, Client, EFFECT_ATTEMPTS, Env, POLL},
+        harness,
+        state::{FaultRecord, HardFaultReasonResponse, Record, StatusRecord, status_key},
+        tx::{AdmitRequest, ChallengeRequest, DepositRequest, RegisterEpochRequest, SettlementTx},
+    },
     operator::{
         DEFAULT_AMOUNT,
         rpc::{AcceptedBatchResponse, PollCloseResponse, StatusResponse as OperatorStatus},
     },
-    protocol::omitting_close,
-    rpc,
-    settlement::{
-        Settlement, SettlementSubmission, rpc as settlement_rpc,
-        rpc::StatusResponse as SettlementStatus,
-    },
+    protocol::{Protocol, deployment, omitting_boundary, omitting_close},
 };
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use commonware_clearing::bajillion::{
     boundary::{WithdrawalAction, WithdrawalBatch},
-    challenge::{Challenge, ChallengeKind},
-    payment::PaymentWitness,
+    challenge::ChallengeKind,
 };
-use commonware_codec::{DecodeExt as _, Encode as _};
 use commonware_cryptography::Sha256;
 use commonware_macros::select;
-use commonware_runtime::{Clock, Network};
+use commonware_runtime::{Clock as _, Runner as _, Supervisor as _, deterministic};
 use crossterm::{
     cursor::Show,
     event::{self, Event, KeyCode, KeyEventKind},
@@ -38,7 +37,12 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
 };
 use std::{
-    collections::VecDeque, io::Stdout, net::SocketAddr, num::NonZeroU64, thread, time::Duration,
+    collections::VecDeque,
+    io::Stdout,
+    net::SocketAddr,
+    num::{NonZeroU64, NonZeroUsize},
+    thread,
+    time::Duration,
 };
 
 const MAX_ACTIVITY: usize = 100;
@@ -100,7 +104,7 @@ struct UiState {
     staged: Vec<(usize, u64)>,
     balance: Option<u64>,
     operator: Option<OperatorStatus>,
-    settlement: Option<SettlementStatus>,
+    settlement: Option<StatusRecord>,
     pending_closes: VecDeque<u64>,
     activity: VecDeque<String>,
 }
@@ -132,17 +136,17 @@ impl UiState {
     }
 }
 
-pub(crate) async fn run<E: Clock + Network>(
+pub(crate) async fn run<E: Env>(
     network: &E,
     operator: SocketAddr,
-    settlement: SocketAddr,
+    mut chain: Client,
     mut agent: Agent,
 ) -> Result<()> {
     let mut terminal = TerminalSession::enter()?;
     let mut state = UiState::new();
     state.receiver = agent.default_receiver();
     loop {
-        refresh_bounded(network, operator, settlement, &mut agent, &mut state).await?;
+        refresh_bounded(network, operator, &mut chain, &mut agent, &mut state).await?;
         terminal
             .terminal
             .draw(|frame| render(frame, &agent, &state))
@@ -173,7 +177,7 @@ pub(crate) async fn run<E: Clock + Network>(
                 match agent
                     .pay(
                         network,
-                        settlement,
+                        &mut chain,
                         operator,
                         &[(state.receiver, state.amount)],
                     )
@@ -213,7 +217,7 @@ pub(crate) async fn run<E: Clock + Network>(
                     state.log("no staged entries; press a to stage the selected payment");
                 } else {
                     match agent
-                        .pay(network, settlement, operator, &state.staged)
+                        .pay(network, &mut chain, operator, &state.staged)
                         .await
                     {
                         Ok(PaymentOutcome::Accepted(payment)) => {
@@ -239,26 +243,21 @@ pub(crate) async fn run<E: Clock + Network>(
                 }
             }
             KeyCode::Char('h') => {
-                handle_hard_fault_recovery(network, settlement, &agent, &mut state).await;
+                handle_hard_fault_recovery(network, &mut chain, &agent, &mut state).await;
             }
             KeyCode::Char('r') => {
-                handle_pending_deposit_recovery(network, settlement, &agent, &mut state).await;
+                handle_pending_deposit_recovery(network, &mut chain, &agent, &mut state).await;
             }
-            KeyCode::Char('d') => match agent
-                .deposit(network, settlement, operator, state.amount)
-                .await
-            {
-                Ok(DepositOutcome::Applied { epoch, event }) => {
-                    let amount = event.amount;
-                    state.log(format!("epoch {epoch} deposit credited: {amount}"));
-                }
-                Ok(DepositOutcome::Recorded { event, error }) => {
-                    let amount = event.amount;
+            KeyCode::Char('d') => match agent.deposit(network, &mut chain, state.amount).await {
+                Ok(event) => {
                     state.log(format!(
-                        "settlement custody recorded for {amount}; operator credit unknown; retry uses the same deposit: {error:#}"
+                        "deposit custody certified for {}; the operator credits it from its own observation of the finalized record",
+                        event.amount
                     ));
                 }
-                Err(error) => state.log(format!("deposit not confirmed: {error:#}")),
+                Err(error) => state.log(format!(
+                    "deposit not confirmed; a staged deposit retries the same id: {error:#}"
+                )),
             },
             KeyCode::Char('w') | KeyCode::Char('f') => {
                 let action = if key.code == KeyCode::Char('f') {
@@ -268,7 +267,7 @@ pub(crate) async fn run<E: Clock + Network>(
                         NonZeroU64::new(state.amount).expect("UI amount is positive"),
                     )
                 };
-                match agent.withdraw(network, settlement, operator, action).await {
+                match agent.withdraw(network, &mut chain, operator, action).await {
                     Ok(WithdrawalOutcome::Applied { epoch, request }) => match request.body().action() {
                         WithdrawalAction::Amount(amount) => state.log(format!(
                             "epoch {epoch} withdrawal carried by operator: {amount}"
@@ -289,14 +288,16 @@ pub(crate) async fn run<E: Clock + Network>(
                     Err(error) => state.log(format!("withdrawal not confirmed: {error:#}")),
                 }
             }
-            KeyCode::Char('x') => match agent.escalate_withdrawal(network, settlement).await {
+            KeyCode::Char('x') => match agent.escalate_withdrawal(network, &mut chain).await {
                 Ok(request) => state.log(format!(
                     "withdrawal escalated to settlement through deadline {}; the next registered close must carry it verbatim; if the operator stalls, expiry becomes hard-fault recovery via h",
                     request.body().deadline()
                 )),
                 Err(error) => state.log(format!("withdrawal escalation rejected: {error:#}")),
             },
-            KeyCode::Char('c') => match agent.claim_withdrawal(network, settlement, operator).await
+            KeyCode::Char('c') => match agent
+                .claim_withdrawal(network, &mut chain, operator)
+                .await
             {
                 Ok(release) => state.log(format!(
                     "withdrawal claimed: {} to {}",
@@ -307,7 +308,7 @@ pub(crate) async fn run<E: Clock + Network>(
             },
             KeyCode::Char('e') => {
                 match agent
-                    .claim_external_payout(network, settlement, operator)
+                    .claim_external_payout(network, &mut chain, operator)
                     .await
                 {
                     Ok(payout) => state.log(format!(
@@ -337,13 +338,13 @@ pub(crate) async fn run<E: Clock + Network>(
     Ok(())
 }
 
-async fn handle_hard_fault_recovery<E: Network>(
-    network: &E,
-    settlement: SocketAddr,
+async fn handle_hard_fault_recovery<E: Env>(
+    ctx: &E,
+    chain: &mut Client,
     agent: &Agent,
     state: &mut UiState,
 ) {
-    match agent.recover_hard_fault(network, settlement).await {
+    match agent.recover_hard_fault(ctx, chain).await {
         Ok(release) => state.log(format!(
             "hard-fault recovery released {} (residual {})",
             release.released_custody, release.residual
@@ -352,13 +353,13 @@ async fn handle_hard_fault_recovery<E: Network>(
     }
 }
 
-async fn handle_pending_deposit_recovery<E: Network>(
-    network: &E,
-    settlement: SocketAddr,
+async fn handle_pending_deposit_recovery<E: Env>(
+    ctx: &E,
+    chain: &mut Client,
     agent: &Agent,
     state: &mut UiState,
 ) {
-    match agent.recover_pending_deposit(network, settlement).await {
+    match agent.recover_pending_deposit(ctx, chain).await {
         Ok(refund) => state.log(format!(
             "pending deposit refunded for {}: {}",
             agent.name(),
@@ -372,15 +373,15 @@ async fn handle_pending_deposit_recovery<E: Network>(
 ///
 /// On timeout the refresh future is dropped and every polled status degrades to its
 /// unavailable display. At most one refresh is ever in flight.
-async fn refresh_bounded<E: Clock + Network>(
+async fn refresh_bounded<E: Env>(
     network: &E,
     operator: SocketAddr,
-    settlement: SocketAddr,
+    chain: &mut Client,
     agent: &mut Agent,
     state: &mut UiState,
 ) -> Result<()> {
     let refreshed = select! {
-        result = refresh(network, operator, settlement, agent, state) => Some(result),
+        result = refresh(network, operator, chain, agent, state) => Some(result),
         _ = network.sleep(REFRESH_BUDGET) => None,
     };
     match refreshed {
@@ -394,10 +395,10 @@ async fn refresh_bounded<E: Clock + Network>(
     }
 }
 
-async fn refresh<E: Network>(
+async fn refresh<E: Env>(
     network: &E,
     operator: SocketAddr,
-    settlement: SocketAddr,
+    chain: &mut Client,
     agent: &mut Agent,
     state: &mut UiState,
 ) -> Result<()> {
@@ -427,17 +428,17 @@ async fn refresh<E: Network>(
         }
     }
     state.operator = agent.operator_status(network, operator).await.ok();
-    state.settlement = agent.settlement_status(network, settlement).await.ok();
+    state.settlement = chain.status(network).await.ok();
 
     // The verified balance poll also refreshes the wallet's frozen-root recovery opening.
-    state.balance = agent.balance(network, settlement, operator).await.ok();
+    state.balance = agent.balance(network, chain, operator).await.ok();
 
     // Receiver intake and its background assurance loop degrade silently like the rest of the
     // heartbeat: a held pair is reliance-grade only once durably persisted and settlement-anchored
     // here. Enforcement events are surfaced into the activity feed so the conviction arc is
     // visible in the running wallet.
-    let _ = agent.intake_incoming(network, settlement, operator).await;
-    if let Ok(summary) = agent.reconcile(network, settlement, operator).await {
+    let _ = agent.intake_incoming(network, chain, operator).await;
+    if let Ok(summary) = agent.reconcile(network, chain, operator).await {
         for epoch in summary.convicted {
             state.log(format!(
                 "epoch {epoch} omission convicted via HigherShardTip; the close is invalidated"
@@ -517,14 +518,14 @@ fn render(frame: &mut Frame<'_>, agent: &Agent, state: &UiState) {
             )
         },
     );
-    let settlement = state.settlement.map_or_else(
+    let settlement = state.settlement.as_ref().map_or_else(
         || "settlement unavailable".to_string(),
         |status| {
             format!(
-                "Settlement custody {} | claimable {} | time {} | state {}...{}",
-                status.custody_balance,
-                status.claimable_balance,
-                status.now,
+                "Settlement custody {} | claimable {} | height {} | state {}...{}",
+                status.custody,
+                status.claimable,
+                status.height,
                 status
                     .state_root
                     .digest
@@ -590,7 +591,7 @@ fn render(frame: &mut Frame<'_>, agent: &Agent, state: &UiState) {
     frame.render_widget(activity, sections[2]);
 
     let footer = Paragraph::new(
-        "The agent signs locally; the SQLite operator issues receipts; settlement owns custody and claims. q or Esc quits.",
+        "The agent signs locally; the SQLite operator issues receipts; the settlement chain owns custody and claims. q or Esc quits.",
     )
     .style(Style::default().fg(Color::DarkGray))
     .block(Block::default().borders(Borders::ALL));
@@ -607,24 +608,91 @@ fn accepted(outcome: PaymentOutcome) -> Result<AcceptedBatchResponse> {
     }
 }
 
-pub(crate) async fn scripted<E: Network>(
+/// Starts one asynchronous close and drives it to the operator's certified
+/// finalization, returning the closed epoch.
+async fn close_epoch<E: Env>(network: &E, operator: SocketAddr, agent: &mut Agent) -> Result<u64> {
+    let close = agent.start_close(network, operator).await?;
+    println!("epoch {} cut and closing asynchronously", close.epoch);
+    loop {
+        match agent.poll_close(network, operator, close.epoch).await? {
+            PollCloseResponse::NoEvent => thread::sleep(Duration::from_millis(10)),
+            PollCloseResponse::Finished(finished) => {
+                println!(
+                    "epoch {} finalized {} rows: dealings sealed and voted by the validator committee over the DA channel (prepare={}us deal={}us seal={}us)",
+                    finished.epoch,
+                    finished.rows,
+                    finished.prepare_micros,
+                    finished.deal_micros,
+                    finished.seal_micros
+                );
+                return Ok(close.epoch);
+            }
+            PollCloseResponse::Failed { epoch, error } => {
+                anyhow::bail!(
+                    "epoch {epoch} close failed: {}",
+                    String::from_utf8_lossy(&error)
+                );
+            }
+        }
+    }
+}
+
+/// Polls the verified balance until it reaches `expected`, the wallet's view
+/// of the operator observing and crediting a finalized deposit.
+async fn observed_balance<E: Env>(
     network: &E,
     operator: SocketAddr,
-    settlement: SocketAddr,
+    chain: &mut Client,
+    agent: &mut Agent,
+    expected: u64,
+) -> Result<u64> {
+    for _ in 0..EFFECT_ATTEMPTS {
+        if let Ok(balance) = agent.balance(network, chain, operator).await
+            && balance == expected
+        {
+            return Ok(balance);
+        }
+        network.sleep(POLL).await;
+    }
+    anyhow::bail!("the operator never credited the observed deposit")
+}
+
+pub(crate) async fn scripted<E: Env>(
+    network: &E,
+    operator: SocketAddr,
+    mut chain: Client,
     mut agent: Agent,
 ) -> Result<()> {
-    let (deposit_epoch, deposit) = match agent.deposit(network, settlement, operator, 10).await? {
-        DepositOutcome::Applied { epoch, event } => (epoch, event),
-        DepositOutcome::Recorded { event, error } => anyhow::bail!(
-            "settlement custody recorded for {}; operator credit unknown; retry uses the same deposit: {error:#}",
-            event.amount
-        ),
-    };
-    println!("epoch {} deposited {}", deposit_epoch, deposit.amount);
+    let mut start = None;
+    for _ in 0..EFFECT_ATTEMPTS {
+        if let Ok(balance) = agent.balance(network, &mut chain, operator).await {
+            start = Some(balance);
+            break;
+        }
+        network.sleep(POLL).await;
+    }
+    let start = start.context("read the verified starting balance")?;
+    let deposit = agent.deposit(network, &mut chain, 10).await?;
+    println!(
+        "deposited {}: chain custody proven by a certified read; no operator report",
+        deposit.amount
+    );
+
+    // The operator's follower observes the finalized custody record and
+    // stages the credit on its own, which the verified balance poll shows.
+    let credited = observed_balance(
+        network,
+        operator,
+        &mut chain,
+        &mut agent,
+        start + deposit.amount,
+    )
+    .await?;
+    println!("operator observed the deposit: verified balance {credited}");
     let withdrawal = match agent
         .withdraw(
             network,
-            settlement,
+            &mut chain,
             operator,
             WithdrawalAction::Amount(NonZeroU64::new(3).unwrap()),
         )
@@ -637,9 +705,9 @@ pub(crate) async fn scripted<E: Network>(
         ),
     };
     println!("epoch {} carried withdrawal 3", withdrawal);
-    let payment = accepted(agent.pay(network, settlement, operator, &[(1, 5)]).await?)?;
+    let payment = accepted(agent.pay(network, &mut chain, operator, &[(1, 5)]).await?)?;
     println!(
-        "epoch {} accepted payment #{}",
+        "epoch {} accepted payment #{}: the context matches a certified anchor read",
         payment.epoch, payment.sequence
     );
 
@@ -649,7 +717,7 @@ pub(crate) async fn scripted<E: Network>(
     let payer_account = agent.account();
     let batch = accepted(
         agent
-            .pay(network, settlement, operator, &[(2, 2), (3, 1)])
+            .pay(network, &mut chain, operator, &[(2, 2), (3, 1)])
             .await?,
     )?;
     println!(
@@ -663,7 +731,7 @@ pub(crate) async fn scripted<E: Network>(
         agent
             .pay(
                 network,
-                settlement,
+                &mut chain,
                 operator,
                 &[(agent.receiver_count() - 1, 2)],
             )
@@ -681,13 +749,13 @@ pub(crate) async fn scripted<E: Network>(
         "commonware-terminal-receiver-{}.sqlite",
         std::process::id()
     ));
-    let mut receiver = Agent::open(&receiver_database, 1)?;
+    let mut receiver = Agent::open_for(&receiver_database, 1, agent.operator())?;
     receiver
-        .intake_incoming(network, settlement, operator)
+        .intake_incoming(network, &mut chain, operator)
         .await?;
     let ledger = receiver.incoming();
     println!(
-        "receiver {} durably holds verified incoming {} across {} pair(s) before the close is cut",
+        "receiver {} durably holds verified incoming {} across {} pair(s), anchored to the chain-registered context by a certified read, before the close is cut",
         receiver.name(),
         ledger.total,
         ledger.count
@@ -700,45 +768,24 @@ pub(crate) async fn scripted<E: Network>(
         None => println!("receiver gate: no held evidence for the invoice, withholding service"),
     }
 
-    let close = agent.start_close(network, operator).await?;
-    println!("epoch {} cut and closing asynchronously", close.epoch);
-    loop {
-        match agent.poll_close(network, operator, close.epoch).await? {
-            PollCloseResponse::NoEvent => thread::sleep(Duration::from_millis(10)),
-            PollCloseResponse::Finished(finished) => {
-                println!(
-                    "epoch {} finalized {} rows in prepare={}us deal={}us seal={}us",
-                    finished.epoch,
-                    finished.rows,
-                    finished.prepare_micros,
-                    finished.deal_micros,
-                    finished.seal_micros
-                );
-                break;
-            }
-            PollCloseResponse::Failed { epoch, error } => {
-                anyhow::bail!(
-                    "epoch {epoch} close failed: {}",
-                    String::from_utf8_lossy(&error)
-                );
-            }
-        }
-    }
-    let successor = accepted(agent.pay(network, settlement, operator, &[(1, 1)]).await?)?;
-    println!(
-        "epoch {} accepted successor payment #{} after epoch {} finalized",
-        successor.epoch, successor.sequence, close.epoch
-    );
+    let closed = close_epoch(network, operator, &mut agent).await?;
     let release = agent
-        .claim_withdrawal(network, settlement, operator)
+        .claim_withdrawal(network, &mut chain, operator)
         .await?;
-    println!("claimed withdrawal {}", release.amount);
+    println!(
+        "claimed withdrawal {} against the certified release record",
+        release.amount
+    );
 
     // Receiver reconciliation after finalization: every finalized credit is proven backed by the
-    // committed close, so the earlier service release was evidence-backed.
-    let summary = receiver.reconcile(network, settlement, operator).await?;
+    // committed close, so the earlier service release was evidence-backed. It runs before the
+    // successor epoch closes: the operator's shard-tip reconstruction retains a finalized
+    // epoch's account-state versions only until a later finalization prunes them.
+    let summary = receiver.reconcile(network, &mut chain, operator).await?;
     for epoch in &summary.reconciled {
-        println!("receiver reconciled epoch {epoch}: every held credit is evidence-backed");
+        println!(
+            "receiver reconciled epoch {epoch} against the certified admitted roots: every held credit is evidence-backed"
+        );
     }
     let _ = std::fs::remove_file(&receiver_database);
     for suffix in ["-wal", "-shm"] {
@@ -747,11 +794,41 @@ pub(crate) async fn scripted<E: Network>(
         let _ = std::fs::remove_file(path);
     }
 
-    let mut external = Agent::new(4)?;
+    let mut external = Agent::new_for(4, agent.operator())?;
     let payout = external
-        .claim_external_payout(network, settlement, operator)
+        .claim_external_payout(network, &mut chain, operator)
         .await?;
-    println!("claimed external payout {}", payout.amount);
+    println!(
+        "claimed external payout {} against the certified release record",
+        payout.amount
+    );
+
+    let successor = accepted(agent.pay(network, &mut chain, operator, &[(1, 1)]).await?)?;
+    println!(
+        "epoch {} accepted successor payment #{} after epoch {} finalized",
+        successor.epoch, successor.sequence, closed
+    );
+
+    // The successor payment registered the next epoch's payment context, so
+    // close that epoch too, inside its admission runway: an activated context
+    // left registered would expire its admission deadline and permanently
+    // hard-fault the deployment.
+    close_epoch(network, operator, &mut agent).await?;
+
+    // Every close completes only on its certified finalization, which
+    // retires the registration slot, and nothing after the last close
+    // registers, so only validator serving lag separates this read from the
+    // proven absence.
+    let mut retired = false;
+    for _ in 0..100 {
+        if chain.registration(network).await?.is_none() {
+            retired = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    ensure!(retired, "a live registration outlived the walkthrough");
+    println!("certified read proves no live registration remains: the deployment idles safely");
 
     fraud_arc()?;
     Ok(())
@@ -760,103 +837,229 @@ pub(crate) async fn scripted<E: Network>(
 /// Demonstrates the enforcement thesis live: an operator that omits a receiver's credit is
 /// convicted by the receiver's held receipt, and the close is invalidated.
 ///
-/// The honest operator binary can never produce an inconsistent close, so the fraud is assembled
-/// here with the shared omitting-close machinery and adjudicated by a self-contained settlement
-/// through the real challenge dispatch. This mirrors what a receiver's reconciliation does on
-/// the wire: it holds an operator-signed receipt, resolves the committed tip that omits it, and
-/// files one `HigherShardTip` challenge that settlement proves.
+/// The honest operator binary can never produce an inconsistent close, so the fraud is
+/// assembled with the shared omitting-close machinery and adjudicated by a throwaway
+/// in-process single-validator chain: the fraudulent close is registered and admitted as
+/// real transactions, the receiver files one real `HigherShardTip` challenge transaction,
+/// and the proven verdict, the fault record, and the hard-faulted status are all read back
+/// certified through the light client. This mirrors what a receiver's reconciliation does
+/// on the wire against the live deployment.
 fn fraud_arc() -> Result<()> {
-    let fraud = omitting_close(&mut rand::rng())?;
-    let committed = fraud
-        .held_lookup
-        .resolve::<Sha256>(&fraud.result.roots.change, &fraud.receiver, 0)
-        .context("resolve the omitted committed tip")?
-        .map_or(0, |tip| tip.cumulative_credit);
     println!(
-        "fraud: the operator's admitted close commits cumulative credit {committed} for the omitted receiver, which holds an operator-signed receipt for {}",
-        fraud.held_credit
+        "fraud: this arc alone is a throwaway in-process single-validator chain with locally simulated close certification, while its deposit, registration, admission, challenge, and readbacks are real transactions and certified reads"
     );
 
-    let mut settlement = Settlement::new()?;
-    settlement.deposit(fraud.deposit.clone())?;
-    let deposits_root = fraud.deposits.root::<Sha256>()?;
-    settlement.register_epoch(
-        0,
-        400,
-        deposits_root,
-        deposits_root,
-        WithdrawalBatch::empty(),
-        &[],
-    )?;
-    settlement.admit_submission(SettlementSubmission::from(&fraud.result))?;
+    deterministic::Runner::default().start(|context| async move {
+        let address = SocketAddr::from(([127, 0, 0, 1], 9_900));
+        let control = harness::start(&context, address, "fraud").await;
+        let mut chain = Client::new(
+            control.identity(),
+            deployment(),
+            vec![address],
+            context.child("fraud_client"),
+        )?;
 
-    // The receiver files exactly the challenge its reconciliation would: its held pair against
-    // the committed lookup that omits it.
-    let challenge = Challenge::HigherShardTip {
-        payment: Box::new(PaymentWitness::from_payment(&fraud.held_pair)),
-        recipient: Box::new(fraud.held_lookup),
-    };
-    let batch_id = fraud.result.finalized.batch_id;
-    let now = settlement.observe_now();
-    let response = settlement_rpc::dispatch(
-        &mut settlement,
-        now,
-        rpc::Request {
-            method: settlement_rpc::METHOD_CHALLENGE,
-            body: settlement_rpc::ChallengeRequest {
-                batch_id,
-                evidence: challenge.encode(),
+        // Stand the fraudulent deployment up with real transactions: the
+        // bystander deposit, then the boundary-only registration whose
+        // deadlines and anchor the chain assigns at inclusion. Every
+        // submission completes on a certified read of its effect record.
+        let (deposit, deposits) = omitting_boundary()?;
+        let deposit_id = deposit.id;
+        chain
+            .deliver(
+                &context,
+                &SettlementTx::Deposit(DepositRequest {
+                    deployment: deployment(),
+                    event: deposit,
+                }),
+            )
+            .await?;
+        let mut recorded = false;
+        for _ in 0..EFFECT_ATTEMPTS {
+            if let Ok(Some(_)) = chain.deposit(&context, deposit_id).await {
+                recorded = true;
+                break;
             }
-            .encode(),
-        },
-    )
-    .context("adjudicate the fraud challenge")?;
-    let verdict =
-        settlement_rpc::ChallengeVerdict::decode(response).context("decode the fraud verdict")?;
-    anyhow::ensure!(
-        verdict == settlement_rpc::ChallengeVerdict::Proven(ChallengeKind::HigherShardTip),
-        "the fraud challenge did not prove"
-    );
-    println!("fraud: HigherShardTip proven; the omitting close is invalidated");
-    anyhow::ensure!(
-        settlement.status()?.hard_faulted,
-        "the proven challenge did not fault the deployment"
-    );
-    println!("fraud: settlement is hard-faulted, so the fraudulent operator is fenced");
-    Ok(())
+            context.sleep(POLL).await;
+        }
+        ensure!(recorded, "the fraud deposit earned no custody record");
+        let protocol = Protocol::new(NonZeroUsize::MIN)?;
+        let deposits_root = deposits.root::<Sha256>()?;
+        let withdrawals = WithdrawalBatch::empty();
+        let signature = protocol.sign_chain_registration(
+            0,
+            400,
+            &deposits_root,
+            &deposits_root,
+            &withdrawals,
+        );
+        let register = SettlementTx::RegisterEpoch(RegisterEpochRequest {
+            deployment: deployment(),
+            epoch: 0,
+            predecessor_liability: 400,
+            deposits_root,
+            staged_root: deposits_root,
+            withdrawals,
+            openings: Vec::new(),
+            signature,
+        });
+        chain.deliver(&context, &register).await?;
+
+        // The registration's effect is its certified record, and the chain
+        // assigned the deadlines at inclusion, so the fraudulent close is
+        // built only after that read-back reveals them: the same completion
+        // the honest operator performs.
+        let mut registered = None;
+        for _ in 0..EFFECT_ATTEMPTS {
+            if let Ok(Some(record)) = chain.registration(&context).await {
+                registered = Some(record);
+                break;
+            }
+            context.sleep(POLL).await;
+        }
+        let record = registered.context("the registered epoch left no certified record")?;
+        ensure!(record.epoch == 0, "the certified record is not epoch 0");
+        let fraud = omitting_close(
+            &mut rand::rng(),
+            record.admission_deadline,
+            record.challenge_deadline,
+        )?;
+        ensure!(
+            *fraud.result.payment_context.anchor() == record.anchor,
+            "the fraudulent close does not bind the assigned anchor"
+        );
+        let committed = fraud
+            .held_lookup
+            .resolve::<Sha256>(&fraud.result.roots.change, &fraud.receiver, 0)
+            .context("resolve the omitted committed tip")?
+            .map_or(0, |tip| tip.cumulative_credit);
+        println!(
+            "fraud: the operator's admitted close commits cumulative credit {committed} for the omitted receiver, which holds an operator-signed receipt for {}",
+            fraud.held_credit
+        );
+        let batch_id = fraud.result.finalized.batch_id;
+        let admit = SettlementTx::Admit(AdmitRequest::from(&fraud.result));
+        chain.deliver(&context, &admit).await?;
+        let mut admitted = false;
+        for _ in 0..EFFECT_ATTEMPTS {
+            if let Ok(Some(record)) = chain.admitted(&context, 0).await
+                && record.batch_id == batch_id
+            {
+                admitted = true;
+                break;
+            }
+            context.sleep(POLL).await;
+        }
+        ensure!(admitted, "the fraud admission earned no admitted record");
+
+        // The receiver files exactly the challenge its reconciliation would: its held pair
+        // against the committed lookup that omits it.
+        let challenge = commonware_clearing::bajillion::challenge::Challenge::HigherShardTip {
+            payment: Box::new(
+                commonware_clearing::bajillion::payment::PaymentWitness::from_payment(
+                    &fraud.held_pair,
+                ),
+            ),
+            recipient: Box::new(fraud.held_lookup),
+        };
+        let tx = SettlementTx::Challenge(ChallengeRequest {
+            batch_id,
+            evidence: commonware_codec::Encode::encode(&challenge),
+        });
+        chain.deliver(&context, &tx).await?;
+
+        // The proven verdict is read back certified: the challenge's effect
+        // is the fault record naming the exact batch and challenge kind, and
+        // the status shows the fence.
+        let mut faulted = None;
+        for _ in 0..EFFECT_ATTEMPTS {
+            if let Ok(Some(fault)) = chain.fault(&context).await {
+                faulted = Some(fault);
+                break;
+            }
+            context.sleep(POLL).await;
+        }
+        let fault = faulted.context("the proven challenge left no certified fault record")?;
+        let reason = match fault {
+            FaultRecord::Faulted(reason) => reason,
+            FaultRecord::Settling(settlement) => settlement.reason,
+        };
+        ensure!(
+            matches!(
+                reason,
+                HardFaultReasonResponse::ProvenChallenge { batch_id: proven, kind }
+                    if proven == batch_id && kind == ChallengeKind::HigherShardTip
+            ),
+            "the certified fault record does not name the proven challenge"
+        );
+        println!("fraud: HigherShardTip proven; the omitting close is invalidated");
+        let status = chain.status(&context).await?;
+        ensure!(
+            status.hard_faulted,
+            "the proven challenge did not fault the deployment"
+        );
+
+        // The harness state agrees with what the light client verified.
+        ensure!(
+            matches!(
+                control.record(status_key(&deployment())).await,
+                Some(Record::Status(status)) if status.hard_faulted
+            ),
+            "the harness status diverged from the certified read"
+        );
+        println!("fraud: settlement is hard-faulted, so the fraudulent operator is fenced");
+        Ok(())
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        REFRESH_BUDGET, UiState, handle_hard_fault_recovery, handle_pending_deposit_recovery,
-        refresh, refresh_bounded,
+        REFRESH_BUDGET, UiState, fraud_arc, handle_hard_fault_recovery,
+        handle_pending_deposit_recovery, refresh, refresh_bounded,
     };
     use crate::{
         agent::Agent,
+        chain::{client::Client, harness},
         operator::rpc as operator_rpc,
-        rpc,
-        settlement::{Settlement, rpc as settlement_rpc},
+        protocol::deployment,
     };
-    use bytes::Bytes;
-    use commonware_codec::Encode as _;
+    use commonware_clearing::bajillion::commitment::VectorRoot;
+    use commonware_cryptography::{Hasher as _, Sha256};
     use commonware_runtime::{
-        Clock as _, Listener as _, Network as _, Runner as _, Spawner as _, Supervisor as _,
-        deterministic,
+        Clock as _, Listener as _, Network as _, Runner as _, Supervisor as _, deterministic,
     };
     use std::net::SocketAddr;
+
+    /// The scripted walkthrough's fraud arc convicts through real chain
+    /// transactions and certified reads on the throwaway deployment.
+    #[test]
+    fn fraud_arc_convicts_on_a_certified_chain() {
+        fraud_arc().unwrap();
+    }
 
     #[test]
     fn hung_operator_refresh_degrades_within_its_budget() {
         deterministic::Runner::default().start(|context| async move {
             // Bound but never accepted: dials succeed and the RPC then hangs forever, the
-            // same stall shape as a SYN-dropping operator behind a connect timeout.
+            // same stall shape as a SYN-dropping operator behind a connect timeout. The
+            // chain's one query address hangs the same way.
             let operator_listener = context
                 .bind(SocketAddr::from(([127, 0, 0, 1], 1)))
                 .await
                 .unwrap();
             let operator_address = operator_listener.local_addr().unwrap();
-            let settlement_address = SocketAddr::from(([127, 0, 0, 1], 2));
+            let chain_listener = context
+                .bind(SocketAddr::from(([127, 0, 0, 1], 2)))
+                .await
+                .unwrap();
+            let mut chain = Client::new(
+                &harness::identity(&mut context.child("identity_rng")),
+                crate::protocol::deployment(),
+                vec![chain_listener.local_addr().unwrap()],
+                context.child("client_rng"),
+            )
+            .unwrap();
 
             let mut agent = Agent::new(0).unwrap();
             let mut state = UiState::new();
@@ -869,16 +1072,25 @@ mod tests {
                 close_in_progress: false,
                 faulted: false,
             });
-            state.settlement = Some(settlement_rpc::StatusResponse::from(
-                Settlement::new().unwrap().status().unwrap(),
-            ));
+            state.settlement = Some(crate::chain::state::StatusRecord {
+                height: 1,
+                timestamp: 1,
+                deployment: deployment(),
+                state_root: VectorRoot {
+                    digest: Sha256::hash(&[b"stale-display-root"]),
+                },
+                last_finalized: None,
+                custody: 400,
+                claimable: 0,
+                hard_faulted: false,
+            });
             state.balance = Some(7);
 
             let started = context.current();
             refresh_bounded(
                 &context,
                 operator_address,
-                settlement_address,
+                &mut chain,
                 &mut agent,
                 &mut state,
             )
@@ -891,45 +1103,22 @@ mod tests {
             assert!(state.settlement.is_none());
             assert!(state.balance.is_none());
             drop(operator_listener);
+            drop(chain_listener);
         });
     }
 
     #[test]
     fn unavailable_operator_keeps_settlement_visible_and_recovery_reachable() {
         deterministic::Runner::default().start(|context| async move {
-            let mut settlement = Settlement::new().unwrap();
-            let expected = settlement_rpc::StatusResponse::from(settlement.status().unwrap());
-            let mut listener = context
-                .bind(SocketAddr::from(([127, 0, 0, 1], 2)))
-                .await
-                .unwrap();
-            let settlement_address = listener.local_addr().unwrap();
-            let server = context.child("settlement").spawn(move |_| async move {
-                for expected_method in [
-                    settlement_rpc::METHOD_STATUS,
-                    settlement_rpc::METHOD_BEGIN_HARD_FAULT_SETTLEMENT,
-                    settlement_rpc::METHOD_CLAIM_PENDING_DEPOSIT,
-                ] {
-                    let (_, mut sink, mut stream) = listener.accept().await.unwrap();
-                    let request = rpc::recv_request(&mut stream).await.unwrap();
-                    assert_eq!(request.method, expected_method);
-                    let response = match expected_method {
-                        settlement_rpc::METHOD_STATUS => rpc::Response::Success {
-                            body: expected.encode(),
-                        },
-                        settlement_rpc::METHOD_BEGIN_HARD_FAULT_SETTLEMENT => {
-                            rpc::Response::Error {
-                                error: Bytes::from_static(b"recovery key reached settlement"),
-                            }
-                        }
-                        settlement_rpc::METHOD_CLAIM_PENDING_DEPOSIT => rpc::Response::Error {
-                            error: Bytes::from_static(b"refund key reached settlement"),
-                        },
-                        _ => unreachable!(),
-                    };
-                    rpc::send_response(&mut sink, &response).await.unwrap();
-                }
-            });
+            let control =
+                harness::start(&context, SocketAddr::from(([127, 0, 0, 1], 2)), "ui").await;
+            let mut chain = Client::new(
+                control.identity(),
+                crate::protocol::deployment(),
+                vec![SocketAddr::from(([127, 0, 0, 1], 2))],
+                context.child("client_rng"),
+            )
+            .unwrap();
 
             let operator_address = SocketAddr::from(([127, 0, 0, 1], 1));
             let mut agent = Agent::new(0).unwrap();
@@ -939,7 +1128,7 @@ mod tests {
             refresh(
                 &context,
                 operator_address,
-                settlement_address,
+                &mut chain,
                 &mut agent,
                 &mut state,
             )
@@ -952,25 +1141,31 @@ mod tests {
                 state.pending_closes.iter().copied().collect::<Vec<_>>(),
                 [7]
             );
-            assert_eq!(state.settlement.unwrap(), expected);
 
-            handle_hard_fault_recovery(&context, settlement_address, &agent, &mut state).await;
+            // The certified settlement status stays visible with the operator
+            // dead, and the recovery keys still reach the chain: an unfaulted
+            // deployment rejects both with no effect, so the flows time out
+            // on the missing effect record and surface the advisory dry-run
+            // diagnosis.
+            let settlement = state.settlement.clone().unwrap();
+            assert_eq!(settlement.deployment, deployment());
+            assert!(!settlement.hard_faulted);
+            assert_eq!(settlement.custody, 400);
+
+            handle_hard_fault_recovery(&context, &mut chain, &agent, &mut state).await;
+            let logged = state.activity.back().unwrap().clone();
             assert!(
-                state
-                    .activity
-                    .back()
-                    .unwrap()
-                    .contains("recovery key reached settlement")
+                logged.contains("terminal settlement never certifiably began")
+                    && logged.contains("Doomed(FaultUnavailable)"),
+                "{logged}"
             );
-            handle_pending_deposit_recovery(&context, settlement_address, &agent, &mut state).await;
+            handle_pending_deposit_recovery(&context, &mut chain, &agent, &mut state).await;
+            let logged = state.activity.back().unwrap().clone();
             assert!(
-                state
-                    .activity
-                    .back()
-                    .unwrap()
-                    .contains("refund key reached settlement")
+                logged.contains("the refund claim earned no certified release")
+                    && logged.contains("Doomed(FaultUnavailable)"),
+                "{logged}"
             );
-            server.await.unwrap();
         });
     }
 }

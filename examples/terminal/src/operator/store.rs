@@ -34,7 +34,7 @@ use std::{
 };
 use thiserror::Error;
 
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 9;
 /// Bounds one page of incoming pairs served to a receiver. Each stored row is one linked
 /// [`Payment`] at most [`MAX_PAYMENT_BYTES`], so this page stays well under the RPC body limit.
 pub(crate) const MAX_INCOMING_PAGE: usize = 128;
@@ -200,6 +200,10 @@ pub(crate) struct EpochData {
     /// belongs to the staged set of every epoch from its origin through its landing.
     pub(crate) carried: Vec<DepositEvent>,
     pub(crate) withdrawals: Vec<StoredWithdrawal>,
+    /// Chain-assigned deadlines, once adopted from the epoch's certified
+    /// registration record. Durable because recovery must rebuild the exact
+    /// registered context offline to validate the epoch's payment log.
+    pub(crate) deadlines: Option<(u64, u64)>,
 }
 
 pub(crate) struct StoredWithdrawal {
@@ -288,6 +292,14 @@ pub(crate) struct StagedDeposit {
     pub(crate) id: Digest,
     pub(crate) account: Key,
     pub(crate) amount: u64,
+}
+
+/// One chain-confirmed deposit event awaiting staging: the configured
+/// identity it credits and the boundary context its staging installs.
+pub(crate) struct Staging {
+    pub(crate) identity: AccountIdentity,
+    pub(crate) event: DepositEvent,
+    pub(crate) replacement: EpochPaymentContext,
 }
 
 pub(crate) struct StagedWithdrawal {
@@ -513,6 +525,14 @@ impl Store {
              );
              CREATE INDEX IF NOT EXISTS withdrawals_pending_close_epoch
                  ON withdrawals(epoch, account) WHERE applied_amount IS NULL;
+
+             CREATE TABLE IF NOT EXISTS registrations (
+                 epoch INTEGER PRIMARY KEY CHECK (epoch >= 0),
+                 admission_deadline INTEGER NOT NULL CHECK (admission_deadline >= 0),
+                 challenge_deadline INTEGER NOT NULL CHECK (
+                     challenge_deadline > admission_deadline
+                 )
+             );
 
              CREATE TABLE IF NOT EXISTS close_jobs (
                  epoch INTEGER PRIMARY KEY CHECK (epoch >= 0),
@@ -870,6 +890,79 @@ impl Store {
         })
     }
 
+    /// Returns the chain-assigned deadlines adopted for `epoch`.
+    pub(crate) fn chain_deadlines(&self, epoch: u64) -> Result<Option<(u64, u64)>> {
+        let deadlines = self
+            .connection
+            .query_row(
+                "SELECT admission_deadline, challenge_deadline
+                 FROM registrations WHERE epoch = ?1",
+                [sql_u64(epoch, "epoch")?],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()?;
+        Ok(match deadlines {
+            Some((admission, challenge)) => Some((
+                from_sql_u64(admission, "admission deadline")?,
+                from_sql_u64(challenge, "challenge deadline")?,
+            )),
+            None => None,
+        })
+    }
+
+    /// Adopts the chain-assigned deadlines for the live epoch, moving the
+    /// stored payment context from `expected` to `replacement` in the same
+    /// transaction. Deadlines may only move before the epoch's first receipt:
+    /// every accepted send binds the registered context, and the anchor
+    /// commits the deadlines.
+    pub(crate) fn adopt_deadlines(
+        &mut self,
+        epoch: u64,
+        expected: &EpochPaymentContext,
+        replacement: &EpochPaymentContext,
+        admission_deadline: u64,
+        challenge_deadline: u64,
+    ) -> Result<()> {
+        mutate(&mut self.connection, "chain registration", |transaction| {
+            ensure!(
+                metadata_epoch(transaction)? == epoch,
+                "chain deadlines target another epoch"
+            );
+            if let Some(stored) = metadata_payment_context(transaction)? {
+                ensure!(
+                    stored == *expected,
+                    "stored payment context differs from the live registration"
+                );
+            }
+            let epoch_sql = sql_u64(epoch, "epoch")?;
+            let payments: i64 = transaction.query_row(
+                "SELECT count(*) FROM payments WHERE epoch = ?1",
+                [epoch_sql],
+                |row| row.get(0),
+            )?;
+            ensure!(
+                payments == 0,
+                "chain deadlines cannot move under an epoch with receipts"
+            );
+            transaction.execute(
+                "INSERT INTO registrations(epoch, admission_deadline, challenge_deadline)
+                 VALUES(?1, ?2, ?3)
+                 ON CONFLICT(epoch) DO UPDATE
+                 SET admission_deadline = ?2, challenge_deadline = ?3",
+                params![
+                    epoch_sql,
+                    sql_u64(admission_deadline, "admission deadline")?,
+                    sql_u64(challenge_deadline, "challenge deadline")?,
+                ],
+            )?;
+            transaction.execute(
+                "UPDATE operator_meta SET payment_context = ?1 WHERE singleton = 1",
+                [replacement.encode().as_ref()],
+            )?;
+            Ok(())
+        })
+    }
+
     pub(crate) fn closing_context(&self, epoch: u64) -> Result<EpochPaymentContext> {
         let epoch = sql_u64(epoch, "epoch")?;
         let encoded: Vec<u8> = self.connection.query_row(
@@ -1043,6 +1136,21 @@ impl Store {
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        let deadlines = connection
+            .query_row(
+                "SELECT admission_deadline, challenge_deadline
+                 FROM registrations WHERE epoch = ?1",
+                [epoch_sql],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()?;
+        let deadlines = match deadlines {
+            Some((admission, challenge)) => Some((
+                from_sql_u64(admission, "admission deadline")?,
+                from_sql_u64(challenge, "challenge deadline")?,
+            )),
+            None => None,
+        };
         Ok(EpochData {
             epoch,
             accounts,
@@ -1051,6 +1159,7 @@ impl Store {
             deposits,
             carried,
             withdrawals,
+            deadlines,
         })
     }
 
@@ -1246,184 +1355,40 @@ impl Store {
         Self::load_epoch(&self.connection, epoch)
     }
 
-    pub(crate) fn stage_deposit(
+    /// Stages one finalized block's chain-confirmed deposit events in one
+    /// immediate transaction: either every credit lands together with the
+    /// boundary context it chains to, or none do and the block is
+    /// re-observed. `expected` is the live context the first staging moves
+    /// from, and each event's replacement is the next event's expectation.
+    pub(crate) fn stage_deposits(
         &mut self,
-        identity: &AccountIdentity,
-        event: &DepositEvent,
         expected: &EpochPaymentContext,
-        replacement: &EpochPaymentContext,
-    ) -> Result<StagedDeposit> {
+        batch: &[Staging],
+    ) -> Result<Vec<StagedDeposit>> {
         #[cfg(test)]
         let fail_commit = std::mem::take(&mut self.fail_deposit_commit);
-        ensure!(event.amount > 0, "deposit amount must be positive");
-        ensure!(
-            event.account == identity.key,
-            "deposit account does not match its identity"
-        );
-        ensure!(
-            expected.epoch() == replacement.epoch()
-                && expected.operator() == replacement.operator(),
-            "deposit context changed immutable epoch identity"
-        );
-        let amount = event.amount;
-        let amount_sql = sql_u64(amount, "deposit amount")?;
+        let mut context = expected;
+        for staging in batch {
+            ensure!(staging.event.amount > 0, "deposit amount must be positive");
+            ensure!(
+                staging.event.account == staging.identity.key,
+                "deposit account does not match its identity"
+            );
+            ensure!(
+                context.epoch() == staging.replacement.epoch()
+                    && context.operator() == staging.replacement.operator(),
+                "deposit context changed immutable epoch identity"
+            );
+            context = &staging.replacement;
+        }
         let staged = mutate(&mut self.connection, "deposit", |transaction| {
-            let epoch = metadata_epoch(transaction)?;
-            ensure!(epoch == expected.epoch(), "deposit context is stale");
-            ensure!(
-                metadata_payment_context(transaction)?.as_ref() == Some(expected),
-                "deposit anchor is stale"
-            );
-            let deposit_events = metadata_deposit_events(transaction)?;
-            ensure!(
-                deposit_events < MAX_DEPOSIT_EVENTS,
-                "deposit event capacity is exhausted"
-            );
-            let payment_count: i64 = transaction.query_row(
-                "SELECT count(*) FROM payments WHERE epoch = ?1",
-                [sql_u64(epoch, "epoch")?],
-                |row| row.get(0),
-            )?;
-            ensure!(
-                payment_count == 0,
-                "deposits are frozen after the first payment in an epoch"
-            );
-            let key = identity.key.clone();
-            let staged = staged_account_deposits(transaction, epoch, &key)?;
-            let aggregate = checked_sql_add(
-                checked_sql_add(
-                    staged.included_total,
-                    staged.parked_total,
-                    "account deposit total",
-                )?,
-                amount,
-                "account deposit total",
-            )?;
-
-            // The chain's boundary rule decides where this event lands: an aggregate
-            // exactly offset by the account's staged withdrawal defers whole to the
-            // successor epoch, and a grown aggregate that no longer offsets returns.
-            // Storage stays normalized so an epoch's rows and account state carry exactly
-            // its boundary-included deposits.
-            let defers = deposit_defers(transaction, epoch, &key, aggregate)?;
-            let successor = epoch.checked_add(1).context("epoch overflow")?;
-            let account = effective_account(transaction, epoch, &key)?;
-            let (landing_epoch, account, live_liability, deposit_events) = if defers {
-                // Parking preserves a row's origin so every epoch of its staged history
-                // stays addressable, and a carried-in row parks onward like a fresh one.
-                let parked = transaction.execute(
-                    "UPDATE deposits
-                     SET epoch = ?1, carried_from = COALESCE(carried_from, ?2)
-                     WHERE account = ?3 AND epoch = ?2",
-                    params![
-                        sql_u64(successor, "epoch")?,
-                        sql_u64(epoch, "epoch")?,
-                        key.as_ref(),
-                    ],
-                )?;
-                ensure!(
-                    parked == staged.included_events,
-                    "staged deposit rows changed during deferral"
-                );
-                let mut account = account.context("deferring account is not in the live state")?;
-                account.current.balance = account
-                    .current
-                    .balance
-                    .checked_sub(staged.included_total)
-                    .context("deferred aggregate exceeds the live balance")?;
-                let live_liability = metadata_live_liability(transaction)?
-                    .checked_sub(staged.included_total)
-                    .context("deferred aggregate exceeds live liability")?;
-                let deposit_events = deposit_events
-                    .checked_sub(staged.included_events)
-                    .context("deferred deposit event count underflow")?;
-                (successor, account, live_liability, deposit_events)
-            } else {
-                let returned = if staged.parked_total > 0 {
-                    // The grown aggregate no longer offsets the withdrawal exactly, so
-                    // the parked rows return to this epoch's boundary with their credit.
-                    // A row this epoch first staged loses its mark, and a carried-in row
-                    // keeps its origin.
-                    let unparked = transaction.execute(
-                        "UPDATE deposits
-                         SET epoch = ?1,
-                             carried_from = CASE
-                                 WHEN carried_from = ?1 THEN NULL ELSE carried_from
-                             END
-                         WHERE account = ?2 AND carried_from <= ?1 AND epoch > ?1",
-                        params![sql_u64(epoch, "epoch")?, key.as_ref()],
-                    )?;
-                    ensure!(
-                        unparked == staged.parked_events,
-                        "parked deposit rows changed during return"
-                    );
-                    staged.parked_total
-                } else {
-                    0
-                };
-                let credit = checked_sql_add(returned, amount, "deposit credit")?;
-                let account = if let Some(mut account) = account {
-                    account.current.balance = checked_sql_add(
-                        account.current.balance,
-                        credit,
-                        "deposit account balance",
-                    )?;
-                    account
-                } else {
-                    StoredAccount {
-                        name: identity.name.to_string(),
-                        key: key.clone(),
-                        predecessor: AccountState::default(),
-                        current: AccountState {
-                            balance: credit,
-                            active: true,
-                            ..AccountState::default()
-                        },
-                    }
-                };
-                let live_liability = checked_sql_add(
-                    metadata_live_liability(transaction)?,
-                    credit,
-                    "live liability",
-                )?;
-                let deposit_events = deposit_events
-                    .checked_add(staged.parked_events)
-                    .and_then(|count| count.checked_add(1))
-                    .context("deposit event count overflow")?;
-                ensure!(
-                    deposit_events <= MAX_DEPOSIT_EVENTS,
-                    "deposit event capacity is exhausted"
-                );
-                (epoch, account, live_liability, deposit_events)
-            };
-            transaction.execute(
-                "INSERT INTO deposits(epoch, event_id, account, amount, carried_from)
-             VALUES(?1, ?2, ?3, ?4, ?5)",
-                params![
-                    sql_u64(landing_epoch, "epoch")?,
-                    event.id.as_ref(),
-                    key.as_ref(),
-                    amount_sql,
-                    defers.then(|| sql_u64(epoch, "epoch")).transpose()?,
-                ],
-            )?;
-            upsert_account_state(transaction, epoch, &account)?;
-            transaction.execute(
-                "UPDATE operator_meta
-             SET payment_context = ?1, live_liability = ?2, deposit_events = ?3
-             WHERE singleton = 1",
-                params![
-                    replacement.encode().as_ref(),
-                    live_liability.to_be_bytes().as_slice(),
-                    sql_usize(deposit_events, "deposit event count")?,
-                ],
-            )?;
-            Ok(StagedDeposit {
-                epoch: landing_epoch,
-                id: event.id,
-                account: event.account.clone(),
-                amount,
-            })
+            let mut context = expected;
+            let mut staged = Vec::with_capacity(batch.len());
+            for staging in batch {
+                staged.push(stage_event(transaction, staging, context)?);
+                context = &staging.replacement;
+            }
+            Ok(staged)
         })?;
         #[cfg(test)]
         if fail_commit {
@@ -2272,16 +2237,6 @@ impl Store {
         )))
     }
 
-    #[cfg(test)]
-    pub(crate) fn settlement_roots(&self, epoch: u64) -> Result<RootBundle<Digest>> {
-        let encoded: Vec<u8> = self.connection.query_row(
-            "SELECT length(roots), roots FROM settlements WHERE epoch = ?1",
-            [sql_u64(epoch, "epoch")?],
-            |row| read_fixed_blob(row, 0, 1, RootBundle::<Digest>::SIZE, "settlement roots"),
-        )?;
-        RootBundle::decode(encoded.as_slice()).context("decode settlement roots")
-    }
-
     pub(crate) fn next_closing_epoch(&self) -> Result<Option<u64>> {
         self.connection
             .query_row(
@@ -2916,6 +2871,171 @@ fn deposit_defers(
     )
 }
 
+/// Stages one chain-confirmed deposit event inside an open transaction: the
+/// per-event step of [`Store::stage_deposits`].
+fn stage_event(
+    transaction: &Transaction<'_>,
+    staging: &Staging,
+    expected: &EpochPaymentContext,
+) -> Result<StagedDeposit> {
+    let event = &staging.event;
+    let amount = event.amount;
+    let amount_sql = sql_u64(amount, "deposit amount")?;
+    let epoch = metadata_epoch(transaction)?;
+    ensure!(epoch == expected.epoch(), "deposit context is stale");
+    ensure!(
+        metadata_payment_context(transaction)?.as_ref() == Some(expected),
+        "deposit anchor is stale"
+    );
+    let deposit_events = metadata_deposit_events(transaction)?;
+    ensure!(
+        deposit_events < MAX_DEPOSIT_EVENTS,
+        "deposit event capacity is exhausted"
+    );
+    let payment_count: i64 = transaction.query_row(
+        "SELECT count(*) FROM payments WHERE epoch = ?1",
+        [sql_u64(epoch, "epoch")?],
+        |row| row.get(0),
+    )?;
+    ensure!(
+        payment_count == 0,
+        "deposits are frozen after the first payment in an epoch"
+    );
+    let key = staging.identity.key.clone();
+    let staged = staged_account_deposits(transaction, epoch, &key)?;
+    let aggregate = checked_sql_add(
+        checked_sql_add(
+            staged.included_total,
+            staged.parked_total,
+            "account deposit total",
+        )?,
+        amount,
+        "account deposit total",
+    )?;
+
+    // The chain's boundary rule decides where this event lands: an aggregate
+    // exactly offset by the account's staged withdrawal defers whole to the
+    // successor epoch, and a grown aggregate that no longer offsets returns.
+    // Storage stays normalized so an epoch's rows and account state carry exactly
+    // its boundary-included deposits.
+    let defers = deposit_defers(transaction, epoch, &key, aggregate)?;
+    let successor = epoch.checked_add(1).context("epoch overflow")?;
+    let account = effective_account(transaction, epoch, &key)?;
+    let (landing_epoch, account, live_liability, deposit_events) = if defers {
+        // Parking preserves a row's origin so every epoch of its staged history
+        // stays addressable, and a carried-in row parks onward like a fresh one.
+        let parked = transaction.execute(
+            "UPDATE deposits
+             SET epoch = ?1, carried_from = COALESCE(carried_from, ?2)
+             WHERE account = ?3 AND epoch = ?2",
+            params![
+                sql_u64(successor, "epoch")?,
+                sql_u64(epoch, "epoch")?,
+                key.as_ref(),
+            ],
+        )?;
+        ensure!(
+            parked == staged.included_events,
+            "staged deposit rows changed during deferral"
+        );
+        let mut account = account.context("deferring account is not in the live state")?;
+        account.current.balance = account
+            .current
+            .balance
+            .checked_sub(staged.included_total)
+            .context("deferred aggregate exceeds the live balance")?;
+        let live_liability = metadata_live_liability(transaction)?
+            .checked_sub(staged.included_total)
+            .context("deferred aggregate exceeds live liability")?;
+        let deposit_events = deposit_events
+            .checked_sub(staged.included_events)
+            .context("deferred deposit event count underflow")?;
+        (successor, account, live_liability, deposit_events)
+    } else {
+        let returned = if staged.parked_total > 0 {
+            // The grown aggregate no longer offsets the withdrawal exactly, so
+            // the parked rows return to this epoch's boundary with their credit.
+            // A row this epoch first staged loses its mark, and a carried-in row
+            // keeps its origin.
+            let unparked = transaction.execute(
+                "UPDATE deposits
+                 SET epoch = ?1,
+                     carried_from = CASE
+                         WHEN carried_from = ?1 THEN NULL ELSE carried_from
+                     END
+                 WHERE account = ?2 AND carried_from <= ?1 AND epoch > ?1",
+                params![sql_u64(epoch, "epoch")?, key.as_ref()],
+            )?;
+            ensure!(
+                unparked == staged.parked_events,
+                "parked deposit rows changed during return"
+            );
+            staged.parked_total
+        } else {
+            0
+        };
+        let credit = checked_sql_add(returned, amount, "deposit credit")?;
+        let account = if let Some(mut account) = account {
+            account.current.balance =
+                checked_sql_add(account.current.balance, credit, "deposit account balance")?;
+            account
+        } else {
+            StoredAccount {
+                name: staging.identity.name.to_string(),
+                key: key.clone(),
+                predecessor: AccountState::default(),
+                current: AccountState {
+                    balance: credit,
+                    active: true,
+                    ..AccountState::default()
+                },
+            }
+        };
+        let live_liability = checked_sql_add(
+            metadata_live_liability(transaction)?,
+            credit,
+            "live liability",
+        )?;
+        let deposit_events = deposit_events
+            .checked_add(staged.parked_events)
+            .and_then(|count| count.checked_add(1))
+            .context("deposit event count overflow")?;
+        ensure!(
+            deposit_events <= MAX_DEPOSIT_EVENTS,
+            "deposit event capacity is exhausted"
+        );
+        (epoch, account, live_liability, deposit_events)
+    };
+    transaction.execute(
+        "INSERT INTO deposits(epoch, event_id, account, amount, carried_from)
+     VALUES(?1, ?2, ?3, ?4, ?5)",
+        params![
+            sql_u64(landing_epoch, "epoch")?,
+            event.id.as_ref(),
+            key.as_ref(),
+            amount_sql,
+            defers.then(|| sql_u64(epoch, "epoch")).transpose()?,
+        ],
+    )?;
+    upsert_account_state(transaction, epoch, &account)?;
+    transaction.execute(
+        "UPDATE operator_meta
+     SET payment_context = ?1, live_liability = ?2, deposit_events = ?3
+     WHERE singleton = 1",
+        params![
+            staging.replacement.encode().as_ref(),
+            live_liability.to_be_bytes().as_slice(),
+            sql_usize(deposit_events, "deposit event count")?,
+        ],
+    )?;
+    Ok(StagedDeposit {
+        epoch: landing_epoch,
+        id: event.id,
+        account: event.account.clone(),
+        amount,
+    })
+}
+
 fn validate_applied_withdrawal(
     request: &SignedWithdrawal<Key, Digest>,
     applied_amount: Option<i64>,
@@ -3186,7 +3306,7 @@ mod tests {
         }
     }
 
-    fn rejected_deposit(result: Result<StagedDeposit>) -> anyhow::Error {
+    fn rejected_deposit(result: Result<Vec<StagedDeposit>>) -> anyhow::Error {
         match result {
             Ok(_) => panic!("deposit was staged"),
             Err(error) => error,
@@ -3440,8 +3560,14 @@ mod tests {
         };
         let changes = store.total_changes();
 
-        let error =
-            rejected_deposit(store.stage_deposit(identity, &event, &expected, &replacement));
+        let error = rejected_deposit(store.stage_deposits(
+            &expected,
+            &[Staging {
+                identity: identity.clone(),
+                event: event.clone(),
+                replacement,
+            }],
+        ));
         assert!(format!("{error:#}").contains("deposit account balance"));
         assert_eq!(store.total_changes(), changes);
         assert!(store.staged_deposit(&event.id).unwrap().is_none());
@@ -3479,8 +3605,14 @@ mod tests {
         };
         let changes = store.total_changes();
 
-        let error =
-            rejected_deposit(store.stage_deposit(identity, &event, &expected, &replacement));
+        let error = rejected_deposit(store.stage_deposits(
+            &expected,
+            &[Staging {
+                identity: identity.clone(),
+                event: event.clone(),
+                replacement,
+            }],
+        ));
         assert!(format!("{error:#}").contains("live liability"));
         assert_eq!(store.total_changes(), changes);
         assert!(store.staged_deposit(&event.id).unwrap().is_none());

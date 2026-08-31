@@ -6,42 +6,51 @@
 )]
 
 mod agent;
+mod chain;
 mod operator;
 mod protocol;
 mod rpc;
 mod service;
-mod settlement;
 mod store;
 mod ui;
 
 use anyhow::Result;
 use std::{net::SocketAddr, num::NonZeroUsize, path::PathBuf};
 
-/// Runs the SQLite-backed settlement role.
+/// Entry points for the settlement chain binary.
 #[doc(hidden)]
-pub fn run_settlement(bind: SocketAddr, database: PathBuf) -> Result<()> {
-    service::run_settlement(bind, database)
+pub mod chain_main {
+    pub use crate::chain::{
+        setup::{Setup, run as run_setup},
+        validator::{Validator, run as run_validator},
+    };
 }
 
-/// Runs the SQLite-backed operator role.
+/// Runs the SQLite-backed operator role as a follower node of the chain.
 #[doc(hidden)]
 pub fn run_operator(
     bind: SocketAddr,
-    settlement: SocketAddr,
+    node_dir: PathBuf,
     database: PathBuf,
     workers: NonZeroUsize,
 ) -> Result<()> {
-    service::run_operator(bind, settlement, database, workers)
+    service::run_operator(bind, node_dir, database, workers)
 }
 
-/// Runs one wallet-owning Ratatui agent.
+/// Runs one wallet-owning Ratatui agent as a chain client, bound to one
+/// operator and its genesis-configured deployment.
 #[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
 pub fn run_agent(
     operator: SocketAddr,
-    settlement: SocketAddr,
+    genesis: PathBuf,
+    queries: Vec<SocketAddr>,
     database: PathBuf,
     identity: usize,
+    deployment: usize,
     scripted: bool,
 ) -> Result<()> {
-    service::run_agent(operator, settlement, database, identity, scripted)
+    service::run_agent(
+        operator, genesis, queries, database, identity, deployment, scripted,
+    )
 }

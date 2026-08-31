@@ -1,11 +1,11 @@
 //! Bounded operator RPC bodies and synchronous dispatch.
 
 use super::{
-    actor::{CloseEvent, CommittedShardTip, Operator},
+    actor::{CloseEvent, CommittedShardTip, Operator, SendOutcome},
     store::MAX_INCOMING_PAGE,
 };
 use crate::{
-    protocol::{Acceptance, DepositEvent, Key, MAX_ACCOUNTS, MAX_DESTINATION_BYTES, Payment},
+    protocol::{Acceptance, Key, MAX_ACCOUNTS, MAX_DESTINATION_BYTES, Payment},
     rpc,
 };
 use anyhow::{Context, Result, bail};
@@ -30,7 +30,8 @@ use std::net::SocketAddr;
 pub(crate) const METHOD_STATUS: u8 = 0;
 pub(crate) const METHOD_PAYMENT_HEAD: u8 = 1;
 pub(crate) const METHOD_ACCEPT_SEND: u8 = 2;
-pub(crate) const METHOD_APPLY_DEPOSIT: u8 = 3;
+// Method 3 (apply-deposit) is retired: the operator observes finalized
+// deposits on its own follower feed.
 pub(crate) const METHOD_WITHDRAWAL_OPENING: u8 = 4;
 pub(crate) const METHOD_APPLY_WITHDRAWAL: u8 = 5;
 pub(crate) const METHOD_START_CLOSE: u8 = 6;
@@ -192,8 +193,6 @@ impl Read for AcceptSendRequest {
         })
     }
 }
-
-pub(crate) type ApplyDepositRequest = DepositEvent;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ApplyWithdrawalRequest {
@@ -371,6 +370,85 @@ impl Read for AcceptedBatchResponse {
     }
 }
 
+/// The operator's typed reply to one submitted send.
+///
+/// The corrective variant keeps head reads off the payment hot path: a payer signing
+/// from its local state learns the operator's live context from the rejection itself,
+/// re-signs the same intent at its own endpoint, and retries once.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum AcceptSendResponse {
+    /// The send, or its exact replay, is committed with its receipts.
+    Accepted(AcceptedBatchResponse),
+    /// Corrective rejection: the send binds a context the operator has moved past. It
+    /// carries the operator's live context and the payer's current cumulative debit
+    /// endpoint as the operator sees it.
+    Stale {
+        context: PaymentContext<Key, Digest>,
+        cumulative_debit: u64,
+    },
+}
+
+impl From<SendOutcome> for AcceptSendResponse {
+    fn from(outcome: SendOutcome) -> Self {
+        match outcome {
+            SendOutcome::Accepted(accepted) => Self::Accepted(accepted.into()),
+            SendOutcome::Stale {
+                context,
+                cumulative_debit,
+            } => Self::Stale {
+                context,
+                cumulative_debit,
+            },
+        }
+    }
+}
+
+impl Write for AcceptSendResponse {
+    fn write(&self, buf: &mut impl BufMut) {
+        match self {
+            Self::Accepted(accepted) => {
+                0u8.write(buf);
+                accepted.write(buf);
+            }
+            Self::Stale {
+                context,
+                cumulative_debit,
+            } => {
+                1u8.write(buf);
+                context.write(buf);
+                cumulative_debit.write(buf);
+            }
+        }
+    }
+}
+
+impl EncodeSize for AcceptSendResponse {
+    fn encode_size(&self) -> usize {
+        1 + match self {
+            Self::Accepted(accepted) => accepted.encode_size(),
+            Self::Stale {
+                context,
+                cumulative_debit,
+            } => context.encode_size() + cumulative_debit.encode_size(),
+        }
+    }
+}
+
+impl Read for AcceptSendResponse {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+        match u8::read(buf)? {
+            0 => Ok(Self::Accepted(AcceptedBatchResponse::read(buf)?)),
+            1 => Ok(Self::Stale {
+                context: PaymentContext::read(buf)?,
+                cumulative_debit: u64::read(buf)?,
+            }),
+            tag => Err(CodecError::InvalidEnum(tag)),
+        }
+    }
+}
+
 /// Incremental fetch of the pairs crediting an account, from a stable acceptance cursor.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct IncomingPaymentsRequest {
@@ -542,45 +620,6 @@ impl Read for CommittedShardTipResponse {
             batch_id: BatchId::read(buf)?,
             change_root: VectorRoot::read(buf)?,
             lookup: HigherShardTipLookup::read(buf)?,
-        })
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct DepositAck {
-    pub(crate) epoch: u64,
-    pub(crate) id: Digest,
-    pub(crate) account: Key,
-    pub(crate) amount: u64,
-}
-
-impl Write for DepositAck {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.epoch.write(buf);
-        self.id.write(buf);
-        self.account.write(buf);
-        self.amount.write(buf);
-    }
-}
-
-impl EncodeSize for DepositAck {
-    fn encode_size(&self) -> usize {
-        self.epoch.encode_size()
-            + self.id.encode_size()
-            + self.account.encode_size()
-            + self.amount.encode_size()
-    }
-}
-
-impl Read for DepositAck {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        Ok(Self {
-            epoch: u64::read(buf)?,
-            id: Digest::read(buf)?,
-            account: Key::read(buf)?,
-            amount: u64::read(buf)?,
         })
     }
 }
@@ -908,7 +947,6 @@ pub(crate) enum OperatorRequest {
     PaymentHead(PaymentHeadRequest),
     AcceptSend(AcceptSendRequest),
     AcceptedBatch(AcceptSendRequest),
-    ApplyDeposit(ApplyDepositRequest),
     WithdrawalOpening(WithdrawalOpeningRequest),
     ApplyWithdrawal(ApplyWithdrawalRequest),
     StartClose(StartCloseRequest),
@@ -942,9 +980,6 @@ pub(crate) fn decode_request(request: rpc::Request) -> Result<OperatorRequest> {
         METHOD_COMMITTED_SHARD_TIP => CommittedShardTipRequest::decode(body)
             .map(OperatorRequest::CommittedShardTip)
             .context("decode committed-shard-tip request"),
-        METHOD_APPLY_DEPOSIT => ApplyDepositRequest::decode(body)
-            .map(OperatorRequest::ApplyDeposit)
-            .context("decode apply-deposit request"),
         METHOD_WITHDRAWAL_OPENING => WithdrawalOpeningRequest::decode(body)
             .map(OperatorRequest::WithdrawalOpening)
             .context("decode withdrawal-opening request"),
@@ -991,26 +1026,16 @@ fn dispatch(operator: &mut Operator, request: OperatorRequest) -> Result<Bytes> 
             .encode())
         }
         OperatorRequest::AcceptSend(request) => {
-            let accepted = operator
+            let outcome = operator
                 .accept_send(request.send)
                 .context("accept payment send")?;
-            Ok(AcceptedBatchResponse::from(accepted).encode())
+            Ok(AcceptSendResponse::from(outcome).encode())
         }
         OperatorRequest::AcceptedBatch(request) => {
             let batch = operator
                 .accepted_batch(&request.send)
                 .context("read accepted batch")?;
             Ok(batch.map(AcceptedBatchResponse::from).encode())
-        }
-        OperatorRequest::ApplyDeposit(request) => {
-            let staged = operator.apply_deposit(request).context("apply deposit")?;
-            Ok(DepositAck {
-                epoch: staged.epoch,
-                id: staged.id,
-                account: staged.account,
-                amount: staged.amount,
-            }
-            .encode())
         }
         OperatorRequest::WithdrawalOpening(request) => {
             let head = operator
@@ -1161,6 +1186,12 @@ pub(crate) async fn status<E: Network>(network: &E, address: SocketAddr) -> Resu
         .context("decode operator status")
 }
 
+/// Reads one payer's live head: the payment context, live account state, and a state
+/// opening against the operator's predecessor root.
+///
+/// This read is off the payment hot path. A paying wallet signs from its cached context
+/// and learns a moved context from the corrective rejection, so the head serves only the
+/// no-cache fallback, the balance heartbeat, and the recovery-opening refresh.
 pub(crate) async fn payment_head<E: Network>(
     network: &E,
     address: SocketAddr,
@@ -1176,8 +1207,8 @@ pub(crate) async fn accept_send<E: Network>(
     network: &E,
     address: SocketAddr,
     request: AcceptSendRequest,
-) -> Result<AcceptedBatchResponse> {
-    AcceptedBatchResponse::decode(
+) -> Result<AcceptSendResponse> {
+    AcceptSendResponse::decode(
         invoke(network, address, METHOD_ACCEPT_SEND, request.encode()).await?,
     )
     .context("decode accepted payment")
@@ -1234,15 +1265,6 @@ pub(crate) async fn committed_shard_tip<E: Network>(
         .await?,
     )
     .context("decode committed shard-tip evidence")
-}
-
-pub(crate) async fn apply_deposit<E: Network>(
-    network: &E,
-    address: SocketAddr,
-    request: ApplyDepositRequest,
-) -> Result<DepositAck> {
-    DepositAck::decode(invoke(network, address, METHOD_APPLY_DEPOSIT, request.encode()).await?)
-        .context("decode applied deposit")
 }
 
 pub(crate) async fn withdrawal_opening<E: Network>(
@@ -1498,6 +1520,13 @@ mod tests {
         }
     }
 
+    fn accepted_body(body: Bytes) -> AcceptedBatchResponse {
+        match AcceptSendResponse::decode(body).unwrap() {
+            AcceptSendResponse::Accepted(accepted) => accepted,
+            AcceptSendResponse::Stale { .. } => panic!("the send earned a corrective rejection"),
+        }
+    }
+
     fn error_text(response: rpc::Response) -> String {
         match response {
             rpc::Response::Success { .. } => panic!("expected RPC error"),
@@ -1602,20 +1631,6 @@ mod tests {
         assert_eq!(status.present_accounts, 4);
         assert_eq!(status.recent_payments, 0);
 
-        let deposit = ApplyDepositRequest {
-            id: Sha256::hash(&[b"operator-rpc-deposit"]),
-            account: payer_key.clone(),
-            amount: 10,
-        };
-        let applied = DepositAck::decode(success_body(handle(
-            &mut operator,
-            request(METHOD_APPLY_DEPOSIT, deposit.encode()),
-        )))
-        .unwrap();
-        assert_eq!(applied.epoch, 0);
-        assert_eq!(applied.account, payer_key);
-        assert_eq!(applied.amount, 10);
-
         let opening = WithdrawalOpeningResponse::decode(success_body(handle(
             &mut operator,
             request(
@@ -1699,7 +1714,7 @@ mod tests {
             ),
         )))
         .unwrap();
-        assert_eq!(head.state.balance, 103);
+        assert_eq!(head.state.balance, 93);
 
         let send = SignedSend::sign_next(
             &head.context,
@@ -1709,11 +1724,10 @@ mod tests {
             head.state.cumulative_debit,
         )
         .unwrap();
-        let accepted = AcceptedBatchResponse::decode(success_body(handle(
+        let accepted = accepted_body(success_body(handle(
             &mut operator,
             request(METHOD_ACCEPT_SEND, AcceptSendRequest { send }.encode()),
-        )))
-        .unwrap();
+        )));
         assert_eq!(accepted.epoch, 0);
         assert_eq!(accepted.total, 5);
         assert_eq!(accepted.acceptance.receipts[0].body().amount(), 5);
@@ -1843,11 +1857,10 @@ mod tests {
             head.state.cumulative_debit,
         )
         .unwrap();
-        let accepted = AcceptedBatchResponse::decode(success_body(handle(
+        let accepted = accepted_body(success_body(handle(
             &mut operator,
             request(METHOD_ACCEPT_SEND, AcceptSendRequest { send }.encode()),
-        )))
-        .unwrap();
+        )));
 
         for response in [Some(accepted), None] {
             let encoded = response.encode();
@@ -1862,6 +1875,60 @@ mod tests {
         assert!(matches!(
             Option::<AcceptedBatchResponse>::decode(Bytes::from(trailing)),
             Err(CodecError::ExtraData(1))
+        ));
+    }
+
+    #[test]
+    fn accept_send_response_round_trips_every_variant() {
+        let mut operator = operator();
+        let mut wallets = wallets();
+        let payer = wallets.remove(0);
+        let head = PaymentHeadResponse::decode(success_body(handle(
+            &mut operator,
+            request(
+                METHOD_PAYMENT_HEAD,
+                PaymentHeadRequest {
+                    account: payer.public_key(),
+                }
+                .encode(),
+            ),
+        )))
+        .unwrap();
+        let send = SignedSend::sign_next(
+            &head.context,
+            payer.signer(),
+            wallets[0].public_key(),
+            5,
+            head.state.cumulative_debit,
+        )
+        .unwrap();
+        let accepted = AcceptSendResponse::decode(success_body(handle(
+            &mut operator,
+            request(METHOD_ACCEPT_SEND, AcceptSendRequest { send }.encode()),
+        )))
+        .unwrap();
+        assert!(matches!(accepted, AcceptSendResponse::Accepted(_)));
+        let stale = AcceptSendResponse::Stale {
+            context: head.context,
+            cumulative_debit: 7,
+        };
+
+        for response in [accepted, stale] {
+            let encoded = response.encode();
+            assert_eq!(
+                AcceptSendResponse::decode(encoded.clone()).unwrap(),
+                response
+            );
+            for end in 0..encoded.len() {
+                assert!(AcceptSendResponse::decode(encoded.slice(..end)).is_err());
+            }
+            let mut trailing = encoded.to_vec();
+            trailing.push(0);
+            assert!(AcceptSendResponse::decode(Bytes::from(trailing)).is_err());
+        }
+        assert!(matches!(
+            AcceptSendResponse::decode(Bytes::from_static(&[2u8])),
+            Err(CodecError::InvalidEnum(2))
         ));
     }
 }

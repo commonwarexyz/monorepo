@@ -9,9 +9,11 @@ struct Args {
     #[arg(long, default_value = "127.0.0.1:7001")]
     bind: SocketAddr,
 
-    /// Settlement RPC address.
-    #[arg(long, default_value = "127.0.0.1:7000")]
-    settlement: SocketAddr,
+    /// Operator node directory containing config, genesis, and storage
+    /// (written by `terminal-chain setup` as `operator-<index>/`). The
+    /// directory's clearing key names the deployment this operator runs.
+    #[arg(long, default_value = "data/operator-0")]
+    node_dir: PathBuf,
 
     /// SQLite database path. Use `:memory:` for an ephemeral run.
     #[arg(long, default_value = "terminal-operator.sqlite")]
@@ -28,5 +30,5 @@ fn default_workers() -> NonZeroUsize {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    commonware_terminal::run_operator(args.bind, args.settlement, args.database, args.workers)
+    commonware_terminal::run_operator(args.bind, args.node_dir, args.database, args.workers)
 }

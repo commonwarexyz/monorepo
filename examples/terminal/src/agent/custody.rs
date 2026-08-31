@@ -2,9 +2,16 @@
 
 use super::{Agent, store::PendingWithdrawalClaim};
 use crate::{
+    chain::{
+        client::{Chain, Client, EFFECT_ATTEMPTS, Env, POLL},
+        state::{ClaimHardFaultResponse, ClaimPendingDepositResponse, FaultRecord},
+        tx::{
+            BeginHardFaultSettlementRequest, ClaimHardFaultRequest, ClaimPendingDepositRequest,
+            DepositRequest, QueueWithdrawalRequest, SettlementTx,
+        },
+    },
     operator::rpc as operator_rpc,
-    protocol::{DepositEvent, Key, deployment, identities},
-    settlement::rpc as settlement_rpc,
+    protocol::{DepositEvent, Key, identities},
 };
 use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
@@ -12,25 +19,13 @@ use commonware_clearing::bajillion::{
     boundary::{SignedWithdrawal, WithdrawalAction},
     commitment::VectorRoot,
 };
+use commonware_codec::Encode as _;
 use commonware_cryptography::{Hasher, Sha256, sha256::Digest};
-use commonware_runtime::Network;
 #[cfg(not(test))]
 use rand::RngExt as _;
 use std::net::SocketAddr;
 
-const DEPOSIT_ID_NAMESPACE: &[u8] = b"_COMMONWARE_EXAMPLES_TERMINAL_AGENT_DEPOSIT";
-
-#[derive(Debug)]
-pub(crate) enum DepositOutcome {
-    Applied {
-        epoch: u64,
-        event: DepositEvent,
-    },
-    Recorded {
-        event: DepositEvent,
-        error: anyhow::Error,
-    },
-}
+pub(super) const DEPOSIT_ID_NAMESPACE: &[u8] = b"_COMMONWARE_EXAMPLES_TERMINAL_AGENT_DEPOSIT";
 
 #[derive(Debug)]
 pub(crate) enum WithdrawalOutcome {
@@ -59,14 +54,34 @@ pub(super) fn initial_deposit_nonce() -> u64 {
 }
 
 impl Agent {
-    pub(crate) async fn recover_hard_fault<E: Network>(
+    pub(crate) async fn recover_hard_fault<E: Env>(
         &self,
-        network: &E,
-        settlement: SocketAddr,
-    ) -> Result<settlement_rpc::ClaimHardFaultResponse> {
-        let hard_fault = settlement_rpc::begin_hard_fault_settlement(network, settlement)
+        ctx: &E,
+        chain: &mut Client,
+    ) -> Result<ClaimHardFaultResponse> {
+        // Terminal settlement begins as a transaction whose effect is the
+        // certified Settling fault record: a lost response resubmits the
+        // same bytes and completes on the same frozen snapshot.
+        let begin = SettlementTx::BeginHardFaultSettlement(BeginHardFaultSettlementRequest {
+            deployment: self.deployment,
+        });
+        let advice = chain
+            .deliver(ctx, &begin)
             .await
             .context("begin hard-fault settlement")?;
+        // A read error (an unavailable snapshot, a briefly stale validator)
+        // clears with time, so every effect poll keeps polling through it.
+        let mut settling = None;
+        for _ in 0..EFFECT_ATTEMPTS {
+            if let Ok(Some(FaultRecord::Settling(settlement))) = chain.fault(ctx).await {
+                settling = Some(settlement);
+                break;
+            }
+            ctx.sleep(POLL).await;
+        }
+        let hard_fault = settling.with_context(|| {
+            format!("terminal settlement never certifiably began (dry-run advice: {advice:?})")
+        })?;
 
         // Recovery at a frozen root requires an opening retained at or refreshed to that
         // root. Openings refresh on every head read or balance poll, so this fails only for a
@@ -80,13 +95,31 @@ impl Agent {
                  passive across the final finalization and needs the operator to serve one",
             )?;
         let expected_custody = opening.leaf.state.balance;
-        let release = settlement_rpc::claim_hard_fault(
-            network,
-            settlement,
-            settlement_rpc::ClaimHardFaultRequest { opening },
-        )
-        .await
-        .context("claim hard-fault payer state")?;
+        let opening_digest = Sha256::hash(&[&opening.encode()]);
+        let claim = SettlementTx::ClaimHardFault(ClaimHardFaultRequest {
+            deployment: self.deployment,
+            opening,
+        });
+        let advice = chain
+            .deliver(ctx, &claim)
+            .await
+            .context("claim hard-fault payer state")?;
+        let mut released = None;
+        for _ in 0..EFFECT_ATTEMPTS {
+            if let Ok(Some(record)) = chain.hard_fault(ctx, self.account()).await {
+                released = Some(record);
+                break;
+            }
+            ctx.sleep(POLL).await;
+        }
+        let record = released.with_context(|| {
+            format!("the hard-fault claim earned no certified release (dry-run advice: {advice:?})")
+        })?;
+        ensure!(
+            record.opening == opening_digest,
+            "the hard-fault release consumed another opening"
+        );
+        let release = record.released;
         ensure!(
             release.account == self.account(),
             "settlement released another account"
@@ -106,21 +139,31 @@ impl Agent {
         Ok(release)
     }
 
-    pub(crate) async fn recover_pending_deposit<E: Network>(
+    pub(crate) async fn recover_pending_deposit<E: Env>(
         &self,
-        network: &E,
-        settlement: SocketAddr,
-    ) -> Result<settlement_rpc::ClaimPendingDepositResponse> {
+        ctx: &E,
+        chain: &mut Client,
+    ) -> Result<ClaimPendingDepositResponse> {
         let account = self.account();
-        let refund = settlement_rpc::claim_pending_deposit(
-            network,
-            settlement,
-            settlement_rpc::ClaimPendingDepositRequest {
-                account: account.clone(),
-            },
-        )
-        .await
-        .context("claim pending settlement deposit")?;
+        let claim = SettlementTx::ClaimPendingDeposit(ClaimPendingDepositRequest {
+            deployment: self.deployment,
+            account: account.clone(),
+        });
+        let advice = chain
+            .deliver(ctx, &claim)
+            .await
+            .context("claim pending settlement deposit")?;
+        let mut released = None;
+        for _ in 0..EFFECT_ATTEMPTS {
+            if let Ok(Some(record)) = chain.refund(ctx, account.clone()).await {
+                released = Some(record);
+                break;
+            }
+            ctx.sleep(POLL).await;
+        }
+        let refund = released.with_context(|| {
+            format!("the refund claim earned no certified release (dry-run advice: {advice:?})")
+        })?;
         ensure!(
             refund.account == account,
             "settlement refunded another account"
@@ -132,13 +175,20 @@ impl Agent {
         Ok(refund)
     }
 
-    pub(crate) async fn deposit<E: Network>(
+    /// Places one deposit at settlement and completes on the certified
+    /// custody record.
+    ///
+    /// The wallet never reports the deposit to the operator: deposits are
+    /// chain state, so the operator observes the finalized record on its own
+    /// follower and stages the credit itself. The credit shows on a later
+    /// verified balance poll, which is the wallet's existing observation
+    /// path.
+    pub(crate) async fn deposit<E: Env>(
         &mut self,
-        network: &E,
-        settlement: SocketAddr,
-        operator: SocketAddr,
+        ctx: &E,
+        chain: &mut Client,
         amount: u64,
-    ) -> Result<DepositOutcome> {
+    ) -> Result<DepositEvent> {
         ensure!(amount > 0, "deposit amount must be positive");
         let next_deposit_nonce = self
             .deposit_nonce
@@ -169,10 +219,10 @@ impl Agent {
                     amount,
                 };
 
-                // The id above derives from a volatile nonce and custody moves at the
-                // settlement call below. Stage the event durably first so a crash in that
+                // The id above derives from a volatile nonce and custody moves once the
+                // transaction applies. Stage the event durably first so a crash in that
                 // window cannot orphan the recorded deposit: a restarted wallet retries the
-                // exact id, which settlement and the operator both deduplicate.
+                // exact id, which the chain and the operator both deduplicate.
                 self.store
                     .stage_deposit(&event)
                     .context("durably stage deposit")?;
@@ -180,75 +230,61 @@ impl Agent {
                 event
             }
         };
-        if let Err(error) = settlement_rpc::deposit(
-            network,
-            settlement,
-            settlement_rpc::DepositRequest {
-                id: event.id,
-                account: event.account.clone(),
-                amount: event.amount,
-            },
-        )
-        .await
-        {
-            // A rejected call may still have recorded custody (its response can be lost),
-            // so only settlement's own statement that the id was never recorded proves no
-            // custody moved. Only then is the staged event discarded so a permanent
-            // rejection cannot wedge the deposit flow. Any other answer keeps the exact
-            // staged retry.
-            if let Ok(settlement_rpc::DepositConfirmation::Unknown) =
-                settlement_rpc::confirm_deposit(network, settlement, event.clone()).await
-            {
+        let advice = chain
+            .deliver(
+                ctx,
+                &SettlementTx::Deposit(DepositRequest {
+                    deployment: self.deployment,
+                    event: event.clone(),
+                }),
+            )
+            .await
+            .context("record settlement deposit")?;
+        let mut recorded = None;
+        for _ in 0..EFFECT_ATTEMPTS {
+            if let Ok(Some(record)) = chain.deposit(ctx, event.id).await {
+                recorded = Some(record);
+                break;
+            }
+            ctx.sleep(POLL).await;
+        }
+        match recorded {
+            Some(record) if record == event => {}
+            Some(_) => {
+                // The id is certifiably consumed by another event, so the
+                // staged bytes can never take custody: this is the one
+                // discard evidence can justify. The id derives from this
+                // wallet's own nonce namespace, so the arm is unreachable
+                // without a local id-derivation bug.
                 self.store
                     .discard_deposit(&event)
-                    .context("discard unrecorded deposit")?;
+                    .context("discard unrecordable deposit")?;
                 self.pending_deposit = None;
+                anyhow::bail!("the deposit id is certifiably bound to another event");
             }
-            return Err(error.context("record settlement deposit"));
-        }
-        let applied = match operator_rpc::apply_deposit(
-            network,
-            operator,
-            operator_rpc::ApplyDepositRequest {
-                id: event.id,
-                account: event.account.clone(),
-                amount: event.amount,
-            },
-        )
-        .await
-        {
-            Ok(applied) => applied,
-            Err(error) => {
-                return Ok(DepositOutcome::Recorded {
-                    event,
-                    error: error.context("credit operator deposit"),
-                });
+            None => {
+                // An effect-free rejection is indistinguishable from
+                // not-yet-included, so the staged event survives for an
+                // exact retry and the advisory dry-run answer is the only
+                // typed diagnosis available.
+                anyhow::bail!(
+                    "record settlement deposit: custody was not certified in time \
+                     (dry-run advice: {advice:?})"
+                );
             }
-        };
-        if applied.id != event.id
-            || applied.account != event.account
-            || applied.amount != event.amount
-        {
-            return Ok(DepositOutcome::Recorded {
-                event,
-                error: anyhow::anyhow!("operator acknowledged another deposit"),
-            });
         }
         self.store
             .complete_deposit(&event)
             .context("complete staged deposit")?;
         self.pending_deposit = None;
         self.deposit_nonce = next_deposit_nonce;
-        Ok(DepositOutcome::Applied {
-            epoch: applied.epoch,
-            event,
-        })
+        Ok(event)
     }
 
-    pub(crate) async fn withdraw<E: Network>(
+    pub(crate) async fn withdraw<E: Env>(
         &mut self,
-        network: &E,
-        settlement: SocketAddr,
+        ctx: &E,
+        chain: &mut Client,
         operator: SocketAddr,
         action: WithdrawalAction,
     ) -> Result<WithdrawalOutcome> {
@@ -268,15 +304,20 @@ impl Agent {
                 pending.clone()
             }
             None => {
-                let settlement_status = settlement_rpc::status(network, settlement)
+                // The signed deadline is an absolute block height, so it is
+                // chosen from a recency-bounded status read: a certified tip
+                // whose timestamp is within the recency threshold of the
+                // local clock.
+                let status = chain
+                    .recent_status(ctx)
                     .await
                     .context("read settlement withdrawal head")?;
                 ensure!(
-                    settlement_status.deployment == deployment(),
+                    status.deployment == self.deployment,
                     "settlement status has an unexpected deployment"
                 );
                 ensure!(
-                    !settlement_status.hard_faulted,
+                    !status.hard_faulted,
                     "settlement is permanently hard-faulted"
                 );
 
@@ -284,12 +325,12 @@ impl Agent {
                 // deployment later hard-faults while frozen at this root, recovery needs it.
                 if self
                     .store
-                    .recovery_opening(&settlement_status.state_root)
+                    .recovery_opening(&status.state_root)
                     .context("read retained withdrawal opening")?
                     .is_none()
                 {
                     let opening = operator_rpc::withdrawal_opening(
-                        network,
+                        ctx,
                         operator,
                         operator_rpc::WithdrawalOpeningRequest {
                             account: self.account(),
@@ -298,17 +339,28 @@ impl Agent {
                     .await
                     .context("read withdrawal opening")?;
                     ensure!(
-                        settlement_status.state_root == opening.root,
+                        status.state_root == opening.root,
                         "operator opening is not the settlement head"
                     );
                     self.store
                         .retain_recovery_opening(&opening.root, &opening.opening)
                         .context("durably retain withdrawal opening")?;
                 }
-                let deadline = withdrawal_deadline(settlement_status.now);
+
+                // A withdrawal reduces the live balance mid-epoch, ahead of any
+                // predecessor root an affordability floor could be read from.
+                // Invalidate the cached signing state durably before the request can
+                // reach the operator: verified head reads re-cache only once no
+                // withdrawal is in flight, so the optimistic payment precheck never
+                // overstates spendable balance.
+                self.store
+                    .clear_context()
+                    .context("invalidate cached signing context")?;
+                self.cache = None;
+                let deadline = withdrawal_deadline(status.height);
                 let request = SignedWithdrawal::sign(
-                    settlement_status.deployment,
-                    settlement_status.state_root.digest,
+                    status.deployment,
+                    status.state_root.digest,
                     Bytes::copy_from_slice(self.wallet.name.as_bytes()),
                     action,
                     deadline,
@@ -320,7 +372,7 @@ impl Agent {
         };
         let digest = operator_rpc::withdrawal_digest(&request);
         let applied = match operator_rpc::apply_withdrawal(
-            network,
+            ctx,
             operator,
             operator_rpc::ApplyWithdrawalRequest {
                 request: request.clone(),
@@ -360,13 +412,14 @@ impl Agent {
         })
     }
 
-    /// Escalates a signed withdrawal the operator would not carry directly to settlement.
+    /// Escalates a signed withdrawal the operator would not carry directly to the chain.
     ///
     /// This is the censorship-fallback exit. When [`Self::withdraw`] returns
     /// [`WithdrawalOutcome::Signed`] because the operator is unreachable, the wallet queues the
-    /// exact retained request and its head opening at settlement, where its deadline becomes an
-    /// on-chain obligation that expires into hard-fault recovery. Settlement deduplicates the
-    /// account's queued request, so a lost response replays it unchanged, and the retained
+    /// exact retained request and its head opening on the chain, where its deadline becomes an
+    /// on-chain obligation that expires into hard-fault recovery. Execution deduplicates the
+    /// account's queued request (a replay lands on the queue-slot guard), so a lost response
+    /// resubmits unchanged and completes on the certified queued record, and the retained
     /// opening remains the durable evidence hard-fault recovery later releases against.
     ///
     /// A `Signed` outcome does not prove the operator skipped the request: it may have applied
@@ -376,10 +429,10 @@ impl Agent {
     /// two payout paths are exclusive: a carried request finalizes a claimable reserve and no
     /// fault occurs, while an expired obligation faults the deployment and hard-fault recovery
     /// pays out, leaving the idle claim intent permanently unavailable and harmless.
-    pub(crate) async fn escalate_withdrawal<E: Network>(
+    pub(crate) async fn escalate_withdrawal<E: Env>(
         &mut self,
-        network: &E,
-        settlement: SocketAddr,
+        ctx: &E,
+        chain: &mut Client,
     ) -> Result<SignedWithdrawal<Key, Digest>> {
         let request = self
             .pending_withdrawal
@@ -392,18 +445,34 @@ impl Agent {
             .store
             .recovery_opening(&root)?
             .context("no retained head opening for the signed withdrawal")?;
-        settlement_rpc::queue_withdrawal(
-            network,
-            settlement,
-            settlement_rpc::QueueWithdrawalRequest {
-                request: request.clone(),
-                openings: vec![opening],
-            },
-        )
-        .await
-        .context("queue signed withdrawal at settlement")?;
+        let tx = SettlementTx::QueueWithdrawal(QueueWithdrawalRequest {
+            request: request.clone(),
+            openings: vec![opening],
+        });
+        let advice = chain
+            .deliver(ctx, &tx)
+            .await
+            .context("queue signed withdrawal at settlement")?;
 
-        // The request is now a settlement obligation. Open the claim slot in case the operator
+        // The effect is the certified queue-slot record holding exactly the
+        // escalated request. A stale record from an earlier serviced
+        // withdrawal is not a verdict, so only the exact match completes.
+        let mut queued = false;
+        for _ in 0..EFFECT_ATTEMPTS {
+            if let Ok(Some(recorded)) = chain.withdrawal(ctx, request.account().clone()).await
+                && recorded == request
+            {
+                queued = true;
+                break;
+            }
+            ctx.sleep(POLL).await;
+        }
+        ensure!(
+            queued,
+            "the queued withdrawal was not certified in time (dry-run advice: {advice:?})"
+        );
+
+        // The request is now a chain obligation. Open the claim slot in case the operator
         // already applied the request and only the response was lost: a close that carries it
         // finalizes an operator-carried claim this slot recovers, while a true non-carriage
         // expires into hard-fault recovery against the retained opening.

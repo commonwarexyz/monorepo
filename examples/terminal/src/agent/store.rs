@@ -9,12 +9,12 @@
 //! openings they are counterparty-death-surviving evidence, never an overwritable cache.
 
 use crate::{
+    chain::state as chain_state,
     operator::rpc as operator_rpc,
     protocol::{
         Acceptance, DepositEvent, Key, MAX_ACCEPTANCE_BYTES, MAX_ACCOUNTS, MAX_PAYMENT_BYTES,
         Payment,
     },
-    settlement::rpc as settlement_rpc,
     store::CommitUnknown,
 };
 use anyhow::{Context, Result, ensure};
@@ -29,7 +29,7 @@ use commonware_cryptography::{Sha256, sha256::Digest};
 use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
 use std::path::Path;
 
-const SCHEMA_VERSION: i64 = 11;
+const SCHEMA_VERSION: i64 = 12;
 const MAX_PENDING_CLAIM_BYTES: usize = 16 * 1024;
 const MIN_STATE_OPENING_BYTES: usize = Key::SIZE + AccountState::SIZE + u32::SIZE * 2 + 1;
 const MAX_STATE_OPENING_BYTES: usize =
@@ -40,6 +40,26 @@ const DEPOSIT_EVENT_BYTES: usize = Digest::SIZE + Key::SIZE + u64::SIZE;
 pub(crate) struct PendingPayment {
     pub(crate) send: SignedSend<Key, Digest>,
     pub(crate) recovery_root: VectorRoot<Digest>,
+}
+
+/// The wallet's durable optimistic signing state.
+///
+/// `context` is the last operator-served payment context adopted for signing. It is a
+/// cache of operator-claimed data used only to construct sends: the settlement
+/// registration gate after acceptance stays the trust anchor before anything is
+/// recorded, so adopting a false context can only produce a send that never commits.
+///
+/// `root` and `epoch` pin the verified affordability floor. `root` names a retained,
+/// Merkle-verified head opening, and `epoch` is the context epoch that opening was
+/// served under, so the local balance view can add exactly the held incoming credits
+/// the floor cannot include yet. A corrective adoption moves `context` forward and
+/// keeps the floor, which stays a lower bound because the account moves past the floor
+/// only by the wallet's own tracked debits, held credits, and balance-adding deposits.
+#[derive(Clone)]
+pub(crate) struct ContextCache {
+    pub(crate) context: PaymentContext<Key, Digest>,
+    pub(crate) root: VectorRoot<Digest>,
+    pub(crate) epoch: u64,
 }
 
 /// One open claim intent: the claim kind and this wallet's identity, an overwritable
@@ -56,14 +76,15 @@ pub(crate) struct PendingClaim<E, R> {
 }
 
 pub(crate) type PendingWithdrawalClaim =
-    PendingClaim<operator_rpc::WithdrawalEvidenceResponse, settlement_rpc::WithdrawalResponse>;
-pub(crate) type PendingPayoutClaim = PendingClaim<
-    operator_rpc::ExternalPayoutEvidenceResponse,
-    settlement_rpc::ExternalPayoutResponse,
->;
+    PendingClaim<operator_rpc::WithdrawalEvidenceResponse, chain_state::WithdrawalResponse>;
+pub(crate) type PendingPayoutClaim =
+    PendingClaim<operator_rpc::ExternalPayoutEvidenceResponse, chain_state::ExternalPayoutResponse>;
 
 pub(crate) struct State {
     pub(crate) cumulative_debit: u64,
+    /// The durable optimistic signing state, absent for a fresh wallet or after an
+    /// invalidation.
+    pub(crate) cache: Option<ContextCache>,
     pub(crate) pending_payment: Option<PendingPayment>,
     pub(crate) pending_deposit: Option<DepositEvent>,
     pub(crate) pending_withdrawal_claim: Option<PendingWithdrawalClaim>,
@@ -283,6 +304,76 @@ impl Store {
         read_recovery_opening(&self.connection, root, &self.account)
     }
 
+    /// Durably caches the wallet's optimistic signing state from one verified head read:
+    /// the operator-served payment context to sign under, and the retained opening at
+    /// `root` as the affordability floor that context was served against.
+    pub(crate) fn cache_context(
+        &mut self,
+        context: &PaymentContext<Key, Digest>,
+        root: &VectorRoot<Digest>,
+    ) -> Result<()> {
+        self.ensure_usable()?;
+        ensure!(
+            context.operator() == &self.operator,
+            "cached payment context has an unexpected operator"
+        );
+        let epoch = sql_u64(context.epoch(), "cached context epoch")?;
+        let encoded_context = context.encode();
+        let encoded_root = root.encode();
+        let result = cache_context_transaction(
+            &mut self.connection,
+            &self.account,
+            root,
+            encoded_context.as_ref(),
+            encoded_root.as_ref(),
+            epoch,
+        );
+        self.finish_mutation(result)
+    }
+
+    /// Durably adopts a corrective context for signing while keeping the cached floor.
+    ///
+    /// The floor stays a lower bound across the adoption: the account moves past it only
+    /// by the wallet's own tracked debits, its held incoming credits, and balance-adding
+    /// deposits, none of which the corrected context changes.
+    pub(crate) fn adopt_context(&mut self, context: &PaymentContext<Key, Digest>) -> Result<()> {
+        self.ensure_usable()?;
+        ensure!(
+            context.operator() == &self.operator,
+            "corrective payment context has an unexpected operator"
+        );
+        let encoded = context.encode();
+        let result = adopt_context_transaction(&mut self.connection, encoded.as_ref());
+        self.finish_mutation(result)
+    }
+
+    /// Invalidates the cached signing state.
+    ///
+    /// A withdrawal reduces the live balance ahead of any predecessor root a floor could
+    /// be read from, so the wallet clears the cache before its request can reach the
+    /// operator and re-caches only from a verified head read once no withdrawal is in
+    /// flight.
+    pub(crate) fn clear_context(&mut self) -> Result<()> {
+        self.ensure_usable()?;
+        let result = clear_context_transaction(&mut self.connection);
+        self.finish_mutation(result)
+    }
+
+    /// Sums the held incoming credits accepted at or after `epoch`.
+    ///
+    /// These are exactly the verified credits a floor served under `epoch` cannot
+    /// include yet: a close commits its own epoch's accepted payments, so the
+    /// predecessor state a context is served against covers only earlier epochs.
+    pub(crate) fn credits_since(&self, epoch: u64) -> Result<u64> {
+        self.ensure_usable()?;
+        let total = self.connection.query_row(
+            "SELECT COALESCE(SUM(amount), 0) FROM agent_incoming WHERE epoch >= ?1",
+            [sql_u64(epoch, "credit floor epoch")?],
+            |row| row.get::<_, i64>(0),
+        )?;
+        from_sql_u64(total, "held credit total")
+    }
+
     /// Opens the withdrawal-claim intent. Opening is idempotent.
     pub(crate) fn open_withdrawal_claim(&mut self) -> Result<()> {
         self.ensure_usable()?;
@@ -321,7 +412,7 @@ impl Store {
     pub(crate) fn record_withdrawal_result(
         &mut self,
         evidence: &operator_rpc::WithdrawalEvidenceResponse,
-        result: &settlement_rpc::WithdrawalResponse,
+        result: &chain_state::WithdrawalResponse,
     ) -> Result<()> {
         self.ensure_usable()?;
         validate_withdrawal_evidence(evidence, &self.account)?;
@@ -342,7 +433,7 @@ impl Store {
     pub(crate) fn complete_withdrawal_claim(
         &mut self,
         evidence: &operator_rpc::WithdrawalEvidenceResponse,
-        result: &settlement_rpc::WithdrawalResponse,
+        result: &chain_state::WithdrawalResponse,
     ) -> Result<()> {
         self.ensure_usable()?;
         validate_withdrawal_evidence(evidence, &self.account)?;
@@ -356,22 +447,6 @@ impl Store {
             ClaimKind::Withdrawal,
             evidence.as_ref(),
             result.as_ref(),
-        );
-        self.finish_mutation(result)
-    }
-
-    /// Drops the exact cached withdrawal evidence after a definitive settlement
-    /// rejection, keeping the claim intent open for a fresh cache.
-    pub(crate) fn drop_withdrawal_claim_evidence(
-        &mut self,
-        evidence: &operator_rpc::WithdrawalEvidenceResponse,
-    ) -> Result<()> {
-        self.ensure_usable()?;
-        let encoded = evidence.encode();
-        let result = drop_claim_evidence_transaction(
-            &mut self.connection,
-            ClaimKind::Withdrawal,
-            encoded.as_ref(),
         );
         self.finish_mutation(result)
     }
@@ -397,7 +472,7 @@ impl Store {
     pub(crate) fn record_payout_result(
         &mut self,
         evidence: &operator_rpc::ExternalPayoutEvidenceResponse,
-        payout: &settlement_rpc::ExternalPayoutResponse,
+        payout: &chain_state::ExternalPayoutResponse,
     ) -> Result<()> {
         self.ensure_usable()?;
         validate_payout_evidence(evidence, &self.account)?;
@@ -418,7 +493,7 @@ impl Store {
     pub(crate) fn complete_payout_claim(
         &mut self,
         evidence: &operator_rpc::ExternalPayoutEvidenceResponse,
-        payout: &settlement_rpc::ExternalPayoutResponse,
+        payout: &chain_state::ExternalPayoutResponse,
     ) -> Result<()> {
         self.ensure_usable()?;
         validate_payout_evidence(evidence, &self.account)?;
@@ -432,22 +507,6 @@ impl Store {
             ClaimKind::ExternalPayout,
             evidence.as_ref(),
             payout.as_ref(),
-        );
-        self.finish_mutation(result)
-    }
-
-    /// Drops the exact cached external-payout evidence after a definitive settlement
-    /// rejection, keeping the claim intent open for a fresh cache.
-    pub(crate) fn drop_payout_claim_evidence(
-        &mut self,
-        evidence: &operator_rpc::ExternalPayoutEvidenceResponse,
-    ) -> Result<()> {
-        self.ensure_usable()?;
-        let encoded = evidence.encode();
-        let result = drop_claim_evidence_transaction(
-            &mut self.connection,
-            ClaimKind::ExternalPayout,
-            encoded.as_ref(),
         );
         self.finish_mutation(result)
     }
@@ -500,6 +559,43 @@ impl Store {
         self.ensure_usable()?;
         let encoded = send.encode();
         let result = mark_payment_submitted_transaction(&mut self.connection, encoded.as_ref());
+        self.finish_mutation(result)
+    }
+
+    /// Replaces the outstanding staged send with a re-signed copy of the same intent
+    /// under a corrected context.
+    ///
+    /// The replacement must carry the exact entries and cumulative debit endpoint of the
+    /// send it replaces, so the two differ only in their `(epoch, anchor)` binding. That
+    /// is what keeps a corrective retry safe against a Byzantine operator that claims
+    /// rejection while keeping the replaced bytes: two sends at one endpoint under
+    /// different contexts can never both debit, so at most one of them ever commits and
+    /// the ledger's endpoint arithmetic stays exact regardless of which one it is.
+    pub(crate) fn restage_payment(
+        &mut self,
+        replaced: &SignedSend<Key, Digest>,
+        send: &SignedSend<Key, Digest>,
+        previous_debit: u64,
+    ) -> Result<()> {
+        self.ensure_usable()?;
+        validate_send(send, &self.account, &self.operator, previous_debit)?;
+        ensure!(
+            send.body().entries() == replaced.body().entries()
+                && send.body().cumulative_debit() == replaced.body().cumulative_debit(),
+            "a corrective retry must re-sign the exact staged intent"
+        );
+        let encoded_replaced = replaced.encode();
+        let encoded = send.encode();
+        ensure!(
+            encoded.len() <= MAX_PAYMENT_BYTES,
+            "signed send encoding exceeds its bound"
+        );
+        let result = restage_payment_transaction(
+            &mut self.connection,
+            previous_debit,
+            encoded_replaced.as_ref(),
+            encoded.as_ref(),
+        );
         self.finish_mutation(result)
     }
 
@@ -818,6 +914,7 @@ enum SchemaPresence {
 fn schema_presence(connection: &Connection) -> Result<SchemaPresence> {
     let has_meta = table_exists(connection, "agent_meta")?;
     let has_openings = table_exists(connection, "agent_state_openings")?;
+    let has_context = table_exists(connection, "agent_context")?;
     let has_pending = table_exists(connection, "agent_pending_payment")?;
     let has_pending_deposit = table_exists(connection, "agent_pending_deposit")?;
     let has_pending_claims = table_exists(connection, "agent_pending_claims")?;
@@ -831,7 +928,7 @@ fn schema_presence(connection: &Connection) -> Result<SchemaPresence> {
              WHERE (type = 'table'
                     AND name NOT LIKE 'sqlite_%'
                     AND name NOT IN (
-                        'agent_meta', 'agent_state_openings',
+                        'agent_meta', 'agent_state_openings', 'agent_context',
                         'agent_pending_payment', 'agent_pending_deposit',
                         'agent_pending_claims', 'agent_payments',
                         'agent_incoming_cursor', 'agent_incoming', 'agent_reconciled'
@@ -851,6 +948,7 @@ fn schema_presence(connection: &Connection) -> Result<SchemaPresence> {
 
     if !has_meta
         && !has_openings
+        && !has_context
         && !has_pending
         && !has_pending_deposit
         && !has_pending_claims
@@ -865,6 +963,7 @@ fn schema_presence(connection: &Connection) -> Result<SchemaPresence> {
     ensure!(
         has_meta
             && has_openings
+            && has_context
             && has_pending
             && has_pending_deposit
             && has_pending_claims
@@ -933,6 +1032,15 @@ fn initialize_schema(
              opening BLOB NOT NULL CHECK (
                  length(opening) BETWEEN {min_opening_size} AND {max_opening_size}
              )
+         );
+
+         CREATE TABLE agent_context (
+             singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+             context BLOB NOT NULL CHECK (length(context) = {context_size}),
+             root BLOB NOT NULL CHECK (length(root) = {root_size}),
+             epoch INTEGER NOT NULL CHECK (epoch >= 0),
+             FOREIGN KEY (singleton) REFERENCES agent_meta(singleton) ON DELETE CASCADE,
+             FOREIGN KEY (root) REFERENCES agent_state_openings(root)
          );
 
          CREATE TABLE agent_pending_payment (
@@ -1013,6 +1121,7 @@ fn initialize_schema(
         key_size = Key::SIZE,
         digest_size = Digest::SIZE,
         root_size = VectorRoot::<Digest>::SIZE,
+        context_size = PaymentContext::<Key, Digest>::SIZE,
         max_send_size = MAX_PAYMENT_BYTES,
         max_acceptance_size = MAX_ACCEPTANCE_BYTES,
         min_opening_size = MIN_STATE_OPENING_BYTES,
@@ -1090,6 +1199,7 @@ fn read_binding(connection: &Connection) -> Result<Binding> {
 
 fn read_state(connection: &Connection, account: &Key, operator: &Key) -> Result<State> {
     let (cumulative_debit, receipt_count) = read_receipt_state(connection, account, operator)?;
+    let cache = read_context_cache(connection, account, operator)?;
     let pending_payment = read_pending_payment(connection, account)?;
     let pending_deposit = read_pending_deposit(connection, account)?;
     let (pending_withdrawal_claim, pending_payout_claim) =
@@ -1107,6 +1217,7 @@ fn read_state(connection: &Connection, account: &Key, operator: &Key) -> Result<
 
     Ok(State {
         cumulative_debit,
+        cache,
         pending_payment,
         pending_deposit,
         pending_withdrawal_claim,
@@ -1242,6 +1353,54 @@ fn read_receipt_state(
     Ok((stored_endpoint, receipt_count))
 }
 
+fn read_context_cache(
+    connection: &Connection,
+    account: &Key,
+    operator: &Key,
+) -> Result<Option<ContextCache>> {
+    let mut statement = connection.prepare(
+        "SELECT singleton, length(context), context, length(root), root, epoch
+         FROM agent_context
+         ORDER BY singleton
+         LIMIT 2",
+    )?;
+    let mut rows = statement.query([])?;
+    let Some(row) = rows.next()? else {
+        return Ok(None);
+    };
+    ensure!(
+        row.get::<_, i64>(0)? == 1,
+        "agent database context singleton is not canonical"
+    );
+    let encoded_context = read_fixed_blob(
+        row,
+        1,
+        2,
+        PaymentContext::<Key, Digest>::SIZE,
+        "cached payment context",
+    )?;
+    let encoded_root = read_fixed_blob(row, 3, 4, VectorRoot::<Digest>::SIZE, "cached floor root")?;
+    let epoch = from_sql_u64(row.get(5)?, "cached context epoch")?;
+    ensure!(
+        rows.next()?.is_none(),
+        "agent database has extra context rows"
+    );
+    let context = PaymentContext::decode(encoded_context.as_slice())
+        .context("decode cached payment context")?;
+    ensure!(
+        context.operator() == operator,
+        "cached payment context has an unexpected operator"
+    );
+    let root = VectorRoot::decode(encoded_root.as_slice()).context("decode cached floor root")?;
+    read_recovery_opening(connection, &root, account)?
+        .context("cached context floor opening is missing")?;
+    Ok(Some(ContextCache {
+        context,
+        root,
+        epoch,
+    }))
+}
+
 fn read_pending_payment(connection: &Connection, account: &Key) -> Result<Option<PendingPayment>> {
     let mut statement = connection.prepare(
         "SELECT singleton,
@@ -1354,7 +1513,7 @@ fn read_pending_claims(
                     .transpose()?;
                 let result = result
                     .map(|encoded| {
-                        settlement_rpc::WithdrawalResponse::decode(encoded.as_slice())
+                        chain_state::WithdrawalResponse::decode(encoded.as_slice())
                             .context("decode pending withdrawal result")
                     })
                     .transpose()?;
@@ -1376,7 +1535,7 @@ fn read_pending_claims(
                     .transpose()?;
                 let result = result
                     .map(|encoded| {
-                        settlement_rpc::ExternalPayoutResponse::decode(encoded.as_slice())
+                        chain_state::ExternalPayoutResponse::decode(encoded.as_slice())
                             .context("decode pending external payout")
                     })
                     .transpose()?;
@@ -1439,7 +1598,7 @@ fn validate_withdrawal_evidence(
 
 fn validate_withdrawal_result(
     evidence: &operator_rpc::WithdrawalEvidenceResponse,
-    result: &settlement_rpc::WithdrawalResponse,
+    result: &chain_state::WithdrawalResponse,
 ) -> Result<()> {
     ensure!(
         result.destination == *evidence.claim.output().destination()
@@ -1461,7 +1620,7 @@ fn validate_payout_evidence(
 }
 
 fn validate_payout_result(
-    result: &settlement_rpc::ExternalPayoutResponse,
+    result: &chain_state::ExternalPayoutResponse,
     account: &Key,
 ) -> Result<()> {
     ensure!(
@@ -1547,6 +1706,61 @@ fn retain_recovery_opening_transaction(
     Ok(())
 }
 
+fn cache_context_transaction(
+    connection: &mut Connection,
+    account: &Key,
+    root: &VectorRoot<Digest>,
+    encoded_context: &[u8],
+    encoded_root: &[u8],
+    epoch: i64,
+) -> Result<()> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .context("begin signing context cache")?;
+    read_recovery_opening(&transaction, root, account)?
+        .context("signing context floor opening is missing")?;
+    transaction.execute(
+        "INSERT INTO agent_context (singleton, context, root, epoch) VALUES (1, ?1, ?2, ?3)
+         ON CONFLICT(singleton) DO UPDATE SET
+             context = excluded.context,
+             root = excluded.root,
+             epoch = excluded.epoch",
+        params![encoded_context, encoded_root, epoch],
+    )?;
+    transaction
+        .commit()
+        .map_err(|source| CommitUnknown::new("signing context cache", source))?;
+    Ok(())
+}
+
+fn adopt_context_transaction(connection: &mut Connection, encoded_context: &[u8]) -> Result<()> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .context("begin corrective context adoption")?;
+    ensure!(
+        transaction.execute(
+            "UPDATE agent_context SET context = ?1 WHERE singleton = 1",
+            [encoded_context],
+        )? == 1,
+        "no cached signing context matched the adoption"
+    );
+    transaction
+        .commit()
+        .map_err(|source| CommitUnknown::new("corrective context adoption", source))?;
+    Ok(())
+}
+
+fn clear_context_transaction(connection: &mut Connection) -> Result<()> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .context("begin signing context invalidation")?;
+    transaction.execute("DELETE FROM agent_context WHERE singleton = 1", [])?;
+    transaction
+        .commit()
+        .map_err(|source| CommitUnknown::new("signing context invalidation", source))?;
+    Ok(())
+}
+
 fn stage_payment_transaction(
     connection: &mut Connection,
     account: &Key,
@@ -1596,6 +1810,33 @@ fn mark_payment_submitted_transaction(
     transaction
         .commit()
         .map_err(|source| CommitUnknown::new("payment submission mark", source))?;
+    Ok(())
+}
+
+fn restage_payment_transaction(
+    connection: &mut Connection,
+    previous_debit: u64,
+    encoded_replaced: &[u8],
+    encoded_send: &[u8],
+) -> Result<()> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .context("begin corrective restage")?;
+    ensure!(
+        latest_debit(&transaction)? == previous_debit,
+        "agent debit changed before the corrective restage"
+    );
+    ensure!(
+        transaction.execute(
+            "UPDATE agent_pending_payment SET send = ?1, state = ?2
+             WHERE singleton = 1 AND send = ?3",
+            params![encoded_send, PaymentState::Staged as i64, encoded_replaced],
+        )? == 1,
+        "pending payment changed before the corrective restage"
+    );
+    transaction
+        .commit()
+        .map_err(|source| CommitUnknown::new("corrective restage", source))?;
     Ok(())
 }
 
@@ -1950,26 +2191,6 @@ fn record_claim_result_transaction(
     Ok(())
 }
 
-fn drop_claim_evidence_transaction(
-    connection: &mut Connection,
-    kind: ClaimKind,
-    evidence: &[u8],
-) -> Result<()> {
-    let transaction = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .context("begin claim evidence drop")?;
-    let dropped = transaction.execute(
-        "UPDATE agent_pending_claims SET evidence = NULL
-         WHERE kind = ?1 AND evidence = ?2 AND result IS NULL",
-        params![kind as i64, evidence],
-    )?;
-    ensure!(dropped == 1, "no cached claim evidence matched the drop");
-    transaction
-        .commit()
-        .map_err(|source| CommitUnknown::new("claim evidence drop", source))?;
-    Ok(())
-}
-
 fn complete_claim_transaction(
     connection: &mut Connection,
     kind: ClaimKind,
@@ -2172,6 +2393,130 @@ mod tests {
     fn signed_send(wallet: &Wallet, anchor: &[u8]) -> SignedSend<Key, Digest> {
         let context = PaymentContext::new(Sha256::hash(&[anchor]), 1, operator_key());
         SignedSend::sign_next(&context, wallet.signer(), identities().remove(1).key, 1, 0).unwrap()
+    }
+
+    #[test]
+    fn context_cache_round_trips_adopts_and_clears() {
+        let database = TempDatabase::new();
+        let account = identities().remove(0).key;
+        let (root, opening) = recovery_evidence(&account, 100);
+        let (mut store, state) = open_store(database.path(), &account);
+        assert!(state.cache.is_none());
+        let context = PaymentContext::new(Sha256::hash(&[b"cache-context-0"]), 3, operator_key());
+
+        // The floor must name an already retained opening.
+        let error = store.cache_context(&context, &root).unwrap_err();
+        assert!(format!("{error:#}").contains("floor opening is missing"));
+        drop(store);
+
+        let (mut store, _) = open_store(database.path(), &account);
+        store.retain_recovery_opening(&root, &opening).unwrap();
+        store.cache_context(&context, &root).unwrap();
+        drop(store);
+
+        let (mut store, state) = open_store(database.path(), &account);
+        let cache = state.cache.unwrap();
+        assert_eq!(cache.context, context);
+        assert_eq!(cache.root, root);
+        assert_eq!(cache.epoch, context.epoch());
+
+        // Adoption moves only the signing context and keeps the floor pinning.
+        let corrected = PaymentContext::new(Sha256::hash(&[b"cache-context-1"]), 4, operator_key());
+        store.adopt_context(&corrected).unwrap();
+        drop(store);
+
+        let (mut store, state) = open_store(database.path(), &account);
+        let cache = state.cache.unwrap();
+        assert_eq!(cache.context, corrected);
+        assert_eq!(cache.root, root);
+        assert_eq!(cache.epoch, context.epoch());
+
+        store.clear_context().unwrap();
+        drop(store);
+
+        let (mut store, state) = open_store(database.path(), &account);
+        assert!(state.cache.is_none());
+        let error = store.adopt_context(&corrected).unwrap_err();
+        assert!(format!("{error:#}").contains("no cached signing context"));
+    }
+
+    #[test]
+    fn restage_requires_the_exact_intent_at_the_same_endpoint() {
+        let database = TempDatabase::new();
+        let wallet = wallets().remove(0);
+        let account = wallet.public_key();
+        let (root, opening) = recovery_evidence(&account, 100);
+        let (mut store, _) = open_store(database.path(), &account);
+        store.retain_recovery_opening(&root, &opening).unwrap();
+        let staged = signed_send(&wallet, b"restage-original");
+        store.stage_payment(&staged, &root, 0).unwrap();
+
+        // A different amount is another intent, so the replacement is refused.
+        let corrected =
+            PaymentContext::new(Sha256::hash(&[b"restage-corrected"]), 2, operator_key());
+        let other_intent = SignedSend::sign_next(
+            &corrected,
+            wallet.signer(),
+            identities().remove(1).key,
+            2,
+            0,
+        )
+        .unwrap();
+        let error = store
+            .restage_payment(&staged, &other_intent, 0)
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("exact staged intent"));
+        drop(store);
+
+        // The exact intent re-signed under the corrected context replaces the slot.
+        let (mut store, _) = open_store(database.path(), &account);
+        let resigned = SignedSend::sign_next(
+            &corrected,
+            wallet.signer(),
+            identities().remove(1).key,
+            1,
+            0,
+        )
+        .unwrap();
+        store.restage_payment(&staged, &resigned, 0).unwrap();
+        drop(store);
+
+        let (_, state) = open_store(database.path(), &account);
+        let pending = state.pending_payment.unwrap();
+        assert_eq!(pending.send, resigned);
+        assert_eq!(pending.recovery_root, root);
+    }
+
+    #[test]
+    fn credits_since_sums_only_the_floor_epoch_onward() {
+        let database = TempDatabase::new();
+        let account = identities().remove(0).key;
+        let (store, _) = open_store(database.path(), &account);
+        let payer = identities().remove(1).key;
+        for (epoch, amount, tag) in [(0_i64, 5_i64, 0_u8), (1, 7, 1), (3, 11, 2)] {
+            store
+                .connection
+                .execute(
+                    "INSERT INTO agent_incoming (
+                         tx_id, payer, epoch, anchor, shard,
+                         cumulative_shard_credit, receipt_index, amount, cursor, pair
+                     ) VALUES (?1, ?2, ?3, ?4, 0, ?5, 0, ?5, ?6, x'01')",
+                    params![
+                        Sha256::hash(&[b"credit-tx", &[tag]]).as_ref(),
+                        payer.as_ref(),
+                        epoch,
+                        Sha256::hash(&[b"credit-anchor"]).as_ref(),
+                        amount,
+                        epoch + 1,
+                    ],
+                )
+                .unwrap();
+        }
+
+        assert_eq!(store.credits_since(0).unwrap(), 23);
+        assert_eq!(store.credits_since(1).unwrap(), 18);
+        assert_eq!(store.credits_since(2).unwrap(), 11);
+        assert_eq!(store.credits_since(4).unwrap(), 0);
     }
 
     #[test]
