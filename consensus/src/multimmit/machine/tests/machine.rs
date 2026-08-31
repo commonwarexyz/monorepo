@@ -982,7 +982,7 @@ fn recover_vote_signing(resources: ResourceLimits) -> RecoveredVoteSigning {
         .unwrap();
     persist(&mut machine, &persist_job(&reserved));
 
-    let mut restored = Machine::restore(profile, machine.snapshot()).unwrap();
+    let mut restored = Machine::restore(profile, machine.live_snapshot_for_test()).unwrap();
     let recovery = restored.step(Input::RecoveryComplete).unwrap();
     let recovered = persist(&mut restored, &persist_job(&recovery));
     let sign = sign_job(&recovered);
@@ -1189,7 +1189,7 @@ fn full_publication_outbox_does_not_block_view_certificate_assembly() {
         .reserve_test_effect(DurableEffect::Broadcast(filler))
         .unwrap();
     persist(&mut machine, &persist_job(&reserved));
-    assert_eq!(machine.snapshot().outbox().len(), 1);
+    assert_eq!(machine.live_snapshot_for_test().outbox().len(), 1);
 
     let proposed = leader(&machine, 1);
     let proposal = Arc::new(Artifact::LeaderBlock(SignedLeaderBlock::new(
@@ -1218,7 +1218,7 @@ fn full_publication_outbox_does_not_block_view_certificate_assembly() {
         effect,
         Capability::Leader(LeaderCapability::AggregateVqc(_))
     )));
-    assert_eq!(machine.snapshot().outbox().len(), 1);
+    assert_eq!(machine.live_snapshot_for_test().outbox().len(), 1);
 }
 
 #[test]
@@ -4025,7 +4025,7 @@ fn inputs_are_lifecycle_gated() {
 fn durable_broadcast_replays_with_stable_id() {
     let mut machine = active_machine(Role::Observer);
     let artifact = Artifact::NoVote(no_vote(&machine, View::new(1), 0));
-    let before = machine.snapshot();
+    let before = machine.live_snapshot_for_test();
     let reserved = machine
         .reserve_test_effect(DurableEffect::Broadcast(Arc::new(artifact.clone())))
         .unwrap();
@@ -4041,7 +4041,7 @@ fn durable_broadcast_replays_with_stable_id() {
     // Staging is application: the entry exists before its barrier acknowledges, and replaying
     // the same event over the pre-stage snapshot must rebuild it identically.
     assert_eq!(
-        machine.snapshot().outbox().get(&id),
+        machine.live_snapshot_for_test().outbox().get(&id),
         Some(&DurableEffect::Broadcast(Arc::new(artifact.clone())))
     );
     let mut restored = Machine::restore(profile(Role::Observer), before).unwrap();
@@ -4049,7 +4049,7 @@ fn durable_broadcast_replays_with_stable_id() {
         restored.replay(event.clone()).unwrap();
     }
     assert!(!restored.inspect().is_live());
-    assert_eq!(restored.snapshot(), machine.snapshot());
+    assert_eq!(restored.live_snapshot_for_test(), machine.live_snapshot_for_test());
 
     let recovery = restored.step(Input::RecoveryComplete).unwrap();
     // The view timer arms with the staged generation advance; the recovered outbox re-releases
@@ -4086,16 +4086,52 @@ fn durable_broadcast_replays_with_stable_id() {
         completion.status(),
         StepStatus::EffectCompleted { admission: None }
     ));
-    assert!(restored.snapshot().outbox().contains_key(&id));
+    assert!(restored.live_snapshot_for_test().outbox().contains_key(&id));
     assert!(completion.capabilities().is_empty());
 
-    let mut restarted = Machine::restore(profile(Role::Observer), restored.snapshot()).unwrap();
+    let mut restarted = Machine::restore(profile(Role::Observer), restored.live_snapshot_for_test()).unwrap();
     let recovery = restarted.step(Input::RecoveryComplete).unwrap();
     let recovered = persist(&mut restarted, &persist_job(&recovery));
     assert!(recovered.capabilities().iter().any(
         |effect| matches!(durable_job(effect), Some(job) if job.id() == id
                 && matches!(job.request(), DurableEffect::Broadcast(_)))
     ));
+}
+
+#[test]
+fn checkpoint_cut_matches_the_acknowledged_cursor() {
+    let mut machine = active_machine(Role::Observer);
+    let artifact = Arc::new(Artifact::NoVote(no_vote(&machine, View::new(1), 0)));
+    let reserved = machine
+        .reserve_test_effect(DurableEffect::Broadcast(artifact))
+        .unwrap();
+
+    assert!(machine.checkpoint_cut().is_none());
+
+    let job = persist_job(&reserved);
+    persist(&mut machine, &job);
+    assert_eq!(
+        machine.checkpoint_cut().unwrap().cursor(),
+        job.last_cursor()
+    );
+}
+
+#[test]
+fn replayed_durable_prefix_advances_the_acknowledged_cursor() {
+    let profile = profile(Role::Observer);
+    let mut source = active_machine(Role::Observer);
+    let before = source.live_snapshot_for_test();
+    let artifact = Arc::new(Artifact::NoVote(no_vote(&source, View::new(1), 0)));
+    let reserved = source
+        .reserve_test_effect(DurableEffect::Broadcast(artifact))
+        .unwrap();
+    let job = persist_job(&reserved);
+
+    let mut replayed = Machine::restore(profile, before).unwrap();
+    for event in job.events() {
+        replayed.replay(event.clone()).unwrap();
+    }
+    assert_eq!(replayed.acked, replayed.durable.cursor);
 }
 
 #[test]
@@ -4121,7 +4157,7 @@ fn restore_rejects_mismatched_publication_obligation_rows() {
     let effect = queued_effect_id(&queued);
     persist(&mut machine, &persist_job(&queued));
 
-    let canonical = machine.snapshot();
+    let canonical = machine.live_snapshot_for_test();
     let mut wrong_family = Machine::restore(profile.clone(), canonical.clone()).unwrap();
     wrong_family.durable.obligations.insert(
         effect,
@@ -4134,7 +4170,7 @@ fn restore_rejects_mismatched_publication_obligation_rows() {
             }],
         ),
     );
-    assert!(Machine::restore(profile.clone(), wrong_family.snapshot()).is_err());
+    assert!(Machine::restore(profile.clone(), wrong_family.live_snapshot_for_test()).is_err());
 
     let mut wrong_object = Machine::restore(profile.clone(), canonical).unwrap();
     wrong_object.durable.obligations.insert(
@@ -4149,7 +4185,7 @@ fn restore_rejects_mismatched_publication_obligation_rows() {
             }],
         ),
     );
-    assert!(Machine::restore(profile, wrong_object.snapshot()).is_err());
+    assert!(Machine::restore(profile, wrong_object.live_snapshot_for_test()).is_err());
 }
 
 #[test]
@@ -4321,16 +4357,16 @@ fn da_certificate_atomically_replaces_the_block_and_vote_publications() {
     assert_eq!(retired, &[block_id, vote_id]);
     assert!(publication.is_some());
     assert_eq!(artifact.as_ref(), &certificate);
-    assert!(!machine.snapshot().outbox().contains_key(&block_id));
-    assert!(!machine.snapshot().outbox().contains_key(&vote_id));
+    assert!(!machine.live_snapshot_for_test().outbox().contains_key(&block_id));
+    assert!(!machine.live_snapshot_for_test().outbox().contains_key(&vote_id));
     let acknowledged = persist_raw(&mut machine, &job);
     let acknowledged = settle(&mut machine, acknowledged);
     assert!(acknowledged.capabilities().iter().all(|effect| !matches!(
         effect,
         Capability::Durability(DurabilityCapability::Persist(_))
     )));
-    assert!(!machine.snapshot().outbox().contains_key(&block_id));
-    assert!(!machine.snapshot().outbox().contains_key(&vote_id));
+    assert!(!machine.live_snapshot_for_test().outbox().contains_key(&block_id));
+    assert!(!machine.live_snapshot_for_test().outbox().contains_key(&vote_id));
 }
 
 #[test]
@@ -4370,7 +4406,7 @@ fn remote_da_certificate_retires_vote_without_rebroadcast_and_replays() {
         .unwrap();
     let vote_id = queued_effect_id(&vote_step);
     persist(&mut machine, &persist_job(&vote_step));
-    let checkpoint = machine.snapshot();
+    let checkpoint = machine.live_snapshot_for_test();
 
     let certificate = Arc::new(Artifact::DaCertificate(symbolic_da_certificate(header, 4)));
     let verification = observe(&mut machine, certificate.as_ref().clone());
@@ -4389,8 +4425,8 @@ fn remote_da_certificate_retires_vote_without_rebroadcast_and_replays() {
     assert_eq!(artifact, &certificate);
 
     persist(&mut machine, &replacement_job);
-    assert!(!machine.snapshot().outbox().contains_key(&vote_id));
-    assert!(machine.snapshot().outbox().values().all(|effect| {
+    assert!(!machine.live_snapshot_for_test().outbox().contains_key(&vote_id));
+    assert!(machine.live_snapshot_for_test().outbox().values().all(|effect| {
         !matches!(effect, DurableEffect::Broadcast(artifact) if artifact == &certificate)
     }));
     assert!(matches!(
@@ -4402,8 +4438,8 @@ fn remote_da_certificate_retires_vote_without_rebroadcast_and_replays() {
     for event in replacement_job.events() {
         restored.replay(event.clone()).unwrap();
     }
-    assert!(!restored.snapshot().outbox().contains_key(&vote_id));
-    assert!(restored.snapshot().outbox().values().all(|effect| {
+    assert!(!restored.live_snapshot_for_test().outbox().contains_key(&vote_id));
+    assert!(restored.live_snapshot_for_test().outbox().values().all(|effect| {
         !matches!(effect, DurableEffect::Broadcast(artifact) if artifact == &certificate)
     }));
 }
@@ -4442,7 +4478,7 @@ fn full_outbox_exit_replacement_uses_the_retired_slot() {
         })
         .collect::<Vec<_>>();
     assert_eq!(exits, vec![View::new(2)]);
-    assert_eq!(machine.snapshot().outbox().len(), 1);
+    assert_eq!(machine.live_snapshot_for_test().outbox().len(), 1);
 }
 
 #[test]
@@ -4468,7 +4504,7 @@ fn delayed_da_vote_signing_completion_retires_after_certification() {
     let certified = complete_with_step(&mut machine, &certificate, true);
     persist(&mut machine, &persist_job(&certified));
     assert_eq!(
-        machine.snapshot().certified_tips()[genesis.chain().get() as usize].height(),
+        machine.live_snapshot_for_test().certified_tips()[genesis.chain().get() as usize].height(),
         Height::new(1)
     );
 
@@ -4489,10 +4525,10 @@ fn delayed_da_vote_signing_completion_retires_after_certification() {
     let Change::SignedArtifact { publication, .. } = event.change() else {
         panic!("the delayed signing result must complete its reservation");
     };
-    assert!(!machine.snapshot().outbox().contains_key(&sign.id()));
-    assert!(!machine.snapshot().outbox().contains_key(publication));
-    assert!(!machine.snapshot().obligations().contains_key(publication));
-    assert!(machine.snapshot().local_artifacts().contains_key(&vote_id));
+    assert!(!machine.live_snapshot_for_test().outbox().contains_key(&sign.id()));
+    assert!(!machine.live_snapshot_for_test().outbox().contains_key(publication));
+    assert!(!machine.live_snapshot_for_test().obligations().contains_key(publication));
+    assert!(machine.live_snapshot_for_test().local_artifacts().contains_key(&vote_id));
 }
 
 #[test]
@@ -4613,7 +4649,7 @@ fn higher_da_certificate_replacement_replays_atomically() {
     let da_choice = validate_block(&mut machine, second, 0);
     let da_choice_job = persist_job(&da_choice);
     persist(&mut machine, &da_choice_job);
-    let checkpoint = machine.snapshot();
+    let checkpoint = machine.live_snapshot_for_test();
 
     let third_certificate = symbolic_da_certificate(third, 3);
     let third_verification = observe(
@@ -4639,7 +4675,7 @@ fn higher_da_certificate_replacement_replays_atomically() {
     for event in replacement_job.events() {
         restored.replay(event.clone()).unwrap();
     }
-    let snapshot = restored.snapshot();
+    let snapshot = restored.live_snapshot_for_test();
     assert!(!snapshot.outbox().contains_key(&first_publication_id));
     assert!(matches!(snapshot.outbox().get(&publication),
         Some(DurableEffect::Broadcast(artifact))
@@ -4649,7 +4685,7 @@ fn higher_da_certificate_replacement_replays_atomically() {
     let released = persist(&mut restored, &persist_job(&recovered));
     assert!(
         !restored
-            .snapshot()
+            .live_snapshot_for_test()
             .outbox()
             .contains_key(&first_publication_id)
     );
@@ -4683,7 +4719,7 @@ fn vqc_does_not_supersede_a_vote_needed_for_lqc() {
     }) {
         step = persist(&mut machine, &job);
     }
-    assert!(machine.snapshot().outbox().contains_key(&vote_id));
+    assert!(machine.live_snapshot_for_test().outbox().contains_key(&vote_id));
 }
 
 #[test]
@@ -4917,7 +4953,7 @@ fn proposal_frontier_survives_retention_and_restart() {
         "the target leader never reserved its proposal"
     );
 
-    let mut restored = Machine::restore(profile, machine.snapshot()).unwrap();
+    let mut restored = Machine::restore(profile, machine.live_snapshot_for_test()).unwrap();
     let recovery = restored.step(Input::RecoveryComplete).unwrap();
     let recovered = persist(&mut restored, &persist_job(&recovery));
     assert!(recovered.capabilities().iter().any(|effect| {
@@ -4962,7 +4998,7 @@ fn retired_leader_dependencies_plateau() {
 fn future_lqc_durably_advances_consensus_floors() {
     let profile = profile_for(Role::Validator(Participant::new(3)), 6, 2);
     let (mut machine, _) = start_profile(profile.clone());
-    let before = machine.snapshot();
+    let before = machine.live_snapshot_for_test();
 
     let genesis = machine.profile().protocol().genesis().tips()[3];
     let transaction = TransactionBlockHeader::new(
@@ -5006,19 +5042,19 @@ fn future_lqc_durably_advances_consensus_floors() {
     assert_eq!(machine.inspect().view(), View::new(6));
     assert!(
         !machine
-            .snapshot()
+            .live_snapshot_for_test()
             .signing_reservations()
             .contains_key(&pending_id)
     );
     assert!(
         machine
-            .snapshot()
+            .live_snapshot_for_test()
             .signing_reservations()
             .contains_key(&transaction_id)
     );
-    assert_eq!(machine.snapshot().certified_tips(), before.certified_tips());
+    assert_eq!(machine.live_snapshot_for_test().certified_tips(), before.certified_tips());
     assert_eq!(
-        machine.snapshot().da_safety_heights(),
+        machine.live_snapshot_for_test().da_safety_heights(),
         before.da_safety_heights()
     );
     assert!(effects.iter().any(|effect| {
@@ -5046,7 +5082,7 @@ fn future_lqc_durably_advances_consensus_floors() {
                 && anchor.conflicting_votes().is_empty()));
     assert_eq!(machine.inspect().finality_floor(), certificate.view());
 
-    let mut restored = Machine::restore(profile, machine.snapshot()).unwrap();
+    let mut restored = Machine::restore(profile, machine.live_snapshot_for_test()).unwrap();
     let recovery = restored.step(Input::RecoveryComplete).unwrap();
     persist(&mut restored, &persist_job(&recovery));
     assert_eq!(restored.inspect().view(), View::new(6));
@@ -5056,11 +5092,11 @@ fn future_lqc_durably_advances_consensus_floors() {
     assert!(matches!(restored.durable.proposal_anchor.as_deref(),
         Some(Artifact::Vqc(anchor)) if certificate.equivalent_vqc(anchor)));
     assert_eq!(
-        restored.snapshot().certified_tips(),
+        restored.live_snapshot_for_test().certified_tips(),
         before.certified_tips()
     );
     assert_eq!(
-        restored.snapshot().da_safety_heights(),
+        restored.live_snapshot_for_test().da_safety_heights(),
         before.da_safety_heights()
     );
 }
@@ -5090,7 +5126,7 @@ fn future_lqc_advances_signing_and_proposal_floors_without_resolution_and_restor
     assert!(matches!(machine.durable.proposal_anchor.as_deref(),
         Some(Artifact::Vqc(anchor)) if certificate.equivalent_vqc(anchor)));
 
-    let restored = Machine::restore(machine.profile().clone(), machine.snapshot()).unwrap();
+    let restored = Machine::restore(machine.profile().clone(), machine.live_snapshot_for_test()).unwrap();
     assert_eq!(restored.inspect().view(), View::new(6));
     assert_eq!(restored.inspect().finality_floor(), certificate.view());
     assert!(matches!(restored.durable.signing_floor.as_deref(),
@@ -5131,7 +5167,7 @@ fn late_lqc_advances_signing_and_proposal_floors_without_resolution_and_restores
     assert!(matches!(machine.durable.proposal_anchor.as_deref(),
         Some(Artifact::Vqc(anchor)) if certificate.equivalent_vqc(anchor)));
 
-    let restored = Machine::restore(machine.profile().clone(), machine.snapshot()).unwrap();
+    let restored = Machine::restore(machine.profile().clone(), machine.live_snapshot_for_test()).unwrap();
     assert_eq!(restored.inspect().view(), View::new(6));
     assert_eq!(restored.inspect().finality_floor(), certificate.view());
     assert!(matches!(restored.durable.signing_floor.as_deref(),
@@ -6285,7 +6321,7 @@ fn observer_cannot_reserve_signing() {
 #[test]
 fn observer_replay_rejects_queued_signing_authority() {
     let machine = Machine::new(profile(Role::Observer));
-    let snapshot = machine.snapshot();
+    let snapshot = machine.live_snapshot_for_test();
     let mut restored = Machine::restore(profile(Role::Observer), snapshot).unwrap();
     let proposed = leader(&restored, 1);
     let cursor = Cursor::zero().next().unwrap();
@@ -6309,7 +6345,7 @@ fn observer_replay_rejects_queued_signing_authority() {
 fn replay_requires_view_advance_proof_to_be_retained_and_forwarded() {
     let profile = profile_for(Role::Observer, 6, 2);
     let machine = Machine::new(profile.clone());
-    let mut restored = Machine::restore(profile, machine.snapshot()).unwrap();
+    let mut restored = Machine::restore(profile, machine.live_snapshot_for_test()).unwrap();
     let proof =
         Artifact::Nullification(symbolic_nullification(&restored, View::new(1), 0)).id::<Sha256>();
     let cursor = Cursor::zero().next().unwrap();
@@ -6346,7 +6382,7 @@ fn replay_requires_the_views_first_vqc_forwarding_before_a_current_lqc_floor() {
             publication_retired: Vec::new(),
         },
     );
-    let mut restored = Machine::restore(profile, machine.snapshot()).unwrap();
+    let mut restored = Machine::restore(profile, machine.live_snapshot_for_test()).unwrap();
 
     assert_eq!(restored.replay(floor), Err(ReplayError::Transition));
 
@@ -6399,7 +6435,7 @@ fn replay_requires_the_views_first_vqc_forwarding_before_a_current_lqc_floor() {
     let alternate_id = alternate.id::<Sha256>();
     assert_ne!(alternate_id, anchor_id);
 
-    let mut restored = Machine::restore(machine.profile().clone(), machine.snapshot()).unwrap();
+    let mut restored = Machine::restore(machine.profile().clone(), machine.live_snapshot_for_test()).unwrap();
     restored
         .replay(DomainEvent::new(
             machine.profile().protocol().epoch(),
@@ -6438,7 +6474,7 @@ fn replay_requires_the_views_first_vqc_forwarding_before_a_current_lqc_floor() {
             .map(|artifact| artifact.id::<Sha256>()),
         Some(anchor_id),
     );
-    Machine::restore(machine.profile().clone(), restored.snapshot()).unwrap();
+    Machine::restore(machine.profile().clone(), restored.live_snapshot_for_test()).unwrap();
 }
 
 #[test]
@@ -6448,7 +6484,7 @@ fn proposal_may_repeat_its_exact_parent_after_forwarding() {
     let machine = Machine::new(profile.clone());
     let parent = view_one_vqc(&machine);
     let request = proposal_request_with_parent(&machine, View::new(2), parent.clone());
-    let mut restored = Machine::restore(profile, machine.snapshot()).unwrap();
+    let mut restored = Machine::restore(profile, machine.live_snapshot_for_test()).unwrap();
 
     let forwarding_cursor = Cursor::zero().next().unwrap();
     restored
@@ -6491,7 +6527,7 @@ fn proposal_may_omit_an_exact_parent_after_its_forwarding_fact_retires() {
         .unwrap();
     let attached = proposal_request_with_parent(&machine, View::new(2), parent.clone());
     let request = ProposalRequest::new(attached.block().clone(), attached.parent().clone(), false);
-    let mut restored = Machine::restore(profile, machine.snapshot()).unwrap();
+    let mut restored = Machine::restore(profile, machine.live_snapshot_for_test()).unwrap();
 
     let forwarding_cursor = Cursor::zero().next().unwrap();
     restored
@@ -6537,7 +6573,7 @@ fn replay_bounds_forwarded_certificate_outbox_growth() {
     let limits = resources_with_capacities(9, 1);
     let profile = profile_with_resources(Role::Observer, 6, 2, limits);
     let machine = Machine::new(profile.clone());
-    let mut restored = Machine::restore(profile, machine.snapshot()).unwrap();
+    let mut restored = Machine::restore(profile, machine.live_snapshot_for_test()).unwrap();
     let first = Arc::new(Artifact::Nullification(symbolic_nullification(
         &restored,
         View::new(1),
@@ -6580,7 +6616,7 @@ fn replay_accepts_reordered_future_exit_forwarding() {
     let limits = resources_with_capacities(9, 16);
     let profile = profile_with_resources(Role::Observer, 6, 2, limits);
     let machine = Machine::new(profile.clone());
-    let mut restored = Machine::restore(profile, machine.snapshot()).unwrap();
+    let mut restored = Machine::restore(profile, machine.live_snapshot_for_test()).unwrap();
     let mut cursor = Cursor::zero();
 
     // Future certificates can finish verification before the current view. Every publication
@@ -6642,7 +6678,7 @@ fn successor_forwarding_reuses_retired_artifact_capacity() {
 
     let successor = symbolic_nullification(&machine, View::new(2), 1);
     let successor = observe(&mut machine, Artifact::Nullification(successor));
-    let acknowledged = machine.snapshot();
+    let acknowledged = machine.live_snapshot_for_test();
     let forwarded = complete_with_step(&mut machine, &successor, true);
     let forwarding = persist_job(&forwarded);
     assert_eq!(machine.artifacts.len(), 2);
@@ -6659,7 +6695,7 @@ fn successor_forwarding_reuses_retired_artifact_capacity() {
     assert!(restored.durable.nullification_forwarded(View::new(2)));
     assert_eq!(restored.durable.outbox.len(), 8);
     assert_eq!(restored.durable_artifact_references.len(), 9);
-    Machine::restore(profile, restored.snapshot()).unwrap();
+    Machine::restore(profile, restored.live_snapshot_for_test()).unwrap();
 }
 
 #[test]
@@ -6667,7 +6703,7 @@ fn replay_bounds_locally_created_view_certificates() {
     let limits = resources_with_capacities(9, 16);
     let profile = profile_with_resources(Role::Observer, 6, 2, limits);
     let machine = Machine::new(profile.clone());
-    let mut restored = Machine::restore(profile, machine.snapshot()).unwrap();
+    let mut restored = Machine::restore(profile, machine.live_snapshot_for_test()).unwrap();
     let mut cursor = Cursor::zero();
     for view in 1..=9 {
         cursor = cursor.next().unwrap();
@@ -6697,7 +6733,7 @@ fn replay_bounds_locally_created_view_certificates() {
     );
     assert_eq!(restored.replay(event), Err(ReplayError::Transition));
     assert_eq!(restored.inspect().cursor(), cursor);
-    assert_eq!(restored.snapshot().local_artifacts().len(), 9);
+    assert_eq!(restored.live_snapshot_for_test().local_artifacts().len(), 9);
 }
 
 #[test]
@@ -6705,7 +6741,7 @@ fn replay_and_restore_count_signing_reservations_with_retained_artifacts() {
     let limits = resources_with_capacities(9, 9);
     let profile = profile_with_resources(Role::Validator(Participant::new(0)), 6, 2, limits);
     let machine = Machine::new(profile.clone());
-    let mut restored = Machine::restore(profile.clone(), machine.snapshot()).unwrap();
+    let mut restored = Machine::restore(profile.clone(), machine.live_snapshot_for_test()).unwrap();
     let mut forwarded_cursor = Cursor::zero();
     for view in 2..=9 {
         forwarded_cursor = forwarded_cursor.next().unwrap();
@@ -6863,7 +6899,7 @@ fn replay_rejects_unauthorized_local_da_certificates() {
     for role in [Role::Observer, Role::Validator(Participant::new(0))] {
         let profile = profile_for(role, 6, 2);
         let machine = Machine::new(profile.clone());
-        let mut restored = Machine::restore(profile, machine.snapshot()).unwrap();
+        let mut restored = Machine::restore(profile, machine.live_snapshot_for_test()).unwrap();
         let genesis = restored.profile().protocol().genesis().tips()[1];
         let header = TransactionBlockHeader::new(
             restored.profile().protocol().epoch(),
@@ -7405,7 +7441,7 @@ fn divergent_certificate_discards_the_prepared_suffix() {
 fn prepared_suffix_is_discarded_across_restart_without_authority() {
     let role = Role::Validator(Participant::new(0));
     let mut machine = active_machine(role);
-    let snapshot = machine.snapshot();
+    let snapshot = machine.live_snapshot_for_test();
     let ready = machine.step(Input::ProducerWake).unwrap();
     let build = build_job(&settle(&mut machine, ready));
     let prepared = prepare_block(&mut machine, &build, digest(b"volatile prepared block"));
@@ -7440,7 +7476,7 @@ fn producer_builds_after_an_external_own_chain_certificate() {
     let role = Role::Validator(Participant::new(0));
     let profile = profile(role);
     let mut machine = active_machine(role);
-    let before_certificate = machine.snapshot();
+    let before_certificate = machine.live_snapshot_for_test();
     let genesis = machine.profile().protocol().genesis().tips()[0];
     let first = TransactionBlockHeader::new(
         machine.profile().protocol().epoch(),
@@ -7475,8 +7511,8 @@ fn producer_builds_after_an_external_own_chain_certificate() {
     assert_eq!(replayed.durable.certified_tips[0].height(), Height::new(1));
     assert_eq!(replayed.durable.produced_height, Height::zero());
 
-    let outbox_before = machine.snapshot().outbox().clone();
-    let obligations_before = machine.snapshot().obligations().clone();
+    let outbox_before = machine.live_snapshot_for_test().outbox().clone();
+    let obligations_before = machine.live_snapshot_for_test().obligations().clone();
     let advanced = persist(&mut machine, &advanced_job);
     let build = build_job(&advanced);
     assert_eq!(build.parent(), first.block_ref::<Sha256>());
@@ -7503,7 +7539,7 @@ fn producer_builds_after_an_external_own_chain_certificate() {
     assert_eq!(machine.durable.produced_blocks, 1);
     assert_eq!(machine.durable.produced_height, Height::new(2));
 
-    let snapshot = machine.snapshot();
+    let snapshot = machine.live_snapshot_for_test();
     assert_eq!(snapshot.outbox(), &outbox_before);
     assert_eq!(snapshot.obligations(), &obligations_before);
     assert_eq!(
@@ -7516,7 +7552,7 @@ fn producer_builds_after_an_external_own_chain_certificate() {
     }
     assert_eq!(replayed.durable.produced_blocks, 1);
     assert_eq!(replayed.durable.produced_height, Height::new(2));
-    let replayed = replayed.snapshot();
+    let replayed = replayed.live_snapshot_for_test();
     assert_eq!(replayed.outbox(), &outbox_before);
     assert_eq!(replayed.obligations(), &obligations_before);
     assert_eq!(
@@ -7671,7 +7707,7 @@ fn crash_recovery_rejects_mismatched_old_resolution_completions_as_stale() {
             .unwrap()
     });
 
-    let mut restored = Machine::restore(profile, machine.snapshot()).unwrap();
+    let mut restored = Machine::restore(profile, machine.live_snapshot_for_test()).unwrap();
     let recovery = restored.step(Input::RecoveryComplete).unwrap();
     persist(&mut restored, &persist_job(&recovery));
     let current = keys.map(|key| {
@@ -7789,7 +7825,7 @@ fn producer_window_stops_before_the_third_uncertified_block() {
     );
 
     let second = machine
-        .snapshot()
+        .live_snapshot_for_test()
         .signing_reservations()
         .values()
         .filter_map(|effect| match effect {
@@ -7852,7 +7888,7 @@ fn certified_chain_state_plateaus_without_ordering() {
     );
 
     let profile = machine.profile().clone();
-    let mut restored = Machine::restore(profile, machine.snapshot()).unwrap();
+    let mut restored = Machine::restore(profile, machine.live_snapshot_for_test()).unwrap();
     let recovery = restored.step(Input::RecoveryComplete).unwrap();
     persist(&mut restored, &persist_job(&recovery));
     assert_eq!(restored.chain.tip_heights()[0].1, Height::new(100));
@@ -7918,15 +7954,15 @@ fn validator_da_safety_state_plateaus_across_restarts() {
         parent = block;
 
         assert_eq!(
-            machine.snapshot().da_safety_heights()[1],
+            machine.live_snapshot_for_test().da_safety_heights()[1],
             Height::new(height)
         );
         assert!(machine.inspect().cached_artifacts() <= 4);
-        assert!(machine.snapshot().local_artifacts().len() <= 1);
-        assert!(machine.snapshot().outbox().len() <= 1);
+        assert!(machine.live_snapshot_for_test().local_artifacts().len() <= 1);
+        assert!(machine.live_snapshot_for_test().outbox().len() <= 1);
 
         if height % 10 == 0 {
-            let mut restored = Machine::restore(profile.clone(), machine.snapshot()).unwrap();
+            let mut restored = Machine::restore(profile.clone(), machine.live_snapshot_for_test()).unwrap();
             let recovery = restored.step(Input::RecoveryComplete).unwrap();
             persist(&mut restored, &persist_job(&recovery));
             machine = restored;
@@ -7954,7 +7990,7 @@ fn recovery_reissues_the_exact_durable_producer_choice() {
     let completed = complete_custody(&mut machine, &custody_job(&completed));
     persist(&mut machine, &persist_job(&completed));
     let expected = machine
-        .snapshot()
+        .live_snapshot_for_test()
         .signing_reservations()
         .values()
         .find_map(|effect| match effect {
@@ -7965,7 +8001,7 @@ fn recovery_reissues_the_exact_durable_producer_choice() {
 
     let mut restored = Machine::restore(
         profile(Role::Validator(Participant::new(0))),
-        machine.snapshot(),
+        machine.live_snapshot_for_test(),
     )
     .unwrap();
     let recovery = restored.step(Input::RecoveryComplete).unwrap();
@@ -8083,7 +8119,7 @@ fn recovered_payloads_are_the_exact_local_producer_and_da_union() {
     let verified = complete_with_step(&mut machine, &observed, true);
     persist(&mut machine, &persist_job(&verified));
 
-    let restored = Machine::restore(recovery_profile.clone(), machine.snapshot()).unwrap();
+    let restored = Machine::restore(recovery_profile.clone(), machine.live_snapshot_for_test()).unwrap();
     assert_eq!(
         restored.recovered_payloads(),
         vec![
@@ -8099,7 +8135,7 @@ fn recovered_payloads_are_the_exact_local_producer_and_da_union() {
     );
     let verified = complete_with_step(&mut machine, &observed, true);
     persist(&mut machine, &persist_job(&verified));
-    let restored = Machine::restore(recovery_profile, machine.snapshot()).unwrap();
+    let restored = Machine::restore(recovery_profile, machine.live_snapshot_for_test()).unwrap();
     assert_eq!(
         restored.recovered_payloads(),
         vec![(Context::from(&local), local.body_digest())],
@@ -8109,7 +8145,7 @@ fn recovered_payloads_are_the_exact_local_producer_and_da_union() {
     let observer_profile = profile_for(Role::Observer, 6, 2);
     let observer = Machine::restore(
         observer_profile.clone(),
-        Machine::new(observer_profile).snapshot(),
+        Machine::new(observer_profile).live_snapshot_for_test(),
     )
     .unwrap();
     assert!(observer.recovered_payloads().is_empty());
@@ -8234,7 +8270,7 @@ fn producer_subset_snapshots_restore_for_every_validator_role() {
     for participant in [Participant::new(3), Participant::new(4)] {
         let profile = profile_for_producers(Role::Validator(participant), 6, producers.clone(), 2);
         let machine = Machine::new(profile.clone());
-        Machine::restore(profile, machine.snapshot()).expect("K<n snapshot restores");
+        Machine::restore(profile, machine.live_snapshot_for_test()).expect("K<n snapshot restores");
     }
 }
 
@@ -8511,8 +8547,8 @@ fn finalized_parent_requires_a_real_da_path_before_voting_for_its_child() {
         machine.inspect().chain_progress()[1].finalized(),
         Height::new(1)
     );
-    assert_eq!(machine.snapshot().certified_tips()[1], genesis);
-    assert_eq!(machine.snapshot().da_safety_heights()[1], genesis.height());
+    assert_eq!(machine.live_snapshot_for_test().certified_tips()[1], genesis);
+    assert_eq!(machine.live_snapshot_for_test().da_safety_heights()[1], genesis.height());
 
     let held = authenticate_block(&mut machine, second.clone(), 1);
     assert!(validation_jobs(&held).is_empty());
@@ -9797,7 +9833,7 @@ fn recovered_chain_signing_reservations_use_global_capacity() {
         let _ = drive_poll_and_persist(&mut machine, advanced);
     }
 
-    let mut recovered = Machine::restore(profile, machine.snapshot()).unwrap();
+    let mut recovered = Machine::restore(profile, machine.live_snapshot_for_test()).unwrap();
     let recovery = recovered.step(Input::RecoveryComplete).unwrap();
     persist(&mut recovered, &persist_job(&recovery));
 
@@ -10007,7 +10043,7 @@ fn recovery_reissues_the_exact_durable_da_vote() {
     let reserved = validate_block(&mut machine, header.clone(), 1);
     persist(&mut machine, &persist_job(&reserved));
 
-    let mut restored = Machine::restore(profile_for(role, 6, 2), machine.snapshot()).unwrap();
+    let mut restored = Machine::restore(profile_for(role, 6, 2), machine.live_snapshot_for_test()).unwrap();
     let recovery = restored.step(Input::RecoveryComplete).unwrap();
     let recovered = persist(&mut restored, &persist_job(&recovery));
     let exact = recovered.capabilities().iter().any(|effect| {
@@ -10193,7 +10229,7 @@ fn da_choices_outrank_earlier_observed_equivocating_records() {
     // After a restart, the DA choice is rebuilt from the journal while the header index
     // starts empty. An equivocating sibling delivered first is then the earliest observed
     // record at the DA-voted height, and must still lose to the durable DA choice.
-    let mut restored = Machine::restore(profile_for(role, 6, 3), machine.snapshot()).unwrap();
+    let mut restored = Machine::restore(profile_for(role, 6, 3), machine.live_snapshot_for_test()).unwrap();
     let recovery = restored.step(Input::RecoveryComplete).unwrap();
     persist(&mut restored, &persist_job(&recovery));
     let sibling = TransactionBlockHeader::new(
@@ -10578,11 +10614,11 @@ fn a_certified_base_allows_voting_for_its_child_after_a_gap() {
     ));
     persist(&mut machine, &persist_job(&reserved));
 
-    let mut restored = Machine::restore(profile, machine.snapshot()).unwrap();
+    let mut restored = Machine::restore(profile, machine.live_snapshot_for_test()).unwrap();
     let recovery = restored.step(Input::RecoveryComplete).unwrap();
     persist(&mut restored, &persist_job(&recovery));
     assert_eq!(
-        restored.snapshot().da_safety_heights()[genesis.chain().get() as usize],
+        restored.live_snapshot_for_test().da_safety_heights()[genesis.chain().get() as usize],
         child.height()
     );
 }
@@ -10613,7 +10649,7 @@ fn recovery_requires_the_held_path_before_extending_a_da_vote() {
     let reserved = validate_block(&mut machine, first.clone(), 1);
     persist(&mut machine, &persist_job(&reserved));
 
-    let mut restored = Machine::restore(profile_for(role, 6, 2), machine.snapshot()).unwrap();
+    let mut restored = Machine::restore(profile_for(role, 6, 2), machine.live_snapshot_for_test()).unwrap();
     let recovery = restored.step(Input::RecoveryComplete).unwrap();
     persist(&mut restored, &persist_job(&recovery));
     let held_second = authenticate_block(&mut restored, second.clone(), 1);
@@ -11032,7 +11068,7 @@ fn maximum_signed_batch_preempts_without_partial_exposure() {
             CoreTurn::Idle => break,
         }
 
-        let snapshot = composer.machine().snapshot();
+        let snapshot = composer.machine().live_snapshot_for_test();
         let local = snapshot.local_artifacts();
         let admitted = expected.iter().filter(|id| local.contains_key(id)).count();
         assert!(
@@ -12136,13 +12172,13 @@ fn timeout_atomically_authorizes_novote_and_nullify() {
         .unwrap();
     let completed = settle(&mut machine, completed);
     // Staging records both artifacts atomically; only their broadcast waits for durability.
-    assert_eq!(machine.snapshot().local_artifacts().len(), 2);
+    assert_eq!(machine.live_snapshot_for_test().local_artifacts().len(), 2);
     assert!(completed.capabilities().iter().all(|effect| !matches!(
         durable_effect(effect),
         Some(DurableEffect::BroadcastBatch(_))
     )));
     let published = persist(&mut machine, &persist_job(&completed));
-    assert_eq!(machine.snapshot().local_artifacts().len(), 2);
+    assert_eq!(machine.live_snapshot_for_test().local_artifacts().len(), 2);
     assert!(published.capabilities().iter().any(|capability| matches!(
         capability,
         Capability::Durability(DurabilityCapability::Released(job))
@@ -12253,7 +12289,7 @@ fn nullification_recovery_uses_the_canonical_subset_and_exits() {
         .unwrap();
     let completed = settle(&mut machine, completed);
     let retained = persist(&mut machine, &persist_job(&completed));
-    Machine::restore(profile, machine.snapshot()).unwrap();
+    Machine::restore(profile, machine.live_snapshot_for_test()).unwrap();
     // The recovered nullification is an independently verifiable aggregate with no local
     // signature pending behind it, so its broadcast releases with the forwarding staging
     // instead of waiting for that barrier's acknowledgement.
@@ -12354,7 +12390,7 @@ fn vqc_aggregation_retains_exact_messages_and_exits_observer() {
         .unwrap();
     let completed = settle(&mut machine, completed);
     let retained = persist(&mut machine, &persist_job(&completed));
-    Machine::restore(profile, machine.snapshot()).unwrap();
+    Machine::restore(profile, machine.live_snapshot_for_test()).unwrap();
     let published = persist(&mut machine, &persist_job(&retained));
     let advance = persist_job(&published);
     assert!(matches!(
@@ -13452,7 +13488,7 @@ fn timeout_signing_batch_survives_recovery_intact() {
     let elapsed = settle(&mut machine, elapsed);
     persist(&mut machine, &persist_job(&elapsed));
 
-    let snapshot = machine.snapshot();
+    let snapshot = machine.live_snapshot_for_test();
     let mut restored = Machine::restore(profile, snapshot).unwrap();
     let recovery = restored.step(Input::RecoveryComplete).unwrap();
     assert!(recovery.capabilities().iter().any(
@@ -13485,7 +13521,7 @@ fn view_snapshot_codec_rejects_noncanonical_and_unbounded_payloads() {
     let elapsed = settle(&mut machine, elapsed);
     persist(&mut machine, &persist_job(&elapsed));
 
-    let snapshot = machine.snapshot();
+    let snapshot = machine.live_snapshot_for_test();
     let config = SnapshotCodecConfig::from_profile(&profile);
     let encoded = snapshot.encode();
     let decoded = Snapshot::<MinPk, Digest>::decode_cfg(encoded, &config).unwrap();
@@ -13536,7 +13572,7 @@ fn view_snapshot_codec_rejects_noncanonical_and_unbounded_payloads() {
 fn timeout_choice_recovers_at_each_durable_crash_prefix() {
     let profile = profile_for(Role::Validator(Participant::new(0)), 6, 2);
     let (mut machine, started) = start_profile(profile.clone());
-    let before = machine.snapshot();
+    let before = machine.live_snapshot_for_test();
     let timer = started
         .capabilities()
         .iter()
@@ -13615,7 +13651,7 @@ fn pending_proposal_parent_survives_recovery() {
     // Acknowledge the proposal barrier without letting the scheduler stage anything on top of
     // it, so the crash snapshot holds the reserved proposal and nothing later.
     persist_raw(&mut machine, &persist_job(&entered));
-    let crashed = machine.snapshot();
+    let crashed = machine.live_snapshot_for_test();
     // The signing request released with the step that staged the proposal choice.
     let sign = sign_job(&entered);
     let SignRequest::LeaderBlock(request) = sign_request(&sign) else {
@@ -13721,7 +13757,7 @@ fn outstanding_proposal_parent_survives_recovery() {
     assert!(delivered.capabilities().is_empty());
     assert!(machine.durable.vqc_forwarded(View::new(1)));
 
-    let mut restored = Machine::restore(profile, machine.snapshot()).unwrap();
+    let mut restored = Machine::restore(profile, machine.live_snapshot_for_test()).unwrap();
     let recovery = restored.step(Input::RecoveryComplete).unwrap();
     persist(&mut restored, &persist_job(&recovery));
     assert!(restored.inspect().ready_artifacts().contains(&parent_id));
@@ -13749,7 +13785,7 @@ fn pending_proposal_parent_counts_against_recovery_capacity() {
 
     let constrained = profile_with_resources(role, 6, 2, resources_with_capacities(9, 16));
     assert!(matches!(
-        Machine::restore(constrained, machine.snapshot()),
+        Machine::restore(constrained, machine.live_snapshot_for_test()),
         Err(ReplayError::Transition)
     ));
 }
@@ -13850,7 +13886,7 @@ fn outstanding_future_exit_certificate_survives_recovery() {
         .unwrap();
     assert!(delivered.capabilities().is_empty());
 
-    let mut restored = Machine::restore(profile, machine.snapshot()).unwrap();
+    let mut restored = Machine::restore(profile, machine.live_snapshot_for_test()).unwrap();
     let recovery = restored.step(Input::RecoveryComplete).unwrap();
     persist(&mut restored, &persist_job(&recovery));
 
@@ -13938,7 +13974,7 @@ fn retained_view_history_keeps_one_typed_exit_obligation() {
         assert!(machine.durable.nullification_forwarded(View::new(view)));
 
         if view % 4 == 0 {
-            let mut restored = Machine::restore(profile.clone(), machine.snapshot()).unwrap();
+            let mut restored = Machine::restore(profile.clone(), machine.live_snapshot_for_test()).unwrap();
             let recovery = restored.step(Input::RecoveryComplete).unwrap();
             persist(&mut restored, &persist_job(&recovery));
             machine = restored;
@@ -13995,7 +14031,7 @@ fn forwarding_history_remains_certificate_class_specific() {
     assert_eq!(machine.inspect().view(), View::new(3));
     assert!(machine.durable.nullification_forwarded(View::new(1)));
 
-    let mut restored = Machine::restore(profile, machine.snapshot()).unwrap();
+    let mut restored = Machine::restore(profile, machine.live_snapshot_for_test()).unwrap();
     let recovery = restored.step(Input::RecoveryComplete).unwrap();
     persist(&mut restored, &persist_job(&recovery));
     let duplicate = restored
@@ -14233,7 +14269,7 @@ fn view_retention_retires_history_while_finality_stalls() {
     let expected_exits = machine.views.retained_exit_proofs();
 
     // The retired suffix is exactly what the snapshot carries, and it restores unchanged.
-    let restored = Machine::restore(profile, machine.snapshot()).unwrap();
+    let restored = Machine::restore(profile, machine.live_snapshot_for_test()).unwrap();
     assert_eq!(restored.durable, machine.durable);
     assert_eq!(restored.views.retained_exit_proofs(), expected_exits);
 }
@@ -14242,7 +14278,7 @@ fn view_retention_retires_history_while_finality_stalls() {
 fn invalid_resolved_exit_rearms_exact_want_and_accepts_retry() {
     let profile = profile_for(Role::Observer, 6, 2);
     let (machine, _) = start_profile(profile.clone());
-    let mut restored = Machine::restore(profile, machine.snapshot()).unwrap();
+    let mut restored = Machine::restore(profile, machine.live_snapshot_for_test()).unwrap();
     let recovery = restored.step(Input::RecoveryComplete).unwrap();
     let exit = recovery
         .capabilities()
@@ -14434,7 +14470,7 @@ fn cross_class_exit_selection_is_completion_order_independent() {
         // Snapshot the instant the forwarding barrier lands, before any follow-up staging, so
         // recovery has to re-derive the rescued vote rather than replay it.
         persist_raw(&mut machine, &forwarding);
-        let crashed = machine.snapshot();
+        let crashed = machine.live_snapshot_for_test();
 
         let mut restored = Machine::restore(profile, crashed).unwrap();
         let recovery = restored.step(Input::RecoveryComplete).unwrap();
@@ -14600,7 +14636,7 @@ fn local_vqc_survives_a_crash_before_forwarding() {
     let completed = settle(&mut machine, completed);
     let acknowledged = persist_raw(&mut machine, &persist_job(&completed));
     // Crash between the retention barrier and the forwarding the scheduler is about to stage.
-    let crashed = machine.snapshot();
+    let crashed = machine.live_snapshot_for_test();
     let retained = settle(&mut machine, acknowledged);
     assert!(matches!(
         persist_job(&retained).events()[0].change(),
@@ -14664,7 +14700,7 @@ fn forwarding_one_certificate_class_does_not_suppress_the_other() {
     assert!(matches!(artifact.as_ref(), Artifact::Vqc(_)));
     persist(&mut machine, &forwarding);
 
-    let snapshot = machine.snapshot();
+    let snapshot = machine.live_snapshot_for_test();
     assert!(snapshot.outbox().contains_key(nullification_publication));
     assert!(snapshot.outbox().contains_key(vqc_publication));
     let exits = snapshot
@@ -14683,11 +14719,11 @@ fn forwarding_one_certificate_class_does_not_suppress_the_other() {
     let restored = Machine::restore(profile, snapshot).unwrap();
     assert!(
         restored
-            .snapshot()
+            .live_snapshot_for_test()
             .outbox()
             .contains_key(nullification_publication)
     );
-    assert!(restored.snapshot().outbox().contains_key(vqc_publication));
+    assert!(restored.live_snapshot_for_test().outbox().contains_key(vqc_publication));
 
     let successor = Artifact::Nullification(symbolic_nullification(
         &machine,
@@ -14711,7 +14747,7 @@ fn forwarding_one_certificate_class_does_not_suppress_the_other() {
     );
     persist(&mut machine, &successor);
 
-    let snapshot = machine.snapshot();
+    let snapshot = machine.live_snapshot_for_test();
     assert!(!snapshot.outbox().contains_key(nullification_publication));
     assert!(!snapshot.outbox().contains_key(vqc_publication));
     assert!(snapshot.outbox().contains_key(successor_publication));

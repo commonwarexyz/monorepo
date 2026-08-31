@@ -930,7 +930,7 @@ impl<'a> World<'a> {
                 .replay(event.clone())
                 .unwrap_or_else(|error| panic!("{}: replay failed: {error:?}", coordinate()));
         }
-        let snapshot = replayed.snapshot();
+        let snapshot = replayed.live_snapshot_for_test();
         assert_eq!(
             snapshot.cursor(),
             state.appended_cursor,
@@ -1351,7 +1351,7 @@ impl<'a> World<'a> {
                 .replay(event.clone())
                 .expect("every staged world event must replay");
         }
-        assert_eq!(replayed.snapshot(), runner.machine.snapshot());
+        assert_eq!(replayed.live_snapshot_for_test(), runner.machine.live_snapshot_for_test());
     }
 
     fn record_persist_job(&mut self, replica: usize, job: &PersistJob<MinPk, Digest>) {
@@ -1503,7 +1503,7 @@ impl<'a> World<'a> {
                 .replay(event.clone())
                 .expect("the independently bounded publication prefix must replay");
         }
-        let snapshot = durable.snapshot();
+        let snapshot = durable.live_snapshot_for_test();
         let tracked = self.replicas[replica]
             .publications
             .iter()
@@ -1839,7 +1839,7 @@ impl<'a> World<'a> {
     fn durable_outcome(&self) -> DurableOutcome {
         DurableOutcome {
             journals: from_fn(|replica| self.replicas[replica].runner.journal.clone()),
-            snapshots: from_fn(|replica| self.replicas[replica].runner.machine.snapshot()),
+            snapshots: from_fn(|replica| self.replicas[replica].runner.machine.live_snapshot_for_test()),
             inspections: from_fn(|replica| self.replicas[replica].runner.inspect()),
             finality: from_fn(|replica| {
                 self.replicas[replica].runner.inspect().finality().to_vec()

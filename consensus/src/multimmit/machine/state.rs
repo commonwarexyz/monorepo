@@ -761,6 +761,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         snapshot.validate(&profile)?;
         let mut machine = Self::new(profile);
         machine.durable = snapshot.state().clone();
+        machine.acked = machine.durable.cursor;
         machine.views.restore_snapshot(snapshot.view_snapshot());
         machine
             .chain
@@ -893,8 +894,9 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         &self.profile
     }
 
-    /// Projects state at the last acknowledged durable cursor.
-    pub fn snapshot(&self) -> Snapshot<V, H::Digest> {
+    /// Projects current state for deterministic tests, including staged changes.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) fn live_snapshot_for_test(&self) -> Snapshot<V, H::Digest> {
         Snapshot::new::<H>(
             self.profile.protocol().epoch(),
             self.profile.role(),
@@ -902,13 +904,13 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         )
     }
 
-    /// Freezes the acknowledged state while leaving projection construction to its consumer.
-    pub(crate) fn checkpoint_cut(&self) -> CheckpointCut<H, V> {
-        CheckpointCut {
+    /// Freezes acknowledged state while leaving projection construction to its consumer.
+    pub(crate) fn checkpoint_cut(&self) -> Option<CheckpointCut<H, V>> {
+        (self.staged.is_empty() && self.durable.cursor == self.acked).then(|| CheckpointCut {
             epoch: self.profile.protocol().epoch(),
             role: self.profile.role(),
             state: self.durable.clone(),
-        }
+        })
     }
 
     /// Returns a normalized read-only projection without exposing internal maps.

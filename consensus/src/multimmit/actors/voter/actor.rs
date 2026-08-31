@@ -2654,12 +2654,13 @@ where
             || !self.journal_responses.is_empty()
             || self.pending_checkpoint.is_some()
             || self.pending_prune.is_some()
-            || self.machine.staged_barriers() != 0
         {
             return Ok(());
         }
+        let Some(cut) = self.machine.checkpoint_cut() else {
+            return Ok(());
+        };
         self.events_since_checkpoint = 0;
-        let cut = self.machine.checkpoint_cut();
         let origin = CheckpointOrigin {
             epoch: self.protocol_epoch,
             view: self.round_view,

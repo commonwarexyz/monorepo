@@ -585,7 +585,7 @@ mod size_probe {
                     core.observe(observed, resident_bytes).unwrap();
                 }
             }
-            let snapshot = core.snapshot();
+            let snapshot = core.live_snapshot_for_test();
             for artifact in snapshot.retained_artifacts() {
                 if let Artifact::Vqc(vqc) = artifact.as_ref() {
                     check(&format!("forwarded vqc view {:?}", vqc.view()), vqc);

@@ -205,8 +205,12 @@ where
         journal,
         events_since_checkpoint: _,
     } = *recovered;
+    let snapshot = core
+        .checkpoint_cut()
+        .ok_or(OpenError::CoreInitialization)?
+        .materialize();
     let checkpoints = checkpoints
-        .store(core.snapshot())
+        .store(snapshot)
         .instrument(info_span!(
             "multimmit.engine.compact_recovery_suffix.checkpoint"
         ))
@@ -388,7 +392,10 @@ where
     } else {
         let snapshot = match checkpoint {
             Some(snapshot) => snapshot,
-            None => CoreState::fresh(profile.clone(), application_tasks)?.snapshot(),
+            None => CoreState::fresh(profile.clone(), application_tasks)?
+                .checkpoint_cut()
+                .ok_or(OpenError::CoreInitialization)?
+                .materialize(),
         };
         let mut core = CoreState::restore(profile, snapshot, application_tasks)?;
         info_span!(
@@ -405,7 +412,10 @@ where
             Ok::<_, ReplayError>(())
         })?;
 
-        let snapshot = core.snapshot();
+        let snapshot = core
+            .checkpoint_cut()
+            .ok_or(OpenError::CoreInitialization)?
+            .materialize();
         let mut artifact_ids = HashSet::new();
         let artifacts = snapshot
             .retained_artifacts()
@@ -1651,7 +1661,7 @@ mod tests {
             let Startup::Recovered(recovered) = &stores.startup else {
                 panic!("active typed obligations must select recovery startup");
             };
-            let snapshot = recovered.core.snapshot();
+            let snapshot = recovered.core.live_snapshot_for_test();
             assert_eq!(
                 snapshot.outbox().keys().collect::<Vec<_>>(),
                 snapshot.obligations().keys().collect::<Vec<_>>(),
