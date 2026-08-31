@@ -723,8 +723,7 @@ where
             Some(message) = self.mailbox.recv() else {
                 debug!("mailbox closed, shutting down");
                 return ControlFlow::Break(());
-            } => {
-                match message {
+            } => match message {
                 Message::NextLog {
                     span,
                     height,
@@ -772,91 +771,25 @@ where
                     block,
                     response,
                 } => {
-                    let process = info_span!(
-                        parent: &span,
-                        "dkg.reshare.actor.inclusion.finalized",
-                        height = block.height().traced()
-                    );
-                    let outcome = async {
-                        let bounds = self
-                            .epocher
-                            .containing(block.height())
-                            .expect("epocher must know of block height");
-                        assert_eq!(
-                            bounds.epoch(),
+                    if let Some(outcome) = self
+                        .handle_finalized(
                             epoch,
-                            "inclusion received future epoch block"
-                        );
-                        assert!(
-                            matches!(bounds.phase(), EpochPhase::Midpoint | EpochPhase::Late),
-                            "inclusion received block before midpoint"
-                        );
-
-                        // A pending ancestry has not established a stable view.
-                        // Restart it after this block's durable effects so its
-                        // lower anchor follows the canonical prefix.
-                        if let Some(request) = scan.take_request() {
-                            work.requests.push_front(request);
-                        }
-
-                        let public_key = self.signer.public_key();
-                        Self::observe_dealer_log(
-                            &public_key,
                             info,
                             store,
-                            epoch,
                             dealer.as_deref_mut(),
-                            block.payload(),
+                            &mut served_at,
+                            &mut finalized_tip,
+                            &mut scan,
+                            &mut work,
+                            span,
+                            block,
+                            response,
                         )
-                        .await;
-
-                        let done = block.height() == bounds.last();
-                        if done
-                            && self
-                                .complete_epoch_artifact(
-                                epoch,
-                                info,
-                                store,
-                                &mut work,
-                                block.as_ref(),
-                            )
-                            .await
-                            .is_break()
-                        {
-                            return ControlFlow::Break(());
-                        }
-
-                        finalized_tip = Some(FinalizedTip {
-                            height: block.height(),
-                            digest: block.digest(),
-                        });
-
-                        // Re-offer our dealer log if finalization reached the height we
-                        // served it into without the log landing on-chain. When our log
-                        // does finalize, observe_dealer_log above clears it via
-                        // clear_finalized, so a still-present finalized log here means
-                        // the proposal we served into lost the view.
-                        if served_at.is_some_and(|served| block.height() >= served)
-                            && dealer
-                                .as_ref()
-                                .is_some_and(|dealer| dealer.finalized().is_some())
-                        {
-                            served_at = None;
-                        }
-
-                        response.acknowledge();
-                        ControlFlow::Continue(done)
-                    }
-                    .instrument(process)
-                    .await;
-                    let ControlFlow::Continue(done) = outcome else {
-                        return ControlFlow::Break(());
-                    };
-                    if done {
-                        return ControlFlow::Continue(());
+                        .await
+                    {
+                        return outcome;
                     }
                     advance = Some(std::future::ready(())).into();
-                }
                 }
             },
             // Mailbox traffic precedes speculative scan completion. An admitted
@@ -866,30 +799,106 @@ where
                 let request = scan
                     .take_request()
                     .expect("completed artifact scan must own a request");
-                self.complete_artifact_scan(
-                    epoch,
-                    info,
-                    store,
-                    request,
-                    pending,
-                    &mut work,
-                )
-                .await;
+                self.complete_artifact_scan(epoch, info, store, request, pending, &mut work)
+                    .await;
                 advance = Some(std::future::ready(())).into();
             },
             _ = &mut advance => {
                 advance = None.into();
-                self.advance_artifact_requests(
-                    epoch,
-                    info,
-                    finalized_tip,
-                    &mut scan,
-                    &mut work,
-                );
+                self.advance_artifact_requests(epoch, info, finalized_tip, &mut scan, &mut work);
             },
         };
 
         ControlFlow::Break(())
+    }
+
+    /// Applies a finalized inclusion block and returns an outcome when it ends the phase.
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_finalized(
+        &mut self,
+        epoch: Epoch,
+        info: &Info<V, C::PublicKey>,
+        store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
+        mut dealer: Option<&mut Dealer<V, C>>,
+        served_at: &mut Option<Height>,
+        finalized_tip: &mut Option<FinalizedTip<B::Digest>>,
+        scan: &mut ArtifactScan<'_, B, V, C>,
+        work: &mut ArtifactWork<B, V, C>,
+        span: Span,
+        block: Arc<B>,
+        response: A,
+    ) -> Option<ControlFlow<()>> {
+        let process = info_span!(
+            parent: &span,
+            "dkg.reshare.actor.inclusion.finalized",
+            height = block.height().traced()
+        );
+        async {
+            let bounds = self
+                .epocher
+                .containing(block.height())
+                .expect("epocher must know of block height");
+            assert_eq!(
+                bounds.epoch(),
+                epoch,
+                "inclusion received future epoch block"
+            );
+            assert!(
+                matches!(bounds.phase(), EpochPhase::Midpoint | EpochPhase::Late),
+                "inclusion received block before midpoint"
+            );
+
+            // A pending ancestry has not established a stable view.
+            // Restart it after this block's durable effects so its
+            // lower anchor follows the canonical prefix.
+            if let Some(request) = scan.take_request() {
+                work.requests.push_front(request);
+            }
+
+            let public_key = self.signer.public_key();
+            Self::observe_dealer_log(
+                &public_key,
+                info,
+                store,
+                epoch,
+                dealer.as_deref_mut(),
+                block.payload(),
+            )
+            .await;
+
+            let done = block.height() == bounds.last();
+            if done
+                && self
+                    .complete_epoch_artifact(epoch, info, store, work, block.as_ref())
+                    .await
+                    .is_break()
+            {
+                return Some(ControlFlow::Break(()));
+            }
+
+            *finalized_tip = Some(FinalizedTip {
+                height: block.height(),
+                digest: block.digest(),
+            });
+
+            // Re-offer our dealer log if finalization reached the height we
+            // served it into without the log landing on-chain. When our log
+            // does finalize, observe_dealer_log above clears it via
+            // clear_finalized, so a still-present finalized log here means
+            // the proposal we served into lost the view.
+            if served_at.is_some_and(|served| block.height() >= served)
+                && dealer
+                    .as_ref()
+                    .is_some_and(|dealer| dealer.finalized().is_some())
+            {
+                *served_at = None;
+            }
+
+            response.acknowledge();
+            done.then_some(ControlFlow::Continue(()))
+        }
+        .instrument(process)
+        .await
     }
 
     /// Offers the finalized local dealer log and records its height after delivery.

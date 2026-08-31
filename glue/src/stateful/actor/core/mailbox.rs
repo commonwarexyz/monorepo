@@ -28,7 +28,7 @@ use tracing::{Span, info_span};
 
 /// Re-enqueues live verification requests after finalization or pruning stops
 /// their active attempt.
-type RetryMailbox<E, A> = Arc<dyn Fn(Message<E, A>) + Send + Sync>;
+pub(super) type RetryMailbox<E, A> = Arc<dyn Fn(Message<E, A>) + Send + Sync>;
 
 /// A non-owning reference to ancestry owned by the verification caller.
 ///

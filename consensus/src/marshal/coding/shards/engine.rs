@@ -3685,11 +3685,9 @@ mod tests {
                 peers[receivers[0]]
                     .mailbox
                     .notarized(live_commitment, later_round);
-                peers[receivers[1]].mailbox.discovered(
-                    live_commitment,
-                    leader,
-                    later_round,
-                );
+                peers[receivers[1]]
+                    .mailbox
+                    .discovered(live_commitment, leader, later_round);
                 context.sleep(Duration::from_millis(10)).await;
 
                 let prune_round = Round::new(Epoch::zero(), View::new(3));
@@ -3733,7 +3731,9 @@ mod tests {
 
                 select! {
                     result = notarized_sub => {
-                        result.expect("notarized reconstruction state should accept the leader shard");
+                        result.expect(
+                            "notarized reconstruction state should accept the leader shard",
+                        );
                     },
                     _ = context.sleep(config.link.latency * 10) => {
                         panic!("notarized reconstruction state did not accept the leader shard");
@@ -3741,7 +3741,9 @@ mod tests {
                 }
                 select! {
                     result = discovered_sub => {
-                        result.expect("discovered reconstruction state should accept the leader shard");
+                        result.expect(
+                            "discovered reconstruction state should accept the leader shard",
+                        );
                     },
                     _ = context.sleep(config.link.latency * 10) => {
                         panic!("discovered reconstruction state did not accept the leader shard");

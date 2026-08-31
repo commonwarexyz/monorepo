@@ -502,7 +502,6 @@ where
                             let participants = self.forward_targets(round, &proposal, leader);
                             self.forward_proposal(proposal, participants);
                         }
-
                     }
                     Message::Constructed(message) => {
                         // Skip votes below the viewport floor. Our own votes
@@ -554,7 +553,10 @@ where
                 self.record_peer_activity(&sender);
 
                 // Skip certificates outside the viewport
-                if !self.viewport(finalized, current.view).admits_certificate(view) {
+                if !self
+                    .viewport(finalized, current.view)
+                    .admits_certificate(view)
+                {
                     continue;
                 }
 

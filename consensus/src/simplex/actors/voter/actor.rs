@@ -1125,7 +1125,8 @@ impl<
                     &mut resolver,
                     &mut pending_propose,
                     &mut pending_verify,
-                ).await;
+                )
+                .await;
 
                 // Attempt to certify any views that we have notarizations for.
                 //
@@ -1135,7 +1136,13 @@ impl<
                 // journal sync completed before this block runs, a child made
                 // eligible by its parent cannot become durable first.
                 let (candidates, fetches) = self.state.certify_candidates();
-                for CertificateFetch { proposal, view, kind, target } in fetches {
+                for CertificateFetch {
+                    proposal,
+                    view,
+                    kind,
+                    target,
+                } in fetches
+                {
                     resolver.resolve(proposal, view, kind, target);
                 }
                 for proposal in candidates {
@@ -1258,9 +1265,7 @@ impl<
                 self = async {
                     // Build and record everything that became available for `view`.
                     let mut staged;
-                    (self, staged) = self
-                        .construct(&mut resolver, view, resolved)
-                        .await;
+                    (self, staged) = self.construct(&mut resolver, view, resolved).await;
                     staged.nullify = nullify;
                     staged.certification = certification;
 
@@ -1272,7 +1277,8 @@ impl<
                         &mut resolver,
                         &mut pending_propose,
                         &mut pending_verify,
-                    ).await;
+                    )
+                    .await;
 
                     // Sync everything appended this iteration (during message
                     // processing and construction) in a single coalesced sync.

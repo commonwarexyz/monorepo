@@ -2099,11 +2099,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(
-                &mut context,
-                NAMESPACE,
-                NUM_VALIDATORS,
-            );
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             // At epoch 0, round-robin elects participant 3 for view 3. Pin the
             // mapping: with a different leader the scripted proposal never
             // reaches verify, and certification would pass through the no-gate
@@ -2180,17 +2176,10 @@ mod tests {
                 leader: byzantine.clone(),
                 parent: (View::new(2), skipped_digest),
             };
-            let block = B::new::<Sha256>(
-                embedded_context,
-                skipped_digest,
-                Height::new(3),
-                300,
-            );
+            let block = B::new::<Sha256>(embedded_context, skipped_digest, Height::new(3), 300);
             let digest = block.digest();
             assert!(
-                buffer
-                    .broadcast(Recipients::Some(vec![]), block)
-                    .accepted(),
+                buffer.broadcast(Recipients::Some(vec![]), block).accepted(),
                 "candidate broadcast should be accepted"
             );
 
@@ -2257,7 +2246,8 @@ mod tests {
                 .map(|index| Nullify::sign::<D>(&schemes[index], skipped_round).unwrap())
                 .collect();
             let nullification =
-                Nullification::from_nullifies(&schemes[0], non_empty![@&nullifies], &Sequential).unwrap();
+                Nullification::from_nullifies(&schemes[0], non_empty![@&nullifies], &Sequential)
+                    .unwrap();
             byzantine_certificate_sender.send(
                 Recipients::One(victim.clone()),
                 Certificate::<S, D>::Nullification(nullification).encode(),
@@ -2304,7 +2294,8 @@ mod tests {
                 .map(|index| Notarize::sign(&schemes[index], good_proposal.clone()).unwrap())
                 .collect();
             let notarization =
-                Notarization::from_notarizes(&schemes[0], non_empty![@&good_votes], &Sequential).unwrap();
+                Notarization::from_notarizes(&schemes[0], non_empty![@&good_votes], &Sequential)
+                    .unwrap();
             byzantine_certificate_sender.send(
                 Recipients::One(victim),
                 Certificate::<S, D>::Notarization(notarization).encode(),
@@ -2324,7 +2315,8 @@ mod tests {
                     loop {
                         let (_, message) = observer_vote_receiver.recv().await.unwrap();
                         let vote = Vote::<S, D>::decode(message).unwrap();
-                        if matches!(vote, Vote::Nullify(ref nullify) if nullify.round == next_round) {
+                        if matches!(vote, Vote::Nullify(ref nullify) if nullify.round == next_round)
+                        {
                             break;
                         }
                     }

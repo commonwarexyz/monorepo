@@ -23,8 +23,8 @@ stability_scope!(BETA {
     };
     use std::{error::Error as StdError, fmt::Debug, future::Future, time::SystemTime};
 
-    mod sizing;
     pub mod authenticated;
+    mod sizing;
     pub mod types;
     pub mod utils;
 
