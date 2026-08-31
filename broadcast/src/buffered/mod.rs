@@ -42,7 +42,7 @@ mod tests {
         Feedback,
         mailbox::{Overflow, Policy},
     };
-    use commonware_codec::RangeCfg;
+    use commonware_codec::{Encode as _, RangeCfg};
     use commonware_cryptography::{
         Digestible, Hasher, Sha256, Signer as _,
         ed25519::{PrivateKey, PublicKey},
@@ -52,6 +52,7 @@ mod tests {
         Manager as _, Recipients, Sender as _, TrackedPeers,
         simulated::{Link, Network, Oracle, Receiver, Sender},
     };
+    use commonware_parallel::Sequential;
     use commonware_runtime::{
         Clock, Error, IoBuf, Metrics as _, Quota, Runner, Supervisor as _, deterministic,
         telemetry::metrics::count_running_tasks,
@@ -500,9 +501,11 @@ mod tests {
                 priority: false,
                 codec_config: RangeCfg::from(..),
                 peer_provider: oracle.manager(),
+                blocker: oracle.control(peer.clone()),
+                strategy: Sequential,
             };
             let (engine, engine_mailbox) =
-                Engine::<_, PublicKey, TestMessage, _>::new(context, config);
+                Engine::<_, PublicKey, TestMessage, _, _, _>::new(context, config);
             mailboxes.insert(peer.clone(), engine_mailbox);
             engine.start(network);
         }
@@ -1047,6 +1050,60 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_invalid_message_blocks_peer() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(10));
+        runner.start(|context| async move {
+            let (peers, mut registrations, oracle) =
+                initialize_simulation(context.child("network"), 3, 1.0).await;
+
+            let attacker = peers[0].clone();
+            let honest = peers[1].clone();
+            let victim = peers[2].clone();
+
+            let (mut attacker_sender, _) = registrations.remove(&attacker).unwrap();
+            let mailboxes =
+                spawn_peer_engines(context.child("peers"), &oracle, &mut registrations).await;
+            let honest_mailbox = mailboxes.get(&honest).unwrap().clone();
+            let victim_mailbox = mailboxes.get(&victim).unwrap().clone();
+
+            // Malformed bytes block the attacker at the victim.
+            let sent = attacker_sender.send(
+                Recipients::One(victim.clone()),
+                IoBuf::from(vec![0xFF]),
+                false,
+            );
+            assert_eq!(sent, vec![victim.clone()]);
+            context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
+
+            // A later well-formed message from the blocked attacker is never buffered.
+            let from_attacker = TestMessage::shared(b"from-blocked-peer");
+            let _ = attacker_sender.send(
+                Recipients::One(victim.clone()),
+                from_attacker.encode(),
+                false,
+            );
+            // Valid traffic from an honest peer still flows.
+            let from_honest = TestMessage::shared(b"from-honest-peer");
+            assert!(
+                honest_mailbox
+                    .broadcast(Recipients::One(victim.clone()), from_honest.clone())
+                    .accepted()
+            );
+            context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
+
+            let received = victim_mailbox
+                .subscribe(from_honest.digest())
+                .await
+                .expect("victim should receive valid traffic from honest peers");
+            assert_eq!(received.as_ref(), &from_honest);
+            assert!(
+                victim_mailbox.get(from_attacker.digest()).await.is_none(),
+                "messages from a blocked peer must not be buffered"
+            );
+        });
+    }
+
+    #[test_traced]
     fn test_dropped_waiters_for_missing_digest_are_cleaned_up() {
         let runner = deterministic::Runner::timed(Duration::from_secs(10));
         runner.start(|context| async move {
@@ -1057,15 +1114,17 @@ mod tests {
 
             let engine_context = context.child("waiter_cleanup");
             let config = Config {
-                public_key: peer,
+                public_key: peer.clone(),
                 mailbox_size: NZUsize!(1024),
                 deque_size: CACHE_SIZE,
                 priority: false,
                 codec_config: RangeCfg::from(..),
                 peer_provider: oracle.manager(),
+                blocker: oracle.control(peer.clone()),
+                strategy: Sequential,
             };
             let (engine, mailbox) =
-                Engine::<_, PublicKey, TestMessage, _>::new(engine_context, config);
+                Engine::<_, PublicKey, TestMessage, _, _, _>::new(engine_context, config);
             engine.start((sender, receiver));
 
             let missing = TestMessage::shared(b"never-arrives");
@@ -1151,8 +1210,10 @@ mod tests {
                 priority: false,
                 codec_config: RangeCfg::from(..),
                 peer_provider: oracle.manager(),
+                blocker: oracle.control(peer.clone()),
+                strategy: Sequential,
             };
-            let (engine, engine_mailbox) = Engine::<_, PublicKey, TestMessage, _>::new(ctx, config);
+            let (engine, engine_mailbox) = Engine::<_, PublicKey, TestMessage, _, _, _>::new(ctx, config);
             mailboxes.insert(peer.clone(), engine_mailbox);
             handles.push(engine.start(network));
         }
@@ -1300,9 +1361,11 @@ mod tests {
                 priority: false,
                 codec_config: RangeCfg::from(..),
                 peer_provider: oracle.manager(),
+                blocker: oracle.control(peer_b.clone()),
+                strategy: Sequential,
             };
             let (engine_b, mailbox_b) =
-                Engine::<_, PublicKey, TestMessage, _>::new(context.child("peer_b"), config_b);
+                Engine::<_, PublicKey, TestMessage, _, _, _>::new(context.child("peer_b"), config_b);
             engine_b.start(network_b);
 
             // Spawn remaining peer engines.
@@ -1317,8 +1380,10 @@ mod tests {
                     priority: false,
                     codec_config: RangeCfg::from(..),
                     peer_provider: oracle.manager(),
+                    blocker: oracle.control(peer.clone()),
+                    strategy: Sequential,
                 };
-                let (engine, mailbox) = Engine::<_, PublicKey, TestMessage, _>::new(ctx, config);
+                let (engine, mailbox) = Engine::<_, PublicKey, TestMessage, _, _, _>::new(ctx, config);
                 mailboxes.insert(peer, mailbox);
                 engine.start(network);
             }
@@ -1414,9 +1479,11 @@ mod tests {
                 priority: false,
                 codec_config: RangeCfg::from(..),
                 peer_provider: oracle.manager(),
+                blocker: oracle.control(peer_b.clone()),
+                strategy: Sequential,
             };
             let (engine_b, mailbox_b) =
-                Engine::<_, PublicKey, TestMessage, _>::new(context.child("peer_b"), config_b);
+                Engine::<_, PublicKey, TestMessage, _, _, _>::new(context.child("peer_b"), config_b);
             engine_b.start(network_b);
 
             let mut mailboxes = BTreeMap::new();
@@ -1430,8 +1497,10 @@ mod tests {
                     priority: false,
                     codec_config: RangeCfg::from(..),
                     peer_provider: oracle.manager(),
+                    blocker: oracle.control(peer.clone()),
+                    strategy: Sequential,
                 };
-                let (engine, mailbox) = Engine::<_, PublicKey, TestMessage, _>::new(ctx, config);
+                let (engine, mailbox) = Engine::<_, PublicKey, TestMessage, _, _, _>::new(ctx, config);
                 mailboxes.insert(peer, mailbox);
                 engine.start(network);
             }
@@ -1550,8 +1619,10 @@ mod tests {
                     priority: false,
                     codec_config: RangeCfg::from(..),
                     peer_provider: oracle.manager(),
+                    blocker: oracle.control(peer.clone()),
+                    strategy: Sequential,
                 };
-                let (engine, mailbox) = Engine::<_, PublicKey, TestMessage, _>::new(ctx, config);
+                let (engine, mailbox) = Engine::<_, PublicKey, TestMessage, _, _, _>::new(ctx, config);
                 mailboxes.insert(peer, mailbox);
                 engine.start(network);
             }
@@ -1599,9 +1670,11 @@ mod tests {
                 priority: false,
                 codec_config: RangeCfg::from(..),
                 peer_provider: oracle.manager(),
+                blocker: oracle.control(peer.clone()),
+                strategy: Sequential,
             };
             let (engine, mailbox) =
-                Engine::<_, PublicKey, TestMessage, _>::new(context.child("peer"), config);
+                Engine::<_, PublicKey, TestMessage, _, _, _>::new(context.child("peer"), config);
 
             // Enqueue a broadcast while the engine task is not running yet (only the mailbox channel)
             let msg = TestMessage::shared(b"queued-before-start");
@@ -1679,8 +1752,10 @@ mod tests {
                     priority: false,
                     codec_config: RangeCfg::from(..),
                     peer_provider: oracle.manager(),
+                    blocker: oracle.control(peer.clone()),
+                    strategy: Sequential,
                 };
-                let (engine, mailbox) = Engine::<_, PublicKey, TestMessage, _>::new(ctx, config);
+                let (engine, mailbox) = Engine::<_, PublicKey, TestMessage, _, _, _>::new(ctx, config);
                 mailboxes.insert(peer, mailbox);
                 engine.start(network);
             }
@@ -1745,9 +1820,11 @@ mod tests {
                 priority: false,
                 codec_config: RangeCfg::from(..),
                 peer_provider: oracle.manager(),
+                blocker: oracle.control(peer_b.clone()),
+                strategy: Sequential,
             };
             let (engine_b, mailbox_b) =
-                Engine::<_, PublicKey, TestMessage, _>::new(context.child("peer_b"), config_b);
+                Engine::<_, PublicKey, TestMessage, _, _, _>::new(context.child("peer_b"), config_b);
             engine_b.start(network_b);
 
             // Spawn remaining peer engines.
@@ -1762,8 +1839,10 @@ mod tests {
                     priority: false,
                     codec_config: RangeCfg::from(..),
                     peer_provider: oracle.manager(),
+                    blocker: oracle.control(peer.clone()),
+                    strategy: Sequential,
                 };
-                let (engine, mailbox) = Engine::<_, PublicKey, TestMessage, _>::new(ctx, config);
+                let (engine, mailbox) = Engine::<_, PublicKey, TestMessage, _, _, _>::new(ctx, config);
                 mailboxes.insert(peer, mailbox);
                 engine.start(network);
             }

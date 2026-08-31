@@ -1848,6 +1848,8 @@ impl TestHarness for StandardHarness {
             priority: false,
             codec_config: (),
             peer_provider: oracle.manager(),
+            blocker: control.clone(),
+            strategy: Sequential,
         };
         let (broadcast_engine, buffer) =
             buffered::Engine::new(context.child("broadcast"), broadcast_config);
@@ -2081,6 +2083,8 @@ impl TestHarness for StandardHarness {
             priority: false,
             codec_config: (),
             peer_provider: oracle.manager(),
+            blocker: control.clone(),
+            strategy: Sequential,
         };
         let (broadcast_engine, buffer) =
             buffered::Engine::new(context.child("broadcast"), broadcast_config);
