@@ -185,6 +185,8 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
             compression: cfg.compression,
             codec_config: cfg.codec_config,
         };
+        // TODO (#4610): fuse this init's recovery drain with the replay below via tracked
+        // replay, restoring single-scan startup
         let oversized: Oversized<E, Record<K>, V> =
             Oversized::init(context.child("oversized"), oversized_cfg, None).await?;
 

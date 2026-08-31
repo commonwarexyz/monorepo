@@ -202,9 +202,10 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
     ///
     /// The buffer must be in the on-disk format produced by [Self::encode_item].
     async fn append_raw(&mut self, section: u64, buf: IoBuf) -> Result<u64, Error> {
-        if self.unrecovered.contains(&section) {
-            return Err(Error::ReplayRequired(section));
-        }
+        assert!(
+            !self.unrecovered.contains(&section),
+            "section {section} must be replayed before append"
+        );
         let blob = self.manager.get_or_create(section).await?;
         let offset = blob.append_owned(buf).await?;
         trace!(blob = section, offset, "appended item");
@@ -492,8 +493,10 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// where the item was written and the size of the item (which may differ
     /// from the raw encoded size if compression is enabled).
     ///
-    /// Returns [Error::ReplayRequired] when `section` contained data at initialization and has not
-    /// completed a replay from offset zero.
+    /// # Panics
+    ///
+    /// Panics when `section` contained data at initialization and has not completed a replay
+    /// from offset zero.
     pub async fn append(mut self, section: u64, item: &V) -> Result<(Self, u64, u32), Error> {
         let (offset, item_len) = self.0.append(section, item).await?;
         Ok((self, offset, item_len))
@@ -1000,6 +1003,7 @@ mod tests {
     }
 
     #[test_traced]
+    #[should_panic(expected = "must be replayed before append")]
     fn test_segmented_variable_rejects_append_before_replay() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -1012,15 +1016,12 @@ mod tests {
             assert_eq!(offset, 0);
             let (journal, offset, _) = journal.append(NEW_SECTION, &16).await.unwrap();
             assert_eq!(offset, 9);
-            let result = journal.append(TORN_SECTION, &15).await;
-            assert!(
-                matches!(result, Err(Error::ReplayRequired(TORN_SECTION))),
-                "an unrecovered section must reject new appends"
-            );
+            let _ = journal.append(TORN_SECTION, &15).await;
         });
     }
 
     #[test_traced]
+    #[should_panic(expected = "must be replayed before append")]
     fn test_segmented_variable_partial_replay_keeps_append_guard() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -1036,10 +1037,7 @@ mod tests {
                 item.unwrap();
             }
             let journal = replay.finish().unwrap();
-            assert!(matches!(
-                journal.append(SECTION, &7).await,
-                Err(Error::ReplayRequired(SECTION))
-            ));
+            let _ = journal.append(SECTION, &7).await;
         });
     }
 

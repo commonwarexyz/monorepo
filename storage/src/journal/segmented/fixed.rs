@@ -333,9 +333,10 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
 
     /// See [Journal::append].
     async fn append(&mut self, section: u64, item: &A) -> Result<u64, Error> {
-        if self.unrecovered.contains(&section) {
-            return Err(Error::ReplayRequired(section));
-        }
+        assert!(
+            !self.unrecovered.contains(&section),
+            "section {section} must be replayed before append"
+        );
         let blob = self.manager.get_or_create(section).await?;
 
         // Encode the item
@@ -611,8 +612,11 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// Append a new item to the journal in the given section.
     ///
     /// Returns the position of the item within the section (0-indexed).
-    /// Returns [Error::ReplayRequired] when `section` contained an unvalidated suffix at
-    /// initialization and has not completed a replay from position zero.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `section` contained an unvalidated suffix at initialization and has not
+    /// completed a replay from position zero.
     pub async fn append(mut self, section: u64, item: &A) -> Result<(Self, u64), Error> {
         let position = self.0.append(section, item).await?;
         Ok((self, position))
@@ -1274,6 +1278,7 @@ mod tests {
     }
 
     #[test_traced]
+    #[should_panic(expected = "must be replayed before append")]
     fn test_segmented_fixed_append_requires_replay_after_reopen() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -1293,10 +1298,7 @@ mod tests {
             let journal = Journal::init(context.child("reopen"), cfg)
                 .await
                 .expect("failed to reopen");
-            assert!(matches!(
-                journal.append(1, &test_digest(1)).await,
-                Err(Error::ReplayRequired(1))
-            ));
+            journal.append(1, &test_digest(1)).await.unwrap();
         });
     }
 
