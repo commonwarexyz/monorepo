@@ -53,6 +53,11 @@ struct CommandKindLabel {
     kind: &'static str,
 }
 
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct CutTriggerLabel {
+    trigger: &'static str,
+}
+
 /// Cold body reader acquisitions by source.
 #[derive(Clone)]
 pub(in crate::multimmit::marshal) struct ReaderAcquisitions(CounterFamily<ReaderSourceLabel>);
@@ -98,6 +103,7 @@ pub(in crate::multimmit::marshal) struct Catalog {
     pub command_defer_wait: Histogram,
     pub admission_cut_restart_gap: Histogram,
     command_defers: CounterFamily<CommandKindLabel>,
+    cut_triggers: CounterFamily<CutTriggerLabel>,
     committed_count: Gauge,
     block_cache_items: Gauge,
     block_cache_bytes: Gauge,
@@ -267,6 +273,10 @@ impl Catalog {
                 "command_defers",
                 "Commands parked in the deferred slot awaiting catalog readiness, by kind",
             ),
+            cut_triggers: context.family(
+                "admission_cut_triggers",
+                "Admission cuts started, by what made the pending cut ripe",
+            ),
             committed_count: context.gauge(
                 "committed_output_count",
                 "Number of dense outputs through the durable commit high-water",
@@ -313,6 +323,12 @@ impl Catalog {
     pub(in crate::multimmit::marshal) fn defer(&self, kind: &'static str) {
         self.command_defers
             .get_or_create(&CommandKindLabel { kind })
+            .inc();
+    }
+
+    pub(in crate::multimmit::marshal) fn cut_trigger(&self, trigger: &'static str) {
+        self.cut_triggers
+            .get_or_create(&CutTriggerLabel { trigger })
             .inc();
     }
 
