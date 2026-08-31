@@ -54,11 +54,13 @@
 //! # Recovery
 //!
 //! To recover existing data, pass `Some(bits)` to [Ordinal::init]. The bits identify which records
-//! were durably committed by the caller. [Ordinal] validates required records using their CRC32 and
-//! rebuilds the in-memory [crate::rmap::RMap]. Stored sections omitted from `bits` are removed, and
-//! stored records whose bits are unset are cleared before replay. Missing or invalid required records
-//! fail initialization. Passing `Some(BTreeMap::new())` or `None` removes all stored sections and
-//! starts empty.
+//! were durably committed by the caller and rebuild the in-memory [crate::rmap::RMap] without
+//! re-reading the records they mark (a damaged marked record surfaces at [Ordinal::get]). Records in
+//! sections listed with no bitmap are instead validated using their CRC32. Stored sections omitted
+//! from `bits` are removed, and stored records whose bits are unset are cleared before replay.
+//! Records missing from stored sections, and CRC-invalid records in sections listed with no
+//! bitmap, fail initialization. Passing `Some(BTreeMap::new())` or `None` removes all stored
+//! sections and starts empty.
 //!
 //! # Example
 //!
@@ -1834,20 +1836,24 @@ mod tests {
                 );
             }
 
-            // Unselected records in a retained section are physically cleared.
+            // Unselected records in a retained section are physically cleared. A later
+            // bitmap claiming a cleared record is trusted at init (the bitmap proves
+            // membership), so the damage surfaces at get.
             {
                 let mut bitmap = BitMap::zeroes(10);
                 bitmap.set(0, true); // Index 10
                 let bitmap_option = Some(bitmap);
                 let mut bits_map: BTreeMap<u64, &Option<BitMap>> = BTreeMap::new();
                 bits_map.insert(1, &bitmap_option);
-                let result = Ordinal::<_, FixedBytes<32>>::init(
+                let store = Ordinal::<_, FixedBytes<32>>::init(
                     context.child("third"),
                     cfg.clone(),
                     Some(bits_map),
                 )
-                .await;
-                assert!(matches!(result, Err(Error::MissingRecord(10))));
+                .await
+                .expect("Failed to initialize store with bits");
+                assert!(store.has(10));
+                assert!(matches!(store.get(10).await, Err(Error::InvalidRecord(10))));
             }
         });
     }
@@ -2041,8 +2047,7 @@ mod tests {
     }
 
     #[test_traced]
-    #[should_panic(expected = "Failed to initialize store with bits: MissingRecord(2)")]
-    fn test_init_corrupted_records() {
+    fn test_marked_record_damage_surfaces_at_get() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -2085,21 +2090,32 @@ mod tests {
             {
                 let mut bits_map: BTreeMap<u64, &Option<BitMap>> = BTreeMap::new();
 
-                // Create a BitMap that includes the corrupted record
+                // Create a BitMap that includes the corrupted record. The bitmap proves
+                // membership, so the record is not re-read at startup and the damage
+                // surfaces at get.
                 let mut bitmap = BitMap::zeroes(5);
                 bitmap.set(0, true); // Index 0
-                bitmap.set(2, true); // Index 2 (corrupted) - this will cause a panic
+                bitmap.set(2, true); // Index 2 (corrupted)
                 bitmap.set(4, true); // Index 4
                 let bitmap_option = Some(bitmap);
                 bits_map.insert(0, &bitmap_option);
 
-                let _store = Ordinal::<_, FixedBytes<32>>::init(
+                let store = Ordinal::<_, FixedBytes<32>>::init(
                     context.child("second"),
                     cfg.clone(),
                     Some(bits_map),
                 )
                 .await
                 .expect("Failed to initialize store with bits");
+                assert_eq!(
+                    store.get(0).await.unwrap(),
+                    Some(FixedBytes::new([0u8; 32]))
+                );
+                assert!(store.get(2).await.is_err());
+                assert_eq!(
+                    store.get(4).await.unwrap(),
+                    Some(FixedBytes::new([4u8; 32]))
+                );
             }
         });
     }

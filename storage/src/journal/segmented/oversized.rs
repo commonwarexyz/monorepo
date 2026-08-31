@@ -125,12 +125,7 @@ pub struct Config<C> {
 /// `Floors` preserves per-section validated prefixes while repairing any suffix, and `Infer`
 /// derives the boundary entirely from journal contents.
 enum Recovery<'a> {
-    Restore {
-        section: u64,
-        index_size: u64,
-    },
-    // TODO (#4610): migrate the prunable archive to tracked replay
-    #[allow(dead_code)]
+    Restore { section: u64, index_size: u64 },
     Floors(&'a BTreeMap<u64, u64>),
     Infer,
 }
@@ -218,8 +213,6 @@ struct Validation {
 }
 
 impl Validation {
-    // TODO (#4610): migrate the prunable archive to tracked replay
-    #[allow(dead_code)]
     const fn new() -> Self {
         Self {
             current_section: None,
@@ -300,8 +293,6 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
     /// The caller must drain the replay and call [Replay::finish_tracked]. Entries below each
     /// durable marker are retained after their cross-journal boundary is proven. Entries above it
     /// are value-validated in order and the first invalid entry truncates its section.
-    // TODO (#4610): migrate the prunable archive to tracked replay
-    #[allow(dead_code)]
     pub(crate) async fn init_with_metadata(
         context: &E,
         cfg: Config<V::Cfg>,
@@ -1183,8 +1174,6 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Replay<E, I, V> {
     }
 
     /// Finish marker-aware startup recovery and return the tracked journal.
-    // TODO (#4610): migrate the prunable archive to tracked replay
-    #[allow(dead_code)]
     pub(crate) async fn finish_tracked(self) -> Result<Oversized<E, I, V>, Error> {
         let Some(validation) = self.validation else {
             return Err(Error::ReplayFailed);

@@ -17,6 +17,14 @@ use commonware_utils::Array;
 use std::collections::{BTreeMap, BTreeSet, btree_map};
 use tracing::debug;
 
+/// Preserve the archive's error classification for journal-owned metadata operations.
+fn map_journal_error(error: crate::journal::Error) -> Error {
+    match error {
+        crate::journal::Error::Metadata(error) => Error::Metadata(error),
+        error => Error::Journal(error),
+    }
+}
+
 /// Index entry for the archive.
 #[derive(Debug, Clone, PartialEq)]
 struct Record<K: Array> {
@@ -174,59 +182,63 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
 
     /// See [Archive::init].
     async fn init(context: E, cfg: Config<T, V::Cfg>) -> Result<Self, Error> {
-        // Initialize oversized journal
+        let Config {
+            translator,
+            metadata_partition,
+            key_partition,
+            key_page_cache,
+            value_partition,
+            compression,
+            codec_config,
+            items_per_section,
+            key_write_buffer,
+            value_write_buffer,
+            replay_buffer,
+        } = cfg;
+        let items_per_section = items_per_section.get();
         let oversized_cfg = OversizedConfig {
-            index_partition: cfg.key_partition,
-            value_partition: cfg.value_partition,
-            index_page_cache: cfg.key_page_cache,
-            index_write_buffer: cfg.key_write_buffer,
-            replay_buffer: cfg.replay_buffer,
-            value_write_buffer: cfg.value_write_buffer,
-            compression: cfg.compression,
-            codec_config: cfg.codec_config,
+            index_partition: key_partition,
+            value_partition,
+            index_page_cache: key_page_cache,
+            index_write_buffer: key_write_buffer,
+            value_write_buffer,
+            replay_buffer,
+            compression,
+            codec_config,
         };
-        // TODO (#4610): fuse this init's recovery drain with the replay below via tracked
-        // replay, restoring single-scan startup
-        let oversized: Oversized<E, Record<K>, V> =
-            Oversized::init(context.child("oversized"), oversized_cfg).await?;
+        let mut replay = Oversized::<E, Record<K>, V>::init_with_metadata(
+            &context,
+            oversized_cfg,
+            metadata_partition,
+            commonware_runtime::ReadOptions::default(),
+        )
+        .await
+        .map_err(map_journal_error)?;
 
-        // Initialize keys and replay index journal (no values read!)
+        // Rebuild every lookup view from the single retained prefix selected by oversized
+        // recovery.
         let mut indices: BTreeMap<u64, u64> = BTreeMap::new();
         let mut extra_indices: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
-        let mut keys = Index::new(context.child("index"), cfg.translator.clone());
+        let mut keys = Index::new(context.child("index"), translator);
         let mut intervals = RMap::new();
-        let oversized = {
-            debug!("initializing archive from index journal");
-            let mut replay = oversized
-                .replay(
-                    0,
-                    0,
-                    cfg.replay_buffer,
-                    commonware_runtime::ReadOptions::default(),
-                )
-                .await?;
-            while let Some(result) = replay.next().await {
-                let (_section, position, entry) = result?;
+        debug!("initializing archive from index journal");
+        while let Some(result) = replay.next().await {
+            let (_, position, entry) = result?;
 
-                // Store index location (position in index journal)
-                match indices.entry(entry.index) {
-                    btree_map::Entry::Vacant(e) => {
-                        e.insert(position);
-                    }
-                    btree_map::Entry::Occupied(_) => {
-                        extra_indices.entry(entry.index).or_default().push(position);
-                    }
+            // Index every retained occurrence by position, translated key, and range.
+            match indices.entry(entry.index) {
+                btree_map::Entry::Vacant(e) => {
+                    e.insert(position);
                 }
-
-                // Store index in keys
-                keys.insert(&entry.key, entry.index);
-
-                // Store index in intervals
-                intervals.insert(entry.index);
+                btree_map::Entry::Occupied(_) => {
+                    extra_indices.entry(entry.index).or_default().push(position);
+                }
             }
-            debug!("archive initialized");
-            replay.finish()?
-        };
+            keys.insert(&entry.key, entry.index);
+            intervals.insert(entry.index);
+        }
+        let oversized = replay.finish_tracked().await.map_err(map_journal_error)?;
+        debug!("archive initialized");
 
         // Initialize metrics
         let items_tracked = context.gauge("items_tracked", "Number of items tracked");
@@ -242,7 +254,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
 
         // Return populated archive
         Ok(Self {
-            items_per_section: cfg.items_per_section.get(),
+            items_per_section,
             oversized,
             pending: BTreeSet::new(),
             requested: BTreeSet::new(),
@@ -363,24 +375,28 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         key: K,
         data: V,
         skip_if_index_exists: bool,
-    ) -> Result<(Box<Self>, bool), Error> {
+    ) -> Result<Box<Self>, Error> {
         // A put below the prune floor is satisfied without storing
         let oldest_allowed = self.oldest_allowed.unwrap_or(0);
         if index < oldest_allowed {
             debug!(index, oldest_allowed, "ignoring put below prune floor");
-            return Ok((self, false));
+            return Ok(self);
         }
 
         // Check for existing index when enforcing single-item semantics.
         if skip_if_index_exists && self.indices.contains_key(&index) {
-            return Ok((self, true));
+            return Ok(self);
         }
 
         // Write value and index entry atomically (glob first, then index)
         let section = self.section(index);
         let entry = Record::new(index, key.clone(), 0, 0);
         let position;
-        (self.oversized, position, _, _) = self.oversized.append(section, entry, &data).await?;
+        (self.oversized, position, _, _) = self
+            .oversized
+            .append(section, entry, &data)
+            .await
+            .map_err(map_journal_error)?;
 
         // Store index location
         match self.indices.entry(index) {
@@ -399,12 +415,12 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         self.keys
             .insert_and_retain(&key, index, |v| *v >= oldest_allowed);
 
-        // Add section to pending
+        // Include this section in the next sync request.
         self.pending.insert(section);
 
         // Update metrics
         let _ = self.items_tracked.try_set(self.indices.len());
-        Ok((self, true))
+        Ok(self)
     }
 
     /// See [Archive::prune].
@@ -422,10 +438,10 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         }
         debug!(min, "pruning archive");
 
-        // Prune oversized journal (handles both index and values)
-        (self.oversized, _) = self.oversized.prune(min).await?;
+        // Prune the section's index, values, and recovery markers together.
+        (self.oversized, _) = self.oversized.prune(min).await.map_err(map_journal_error)?;
 
-        // Remove pending and requested sync work (no need to call `sync` as we are pruning)
+        // Discard synchronization state owned by pruned sections.
         self.pending = self.pending.split_off(&min);
         self.requested = self.requested.split_off(&min);
 
@@ -440,7 +456,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
             self.indices_pruned.inc();
         }
 
-        // Remove all keys from interval tree less than min
+        // Remove pruned indices from the retained range view.
         if min > 0 {
             self.intervals.remove(0, min - 1);
         }
@@ -470,14 +486,16 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
 
     /// See [crate::archive::Archive::sync].
     async fn sync(mut self: Box<Self>) -> Result<Box<Self>, Error> {
-        // Update metrics (`requested` sections were already counted by `start_sync`)
+        // Include each section once in the sync metric and retain prior pipelined requests until
+        // this blocking call observes their completion.
         self.syncs.inc_by(self.pending.len() as u64);
+        let active = self.pending.clone();
         self.requested.append(&mut self.pending);
-
-        // Sync oversized journal (handles both index and values). Re-syncing `requested` sections
-        // also waits for any of their syncs still in flight.
-        self.oversized = self.oversized.sync(&self.requested).await?;
-
+        self.oversized = self
+            .oversized
+            .sync_tracked(&self.requested, &active)
+            .await
+            .map_err(map_journal_error)?;
         self.requested.clear();
         Ok(self)
     }
@@ -487,12 +505,16 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         // Update metrics
         self.syncs.inc_by(self.pending.len() as u64);
 
-        // Move sections into `requested` rather than dropping them: section buffers reuse
-        // in-flight syncs, so re-requesting a section makes this handle observe outstanding work
-        // without issuing a new sync.
+        // Retain requested sections until a blocking sync observes their outstanding work.
+        let active = self.pending.clone();
         self.requested.append(&mut self.pending);
+
         let handle;
-        (self.oversized, handle) = self.oversized.start_sync(&self.requested).await?;
+        (self.oversized, handle) = self
+            .oversized
+            .start_sync_tracked(&self.requested, &active)
+            .await
+            .map_err(map_journal_error)?;
         Ok((self, handle))
     }
 
@@ -528,7 +550,8 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
 
     /// See [crate::archive::Archive::destroy].
     async fn destroy(self) -> Result<(), Error> {
-        Ok(self.oversized.destroy().await?)
+        self.oversized.destroy().await.map_err(map_journal_error)?;
+        Ok(())
     }
 
     /// See [crate::archive::MultiArchive::get_all].
@@ -608,8 +631,11 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> std::fmt::Debug for Ar
 impl<T: Translator, E: Context, K: Array, V: CodecShared> Archive<T, E, K, V> {
     /// Initialize a new `Archive` instance.
     ///
-    /// The in-memory index for `Archive` is populated during this call
-    /// by replaying only the index journal (no values are read).
+    /// The in-memory index is populated by replaying the index journal. Value frames not covered by
+    /// a durable validation marker are CRC-validated before this returns.
+    ///
+    /// Recovery relies on the runtime's startup durability guarantee. Before reopening the same
+    /// storage within a running process, synchronize the previous owner before dropping it.
     pub async fn init(context: E, cfg: Config<T, V::Cfg>) -> Result<Self, Error> {
         Ok(Self(Box::new(Inner::init(context, cfg).await?)))
     }
@@ -632,33 +658,8 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> crate::archive::Archiv
     type Value = V;
 
     async fn put(mut self, index: u64, key: K, data: V) -> Result<Self, Error> {
-        (self.0, _) = self.0.put_internal(index, key, data, true).await?;
+        self.0 = self.0.put_internal(index, key, data, true).await?;
         Ok(self)
-    }
-
-    async fn put_sync(mut self, index: u64, key: K, data: V) -> Result<Self, Error> {
-        // A put satisfied below the prune floor stored nothing, so skip the sync.
-        let stored;
-        (self.0, stored) = self.0.put_internal(index, key, data, true).await?;
-        if !stored {
-            return Ok(self);
-        }
-        self.sync().await
-    }
-
-    async fn put_start_sync(
-        mut self,
-        index: u64,
-        key: K,
-        data: V,
-    ) -> Result<(Self, Handle<()>), Error> {
-        // A put satisfied below the prune floor stored nothing, so skip the sync.
-        let stored;
-        (self.0, stored) = self.0.put_internal(index, key, data, true).await?;
-        if !stored {
-            return Ok((self, Handle::ready(Ok(()))));
-        }
-        self.start_sync().await
     }
 
     async fn get(&self, identifier: Identifier<'_, K>) -> Result<Option<V>, Error> {
@@ -717,33 +718,8 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> crate::archive::MultiA
     }
 
     async fn put_multi(mut self, index: u64, key: K, data: V) -> Result<Self, Error> {
-        (self.0, _) = self.0.put_internal(index, key, data, false).await?;
+        self.0 = self.0.put_internal(index, key, data, false).await?;
         Ok(self)
-    }
-
-    async fn put_multi_sync(mut self, index: u64, key: K, data: V) -> Result<Self, Error> {
-        // A put satisfied below the prune floor stored nothing, so skip the sync.
-        let stored;
-        (self.0, stored) = self.0.put_internal(index, key, data, false).await?;
-        if !stored {
-            return Ok(self);
-        }
-        crate::archive::Archive::sync(self).await
-    }
-
-    async fn put_multi_start_sync(
-        mut self,
-        index: u64,
-        key: K,
-        data: V,
-    ) -> Result<(Self, Handle<()>), Error> {
-        // A put satisfied below the prune floor stored nothing, so skip the sync.
-        let stored;
-        (self.0, stored) = self.0.put_internal(index, key, data, false).await?;
-        if !stored {
-            return Ok((self, Handle::ready(Ok(()))));
-        }
-        crate::archive::Archive::start_sync(self).await
     }
 
     async fn has_at(&self, index: u64, key: &K) -> Result<bool, Error> {
