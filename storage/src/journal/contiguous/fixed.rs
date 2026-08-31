@@ -435,6 +435,10 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             return Self::complete_staged_clear(context, cfg, checkpoint, clear_target).await;
         }
 
+        // Open every blob in the active partition as a writer, then reconcile the pruning
+        // boundary: the checkpoint's hint and the oldest blob on disk can disagree after a
+        // crash mid-prune, and a mid-blob hint is honored only while it matches the oldest
+        // retained blob.
         let (blob_partition, names) = Partition::select(&context, &cfg.partition).await?;
         let partition = Partition::new(
             context.child("blobs"),
