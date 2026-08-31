@@ -28,6 +28,12 @@ pub fn release_oldest_pending_sync(pending: &PendingSyncs) {
     }
 }
 
+/// Decode one faulted recovery attempt's fault config from `seed`'s selector bytes.
+///
+/// Byte 0 selects one of four mutations (write, sync, resize, or remove failures), byte 1
+/// its failure rate, byte 2 the crash retention rate, byte 3 the resize partial rate, and
+/// byte 4 the partial-write mode. Crash retention and mode stay live for every mutation so
+/// the crash after the attempt can still tear whatever the attempt wrote.
 fn recovery_fault_config(seed: u64) -> deterministic::FaultConfig {
     let selectors = seed.to_le_bytes();
     let mutation = selectors[0] & 0x03;

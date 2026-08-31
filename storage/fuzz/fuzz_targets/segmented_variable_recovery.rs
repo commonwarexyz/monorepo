@@ -356,7 +356,7 @@ fn fuzz(input: FuzzInput) {
             );
         }
 
-        // Every item covered by the completed baseline sync must survive the crash in order.
+        // Every item covered by a completed sync must survive the crash in order.
         for (section, count) in &durable {
             let baseline_items: Vec<Vec<u8>> = script
                 .iter()

@@ -132,8 +132,9 @@ pub async fn corrupt_page(
     let offset = page * physical_page_size;
     let (blob, size) = storage.open(partition, name).await.unwrap();
 
-    // A complete physical page must follow the target: a trailing partial page can never
-    // validate, so a target followed only by one would be the last validatable page.
+    // A complete physical page must follow the target: a trailing truncated physical page
+    // can never validate, so a target followed only by one would be the last validatable
+    // page.
     assert!(
         offset
             .checked_add(physical_page_size * 2)

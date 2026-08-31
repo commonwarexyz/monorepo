@@ -65,6 +65,7 @@ struct FuzzInput {
     /// Write buffer size.
     #[arbitrary(with = bounded_buffer)]
     write_buffer: usize,
+    /// Replay buffer size.
     #[arbitrary(with = bounded_buffer)]
     replay_buffer: usize,
     /// Failure rate for sync operations (0, 1].
@@ -98,7 +99,7 @@ struct RecoveryState {
     /// These may be lost on crash. On commit, they move to `committed`.
     uncommitted: BTreeMap<u64, u8>,
 
-    /// Blob-aligned pruning boundary removed by the last successful Sync.
+    /// Blob-aligned pruning boundary established by the last successful Sync.
     /// Recovery reports this boundary as the ack floor.
     synced_boundary: u64,
 

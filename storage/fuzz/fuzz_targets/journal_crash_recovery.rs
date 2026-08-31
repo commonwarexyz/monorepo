@@ -17,8 +17,8 @@
 //!   4. Drop the journal without a clean shutdown: the crash. Unsynchronized bytes survive
 //!      according to the configured write-retention policy.
 //!
-//! Between cycles, an ordinary recovery attempt runs under storage faults and crashes. The next
-//! clean `init()` verifies that checkpoint before operations continue.
+//! Between cycles, a chain of recovery attempts runs under storage faults, each crashing into
+//! the next. The next clean `init()` verifies that checkpoint before operations continue.
 //!
 //! `Crash` markers split the op list into one `ops` list per cycle. Driving recovery repeatedly on
 //! the same journal is the point: watermark, pruning-metadata, and section-layout bugs often need a
@@ -170,7 +170,8 @@ struct FuzzInput {
     /// Probability that a resize failure is partial.
     #[arbitrary(with = bounded_rate)]
     partial_resize_rate: Probability,
-    /// Operations to execute, split into one `ops` list per cycle at each `Crash` marker.
+    /// Operations to execute, split into one `ops` list per cycle at each `Crash` or
+    /// `Reset` marker.
     #[arbitrary(with = bounded_operations)]
     operations: Vec<JournalOperation>,
 }
@@ -649,7 +650,7 @@ fn assert_replay_suffix(items: &[(u64, Item)], start: u64, bounds: &Range<u64>) 
 }
 
 /// Run a cycle's ops under faults, updating `expected`. Stops early on a mutable-method error,
-/// which may have left the journal inconsistent; the journal is then dropped to crash. Reads and
+/// which may have left the journal inconsistent. The journal is then dropped to crash. Reads and
 /// replays never fault, so a bad one panics instead of ending the cycle.
 async fn run_ops<J: FuzzJournal>(
     mut journal: J,
@@ -853,7 +854,7 @@ async fn run_ops<J: FuzzJournal>(
                 journal
             }
 
-            // `split_into_cycles` strips the cycle markers; a stray one defensively ends the
+            // `split_into_cycles` strips the cycle markers. A stray one defensively ends the
             // cycle.
             JournalOperation::Crash | JournalOperation::Reset { .. } => return,
         };

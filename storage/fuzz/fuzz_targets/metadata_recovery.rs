@@ -171,10 +171,10 @@ fn run(input: &FuzzInput, mode: PartialWriteMode) {
         }
     });
 
-    // Metadata::init performs no write_at and no remove, so force the faulted pass's
-    // mutation selector to the sync (1) or resize (2) arm it can actually exercise.
-    let fault_seed = (input.seed & !0x03) | (1 + (input.seed & 1));
-    let checkpoint = faulted_recovery(checkpoint, fault_seed, |context| async move {
+    // Metadata::init performs no write_at and no remove, so those fault arms are inert
+    // here. The faulted pass draws a fresh mutation per chained attempt, so an inert
+    // draw dilutes one link of the chain instead of wasting the whole pass.
+    let checkpoint = faulted_recovery(checkpoint, input.seed, |context| async move {
         Metadata::<_, U64, Vec<u8>>::init(context.child("faulted_recovery"), config()).await
     });
 

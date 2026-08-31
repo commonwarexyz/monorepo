@@ -3920,19 +3920,9 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Drop every write not covered by a completed sync at the crash. Writes still
-            // succeed, so the appends below land but stay volatile until prune's own sync.
-            *context.storage_fault_config().write() = deterministic::FaultConfig {
-                write_rate: Some(deterministic::WriteConfig {
-                    failure_rate: probability!(0.0),
-                    retention_rate: probability!(0.0),
-                    mode: deterministic::PartialWriteMode::Prefix,
-                }),
-                ..Default::default()
-            };
-
-            // Fill two sections plus an unsynced tail, then prune into section 1. The prune's
-            // internal sync is the only durability point covering these items.
+            // Fill two sections plus an unsynced tail, then prune into section 1. The crash
+            // drops every write not covered by a completed sync, so the prune's internal
+            // sync is the only durability point covering these items.
             for i in 0..8u64 {
                 (journal, _) = journal.append(&(i * 100)).await.unwrap();
             }
@@ -3942,7 +3932,6 @@ mod tests {
         });
 
         deterministic::Runner::from(checkpoint).start(|context| async move {
-            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
             let journal = Journal::<_, u64>::init(context.child("recover"), cfg(&context))
                 .await
                 .unwrap();

@@ -200,9 +200,9 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 QueueOperation::Ack { pos_offset } => {
+                    // Map the offset with slack past size so out-of-range positions stay
+                    // reachable while in-range remains the common case.
                     let size = reference.size();
-                    // Map offset with slack past size so out-of-range positions
-                    // stay reachable while in-range remains the common case
                     let pos = (*pos_offset as u64) % (size + size / 4 + 1);
 
                     // Snapshot ack state to pin that a rejected ack is a no-op
@@ -237,9 +237,9 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 QueueOperation::AckUpTo { pos_offset } => {
+                    // Map the offset with slack past size + 1 so out-of-range values stay
+                    // reachable while in-range remains the common case.
                     let size = reference.size();
-                    // Map offset with slack past size + 1 so out-of-range values
-                    // stay reachable while in-range remains the common case
                     let up_to = (*pos_offset as u64) % (size + size / 4 + 2);
 
                     // Snapshot ack state to pin that a rejected ack_up_to is a no-op

@@ -44,8 +44,8 @@ struct FuzzInput {
     fault: FaultKind,
     rate: u8,
     retention: u8,
-    // Skip the fault-free baseline commit so init and the first-ever metadata publish run
-    // under faults and recovery can land on the empty commit record.
+    /// Skip the fault-free baseline commit so init and the first-ever metadata publish run
+    /// under faults and recovery can land on the empty commit record.
     virgin: bool,
     payload: [u8; 32],
 }
