@@ -51,12 +51,10 @@
 //! missing or damaged durable boundary fails init rather than being repaired. Other
 //! committed damage the checkpoint covers surfaces lazily as read errors.
 //!
-//! Tracked recovery maintains a per-section committed item count for owners that must validate
-//! every newly recovered value. The covered index/value prefix is proven before repair, replay
-//! verifies values above it in order, and the first invalid value truncates the rest of that
-//! section. Marker publication conservatively trails proven data syncs: a section's boundary
-//! is published once it is proven durable and the section is no longer receiving writes, or on
-//! an empty flush.
+//! Tracked recovery persists a per-section committed item count. Entries below the marker are
+//! adopted once their index/value boundary is proven, entries above it are value-verified in
+//! order, and the first invalid value truncates the section's remainder. Markers trail proven
+//! syncs, publishing once a section is durable and idle (or on an empty flush).
 
 use super::{
     fixed::{
@@ -276,7 +274,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         cfg: Config<V::Cfg>,
         checkpoint: Option<(u64, u64)>,
     ) -> Result<Self, Error> {
-        let recovery_buffer = cfg.replay_buffer;
+        let replay_buffer = cfg.replay_buffer;
         let recovery = match checkpoint {
             Some((section, index_size)) => Recovery::Restore {
                 section,
@@ -286,7 +284,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         };
         let journal = Self::init_inner(context, cfg, recovery).await?;
         if checkpoint.is_none() {
-            journal.recover_inferred(recovery_buffer).await
+            journal.recover_inferred(replay_buffer).await
         } else {
             Ok(journal)
         }
@@ -305,7 +303,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         metadata_partition: String,
         read_options: ReadOptions,
     ) -> Result<Replay<E, I, V>, Error> {
-        let buffer = cfg.replay_buffer;
+        let replay_buffer = cfg.replay_buffer;
 
         // Open the commit markers before the data they constrain.
         let metadata = Metadata::init(
@@ -339,11 +337,12 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
             marker_sync_pending: None,
             barriers: BTreeMap::new(),
         });
-        let mut replay = journal.replay(0, 0, buffer, read_options).await?;
+        let mut replay = journal.replay(0, 0, replay_buffer, read_options).await?;
         replay.validation = Some(Validation::new());
         Ok(replay)
     }
 
+    /// Open the index and value journals, reconciling them per the selected [Recovery] mode.
     async fn init_inner(
         context: E,
         cfg: Config<V::Cfg>,
@@ -4210,6 +4209,7 @@ mod tests {
     fn test_recovery_discards_index_extension_after_prefix_loss() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            // Seed two sections with one synced entry each, so both hold durable values.
             let cfg = test_cfg(&context);
             let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("first"), cfg.clone(), None)
@@ -4254,6 +4254,9 @@ mod tests {
                 .expect("Failed to extend index");
             }
 
+            // Recovery must not adopt the checksum-less extensions as index data: both
+            // sections come back empty (the original entries are gone with their prefixes)
+            // and the truncation is durable.
             let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg.clone(), None)
                     .await
@@ -4269,6 +4272,7 @@ mod tests {
                     .expect("Failed to reopen index blob");
                 assert_eq!(recovered_size, 0);
 
+                // The recovered sections accept new entries from position zero.
                 let position;
                 (oversized, position, _, _) = oversized
                     .append(section, TestEntry::new(section, 0, 0), &[section as u8; 16])
@@ -4279,6 +4283,7 @@ mod tests {
             oversized = oversized.sync_all().await.expect("Failed to sync sentinel");
             drop(oversized);
 
+            // The sentinel entries written after recovery survive a clean reopen.
             let oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("third"), cfg, None)
                     .await

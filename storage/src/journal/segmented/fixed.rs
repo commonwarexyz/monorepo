@@ -262,7 +262,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
             RError::InvalidChecksum | RError::BlobInsufficientLength => Error::Corruption(format!(
                 "section {section} does not retain its {required}-byte durable boundary"
             )),
-            err => Error::Runtime(err),
+            err => err.into(),
         }
     }
 
@@ -826,11 +826,14 @@ pub struct Replay<E: Storage + Metrics, A: CodecFixed> {
 impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
     /// Repair a torn page discovered by ordered replay and resume at the last complete item.
     async fn repair_torn_front(&mut self, source: RError) -> Result<(), Error> {
+        // Only a checksum failure is repairable: it marks a torn write, while any other error
+        // is an I/O failure this repair must not mask.
         if !matches!(source, RError::InvalidChecksum) {
             self.sections.pop_front();
             return Err(source.into());
         }
 
+        // The bytes already replayed are validated: they bound the truncation from below.
         let current = self.sections.front().expect("replayed section is present");
         let section = current.section;
         let position = current.position;
@@ -839,6 +842,8 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
             self.sections.pop_front();
             return Err(Error::OffsetOverflow);
         };
+
+        // Forward-validate from the replayed prefix to find where well-formed pages end.
         let recoverable = match self
             .journal
             .0
@@ -854,10 +859,16 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
                 return Err(err.into());
             }
         };
+
+        // A whole-blob recoverable prefix means the checksum failure did not come from a torn
+        // page: surface the original error instead of truncating valid data.
         if recoverable >= size {
             self.sections.pop_front();
             return Err(source.into());
         }
+
+        // Truncate to whole items, never below the validated replay prefix or the durability
+        // floor: a cut inside either lost acknowledged data.
         let target = recoverable - recoverable % Inner::<E, A>::CHUNK_SIZE_U64;
         if target < valid_size {
             self.sections.pop_front();
