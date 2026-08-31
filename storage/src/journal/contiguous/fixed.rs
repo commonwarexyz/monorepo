@@ -5461,6 +5461,56 @@ mod tests {
         });
     }
 
+    /// A prune that returns true has made every pre-prune item durable: a crash immediately
+    /// after must recover the full pre-prune size even when every unsynced write is lost.
+    #[test_traced]
+    fn test_fixed_journal_prune_durability_survives_crash() {
+        let executor = deterministic::Runner::default();
+        let (_, checkpoint) = executor.start_and_recover(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(3));
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg)
+                .await
+                .unwrap();
+
+            // Drop every write not covered by a completed sync at the crash. Writes still
+            // succeed, so the appends below land but stay volatile until prune's own sync.
+            *context.storage_fault_config().write() = deterministic::FaultConfig {
+                write_rate: Some(deterministic::WriteConfig {
+                    failure_rate: probability!(0.0),
+                    retention_rate: probability!(0.0),
+                    mode: deterministic::PartialWriteMode::Prefix,
+                }),
+                ..Default::default()
+            };
+
+            // Fill two blobs plus an unsynced tail, then prune into blob 1. The prune's
+            // internal sync is the only durability point covering these items.
+            for i in 0..8u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            let (journal, pruned) = journal.prune(3).await.unwrap();
+            assert!(pruned);
+            drop(journal);
+        });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+            let cfg = test_cfg(&context, NZU64!(3));
+            let journal = Journal::<_, Digest>::init(context.child("recover"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(
+                journal.bounds(),
+                3..8,
+                "pruned journal lost acknowledged items"
+            );
+            for i in 3..8u64 {
+                assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
+            }
+            journal.destroy().await.unwrap();
+        });
+    }
+
     /// Prune makes all data durable before removing blobs, so a commit issued right after must
     /// not attempt to sync the removed blobs.
     #[test_traced]
