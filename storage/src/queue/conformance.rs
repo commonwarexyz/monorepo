@@ -13,6 +13,7 @@ use core::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 use rand::RngExt as _;
 
 const WRITE_BUFFER: NonZeroUsize = NZUsize!(1024);
+const REPLAY_BUFFER: NonZeroUsize = NZUsize!(1024);
 const ITEMS_PER_SECTION: NonZeroU64 = NZU64!(64);
 const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
@@ -23,6 +24,7 @@ fn config(seed: u64, pooler: &impl BufferPooler) -> Config<(RangeCfg<usize>, ())
         items_per_section: ITEMS_PER_SECTION,
         page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         write_buffer: WRITE_BUFFER,
+        replay_buffer: REPLAY_BUFFER,
         compression: None,
         codec_config: (RangeCfg::new(0..256), ()),
     }

@@ -154,6 +154,7 @@ fn fuzz(input: FuzzInput) {
             partition: "fixed-journal-operations-fuzz-test".into(),
             items_per_blob: NZU64!(3),
             write_buffer: NZUsize!(MAX_WRITE_BUF),
+            replay_buffer: NZUsize!(MAX_WRITE_BUF),
             page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
         };
 

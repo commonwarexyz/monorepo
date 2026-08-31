@@ -66,6 +66,7 @@
 //!         codec_config: ((0..).into(), ()), // RangeCfg for Vec length, () for u8
 //!         page_cache,
 //!         write_buffer: NonZeroUsize::new(4096).unwrap(),
+//!         replay_buffer: NonZeroUsize::new(4096).unwrap(),
 //!     }).await.unwrap();
 //!
 //!     // Enqueue items

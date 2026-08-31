@@ -11,7 +11,7 @@
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::queue::{Config, Queue};
-use commonware_utils::{Probability, probability};
+use commonware_utils::{NZUsize, Probability, probability};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::BTreeMap,
@@ -477,6 +477,7 @@ fn fuzz(input: FuzzInput) {
                 codec_config: ((0usize..).into(), ()),
                 page_cache: CacheRef::from_pooler(&ctx, page_size, page_cache_size),
                 write_buffer,
+                replay_buffer: NZUsize!(4096),
             };
 
             let queue = Queue::<_, Vec<u8>>::init(ctx.child("storage"), queue_cfg)
@@ -513,6 +514,7 @@ fn fuzz(input: FuzzInput) {
             codec_config: ((0usize..).into(), ()),
             page_cache: CacheRef::from_pooler(&ctx, page_size, page_cache_size),
             write_buffer,
+            replay_buffer: NZUsize!(4096),
         };
 
         let queue = Queue::<_, Vec<u8>>::init(ctx.child("storage"), queue_cfg)
