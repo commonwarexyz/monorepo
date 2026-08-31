@@ -218,7 +218,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
             } else if physical_size == 0 {
                 None
             } else {
-                let (logical_size, entry) = Writer::<E::Blob>::read_validated_tail(
+                let (logical_size, entry) = Writer::<E::Blob>::read_tail(
                     &blob,
                     physical_size,
                     page_size,
@@ -253,7 +253,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         section: u64,
         size: u64,
     ) -> Result<A, Error> {
-        let entry = Writer::<E::Blob>::read_validated(
+        let entry = Writer::<E::Blob>::read(
             blob,
             page_size,
             size - Self::CHUNK_SIZE_U64,
