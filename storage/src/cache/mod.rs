@@ -129,7 +129,8 @@ mod tests {
     use crate::journal::Error as JournalError;
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{
-        Metrics as _, Runner, Supervisor as _, deterministic, telemetry::metrics::has_metric_value,
+        Metrics as _, Runner, Supervisor as _, deterministic, mocks::RecordingContext,
+        telemetry::metrics::has_metric_value,
     };
     use commonware_utils::{NZU16, NZU64, NZUsize};
     use rand::RngExt as _;
@@ -365,6 +366,43 @@ mod tests {
 
             context.auditor().state()
         })
+    }
+
+    #[test_traced]
+    fn test_cache_clean_restart_reads_journal_once() {
+        deterministic::Runner::default().start(|context| async move {
+            let (context, recordings) = RecordingContext::new(context);
+            let config = |context: &RecordingContext<_>| Config {
+                partition: "clean-restart-single-pass".into(),
+                codec_config: (),
+                compression: None,
+                write_buffer: NZUsize!(256),
+                replay_buffer: NZUsize!(1024),
+                items_per_blob: NZU64!(64),
+                page_cache: CacheRef::from_pooler(context, NZU16!(64), NZUsize!(10)),
+            };
+
+            let mut cache = Cache::<_, u64>::init(context.child("seed"), config(&context))
+                .await
+                .expect("failed to initialize cache");
+            for index in 0..15 {
+                cache = cache.put(index, index).await.expect("failed to put");
+            }
+            cache = cache.sync().await.expect("failed to sync");
+            drop(cache);
+
+            recordings.clear();
+            let cache = Cache::<_, u64>::init(context.child("reopen"), config(&context))
+                .await
+                .expect("failed to reopen cache");
+            for index in 0..15 {
+                assert!(cache.has(index));
+            }
+
+            // The 150 logical bytes occupy three pages. Writer construction reads the tail page,
+            // then one replay prefetch validates and decodes all three pages.
+            assert_eq!(recordings.snapshot().reads.len(), 2);
+        });
     }
 
     #[test_group("slow")]

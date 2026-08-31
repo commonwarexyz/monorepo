@@ -1970,6 +1970,7 @@ mod tests {
                 metadata_partition: format!("initial-target-{suffix}-merkle-metadata"),
                 items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
                 page_cache: page_cache(context),
             }
@@ -1981,6 +1982,7 @@ mod tests {
                 items_per_blob: NZU64!(7),
                 page_cache: page_cache(context),
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
             }
         }
 
@@ -1996,6 +1998,7 @@ mod tests {
                 codec_config,
                 page_cache: page_cache(context),
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
             }
         }
 

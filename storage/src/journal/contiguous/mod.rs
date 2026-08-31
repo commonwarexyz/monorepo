@@ -19,7 +19,6 @@ use tracing::warn;
 
 mod blobs;
 mod checkpoint;
-mod durability;
 pub mod fixed;
 mod metrics;
 pub mod variable;

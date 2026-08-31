@@ -13,6 +13,30 @@ commonware_macros::stability_scope!(BETA {
     #[cfg(not(feature = "std"))]
     extern crate alloc;
 
+    /// Lossless widening for nonzero integers, covering the conversions std provides no
+    /// [From] impl for (for example `NonZeroU16` into `u64`).
+    pub trait Widen<T> {
+        /// Convert without loss.
+        fn widen(self) -> T;
+    }
+
+    macro_rules! impl_widen {
+        ($($nz:ty => $($t:ty),+);+ $(;)?) => {$($(
+            impl Widen<$t> for $nz {
+                #[inline]
+                fn widen(self) -> $t {
+                    <$t>::from(self.get())
+                }
+            }
+        )+)+};
+    }
+    impl_widen!(
+        core::num::NonZeroU8 => u16, u32, u64, u128, usize;
+        core::num::NonZeroU16 => u32, u64, u128, usize;
+        core::num::NonZeroU32 => u64, u128;
+        core::num::NonZeroU64 => u128;
+    );
+
     #[cfg(not(feature = "std"))]
     use alloc::{boxed::Box, vec::Vec};
     use bytes::{BufMut, BytesMut};
