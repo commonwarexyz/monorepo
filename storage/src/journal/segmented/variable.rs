@@ -666,7 +666,7 @@ pub struct Replay<E: Storage + Metrics, V: Codec> {
 impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
     /// Validate that the front section's checksum failure is a repairable torn page, returning
     /// the truncation target.
-    async fn plan_front_repair(&mut self, source: RError) -> Result<u64, Error> {
+    async fn plan_repair(&mut self, source: RError) -> Result<u64, Error> {
         // Only a checksum failure is repairable: it marks a torn write, while any other error
         // is an I/O failure this repair must not mask.
         if !matches!(source, RError::InvalidChecksum) {
@@ -703,9 +703,9 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
     }
 
     /// Repair a torn page discovered by ordered replay and resume at the last complete item.
-    async fn repair_torn_front(&mut self, source: RError) -> Result<(), Error> {
+    async fn repair(&mut self, source: RError) -> Result<(), Error> {
         // A rejected plan mutates nothing: drop the damaged section and surface its error.
-        let recoverable = match self.plan_front_repair(source).await {
+        let recoverable = match self.plan_repair(source).await {
             Ok(target) => target,
             Err(err) => {
                 self.sections.pop_front();
@@ -808,7 +808,7 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
                             // Buffer still has data - continue to try decoding
                         }
                         Err(err) => {
-                            if let Err(err) = self.repair_torn_front(err).await {
+                            if let Err(err) = self.repair(err).await {
                                 return self.fail(err);
                             }
                             continue;
@@ -872,7 +872,7 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
                     continue;
                 }
                 Err(err) => {
-                    if let Err(err) = self.repair_torn_front(err).await {
+                    if let Err(err) = self.repair(err).await {
                         return self.fail(err);
                     }
                     continue;

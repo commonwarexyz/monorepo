@@ -835,7 +835,7 @@ pub struct Replay<E: Storage + Metrics, A: CodecFixed> {
 impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
     /// Validate that the front section's checksum failure is a repairable torn page, returning
     /// the item-aligned truncation target and the validated replay prefix.
-    async fn plan_front_repair(&mut self, source: RError) -> Result<(u64, u64), Error> {
+    async fn plan_repair(&mut self, source: RError) -> Result<(u64, u64), Error> {
         // Only a checksum failure is repairable: it marks a torn write, while any other error
         // is an I/O failure this repair must not mask.
         if !matches!(source, RError::InvalidChecksum) {
@@ -877,9 +877,9 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
     }
 
     /// Repair a torn page discovered by ordered replay and resume at the last complete item.
-    async fn repair_torn_front(&mut self, source: RError) -> Result<(), Error> {
+    async fn repair(&mut self, source: RError) -> Result<(), Error> {
         // A rejected plan mutates nothing: drop the damaged section and surface its error.
-        let (valid_size, target) = match self.plan_front_repair(source).await {
+        let (valid_size, target) = match self.plan_repair(source).await {
             Ok(plan) => plan,
             Err(err) => {
                 self.sections.pop_front();
@@ -981,7 +981,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
                     continue;
                 }
                 Err(err) => {
-                    if let Err(err) = self.repair_torn_front(err).await {
+                    if let Err(err) = self.repair(err).await {
                         return self.fail(err);
                     }
                     continue;
