@@ -64,6 +64,13 @@ use tracing::{Instrument as _, Span, info_span};
 /// Bounds temporary archive growth without putting cleanup on every publication.
 const MAX_COMMITS_BEFORE_CLEANUP: usize = 8;
 
+/// Admission-cut size above which a reply-free cut counts as naturally full.
+///
+/// Purely observational: [`metrics::Catalog::cut_trigger`] labels each smaller reply-free cut
+/// `eager`, measuring how many cuts a batching policy could hold back and how large their
+/// batches would grow. Cut starts are not gated on it.
+const ADMISSION_CUT_MIN_ITEMS: usize = 16;
+
 /// Returns the complete single-row metadata blob size for a catalog state.
 pub(in crate::multimmit::marshal) fn metadata_blob_size<D: Digest>(
     state: &CatalogState<D>,
@@ -1867,6 +1874,14 @@ where
         let Some(cut) = self.pending_admission.take() else {
             return Ok(false);
         };
+        let trigger = if !cut.replies.is_empty() {
+            "reply"
+        } else if cut.items >= ADMISSION_CUT_MIN_ITEMS {
+            "items"
+        } else {
+            "eager"
+        };
+        self.metrics.cut_trigger(trigger);
         if let Some(durable_at) = self.admission_durable_at.take() {
             self.metrics
                 .admission_cut_restart_gap
@@ -5641,6 +5656,79 @@ mod tests {
 
             syncs.unblock();
             assert!(custody.await.unwrap()[0].is_some());
+            drop(client);
+            assert!(handle.await.is_ok());
+        });
+    }
+
+    #[test]
+    fn admission_cut_triggers_label_reply_and_eager_cuts() {
+        deterministic::Runner::default().start(|context| async move {
+            let committee = Committee::<MinPk>::new_with_namespace_and_producers(
+                27,
+                b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_CUT_TRIGGERS",
+                6,
+                (0..4).map(Participant::new).collect(),
+                Limits::new(2, 2).unwrap(),
+            );
+            let syncs = PendingSyncs::default();
+            let delayed = DelayedSyncContext {
+                inner: context.child("delayed"),
+                pending: syncs.clone(),
+            };
+            let (client, handle, _delivery) =
+                spawn_catalog(config(&context, &committee), delayed.child("catalog")).await;
+
+            // Hold a reply-bearing staged cut in flight.
+            syncs.arm();
+            let first = client
+                .stage_block(producer_block(&committee, 0, 10))
+                .await
+                .unwrap();
+            client.progress().await.unwrap();
+            assert!(syncs.calls() > 0, "staged cut did not start");
+
+            // Reply-free buffered blocks accumulate behind the in-flight cut and start as
+            // their own small cut once it completes.
+            let buffered = [
+                producer_block(&committee, 1, 11),
+                producer_block(&committee, 2, 12),
+            ];
+            client.stage_blocks(&buffered).await.unwrap();
+
+            syncs.unblock();
+            first.wait().await.unwrap();
+            client.prune(0).await.unwrap();
+            let metrics = context.encode();
+            assert_eq!(
+                metric_total(&metrics, "admission_durability_duration_count"),
+                2,
+                "the staged cut and the buffered cut both completed"
+            );
+            assert_eq!(
+                metric_total(&metrics, "admission_cut_scheduled_items_total"),
+                3,
+                "every admission was scheduled"
+            );
+            assert_eq!(
+                metric_sum(
+                    &metrics,
+                    "admission_cut_triggers_total",
+                    Some("trigger=\"reply\"")
+                ),
+                1,
+                "the staged cut is labeled by its waiting reply"
+            );
+            assert_eq!(
+                metric_sum(
+                    &metrics,
+                    "admission_cut_triggers_total",
+                    Some("trigger=\"eager\"")
+                ),
+                1,
+                "the small reply-free cut is labeled as batchable"
+            );
+
             drop(client);
             assert!(handle.await.is_ok());
         });
