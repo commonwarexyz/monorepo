@@ -418,23 +418,19 @@ where
                 });
             }
             Request::SubscribeBlock(_, _) => unreachable!("subscriptions are dispatched above"),
-            Request::InstallFloor(floor, mut reply) => {
+            Request::InstallFloor(floor, reply) => {
                 let synchronizer = self.synchronizer.clone();
                 let resolver = self.resolver.clone();
                 let frontiers = floor.emitted.clone();
                 self.push(async move {
-                    select! {
-                        result = synchronizer.install_floor(floor) => {
-                            if result.is_ok() {
-                                resolver
-                                    .retire_certified(frontiers)
-                                    .await
-                                    .map_err(mailbox::Error::failed)?;
-                            }
-                            drop(reply.send(result.map_err(mailbox::Error::failed)));
-                        },
-                        _ = reply.closed() => {},
+                    let result = synchronizer.install_floor(floor).await;
+                    if result.is_ok() {
+                        resolver
+                            .retire_certified(frontiers)
+                            .await
+                            .map_err(mailbox::Error::failed)?;
                     }
+                    drop(reply.send(result.map_err(mailbox::Error::failed)));
                     Ok(())
                 });
             }
