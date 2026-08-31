@@ -1089,6 +1089,8 @@ impl<B: Blob> Writer<B> {
             };
         }
 
+        // A trailing partial page means the caller did not size the blob to complete physical
+        // pages, so there is no trusted terminal page to read the logical end from.
         let page_size: u64 = logical_page_size.widen();
         let physical_page_size = page_size
             .checked_add(CHECKSUM_SIZE)
