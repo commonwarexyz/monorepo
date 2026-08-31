@@ -1,7 +1,4 @@
-use super::{
-    super::Kind,
-    round::Round,
-};
+use super::{super::Kind, round::Round};
 use crate::{
     Viewable,
     simplex::{
@@ -1137,9 +1134,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// Takes newly notarized or unblocked certification candidates and returns
     /// proposals ready for certification, plus fetches for missing parent
     /// certificates (see [`Self::certification_fetch`]).
-    pub fn certify_candidates(
-        &mut self,
-    ) -> (Vec<Proposal<D>>, Vec<CertificateFetch>) {
+    pub fn certify_candidates(&mut self) -> (Vec<Proposal<D>>, Vec<CertificateFetch>) {
         let candidates = take(&mut self.certification_candidates);
         let mut ready = Vec::new();
         let mut fetches = Vec::new();
@@ -1192,10 +1187,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// certificate once, and the candidate's own certificate proves the votes
     /// that could form it have stopped circulating. The certificate must be
     /// fetched, or the voter can never certify another view in the term.
-    fn certification_fetch(
-        &self,
-        err: &ParentPayloadError,
-    ) -> Option<CertificateFetch> {
+    fn certification_fetch(&self, err: &ParentPayloadError) -> Option<CertificateFetch> {
         let ParentPayloadError::ParentNotCertified {
             proposal_view,
             parent_view,
