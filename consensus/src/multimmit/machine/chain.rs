@@ -105,13 +105,6 @@ pub(crate) enum VoteBodyProgress<D: Digest> {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct BuildId(u64);
 
-impl BuildId {
-    #[cfg(test)]
-    pub(crate) const fn fabricate(id: u64) -> Self {
-        Self(id)
-    }
-}
-
 /// Exact application build request for the local producer's next block.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct BuildJob<D: Digest> {
@@ -237,13 +230,6 @@ impl CustodyCancellation {
 /// Identifies one deterministic block-validation request.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct ValidationId(u64);
-
-impl ValidationId {
-    #[cfg(test)]
-    pub(crate) const fn fabricate(id: u64) -> Self {
-        Self(id)
-    }
-}
 
 /// Exact immutable block metadata whose payload must be validated.
 #[derive(Clone, Debug)]

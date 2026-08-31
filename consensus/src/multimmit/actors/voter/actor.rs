@@ -467,16 +467,6 @@ impl<D: Digest> BlockArrivals<D> {
     }
 }
 
-fn reset_generation_runtime_correlations<P>(
-    active_custody: &mut BTreeMap<BuildId, Option<oneshot::Sender<()>>>,
-    active_validations: &mut BTreeMap<ValidationId, Option<oneshot::Sender<()>>>,
-    verification_sources: &mut BTreeMap<Observation, P>,
-) {
-    active_custody.clear();
-    active_validations.clear();
-    verification_sources.clear();
-}
-
 /// One checkpoint whose snapshot write runs behind the live pipeline.
 struct PendingCheckpoint<E: StorageContext, V: Variant, D: Digest> {
     store: CheckpointProgress<E, V, D>,
@@ -1975,19 +1965,7 @@ where
     ) -> Result<(), Fatal> {
         let generation = self.machine.generation();
         if generation > self.core().task_generation() {
-            self.jobs.cancel_all();
-            self.crypto.cancel_all();
-            self.verification_tasks.clear();
-            self.fast_verifications.clear();
-            self.bulk_verifications.clear();
-            self.pending_signs.clear();
-            self.pending_applications.clear();
-            self.pending_publication = None;
-            reset_generation_runtime_correlations(
-                &mut self.active_custody,
-                &mut self.active_validations,
-                &mut self.verification_sources,
-            );
+            self.clear_generation_runtime();
             self.view_timer = None;
             self.production_timer = None;
             self.core_mut().advance_task_generation(generation)?;
@@ -2003,6 +1981,21 @@ where
         let view = self.update_progress_gauges();
         self.refresh_round_span(view);
         Ok(())
+    }
+
+    /// Cancels actor-owned work and correlations tied to the current task generation.
+    fn clear_generation_runtime(&mut self) {
+        self.jobs.cancel_all();
+        self.crypto.cancel_all();
+        self.verification_tasks.clear();
+        self.fast_verifications.clear();
+        self.bulk_verifications.clear();
+        self.pending_signs.clear();
+        self.pending_applications.clear();
+        self.pending_publication = None;
+        self.active_custody.clear();
+        self.active_validations.clear();
+        self.verification_sources.clear();
     }
 
     fn update_progress_gauges(&mut self) -> View {
@@ -3041,23 +3034,4 @@ mod tests {
         });
     }
 
-    #[test]
-    fn generation_reset_releases_actor_runtime_correlations() {
-        let (custody_cancel, _custody_cancelled) = oneshot::channel();
-        let (validation_cancel, _validation_cancelled) = oneshot::channel();
-        let mut active_custody = BTreeMap::from([(BuildId::fabricate(0), Some(custody_cancel))]);
-        let mut active_validations =
-            BTreeMap::from([(ValidationId::fabricate(0), Some(validation_cancel))]);
-        let mut verification_sources = BTreeMap::from([(Observation::new(1, 0), 7_u8)]);
-
-        reset_generation_runtime_correlations(
-            &mut active_custody,
-            &mut active_validations,
-            &mut verification_sources,
-        );
-
-        assert!(active_custody.is_empty());
-        assert!(active_validations.is_empty());
-        assert!(verification_sources.is_empty());
-    }
 }
