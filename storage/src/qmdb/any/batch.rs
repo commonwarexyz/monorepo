@@ -5090,9 +5090,9 @@ mod tests {
     }
 
     /// Ordered mirror of [`recreate_deleted_key_with_collision_sibling_root_matches`]:
-    /// a colliding sibling's bucket scan reintroduces the parent-deleted key's stale
-    /// committed location, and the classifier consumed the re-creation there as an
-    /// update.
+    /// re-creating a key deleted by a pending parent must match the committed-parent
+    /// path even though a colliding sibling's bucket scan exposes the deleted key's
+    /// stale committed location to the classifier.
     #[test]
     fn ordered_recreate_deleted_key_with_collision_sibling_root_matches() {
         let runner = deterministic::Runner::default();
@@ -5169,10 +5169,10 @@ mod tests {
         });
     }
 
-    /// Redundant-delete variant: the parent-deleted key's stale committed location
-    /// (reintroduced by the sibling's collision scan) consumed the child's redundant
-    /// delete as a live delete, double-decrementing active keys and raising the floor
-    /// to the tip while a key is still live.
+    /// Deleting a key already deleted by a pending parent must be a no-op: same root
+    /// as the committed-parent path and no double decrement of the active-key count,
+    /// even though the sibling update's bucket scan exposes the key's stale committed
+    /// location.
     #[test]
     fn ordered_redundant_delete_with_collision_sibling_root_matches() {
         let runner = deterministic::Runner::default();
@@ -5239,8 +5239,9 @@ mod tests {
         });
     }
 
-    /// Underflow variant: two redundant deletes double-decrement past zero, so
-    /// merkleizing the pending child hit the `active_keys underflow` assertion.
+    /// Redundant deletes of two parent-deleted keys must not drive the active-key
+    /// count negative while a colliding create pulls their stale committed locations
+    /// into the classifier's read set.
     #[test]
     fn ordered_redundant_delete_underflow_regression() {
         let runner = deterministic::Runner::default();
