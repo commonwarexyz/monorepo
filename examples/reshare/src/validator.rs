@@ -130,7 +130,6 @@ pub async fn run(context: tokio::Context, args: Validator) {
             peer_provider: oracle.clone(),
             blocker: oracle.clone(),
             mailbox_size: MAILBOX_SIZE,
-            initial: Duration::from_secs(1),
             timeout: Duration::from_secs(2),
             fetch_retry_timeout: Duration::from_millis(100),
             priority_requests: false,
@@ -243,7 +242,6 @@ pub async fn run(context: tokio::Context, args: Validator) {
             blocker: oracle.clone(),
             mailbox_size: MAILBOX_SIZE,
             me: Some(local.clone()),
-            initial: Duration::from_secs(1),
             timeout: Duration::from_secs(2),
             fetch_retry_timeout: Duration::from_millis(100),
             max_serve_ops: NZU64!(16),
@@ -405,6 +403,7 @@ fn archive_config<C>(
 ) -> prunable::Config<TwoCap, C> {
     prunable::Config {
         translator: TwoCap,
+        metadata_partition: format!("{prefix}-{name}-metadata"),
         key_partition: format!("{prefix}-{name}-key"),
         key_page_cache: page_cache,
         value_partition: format!("{prefix}-{name}-value"),

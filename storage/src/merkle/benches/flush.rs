@@ -32,6 +32,7 @@ const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(10_000_000);
 const PAGE_SIZE: NonZeroU16 = NZU16!(16384);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(512);
 const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(2 * 1024 * 1024);
+const REPLAY_BUFFER_SIZE: NonZeroUsize = NZUsize!(2 * 1024 * 1024);
 
 /// Rebuild the structure after roughly this many flushed nodes so the journal stays bounded on
 /// disk over a run (~32 bytes/node, so the live journal stays around 64 MiB).
@@ -48,6 +49,7 @@ fn merkle_cfg(ctx: &impl BufferPooler, family: &str) -> full::Config<Sequential>
         metadata_partition: format!("metadata-bench-flush-{family}"),
         items_per_blob: ITEMS_PER_BLOB,
         write_buffer: WRITE_BUFFER_SIZE,
+        replay_buffer: REPLAY_BUFFER_SIZE,
         strategy: Sequential,
         page_cache: CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE),
     }

@@ -425,15 +425,16 @@ where
         context: Context<Self::Digest, S::PublicKey>,
         digest: Self::Digest,
     ) -> oneshot::Receiver<bool> {
-        // Register the certification gate synchronously so `certify` always finds it, even
-        // while the block subscription / durable sync is still in flight. Inline verification
-        // verdicts are scoped to the proposal context, while certification receives only a
-        // notarized `(round, digest)`, so this gate records durability rather than validity.
-        // Unlike deferred, inline blocks do not embed their context, so no local check can
-        // rule out an honest notarization forming under a different header for this key. A
-        // notarization also implies f+1 honest validators already ran application
-        // verification, so durability is the only local fact certification still needs.
         let round = context.round;
+
+        // Verification needs the full block but waits only for local delivery. Certification starts
+        // recovery only when the block is not buffered. If a buffered block is evicted before
+        // verification registers its wait, verification is left with neither the block nor an
+        // active fetch. Register the wait before publishing the gate so it receives the buffered
+        // block or is waiting when recovery delivers it.
+        let block_request = self
+            .marshal
+            .subscribe_by_digest(digest, DigestFallback::Wait);
         let (durable_tx, durable_rx) = oneshot::channel();
         self.gates.insert(round, digest, durable_rx);
 
@@ -472,7 +473,6 @@ where
                     )
                 });
 
-                let block_request = marshal.subscribe_by_digest(digest, DigestFallback::Wait);
                 let Some(block) =
                     await_block_subscription(&mut tx, block_request, &digest, "verification").await
                 else {

@@ -9,6 +9,7 @@ use thiserror::Error;
 
 commonware_macros::stability_mod!(ALPHA, pub mod authenticated);
 pub mod contiguous;
+pub(crate) mod durability;
 mod frame;
 pub mod segmented;
 
