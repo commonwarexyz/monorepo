@@ -37,7 +37,6 @@ commonware_macros::stability_scope!(BETA {
         core::num::NonZeroU64 => u128;
     );
 
-
     #[cfg(not(feature = "std"))]
     use alloc::{boxed::Box, vec::Vec};
     use bytes::{BufMut, BytesMut};

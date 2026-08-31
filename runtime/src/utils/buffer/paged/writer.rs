@@ -848,8 +848,8 @@ impl<B: Blob> Writer<B> {
         buffer_size: NonZeroUsize,
         read_options: ReadOptions,
     ) -> Result<Replay<B>, Error> {
-        let page_size: u64 = self.cache_ref.page_size().widen();
-        let page_size_nz = NonZeroU16::new(page_size as u16).expect("page_size is non-zero");
+        let page_size_nz = self.cache_ref.page_size();
+        let page_size: u64 = page_size_nz.widen();
 
         // Flush any buffered data (without fsync) so the reader sees all written data.
         self.flush_internal(true, false).await?;
@@ -1009,6 +1009,21 @@ impl<B: Blob> Writer<B> {
         Ok(valid_len)
     }
 
+    /// Read and validate one page, returning its logical bytes and the range they cover.
+    async fn read_page(
+        blob: &B,
+        page: u64,
+        page_size: u64,
+        read_options: ReadOptions,
+    ) -> Result<(IoBuf, u64, u64), Error> {
+        let (logical, _) =
+            super::get_page_with_checksum_from_blob(blob, page, page_size, read_options).await?;
+        let start = page.checked_mul(page_size).ok_or(Error::OffsetOverflow)?;
+        let len = u64::try_from(logical.len()).map_err(|_| Error::OffsetOverflow)?;
+        let end = start.checked_add(len).ok_or(Error::OffsetOverflow)?;
+        Ok((logical, start, end))
+    }
+
     /// Read a logical range directly from a raw paged blob, validating every page it spans.
     ///
     /// Returns [Error::BlobInsufficientLength] when valid page contents do not cover the whole
@@ -1035,20 +1050,8 @@ impl<B: Blob> Writer<B> {
 
         // Validate every spanning page and append only its intersection with the requested range.
         for page in first_page..=last_page {
-            let (logical, _) = super::get_page_with_checksum_from_blob(
-                blob,
-                page,
-                logical_page_size,
-                read_options,
-            )
-            .await?;
-            let page_start = page
-                .checked_mul(logical_page_size)
-                .ok_or(Error::OffsetOverflow)?;
-            let logical_len = u64::try_from(logical.len()).map_err(|_| Error::OffsetOverflow)?;
-            let page_end = page_start
-                .checked_add(logical_len)
-                .ok_or(Error::OffsetOverflow)?;
+            let (logical, page_start, page_end) =
+                Self::read_page(blob, page, logical_page_size, read_options).await?;
             let overlap_start = offset.max(page_start);
             let overlap_end = end.min(page_end);
             if overlap_start >= overlap_end {
@@ -1096,12 +1099,8 @@ impl<B: Blob> Writer<B> {
 
         // The checksum length on the terminal page determines the blob's logical end.
         let page = physical_size / physical_page_size - 1;
-        let (tail, _) =
-            super::get_page_with_checksum_from_blob(blob, page, page_size, read_options).await?;
-        let page_start = page.checked_mul(page_size).ok_or(Error::OffsetOverflow)?;
-        let logical_size = page_start
-            .checked_add(u64::try_from(tail.len()).map_err(|_| Error::OffsetOverflow)?)
-            .ok_or(Error::OffsetOverflow)?;
+        let (tail, page_start, logical_size) =
+            Self::read_page(blob, page, page_size, read_options).await?;
         let len_u64 = u64::try_from(len).map_err(|_| Error::OffsetOverflow)?;
         let offset = logical_size
             .checked_sub(len_u64)

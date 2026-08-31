@@ -511,15 +511,13 @@ impl Cache {
     /// page boundary, so multiple reads may be required even if all data in the desired range is
     /// buffered.
     fn read_at(&self, blob_id: u64, buf: &mut [u8], logical_offset: u64) -> usize {
-        let (page_num, offset_in_page) = Self::offset_to_page(self.page_size, logical_offset);
+        let (page_num, offset_in_page, remaining) = Self::locate(self.page_size, logical_offset);
         let Some(page) = self.get_page(blob_id, page_num) else {
             return 0;
         };
         let page = page.as_ref();
 
-        let offset_in_page = offset_in_page as usize;
-        let width: usize = self.page_size.widen();
-        let bytes_to_copy = std::cmp::min(buf.len(), width - offset_in_page);
+        let bytes_to_copy = std::cmp::min(buf.len(), remaining);
         buf[..bytes_to_copy].copy_from_slice(&page[offset_in_page..offset_in_page + bytes_to_copy]);
 
         bytes_to_copy

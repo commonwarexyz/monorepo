@@ -89,7 +89,7 @@ use crate::journal::{
 };
 use commonware_codec::{Codec, CodecShared, varint::MAX_U32_VARINT_SIZE};
 use commonware_runtime::{
-    Blob, Buf, Handle, IoBuf, Metrics, ReadOptions, Storage,
+    Blob, Buf, Error as RError, Handle, IoBuf, Metrics, ReadOptions, Storage,
     buffer::paged::{CacheRef, Replay as BlobReplay, Writer},
 };
 use std::{
@@ -141,6 +141,16 @@ struct Inner<E: Storage + Metrics, V: Codec> {
 
     /// Codec configuration.
     codec_config: V::Cfg,
+}
+
+impl<E: Storage + Metrics, V: Codec> Inner<E, V> {
+    /// The section's writer. A replayed section cannot be removed while the replay owns the
+    /// journal.
+    fn writer(&mut self, section: u64) -> &mut Writer<E::Blob> {
+        self.manager
+            .get_mut(section)
+            .expect("replayed section is present")
+    }
 }
 
 impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
@@ -654,45 +664,60 @@ pub struct Replay<E: Storage + Metrics, V: Codec> {
 }
 
 impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
-    /// Repair a torn page discovered by the ordered replay pass, then resume at the last complete
-    /// frame boundary. Clean sections never enter this path or pay for a separate prefix scan.
-    async fn repair_torn_front(&mut self, source: commonware_runtime::Error) -> Result<(), Error> {
-        if !matches!(source, commonware_runtime::Error::InvalidChecksum) {
-            self.sections.pop_front();
+    /// Validate that the front section's checksum failure is a repairable torn page, returning
+    /// the truncation target.
+    async fn plan_front_repair(&mut self, source: RError) -> Result<u64, Error> {
+        // Only a checksum failure is repairable: it marks a torn write, while any other error
+        // is an I/O failure this repair must not mask.
+        if !matches!(source, RError::InvalidChecksum) {
             return Err(source.into());
         }
 
+        // The bytes already replayed are validated: they bound the truncation from below.
         let current = self.sections.front().expect("replayed section is present");
         let section = current.section;
         let size = current.reader.blob_size();
         let valid_offset = current.valid_offset;
-        let recoverable = match self
+
+        // Forward-validate from the replayed prefix to find where well-formed pages end.
+        let recoverable = self
             .journal
             .0
-            .manager
-            .get_mut(section)
-            .expect("replayed section is present")
+            .writer(section)
             .recoverable_prefix_len(valid_offset, self.buffer, self.read_options)
-            .await
-        {
-            Ok(recoverable) => recoverable,
-            Err(err) => {
-                self.sections.pop_front();
-                return Err(err.into());
-            }
-        };
+            .await?;
+
+        // A whole-blob recoverable prefix means the checksum failure did not come from a torn
+        // page: surface the original error instead of truncating valid data.
         if recoverable >= size {
-            self.sections.pop_front();
             return Err(source.into());
         }
+
+        // The cut must not drop below the validated replay prefix: that would lose data the
+        // replay already handed out.
         if recoverable < valid_offset {
-            self.sections.pop_front();
             return Err(Error::ItemOutOfRange(valid_offset));
         }
 
+        Ok(recoverable)
+    }
+
+    /// Repair a torn page discovered by ordered replay and resume at the last complete item.
+    async fn repair_torn_front(&mut self, source: RError) -> Result<(), Error> {
+        // A rejected plan mutates nothing: drop the damaged section and surface its error.
+        let recoverable = match self.plan_front_repair(source).await {
+            Ok(target) => target,
+            Err(err) => {
+                self.sections.pop_front();
+                return Err(err);
+            }
+        };
+
+        let current = self.sections.front().expect("replayed section is present");
+        let (section, valid_offset) = (current.section, current.valid_offset);
         warn!(
             section,
-            invalid_size = size,
+            invalid_size = current.reader.blob_size(),
             new_size = recoverable,
             "torn page detected: truncating"
         );
@@ -709,9 +734,7 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
         let mut reader = self
             .journal
             .0
-            .manager
-            .get_mut(section)
-            .expect("repaired section is present")
+            .writer(section)
             .replay(self.buffer, self.read_options)
             .await?;
         reader.seek_to(valid_offset)?;
@@ -723,6 +746,27 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
             valid_offset,
             pending: None,
         });
+        self.repairing = false;
+        Ok(())
+    }
+
+    /// Truncate the front section to its validated prefix and make the repair durable.
+    async fn repair_tail(&mut self, message: &'static str) -> Result<(), Error> {
+        let current = self.sections.front().expect("replayed section is present");
+        let (section, offset, valid_offset) =
+            (current.section, current.offset, current.valid_offset);
+        warn!(
+            blob = section,
+            bad_offset = offset,
+            new_size = valid_offset,
+            "{message}"
+        );
+
+        // Tail repair is exceptional. Make it durable immediately so callers do not need to
+        // track replay-time repaired sections separately. Keep the interruption guard set
+        // until the repair is durable.
+        self.repairing = true;
+        repair_blob(&mut self.journal, section, valid_offset).await?;
         self.repairing = false;
         Ok(())
     }
@@ -796,26 +840,14 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
                                 || before_remaining < MAX_U32_VARINT_SIZE
                             {
                                 // Treat as trailing bytes
-                                if current.valid_offset < blob_size && current.offset < blob_size {
-                                    warn!(
-                                        blob = current.section,
-                                        bad_offset = current.offset,
-                                        new_size = current.valid_offset,
-                                        "trailing bytes detected: truncating"
-                                    );
-                                    // Tail repair is exceptional. Make it durable
-                                    // immediately so callers do not need to track
-                                    // replay-time repaired sections separately.
-                                    let (section, valid_offset) =
-                                        (current.section, current.valid_offset);
-                                    self.repairing = true;
-                                    if let Err(err) =
-                                        repair_blob(&mut self.journal, section, valid_offset).await
-                                    {
-                                        self.sections.pop_front();
-                                        return self.fail(err);
-                                    }
-                                    self.repairing = false;
+                                if current.valid_offset < blob_size
+                                    && current.offset < blob_size
+                                    && let Err(err) = self
+                                        .repair_tail("trailing bytes detected: truncating")
+                                        .await
+                                {
+                                    self.sections.pop_front();
+                                    return self.fail(err);
                                 }
                                 self.sections.pop_front();
                                 continue;
@@ -832,19 +864,10 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
                 Ok(true) => {}
                 Ok(false) => {
                     // Incomplete item at end - truncate
-                    warn!(
-                        blob = current.section,
-                        bad_offset = current.offset,
-                        new_size = current.valid_offset,
-                        "incomplete item at end: truncating"
-                    );
-                    let (section, valid_offset) = (current.section, current.valid_offset);
-                    self.repairing = true;
-                    if let Err(err) = repair_blob(&mut self.journal, section, valid_offset).await {
+                    if let Err(err) = self.repair_tail("incomplete item at end: truncating").await {
                         self.sections.pop_front();
                         return self.fail(err);
                     }
-                    self.repairing = false;
                     self.sections.pop_front();
                     continue;
                 }
@@ -925,12 +948,7 @@ async fn repair_blob<E: Storage + Metrics, V: Codec>(
     section: u64,
     size: u64,
 ) -> Result<(), Error> {
-    // The journal is owned by the reader, so a replayed section cannot be removed.
-    let blob = journal
-        .0
-        .manager
-        .get_mut(section)
-        .expect("replayed section must exist");
+    let blob = journal.0.writer(section);
     blob.resize(size).await?;
     blob.sync().await?;
     Ok(())
@@ -2063,35 +2081,32 @@ mod tests {
             // lifecycle boundary: replay setup and consumption of an earlier section must not
             // read or repair this later section.
             let journal = journal_with_torn_interior_page(&context, PARTITION, false).await;
-            let original_size = context
+            let (_, original_size) = context
                 .open(PARTITION, &TORN_SECTION.to_be_bytes())
                 .await
-                .unwrap()
-                .1;
+                .unwrap();
             let mut replay = journal
                 .replay(FIRST_SECTION, 0, NZUsize!(1024), ReadOptions::default())
                 .await
                 .unwrap();
 
+            let (_, size) = context
+                .open(PARTITION, &TORN_SECTION.to_be_bytes())
+                .await
+                .unwrap();
             assert_eq!(
-                context
-                    .open(PARTITION, &TORN_SECTION.to_be_bytes())
-                    .await
-                    .unwrap()
-                    .1,
-                original_size,
+                size, original_size,
                 "replay setup must not repair a later section"
             );
 
             let (section, offset, _, value) = replay.next().await.unwrap().unwrap();
             assert_eq!((section, offset, value), (FIRST_SECTION, 0, u64::MAX));
+            let (_, size) = context
+                .open(PARTITION, &TORN_SECTION.to_be_bytes())
+                .await
+                .unwrap();
             assert_eq!(
-                context
-                    .open(PARTITION, &TORN_SECTION.to_be_bytes())
-                    .await
-                    .unwrap()
-                    .1,
-                original_size,
+                size, original_size,
                 "consuming an earlier section must not repair a later section"
             );
 
@@ -2121,11 +2136,10 @@ mod tests {
             const START_OFFSET: u64 = 72;
 
             let journal = journal_with_torn_interior_page(&context, PARTITION, false).await;
-            let original_size = context
+            let (_, original_size) = context
                 .open(PARTITION, &SECTION.to_be_bytes())
                 .await
-                .unwrap()
-                .1;
+                .unwrap();
             let mut replay = journal
                 .replay(
                     SECTION,
@@ -2140,13 +2154,12 @@ mod tests {
                 replay.next().await,
                 Some(Err(Error::ItemOutOfRange(START_OFFSET)))
             ));
+            let (_, size) = context
+                .open(PARTITION, &SECTION.to_be_bytes())
+                .await
+                .unwrap();
             assert_eq!(
-                context
-                    .open(PARTITION, &SECTION.to_be_bytes())
-                    .await
-                    .unwrap()
-                    .1,
-                original_size,
+                size, original_size,
                 "an unvalidated start offset must not become a repair boundary"
             );
             assert!(matches!(replay.finish(), Err(Error::ReplayFailed)));

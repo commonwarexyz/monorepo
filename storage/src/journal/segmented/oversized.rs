@@ -362,27 +362,17 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         let index_context = context.child("index");
         let value_context = context.child("values");
 
-        match recovery {
+        let (index, values) = match recovery {
             Recovery::Infer => {
                 let index = FixedJournal::init(index_context, index_cfg).await?;
-                let values = Glob::init(value_context, value_cfg).await?;
-                Ok(Self {
-                    index,
-                    values,
-                    tracking: None,
-                })
+                (index, Glob::init(value_context, value_cfg).await?)
             }
             Recovery::Floors(minimum_items) => {
                 let preflight =
                     FixedJournal::preflight_floors(index_context, index_cfg, minimum_items).await?;
                 let values = Glob::init(value_context, value_cfg).await?;
                 Self::validate_value_floors(&values, &preflight)?;
-                let index = preflight.finish().await?;
-                Ok(Self {
-                    index,
-                    values,
-                    tracking: None,
-                })
+                (preflight.finish().await?, values)
             }
             Recovery::Restore {
                 section,
@@ -392,28 +382,20 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
                     FixedJournal::preflight_restore(index_context, index_cfg, section, index_size)
                         .await?;
                 let values = Glob::init(value_context, value_cfg).await?;
-                Self::validate_restore_values(&values, &preflight, section)?;
-                let value_size = Self::boundary_value_end(
-                    section,
-                    preflight
-                        .boundaries()
-                        .get(&section)
-                        .expect("restore preflight includes its current section"),
-                )?;
+                let value_size = Self::validate_restore_values(&values, &preflight, section)?;
                 let index = preflight.finish().await?;
 
                 // The index truncation is already durable. Release its unreferenced values only
                 // after that proof, preserving the index-first crash-recovery order.
-                let mut journal = Self {
-                    index,
-                    values,
-                    tracking: None,
-                };
-                journal.values = journal.values.rewind(section, value_size).await?;
-                journal.values = journal.values.sync(section).await?;
-                Ok(journal)
+                let values = values.rewind(section, value_size).await?;
+                (index, values.sync(section).await?)
             }
-        }
+        };
+        Ok(Self {
+            index,
+            values,
+            tracking: None,
+        })
     }
 
     /// Drain the fixed journal's ordered recovery pass, then reconcile the value tail of each
@@ -534,15 +516,10 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         preflight: &RecoveryPreflight<E, I>,
     ) -> Result<(), Error> {
         for (&section, entry) in preflight.boundaries() {
-            let Some(entry) = entry else {
+            let required = Self::boundary_value_end(section, entry)?;
+            if required == 0 {
                 continue;
-            };
-            let (offset, size) = entry.value_location();
-            let required = offset.checked_add(u64::from(size)).ok_or_else(|| {
-                Error::Corruption(format!(
-                    "section {section} validation floor has an overflowing value range"
-                ))
-            })?;
+            }
             let retained = values.size(section)?;
             if retained < required {
                 return Err(Error::Corruption(format!(
@@ -554,26 +531,17 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         Ok(())
     }
 
-    /// Verify checkpoint-covered value extents against preflighted index boundaries.
+    /// Verify checkpoint-covered value extents against preflighted index boundaries, returning
+    /// the checkpoint section's terminal value end.
     fn validate_restore_values(
         values: &Glob<E, V>,
         preflight: &RecoveryPreflight<E, I>,
         section: u64,
-    ) -> Result<(), Error> {
+    ) -> Result<u64, Error> {
         // Every earlier section is immutable under the checkpoint, so its terminal index entry
         // must end exactly at the retained value length.
         for (&candidate, entry) in preflight.boundaries().range(..section) {
-            let required = match entry {
-                None => 0,
-                Some(entry) => {
-                    let (offset, size) = entry.value_location();
-                    offset.checked_add(u64::from(size)).ok_or_else(|| {
-                        Error::Corruption(format!(
-                            "section {candidate} has an overflowing committed value range"
-                        ))
-                    })?
-                }
-            };
+            let required = Self::boundary_value_end(candidate, entry)?;
             let retained = values.size(candidate)?;
             if retained != required {
                 return Err(Error::Corruption(format!(
@@ -592,14 +560,8 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         }
 
         // The current section may retain a suffix, but it must cover its committed terminal value.
-        let entry = &preflight.boundaries()[&section];
-        if let Some(entry) = entry {
-            let (offset, size) = entry.value_location();
-            let required = offset.checked_add(u64::from(size)).ok_or_else(|| {
-                Error::Corruption(format!(
-                    "section {section} checkpoint has an overflowing value range"
-                ))
-            })?;
+        let required = Self::boundary_value_end(section, &preflight.boundaries()[&section])?;
+        if required > 0 {
             let retained = values.size(section)?;
             if retained < required {
                 return Err(Error::Corruption(format!(
@@ -608,7 +570,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
             }
         }
 
-        Ok(())
+        Ok(required)
     }
 
     /// Remove any value sections that don't have corresponding index sections.
@@ -1011,6 +973,23 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         Ok((self, index_pruned || value_pruned))
     }
 
+    /// Derive the value boundary owned by `section`'s last entry after an index rewind.
+    ///
+    /// A rewind to zero may leave no section behind, which owns no value bytes.
+    async fn rewound_value_end(&self, section: u64, index_size: u64) -> Result<u64, Error> {
+        match self.index.last(section).await {
+            Ok(Some(entry)) => {
+                let (offset, size) = entry.value_location();
+                offset
+                    .checked_add(u64::from(size))
+                    .ok_or(Error::OffsetOverflow)
+            }
+            Ok(None) => Ok(0),
+            Err(Error::SectionOutOfRange(_)) if index_size == 0 => Ok(0),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Rewind both journals to a specific section and index size.
     ///
     /// This rewinds the section to the given index size and removes all sections
@@ -1027,17 +1006,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         self.index = self.index.rewind(section, index_size).await?;
 
         // Derive value size from last entry (section may not exist if empty)
-        let value_size = match self.index.last(section).await {
-            Ok(Some(entry)) => {
-                let (offset, size) = entry.value_location();
-                offset
-                    .checked_add(u64::from(size))
-                    .ok_or(Error::OffsetOverflow)?
-            }
-            Ok(None) => 0,
-            Err(Error::SectionOutOfRange(_)) if index_size == 0 => 0,
-            Err(e) => return Err(e),
-        };
+        let value_size = self.rewound_value_end(section, index_size).await?;
 
         // Make the index truncation durable before the values are rewound: rewinding the
         // values frees their ranges for reuse by later appends, and a dropped index entry
@@ -1064,17 +1033,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         self.index = self.index.rewind_section(section, index_size).await?;
 
         // Derive value size from last entry (section may not exist if empty)
-        let value_size = match self.index.last(section).await {
-            Ok(Some(entry)) => {
-                let (offset, size) = entry.value_location();
-                offset
-                    .checked_add(u64::from(size))
-                    .ok_or(Error::OffsetOverflow)?
-            }
-            Ok(None) => 0,
-            Err(Error::SectionOutOfRange(_)) if index_size == 0 => 0,
-            Err(e) => return Err(e),
-        };
+        let value_size = self.rewound_value_end(section, index_size).await?;
 
         // Make the index truncation durable before the values are rewound (see Self::rewind).
         self.index = self.index.sync(section).await?;
@@ -1336,6 +1295,14 @@ mod tests {
             compression: None,
             codec_config: (),
         }
+    }
+
+    /// Test configuration sized so each index page holds exactly one entry.
+    fn entry_cfg(pooler: &impl BufferPooler) -> Config<()> {
+        let mut cfg = test_cfg(pooler);
+        cfg.index_page_cache =
+            CacheRef::from_pooler(pooler, NZU16!(TestEntry::SIZE as u16), NZUsize!(8));
+        cfg
     }
 
     /// Simple test value type with unit config.
@@ -2006,20 +1973,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Use page size = entry size so each entry is on its own page.
-            let cfg = Config {
-                index_partition: "test-index".into(),
-                value_partition: "test-values".into(),
-                index_page_cache: CacheRef::from_pooler(
-                    &context,
-                    NZU16!(TestEntry::SIZE as u16),
-                    NZUsize!(8),
-                ),
-                index_write_buffer: NZUsize!(1024),
-                value_write_buffer: NZUsize!(1024),
-                replay_buffer: NZUsize!(4096),
-                compression: None,
-                codec_config: (),
-            };
+            let cfg = entry_cfg(&context);
 
             // Create five durable entry/value pairs.
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -2133,9 +2087,7 @@ mod tests {
     fn test_oversized_restore_does_not_repair_discarded_sections() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut cfg = test_cfg(&context);
-            cfg.index_page_cache =
-                CacheRef::from_pooler(&context, NZU16!(TestEntry::SIZE as u16), NZUsize!(8));
+            let cfg = entry_cfg(&context);
             let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("seed"), cfg.clone(), None)
                     .await
@@ -2248,11 +2200,9 @@ mod tests {
                     (2, TestEntry::SIZE as u64),
                 ),
             ] {
-                let mut cfg = test_cfg(&context);
+                let mut cfg = entry_cfg(&context);
                 cfg.index_partition = format!("test-index-{child}");
                 cfg.value_partition = format!("test-values-{child}");
-                cfg.index_page_cache =
-                    CacheRef::from_pooler(&context, NZU16!(TestEntry::SIZE as u16), NZUsize!(8));
 
                 // Persist three entries in section 1 and a later checkpoint candidate. One entry
                 // per integrity page makes the damaged page strictly interior.
@@ -2718,20 +2668,7 @@ mod tests {
             // Use page size = entry size so each entry is on its own page.
             // This allows corrupting just the last entry's page without affecting others.
             // Physical page size = TestEntry::SIZE (20) + 12 (CRC record) = 32 bytes.
-            let cfg = Config {
-                index_partition: "test-index".into(),
-                value_partition: "test-values".into(),
-                index_page_cache: CacheRef::from_pooler(
-                    &context,
-                    NZU16!(TestEntry::SIZE as u16),
-                    NZUsize!(8),
-                ),
-                index_write_buffer: NZUsize!(1024),
-                value_write_buffer: NZUsize!(1024),
-                replay_buffer: NZUsize!(4096),
-                compression: None,
-                codec_config: (),
-            };
+            let cfg = entry_cfg(&context);
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -3263,20 +3200,7 @@ mod tests {
             // Use page size = entry size so each entry is exactly one page.
             // This allows truncating by entry count to equal truncating by full pages,
             // maintaining page-level integrity.
-            let cfg = Config {
-                index_partition: "test-index".into(),
-                value_partition: "test-values".into(),
-                index_page_cache: CacheRef::from_pooler(
-                    &context,
-                    NZU16!(TestEntry::SIZE as u16),
-                    NZUsize!(8),
-                ),
-                index_write_buffer: NZUsize!(1024),
-                value_write_buffer: NZUsize!(1024),
-                replay_buffer: NZUsize!(4096),
-                compression: None,
-                codec_config: (),
-            };
+            let cfg = entry_cfg(&context);
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -3553,20 +3477,7 @@ mod tests {
             // Use page size = entry size so each entry is exactly one page.
             // This allows truncating by entry count to equal truncating by full pages,
             // maintaining page-level integrity.
-            let cfg = Config {
-                index_partition: "test-index".into(),
-                value_partition: "test-values".into(),
-                index_page_cache: CacheRef::from_pooler(
-                    &context,
-                    NZU16!(TestEntry::SIZE as u16),
-                    NZUsize!(8),
-                ),
-                index_write_buffer: NZUsize!(1024),
-                value_write_buffer: NZUsize!(1024),
-                replay_buffer: NZUsize!(4096),
-                compression: None,
-                codec_config: (),
-            };
+            let cfg = entry_cfg(&context);
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -4404,20 +4315,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Use page size = entry size so one entry per page
-            let cfg = Config {
-                index_partition: "test-index".into(),
-                value_partition: "test-values".into(),
-                index_page_cache: CacheRef::from_pooler(
-                    &context,
-                    NZU16!(TestEntry::SIZE as u16),
-                    NZUsize!(8),
-                ),
-                index_write_buffer: NZUsize!(1024),
-                value_write_buffer: NZUsize!(1024),
-                replay_buffer: NZUsize!(4096),
-                compression: None,
-                codec_config: (),
-            };
+            let cfg = entry_cfg(&context);
 
             // Create and populate with valid entry
             let mut oversized: Oversized<_, TestEntry, TestValue> =
