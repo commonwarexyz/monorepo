@@ -361,7 +361,7 @@ impl CacheRef {
         // Scatter each range out of the fetched pages, which are all full. The flattened
         // (range, page) access sequence is non-decreasing in page number, so a single cursor
         // suffices.
-        let page_size = self.page_size as usize;
+        let page_size: usize = self.page_size.widen();
         let mut cursor = 0;
         for (buf, offset) in ranges.iter_mut() {
             let mut buf: &mut [u8] = buf;
