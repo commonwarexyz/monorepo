@@ -636,14 +636,18 @@ mod tests {
     use super::{super::test_helpers::*, *};
     use crate::{
         simplex::{
+            elector::{Config as _, Elector as _, RoundRobin, RoundRobinElector},
             scheme::ed25519,
             types::{Notarization, Notarize},
         },
-        types::TermLength,
+        types::{Round, TermLength, ViewDelta},
     };
     use commonware_actor::Feedback;
     use commonware_cryptography::{
-        certificate::mocks::Fixture, ed25519::PublicKey, sha256::Digest as Sha256Digest,
+        Sha256,
+        certificate::{Scheme as _, mocks::Fixture},
+        ed25519::PublicKey,
+        sha256::Digest as Sha256Digest,
     };
     use commonware_macros::{select, test_async};
     use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network};
@@ -986,6 +990,15 @@ mod tests {
                 verifier,
                 ..
             } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let elector: RoundRobinElector<TestScheme> = RoundRobin::<Sha256>::default()
+                .with_term(TERM_LENGTH, Duration::from_secs(1), ViewDelta::new(0))
+                .build(schemes[0].participants());
+            let leader = usize::from(elector.elect(Round::new(EPOCH, View::new(1)), None));
+            assert_eq!(
+                leader, 2,
+                "fixture must leave the stable leader unavailable"
+            );
+
             let (network, oracle) = Network::new_with_peers(
                 context.child("network"),
                 NetworkConfig {
@@ -1011,8 +1024,8 @@ mod tests {
             }
             let mut connections = connections.into_iter();
             let requester_connection = connections.next().unwrap();
-            let _unavailable_leader_connection = connections.next().unwrap();
             let first_holder_connection = connections.next().unwrap();
+            let _unavailable_leader_connection = connections.next().unwrap();
             let second_holder_connection = connections.next().unwrap();
 
             let link = Link {
@@ -1020,7 +1033,7 @@ mod tests {
                 jitter: Duration::from_millis(1),
                 success_rate: probability!(1.0),
             };
-            for holder in &participants[2..] {
+            for holder in [&participants[1], &participants[3]] {
                 oracle
                     .add_link(participants[0].clone(), holder.clone(), link.clone())
                     .await
@@ -1053,7 +1066,7 @@ mod tests {
 
             let parent = build_notarization(&schemes, &verifier, EPOCH, View::new(2));
             let mut holders = Vec::new();
-            for (index, connection) in [(2, first_holder_connection), (3, second_holder_connection)]
+            for (index, connection) in [(1, first_holder_connection), (3, second_holder_connection)]
             {
                 let (voter_sender, voter_receiver) =
                     mailbox::new(context.child("holder_voter"), NZUsize!(8));
