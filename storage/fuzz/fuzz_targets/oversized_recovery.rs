@@ -1,6 +1,7 @@
 #![no_main]
 
-//! Oversized journal crash recovery under supported partial-write crash cuts.
+//! Oversized journal crash recovery under supported partial-write crash cuts, in inferred and
+//! marker-tracked recovery modes.
 
 use arbitrary::Arbitrary;
 use commonware_codec::{DecodeExt as _, FixedSize, Read, ReadExt as _, Write};
@@ -12,15 +13,19 @@ use commonware_runtime::{
     deterministic::{self, PartialWriteMode, WriteConfig},
     mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs, release_pending_syncs},
 };
-use commonware_storage::journal::{
-    Error as JournalError,
-    segmented::oversized::{Config, Oversized, Record},
+use commonware_storage::{
+    Context,
+    journal::{
+        Error as JournalError,
+        segmented::oversized::{Config, Oversized, Record},
+    },
+    metadata::{Config as MetadataConfig, Metadata},
 };
 use commonware_storage_fuzz::{faulted_recovery, release_oldest_pending_sync};
-use commonware_utils::{NZU16, NZUsize, Probability};
+use commonware_utils::{NZU16, NZUsize, Probability, sequence::U64};
 use libfuzzer_sys::fuzz_target;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     num::{NonZeroU16, NonZeroUsize},
 };
 
@@ -31,6 +36,7 @@ const VALUE_CHECKSUM_SIZE: usize = 4;
 const SECTIONS: u64 = 4;
 const INDEX_PARTITION: &str = "fuzz-index";
 const VALUE_PARTITION: &str = "fuzz-values";
+const METADATA_PARTITION: &str = "fuzz-markers";
 
 /// Test index entry that stores a u64 id and references a value.
 #[derive(Debug, Clone, PartialEq)]
@@ -100,13 +106,22 @@ struct FuzzInput {
     count: u8,
     retention: u8,
     subset: bool,
+    /// Drive the whole execution through marker-tracked recovery: the op-phase instance and
+    /// every recovery attempt (interrupted or clean) open the sidecar, replay, and finish
+    /// tracked. Mixing tracked images with inferred inits is a different product scenario, so
+    /// one input never mixes modes.
+    tracked: bool,
     /// Per-entry target section selector.
     routes: [u8; 24],
     /// Per-entry action applied after its append: pipeline a sync of its section, release one
-    /// held completion, settle everything held, sync one section, or sync everything.
+    /// held completion, settle everything held, sync one section, or sync everything. Tracked
+    /// mode adds an empty flush that publishes marker debt, a prune, and a section rewind.
+    /// These ops complete before the fault window opens, so the marker-before-data ordering
+    /// inside prune and rewind is not falsifiable here. Prune's ordering is made falsifiable
+    /// by the interrupted-prune final op.
     ops: [u8; 24],
-    /// Shape of the faulted crash: flush everything then abandon the requests, or interrupt a
-    /// blocking sync mid-flight.
+    /// Shape of the faulted crash: flush everything then abandon the requests, interrupt a
+    /// blocking sync mid-flight, or abandon a tracked prune mid-flight.
     final_op: u8,
 }
 
@@ -115,12 +130,36 @@ fn config(pooler: &impl BufferPooler) -> Config<()> {
         index_partition: INDEX_PARTITION.into(),
         value_partition: VALUE_PARTITION.into(),
         index_page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+        // The fully-retained-section assert relies on no buffer-fill flush being issued
+        // before the fault window opens: at most 24 entries of 20 bytes stay under these
+        // 512-byte buffers. Raising the entry count or size, or shrinking these buffers,
+        // would tear supposedly lossless sections through an unrecorded early flush.
         index_write_buffer: NZUsize!(512),
         value_write_buffer: NZUsize!(512),
         replay_buffer: NZUsize!(4096),
         compression: None,
         codec_config: (),
     }
+}
+
+/// Run the full tracked recovery: open the marker sidecar, drain the marker-aware replay, and
+/// finish. The sidecar opens under the same context as the journals, so its writes see the same
+/// fault shapes, and an error at any stage abandons the interrupted image to the next attempt.
+async fn init_tracked<E: Context>(
+    context: E,
+    cfg: Config<()>,
+) -> Result<Oversized<E, TestEntry, TestValue>, JournalError> {
+    let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_metadata(
+        &context,
+        cfg,
+        METADATA_PARTITION.into(),
+        ReadOptions::default(),
+    )
+    .await?;
+    while let Some(result) = replay.next().await {
+        result?;
+    }
+    replay.finish_tracked().await
 }
 
 /// The scripted append stream: `(section, id)` per operation, ids in append order.
@@ -193,9 +232,19 @@ async fn frame_valid(
 /// Reconstruct each section's expected recovery outcome from the raw crash image without
 /// repairing it.
 ///
-/// Reads each index blob's valid-page whole-record prefix, then scans backward for the last
-/// record with an in-bounds, checksum-valid value frame: recovery retains exactly the records
-/// through it, adopting earlier records whose frames were damaged (their reads must fail loud).
+/// Reads each index blob's valid-page whole-record prefix, then derives the retained prefix per
+/// mode. Inferred recovery (`floors` is `None`) scans backward for the last record with an
+/// in-bounds, checksum-valid value frame: it retains exactly the records through it, adopting
+/// earlier records whose frames were damaged (their reads must fail loud). Tracked recovery
+/// adopts each section's marker floor without value checks and validates forward from it,
+/// truncating at the first invalid value.
+///
+/// Markers trail durability: under crash cuts (no bit rot) a floor was published only after a
+/// completed joint sync covered it, and prune or rewind durably move markers before data can
+/// shrink, so a floor can never exceed the section's durable record count and every frame below
+/// it must still be in bounds and checksum-valid. Both halves are asserted here against the
+/// image-derived boundaries.
+///
 /// Maps each section to `(id, value readable)` per retained position, asserting identity against
 /// the intended append stream since an in-model crash cut cannot forge a CRC-valid record.
 ///
@@ -204,10 +253,12 @@ async fn frame_valid(
 async fn recover_expected(
     context: &deterministic::Context,
     intended: &BTreeMap<u64, Vec<u64>>,
+    floors: Option<&BTreeMap<u64, u64>>,
 ) -> (BTreeMap<u64, Vec<(u64, bool)>>, BTreeMap<u64, u64>) {
     let page_size = usize::from(PAGE_SIZE.get());
     let physical_page_size = page_size + PAGE_CHECKSUM_RECORD_SIZE;
     let mut value_ends = BTreeMap::new();
+    let mut seen = BTreeSet::new();
     let mut sections: BTreeMap<u64, Vec<(u64, bool)>> =
         (0..SECTIONS).map(|section| (section, Vec::new())).collect();
     for name in context
@@ -216,6 +267,7 @@ async fn recover_expected(
         .expect("oracle index scan failed")
     {
         let section = u64::from_be_bytes(name.as_slice().try_into().expect("invalid section name"));
+        seen.insert(section);
         let (blob, size) = context
             .open(INDEX_PARTITION, &name)
             .await
@@ -248,7 +300,6 @@ async fn recover_expected(
             .map(|record| TestEntry::decode(&record[..]).expect("oracle index record failed"))
             .collect();
 
-        // Recovery retains the prefix through the last record with a valid value frame.
         let mut validity = Vec::with_capacity(records.len());
         for record in &records {
             validity.push(
@@ -257,10 +308,36 @@ async fn recover_expected(
                     .expect("oracle frame read failed"),
             );
         }
-        let retained = validity
-            .iter()
-            .rposition(|&valid| valid)
-            .map_or(0, |last| last + 1);
+        let retained = match floors {
+            // Inferred recovery retains the prefix through the last record with a valid frame.
+            None => validity
+                .iter()
+                .rposition(|&valid| valid)
+                .map_or(0, |last| last + 1),
+            Some(floors) => {
+                // The marker must trail the durable index boundary and, because publication
+                // followed a completed joint sync, every frame below it must be in bounds and
+                // valid (frame validity implies the value boundary).
+                let floor = usize::try_from(floors.get(&section).copied().unwrap_or(0))
+                    .expect("oracle floor overflow");
+                assert!(
+                    floor <= records.len(),
+                    "marker exceeds the durable index boundary in section {section}"
+                );
+                assert!(
+                    validity[..floor].iter().all(|&valid| valid),
+                    "marker exceeds the durable value boundary in section {section}"
+                );
+
+                // Tracked recovery adopts the floor prefix and truncates at the first invalid
+                // value above it.
+                floor
+                    + validity[floor..]
+                        .iter()
+                        .position(|&valid| !valid)
+                        .unwrap_or(records.len() - floor)
+            }
+        };
         let value_end = records[..retained].last().map_or(0, |record| {
             let (offset, size) = record.value_location();
             offset
@@ -284,6 +361,16 @@ async fn recover_expected(
             expected.push((id, readable));
         }
         sections.insert(section, expected);
+    }
+
+    // A positive marker proves its records durable, so its section must survive in the image.
+    if let Some(floors) = floors {
+        for (&section, &floor) in floors {
+            assert!(
+                floor == 0 || seen.contains(&section),
+                "marker names section {section} missing from the crash image"
+            );
+        }
     }
     (sections, value_ends)
 }
@@ -348,14 +435,15 @@ fn fuzz(input: FuzzInput) {
     let intended = items(&input);
     let retention_percent = input.retention % 101;
     let final_op = input.final_op;
-    let mut appended: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
-    for &(section, id) in &intended {
-        appended.entry(section).or_default().push(id);
-    }
+    let tracked = input.tracked;
+
+    // The flush-everything final op is dispatch arm 0, and arm 3 also falls through to it in
+    // inferred mode.
+    let flushed_all = final_op.is_multiple_of(4) || (!tracked && final_op % 4 == 3);
 
     let first_phase_input = input.clone();
     let runner = deterministic::Runner::new(deterministic::Config::default().with_seed(input.seed));
-    let (durable, checkpoint) = runner.start_and_recover(move |context| async move {
+    let ((durable, model), checkpoint) = runner.start_and_recover(move |context| async move {
         let fault_config = context.storage_fault_config();
         let pending = PendingSyncs::default();
         let context = DelayedSyncContext {
@@ -363,23 +451,38 @@ fn fuzz(input: FuzzInput) {
             pending: pending.clone(),
         };
         let cfg = config(&context);
-        let mut oversized: Oversized<_, TestEntry, TestValue> =
+        let mut oversized: Oversized<_, TestEntry, TestValue> = if tracked {
+            init_tracked(context.child("initial"), cfg)
+                .await
+                .expect("initial tracked init failed")
+        } else {
             Oversized::init(context.child("initial"), cfg)
                 .await
-                .expect("initial init failed");
+                .expect("initial init failed")
+        };
 
         // Every sync completion below stays parked until an op resolves it, so requests pipeline
-        // and completions resolve in op-chosen order.
+        // and completions resolve in op-chosen order. The model mirrors each section's logical
+        // ids through appends, prunes, and rewinds.
         let mut counts: BTreeMap<u64, u64> = BTreeMap::new();
         let mut durable: BTreeMap<u64, u64> = BTreeMap::new();
+        let mut model: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
         let mut held: Vec<(u64, u64, Handle<()>)> = Vec::new();
+        let mut prune_floor = 0u64;
         for (offset, &(section, id)) in intended.iter().enumerate() {
+            // Route appends above the prune floor: mutating a pruned section fails.
+            let section = if section < prune_floor {
+                prune_floor + section % (SECTIONS - prune_floor)
+            } else {
+                section
+            };
             let value: TestValue = [id as u8; 16];
             (oversized, _, _, _) = oversized
                 .append(section, TestEntry::new(id), &value)
                 .await
                 .expect("append failed");
             *counts.entry(section).or_default() += 1;
+            model.entry(section).or_default().push(id);
 
             let op = first_phase_input.ops[offset % first_phase_input.ops.len()];
             match op & 0x07 {
@@ -428,6 +531,61 @@ fn fuzz(input: FuzzInput) {
                         .expect("sync_all failed");
                     durable = counts.clone();
                 }
+                6 if tracked => {
+                    // Empty flush: with no active sections, every settled durability proof
+                    // publishes as a marker generation under the parked completions.
+                    oversized = drive_pending_syncs(&pending, oversized.sync(Vec::<u64>::new()))
+                        .await
+                        .expect("empty flush failed");
+                }
+                7 if tracked => {
+                    // Settle held pipelines first: a completion credited after the truncation
+                    // below would claim durability for entries the operation removed.
+                    release_pending_syncs(&pending);
+                    for (covered_section, covered, handle) in held.drain(..) {
+                        handle.await.expect("pipelined sync failed");
+                        let durable = durable.entry(covered_section).or_default();
+                        *durable = (*durable).max(covered);
+                    }
+                    if op & 0x08 == 0 {
+                        // Prune: tracked floors are durably removed before section data
+                        // disappears.
+                        let min = u64::from(op >> 4) % SECTIONS;
+                        let did_prune;
+                        (oversized, did_prune) =
+                            drive_pending_syncs(&pending, oversized.prune(min))
+                                .await
+                                .expect("prune failed");
+                        if did_prune {
+                            prune_floor = prune_floor.max(min);
+                            counts.retain(|&section, _| section >= min);
+                            durable.retain(|&section, _| section >= min);
+                            model.retain(|&section, _| section >= min);
+                        }
+                    } else {
+                        // Rewind one live section below its current length: its tracked floor
+                        // durably lowers before the freed index and value ranges can be reused.
+                        let live: Vec<u64> = counts.keys().copied().collect();
+                        if let Some(&section) = live.get(usize::from(op >> 4) % live.len().max(1)) {
+                            let count = counts[&section];
+                            let keep = count * u64::from(op >> 6) / 4;
+                            oversized = drive_pending_syncs(
+                                &pending,
+                                oversized.rewind_section(section, keep * TestEntry::SIZE as u64),
+                            )
+                            .await
+                            .expect("rewind failed");
+                            counts.insert(section, keep);
+                            model
+                                .get_mut(&section)
+                                .expect("rewound section is modeled")
+                                .truncate(keep as usize);
+                            if let Some(durable) = durable.get_mut(&section) {
+                                *durable = (*durable).min(keep);
+                            }
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -453,7 +611,7 @@ fn fuzz(input: FuzzInput) {
             }),
             ..Default::default()
         };
-        match first_phase_input.final_op % 3 {
+        match first_phase_input.final_op % 4 {
             1 => {
                 // Interrupt a blocking sync of every section behind the armed one-shot
                 // gate: the first barrier to arrive parks with its blob's flush left
@@ -475,9 +633,13 @@ fn fuzz(input: FuzzInput) {
             }
             2 => {
                 // Interrupt a blocking sync of one section behind the armed gate, with
-                // the same parked-or-completed split as above.
+                // the same parked-or-completed split as above. Pruned sections reject
+                // mutations, so the target is remapped above the floor.
                 pending.arm();
-                let section = u64::from(first_phase_input.final_op >> 2) % SECTIONS;
+                let mut section = u64::from(first_phase_input.final_op >> 2) % SECTIONS;
+                if section < prune_floor {
+                    section = prune_floor + section % (SECTIONS - prune_floor);
+                }
                 let mut sync = Box::pin(oversized.sync(section));
                 for _ in 0..usize::from(first_phase_input.final_op >> 5) % 2 + 1 {
                     if let Some(result) = futures::future::poll_immediate(sync.as_mut()).await {
@@ -493,10 +655,47 @@ fn fuzz(input: FuzzInput) {
                 }
                 drop(sync);
             }
+            3 if tracked => {
+                // Interrupt a prune behind the armed gate and abandon it mid-flight. This arm
+                // makes prune's internal ordering falsifiable: the marker removal must be
+                // durably synced before any section blob is removed, or a crash image can hold
+                // a positive marker naming a section it no longer contains. The input-derived
+                // poll count lands the crash before the future first runs, while its marker
+                // sync is parked at the gate, or after the whole prune completed.
+                pending.arm();
+                let min = u64::from(first_phase_input.final_op >> 2) % SECTIONS;
+                let polls = usize::from(first_phase_input.final_op >> 4) % 3;
+                let mut prune = Box::pin(oversized.prune(min));
+                let mut completed = false;
+                for _ in 0..polls {
+                    if let Some(result) = futures::future::poll_immediate(prune.as_mut()).await {
+                        // A prune that ran to completion durably removed the markers and
+                        // section blobs below the floor before returning.
+                        let (journal, did_prune) = result.expect("interrupted prune failed");
+                        drop(journal);
+                        if did_prune {
+                            durable.retain(|&section, _| section >= min);
+                            model.retain(|&section, _| section >= min);
+                        }
+                        completed = true;
+                        break;
+                    }
+                    release_oldest_pending_sync(&pending);
+                }
+                drop(prune);
+
+                // The oracle must not depend on where the abandoned future stopped, so
+                // durability claims below the floor are dropped rather than assuming the
+                // removals never started. The intended stream is kept because the sections
+                // may equally have survived, and surviving records must stay authentic.
+                if !completed && polls > 0 {
+                    durable.retain(|&section, _| section >= min);
+                }
+            }
             _ => {
                 // Flush every buffered append through the fault layer, then abandon the sync
                 // requests so the crash discards their barriers but samples their writes.
-                for section in 0..SECTIONS {
+                for section in prune_floor..SECTIONS {
                     let handle;
                     (oversized, handle) = oversized
                         .start_sync(section)
@@ -507,27 +706,67 @@ fn fuzz(input: FuzzInput) {
                 drop(oversized);
             }
         }
-        durable
+        (durable, model)
     });
 
-    let checkpoint = faulted_recovery(checkpoint, input.seed, |context| async move {
-        Oversized::<_, TestEntry, TestValue>::init(
-            context.child("faulted_recovery"),
-            config(&context),
-        )
-        .await
-    });
+    let checkpoint = if tracked {
+        faulted_recovery(checkpoint, input.seed, |context| async move {
+            init_tracked(context.child("faulted_recovery"), config(&context)).await
+        })
+    } else {
+        faulted_recovery(checkpoint, input.seed, |context| async move {
+            Oversized::<_, TestEntry, TestValue>::init(
+                context.child("faulted_recovery"),
+                config(&context),
+            )
+            .await
+        })
+    };
 
-    let recovery_appended = appended.clone();
+    let recovery_model = model.clone();
     let ((expected, sizes), checkpoint) = deterministic::Runner::from(checkpoint)
         .start_and_recover(move |context| async move {
             *context.storage_fault_config().write() = deterministic::FaultConfig::default();
             let cfg = config(&context);
-            let (expected, value_ends) = recover_expected(&context, &recovery_appended).await;
-            let recovered: Oversized<_, TestEntry, TestValue> =
+
+            // Read the sidecar floors with the production parser before recovery reconciles
+            // them: init adopts the newest valid marker generation and durably resets only the
+            // one copy a crash left torn, which the tracked recovery below repeats identically.
+            let floors = if tracked {
+                let metadata: Metadata<_, U64, u64> = Metadata::init(
+                    context.child("floors"),
+                    MetadataConfig {
+                        partition: METADATA_PARTITION.into(),
+                        codec_config: (),
+                    },
+                )
+                .await
+                .expect("sidecar oracle init failed");
+                Some(
+                    metadata
+                        .keys()
+                        .map(|key| {
+                            (
+                                u64::from(key),
+                                *metadata.get(key).expect("marker key must have a floor"),
+                            )
+                        })
+                        .collect::<BTreeMap<_, _>>(),
+                )
+            } else {
+                None
+            };
+            let (expected, value_ends) =
+                recover_expected(&context, &recovery_model, floors.as_ref()).await;
+            let recovered: Oversized<_, TestEntry, TestValue> = if tracked {
+                init_tracked(context.child("recovered"), cfg)
+                    .await
+                    .expect("tracked recovery failed")
+            } else {
                 Oversized::init(context.child("recovered"), cfg)
                     .await
-                    .expect("recovery failed");
+                    .expect("recovery failed")
+            };
 
             // Entries covered by a completed sync must survive, and a crash that retained every
             // faulted byte after flushing everything loses nothing at all.
@@ -538,8 +777,8 @@ fn fuzz(input: FuzzInput) {
                     "section {section} lost entries covered by a completed sync"
                 );
             }
-            if retention_percent == 100 && final_op.is_multiple_of(3) {
-                for (section, ids) in &recovery_appended {
+            if retention_percent == 100 && flushed_all {
+                for (section, ids) in &recovery_model {
                     let retained: Vec<u64> = expected
                         .get(section)
                         .map_or(&[][..], Vec::as_slice)
@@ -582,10 +821,15 @@ fn fuzz(input: FuzzInput) {
     deterministic::Runner::from(checkpoint).start(move |context| async move {
         *context.storage_fault_config().write() = deterministic::FaultConfig::default();
         let cfg = config(&context);
-        let mut oversized: Oversized<_, TestEntry, TestValue> =
+        let mut oversized: Oversized<_, TestEntry, TestValue> = if tracked {
+            init_tracked(context.child("reopened"), cfg.clone())
+                .await
+                .expect("second tracked recovery failed")
+        } else {
             Oversized::init(context.child("reopened"), cfg.clone())
                 .await
-                .expect("second recovery failed");
+                .expect("second recovery failed")
+        };
 
         // Recovery is idempotent: a second initialization serves the same view and rewrites
         // nothing.
@@ -615,10 +859,15 @@ fn fuzz(input: FuzzInput) {
         oversized = oversized.sync_all().await.expect("sentinel sync failed");
         drop(oversized);
 
-        let reopened: Oversized<_, TestEntry, TestValue> =
+        let reopened: Oversized<_, TestEntry, TestValue> = if tracked {
+            init_tracked(context.child("sentinels"), cfg)
+                .await
+                .expect("reopen after sentinel sync failed")
+        } else {
             Oversized::init(context.child("sentinels"), cfg)
                 .await
-                .expect("reopen after sentinel sync failed");
+                .expect("reopen after sentinel sync failed")
+        };
         assert_view(&reopened, &expected, false).await;
         for (section, position, sentinel) in sentinels {
             let entry = reopened
