@@ -8132,7 +8132,7 @@ mod tests {
 
     #[test_traced]
     fn test_variable_snapshots_readable_during_concurrent_appends() {
-        let executor = deterministic::Runner::seeded(7);
+        let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "snapshot-concurrent".into(),

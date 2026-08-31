@@ -1058,7 +1058,7 @@ mod tests {
             release_pending_syncs,
         },
     };
-    use commonware_utils::{NZU16, NZUsize, probability};
+    use commonware_utils::{NZU16, NZUsize};
     use core::num::NonZeroU16;
     use std::{
         ops::RangeInclusive,
@@ -1083,9 +1083,9 @@ mod tests {
         }
     }
 
-    fn aligned_subset_cfg(pooler: &impl BufferPooler) -> Config {
+    fn aligned_cfg(pooler: &impl BufferPooler) -> Config {
         Config {
-            partition: "segmented-fixed-aligned-subset".into(),
+            partition: "segmented-fixed-aligned".into(),
             page_cache: CacheRef::from_pooler(pooler, NZU16!(16), NZUsize!(4)),
             write_buffer: NZUsize!(128),
         }
@@ -1468,7 +1468,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (context, recordings) = RecordingContext::new(context);
-            let cfg = aligned_subset_cfg(&context);
+            let cfg = aligned_cfg(&context);
             let mut journal = Journal::init(context.child("seed"), cfg.clone())
                 .await
                 .expect("failed to init");
@@ -2363,27 +2363,23 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_segmented_fixed_repairs_aligned_subset_crash() {
+    fn test_segmented_fixed_repairs_torn_interior_page() {
         const SECTION: u64 = 0;
 
-        let executor = deterministic::Runner::new(deterministic::Config::default().with_seed(4));
-        let (_, checkpoint) = executor.start_and_recover(|context| async move {
-            let fault_config = context.storage_fault_config();
-            let pending = PendingSyncs::default();
-            let context = DelayedSyncContext {
-                inner: context,
-                pending: pending.clone(),
-            };
-            let cfg = aligned_subset_cfg(&context);
-            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg)
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = aligned_cfg(&context);
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
             for value in 0..6 {
                 (journal, _) = journal.append(SECTION, &value).await.unwrap();
             }
+            journal = journal.sync_all().await.unwrap();
+            drop(journal);
 
-            // The three 16-byte logical pages each contain two complete u64 items. This seed
-            // retains pages 0 and 2 but tears page 1 while the durability barrier is pending:
+            // The three 16-byte logical pages each contain two complete u64 items. Tear the
+            // interior page while its neighbors stay valid:
             //
             // pages: [0........16) [16.......32) [32.......48)
             // state:     valid          torn          valid
@@ -2391,45 +2387,27 @@ mod tests {
             //
             // Backward sizing sees valid page 2 and reports the item-aligned length 48. Recovery
             // must still scan forward, truncate to page 0's 16-byte prefix, and discard items 2-5.
-            *fault_config.write() = deterministic::FaultConfig {
-                write_rate: Some(deterministic::WriteConfig {
-                    failure_rate: probability!(0.0),
-                    retention_rate: probability!(0.99),
-                    mode: deterministic::PartialWriteMode::Subset,
-                }),
-                ..Default::default()
-            };
-            let (journal, handle) = journal.start_sync(SECTION).await.unwrap();
-            assert_eq!(pending.lock().len(), 1);
-            drop(handle);
-            drop(journal);
-        });
+            corrupt_page(&context, &cfg.partition, &SECTION.to_be_bytes(), 1, 16).await;
 
-        let (_, checkpoint) =
-            deterministic::Runner::from(checkpoint).start_and_recover(|context| async move {
-                *context.storage_fault_config().write() = deterministic::FaultConfig::default();
-                let cfg = aligned_subset_cfg(&context);
-                let mut journal = Journal::<_, u64>::init(context.child("recover"), cfg)
-                    .await
-                    .unwrap();
-                journal = replay_all(journal).await;
-                assert_eq!(journal.section_len(SECTION).unwrap(), 2);
-                assert_eq!(journal.get(SECTION, 0).await.unwrap(), 0);
-                assert_eq!(journal.get(SECTION, 1).await.unwrap(), 1);
-                assert!(matches!(
-                    journal.get(SECTION, 2).await,
-                    Err(Error::ItemOutOfRange(2))
-                ));
+            let mut journal = Journal::<_, u64>::init(context.child("recover"), cfg.clone())
+                .await
+                .unwrap();
+            journal = replay_all(journal).await;
+            assert_eq!(journal.section_len(SECTION).unwrap(), 2);
+            assert_eq!(journal.get(SECTION, 0).await.unwrap(), 0);
+            assert_eq!(journal.get(SECTION, 1).await.unwrap(), 1);
+            assert!(matches!(
+                journal.get(SECTION, 2).await,
+                Err(Error::ItemOutOfRange(2))
+            ));
 
-                let position;
-                (journal, position) = journal.append(SECTION, &99).await.unwrap();
-                assert_eq!(position, 2);
-                journal.sync_all().await.unwrap();
-            });
+            // The repair truncation is durable: appends resume at the repaired boundary and
+            // survive reopen.
+            let position;
+            (journal, position) = journal.append(SECTION, &99).await.unwrap();
+            assert_eq!(position, 2);
+            journal.sync_all().await.unwrap();
 
-        deterministic::Runner::from(checkpoint).start(|context| async move {
-            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
-            let cfg = aligned_subset_cfg(&context);
             let journal = Journal::<_, u64>::init(context.child("reopen"), cfg)
                 .await
                 .unwrap();

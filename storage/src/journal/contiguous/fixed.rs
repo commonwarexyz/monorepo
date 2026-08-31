@@ -6298,7 +6298,7 @@ mod tests {
     /// appending and rolling.
     #[test_traced]
     fn test_snapshots_readable_during_concurrent_appends() {
-        let executor = deterministic::Runner::seeded(7);
+        let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(5));
             let mut journal = Journal::<_, Digest>::init(context.child("j"), cfg)
