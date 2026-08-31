@@ -7093,7 +7093,8 @@ mod tests {
     /// while a different pair certifies views 21 and 22. Each deprived validator holds a
     /// nullification covering the other pair's term. When `suppress_backfill` is true, that
     /// nullification starts at the term boundary and hides the missing chain from background
-    /// repair; otherwise the term head remains visible to background repair.
+    /// repair; otherwise the term head remains visible to background repair, which heals it
+    /// without the certification fetch.
     fn stable_leader_cross_term_certified_split<S, F, L>(
         mut fixture: F,
         elector: L,
