@@ -1956,7 +1956,6 @@ name = "commonware-storage"
 version = "2026.7.0"
 dependencies = [
  "ahash",
- "anyhow",
  "arbitrary",
  "bytes",
  "cfg-if",

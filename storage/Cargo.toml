@@ -15,7 +15,6 @@ workspace = true
 
 [dependencies]
 ahash = { workspace = true, features = ["no-rng"] }
-anyhow.workspace = true
 arbitrary = { workspace = true, optional = true, features = ["derive"] }
 bytes = { workspace = true, default-features = false }
 cfg-if.workspace = true
@@ -60,7 +59,6 @@ default = [ "std" ]
 std = [
 	"ahash/runtime-rng",
 	"ahash/std",
-	"anyhow/std",
 	"bytes/std",
 	"commonware-codec/std",
 	"commonware-cryptography/std",
