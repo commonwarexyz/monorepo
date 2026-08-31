@@ -193,8 +193,8 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         )
         .await?;
 
-        // Rebuild every lookup view from the single retained prefix selected by oversized
-        // recovery.
+        // Rebuild the in-memory indexes from the replay. It yields exactly the entries
+        // recovery retained, so one scan serves both recovery and indexing.
         let mut indices: BTreeMap<u64, u64> = BTreeMap::new();
         let mut extra_indices: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
         let mut keys = Index::new(context.child("index"), cfg.translator);
