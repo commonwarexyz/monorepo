@@ -312,10 +312,9 @@ enum AppCompletionKey<D: Digest> {
     Verify(D),
 }
 
-#[derive(Copy, Clone)]
-struct SigningTiming {
+struct SigningTiming<A> {
     ready_to_sign_at: SystemTime,
-    application: Option<AppCompletionTiming>,
+    application: A,
 }
 
 #[derive(Clone, Copy)]
@@ -375,13 +374,13 @@ enum CryptoOutcome<V: Variant, D: Digest> {
         id: EffectId,
         generation: u64,
         artifact: Arc<Artifact<V, D>>,
-        timing: SigningTiming,
+        timing: SigningTiming<Option<AppCompletionTiming>>,
     },
     SignedBatch {
         id: EffectId,
         generation: u64,
         artifacts: Vec<Artifact<V, D>>,
-        timing: SigningTiming,
+        timing: SigningTiming<Vec<AppCompletionTiming>>,
     },
     DaRecovered {
         started_at: SystemTime,
