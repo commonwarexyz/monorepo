@@ -56,19 +56,7 @@ where
     }
 
     pub(super) fn shutdown_tasks(&mut self) {
-        self.jobs.cancel_all();
-        self.crypto.cancel_all();
-        self.verification_tasks.clear();
-        self.fast_verifications.clear();
-        self.bulk_verifications.clear();
-        self.pending_signs.clear();
-        self.pending_applications.clear();
-        self.pending_publication = None;
-        reset_generation_runtime_correlations(
-            &mut self.active_custody,
-            &mut self.active_validations,
-            &mut self.verification_sources,
-        );
+        self.clear_generation_runtime();
         self.core_mut().shutdown_tasks();
     }
 
