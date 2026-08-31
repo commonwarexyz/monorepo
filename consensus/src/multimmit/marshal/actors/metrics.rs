@@ -5,10 +5,18 @@ use commonware_resolver::Outcome;
 use commonware_runtime::{
     Metrics,
     telemetry::metrics::{
-        Counter, CounterFamily, EncodeLabelSet, EncodeLabelValue, Gauge, GaugeExt as _,
+        Counter, CounterFamily, EncodeLabelSet, EncodeLabelValue, Gauge, GaugeExt as _, Histogram,
         MetricsExt as _, histogram,
     },
 };
+
+/// Buckets for catalog intake stalls, in seconds.
+///
+/// Intake waits span sub-millisecond mailbox handoffs through multi-second head-of-line
+/// blocking behind barrier commands, so the range is wider than [`histogram::Buckets::LOCAL`].
+const STALL: [f64; 14] = [
+    0.0005, 0.001, 0.003, 0.01, 0.03, 0.06, 0.1, 0.15, 0.2, 0.3, 0.5, 1.0, 2.0, 5.0,
+];
 
 /// The protocol obligation that caused marshal to issue an exact network fetch.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
@@ -38,6 +46,11 @@ struct FetchLabel {
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct ReaderSourceLabel {
     source: ColdOpen,
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct CommandKindLabel {
+    kind: &'static str,
 }
 
 /// Cold body reader acquisitions by source.
@@ -80,6 +93,11 @@ pub(in crate::multimmit::marshal) struct Catalog {
     pub admission_durability: histogram::Timed,
     pub finalized_archive_durability: histogram::Timed,
     pub checkpoint_publication: histogram::Timed,
+    pub command_dwell: Histogram,
+    pub admission_command_dwell: Histogram,
+    pub command_defer_wait: Histogram,
+    pub admission_cut_restart_gap: Histogram,
+    command_defers: CounterFamily<CommandKindLabel>,
     committed_count: Gauge,
     block_cache_items: Gauge,
     block_cache_bytes: Gauge,
@@ -225,6 +243,30 @@ impl Catalog {
                 "checkpoint_publication_duration",
                 "Duration of one checkpoint-last publication sync",
             ),
+            command_dwell: context.histogram(
+                "command_dwell_duration",
+                "Time a client command waits between mailbox enqueue and catalog intake",
+                STALL,
+            ),
+            admission_command_dwell: context.histogram(
+                "admission_command_dwell_duration",
+                "Time an admission command waits between mailbox enqueue and catalog intake",
+                STALL,
+            ),
+            command_defer_wait: context.histogram(
+                "command_defer_wait_duration",
+                "Time the deferred-command slot stays occupied before its command becomes ready",
+                STALL,
+            ),
+            admission_cut_restart_gap: context.histogram(
+                "admission_cut_restart_gap_duration",
+                "Delay between an admission cut completing and the next cut starting while admissions were already pending",
+                STALL,
+            ),
+            command_defers: context.family(
+                "command_defers",
+                "Commands parked in the deferred slot awaiting catalog readiness, by kind",
+            ),
             committed_count: context.gauge(
                 "committed_output_count",
                 "Number of dense outputs through the durable commit high-water",
@@ -266,6 +308,12 @@ impl Catalog {
 
     pub(in crate::multimmit::marshal) fn progress(&self, committed: Option<OutputIndex>) {
         let _ = self.committed_count.try_set(count(committed));
+    }
+
+    pub(in crate::multimmit::marshal) fn defer(&self, kind: &'static str) {
+        self.command_defers
+            .get_or_create(&CommandKindLabel { kind })
+            .inc();
     }
 
     pub(in crate::multimmit::marshal) fn caches(

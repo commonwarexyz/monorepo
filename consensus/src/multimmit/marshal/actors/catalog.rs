@@ -46,7 +46,8 @@ use commonware_cryptography::{
 };
 use commonware_macros::select;
 use commonware_runtime::{
-    Clock, Handle, Metrics as RuntimeMetrics, Spawner, telemetry::metrics::histogram,
+    Clock, Handle, Metrics as RuntimeMetrics, Spawner,
+    telemetry::metrics::{HistogramExt as _, histogram},
 };
 use commonware_storage::{Context, metadata::Metadata, translator::Translator};
 use commonware_utils::{channel::oneshot, futures::Pool, sequence::Unit};
@@ -56,6 +57,7 @@ use std::{
     future::Future,
     num::NonZeroUsize,
     sync::{Arc, mpsc::TryRecvError},
+    time::SystemTime,
 };
 use tracing::{Instrument as _, Span, info_span};
 
@@ -835,6 +837,8 @@ where
 {
     command: Command<H, V, B>,
     span: Span,
+    /// Client-side enqueue time; present only on commands stamped at the mailbox boundary.
+    enqueued: Option<SystemTime>,
 }
 
 impl<H, V, B> TracedCommand<H, V, B>
@@ -847,11 +851,24 @@ where
         Self {
             command,
             span: Span::current(),
+            enqueued: None,
+        }
+    }
+
+    fn stamped(command: Command<H, V, B>, enqueued: SystemTime) -> Self {
+        Self {
+            command,
+            span: Span::current(),
+            enqueued: Some(enqueued),
         }
     }
 
     const fn with_span(command: Command<H, V, B>, span: Span) -> Self {
-        Self { command, span }
+        Self {
+            command,
+            span,
+            enqueued: None,
+        }
     }
 
     fn fail(self, error: Error) {
@@ -965,7 +982,15 @@ where
     commands: mailbox::Sender<TracedCommand<H, V, B>>,
     delivery_cursors: mailbox::Sender<DeliveryCursorControl>,
     admission_capacity: usize,
+    /// Reads the runtime clock at enqueue so the actor can measure mailbox dwell.
+    now: EnqueueClock,
 }
+
+/// Runtime-clock accessor shared with catalog clients.
+///
+/// Clients stay generic only over protocol types, so the runtime clock crosses this boundary
+/// as an erased closure; the call runs once per command, off every hot path.
+type EnqueueClock = Arc<dyn Fn() -> SystemTime + Send + Sync>;
 
 impl<H, V, B> Clone for CatalogClient<H, V, B>
 where
@@ -978,6 +1003,7 @@ where
             commands: self.commands.clone(),
             delivery_cursors: self.delivery_cursors.clone(),
             admission_capacity: self.admission_capacity,
+            now: self.now.clone(),
         }
     }
 }
@@ -993,7 +1019,8 @@ where
         make: impl FnOnce(Reply<T>) -> Command<H, V, B>,
     ) -> Result<T, Error> {
         let (reply, receiver) = oneshot::channel();
-        if self.commands.enqueue(TracedCommand::new(make(reply))) == Feedback::Closed {
+        let command = TracedCommand::stamped(make(reply), (self.now)());
+        if self.commands.enqueue(command) == Feedback::Closed {
             return Err(Error::Closed);
         }
         receiver.await.unwrap_or(Err(Error::Closed))
@@ -1308,6 +1335,11 @@ where
     commands: mailbox::Receiver<TracedCommand<H, V, B>>,
     delivery_cursors: mailbox::Receiver<DeliveryCursorControl>,
     deferred: Option<TracedCommand<H, V, B>>,
+    /// Start of the current deferred-slot occupancy episode, if the slot held a command
+    /// that was not ready when last observed.
+    deferred_since: Option<SystemTime>,
+    /// Completion time of the last admission cut that left further admissions pending.
+    admission_durable_at: Option<SystemTime>,
     durability: Pool<'static, DurabilityCompletion<H::Digest>>,
     metadata_reads: Pool<'static, MetadataCompletion<E, H>>,
     metadata_steps: usize,
@@ -1412,8 +1444,17 @@ where
 
             if let Some(command) = self.deferred.take() {
                 if self.command_ready(&command.command) {
+                    if let Some(since) = self.deferred_since.take() {
+                        self.metrics
+                            .command_defer_wait
+                            .observe_between(since, self.clock.current());
+                    }
                     self.process_command(command).await?;
                     continue;
+                }
+                if self.deferred_since.is_none() {
+                    self.deferred_since = Some(self.clock.current());
+                    self.metrics.defer(command.command.kind());
                 }
                 self.deferred = Some(command);
             // The biased select below services ready internal completions before more intake.
@@ -1425,7 +1466,8 @@ where
                 && self.materializer.is_idle()
             {
                 match self.commands.try_recv() {
-                    Ok(command) => {
+                    Ok(mut command) => {
+                        self.note_intake(&mut command);
                         self.process_command(command).await?;
                         continue;
                     }
@@ -1484,11 +1526,28 @@ where
                         self.retry_body_waiters(&available)?;
                     }
                 }
-                CatalogEvent::Command(Some(command)) => {
+                CatalogEvent::Command(Some(mut command)) => {
+                    self.note_intake(&mut command);
                     self.process_command(command).await?;
                 }
                 CatalogEvent::Command(None) => commands_open = false,
             }
+        }
+    }
+
+    /// Records mailbox dwell for a stamped command at its first intake.
+    ///
+    /// The stamp is consumed so deferred retries and internal requeues are never re-observed.
+    fn note_intake(&mut self, command: &mut TracedCommand<H, V, B>) {
+        let Some(enqueued) = command.enqueued.take() else {
+            return;
+        };
+        let now = self.clock.current();
+        self.metrics.command_dwell.observe_between(enqueued, now);
+        if matches!(command.command, Command::Admit(_, _, _)) {
+            self.metrics
+                .admission_command_dwell
+                .observe_between(enqueued, now);
         }
     }
 
@@ -1499,7 +1558,7 @@ where
             command = command.command.kind(),
         );
         async {
-            let TracedCommand { command, span } = command;
+            let TracedCommand { command, span, .. } = command;
             match command {
                 Command::Admit(write, sync, reply) => {
                     self.admit_batch(write, sync, reply, span).await
@@ -1761,6 +1820,10 @@ where
             }) => {
                 timer.observe(&self.clock);
                 self.admission_active = false;
+                self.admission_durable_at = self
+                    .pending_admission
+                    .is_some()
+                    .then(|| self.clock.current());
                 if result.is_ok() {
                     self.materializer
                         .retain_readers(self.stores.sealed_body_readers());
@@ -1807,6 +1870,11 @@ where
         let Some(cut) = self.pending_admission.take() else {
             return Ok(false);
         };
+        if let Some(durable_at) = self.admission_durable_at.take() {
+            self.metrics
+                .admission_cut_restart_gap
+                .observe_between(durable_at, self.clock.current());
+        }
         self.metrics
             .admission_cut_scheduled_items
             .inc_by(u64::try_from(cut.items).unwrap_or(u64::MAX));
@@ -2151,20 +2219,24 @@ where
                 let mut items = admissions.len();
                 let mut commands = vec![(admissions, mode, reply)];
                 while items < remaining {
-                    match self.commands.try_recv() {
-                        Ok(TracedCommand {
+                    let Ok(mut traced) = self.commands.try_recv() else {
+                        break;
+                    };
+                    self.note_intake(&mut traced);
+                    match traced {
+                        TracedCommand {
                             command: Command::Admit(admissions, mode, reply),
                             span,
-                        }) if admissions.len() <= remaining - items => {
+                            ..
+                        } if admissions.len() <= remaining - items => {
                             processing_span.follows_from(span.id());
                             items += admissions.len();
                             commands.push((admissions, mode, reply));
                         }
-                        Ok(command) => {
+                        command => {
                             self.deferred = Some(command);
                             break;
                         }
-                        Err(_) => break,
                     }
                 }
                 self.buffer_admission_commands(commands).await?;
@@ -2178,19 +2250,23 @@ where
             {
                 break;
             }
-            match self.commands.try_recv() {
-                Ok(TracedCommand {
+            let Ok(mut traced) = self.commands.try_recv() else {
+                break;
+            };
+            self.note_intake(&mut traced);
+            match traced {
+                TracedCommand {
                     command: Command::Admit(admissions, mode, reply),
                     span,
-                }) => {
+                    ..
+                } => {
                     processing_span.follows_from(span.id());
                     next = Some((admissions, mode, reply, span));
                 }
-                Ok(command) => {
+                command => {
                     self.deferred = Some(command);
                     break;
                 }
-                Err(_) => break,
             }
         }
         Ok(())
@@ -3415,10 +3491,12 @@ where
     let (commands, receiver) = mailbox::new(context.child("mailbox"), capacity);
     let (delivery_cursors, delivery_cursor_receiver) =
         mailbox::new(context.child("delivery_cursor_mailbox"), NonZeroUsize::MIN);
+    let enqueue_clock = context.child("enqueue_clock");
     let client = CatalogClient {
         commands,
         delivery_cursors,
         admission_capacity: admission_cut_capacity.get(),
+        now: Arc::new(move || enqueue_clock.current()),
     };
     let mut materializer = Materializer::new(
         context.child("materializer"),
@@ -3451,6 +3529,8 @@ where
             commands: receiver,
             delivery_cursors: delivery_cursor_receiver,
             deferred: None,
+            deferred_since: None,
+            admission_durable_at: None,
             durability: Pool::default(),
             metadata_reads: Pool::default(),
             metadata_steps: 0,
@@ -5564,6 +5644,80 @@ mod tests {
 
             syncs.unblock();
             assert!(custody.await.unwrap()[0].is_some());
+            drop(client);
+            assert!(handle.await.is_ok());
+        });
+    }
+
+    #[test]
+    fn intake_instrumentation_records_dwell_defers_and_restart_gap() {
+        deterministic::Runner::default().start(|context| async move {
+            let committee = Committee::<MinPk>::new_with_namespace_and_producers(
+                26,
+                b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_INTAKE_INSTRUMENTATION",
+                6,
+                (0..4).map(Participant::new).collect(),
+                Limits::new(2, 2).unwrap(),
+            );
+            let syncs = PendingSyncs::default();
+            let delayed = DelayedSyncContext {
+                inner: context.child("delayed"),
+                pending: syncs.clone(),
+            };
+            let (client, handle, _delivery) =
+                spawn_catalog(config(&context, &committee), delayed.child("catalog")).await;
+            let blocks = [
+                producer_block(&committee, 0, 10),
+                producer_block(&committee, 1, 11),
+            ];
+
+            // Block the first admission cut so a second cut queues behind it.
+            syncs.arm();
+            let first = client.stage_block(blocks[0].clone()).await.unwrap();
+            client.progress().await.unwrap();
+            assert!(syncs.calls() > 0, "first admission cut did not start");
+            let second = client.stage_block(blocks[1].clone()).await.unwrap();
+
+            // A commit-barrier command defers until admission quiescence, and the occupied
+            // deferred slot holds back every later command.
+            let mut prune = Box::pin(client.prune(0));
+            commonware_macros::select! {
+                result = &mut prune => panic!("prune completed before quiescence: {result:?}"),
+                _ = context.sleep(std::time::Duration::from_millis(1)) => {},
+            }
+            let mut blocked = Box::pin(client.progress());
+            commonware_macros::select! {
+                result = &mut blocked => panic!("intake proceeded past a deferred barrier: {result:?}"),
+                _ = context.sleep(std::time::Duration::from_millis(1)) => {},
+            }
+
+            syncs.unblock();
+            first.wait().await.unwrap();
+            second.wait().await.unwrap();
+            prune.await.unwrap();
+            blocked.await.unwrap();
+
+            let metrics = context.encode();
+            let admit_dwell = metric_total(&metrics, "admission_command_dwell_duration_count");
+            assert!(admit_dwell >= 2, "both stage commands record dwell");
+            assert!(
+                metric_total(&metrics, "command_dwell_duration_count") > admit_dwell,
+                "non-admission commands record dwell"
+            );
+            assert_eq!(
+                metric_sum(&metrics, "command_defers_total", Some("kind=\"prune\"")),
+                1,
+                "the deferred barrier command is counted once"
+            );
+            assert!(
+                metric_total(&metrics, "command_defer_wait_duration_count") >= 1,
+                "the defer episode records its wait"
+            );
+            assert!(
+                metric_total(&metrics, "admission_cut_restart_gap_duration_count") >= 1,
+                "the queued second cut records its restart gap"
+            );
+
             drop(client);
             assert!(handle.await.is_ok());
         });
