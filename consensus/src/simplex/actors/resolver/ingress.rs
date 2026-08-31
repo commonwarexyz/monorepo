@@ -43,7 +43,7 @@ pub enum MailboxMessage<S: Scheme, D: Digest> {
         view: View,
         /// The certificate that is needed.
         kind: Kind,
-        /// Preferred peer, or `None` to use ordinary resolver peer selection.
+        /// Peer the fetch is restricted to, or `None` to ask any peer.
         target: Option<S::PublicKey>,
     },
 }
@@ -148,9 +148,9 @@ impl<S: Scheme, D: Digest> Policy for MailboxMessage<S, D> {
         }
 
         // Ignore duplicate work. Resolve requests for the same certificate
-        // share one network fetch, whose peer scope must remain as wide as any
-        // duplicate requested. Requests for different kinds at the same views
-        // are distinct work: neither certificate substitutes for the other
+        // share one network fetch, which an unrestricted duplicate widens to
+        // any peer. Requests for different kinds at the same views are
+        // distinct work: neither certificate substitutes for the other
         // (see [Kind]).
         if overflow
             .messages

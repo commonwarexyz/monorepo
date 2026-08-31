@@ -347,17 +347,17 @@
 //! an uncertified parent inside the optimistic issuance window: its certificate is still forming
 //! from live votes (see [Optimistic Validation](#optimistic-validation)).
 //!
-//! Certification repairs a missed certificate the same way. A notarized view certifies only after
-//! its parent certifies, which requires the parent's exact-view notarization. When the voter holds
-//! a view's notarization but not its parent's, the parent's votes have stopped circulating.
-//! Peers broadcast a certificate only once, so the voter requests the parent's notarization from
-//! the term's leader, or from any peer when the term's leader is unknown.
+//! Certification exposes the same split. A notarized view certifies only after its parent
+//! certifies, which requires the parent's exact-view notarization. When the voter holds a view's
+//! notarization but not its parent's, the parent's votes have stopped circulating. Peers broadcast
+//! a certificate only once, and a leader that withheld it may never answer, so the voter requests
+//! the parent's notarization from any peer.
 //!
 //! A resolver key identifies a view, not a certificate. A notarization and a covering nullification
 //! for one view answer opposite questions, so a peer can return valid evidence that does not settle
 //! the request. The requester records that evidence and retries without faulting the peer. A
 //! delivered notarization completes its fetch on arrival, because certification judges evidence
-//! already in hand. Matching evidence or finalization retires targeted work.
+//! already in hand. Matching evidence or finalization retires pending work.
 //!
 //! ## Pluggable Hashing and Cryptography
 //!
@@ -6037,34 +6037,14 @@ mod tests {
             let null_a = build_nullification(Round::new(Epoch::new(333), View::new(f_view + 1)));
             let null_b = build_nullification(Round::new(Epoch::new(333), View::new(f_view + 2)));
 
-            // Create an 11th non-participant injector and obtain senders
-            let injector_pk = PrivateKey::from_seed(1_000_000).public_key();
-            let (mut injector_sender, _inj_certificate_receiver) = oracle
-                .control(injector_pk.clone())
-                .register(1, TEST_QUOTA)
-                .await
-                .unwrap();
-
-            // Create minimal one-way links from injector to all participants (not full mesh)
+            // Create an 11th non-participant injector with one-way links to all participants
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(0),
                 success_rate: probability!(1.0),
             };
-            for p in participants.iter() {
-                oracle
-                    .add_link(injector_pk.clone(), p.clone(), link.clone())
-                    .await
-                    .unwrap();
-            }
-            oracle.manager().track(
-                1,
-                TrackedPeers::new(
-                    Set::from_iter_dedup(participants.iter().cloned()),
-                    Set::from_iter_dedup(std::slice::from_ref(&injector_pk).iter().cloned()),
-                ),
-            );
-            context.sleep(Duration::from_millis(10)).await;
+            let mut injector_sender =
+                start_certificate_injector(&context, &mut oracle, &participants, &link).await;
 
             // ========== Broadcast certificates over recovered network. ==========
 
@@ -6386,7 +6366,7 @@ mod tests {
             let application_cfg = mocks::application::Config::<Sha256, _> {
                 relay: relay.clone(),
                 me: validator.clone(),
-                propose_latency: (250.0, 50.0),
+                propose_latency: (250.0, 50.0), // ensure we process certificates first
                 verify_latency: (10.0, 5.0),
                 certify_latency: (10.0, 5.0),
                 should_certify: mocks::application::Certifier::Always,
@@ -7093,7 +7073,7 @@ mod tests {
     /// while a different pair certifies views 21 and 22. Each deprived validator holds a
     /// nullification covering the other pair's term. When `suppress_backfill` is true, that
     /// nullification starts at the term boundary and hides the missing chain from background
-    /// repair; otherwise the term head remains visible to background repair, which heals it
+    /// repair. Otherwise the term head remains visible to background repair, which heals it
     /// without the certification fetch.
     fn stable_leader_cross_term_certified_split<S, F, L>(
         mut fixture: F,
@@ -7285,8 +7265,8 @@ mod tests {
                 }));
             }
 
-            // Reaching the next Byzantine-led term proves every honest participant led a full
-            // term without finalizing; this is protocol progress, not a stalled executor.
+            // Reaching the next Byzantine-led term proves honest-led terms elapsed without
+            // finalizing. This is protocol progress, not a stalled executor.
             let progress_reporters: Vec<_> = honest_reporters.values().cloned().collect();
             let next_byzantine_term = context.child("next_byzantine_term").spawn(
                 move |context| async move {
@@ -7319,14 +7299,32 @@ mod tests {
 
             if !finalized {
                 let a_reporter = &honest_reporters[&a];
-                assert!(a_reporter.notarizations.lock().contains_key(&View::new(2)));
-                assert!(!a_reporter.notarizations.lock().contains_key(&View::new(1)));
-                assert!(!a_reporter.certifications.lock().contains_key(&View::new(2)));
+                assert!(
+                    a_reporter.notarizations.lock().contains_key(&View::new(2)),
+                    "halted, but a is missing notarization(2)"
+                );
+                assert!(
+                    !a_reporter.notarizations.lock().contains_key(&View::new(1)),
+                    "halted, but a repaired notarization(1)"
+                );
+                assert!(
+                    !a_reporter.certifications.lock().contains_key(&View::new(2)),
+                    "halted, but a certified view 2"
+                );
 
                 let c_reporter = &honest_reporters[&c];
-                assert!(c_reporter.notarizations.lock().contains_key(&View::new(22)));
-                assert!(!c_reporter.notarizations.lock().contains_key(&View::new(21)));
-                assert!(!c_reporter.certifications.lock().contains_key(&View::new(22)));
+                assert!(
+                    c_reporter.notarizations.lock().contains_key(&View::new(22)),
+                    "halted, but c is missing notarization(22)"
+                );
+                assert!(
+                    !c_reporter.notarizations.lock().contains_key(&View::new(21)),
+                    "halted, but c repaired notarization(21)"
+                );
+                assert!(
+                    !c_reporter.certifications.lock().contains_key(&View::new(22)),
+                    "halted, but c certified view 22"
+                );
 
                 panic!(
                     "all honest leaders exhausted a term, but recursive parent repair never finalized"

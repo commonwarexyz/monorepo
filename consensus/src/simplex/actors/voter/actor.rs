@@ -7,7 +7,7 @@ use crate::{
     CertifiableAutomaton, LATENCY, Relay, Reporter, Viewable,
     simplex::{
         Floor, Plan,
-        actors::{batcher, resolver},
+        actors::{Kind, batcher, resolver},
         elector::Elector,
         metrics::{self, Outbound, TimeoutReason},
         scheme::Scheme,
@@ -1135,8 +1135,8 @@ impl<
                 // journal sync completed before this block runs, a child made
                 // eligible by its parent cannot become durable first.
                 let (candidates, fetches) = self.state.certify_candidates();
-                for CertificateFetch { proposal, view, kind } in fetches {
-                    resolver.resolve(proposal, view, kind, None);
+                for CertificateFetch { proposal, view } in fetches {
+                    resolver.resolve(proposal, view, Kind::Notarization, None);
                 }
                 for proposal in candidates {
                     let round = proposal.round;

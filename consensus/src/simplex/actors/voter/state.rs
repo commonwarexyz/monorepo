@@ -94,15 +94,13 @@ pub enum Verify<S: Scheme<D>, D: Digest> {
     Wait,
 }
 
-/// A certificate fetch justified by a blocked certification (see
+/// A notarization fetch justified by a blocked certification (see
 /// [`State::certify_candidates`]).
 pub struct CertificateFetch {
-    /// View of the candidate that exposed the missing certificate.
+    /// View of the candidate that exposed the missing notarization.
     pub proposal: View,
-    /// View whose certificate is needed.
+    /// View whose notarization is needed.
     pub view: View,
-    /// Kind of certificate that is needed.
-    pub kind: Kind,
 }
 
 /// Configuration for initializing [`State`].
@@ -1206,7 +1204,6 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         Some(CertificateFetch {
             proposal: *proposal_view,
             view: *parent_view,
-            kind: Kind::Notarization,
         })
     }
 
@@ -3616,7 +3613,6 @@ mod tests {
             assert_eq!(fetches.len(), 1);
             assert_eq!(fetches[0].proposal, View::new(3));
             assert_eq!(fetches[0].view, View::new(2));
-            assert!(matches!(fetches[0].kind, Kind::Notarization));
 
             // The blocked candidate is dormant, so another pass emits nothing.
             let (ready, fetches) = state.certify_candidates();
@@ -3703,7 +3699,6 @@ mod tests {
             assert_eq!(fetches.len(), 1);
             assert_eq!(fetches[0].proposal, View::new(3));
             assert_eq!(fetches[0].view, View::new(2));
-            assert!(matches!(fetches[0].kind, Kind::Notarization));
         });
     }
 
@@ -3744,8 +3739,9 @@ mod tests {
                     .add_notarization(build_notarization(&verifier, &schemes, &p6))
                     .0
             );
-            // Precondition: neither the candidate nor its parent carries
-            // leader metadata, so repair cannot rely on either round.
+            // Precondition: the gap exceeds the optimistic frontier, so
+            // neither the candidate's nor its parent's round carries leader
+            // metadata.
             assert!(!state.leader_is_set(View::new(6)));
             assert!(!state.leader_is_set(View::new(5)));
             let (ready, fetches) = state.certify_candidates();
@@ -3753,7 +3749,6 @@ mod tests {
             assert_eq!(fetches.len(), 1);
             assert_eq!(fetches[0].proposal, View::new(6));
             assert_eq!(fetches[0].view, View::new(5));
-            assert!(matches!(fetches[0].kind, Kind::Notarization));
 
             // Repair cascades one view at a time: delivering notarization(5)
             // exposes the next gap, again from a leaderless round.
@@ -3768,7 +3763,6 @@ mod tests {
             assert_eq!(fetches.len(), 1);
             assert_eq!(fetches[0].proposal, View::new(5));
             assert_eq!(fetches[0].view, View::new(4));
-            assert!(matches!(fetches[0].kind, Kind::Notarization));
         });
     }
 
@@ -3813,7 +3807,6 @@ mod tests {
             assert_eq!(fetches.len(), 1);
             assert_eq!(fetches[0].proposal, View::new(10));
             assert_eq!(fetches[0].view, View::new(9));
-            assert!(matches!(fetches[0].kind, Kind::Notarization));
         });
     }
 
