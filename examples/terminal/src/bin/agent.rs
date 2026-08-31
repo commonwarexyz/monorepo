@@ -28,7 +28,8 @@ struct Args {
     #[arg(long, default_value_t = 0)]
     deployment: usize,
 
-    /// SQLite wallet database path. Defaults to `terminal-agent-<identity>.sqlite`.
+    /// SQLite wallet database path. Defaults to
+    /// `terminal-agent-<deployment>-<identity>.sqlite`.
     #[arg(long)]
     database: Option<PathBuf>,
 

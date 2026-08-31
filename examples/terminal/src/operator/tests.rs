@@ -707,6 +707,149 @@ fn close_retry_survives_operator_restart() {
     recovered.wait_for_closes().unwrap();
 }
 
+/// The restart hard-fault arc: an epoch is registered and adopted, the
+/// operator dies before cutting, and the admission runway keeps expiring
+/// while it is down. Startup must resume the cut itself (no agent RPC is
+/// owed) and the close must still admit inside the driven window.
+#[test]
+fn registered_epoch_restart_resumes_the_cut_and_admits() {
+    deterministic::Runner::default().start(|context| async move {
+        let database = TempDatabase::new();
+        let chain = Chain::new(&context).await;
+        let record = {
+            let mut operator =
+                Operator::open(database.path(), NonZeroUsize::new(2).unwrap()).unwrap();
+
+            // A fresh operator has nothing to resume.
+            assert!(operator.resume_registered_close().unwrap().is_none());
+
+            // The first send triggers the registration before it is accepted,
+            // so adopt the assigned deadlines and then take the payment.
+            let record = chain
+                .try_register(&mut operator)
+                .await
+                .expect("the registration earned no record");
+            operator.adopt_registration(&record).unwrap();
+
+            // An adopted registration without work is not resumable: there is
+            // nothing to close.
+            assert!(operator.resume_registered_close().unwrap().is_none());
+            operator.pay(0, 1, 25).unwrap();
+
+            // Killed here: the epoch is registered and adopted, the cut is not.
+            record
+        };
+
+        // Most of the admission runway passes while the operator is down.
+        let height = chain.control.advance(0).await;
+        assert!(height + 3 <= record.admission_deadline);
+        chain
+            .control
+            .advance(record.admission_deadline - 3 - height)
+            .await;
+
+        // Startup resumes the cut from the adopted registration alone.
+        let mut recovered = Operator::open(database.path(), NonZeroUsize::new(2).unwrap()).unwrap();
+        let started = recovered
+            .resume_registered_close()
+            .unwrap()
+            .expect("the adopted registration resumes its cut");
+        assert_eq!(started.epoch, 0);
+        assert!(!started.queued);
+        assert_eq!(recovered.store.epoch().unwrap(), 1);
+
+        // The cut is durable and the successor is unregistered, so a second
+        // resume finds nothing to do.
+        assert!(recovered.resume_registered_close().unwrap().is_none());
+        assert!(matches!(
+            recovered.wait_for_closes().unwrap().as_slice(),
+            [CloseEvent::Finished(close)] if close.epoch == 0
+        ));
+
+        // The resumed worker is seeded by its epoch, so its exact certified
+        // result rebuilds here and admits inside the driven window.
+        let data = recovered.store.epoch_reader().load(0).unwrap();
+        let registration = registration_for(&recovered.protocol, &data).unwrap();
+        let prepared = prepare_epoch(&recovered.protocol, data, registration).unwrap();
+        let result = recovered
+            .protocol
+            .complete(prepared, &mut TestRng::new(0))
+            .unwrap();
+        chain.admit(&result).await;
+    });
+}
+
+/// The close rehearsal must derive its intake horizons from the deadlines it
+/// rehearses. Under a genesis challenge duration past the fixed constants it
+/// once reused, the rehearsal broke twice on a perfectly finalizable close:
+/// its notice window rejected the carried withdrawal outright ("withdrawal
+/// deadline exceeds the maximum notice"), and a deferred deposit (recorded
+/// by the rehearsal but consumed by no boundary) expired before the finalize
+/// tick, silently hard-faulting the rehearsal chain.
+#[test]
+fn close_rehearsal_survives_a_long_genesis_challenge_window() {
+    let mut operator = operator();
+
+    // A staged deposit exactly offset by the account's withdrawal defers
+    // whole to the successor boundary, so the rehearsal records it without
+    // admitting it: it stays pending through the finalize tick.
+    operator
+        .observe(&[DepositEvent {
+            id: Sha256::hash(&[b"long-window-deferred-deposit"]),
+            account: wallets()[0].public_key(),
+            amount: 5,
+        }])
+        .unwrap();
+    let wallet = wallets().remove(0);
+    let request = SignedWithdrawal::sign(
+        deployment(),
+        operator.predecessor.root().digest,
+        Bytes::copy_from_slice(wallet.name.as_bytes()),
+        amount(5),
+        500,
+        wallet.signer(),
+    );
+    operator.apply_withdrawal(request).unwrap();
+
+    // Adopt chain-shaped deadlines whose challenge window outgrows the fixed
+    // deposit timeout a rehearsal would otherwise reuse.
+    let admission_deadline = 40;
+    let challenge_deadline = admission_deadline + 420;
+    let replacement = operator
+        .protocol
+        .registration_at(
+            0,
+            staged_deposits(&operator.registration).unwrap(),
+            operator.registration.withdrawals.clone(),
+            operator.registration.context.predecessor_liability(),
+            admission_deadline,
+            challenge_deadline,
+        )
+        .unwrap();
+    let deposits_root = replacement.deposits.root::<Sha256>().unwrap();
+    operator
+        .adopt_registration(&RegistrationRecord {
+            epoch: 0,
+            predecessor_liability: operator.registration.context.predecessor_liability(),
+            anchor: *replacement.context.payment().anchor(),
+            admission_deadline,
+            challenge_deadline,
+            deposits_root,
+            staged_root: deposits_root,
+            withdrawals_root: replacement.withdrawals.root::<Sha256>().unwrap(),
+            admitted: None,
+        })
+        .unwrap();
+
+    let result = operator.complete_close(45).unwrap();
+    assert_eq!(result.epoch, 0);
+
+    // The deferred deposit rode through as the successor's parked aggregate:
+    // it was never in this close's boundary and never expired.
+    assert_eq!(result.deposits.total(), 0);
+    assert_eq!(result.finalized.withdrawal_total, 5);
+}
+
 #[test]
 fn close_request_rejects_an_unstarted_noncurrent_epoch() {
     let mut operator = operator();

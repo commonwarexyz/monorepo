@@ -1417,7 +1417,10 @@ fn unaffordable_by_local_view_is_refused_before_staging() {
 
 #[test]
 fn withdrawal_deadline_caps_at_the_clock_horizon() {
-    assert_eq!(withdrawal_deadline(7), 57);
+    assert_eq!(
+        withdrawal_deadline(7),
+        7 + crate::protocol::WITHDRAWAL_HORIZON
+    );
     assert_eq!(withdrawal_deadline(u64::MAX - 20), u64::MAX);
 }
 
@@ -2385,6 +2388,294 @@ fn external_payout_ack_loss_recovers_after_agent_restart() {
         let recovered = Agent::open(database.path(), identity).unwrap();
         assert!(recovered.pending_payout_claim.is_none());
         operator_server.await.unwrap();
+    });
+}
+
+/// The exact cross-batch replay attack: after claim #1 completes, a Byzantine
+/// operator re-serves batch #1's evidence for the wallet's new intent. The
+/// old batch's claim roots still verify it, so only the durable completed set
+/// can refuse it. The wallet must keep the intent open and complete it only
+/// on genuine batch #2 evidence, with the completed set surviving a restart.
+#[test]
+fn withdrawal_claim_refuses_replayed_evidence_across_batches() {
+    deterministic::Runner::default().start(|context| async move {
+        let database = TempDatabase::new();
+        let (control, mut chain) = chain(&context).await;
+        let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
+        let account = wallets()[0].public_key();
+
+        // Two finalized batches, each carrying one withdrawal for the wallet.
+        operator
+            .withdraw(0, WithdrawalAction::Amount(NonZeroU64::new(25).unwrap()))
+            .unwrap();
+        register(&control, &mut operator).await;
+        let first = operator.complete_close(41).unwrap();
+        finalize(&control, &first).await;
+        let stale = operator.withdrawal_evidence(&account).unwrap();
+        let stale = operator_rpc::WithdrawalEvidenceResponse {
+            batch_id: stale.batch_id,
+            account: stale.account,
+            claim: stale.claim,
+        };
+        operator
+            .withdraw(0, WithdrawalAction::Amount(NonZeroU64::new(20).unwrap()))
+            .unwrap();
+        register(&control, &mut operator).await;
+        let second = operator.complete_close(42).unwrap();
+        finalize(&control, &second).await;
+        assert_ne!(first.finalized.batch_id, second.finalized.batch_id);
+
+        let mut operator_listener = context
+            .bind(SocketAddr::from(([127, 0, 0, 1], 11)))
+            .await
+            .unwrap();
+        let operator_address = operator_listener.local_addr().unwrap();
+        let served_stale = stale.clone();
+        let served_account = account.clone();
+        let operator_server = context.child("operator").spawn(move |_| async move {
+            // Claim #1: evidence, then the acknowledgement that retires it.
+            respond(&mut operator_listener, |request| {
+                assert!(matches!(
+                    request,
+                    operator_rpc::OperatorRequest::WithdrawalEvidence(_)
+                ));
+                rpc::Response::Success {
+                    body: served_stale.encode(),
+                }
+            })
+            .await;
+            respond(&mut operator_listener, |request| {
+                let operator_rpc::OperatorRequest::AcknowledgeWithdrawal(request) = request else {
+                    panic!("expected the first withdrawal acknowledgement");
+                };
+                operator_rpc::acknowledge_withdrawal_confirmed(&mut operator, &request)
+            })
+            .await;
+
+            // The Byzantine replay: batch #1's spent evidence for intent #2.
+            respond(&mut operator_listener, |request| {
+                assert!(matches!(
+                    request,
+                    operator_rpc::OperatorRequest::WithdrawalEvidence(_)
+                ));
+                rpc::Response::Success {
+                    body: served_stale.encode(),
+                }
+            })
+            .await;
+
+            // The honest retry: the acknowledged store serves batch #2.
+            let fresh = operator.withdrawal_evidence(&served_account).unwrap();
+            let fresh = operator_rpc::WithdrawalEvidenceResponse {
+                batch_id: fresh.batch_id,
+                account: fresh.account,
+                claim: fresh.claim,
+            };
+            assert_ne!(fresh.batch_id, served_stale.batch_id);
+            respond(&mut operator_listener, |request| {
+                assert!(matches!(
+                    request,
+                    operator_rpc::OperatorRequest::WithdrawalEvidence(_)
+                ));
+                rpc::Response::Success {
+                    body: fresh.encode(),
+                }
+            })
+            .await;
+            respond(&mut operator_listener, |request| {
+                let operator_rpc::OperatorRequest::AcknowledgeWithdrawal(request) = request else {
+                    panic!("expected the second withdrawal acknowledgement");
+                };
+                operator_rpc::acknowledge_withdrawal_confirmed(&mut operator, &request)
+            })
+            .await;
+        });
+
+        // Claim #1 completes and durably consumes its (batch, position).
+        let mut agent = Agent::open(database.path(), 0).unwrap();
+        open_withdrawal_intent(&mut agent);
+        let release = agent
+            .claim_withdrawal(&context, &mut chain, operator_address)
+            .await
+            .unwrap();
+        assert_eq!(release.amount, 25);
+        assert!(agent.pending_withdrawal_claim.is_none());
+        assert!(
+            agent
+                .store
+                .withdrawal_claim_completed(stale.batch_id, stale.claim.position())
+                .unwrap()
+        );
+        drop(agent);
+
+        // The completed set survives the restart, so the re-served batch #1
+        // evidence is refused for intent #2: nothing is cached, no settlement
+        // claim is submitted, and the intent stays open.
+        let mut agent = Agent::open(database.path(), 0).unwrap();
+        open_withdrawal_intent(&mut agent);
+        let refused = agent
+            .claim_withdrawal(&context, &mut chain, operator_address)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{refused:#}").contains("already-completed withdrawal claim"),
+            "unexpected refusal: {refused:#}"
+        );
+        let pending = agent.pending_withdrawal_claim.clone().unwrap();
+        assert!(pending.evidence.is_none());
+        assert!(pending.result.is_none());
+
+        // Genuine batch #2 evidence completes the open intent.
+        let release = agent
+            .claim_withdrawal(&context, &mut chain, operator_address)
+            .await
+            .unwrap();
+        assert_eq!(release.amount, 20);
+        assert!(agent.pending_withdrawal_claim.is_none());
+        operator_server.await.unwrap();
+
+        // The store-level cache guard is the same refusal one layer deeper.
+        let refused = agent.store.cache_withdrawal_claim(&stale).unwrap_err();
+        assert!(format!("{refused:#}").contains("already-completed (batch, position)"));
+    });
+}
+
+/// The external-payout twin of the cross-batch replay attack.
+#[test]
+fn external_payout_claim_refuses_replayed_evidence_across_batches() {
+    deterministic::Runner::default().start(|context| async move {
+        let database = TempDatabase::new();
+        let (control, mut chain) = chain(&context).await;
+        let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
+        let identity = wallets().len();
+        let account = external_identity().key;
+
+        // Two finalized batches, each paying the external receiver once.
+        register(&control, &mut operator).await;
+        operator.pay(0, operator.wallet_count(), 40).unwrap();
+        let first = operator.complete_close(43).unwrap();
+        finalize(&control, &first).await;
+        let stale = operator.external_payout_evidence(&account).unwrap();
+        let stale = operator_rpc::ExternalPayoutEvidenceResponse {
+            batch_id: stale.batch_id,
+            claim: stale.claim,
+        };
+        register(&control, &mut operator).await;
+        operator.pay(0, operator.wallet_count(), 30).unwrap();
+        let second = operator.complete_close(44).unwrap();
+        finalize(&control, &second).await;
+        assert_ne!(first.finalized.batch_id, second.finalized.batch_id);
+
+        let mut operator_listener = context
+            .bind(SocketAddr::from(([127, 0, 0, 1], 12)))
+            .await
+            .unwrap();
+        let operator_address = operator_listener.local_addr().unwrap();
+        let served_stale = stale.clone();
+        let served_account = account.clone();
+        let operator_server = context.child("operator").spawn(move |_| async move {
+            // Claim #1: evidence, then the acknowledgement that retires it.
+            respond(&mut operator_listener, |request| {
+                assert!(matches!(
+                    request,
+                    operator_rpc::OperatorRequest::ExternalPayoutEvidence(_)
+                ));
+                rpc::Response::Success {
+                    body: served_stale.encode(),
+                }
+            })
+            .await;
+            respond(&mut operator_listener, |request| {
+                let operator_rpc::OperatorRequest::AcknowledgeExternalPayout(request) = request
+                else {
+                    panic!("expected the first payout acknowledgement");
+                };
+                operator_rpc::acknowledge_external_payout_confirmed(&mut operator, &request)
+            })
+            .await;
+
+            // The Byzantine replay: batch #1's spent evidence for intent #2.
+            respond(&mut operator_listener, |request| {
+                assert!(matches!(
+                    request,
+                    operator_rpc::OperatorRequest::ExternalPayoutEvidence(_)
+                ));
+                rpc::Response::Success {
+                    body: served_stale.encode(),
+                }
+            })
+            .await;
+
+            // The honest retry: the acknowledged store serves batch #2.
+            let fresh = operator.external_payout_evidence(&served_account).unwrap();
+            let fresh = operator_rpc::ExternalPayoutEvidenceResponse {
+                batch_id: fresh.batch_id,
+                claim: fresh.claim,
+            };
+            assert_ne!(fresh.batch_id, served_stale.batch_id);
+            respond(&mut operator_listener, |request| {
+                assert!(matches!(
+                    request,
+                    operator_rpc::OperatorRequest::ExternalPayoutEvidence(_)
+                ));
+                rpc::Response::Success {
+                    body: fresh.encode(),
+                }
+            })
+            .await;
+            respond(&mut operator_listener, |request| {
+                let operator_rpc::OperatorRequest::AcknowledgeExternalPayout(request) = request
+                else {
+                    panic!("expected the second payout acknowledgement");
+                };
+                operator_rpc::acknowledge_external_payout_confirmed(&mut operator, &request)
+            })
+            .await;
+        });
+
+        // Claim #1 completes and durably consumes its (batch, position).
+        let mut agent = Agent::open(database.path(), identity).unwrap();
+        let payout = agent
+            .claim_external_payout(&context, &mut chain, operator_address)
+            .await
+            .unwrap();
+        assert_eq!(payout.amount, 40);
+        assert!(agent.pending_payout_claim.is_none());
+        assert!(
+            agent
+                .store
+                .payout_claim_completed(stale.batch_id, stale.claim.position())
+                .unwrap()
+        );
+        drop(agent);
+
+        // The completed set survives the restart, so the re-served batch #1
+        // evidence is refused for the new intent, which stays open.
+        let mut agent = Agent::open(database.path(), identity).unwrap();
+        let refused = agent
+            .claim_external_payout(&context, &mut chain, operator_address)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{refused:#}").contains("already-completed external-payout claim"),
+            "unexpected refusal: {refused:#}"
+        );
+        let pending = agent.pending_payout_claim.clone().unwrap();
+        assert!(pending.evidence.is_none());
+        assert!(pending.result.is_none());
+
+        // Genuine batch #2 evidence completes the open intent.
+        let payout = agent
+            .claim_external_payout(&context, &mut chain, operator_address)
+            .await
+            .unwrap();
+        assert_eq!(payout.amount, 30);
+        assert!(agent.pending_payout_claim.is_none());
+        operator_server.await.unwrap();
+
+        // The store-level cache guard is the same refusal one layer deeper.
+        let refused = agent.store.cache_payout_claim(&stale).unwrap_err();
+        assert!(format!("{refused:#}").contains("already-completed (batch, position)"));
     });
 }
 

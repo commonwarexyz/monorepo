@@ -9,7 +9,7 @@ use crate::{
         state::Record,
         tx::SettlementTx,
     },
-    operator::{Operator, StagedDeposit, rpc as operator_rpc},
+    operator::{CloseEvent, Operator, StagedDeposit, rpc as operator_rpc},
     protocol::short_digest,
     rpc, ui,
 };
@@ -81,6 +81,57 @@ pub(crate) fn run_operator(
             Operator::open_remote(&database, workers, pipeline, config.clearing)
                 .context("initialize SQLite operator")?,
         ));
+
+        // A restart inside the registration window resumes the cut itself:
+        // the adopted admission deadline kept running while the operator was
+        // down, and no agent RPC is owed before it expires.
+        if let Some(started) = operator
+            .lock()
+            .resume_registered_close()
+            .context("resume the registered epoch close")?
+        {
+            println!(
+                "resumed the epoch {} close from its adopted registration",
+                started.epoch
+            );
+        }
+
+        // A close resumed at startup (the cut above, or a recovered pending
+        // close job) has no agent poller, and only polling drives its durable
+        // completion once its worker returns: evidence serving and the
+        // successor cut wait on it, so drive every in-flight close here
+        // instead of waiting for the next agent RPC.
+        let mut resume_handle = None;
+        if operator.lock().next_closing_epoch()?.is_some() {
+            let poller = operator.clone();
+            resume_handle = Some(context.child("resume").spawn(move |context| async move {
+                loop {
+                    let polled = {
+                        let mut operator = poller.lock();
+                        match operator.next_closing_epoch() {
+                            Ok(Some(epoch)) => operator.poll_close(epoch),
+                            Ok(None) => break,
+                            Err(error) => Err(error),
+                        }
+                    };
+                    match polled {
+                        Ok(Some(CloseEvent::Finished(close))) => {
+                            println!("the resumed epoch {} close finalized", close.epoch);
+                        }
+                        Ok(Some(CloseEvent::Failed { epoch, error })) => {
+                            eprintln!("the resumed epoch {epoch} close failed: {error}");
+                            break;
+                        }
+                        Ok(None) => context.sleep(POLL).await,
+                        Err(error) => {
+                            eprintln!("polling the resumed close failed: {error:#}");
+                            break;
+                        }
+                    }
+                }
+            }));
+        }
+        let _resume_handle = resume_handle;
         let mut listener = context.bind(bind).await.context("bind operator RPC")?;
 
         // The deposit observer: every finalized block's deposit transactions

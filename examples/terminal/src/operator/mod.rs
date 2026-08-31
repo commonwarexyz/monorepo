@@ -4,5 +4,5 @@ mod actor;
 pub(crate) mod rpc;
 mod store;
 
-pub(crate) use actor::{DEFAULT_AMOUNT, Operator};
+pub(crate) use actor::{CloseEvent, DEFAULT_AMOUNT, Operator};
 pub(crate) use store::StagedDeposit;

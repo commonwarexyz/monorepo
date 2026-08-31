@@ -40,7 +40,7 @@ pub(crate) enum WithdrawalOutcome {
 }
 
 pub(super) const fn withdrawal_deadline(now: u64) -> u64 {
-    now.saturating_add(50)
+    now.saturating_add(crate::protocol::WITHDRAWAL_HORIZON)
 }
 
 #[cfg(test)]

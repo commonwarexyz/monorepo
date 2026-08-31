@@ -541,8 +541,10 @@ pub(crate) enum SettlementTx {
 impl SettlementTx {
     /// Identity of this transaction: the digest of its encoding.
     ///
-    /// Outcome records are keyed by it, so acceptance and rejection of the
-    /// exact submitted bytes are both provable against the state root.
+    /// The mempool keys dedupe, leasing, and retirement by it. It proves
+    /// nothing about outcomes: acceptance is proven by the transaction's
+    /// effect record in certified state, and a rejection is effect-free, so
+    /// it leaves nothing provable against the state root.
     pub(crate) fn digest(&self) -> Digest {
         Sha256::hash(&[&self.encode()])
     }

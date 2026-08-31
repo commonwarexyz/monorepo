@@ -23,13 +23,14 @@ use commonware_clearing::bajillion::{
     commitment::{VectorKind, VectorRoot},
     payment::{PaymentContext, SignedSend},
     state::AccountState,
+    transition::BatchId,
 };
 use commonware_codec::{DecodeExt as _, Encode as _, FixedSize};
 use commonware_cryptography::{Sha256, sha256::Digest};
 use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
 use std::path::Path;
 
-const SCHEMA_VERSION: i64 = 12;
+const SCHEMA_VERSION: i64 = 13;
 const MAX_PENDING_CLAIM_BYTES: usize = 16 * 1024;
 const MIN_STATE_OPENING_BYTES: usize = Key::SIZE + AccountState::SIZE + u32::SIZE * 2 + 1;
 const MAX_STATE_OPENING_BYTES: usize =
@@ -392,21 +393,42 @@ impl Store {
     ///
     /// Evidence is counterparty-reproducible, so any self-verified copy may replace the
     /// cache. The one exception is evidence with a recorded settlement release, which
-    /// stays immutable until the operator acknowledgement completes the claim.
+    /// stays immutable until the operator acknowledgement completes the claim. Evidence
+    /// naming an already-completed (batch, position) is refused outright: its release is
+    /// spent, so caching it could close a new intent against an old obligation.
     pub(crate) fn cache_withdrawal_claim(
         &mut self,
         evidence: &operator_rpc::WithdrawalEvidenceResponse,
     ) -> Result<()> {
         self.ensure_usable()?;
         validate_withdrawal_evidence(evidence, &self.account)?;
+        let batch = evidence.batch_id.encode();
+        let position = i64::from(evidence.claim.position());
         let encoded = evidence.encode();
         ensure_claim_bound(encoded.as_ref(), "withdrawal evidence")?;
         let result = cache_claim_transaction(
             &mut self.connection,
             ClaimKind::Withdrawal,
+            batch.as_ref(),
+            position,
             encoded.as_ref(),
         );
         self.finish_mutation(result)
+    }
+
+    /// Whether a withdrawal claim against this exact (batch, position) already completed.
+    pub(crate) fn withdrawal_claim_completed(
+        &self,
+        batch_id: BatchId<Digest>,
+        position: u32,
+    ) -> Result<bool> {
+        self.ensure_usable()?;
+        claim_completed(
+            &self.connection,
+            ClaimKind::Withdrawal,
+            batch_id.encode().as_ref(),
+            i64::from(position),
+        )
     }
 
     pub(crate) fn record_withdrawal_result(
@@ -438,6 +460,8 @@ impl Store {
         self.ensure_usable()?;
         validate_withdrawal_evidence(evidence, &self.account)?;
         validate_withdrawal_result(evidence, result)?;
+        let batch = evidence.batch_id.encode();
+        let position = i64::from(evidence.claim.position());
         let evidence = evidence.encode();
         let result = result.encode();
         ensure_claim_bound(evidence.as_ref(), "withdrawal evidence")?;
@@ -445,6 +469,8 @@ impl Store {
         let result = complete_claim_transaction(
             &mut self.connection,
             ClaimKind::Withdrawal,
+            batch.as_ref(),
+            position,
             evidence.as_ref(),
             result.as_ref(),
         );
@@ -452,21 +478,41 @@ impl Store {
     }
 
     /// Overwrites the open external-payout-claim intent's evidence cache, under the same
-    /// immutability rule as [`Self::cache_withdrawal_claim`].
+    /// immutability and completed-claim rules as [`Self::cache_withdrawal_claim`].
     pub(crate) fn cache_payout_claim(
         &mut self,
         evidence: &operator_rpc::ExternalPayoutEvidenceResponse,
     ) -> Result<()> {
         self.ensure_usable()?;
         validate_payout_evidence(evidence, &self.account)?;
+        let batch = evidence.batch_id.encode();
+        let position = i64::from(evidence.claim.position());
         let encoded = evidence.encode();
         ensure_claim_bound(encoded.as_ref(), "external-payout evidence")?;
         let result = cache_claim_transaction(
             &mut self.connection,
             ClaimKind::ExternalPayout,
+            batch.as_ref(),
+            position,
             encoded.as_ref(),
         );
         self.finish_mutation(result)
+    }
+
+    /// Whether an external-payout claim against this exact (batch, position) already
+    /// completed.
+    pub(crate) fn payout_claim_completed(
+        &self,
+        batch_id: BatchId<Digest>,
+        position: u32,
+    ) -> Result<bool> {
+        self.ensure_usable()?;
+        claim_completed(
+            &self.connection,
+            ClaimKind::ExternalPayout,
+            batch_id.encode().as_ref(),
+            i64::from(position),
+        )
     }
 
     pub(crate) fn record_payout_result(
@@ -498,6 +544,8 @@ impl Store {
         self.ensure_usable()?;
         validate_payout_evidence(evidence, &self.account)?;
         validate_payout_result(payout, &self.account)?;
+        let batch = evidence.batch_id.encode();
+        let position = i64::from(evidence.claim.position());
         let evidence = evidence.encode();
         let payout = payout.encode();
         ensure_claim_bound(evidence.as_ref(), "external-payout evidence")?;
@@ -505,6 +553,8 @@ impl Store {
         let result = complete_claim_transaction(
             &mut self.connection,
             ClaimKind::ExternalPayout,
+            batch.as_ref(),
+            position,
             evidence.as_ref(),
             payout.as_ref(),
         );
@@ -918,6 +968,7 @@ fn schema_presence(connection: &Connection) -> Result<SchemaPresence> {
     let has_pending = table_exists(connection, "agent_pending_payment")?;
     let has_pending_deposit = table_exists(connection, "agent_pending_deposit")?;
     let has_pending_claims = table_exists(connection, "agent_pending_claims")?;
+    let has_completed_claims = table_exists(connection, "agent_completed_claims")?;
     let has_payments = table_exists(connection, "agent_payments")?;
     let has_incoming_cursor = table_exists(connection, "agent_incoming_cursor")?;
     let has_incoming = table_exists(connection, "agent_incoming")?;
@@ -930,7 +981,7 @@ fn schema_presence(connection: &Connection) -> Result<SchemaPresence> {
                     AND name NOT IN (
                         'agent_meta', 'agent_state_openings', 'agent_context',
                         'agent_pending_payment', 'agent_pending_deposit',
-                        'agent_pending_claims', 'agent_payments',
+                        'agent_pending_claims', 'agent_completed_claims', 'agent_payments',
                         'agent_incoming_cursor', 'agent_incoming', 'agent_reconciled'
                     ))
                 OR type IN ('trigger', 'view')
@@ -952,6 +1003,7 @@ fn schema_presence(connection: &Connection) -> Result<SchemaPresence> {
         && !has_pending
         && !has_pending_deposit
         && !has_pending_claims
+        && !has_completed_claims
         && !has_payments
         && !has_incoming_cursor
         && !has_incoming
@@ -967,6 +1019,7 @@ fn schema_presence(connection: &Connection) -> Result<SchemaPresence> {
             && has_pending
             && has_pending_deposit
             && has_pending_claims
+            && has_completed_claims
             && has_payments
             && has_incoming_cursor
             && has_incoming
@@ -1073,6 +1126,13 @@ fn initialize_schema(
              )
          );
 
+         CREATE TABLE agent_completed_claims (
+             kind INTEGER NOT NULL CHECK (kind IN (1, 2)),
+             batch BLOB NOT NULL CHECK (length(batch) = {batch_id_size}),
+             position INTEGER NOT NULL CHECK (position >= 0),
+             PRIMARY KEY (kind, batch, position)
+         );
+
          CREATE TABLE agent_payments (
              tx_id BLOB PRIMARY KEY CHECK (length(tx_id) = {digest_size}),
              cumulative_debit INTEGER NOT NULL CHECK (cumulative_debit > 0),
@@ -1127,6 +1187,7 @@ fn initialize_schema(
         min_opening_size = MIN_STATE_OPENING_BYTES,
         max_opening_size = MAX_STATE_OPENING_BYTES,
         max_claim_size = MAX_PENDING_CLAIM_BYTES,
+        batch_id_size = BatchId::<Digest>::SIZE,
         max_pair_size = MAX_PAYMENT_BYTES,
         deposit_event_size = DEPOSIT_EVENT_BYTES,
     );
@@ -2121,11 +2182,17 @@ fn open_claim_transaction(connection: &mut Connection, kind: ClaimKind) -> Resul
 fn cache_claim_transaction(
     connection: &mut Connection,
     kind: ClaimKind,
+    batch: &[u8],
+    position: i64,
     evidence: &[u8],
 ) -> Result<()> {
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .context("begin claim evidence cache")?;
+    ensure!(
+        !claim_completed(&transaction, kind, batch, position)?,
+        "claim evidence names an already-completed (batch, position)"
+    );
     let result_recorded: Option<bool> = transaction
         .query_row(
             "SELECT result IS NOT NULL FROM agent_pending_claims WHERE kind = ?1",
@@ -2191,9 +2258,14 @@ fn record_claim_result_transaction(
     Ok(())
 }
 
+/// Completes the claim: the intent deletion and the durable record of the
+/// consumed (kind, batch, position) commit in one transaction, so evidence
+/// against a spent release can never rebind to a later intent of this kind.
 fn complete_claim_transaction(
     connection: &mut Connection,
     kind: ClaimKind,
+    batch: &[u8],
+    position: i64,
     evidence: &[u8],
     result: &[u8],
 ) -> Result<()> {
@@ -2208,10 +2280,34 @@ fn complete_claim_transaction(
         )? == 1,
         "pending claim completion does not match durable evidence"
     );
+
+    // The cache guard refuses completed evidence before it can pin an intent,
+    // so the deleted intent's key is never already recorded: a conflicting
+    // insert aborts the completion loudly instead of masking that breach.
+    transaction.execute(
+        "INSERT INTO agent_completed_claims (kind, batch, position) VALUES (?1, ?2, ?3)",
+        params![kind as i64, batch, position],
+    )?;
     transaction
         .commit()
         .map_err(|source| CommitUnknown::new("pending claim completion", source))?;
     Ok(())
+}
+
+fn claim_completed(
+    connection: &Connection,
+    kind: ClaimKind,
+    batch: &[u8],
+    position: i64,
+) -> Result<bool> {
+    Ok(connection.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM agent_completed_claims
+             WHERE kind = ?1 AND batch = ?2 AND position = ?3
+         )",
+        params![kind as i64, batch, position],
+        |row| row.get(0),
+    )?)
 }
 
 fn latest_debit(connection: &Connection) -> Result<u64> {

@@ -910,21 +910,24 @@ fn expired_deposit_faults_the_deployment() {
         });
         seal(&db, 1, std::slice::from_ref(&deposit)).await;
 
-        // The inclusion deadline is height 1 plus the 100-block timeout.
-        for height in 2..=100 {
+        // The inclusion deadline is height 1 plus the configured timeout.
+        let timeout = crate::protocol::settlement_config(&Timing::DEFAULT)
+            .deposit_inclusion_timeout
+            .get();
+        for height in 2..=timeout {
             seal(&db, height, &[]).await;
         }
         assert!(!status(&db).await.hard_faulted);
-        seal(&db, 101, &[]).await;
+        seal(&db, timeout + 1, &[]).await;
         assert!(status(&db).await.hard_faulted);
         assert!(matches!(
             read(&db, &fault_key(&deployment())).await,
             Some(Record::Fault(super::state::FaultRecord::Faulted(
                 HardFaultReasonResponse::ExpiredDeposit {
-                    expired_at: 101,
+                    expired_at,
                     ..
                 }
-            )))
+            ))) if expired_at == timeout + 1
         ));
 
         // The stranded deposit refunds after the fault.
@@ -932,7 +935,7 @@ fn expired_deposit_faults_the_deployment() {
             deployment: deployment(),
             account: account.clone(),
         });
-        seal(&db, 102, std::slice::from_ref(&refund)).await;
+        seal(&db, timeout + 2, std::slice::from_ref(&refund)).await;
         assert!(matches!(
             read(&db, &refund_key(&deployment(), &account)).await,
             Some(Record::Refund(_))
@@ -4669,16 +4672,16 @@ fn advisory_dry_run_classifies_submissions() {
 /// inclusion and the certified admission (the corrective payment retry, the
 /// receiver's anchored intake, and the close worker's dissemination and
 /// admission), and each certified poll advances simulated blocks, so the
-/// compiled default ten-block runway is too tight for this arc. The admission
+/// compiled grid's ten-block runway is too tight for this arc. The admission
 /// offset is deployment-chosen at genesis and bounded above by the wallet's
-/// fifty-block withdrawal deadline (the carried withdrawal must finalize at
+/// withdrawal-deadline horizon (the carried withdrawal must finalize at
 /// offset plus duration plus one blocks after the registration's inclusion).
-/// Both fields deliberately differ from the compiled defaults: genesis is the
-/// timing authority end to end, with execution assigning the deadlines from
-/// this policy and the close worker's settlement rehearsal deriving its exact
-/// challenge duration from the adopted pair. The walkthrough passing under a
-/// two-block duration pins that no chain-facing path enforces the compiled
-/// default.
+/// Both fields deliberately differ from the compiled grid and the generated
+/// genesis defaults: genesis is the timing authority end to end, with
+/// execution assigning the deadlines from this policy and the close worker's
+/// settlement rehearsal deriving its horizons from the adopted pair. The
+/// walkthrough passing under a two-block duration pins that no chain-facing
+/// path enforces a compiled pair.
 const WALKTHROUGH_TIMING: Timing = Timing {
     admission_offset: 30,
     challenge_duration: 2,

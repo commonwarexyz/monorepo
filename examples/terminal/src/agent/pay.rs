@@ -116,6 +116,42 @@ impl Agent {
         entries: &[(usize, u64)],
     ) -> Result<PaymentOutcome> {
         let (requested, total) = self.payment_entries(entries)?;
+        self.pay_requested(ctx, chain, operator, requested, total)
+            .await
+    }
+
+    /// Resumes the durably staged pending send, when one exists.
+    ///
+    /// The exact staged bytes resubmit and adjudicate through the standard
+    /// pipeline, so an interrupted run's in-flight payment concludes before
+    /// any new intent is staged.
+    pub(crate) async fn resume_pending_payment<E: Env>(
+        &mut self,
+        ctx: &E,
+        chain: &mut Client,
+        operator: SocketAddr,
+    ) -> Result<Option<PaymentOutcome>> {
+        let Some(pending) = &self.pending_payment else {
+            return Ok(None);
+        };
+        let requested = pending.send.body().entries().to_vec();
+        let total = requested.iter().try_fold(0_u64, |sum, entry| {
+            sum.checked_add(entry.amount())
+                .context("pending payment total overflow")
+        })?;
+        self.pay_requested(ctx, chain, operator, requested, total)
+            .await
+            .map(Some)
+    }
+
+    async fn pay_requested<E: Env>(
+        &mut self,
+        ctx: &E,
+        chain: &mut Client,
+        operator: SocketAddr,
+        requested: Vec<Entry<Key>>,
+        total: u64,
+    ) -> Result<PaymentOutcome> {
         let mut staged = match self
             .pending_payment
             .as_ref()

@@ -476,7 +476,7 @@ fn run_inner(args: Setup) -> anyhow::Result<()> {
 
     // The chain metadata fixed at creation: the display/recency-grade
     // creation timestamp, the epoch timing policy populated from the
-    // compiled defaults (see [`Timing::DEFAULT`]) and applied to every
+    // genesis defaults (see [`Timing::GENESIS`]) and applied to every
     // deployment, and the deployment list itself.
     let timestamp = u64::try_from(
         std::time::SystemTime::now()
@@ -488,8 +488,8 @@ fn run_inner(args: Setup) -> anyhow::Result<()> {
     let encoded = |output: Identity| EncodedGenesis {
         output,
         timestamp,
-        admission_offset: Timing::DEFAULT.admission_offset,
-        challenge_duration: Timing::DEFAULT.challenge_duration,
+        admission_offset: Timing::GENESIS.admission_offset,
+        challenge_duration: Timing::GENESIS.challenge_duration,
         deployments: deployments.iter().map(EncodedDeployment::from).collect(),
     };
 
@@ -825,10 +825,10 @@ mod tests {
         assert_eq!(genesis.players().len(), 4);
 
         // The chain metadata is fixed at creation: the epoch timing policy
-        // carries the compiled defaults, the creation timestamp is a real
+        // carries the genesis defaults, the creation timestamp is a real
         // wall-clock instant, and every deployment configures the compiled
         // demo accounts under a distinct operator.
-        assert_eq!(genesis.timing(), Timing::DEFAULT);
+        assert_eq!(genesis.timing(), Timing::GENESIS);
         assert!(genesis.timestamp > 0);
         assert_eq!(genesis.deployments.len(), 2);
         assert_ne!(

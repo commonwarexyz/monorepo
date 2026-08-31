@@ -1435,9 +1435,14 @@ impl Store {
                 [sql_u64(epoch, "epoch")?],
                 |row| row.get(0),
             )?;
+
+            // The boundary is committed by the epoch's on-chain registration,
+            // which the first receipt triggers before it is released. A
+            // nonzero payment count therefore means the committed boundary
+            // may no longer move, so intake freezes here.
             ensure!(
                 payment_count == 0,
-                "withdrawals are frozen after the first payment in an epoch"
+                "withdrawals are frozen once the first payment registers the epoch boundary"
             );
 
             let mut account = effective_account(transaction, epoch, request.account())?
@@ -2897,9 +2902,14 @@ fn stage_event(
         [sql_u64(epoch, "epoch")?],
         |row| row.get(0),
     )?;
+
+    // The boundary is committed by the epoch's on-chain registration, which
+    // the first receipt triggers before it is released. A nonzero payment
+    // count therefore means the committed boundary may no longer move, so
+    // intake freezes here.
     ensure!(
         payment_count == 0,
-        "deposits are frozen after the first payment in an epoch"
+        "deposits are frozen once the first payment registers the epoch boundary"
     );
     let key = staging.identity.key.clone();
     let staged = staged_account_deposits(transaction, epoch, &key)?;

@@ -754,6 +754,12 @@ impl Operator {
         self.store.has_close_job(epoch)
     }
 
+    /// The oldest cut epoch whose close has not durably finished.
+    pub(crate) fn next_closing_epoch(&self) -> Result<Option<u64>> {
+        self.ensure_store_usable()?;
+        self.store.next_closing_epoch()
+    }
+
     pub(crate) fn validate_close_start(&self, expected_epoch: u64) -> Result<()> {
         self.ensure_operating()?;
         ensure!(
@@ -1214,6 +1220,32 @@ impl Operator {
             self.spawn_close(payment_context)?;
         }
         Ok(())
+    }
+
+    /// Resumes the registered-but-uncut live epoch after a restart, returning
+    /// the started close when the cut resumed.
+    ///
+    /// A certified registration's admission deadline keeps running while the
+    /// operator is down, and only its admitted close consumes it. Once the
+    /// chain-assigned deadlines are adopted the cut is fully determined, so
+    /// startup starts the close itself instead of waiting for an agent RPC
+    /// that may come after the runway expired. A fenced or recovering
+    /// operator skips the resume: it cannot cut, and its fault already
+    /// surfaces on every close-facing call.
+    pub(crate) fn resume_registered_close(&mut self) -> Result<Option<CloseStarted>> {
+        self.ensure_store_usable()?;
+        if self.ensure_operating().is_err() {
+            return Ok(None);
+        }
+        let epoch = self.registration.context.payment().epoch();
+        if self.store.chain_deadlines(epoch)?.is_none()
+            || !self.store.has_current_work()?
+            || self.close_already_started(epoch)?
+        {
+            return Ok(None);
+        }
+        self.validate_close_start(epoch)?;
+        self.start_close(epoch).map(Some)
     }
 
     fn ensure_operating(&self) -> Result<()> {

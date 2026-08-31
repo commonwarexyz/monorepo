@@ -86,26 +86,42 @@ const MAX_SHARDS: u64 = 1_024;
 pub(crate) const INITIAL_BALANCE: u64 = 100;
 /// Largest monetary value that the SQLite operator can persist exactly.
 pub(crate) const SQLITE_U64_MAX: u64 = i64::MAX as u64;
-const DEPOSIT_INCLUSION_TIMEOUT: u64 = 100;
-const MINIMUM_WITHDRAWAL_NOTICE: u64 = 4;
-const MAXIMUM_WITHDRAWAL_NOTICE: u64 = 100;
-
-// The default deadline geometry, in blocks: a registration gets a ten-block
+// The compiled deadline geometry, in blocks: a registration gets a ten-block
 // admission runway from its inclusion height and one inclusive challenge
-// block. Setup writes these defaults into a new chain's genesis, where the
-// timing policy is fixed for the chain's life and applied to every
-// configured deployment. On the chain-facing
-// flow that genesis policy is the authority end to end: execution assigns
-// each registration's deadlines from it and the close worker's rehearsal
-// derives its challenge duration from the adopted pair, so the consts bind
-// only the deterministic placeholder grid that pre-registration contexts are
-// staged under and the fixture harness that runs on that grid. Deposit and
-// withdrawal deadlines remain independent obligations and may permanently
-// fault an admitted close before that point.
+// block. On the chain-facing flow the genesis policy is the timing authority
+// end to end: execution assigns each registration's deadlines from it and
+// the close worker's rehearsal derives its horizons from the adopted pair,
+// so these consts bind only the deterministic placeholder grid that
+// pre-registration contexts are staged under and the fixture harness that
+// runs on that grid. Deposit and withdrawal deadlines remain independent
+// obligations and may permanently fault an admitted close before that point.
 const ADMISSION_OFFSET: u64 = 10;
 const CHALLENGE_DURATION: u64 = 1;
 const CHALLENGE_OFFSET: u64 = ADMISSION_OFFSET + CHALLENGE_DURATION;
 const EPOCH_STRIDE: u64 = CHALLENGE_OFFSET + 1;
+
+// The admission runway setup writes into a new chain's genesis. The deadline
+// keeps running while an operator is down and only the admitted close
+// consumes it, so the runway must cover an operator relaunch (which resumes
+// the cut on startup), not just the immediate cut: the compiled grid's ten
+// blocks pass in seconds at live cadence.
+const GENESIS_ADMISSION_OFFSET: u64 = 300;
+
+// A deposit must reach an admitted close within this many blocks of its
+// custody record. A registered boundary's deposits stay pending until that
+// close admits, and the close may consume most of the genesis admission
+// runway (an operator relaunch included), so the timeout dominates it.
+const DEPOSIT_INCLUSION_TIMEOUT: u64 = GENESIS_ADMISSION_OFFSET + 100;
+const MINIMUM_WITHDRAWAL_NOTICE: u64 = 4;
+
+/// Blocks between a wallet's signed-withdrawal head read and its absolute
+/// deadline. A carried request must outlive its close's challenge deadline
+/// (the genesis admission offset plus challenge duration plus one past the
+/// registration's inclusion), so the horizon dominates the genesis runway
+/// with slack for the registration to land, while staying under the queue's
+/// maximum notice so escalation stays available.
+pub(crate) const WITHDRAWAL_HORIZON: u64 = GENESIS_ADMISSION_OFFSET + 100;
+const MAXIMUM_WITHDRAWAL_NOTICE: u64 = WITHDRAWAL_HORIZON + 100;
 
 /// Genesis-fixed epoch timing policy, in blocks.
 ///
@@ -133,9 +149,17 @@ pub(crate) struct Timing {
 }
 
 impl Timing {
-    /// The compiled defaults setup writes into a new chain's genesis.
+    /// The compiled fixture-grid pair the harness and placeholder contexts
+    /// run on.
     pub(crate) const DEFAULT: Self = Self {
         admission_offset: ADMISSION_OFFSET,
+        challenge_duration: CHALLENGE_DURATION,
+    };
+
+    /// The defaults setup writes into a new chain's genesis: the fixture
+    /// challenge duration under the wall-clock admission runway.
+    pub(crate) const GENESIS: Self = Self {
+        admission_offset: GENESIS_ADMISSION_OFFSET,
         challenge_duration: CHALLENGE_DURATION,
     };
 }
@@ -708,7 +732,7 @@ pub(crate) struct Protocol {
 }
 
 impl Protocol {
-    /// Protocol machinery for the compiled default deployment (the seed-0
+    /// Protocol machinery for the compiled default deployment (the seed-1
     /// demo operator): the fixture and harness path.
     pub(crate) fn new(workers: NonZeroUsize) -> Result<Self> {
         Self::with_signer(workers, operator_signer(0))
@@ -1092,10 +1116,41 @@ impl Protocol {
             .challenge_deadline()
             .checked_sub(context.admission_deadline())
             .expect("the epoch context orders its deadlines");
-        let config = settlement_config(&Timing {
+
+        // Rehearse at a registration height within the compiled admission
+        // offset of the admission deadline. The policy below bounds the
+        // admission delay by at least that offset, so the rehearsal accepts
+        // both grid placeholders and chain-assigned deadlines whatever the
+        // deployment's genesis admission offset.
+        let now = context
+            .admission_deadline()
+            .saturating_sub(ADMISSION_OFFSET);
+
+        // That compiled height is not the inclusion height the chain assigned,
+        // so the genesis-tuned intake horizons cannot be reused verbatim: a
+        // fixed deposit timeout expires the rehearsal's own deposits before
+        // its finalize tick once the adopted challenge duration outgrows it,
+        // and a fixed withdrawal notice can refuse a carried request the
+        // chain already accepted under its own clock. Both horizons derive
+        // from the deadlines this close actually rehearses: the deposit
+        // timeout spans every rehearsal deposit through the finalize tick,
+        // and the notice window widens by the compiled offset to absorb the
+        // clock shift. The authoritative settlement enforces the genuine
+        // policy itself.
+        let mut config = settlement_config(&Timing {
             admission_offset: ADMISSION_OFFSET,
             challenge_duration,
         });
+        config.deposit_inclusion_timeout = context
+            .challenge_deadline()
+            .checked_add(2)
+            .and_then(|end| end.checked_sub(now))
+            .and_then(NonZeroU64::new)
+            .expect("the rehearsal spans at least the challenge window");
+        config.maximum_withdrawal_notice = config
+            .maximum_withdrawal_notice
+            .checked_add(ADMISSION_OFFSET)
+            .expect("the rehearsal notice window fits the epoch clock");
         let mut chain = SettlementChain::<Sha256, Key>::new(
             self.deployment,
             self.operator.public_key(),
@@ -1105,15 +1160,6 @@ impl Protocol {
             config,
         )
         .context("construct settlement chain")?;
-
-        // Rehearse at a registration height within the compiled admission
-        // offset of the admission deadline. The policy above bounds the
-        // admission delay by at least that offset, so the rehearsal accepts
-        // both grid placeholders and chain-assigned deadlines whatever the
-        // deployment's genesis admission offset.
-        let now = context
-            .admission_deadline()
-            .saturating_sub(ADMISSION_OFFSET);
         for event in &deposit_events {
             chain
                 .record_deposit(now, event.id, event.account.clone(), event.amount)

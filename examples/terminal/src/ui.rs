@@ -3,7 +3,7 @@
 use crate::{
     agent::{Agent, PaymentOutcome, WithdrawalOutcome},
     chain::{
-        client::{Chain, Client, EFFECT_ATTEMPTS, Env, POLL},
+        client::{Chain, Client, EFFECT_ATTEMPTS, Env, FINALIZE_ATTEMPTS, POLL},
         harness,
         state::{FaultRecord, HardFaultReasonResponse, Record, StatusRecord, status_key},
         tx::{AdmitRequest, ChallengeRequest, DepositRequest, RegisterEpochRequest, SettlementTx},
@@ -663,6 +663,36 @@ pub(crate) async fn scripted<E: Env>(
     mut chain: Client,
     mut agent: Agent,
 ) -> Result<()> {
+    // An interrupted earlier run can leave the wallet's withdrawal-claim
+    // intent open, and a new withdrawal must wait for it. The relaunched
+    // operator resumes the interrupted epoch's close on startup, so the
+    // claim completes here once that close finalizes and the walkthrough
+    // then proceeds as a fresh arc. The retry budget must outlast that
+    // close's challenge window, so it is finalization-sized.
+    if agent.has_pending_withdrawal_claim() {
+        let mut released = None;
+        let mut last = None;
+        for _ in 0..FINALIZE_ATTEMPTS {
+            match agent.claim_withdrawal(network, &mut chain, operator).await {
+                Ok(release) => {
+                    released = Some(release);
+                    break;
+                }
+                Err(error) => last = Some(error),
+            }
+            network.sleep(POLL).await;
+        }
+        let Some(release) = released else {
+            return Err(last
+                .expect("a failed claim retry leaves its error")
+                .context("complete the interrupted withdrawal claim"));
+        };
+        println!(
+            "claimed the interrupted withdrawal {} against the certified release record",
+            release.amount
+        );
+    }
+
     let mut start = None;
     for _ in 0..EFFECT_ATTEMPTS {
         if let Ok(balance) = agent.balance(network, &mut chain, operator).await {
@@ -705,6 +735,26 @@ pub(crate) async fn scripted<E: Env>(
         ),
     };
     println!("epoch {} carried withdrawal 3", withdrawal);
+
+    // An interrupted run can also lose a staged payment's response. Resubmit
+    // the exact staged bytes here, after this run's deposit and withdrawal:
+    // the resumed send registers the epoch and becomes its first payment,
+    // which freezes the boundary that intake had to enter first.
+    if let Some(outcome) = agent
+        .resume_pending_payment(network, &mut chain, operator)
+        .await
+        .context("resume the interrupted payment")?
+    {
+        match outcome {
+            PaymentOutcome::Accepted(payment) => println!(
+                "resumed the interrupted payment #{} to acceptance",
+                payment.sequence
+            ),
+            PaymentOutcome::CommittedUnheld { epoch, total } => println!(
+                "resumed interrupted payment for {total} proven committed in epoch {epoch}"
+            ),
+        }
+    }
     let payment = accepted(agent.pay(network, &mut chain, operator, &[(1, 5)]).await?)?;
     println!(
         "epoch {} accepted payment #{}: the context matches a certified anchor read",

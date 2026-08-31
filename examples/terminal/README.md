@@ -372,7 +372,8 @@ the deployment's custody rather than a self-declared credit. A withdrawal is aut
 the settlement state root, carried by the operator, and included in an epoch close.
 Deposits and fresh withdrawal authorizations are accepted only while no payment context is
 registered: the epoch's first payment registers the context, and later requests are rejected
-until the successor epoch opens after the close finalizes. Every validator derives the exact
+until the close's admission opens the successor epoch's eligibility, while its challenge
+window still runs. Every validator derives the exact
 destination and amount at the request's position under the withdrawal-output root. A finalized
 output is independently claimed with that destination, amount, and one Merkle opening. A Close
 stays pending and leaves the account usable for the rest of the epoch. Its output is the
@@ -394,8 +395,10 @@ triggered the registration earns one corrective rejection and is re-signed, whic
 wallet's bounded corrective retry already handles. Registration is one-shot rather than a
 heartbeat: an idle open slot has no deadline, but an activated context must admit its matching
 certified close by its inclusive admission-deadline height or the deployment permanently
-hard-faults. A registered context has a ten-block admission runway from its inclusion height
-and an admitted close remains pending for one inclusive challenge block; block production
+hard-faults. A registered context has a three-hundred-block admission runway from its
+inclusion height (the generated genesis default, sized so an operator restart inside the
+window can still resume the cut) and an admitted close remains pending for one inclusive
+challenge block; block production
 itself observes every deadline, so no heartbeat is needed to make an expired obligation
 permanent.
 Deposit and withdrawal deadlines are independent: if one expires while a clean admitted close

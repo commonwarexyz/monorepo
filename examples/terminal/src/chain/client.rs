@@ -582,8 +582,12 @@ fn extract_status(verified: Verified) -> Result<StatusRecord> {
     }
 }
 
-/// Certified admission polls before an admitted close is reported stuck.
-const FINALIZE_ATTEMPTS: usize = 600;
+/// Certified admission polls before an admitted close is reported stuck. The
+/// budget must outlast a genesis challenge window at live cadence: the
+/// admitted close finalizes only past its challenge deadline, roughly the
+/// genesis admission offset plus challenge duration after its registration's
+/// inclusion.
+pub(crate) const FINALIZE_ATTEMPTS: usize = 3_000;
 
 /// Submits a completed close and completes once the chain certifiably
 /// finalized the exact batch.

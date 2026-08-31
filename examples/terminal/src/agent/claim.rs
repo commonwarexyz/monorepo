@@ -35,6 +35,8 @@ trait ClaimChannel {
 
     /// Binds operator-supplied evidence to this wallet by full local verification against
     /// the claim roots of the finalized batch the evidence names, before it may be cached.
+    /// Evidence naming an already-completed (batch, position) is refused: its release is
+    /// spent, so binding it would close the open intent against an old obligation.
     fn bind(agent: &Agent, evidence: &Self::Evidence, roots: &ClaimRootsResponse) -> Result<()>;
 
     /// Confirms a settlement release pays what the bound evidence certifies.
@@ -109,6 +111,18 @@ impl ClaimChannel for WithdrawalChannel {
         ensure!(
             output.destination().as_ref() == agent.wallet.name.as_bytes(),
             "operator returned withdrawal evidence for another destination"
+        );
+
+        // An old batch's still-present claim roots verify its evidence forever, so a
+        // completed (batch, position) must be refused here: rebinding it would close the
+        // open intent against a spent release and strand the new reserve. Like an
+        // unfinalized batch this is an availability verdict, not a completion: nothing is
+        // cached and the exact claim retries on fresh evidence.
+        ensure!(
+            !agent
+                .store
+                .withdrawal_claim_completed(evidence.batch_id, evidence.claim.position())?,
+            "operator re-served evidence for an already-completed withdrawal claim"
         );
         Ok(())
     }
@@ -221,6 +235,15 @@ impl ClaimChannel for PayoutChannel {
             payout.recipient == agent.account(),
             "operator returned external-payout evidence for another account"
         );
+
+        // A completed (batch, position) is refused under the same rule as the withdrawal
+        // channel: its release is spent, and the open intent must wait for fresh evidence.
+        ensure!(
+            !agent
+                .store
+                .payout_claim_completed(evidence.batch_id, evidence.claim.position())?,
+            "operator re-served evidence for an already-completed external-payout claim"
+        );
         Ok(())
     }
 
@@ -308,7 +331,10 @@ impl Agent {
     /// fetches fresh evidence, looks up the claim roots of the finalized batch that
     /// evidence names through a certified read, and verifies the claim locally against
     /// those roots before caching. Every cached copy is therefore releasable, so
-    /// poisoning and epoch lies are structurally impossible.
+    /// poisoning and epoch lies are structurally impossible. Bind also refuses evidence
+    /// naming a (batch, position) this wallet already completed, so a re-served old
+    /// batch's spent claim can never close a newer intent: the attempt fails like an
+    /// unavailable batch and the exact claim retries on fresh evidence.
     ///
     /// Claims complete on the certified release record at the claim's (batch,
     /// position), which must have consumed exactly this evidence: that record is the

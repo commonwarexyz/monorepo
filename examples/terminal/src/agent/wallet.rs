@@ -187,6 +187,11 @@ impl Agent {
         self.operator.clone()
     }
 
+    /// Whether a withdrawal-claim intent from an interrupted run is still open.
+    pub(crate) const fn has_pending_withdrawal_claim(&self) -> bool {
+        self.pending_withdrawal_claim.is_some()
+    }
+
     pub(crate) const fn receiver_count(&self) -> usize {
         self.receivers.len()
     }
