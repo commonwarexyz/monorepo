@@ -1,7 +1,4 @@
-use super::{
-    super::Kind,
-    round::{Leader as RoundLeader, Round},
-};
+use super::{super::Kind, round::Round};
 use crate::{
     Viewable,
     simplex::{
@@ -99,15 +96,13 @@ pub enum Verify<S: Scheme<D>, D: Digest> {
 
 /// A certificate fetch justified by a blocked certification (see
 /// [`State::certify_candidates`]).
-pub struct CertificateFetch<P> {
+pub struct CertificateFetch {
     /// View of the candidate that exposed the missing certificate.
     pub proposal: View,
     /// View whose certificate is needed.
     pub view: View,
     /// Kind of certificate that is needed.
     pub kind: Kind,
-    /// Leader to query, or `None` to ask any peer.
-    pub target: Option<P>,
 }
 
 /// Configuration for initializing [`State`].
@@ -380,21 +375,6 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         }
         let leader = self.elector.elect(Rnd::new(self.epoch, view), certificate);
         self.create_round(view).set_leader(leader);
-    }
-
-    /// Returns the stable leader of the term containing `view`, from any
-    /// tracked round in that term that has one.
-    ///
-    /// Every leader-bearing round in a term holds the term's leader:
-    /// [`Self::set_leader`] stores the elector's leader for the round's own
-    /// view, and [`Self::inherit_leader`] never copies across a term end. A
-    /// term can also have no tracked leader: a bare certificate creates its
-    /// round without one beyond the optimistic frontier, and a notarization
-    /// for the term's final view seeds only the next term's leader.
-    fn term_leader(&self, view: View) -> Option<RoundLeader<S::PublicKey>> {
-        let term_length = self.term_length();
-        let term = view.term_start(term_length)..=view.term_end(term_length);
-        self.views.range(term).find_map(|(_, round)| round.leader())
     }
 
     /// Copies the same-term stable leader into an optimistic successor.
@@ -1154,9 +1134,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// Takes newly notarized or unblocked certification candidates and returns
     /// proposals ready for certification, plus fetches for missing parent
     /// certificates (see [`Self::certification_fetch`]).
-    pub fn certify_candidates(
-        &mut self,
-    ) -> (Vec<Proposal<D>>, Vec<CertificateFetch<S::PublicKey>>) {
+    pub fn certify_candidates(&mut self) -> (Vec<Proposal<D>>, Vec<CertificateFetch>) {
         let candidates = take(&mut self.certification_candidates);
         let mut ready = Vec::new();
         let mut fetches = Vec::new();
@@ -1209,10 +1187,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// certificate once, and the candidate's own certificate proves the votes
     /// that could form it have stopped circulating. The certificate must be
     /// fetched, or the voter can never certify another view in the term.
-    fn certification_fetch(
-        &mut self,
-        err: &ParentPayloadError,
-    ) -> Option<CertificateFetch<S::PublicKey>> {
+    fn certification_fetch(&mut self, err: &ParentPayloadError) -> Option<CertificateFetch> {
         let ParentPayloadError::ParentNotCertified {
             proposal_view,
             parent_view,
@@ -1228,18 +1203,13 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         }
 
         // Certification exempts term starts, so the candidate and its parent
-        // sit mid-term and share the term's stable leader (see
-        // [`Self::term_leader`]). Without a tracked leader the fetch asks any
-        // peer. A leader that is the local signer is also excluded: a fresh
-        // fetch targeted only at ourselves has no peer to serve it.
+        // sit mid-term. The fetch is untargeted: a resolver target is
+        // exclusive, and validators other than the term's leader (which may
+        // be unreachable) hold the parent's notarization.
         Some(CertificateFetch {
             proposal: *proposal_view,
             view: *parent_view,
             kind: Kind::Notarization,
-            target: self
-                .term_leader(*proposal_view)
-                .filter(|leader| !self.is_me(leader.idx))
-                .map(|leader| leader.key),
         })
     }
 
@@ -3650,12 +3620,6 @@ mod tests {
             assert_eq!(fetches[0].proposal, View::new(3));
             assert_eq!(fetches[0].view, View::new(2));
             assert!(matches!(fetches[0].kind, Kind::Notarization));
-            // The local signer is the term's stable leader, so the fetch is
-            // untargeted: a fresh fetch targeted only at ourselves has no
-            // peer to serve it.
-            let leader = state.term_leader(View::new(3)).expect("term leader");
-            assert!(state.is_me(leader.idx));
-            assert!(fetches[0].target.is_none());
 
             // The blocked candidate is dormant, so another pass emits nothing.
             let (ready, fetches) = state.certify_candidates();
@@ -3685,19 +3649,15 @@ mod tests {
     }
 
     /// Regression: the fetch must fire even when the certificate gap is wider
-    /// than the optimistic frontier. The candidate's and parent's rounds then
-    /// have no leader, so the fetch target must come from any same-term round
-    /// that knows the stable leader.
+    /// than the optimistic frontier. The fetch remains untargeted even when a
+    /// same-term round records the stable leader.
     #[test]
     fn certify_candidates_fetches_across_wide_gap() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let (
                 Fixture {
-                    participants,
-                    schemes,
-                    verifier,
-                    ..
+                    schemes, verifier, ..
                 },
                 mut state,
             ) = setup_state_with(
@@ -3717,15 +3677,14 @@ mod tests {
 
             // Receive notarization(6) without any of 2..=5. Views 5 and 6 sit
             // beyond the frontier, so neither round has a leader. The fetch
-            // still fires with the term's stable leader as target.
+            // still fires and may be served by any peer.
             let p6 = fetch_proposal(6, 5, 106);
             assert!(
                 state
                     .add_notarization(build_notarization(&verifier, &schemes, &p6))
                     .0
             );
-            // Precondition: the candidate's and parent's rounds are leaderless,
-            // so the fetch target can only come from the same-term scan.
+            // Precondition: the candidate's and parent's rounds are leaderless.
             assert!(!state.leader_is_set(View::new(6)));
             assert!(!state.leader_is_set(View::new(5)));
             let (ready, fetches) = state.certify_candidates();
@@ -3734,14 +3693,9 @@ mod tests {
             assert_eq!(fetches[0].proposal, View::new(6));
             assert_eq!(fetches[0].view, View::new(5));
             assert!(matches!(fetches[0].kind, Kind::Notarization));
-            // The target is the term's stable leader, held by view 2's round.
-            let leader = state
-                .leader_index(View::new(2))
-                .expect("view 2 must hold the term leader");
-            assert_eq!(
-                fetches[0].target.as_ref(),
-                Some(&participants[leader.get() as usize])
-            );
+            // A same-term round still records the old leader, but
+            // certification recovery must not depend on that peer.
+            assert!(state.leader_index(View::new(2)).is_some());
 
             // Repair cascades one view at a time: delivering notarization(5)
             // exposes the next gap, again from a leaderless round.
@@ -3763,7 +3717,7 @@ mod tests {
     /// Regression: a bare notarization for a term's final view can be the
     /// only artifact the voter holds from that term. It seeds a leader only
     /// for the next term's start, so no tracked round supplies the term's
-    /// leader. The fetch must still fire, without a target.
+    /// leader. The fetch must still fire.
     #[test]
     fn certify_candidates_fetches_term_end_without_leader() {
         let runtime = deterministic::Runner::default();
@@ -3802,7 +3756,6 @@ mod tests {
             assert_eq!(fetches[0].proposal, View::new(10));
             assert_eq!(fetches[0].view, View::new(9));
             assert!(matches!(fetches[0].kind, Kind::Notarization));
-            assert!(fetches[0].target.is_none());
         });
     }
 

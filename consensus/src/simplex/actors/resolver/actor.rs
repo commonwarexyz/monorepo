@@ -974,6 +974,136 @@ mod tests {
         assert_targeted_fetch_does_not_restrict_existing_backfill(0);
     }
 
+    /// Certification recovery can fetch a missing mid-term parent from any
+    /// validator that holds it while the old leader is unavailable.
+    #[test_async]
+    async fn untargeted_parent_fetch_uses_available_holder() {
+        let runtime = deterministic::Runner::timed(Duration::from_secs(10));
+        runtime.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                verifier,
+                ..
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let (network, oracle) = Network::new_with_peers(
+                context.child("network"),
+                NetworkConfig {
+                    max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(participants.len()),
+                    disconnect_on_block: true,
+                    tracked_peer_sets: NZUsize!(1),
+                },
+                participants.clone(),
+            )
+            .await;
+            network.start();
+
+            let mut connections = Vec::new();
+            for participant in &participants {
+                connections.push(
+                    oracle
+                        .control(participant.clone())
+                        .register(2, Quota::per_second(NZU32!(1_000)))
+                        .await
+                        .unwrap(),
+                );
+            }
+            let mut connections = connections.into_iter();
+            let requester_connection = connections.next().unwrap();
+            let _unavailable_leader_connection = connections.next().unwrap();
+            let first_holder_connection = connections.next().unwrap();
+            let second_holder_connection = connections.next().unwrap();
+
+            let link = Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: probability!(1.0),
+            };
+            for holder in &participants[2..] {
+                oracle
+                    .add_link(participants[0].clone(), holder.clone(), link.clone())
+                    .await
+                    .unwrap();
+                oracle
+                    .add_link(holder.clone(), participants[0].clone(), link.clone())
+                    .await
+                    .unwrap();
+            }
+
+            let (requester_voter_sender, mut requester_voter_receiver) =
+                mailbox::new(context.child("requester_voter"), NZUsize!(8));
+            let (requester, mut requester_mailbox) = TestActor::new(
+                context.child("requester"),
+                Config {
+                    scheme: schemes[0].clone(),
+                    blocker: NoopBlocker,
+                    strategy: Sequential,
+                    epoch: EPOCH,
+                    mailbox_size: NZUsize!(8),
+                    fetch_timeout: Duration::from_millis(200),
+                    term_length: TERM_LENGTH,
+                },
+            );
+            let _requester = requester.start(
+                voter::Mailbox::new(requester_voter_sender),
+                requester_connection.0,
+                requester_connection.1,
+            );
+
+            let parent = build_notarization(&schemes, &verifier, EPOCH, View::new(2));
+            let mut holders = Vec::new();
+            for (index, connection) in [(2, first_holder_connection), (3, second_holder_connection)]
+            {
+                let (voter_sender, voter_receiver) =
+                    mailbox::new(context.child("holder_voter"), NZUsize!(8));
+                let (holder, mut holder_mailbox) = TestActor::new(
+                    context.child("holder"),
+                    Config {
+                        scheme: schemes[index].clone(),
+                        blocker: NoopBlocker,
+                        strategy: Sequential,
+                        epoch: EPOCH,
+                        mailbox_size: NZUsize!(8),
+                        fetch_timeout: Duration::from_millis(200),
+                        term_length: TERM_LENGTH,
+                    },
+                );
+                let handle = holder.start(
+                    voter::Mailbox::new(voter_sender),
+                    connection.0,
+                    connection.1,
+                );
+                holder_mailbox.updated(Certificate::Notarization(parent.clone()));
+                holder_mailbox.certified(parent.view(), true);
+                // A holder exits when its mailbox closes, so keep the handles
+                // alive until the fetch completes.
+                holders.push((handle, holder_mailbox, voter_receiver));
+            }
+
+            // The certification request must not depend on the disconnected
+            // old leader. The voter-side regression supplies the held child.
+            context.sleep(Duration::from_millis(10)).await;
+            requester_mailbox.resolve(View::new(3), View::new(2), Kind::Notarization, None);
+
+            let recovered = select! {
+                message = requester_voter_receiver.recv() => {
+                    message.expect("voter mailbox closed")
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("missing parent was not fetched from an available validator");
+                },
+            };
+            assert!(matches!(
+                recovered,
+                voter::Message::Verified {
+                    certificate: Certificate::Notarization(fetched),
+                    ..
+                } if fetched == parent
+            ));
+        });
+    }
+
     /// A valid notarization that does not settle the ask does not prevent a
     /// different peer from supplying the requested nullification.
     #[test_async]

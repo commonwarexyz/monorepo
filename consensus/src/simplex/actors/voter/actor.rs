@@ -1135,8 +1135,13 @@ impl<
                 // journal sync completed before this block runs, a child made
                 // eligible by its parent cannot become durable first.
                 let (candidates, fetches) = self.state.certify_candidates();
-                for CertificateFetch { proposal, view, kind, target } in fetches {
-                    resolver.resolve(proposal, view, kind, target);
+                for CertificateFetch {
+                    proposal,
+                    view,
+                    kind,
+                } in fetches
+                {
+                    resolver.resolve(proposal, view, kind, None);
                 }
                 for proposal in candidates {
                     let round = proposal.round;
