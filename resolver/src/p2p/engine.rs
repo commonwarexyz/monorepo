@@ -492,6 +492,7 @@ where
             }
             self.inflight.cancel(&key);
             self.fetcher.clear_targets(&key);
+            self.fetcher.clear_attempts(&key);
             return;
         };
 
@@ -522,7 +523,7 @@ where
                     }
                     self.inflight.complete(self.context.as_ref(), &key);
                     self.fetcher.clear_targets(&key);
-                    self.fetcher.clear_missing(&key);
+                    self.fetcher.clear_attempts(&key);
                 }
             }
             Outcome::Ambiguous => {
@@ -547,7 +548,7 @@ where
                     self.inflight.complete(self.context.as_ref(), &key);
                     self.subscribers.remove(&key);
                     self.fetcher.clear_targets(&key);
-                    self.fetcher.clear_missing(&key);
+                    self.fetcher.clear_attempts(&key);
                     return;
                 }
 
@@ -566,7 +567,7 @@ where
                 self.inflight.cancel(&key);
                 self.subscribers.remove(&key);
                 self.fetcher.clear_targets(&key);
-                self.fetcher.clear_missing(&key);
+                self.fetcher.clear_attempts(&key);
             }
         }
     }

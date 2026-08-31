@@ -118,8 +118,8 @@ where
     requests: HashMap<ID, ActiveRequest<P, Key>>,
     /// Reverse lookup from key to request ID
     key_to_id: HashMap<Key, ID>,
-    /// Peers that reported a key missing during its current retry cycle.
-    missing_peers: HashMap<Key, HashSet<P>>,
+    /// Peers already sent a request for a key during its current retry cycle.
+    attempted_peers: HashMap<Key, HashSet<P>>,
 
     // Config
     /// Timeout for requests
@@ -213,7 +213,7 @@ where
             active: PrioritySet::new(),
             requests: HashMap::new(),
             key_to_id: HashMap::new(),
-            missing_peers: HashMap::new(),
+            attempted_peers: HashMap::new(),
             timeout: config.timeout,
             pending: PrioritySet::new(),
             waiter: None,
@@ -252,7 +252,7 @@ where
     /// shuffled without regard to preference (used for retries to try different peers).
     fn get_eligible_peers(&mut self, key: &Key, shuffle: bool) -> Vec<P> {
         let targets = self.targets.get(key);
-        let missing = self.missing_peers.get(key);
+        let attempted = self.attempted_peers.get(key);
 
         // Prepare participant iterator. The set stores throughput as `Reverse`,
         // so it iterates best-performing peer first.
@@ -263,7 +263,7 @@ where
             .filter(|(p, _)| self.me.as_ref() != Some(p)) // not self
             .filter(|(p, _)| !self.blocked.contains(p)) // not blocked
             .filter(|(p, _)| targets.is_none_or(|t| t.contains(p))) // matches target if any
-            .filter(|(p, _)| missing.is_none_or(|m| !m.contains(p))) // has not reported missing
+            .filter(|(p, _)| attempted.is_none_or(|peers| !peers.contains(p))) // not yet attempted
             .map(|(p, _)| p.clone())
             .collect();
 
@@ -355,6 +355,10 @@ where
         self.pending = pending;
         if let Some((key, id, peer, start)) = sent {
             assert!(self.pending.remove(&key));
+            self.attempted_peers
+                .entry(key.clone())
+                .or_default()
+                .insert(peer.clone());
             let deadline = start.checked_add(self.timeout).expect("time overflowed");
             self.active.put(id, deadline);
             self.requests.insert(
@@ -399,7 +403,7 @@ where
         self.key_to_id.retain(|k, _| predicate(k));
         self.pending.retain(&predicate);
         self.targets.retain(|k, _| predicate(k));
-        self.missing_peers.retain(|k, _| predicate(k));
+        self.attempted_peers.retain(|k, _| predicate(k));
 
         // Clear waiter since the key that caused it may have been removed
         self.waiter = None;
@@ -420,6 +424,11 @@ where
     /// Panics if the key is already pending.
     pub fn add_retry(&mut self, key: Key) {
         assert!(!self.pending.contains(&key));
+        // Visit every eligible peer before repeating an attempt, including after timeouts
+        // and ambiguous responses.
+        if self.get_eligible_peers(&key, false).is_empty() {
+            self.attempted_peers.remove(&key);
+        }
         // A previous pending key may have pushed the waiter far into the future
         // because no eligible peer could serve it. Clear the stale global waiter
         // so this retry can drive pending processing again.
@@ -436,7 +445,7 @@ where
         let deadline = if !self.get_eligible_peers(&key, false).is_empty() {
             now
         } else {
-            self.missing_peers.remove(&key);
+            self.attempted_peers.remove(&key);
             now + self.retry_timeout
         };
         self.pending.put(key, (true, deadline));
@@ -523,28 +532,29 @@ where
     /// Processes a response indicating that the peer does not have the requested data.
     ///
     /// Missing data is scored as zero throughput because the peer delivered nothing.
-    /// The peer is skipped for this key until every eligible peer has reported it missing.
+    /// Each serving peer is skipped until the current retry cycle has tried every eligible peer.
     pub fn pop_missing(&mut self, id: ID, peer: &P) -> Option<Key> {
         let req = self.pop_request(id, peer)?;
         self.update_performance(&req.peer, 0);
-        self.missing_peers
-            .entry(req.key.clone())
-            .or_default()
-            .insert(req.peer);
         Some(req.key)
     }
 
     /// Clears peer-availability state after a logical fetch completes.
-    pub fn clear_missing(&mut self, key: &Key) {
-        self.missing_peers.remove(key);
+    pub fn clear_attempts(&mut self, key: &Key) {
+        self.attempted_peers.remove(key);
     }
 
     /// Reconciles the list of peers that can be used to fetch future requests.
     pub fn reconcile(&mut self, keep: &[P]) {
+        if self.participants.len() == keep.len()
+            && keep.iter().all(|peer| self.participants.contains(peer))
+        {
+            return;
+        }
         // New peers start with zero throughput, having delivered nothing yet. They
         // are tried via shuffled retries and earn a real score once they respond.
         self.participants.reconcile(keep, Reverse(0));
-        self.missing_peers.clear();
+        self.attempted_peers.clear();
 
         // Clear waiter (may no longer apply)
         self.waiter = None;
@@ -556,7 +566,12 @@ where
     /// a later update no longer lists them. Clears the waiter, since an
     /// unblocked peer may make a waiting fetch servable.
     pub fn set_blocked(&mut self, blocked: impl IntoIterator<Item = P>) {
-        self.blocked = blocked.into_iter().collect();
+        let blocked = blocked.into_iter().collect();
+        if self.blocked == blocked {
+            return;
+        }
+        self.blocked = blocked;
+        self.attempted_peers.clear();
         self.waiter = None;
     }
 
@@ -2279,6 +2294,40 @@ mod tests {
     }
 
     #[test]
+    fn unchanged_peer_snapshots_preserve_retry_progress() {
+        for update_membership in [false, true] {
+            Runner::default().start(move |context| async move {
+                let me = PrivateKey::from_seed(0).public_key();
+                let first = PrivateKey::from_seed(1).public_key();
+                let second = PrivateKey::from_seed(2).public_key();
+                let participants = [me, first.clone(), second.clone()];
+                let mut fetcher = create_test_fetcher_with_preferred::<SuccessMockSender>(
+                    context.child("fetcher"),
+                    [first.clone()],
+                );
+                fetcher.reconcile(&participants);
+                let mut sender = WrappedSender::new(
+                    context.network_buffer_pool().clone(),
+                    SuccessMockSender::default(),
+                );
+                let key = MockKey(1);
+                fetcher.add_ready(key.clone());
+                fetcher.fetch(&mut sender);
+                assert_eq!(active_peer(&fetcher, &key), first);
+                let key = fetcher.pop_active().unwrap();
+                fetcher.add_retry(key.clone());
+
+                if update_membership {
+                    fetcher.reconcile(&participants);
+                } else {
+                    fetcher.set_blocked([]);
+                }
+                assert_eq!(fetcher.get_eligible_peers(&key, true), vec![second]);
+            });
+        }
+    }
+
+    #[test]
     fn retry_candidates_ignore_preferences() {
         let runner = Runner::default();
         runner.start(|context| async move {
@@ -2351,6 +2400,47 @@ mod tests {
             context.sleep(Duration::from_millis(100)).await;
             fetcher.fetch(&mut sender);
             assert!(attempted.contains(&active_peer(&fetcher, &key)));
+        });
+    }
+
+    #[test]
+    fn missing_then_invalid_starts_a_new_missing_cycle() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            let me = PrivateKey::from_seed(0).public_key();
+            let missing = PrivateKey::from_seed(1).public_key();
+            let invalid = PrivateKey::from_seed(2).public_key();
+            let mut fetcher = create_test_fetcher_with_preferred::<SuccessMockSender>(
+                context.child("fetcher"),
+                [missing.clone()],
+            );
+            fetcher.reconcile(&[me, missing.clone(), invalid.clone()]);
+            let mut sender = WrappedSender::new(
+                context.network_buffer_pool().clone(),
+                SuccessMockSender::default(),
+            );
+            let key = MockKey(1);
+
+            fetcher.add_ready(key.clone());
+            fetcher.fetch(&mut sender);
+            assert_eq!(active_peer(&fetcher, &key), missing);
+
+            let id = *fetcher.key_to_id.get(&key).unwrap();
+            assert_eq!(fetcher.pop_missing(id, &missing), Some(key.clone()));
+            fetcher.add_missing_retry(key.clone());
+            fetcher.fetch(&mut sender);
+            assert_eq!(active_peer(&fetcher, &key), invalid);
+
+            let id = *fetcher.key_to_id.get(&key).unwrap();
+            let (response, elapsed) = fetcher.pop_response(id, &invalid).unwrap();
+            assert_eq!(response, key);
+            fetcher.record_response(&invalid, elapsed, 1);
+            fetcher.set_blocked([invalid]);
+            fetcher.add_retry(key.clone());
+
+            context.sleep(Duration::from_millis(100)).await;
+            fetcher.fetch(&mut sender);
+            assert_eq!(active_peer(&fetcher, &key), missing);
         });
     }
 
@@ -2438,8 +2528,8 @@ mod tests {
                 [preferred.clone()],
             );
             fetcher.reconcile(&[me, preferred.clone(), target.clone()]);
-                fetcher.update_performance(&preferred, 100);
-                fetcher.update_performance(&target, 1_000);
+            fetcher.update_performance(&preferred, 100);
+            fetcher.update_performance(&target, 1_000);
 
             fetcher.add_targets(MockKey(1), [preferred.clone(), target.clone()]);
             assert_eq!(
