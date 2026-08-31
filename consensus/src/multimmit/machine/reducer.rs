@@ -954,7 +954,21 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             }
             Input::Verified(completion) => {
                 self.ensure_live()?;
-                self.complete_verification(completion)
+                let mut pass = VerificationPass::new(completion);
+                let advanced = self.advance_verification_pass(&mut pass, usize::MAX)?;
+                debug_assert!(advanced.complete);
+                Ok(advanced.step)
+            }
+            Input::EffectCompleted(EffectCompletion::SignedBatch {
+                id,
+                generation,
+                artifacts,
+            }) => {
+                self.ensure_live()?;
+                let mut pass = SigningBatchPass::new(id, generation, artifacts);
+                let advanced = self.advance_signing_batch_pass(&mut pass, usize::MAX)?;
+                debug_assert!(advanced.complete);
+                Ok(advanced.step)
             }
             Input::EffectCompleted(completion) => {
                 self.ensure_live()?;
@@ -3147,44 +3161,6 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             .checked_add(self.pending_artifact_reservations())
     }
 
-    fn complete_verification(
-        &mut self,
-        completion: VerificationCompletion<H::Digest>,
-    ) -> Result<Step<V, H::Digest>, StepError> {
-        if completion.generation() != self.durable.generation {
-            return Ok(Step::new(StepStatus::StaleCompletion, Vec::new()));
-        }
-        let job = completion.job();
-        let Some(tickets) = self.jobs.get(&job) else {
-            return Ok(Step::new(StepStatus::StaleCompletion, Vec::new()));
-        };
-        if tickets.len() != completion.verdicts().len()
-            || !tickets
-                .iter()
-                .zip(completion.verdicts())
-                .all(|(expected, verdict)| expected == &verdict.ticket())
-        {
-            return Err(StepError::CompletionMismatch);
-        }
-
-        let (verdicts, validated_vqcs) = completion.into_parts();
-        self.jobs.remove(&job);
-        let mut valid = 0;
-        let mut invalid = 0;
-        let mut validated_vqcs = validated_vqcs.into_iter().peekable();
-        for (index, verdict) in verdicts.into_iter().enumerate() {
-            let validated_vqc = validated_vqcs
-                .next_if(|(candidate, _)| *candidate == index)
-                .map(|(_, validated)| validated);
-            if let Some(verdict_valid) = self.apply_verification_verdict(verdict, validated_vqc)? {
-                valid += usize::from(verdict_valid);
-                invalid += usize::from(!verdict_valid);
-            }
-        }
-
-        self.finish_verification_prefix(valid, invalid)
-    }
-
     fn apply_verification_verdict(
         &mut self,
         verdict: Verdict<H::Digest>,
@@ -5165,34 +5141,6 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                 }
                 let id = self.validate_self_admission(&artifact)?;
                 Ok(PendingSigningCompletion::One { artifact, id })
-            }
-            (
-                DurableEffect::SignBatch(requests),
-                EffectCompletion::SignedBatch { artifacts, .. },
-            ) => {
-                let Role::Validator(signer) = self.profile.role() else {
-                    return Err(StepError::UnauthorizedEffect);
-                };
-                if requests.len() != artifacts.len()
-                    || !requests
-                        .iter()
-                        .zip(&artifacts)
-                        .all(|(request, artifact)| request.matches(signer, artifact))
-                {
-                    return Err(StepError::EffectMismatch);
-                }
-                let artifacts = artifacts.into_iter().map(Arc::new).collect::<Arc<[_]>>();
-                let ids = artifacts
-                    .iter()
-                    .map(|artifact| self.validate_self_admission(artifact))
-                    .collect::<Result<Vec<_>, _>>()?;
-                if ids.iter().copied().collect::<BTreeSet<_>>().len() != ids.len()
-                    || self.artifacts.len() + ids.len()
-                        > self.profile.resources().max_cached_artifacts()
-                {
-                    return Err(StepError::LocalArtifactReservation);
-                }
-                Ok(PendingSigningCompletion::Batch { artifacts, ids })
             }
             _ => Err(StepError::EffectMismatch),
         }
