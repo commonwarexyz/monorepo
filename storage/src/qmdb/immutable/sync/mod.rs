@@ -126,7 +126,6 @@ where
             journal,
             root,
             snapshot,
-            last_commit_loc,
             inactivity_floor_loc,
             metrics,
         };

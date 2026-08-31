@@ -102,7 +102,6 @@ where
         let db = Self {
             journal,
             root,
-            last_commit_loc,
             inactivity_floor_loc,
             metrics,
         };

@@ -303,7 +303,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                         }
                         Some(kind) => {
                             // Snapshot state; the reject must not mutate persisted state.
-                            let before_last_commit = db.last_commit_loc();
+                            let before_last_commit = db.bounds().end - 1;
                             let before_floor = db.inactivity_floor_loc();
                             let before_root = db.root();
                             let err = match db.apply_batch(merkleized).await {
@@ -313,7 +313,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                             assert_bad_floor_error(&err, kind);
                             // Reopen and verify the reject persisted nothing.
                             let db = reopen(&context, suffix, &strategy, &mut restarts).await;
-                            assert_eq!(db.last_commit_loc(), before_last_commit);
+                            assert_eq!(db.bounds().end - 1, before_last_commit);
                             assert_eq!(db.inactivity_floor_loc(), before_floor);
                             assert_eq!(db.root(), before_root);
                             db
@@ -358,7 +358,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                         .append(vec![1u8; 1])
                         .merkleize(&db, None, child_floor).await;
 
-                    let before_last_commit = db.last_commit_loc();
+                    let before_last_commit = db.bounds().end - 1;
                     let before_floor = db.inactivity_floor_loc();
                     let before_root = db.root();
                     let err = match db.apply_batch(child).await {
@@ -368,7 +368,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                     assert_bad_floor_error(&err, kind);
                     // Reopen and verify the reject persisted nothing.
                     let db = reopen(&context, suffix, &strategy, &mut restarts).await;
-                    assert_eq!(db.last_commit_loc(), before_last_commit);
+                    assert_eq!(db.bounds().end - 1, before_last_commit);
                     assert_eq!(db.inactivity_floor_loc(), before_floor);
                     assert_eq!(db.root(), before_root);
                     db
@@ -428,7 +428,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                 }
 
                 Operation::LastCommitLoc => {
-                    let _ = db.last_commit_loc();
+                    let _ = db.bounds().end - 1;
                     db
                 }
 
