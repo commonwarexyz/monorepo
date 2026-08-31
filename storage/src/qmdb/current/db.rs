@@ -734,6 +734,17 @@ where
         Ok((self, handle))
     }
 
+    /// Flush buffered state to storage without guaranteeing durability.
+    ///
+    /// Flushed state is not guaranteed to survive a crash until a later durability operation
+    /// (e.g. [Self::sync]) completes.
+    #[tracing::instrument(name = "qmdb.current.db.flush", level = "info", skip_all)]
+    #[boxed]
+    pub async fn flush(mut self) -> Result<Self, Error<F>> {
+        self.any = self.any.flush().await?;
+        Ok(self)
+    }
+
     /// Durably commit the journal state published by prior [`Db::apply_batch`]
     /// calls.
     #[tracing::instrument(name = "qmdb.current.db.commit", level = "info", skip_all)]
