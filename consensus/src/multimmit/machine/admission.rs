@@ -719,10 +719,6 @@ impl<D: Digest> VerificationCompletion<D> {
         Some(self.validated_vqcs.swap_remove(position).1)
     }
 
-    pub(crate) fn into_parts(self) -> (Vec<Verdict<D>>, ValidatedVqcs<D>) {
-        (self.verdicts, self.validated_vqcs)
-    }
-
     pub(crate) fn resident_bytes(&self) -> Option<usize> {
         let verdicts = self
             .verdicts
