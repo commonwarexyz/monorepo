@@ -21,10 +21,10 @@ use commonware_storage::{
     translator::TwoCap,
 };
 use commonware_storage_fuzz::{
-    bounded_buffer, bounded_items, bounded_nonzero_rate, bounded_page_cache_size,
+    bounded_buffer, bounded_entropy, bounded_items, bounded_nonzero_rate, bounded_page_cache_size,
     bounded_page_size, faulted_recovery,
 };
-use commonware_utils::{NZU64, NZUsize, Probability, sequence::FixedBytes};
+use commonware_utils::{FuzzRng, NZU64, NZUsize, Probability, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::{BTreeSet, HashMap},
@@ -50,7 +50,6 @@ enum CurrentOperation {
 /// Fuzz input containing fault injection parameters and operations.
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {
-    seed: u64,
     #[arbitrary(with = bounded_page_size)]
     page_size: u16,
     #[arbitrary(with = bounded_page_cache_size)]
@@ -67,6 +66,10 @@ struct FuzzInput {
     sync_failure_rate: Probability,
     write_config: deterministic::WriteConfig,
     operations: Vec<CurrentOperation>,
+    /// Byte stream driving the runtime rng: all in-run randomness, fault sampling, and the
+    /// faulted recovery chain's depth and shapes.
+    #[arbitrary(with = bounded_entropy)]
+    entropy: Vec<u8>,
 }
 
 #[derive(Clone, Copy)]
@@ -227,9 +230,10 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
     let sync_failure_rate = input.sync_failure_rate;
     let write_config = input.write_config;
     let operations = input.operations.clone();
-    let suffix = format!("{suffix_base}_{}", input.seed);
+    let suffix = suffix_base.to_string();
 
-    let cfg = deterministic::Config::default().with_seed(input.seed);
+    let cfg =
+        deterministic::Config::default().with_rng(Box::new(FuzzRng::new(input.entropy.clone())));
     let runner = deterministic::Runner::new(cfg);
 
     // Phase 1: Execute operations with fault injection until crash.
@@ -327,7 +331,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
     });
 
     let recovery_suffix = suffix.clone();
-    let checkpoint = faulted_recovery(checkpoint, input.seed, move |ctx| {
+    let checkpoint = faulted_recovery(checkpoint, move |ctx| {
         let recovery_suffix = recovery_suffix.clone();
         async move {
             Db::<F>::init(

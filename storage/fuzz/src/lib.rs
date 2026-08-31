@@ -5,7 +5,7 @@ use commonware_runtime::{
     deterministic::{self, PartialWriteMode},
     mocks::PendingSyncs,
 };
-use commonware_utils::{Probability, TestRng, probability};
+use commonware_utils::{Probability, probability};
 use rand::{Rng as _, RngExt as _};
 use std::future::Future;
 
@@ -76,38 +76,60 @@ fn recovery_fault_config(seed: u64) -> deterministic::FaultConfig {
 /// Run a chain of 1..=4 recovery attempts, each with a mutable storage fault enabled and
 /// each crashing into the next, then return the final crash image.
 ///
-/// `fault_seed` seeds an rng that draws the chain depth and a fresh fault selector per
-/// attempt (mutation, failure and retention rates, and partial-write mode). Chaining
-/// interrupts the recovery of an already-interrupted recovery, so images reachable only
-/// through repeated repair interruption are also explored.
+/// The chain draws from the runtime rng, which the checkpoint carries across attempts: the
+/// first attempt draws the chain depth, and every attempt draws its fault selector
+/// (mutation, failure and retention rates, and partial-write mode) before its faults arm.
+/// Chaining interrupts the recovery of an already-interrupted recovery, so images
+/// reachable only through repeated repair interruption are also explored.
 ///
 /// Each attempt's recovered object or error is discarded because mutable-operation errors
 /// retire the instance. The fault config is cleared before each crash (retention policies
 /// bind when a write is issued), so the returned checkpoint recovers fault-free.
 pub fn faulted_recovery<F, Fut, T, E>(
     mut checkpoint: deterministic::Checkpoint,
-    fault_seed: u64,
     recover: F,
 ) -> deterministic::Checkpoint
 where
     F: Fn(deterministic::Context) -> Fut + Clone,
     Fut: Future<Output = Result<T, E>>,
 {
-    let mut rng = TestRng::new(fault_seed);
-    let depth = rng.random_range(1..=4);
-    for _ in 0..depth {
-        let seed = rng.next_u64();
+    let mut remaining = None;
+    loop {
         let recover = recover.clone();
-        let (_, next) =
-            deterministic::Runner::from(checkpoint).start_and_recover(move |context| async move {
+        let (left, next) = deterministic::Runner::from(checkpoint).start_and_recover(
+            move |mut context| async move {
+                // The first attempt draws the chain depth, later attempts count down.
+                // Both draws land before the faults arm.
+                let left: u32 = match remaining {
+                    None => context.random_range(1..=4u32) - 1,
+                    Some(left) => left - 1,
+                };
+                let seed = context.next_u64();
                 let config = context.storage_fault_config();
                 *config.write() = recovery_fault_config(seed);
                 drop(recover(context).await);
                 *config.write() = deterministic::FaultConfig::default();
-            });
+                left
+            },
+        );
         checkpoint = next;
+        if left == 0 {
+            break;
+        }
+        remaining = Some(left);
     }
     checkpoint
+}
+
+/// Cap on the entropy stream a recovery target draws its randomness from.
+const MAX_ENTROPY_BYTES: usize = 4096;
+
+/// Consume the input's remaining bytes (capped) as the entropy stream driving the runtime
+/// rng: all in-run randomness, fault sampling, and the faulted recovery chain's depth and
+/// shapes.
+pub fn bounded_entropy(u: &mut Unstructured<'_>) -> arbitrary::Result<Vec<u8>> {
+    let remaining = u.len().min(MAX_ENTROPY_BYTES);
+    Ok(u.bytes(remaining)?.to_vec())
 }
 
 /// Generate a logical page size in `1..=256`.

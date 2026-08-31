@@ -18,8 +18,8 @@ use commonware_storage::{
     },
     rmap::RMap,
 };
-use commonware_storage_fuzz::faulted_recovery;
-use commonware_utils::{NZU16, NZU64, NZUsize, Probability, sequence::FixedBytes};
+use commonware_storage_fuzz::{bounded_entropy, faulted_recovery};
+use commonware_utils::{FuzzRng, NZU16, NZU64, NZUsize, Probability, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 
 type Key = FixedBytes<16>;
@@ -40,7 +40,6 @@ enum FaultKind {
 
 #[derive(Arbitrary, Clone, Debug)]
 struct FuzzInput {
-    seed: u64,
     fault: FaultKind,
     rate: u8,
     retention: u8,
@@ -48,6 +47,10 @@ struct FuzzInput {
     /// under faults and recovery can land on the empty commit record.
     virgin: bool,
     payload: [u8; 32],
+    /// Byte stream driving the runtime rng: all in-run randomness, fault sampling, and the
+    /// faulted recovery chain's depth and shapes.
+    #[arbitrary(with = bounded_entropy)]
+    entropy: Vec<u8>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -225,7 +228,9 @@ fn run(input: &FuzzInput, mode: PartialWriteMode) {
     let floor = if input.virgin { Vec::new() } else { baseline };
     let phase_floor = floor.clone();
     let phase_candidate = candidate.clone();
-    let runner = deterministic::Runner::new(deterministic::Config::default().with_seed(input.seed));
+    let cfg =
+        deterministic::Config::default().with_rng(Box::new(FuzzRng::new(input.entropy.clone())));
+    let runner = deterministic::Runner::new(cfg);
     let (outcome, checkpoint) = runner.start_and_recover(move |context| async move {
         // All mutations after the floor run under one partial-write policy. Any mutating error
         // ends the phase immediately.
@@ -294,7 +299,7 @@ fn run(input: &FuzzInput, mode: PartialWriteMode) {
 
     // A failed recovery instance is abandoned. Its crash checkpoint must remain recoverable by
     // the same ordinary initialization path with faults disabled.
-    let checkpoint = faulted_recovery(checkpoint, input.seed, |context| async move {
+    let checkpoint = faulted_recovery(checkpoint, |context| async move {
         Archive::<_, Key, Value>::init(context.child("faulted_recovery"), config(&context)).await
     });
 

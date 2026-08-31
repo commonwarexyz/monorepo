@@ -20,8 +20,8 @@ use commonware_runtime::{
     mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs},
 };
 use commonware_storage::journal::{Error, segmented::variable};
-use commonware_storage_fuzz::{faulted_recovery, release_oldest_pending_sync};
-use commonware_utils::{NZUsize, Probability};
+use commonware_storage_fuzz::{bounded_entropy, faulted_recovery, release_oldest_pending_sync};
+use commonware_utils::{FuzzRng, NZUsize, Probability};
 use libfuzzer_sys::fuzz_target;
 use std::{collections::BTreeMap, num::NonZeroU16};
 
@@ -33,7 +33,6 @@ const MAX_ITEM_LEN: usize = 48;
 
 #[derive(Arbitrary, Clone, Debug)]
 struct FuzzInput {
-    seed: u64,
     count: u8,
     baseline: u8,
     retention: u8,
@@ -44,6 +43,10 @@ struct FuzzInput {
     /// completion before the crash, or left parked with one section's flush
     /// volatile so the crash tears it per the retention policy.
     final_polls: u8,
+    /// Byte stream driving the runtime rng: all in-run randomness, fault sampling, and the
+    /// faulted recovery chain's depth and shapes.
+    #[arbitrary(with = bounded_entropy)]
+    entropy: Vec<u8>,
 }
 
 fn config(
@@ -264,7 +267,9 @@ fn fuzz(input: FuzzInput) {
     let baseline = usize::from(input.baseline) % (script.len() + 1);
     let phase_script = script.clone();
     let phase_input = input.clone();
-    let runner = deterministic::Runner::new(deterministic::Config::default().with_seed(input.seed));
+    let cfg =
+        deterministic::Config::default().with_rng(Box::new(FuzzRng::new(input.entropy.clone())));
+    let runner = deterministic::Runner::new(cfg);
     let (durable, checkpoint) = runner.start_and_recover(move |context| async move {
         let fault_config = context.storage_fault_config();
         let pending = PendingSyncs::default();
@@ -330,7 +335,7 @@ fn fuzz(input: FuzzInput) {
         durable
     });
 
-    let checkpoint = faulted_recovery(checkpoint, input.seed, recover_once);
+    let checkpoint = faulted_recovery(checkpoint, recover_once);
 
     deterministic::Runner::from(checkpoint).start(move |context| async move {
         *context.storage_fault_config().write() = deterministic::FaultConfig::default();

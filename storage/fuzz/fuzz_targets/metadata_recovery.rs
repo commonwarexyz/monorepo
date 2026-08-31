@@ -10,8 +10,8 @@ use commonware_runtime::{
     mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs},
 };
 use commonware_storage::metadata::{Config, Metadata};
-use commonware_storage_fuzz::faulted_recovery;
-use commonware_utils::{Probability, sequence::U64};
+use commonware_storage_fuzz::{bounded_entropy, faulted_recovery};
+use commonware_utils::{FuzzRng, Probability, sequence::U64};
 use libfuzzer_sys::fuzz_target;
 use std::collections::BTreeMap;
 
@@ -34,11 +34,14 @@ enum CrashKind {
 
 #[derive(Arbitrary, Clone, Debug)]
 struct FuzzInput {
-    seed: u64,
     path: WritePath,
     crash: CrashKind,
     retention: u8,
     payload: [u8; 32],
+    /// Byte stream driving the runtime rng: all in-run randomness, fault sampling, and the
+    /// faulted recovery chain's depth and shapes.
+    #[arbitrary(with = bounded_entropy)]
+    entropy: Vec<u8>,
 }
 
 fn config() -> Config<<Vec<u8> as Read>::Cfg> {
@@ -76,7 +79,9 @@ fn run(input: &FuzzInput, mode: PartialWriteMode) {
     let crash = input.crash;
     let path = input.path;
     let retention_percent = input.retention % 101;
-    let runner = deterministic::Runner::new(deterministic::Config::default().with_seed(input.seed));
+    let cfg =
+        deterministic::Config::default().with_rng(Box::new(FuzzRng::new(input.entropy.clone())));
+    let runner = deterministic::Runner::new(cfg);
     let ((baseline, candidate), checkpoint) = runner.start_and_recover(move |context| {
         let fault_config = context.storage_fault_config();
         let pending = PendingSyncs::default();
@@ -174,7 +179,7 @@ fn run(input: &FuzzInput, mode: PartialWriteMode) {
     // Metadata::init performs no write_at and no remove, so those fault arms are inert
     // here. The faulted pass draws a fresh mutation per chained attempt, so an inert
     // draw dilutes one link of the chain instead of wasting the whole pass.
-    let checkpoint = faulted_recovery(checkpoint, input.seed, |context| async move {
+    let checkpoint = faulted_recovery(checkpoint, |context| async move {
         Metadata::<_, U64, Vec<u8>>::init(context.child("faulted_recovery"), config()).await
     });
 

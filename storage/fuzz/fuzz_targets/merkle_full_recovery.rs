@@ -14,10 +14,10 @@ use commonware_storage::merkle::{
     hasher::Standard as StandardHasher, mem::Mem, mmb, mmr,
 };
 use commonware_storage_fuzz::{
-    bounded_buffer, bounded_items, bounded_nonzero_rate, bounded_page_cache_size,
+    bounded_buffer, bounded_entropy, bounded_items, bounded_nonzero_rate, bounded_page_cache_size,
     bounded_page_size, faulted_recovery,
 };
-use commonware_utils::{NZU64, Probability};
+use commonware_utils::{FuzzRng, NZU64, Probability};
 use libfuzzer_sys::fuzz_target;
 use std::num::{NonZeroU16, NonZeroUsize};
 
@@ -47,8 +47,6 @@ enum MerkleOperation {
 /// Fuzz input containing fault injection parameters and operations.
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {
-    /// Seed for deterministic execution.
-    seed: u64,
     /// Page size for buffer pool.
     #[arbitrary(with = bounded_page_size)]
     page_size: u16,
@@ -71,6 +69,10 @@ struct FuzzInput {
     write_config: deterministic::WriteConfig,
     /// Sequence of operations to execute.
     operations: Vec<MerkleOperation>,
+    /// Byte stream driving the runtime rng: all in-run randomness, fault sampling, and the
+    /// faulted recovery chain's depth and shapes.
+    #[arbitrary(with = bounded_entropy)]
+    entropy: Vec<u8>,
 }
 
 fn merkle_config(
@@ -259,8 +261,9 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
     let items_per_blob = input.items_per_blob;
     let write_buffer = NonZeroUsize::new(input.write_buffer).unwrap();
     let replay_buffer = NonZeroUsize::new(input.replay_buffer).unwrap();
-    let cfg = deterministic::Config::default().with_seed(input.seed);
-    let partition_suffix = format!("crash-{suffix}-{}", input.seed);
+    let cfg =
+        deterministic::Config::default().with_rng(Box::new(FuzzRng::new(input.entropy.clone())));
+    let partition_suffix = format!("crash-{suffix}");
     let runner = deterministic::Runner::new(cfg);
     let operations = input.operations.clone();
     let sync_failure_rate = input.sync_failure_rate;
@@ -300,7 +303,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
     });
 
     let recovery_partition_suffix = partition_suffix.clone();
-    let checkpoint = faulted_recovery(checkpoint, input.seed, move |ctx| {
+    let checkpoint = faulted_recovery(checkpoint, move |ctx| {
         let recovery_partition_suffix = recovery_partition_suffix.clone();
         async move {
             let hasher = StandardHasher::<Sha256>::new(ForwardFold);

@@ -25,57 +25,57 @@ rand_core.workspace = true
 bench = false
 
 [[bin]]
-name = "qmdb_unordered_operations"
-path = "fuzz_targets/qmdb_unordered_operations.rs"
+name = "qmdb_any_unordered_operations"
+path = "fuzz_targets/qmdb_any_unordered_operations.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "qmdb_unordered_batch_root"
-path = "fuzz_targets/qmdb_unordered_batch_root.rs"
+name = "qmdb_any_unordered_batch_root"
+path = "fuzz_targets/qmdb_any_unordered_batch_root.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "qmdb_ordered_operations"
-path = "fuzz_targets/qmdb_ordered_operations.rs"
+name = "qmdb_any_ordered_operations"
+path = "fuzz_targets/qmdb_any_ordered_operations.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "qmdb_ordered_batching"
-path = "fuzz_targets/qmdb_ordered_batching.rs"
+name = "qmdb_any_ordered_batching"
+path = "fuzz_targets/qmdb_any_ordered_batching.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "archive_operations"
-path = "fuzz_targets/archive_operations.rs"
+name = "archive_prunable_operations"
+path = "fuzz_targets/archive_prunable_operations.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "segmented_variable_recovery"
-path = "fuzz_targets/segmented_variable_recovery.rs"
+name = "journal_segmented_variable_recovery"
+path = "fuzz_targets/journal_segmented_variable_recovery.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "prunable_archive_recovery"
-path = "fuzz_targets/prunable_archive_recovery.rs"
+name = "archive_prunable_recovery"
+path = "fuzz_targets/archive_prunable_recovery.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "immutable_archive_recovery"
-path = "fuzz_targets/immutable_archive_recovery.rs"
+name = "archive_immutable_recovery"
+path = "fuzz_targets/archive_immutable_recovery.rs"
 test = false
 doc = false
 bench = false
@@ -109,22 +109,22 @@ doc = false
 bench = false
 
 [[bin]]
-name = "fixed_journal_operations"
-path = "fuzz_targets/fixed_journal_operations.rs"
+name = "journal_fixed_operations"
+path = "fuzz_targets/journal_fixed_operations.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "ordered_index_operations"
-path = "fuzz_targets/ordered_index_operations.rs"
+name = "index_ordered_operations"
+path = "fuzz_targets/index_ordered_operations.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "unordered_index_operations"
-path = "fuzz_targets/unordered_index_operations.rs"
+name = "index_unordered_operations"
+path = "fuzz_targets/index_unordered_operations.rs"
 test = false
 doc = false
 bench = false
@@ -151,29 +151,29 @@ doc = false
 bench = false
 
 [[bin]]
-name = "current_unordered_operations"
-path = "fuzz_targets/current_unordered_operations.rs"
+name = "qmdb_current_unordered_operations"
+path = "fuzz_targets/qmdb_current_unordered_operations.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "current_mmb_prune_grow"
-path = "fuzz_targets/current_mmb_prune_grow.rs"
+name = "qmdb_current_mmb_prune_grow"
+path = "fuzz_targets/qmdb_current_mmb_prune_grow.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "current_unordered_batch_root"
-path = "fuzz_targets/current_unordered_batch_root.rs"
+name = "qmdb_current_unordered_batch_root"
+path = "fuzz_targets/qmdb_current_unordered_batch_root.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "current_ordered_operations"
-path = "fuzz_targets/current_ordered_operations.rs"
+name = "qmdb_current_ordered_operations"
+path = "fuzz_targets/qmdb_current_ordered_operations.rs"
 test = false
 doc = false
 bench = false
@@ -193,15 +193,15 @@ doc = false
 bench = false
 
 [[bin]]
-name = "qmdb_keyless"
-path = "fuzz_targets/qmdb_keyless.rs"
+name = "qmdb_keyless_operations"
+path = "fuzz_targets/qmdb_keyless_operations.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "store_operations"
-path = "fuzz_targets/store_operations.rs"
+name = "qmdb_store_operations"
+path = "fuzz_targets/qmdb_store_operations.rs"
 test = false
 doc = false
 bench = false
@@ -214,22 +214,22 @@ doc = false
 bench = false
 
 [[bin]]
-name = "merkle_full"
-path = "fuzz_targets/merkle_full.rs"
+name = "merkle_full_operations"
+path = "fuzz_targets/merkle_full_operations.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "mmr_bitmap"
-path = "fuzz_targets/mmr_bitmap.rs"
+name = "bitmap_operations"
+path = "fuzz_targets/bitmap_operations.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "qmdb_immutable"
-path = "fuzz_targets/qmdb_immutable.rs"
+name = "qmdb_immutable_operations"
+path = "fuzz_targets/qmdb_immutable_operations.rs"
 test = false
 doc = false
 bench = false
@@ -242,22 +242,22 @@ doc = false
 bench = false
 
 [[bin]]
-name = "verify_proof"
-path = "fuzz_targets/verify_proof.rs"
+name = "qmdb_verify_proof"
+path = "fuzz_targets/qmdb_verify_proof.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "range_proof"
-path = "fuzz_targets/range_proof.rs"
+name = "merkle_range_proof"
+path = "fuzz_targets/merkle_range_proof.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "proof_store"
-path = "fuzz_targets/proof_store.rs"
+name = "merkle_proof_store"
+path = "fuzz_targets/merkle_proof_store.rs"
 test = false
 doc = false
 bench = false
@@ -270,15 +270,15 @@ doc = false
 bench = false
 
 [[bin]]
-name = "oversized_recovery"
-path = "fuzz_targets/oversized_recovery.rs"
+name = "journal_oversized_recovery"
+path = "fuzz_targets/journal_oversized_recovery.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "journal_crash_recovery"
-path = "fuzz_targets/journal_crash_recovery.rs"
+name = "journal_contiguous_recovery"
+path = "fuzz_targets/journal_contiguous_recovery.rs"
 test = false
 doc = false
 bench = false
@@ -291,22 +291,22 @@ doc = false
 bench = false
 
 [[bin]]
-name = "queue_crash_recovery"
-path = "fuzz_targets/queue_crash_recovery.rs"
+name = "queue_recovery"
+path = "fuzz_targets/queue_recovery.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "merkle_full_crash_recovery"
-path = "fuzz_targets/merkle_full_crash_recovery.rs"
+name = "merkle_full_recovery"
+path = "fuzz_targets/merkle_full_recovery.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "current_crash_recovery"
-path = "fuzz_targets/current_crash_recovery.rs"
+name = "qmdb_current_recovery"
+path = "fuzz_targets/qmdb_current_recovery.rs"
 test = false
 doc = false
 bench = false

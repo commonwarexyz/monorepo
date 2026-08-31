@@ -16,8 +16,8 @@ use commonware_storage::{
     rmap::RMap,
     translator::EightCap,
 };
-use commonware_storage_fuzz::{faulted_recovery, release_oldest_pending_sync};
-use commonware_utils::{NZUsize, Probability, sequence::FixedBytes};
+use commonware_storage_fuzz::{bounded_entropy, faulted_recovery, release_oldest_pending_sync};
+use commonware_utils::{FuzzRng, NZUsize, Probability, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -34,7 +34,6 @@ const VALUE_CHECKSUM_SIZE: usize = 4;
 
 #[derive(Arbitrary, Clone, Debug)]
 struct FuzzInput {
-    seed: u64,
     count: u8,
     items_per_section: u8,
     retention: u8,
@@ -46,6 +45,10 @@ struct FuzzInput {
     /// Shape of the faulted crash: an abandoned sync request, an interrupted blocking sync,
     /// or an interrupted prune.
     final_op: u8,
+    /// Byte stream driving the runtime rng: all in-run randomness, fault sampling, and the
+    /// faulted recovery chain's depth and shapes.
+    #[arbitrary(with = bounded_entropy)]
+    entropy: Vec<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -430,7 +433,9 @@ fn fuzz(input: FuzzInput) {
     let baseline = intended[..baseline_count].to_vec();
     let first_phase_entries = intended.clone();
     let first_phase_input = input.clone();
-    let runner = deterministic::Runner::new(deterministic::Config::default().with_seed(input.seed));
+    let cfg =
+        deterministic::Config::default().with_rng(Box::new(FuzzRng::new(input.entropy.clone())));
+    let runner = deterministic::Runner::new(cfg);
     let ((durable, exempt_below, pruned), checkpoint) =
         runner.start_and_recover(move |context| async move {
             let fault_config = context.storage_fault_config();
@@ -605,7 +610,7 @@ fn fuzz(input: FuzzInput) {
             (durable, exempt_below, pruned)
         });
 
-    let checkpoint = faulted_recovery(checkpoint, input.seed, move |context| async move {
+    let checkpoint = faulted_recovery(checkpoint, move |context| async move {
         TestArchive::init(
             context.child("faulted_recovery"),
             config(&context, items_per_section),

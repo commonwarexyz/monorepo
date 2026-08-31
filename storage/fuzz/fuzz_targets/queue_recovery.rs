@@ -12,10 +12,10 @@ use arbitrary::Arbitrary;
 use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::queue::{Config, Queue};
 use commonware_storage_fuzz::{
-    bounded_buffer, bounded_items, bounded_nonzero_rate, bounded_page_cache_size,
+    bounded_buffer, bounded_entropy, bounded_items, bounded_nonzero_rate, bounded_page_cache_size,
     bounded_page_size, faulted_recovery,
 };
-use commonware_utils::Probability;
+use commonware_utils::{FuzzRng, Probability};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::BTreeMap,
@@ -51,8 +51,6 @@ enum QueueOperation {
 /// Fuzz input containing fault injection parameters and operations.
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {
-    /// Seed for deterministic execution.
-    seed: u64,
     /// Page size for buffer pool.
     #[arbitrary(with = bounded_page_size)]
     page_size: u16,
@@ -75,6 +73,10 @@ struct FuzzInput {
     write_config: deterministic::WriteConfig,
     /// Sequence of operations to execute.
     operations: Vec<QueueOperation>,
+    /// Byte stream driving the runtime rng: all in-run randomness, fault sampling, and the
+    /// faulted recovery chain's depth and shapes.
+    #[arbitrary(with = bounded_entropy)]
+    entropy: Vec<u8>,
 }
 
 /// Tracking state for verifying recovery.
@@ -482,8 +484,9 @@ fn fuzz(input: FuzzInput) {
     let items_per_section = NonZeroU64::new(input.items_per_section).unwrap();
     let write_buffer = NonZeroUsize::new(input.write_buffer).unwrap();
     let replay_buffer = NonZeroUsize::new(input.replay_buffer).unwrap();
-    let cfg = deterministic::Config::default().with_seed(input.seed);
-    let partition_name = format!("queue-crash-recovery-{}", input.seed);
+    let cfg =
+        deterministic::Config::default().with_rng(Box::new(FuzzRng::new(input.entropy.clone())));
+    let partition_name = "queue-crash-recovery".to_string();
     let operations = input.operations.clone();
     let sync_failure_rate = input.sync_failure_rate;
     let write_config = input.write_config;
@@ -522,7 +525,7 @@ fn fuzz(input: FuzzInput) {
     });
 
     let recovery_partition = partition_name.clone();
-    let checkpoint = faulted_recovery(checkpoint, input.seed, move |ctx| {
+    let checkpoint = faulted_recovery(checkpoint, move |ctx| {
         let recovery_partition = recovery_partition.clone();
         async move {
             let queue_cfg = Config {

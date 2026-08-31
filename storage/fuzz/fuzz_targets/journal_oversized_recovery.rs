@@ -21,8 +21,8 @@ use commonware_storage::{
     },
     metadata::{Config as MetadataConfig, Metadata},
 };
-use commonware_storage_fuzz::{faulted_recovery, release_oldest_pending_sync};
-use commonware_utils::{NZU16, NZUsize, Probability, sequence::U64};
+use commonware_storage_fuzz::{bounded_entropy, faulted_recovery, release_oldest_pending_sync};
+use commonware_utils::{FuzzRng, NZU16, NZUsize, Probability, sequence::U64};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -102,7 +102,6 @@ type TestValue = [u8; 16];
 
 #[derive(Arbitrary, Clone, Debug)]
 struct FuzzInput {
-    seed: u64,
     count: u8,
     retention: u8,
     subset: bool,
@@ -123,6 +122,10 @@ struct FuzzInput {
     /// Shape of the faulted crash: flush everything then abandon the requests, interrupt a
     /// blocking sync mid-flight, or abandon a tracked prune mid-flight.
     final_op: u8,
+    /// Byte stream driving the runtime rng: all in-run randomness, fault sampling, and the
+    /// faulted recovery chain's depth and shapes.
+    #[arbitrary(with = bounded_entropy)]
+    entropy: Vec<u8>,
 }
 
 fn config(pooler: &impl BufferPooler) -> Config<()> {
@@ -442,7 +445,9 @@ fn fuzz(input: FuzzInput) {
     let flushed_all = final_op.is_multiple_of(4) || (!tracked && final_op % 4 == 3);
 
     let first_phase_input = input.clone();
-    let runner = deterministic::Runner::new(deterministic::Config::default().with_seed(input.seed));
+    let cfg =
+        deterministic::Config::default().with_rng(Box::new(FuzzRng::new(input.entropy.clone())));
+    let runner = deterministic::Runner::new(cfg);
     let ((durable, model), checkpoint) = runner.start_and_recover(move |context| async move {
         let fault_config = context.storage_fault_config();
         let pending = PendingSyncs::default();
@@ -710,11 +715,11 @@ fn fuzz(input: FuzzInput) {
     });
 
     let checkpoint = if tracked {
-        faulted_recovery(checkpoint, input.seed, |context| async move {
+        faulted_recovery(checkpoint, |context| async move {
             init_tracked(context.child("faulted_recovery"), config(&context)).await
         })
     } else {
-        faulted_recovery(checkpoint, input.seed, |context| async move {
+        faulted_recovery(checkpoint, |context| async move {
             Oversized::<_, TestEntry, TestValue>::init(
                 context.child("faulted_recovery"),
                 config(&context),

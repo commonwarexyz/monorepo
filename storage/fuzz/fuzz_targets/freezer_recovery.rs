@@ -10,8 +10,8 @@ use commonware_runtime::{
     deterministic::{self, PartialWriteMode, WriteConfig},
 };
 use commonware_storage::freezer::{Config, Freezer, Identifier};
-use commonware_storage_fuzz::faulted_recovery;
-use commonware_utils::{NZU16, NZUsize, Probability, sequence::FixedBytes};
+use commonware_storage_fuzz::{bounded_entropy, faulted_recovery};
+use commonware_utils::{FuzzRng, NZU16, NZUsize, Probability, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 
 type Key = FixedBytes<32>;
@@ -32,7 +32,6 @@ enum CrashKind {
 
 #[derive(Arbitrary, Clone, Debug)]
 struct FuzzInput {
-    seed: u64,
     path: WritePath,
     crash: CrashKind,
     retention: u8,
@@ -42,6 +41,10 @@ struct FuzzInput {
     /// Deepen the checkpointed baseline with filler puts and syncs that complete
     /// a table resize and roll past one value section before the crash scenario.
     deepen: bool,
+    /// Byte stream driving the runtime rng: all in-run randomness, fault sampling, and the
+    /// faulted recovery chain's depth and shapes.
+    #[arbitrary(with = bounded_entropy)]
+    entropy: Vec<u8>,
 }
 
 /// Build the deterministic Freezer configuration used by the recovery scenario.
@@ -117,7 +120,9 @@ async fn assert_values<E: commonware_storage::Context>(
 /// Run one crash/recovery scenario for the selected partial-write mode.
 fn run(input: &FuzzInput, mode: PartialWriteMode) {
     let phase_input = input.clone();
-    let runner = deterministic::Runner::new(deterministic::Config::default().with_seed(input.seed));
+    let cfg =
+        deterministic::Config::default().with_rng(Box::new(FuzzRng::new(input.entropy.clone())));
+    let runner = deterministic::Runner::new(cfg);
     let ((freezer_checkpoint, baseline, candidate_cursors), runtime_checkpoint) = runner
         .start_and_recover(move |context| async move {
             // Build a checkpointed baseline. The resize case deliberately leaves a bounded resize
@@ -245,15 +250,14 @@ fn run(input: &FuzzInput, mode: PartialWriteMode) {
             (freezer_checkpoint, baseline, candidate_cursors)
         });
 
-    let runtime_checkpoint =
-        faulted_recovery(runtime_checkpoint, input.seed, move |context| async move {
-            Freezer::<_, Key, i32>::init(
-                context.child("faulted_recovery"),
-                config(&context),
-                Some(freezer_checkpoint),
-            )
-            .await
-        });
+    let runtime_checkpoint = faulted_recovery(runtime_checkpoint, move |context| async move {
+        Freezer::<_, Key, i32>::init(
+            context.child("faulted_recovery"),
+            config(&context),
+            Some(freezer_checkpoint),
+        )
+        .await
+    });
 
     deterministic::Runner::from(runtime_checkpoint).start(move |context| async move {
         *context.storage_fault_config().write() = deterministic::FaultConfig::default();

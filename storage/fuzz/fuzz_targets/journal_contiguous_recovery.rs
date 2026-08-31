@@ -60,9 +60,10 @@ use commonware_storage::journal::{
     },
 };
 use commonware_storage_fuzz::{
-    bounded_buffer, bounded_items, bounded_page_cache_size, bounded_page_size, faulted_recovery,
+    bounded_buffer, bounded_entropy, bounded_items, bounded_page_cache_size, bounded_page_size,
+    faulted_recovery,
 };
-use commonware_utils::{NZU64, NZUsize, Probability, probability, sequence::FixedBytes};
+use commonware_utils::{FuzzRng, NZU64, NZUsize, Probability, probability, sequence::FixedBytes};
 use futures::StreamExt;
 use libfuzzer_sys::fuzz_target;
 use std::{
@@ -142,8 +143,6 @@ enum JournalOperation {
 struct FuzzInput {
     /// Which journal type to test.
     journal_type: JournalType,
-    /// Seed for deterministic execution.
-    seed: u64,
     /// Page size for buffer pool.
     #[arbitrary(with = bounded_page_size)]
     page_size: u16,
@@ -174,6 +173,10 @@ struct FuzzInput {
     /// `Reset` marker.
     #[arbitrary(with = bounded_operations)]
     operations: Vec<JournalOperation>,
+    /// Byte stream driving the runtime rng: all in-run randomness, fault sampling, and the
+    /// faulted recovery chain's depth and shapes.
+    #[arbitrary(with = bounded_entropy)]
+    entropy: Vec<u8>,
 }
 
 /// Journal config plus fault-injection rates, shared by every cycle.
@@ -188,7 +191,6 @@ struct Params {
     sync_rate: Probability,
     resize_rate: Probability,
     partial_resize_rate: Probability,
-    recovery_seed: u64,
 }
 
 impl Params {
@@ -948,21 +950,21 @@ where
 
 /// Attempt journal recovery under storage faults and return its crash checkpoint.
 ///
-/// `cycle` varies the fault selectors per restart, so a multi-cycle run can hit a different
-/// mutation class (write, sync, resize, or remove) at each recovery. With `reset`, the attempt
-/// runs `init_at_size(target)` instead of `init`, planting a staged clear that the crash can
+/// Each restart draws fresh fault selectors from the runtime rng carried by the
+/// checkpoint, so a multi-cycle run can hit a different mutation class (write, sync,
+/// resize, or remove) at each recovery. With `reset`, the attempt runs
+/// `init_at_size(target)` instead of `init`, planting a staged clear that the crash can
 /// interrupt anywhere: before the intent is durable, mid-clear, or after completion.
 fn faulted_restart<J: FuzzJournal + Send + 'static>(
     checkpoint: deterministic::Checkpoint,
     partition: String,
     params: Params,
-    cycle: u64,
     reset: Option<u64>,
 ) -> deterministic::Checkpoint
 where
     J::Config: Send,
 {
-    faulted_recovery(checkpoint, params.recovery_seed ^ cycle, move |ctx| {
+    faulted_recovery(checkpoint, move |ctx| {
         let partition = partition.clone();
         async move {
             let cfg = J::config(&partition, &ctx, &params);
@@ -1022,15 +1024,15 @@ where
         sync_rate: input.sync_failure_rate,
         resize_rate: input.resize_failure_rate,
         partial_resize_rate: input.partial_resize_rate,
-        recovery_seed: input.seed,
     };
-    let partition = format!("crash-recovery-{tag}-{}", input.seed);
+    let partition = format!("crash-recovery-{tag}");
     let cycles = split_into_cycles(&input.operations);
 
     // First cycle starts from a fresh runtime and recovers an empty journal, so the expectation is
     // empty too.
-    let mut runner =
-        deterministic::Runner::new(deterministic::Config::default().with_seed(input.seed));
+    let cfg =
+        deterministic::Config::default().with_rng(Box::new(FuzzRng::new(input.entropy.clone())));
+    let mut runner = deterministic::Runner::new(cfg);
     let mut expected = Expected::default();
     for (i, cycle) in cycles.iter().enumerate() {
         let (next, checkpoint) =
@@ -1043,8 +1045,7 @@ where
             Some(Recovery::Reset { target, .. }) => Some(target),
             _ => None,
         };
-        let checkpoint =
-            faulted_restart::<J>(checkpoint, partition.clone(), params, i as u64, reset);
+        let checkpoint = faulted_restart::<J>(checkpoint, partition.clone(), params, reset);
         runner = deterministic::Runner::from(checkpoint);
     }
 
