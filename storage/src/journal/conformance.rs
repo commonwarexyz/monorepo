@@ -319,15 +319,13 @@ impl StorageWorkload for SegmentedOversizedWorkload {
             index_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             index_write_buffer: WRITE_BUFFER,
             value_write_buffer: WRITE_BUFFER,
+            replay_buffer: REPLAY_BUFFER,
             compression: None,
             codec_config: (RangeCfg::new(0..256), ()),
         };
-        let mut journal = oversized::Oversized::<_, TestEntry, Vec<u8>>::init(
-            context.child("journal"),
-            config,
-            None,
-        )
-        .await?;
+        let mut journal =
+            oversized::Oversized::<_, TestEntry, Vec<u8>>::init(context.child("journal"), config)
+                .await?;
 
         let items_count = context.random_range(0..(ITEMS_PER_BLOB.get() as usize) * 4);
         let mut data_to_write = vec![Vec::new(); items_count];

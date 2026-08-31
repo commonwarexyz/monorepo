@@ -29,10 +29,10 @@ impl Barrier {
 
     /// Observe the outcome of the last started sync without blocking.
     fn observe(&mut self) {
-        let Some((boundary, completion)) = &self.pending else {
+        let Some((boundary, completion)) = &mut self.pending else {
             return;
         };
-        let Some(result) = completion.clone().now_or_never() else {
+        let Some(result) = completion.now_or_never() else {
             return;
         };
         if result.is_ok() {
@@ -42,6 +42,13 @@ impl Barrier {
         // The layer that started a failed sync owns surfacing the failure. A failed observation
         // cannot advance this proof, so retaining it here would add no information.
         self.pending = None;
+    }
+
+    /// Whether no recorded sync remains unobserved.
+    ///
+    /// Call [Self::boundary] first to observe a completion that already resolved.
+    pub(crate) const fn settled(&self) -> bool {
+        self.pending.is_none()
     }
 
     /// Record that everything below `boundary` was proven durable.

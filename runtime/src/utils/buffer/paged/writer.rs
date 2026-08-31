@@ -51,6 +51,7 @@ use crate::{
 };
 use bytes::BufMut;
 use commonware_cryptography::Crc32;
+use commonware_utils::Widen;
 use std::num::{NonZeroU16, NonZeroUsize};
 use tracing::warn;
 
@@ -143,11 +144,12 @@ impl<B: Blob> Writer<B> {
         capacity: usize,
         cache_ref: CacheRef,
     ) -> Result<Self, Error> {
+        let page_size: u64 = cache_ref.page_size().widen();
         let (partial_page_state, pages, invalid_data_found) =
-            Self::read_last_valid_page(&blob, original_blob_size, cache_ref.page_size()).await?;
+            Self::read_last_valid_page(&blob, original_blob_size, page_size).await?;
         if invalid_data_found {
             // Invalid data was detected, trim it from the blob.
-            let new_blob_size = pages * (cache_ref.page_size() + CHECKSUM_SIZE);
+            let new_blob_size = pages * (page_size + CHECKSUM_SIZE);
             warn!(
                 original_blob_size,
                 new_blob_size, "truncating blob to remove invalid data"
@@ -156,7 +158,7 @@ impl<B: Blob> Writer<B> {
             blob.sync().await?;
         }
 
-        let capacity = adjusted_capacity(capacity, cache_ref.page_size());
+        let capacity = adjusted_capacity(capacity, page_size);
         let needs_sync = !invalid_data_found; // ensure pending writes on the wrapped blob are synced
 
         let (current_page, partial_page_state, partial_data) = match partial_page_state {
@@ -165,7 +167,7 @@ impl<B: Blob> Writer<B> {
         };
 
         let buffer = Buffer::from(
-            current_page * cache_ref.page_size(),
+            current_page * page_size,
             partial_data.unwrap_or_default(),
             capacity,
             cache_ref.pool().clone(),
@@ -263,7 +265,7 @@ impl<B: Blob> Writer<B> {
     /// Append all bytes in `buf` to the tip of the blob, returning the logical offset at which
     /// the first byte was written.
     pub async fn append(&mut self, buf: &[u8]) -> Result<u64, Error> {
-        let page_size = self.cache_ref.page_size() as usize;
+        let page_size: usize = self.cache_ref.page_size().widen();
 
         // Bypass the write buffer and write whole pages directly when `buf` is large.
         if too_big_for_buffer(
@@ -288,7 +290,7 @@ impl<B: Blob> Writer<B> {
     /// blob, and leave only a sub-page suffix in the write buffer. This avoids copying full-page
     /// payloads while preserving the invariant that the buffer starts at `current_page`.
     pub async fn append_owned(&mut self, buf: IoBuf) -> Result<u64, Error> {
-        let page_size = self.cache_ref.page_size() as usize;
+        let page_size: usize = self.cache_ref.page_size().widen();
         let offset = self.buffer.size();
 
         // Buffer the append unless `buf` is too big for the buffer.
@@ -364,13 +366,11 @@ impl<B: Blob> Writer<B> {
         self.buffer.replace(boundary + bulk_len as u64, suffix);
 
         // Make sure the buffer offset and underlying blob agree on the state of the tip.
-        assert_eq!(
-            self.current_page * self.cache_ref.page_size(),
-            self.buffer.offset
-        );
+        let page_size: u64 = self.cache_ref.page_size().widen();
+        assert_eq!(self.current_page * page_size, self.buffer.offset);
 
-        let physical_page_size = page_size as u64 + CHECKSUM_SIZE;
-        let write_at_offset = boundary / page_size as u64 * physical_page_size;
+        let physical_page_size = page_size + CHECKSUM_SIZE;
+        let write_at_offset = boundary / page_size * physical_page_size;
         self.sync_state
             .write_at(
                 &self.blob,
@@ -398,7 +398,7 @@ impl<B: Blob> Writer<B> {
 
     /// Whether a flush would emit any physical page write.
     fn has_flush_work(&self, write_partial_page: bool) -> bool {
-        let page_size = self.cache_ref.page_size() as usize;
+        let page_size: usize = self.cache_ref.page_size().widen();
         let full_pages = self.buffer.len() / page_size;
         if full_pages > 0 {
             return true;
@@ -460,7 +460,7 @@ impl<B: Blob> Writer<B> {
 
         // Split buffered bytes into full logical pages to hand off now, leaving any trailing
         // partial page in tip for continued buffering.
-        let page_size = self.cache_ref.page_size() as usize;
+        let page_size: usize = self.cache_ref.page_size().widen();
         let pages_to_cache = self.buffer.len() / page_size;
         let bytes_to_drain = pages_to_cache * page_size;
 
@@ -510,7 +510,8 @@ impl<B: Blob> Writer<B> {
         };
 
         // Make sure the buffer offset and underlying blob agree on the state of the tip.
-        assert_eq!(self.current_page * self.cache_ref.page_size(), new_offset);
+        let page_size: u64 = self.cache_ref.page_size().widen();
+        assert_eq!(self.current_page * page_size, new_offset);
 
         // Rewriting a physical page resubmits its durable bytes and protected checksum
         // unchanged, so a torn write leaves the durable state recoverable.
@@ -640,7 +641,7 @@ impl<B: Blob> Writer<B> {
         flushed: Option<&ActiveChecksum>,
         durable: Option<&ActiveChecksum>,
     ) -> (IoBufs, Option<ActiveChecksum>) {
-        let page_size = self.cache_ref.page_size() as usize;
+        let page_size: usize = self.cache_ref.page_size().widen();
         let physical_page_size = page_size + CHECKSUM_SIZE as usize;
         let pages_to_write = buffer.len() / page_size;
         let mut write_buffer = IoBufs::default();
@@ -696,7 +697,7 @@ impl<B: Blob> Writer<B> {
         old_checksum: Option<&ActiveChecksum>,
         write_buffer: &mut IoBufs,
     ) {
-        let page_size = self.cache_ref.page_size() as usize;
+        let page_size: usize = self.cache_ref.page_size().widen();
         let pages = data.len() / page_size;
         debug_assert!(pages > 0);
         debug_assert_eq!(data.len() % page_size, 0);
@@ -847,8 +848,8 @@ impl<B: Blob> Writer<B> {
         buffer_size: NonZeroUsize,
         read_options: ReadOptions,
     ) -> Result<Replay<B>, Error> {
-        let page_size = self.cache_ref.page_size();
-        let page_size_nz = NonZeroU16::new(page_size as u16).expect("page_size is non-zero");
+        let page_size_nz = self.cache_ref.page_size();
+        let page_size: u64 = page_size_nz.widen();
 
         // Flush any buffered data (without fsync) so the reader sees all written data.
         self.flush_internal(true, false).await?;
@@ -953,7 +954,7 @@ impl<B: Blob> Writer<B> {
         buffer_size: NonZeroUsize,
         read_options: ReadOptions,
     ) -> Result<u64, Error> {
-        let logical_page_size = self.cache_ref.page_size();
+        let logical_page_size: u64 = self.cache_ref.page_size().widen();
         let total_pages = self.current_page + u64::from(self.partial_page_state.is_some());
         let physical_page_size = logical_page_size
             .checked_add(CHECKSUM_SIZE)
@@ -1008,6 +1009,121 @@ impl<B: Blob> Writer<B> {
         Ok(valid_len)
     }
 
+    /// Read and validate one page, returning its logical bytes and the range they cover.
+    async fn read_page(
+        blob: &B,
+        page: u64,
+        page_size: u64,
+        read_options: ReadOptions,
+    ) -> Result<(IoBuf, u64, u64), Error> {
+        let (logical, _) =
+            super::get_page_with_checksum_from_blob(blob, page, page_size, read_options).await?;
+        let start = page.checked_mul(page_size).ok_or(Error::OffsetOverflow)?;
+        let len = u64::try_from(logical.len()).map_err(|_| Error::OffsetOverflow)?;
+        let end = start.checked_add(len).ok_or(Error::OffsetOverflow)?;
+        Ok((logical, start, end))
+    }
+
+    /// Read a logical range directly from a raw paged blob, validating every page it spans.
+    ///
+    /// Returns [Error::BlobInsufficientLength] when valid page contents do not cover the whole
+    /// range, and [Error::OffsetOverflow] when its end or page offsets overflow.
+    pub async fn read_range(
+        blob: &B,
+        logical_page_size: NonZeroU16,
+        offset: u64,
+        len: usize,
+        read_options: ReadOptions,
+    ) -> Result<IoBufs, Error> {
+        // Resolve the requested range before allocating or reading any pages.
+        let len_u64 = u64::try_from(len).map_err(|_| Error::OffsetOverflow)?;
+        let end = offset.checked_add(len_u64).ok_or(Error::OffsetOverflow)?;
+        if len == 0 {
+            return Ok(IoBufs::default());
+        }
+
+        // Identify the inclusive logical page range spanning the requested bytes.
+        let logical_page_size: u64 = logical_page_size.widen();
+        let first_page = offset / logical_page_size;
+        let last_page = (end - 1) / logical_page_size;
+        let mut out = IoBufs::default();
+
+        // Validate every spanning page and append only its intersection with the requested range.
+        for page in first_page..=last_page {
+            let (logical, page_start, page_end) =
+                Self::read_page(blob, page, logical_page_size, read_options).await?;
+            let overlap_start = offset.max(page_start);
+            let overlap_end = end.min(page_end);
+            if overlap_start >= overlap_end {
+                return Err(Error::BlobInsufficientLength);
+            }
+            let start = (overlap_start - page_start) as usize;
+            let end = (overlap_end - page_start) as usize;
+            out.append(logical.slice(start..end));
+        }
+
+        // A short terminal page can leave the requested range only partially covered.
+        if out.len() != len {
+            return Err(Error::BlobInsufficientLength);
+        }
+        Ok(out)
+    }
+
+    /// Read the terminal logical range of a raw paged blob and return its logical size.
+    ///
+    /// The blob must contain only complete physical pages. The last page is validated first to
+    /// determine the logical end. If `len` crosses a page boundary, preceding pages are validated
+    /// with [Self::read_range].
+    pub async fn read_tail(
+        blob: &B,
+        physical_size: u64,
+        logical_page_size: NonZeroU16,
+        len: usize,
+        read_options: ReadOptions,
+    ) -> Result<(u64, IoBufs), Error> {
+        if physical_size == 0 {
+            return if len == 0 {
+                Ok((0, IoBufs::default()))
+            } else {
+                Err(Error::BlobInsufficientLength)
+            };
+        }
+
+        // A trailing partial page means the caller did not size the blob to complete physical
+        // pages, so there is no trusted terminal page to read the logical end from.
+        let page_size: u64 = logical_page_size.widen();
+        let physical_page_size = page_size
+            .checked_add(CHECKSUM_SIZE)
+            .ok_or(Error::OffsetOverflow)?;
+        if !physical_size.is_multiple_of(physical_page_size) {
+            return Err(Error::BlobInsufficientLength);
+        }
+
+        // The checksum length on the terminal page determines the blob's logical end.
+        let page = physical_size / physical_page_size - 1;
+        let (tail, page_start, logical_size) =
+            Self::read_page(blob, page, page_size, read_options).await?;
+        let len_u64 = u64::try_from(len).map_err(|_| Error::OffsetOverflow)?;
+        let offset = logical_size
+            .checked_sub(len_u64)
+            .ok_or(Error::BlobInsufficientLength)?;
+
+        // Read only the portion preceding the terminal page, then append its already-validated
+        // suffix. This keeps a terminal item wholly within the last page to one blob read.
+        let mut out = if offset < page_start {
+            let prefix_len =
+                usize::try_from(page_start - offset).map_err(|_| Error::OffsetOverflow)?;
+            Self::read_range(blob, logical_page_size, offset, prefix_len, read_options).await?
+        } else {
+            IoBufs::default()
+        };
+        let tail_start = usize::try_from(offset.max(page_start) - page_start)
+            .map_err(|_| Error::OffsetOverflow)?;
+        out.append(tail.slice(tail_start..));
+        assert_eq!(out.len(), len);
+        Ok((logical_size, out))
+    }
+
     /// Wait for any started sync to complete without starting a new sync.
     pub async fn wait_for_sync(&mut self) -> Result<(), Error> {
         self.sync_state.wait_for_pending().await
@@ -1043,7 +1159,7 @@ impl<B: Blob> Writer<B> {
 
     /// Coordinate the dispatch logic for shrinking the blob.
     async fn shrink(&mut self, target_size: u64) -> Result<(), Error> {
-        let page_size = self.cache_ref.page_size();
+        let page_size: u64 = self.cache_ref.page_size().widen();
         let physical_page_size = page_size
             .checked_add(CHECKSUM_SIZE)
             .ok_or(Error::OffsetOverflow)?;
@@ -1164,7 +1280,7 @@ impl<B: Blob> Writer<B> {
 
     /// Construct an immutable read handle for the current blob state.
     fn sealed_handle(&self, id: u64) -> super::Sealed<B> {
-        let page_size = self.cache_ref.page_size();
+        let page_size: u64 = self.cache_ref.page_size().widen();
         let full_pages = self.current_page;
         assert_eq!(
             full_pages.checked_mul(page_size),

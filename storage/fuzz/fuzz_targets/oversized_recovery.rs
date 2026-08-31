@@ -174,6 +174,7 @@ fn test_cfg(pooler: &impl BufferPooler) -> Config<()> {
         index_partition: INDEX_PARTITION.into(),
         value_partition: VALUE_PARTITION.into(),
         index_page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+        replay_buffer: NZUsize!(4096),
         index_write_buffer: NZUsize!(512),
         value_write_buffer: NZUsize!(512),
         compression: None,
@@ -189,7 +190,7 @@ fn fuzz(input: FuzzInput) {
 
         // Phase 1: Create valid data
         let mut oversized: Oversized<_, TestEntry, TestValue> =
-            Oversized::init(context.child("initial"), cfg.clone(), None)
+            Oversized::init(context.child("initial"), cfg.clone())
                 .await
                 .expect("Failed to init");
 
@@ -313,7 +314,7 @@ fn fuzz(input: FuzzInput) {
 
         // Phase 3: Recovery - this should not panic
         let mut recovered: Oversized<_, TestEntry, TestValue> =
-            match Oversized::init(context.child("recovered"), cfg.clone(), None).await {
+            match Oversized::init(context.child("recovered"), cfg.clone()).await {
                 Ok(recovered) => recovered,
                 // Existing-byte overwrites in the paged index can invalidate fixed-journal
                 // integrity checks before oversized recovery has a chance to inspect entries.
