@@ -122,6 +122,7 @@ jobs:
     - name: Run setup
       uses: ./.github/actions/setup
       with:
+        components: rustfmt
         additional-cache-key: ${{ matrix.flags || 'default' }}
         rust-cache-save: ${{ matrix.partition == 1 }}
         sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}

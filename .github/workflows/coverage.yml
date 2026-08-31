@@ -37,7 +37,7 @@ jobs:
       uses: ./.github/actions/setup
       with:
         additional-toolchain: ${{ env.NIGHTLY_VERSION }}
-        additional-components: llvm-tools-preview
+        additional-components: llvm-tools-preview,rustfmt
         additional-cache-key: ${{ matrix.flags || 'default' }}
         rust-cache-save: ${{ matrix.partition == 1 }}
         sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
