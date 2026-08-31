@@ -2708,7 +2708,7 @@ where
         level = "debug",
         skip_all,
         fields(
-            base_size = *self.last_commit_loc + 1,
+            base_size = *self.log.size(),
             inactivity_floor = *self.inactivity_floor_loc,
             active_keys = self.active_keys as u64,
         ),
@@ -2768,7 +2768,7 @@ where
         fields(
             batch_total_size = *batch.bounds.tip.size,
             batch_base_size = *batch.bounds.base.size,
-            db_size = *self.last_commit_loc + 1,
+            db_size = *self.log.size(),
             ancestor_batches = batch.ancestor_diffs.len() as u64,
         ),
     )]
@@ -2779,7 +2779,7 @@ where
         let _timer = self.metrics.apply_batch_timer();
         self.metrics.apply_batch_calls.inc();
         self.validate_batch(&batch)?;
-        let db_size = *self.last_commit_loc + 1;
+        let db_size = *self.log.size();
         let start_loc = Location::new(db_size);
 
         // Apply journal (handles its own partial ancestor skipping).
@@ -2858,19 +2858,17 @@ where
             // CommitFloor: bit = 1 only on the current last commit. Demote the previous and
             // set the new; earlier ancestor commits between them are already 0 from
             // `extend_to`.
-            bitmap.set_bit(*self.last_commit_loc, false);
+            bitmap.set_bit(db_size - 1, false);
             bitmap.set_bit(*batch.bounds.tip.size - 1, true);
         }
 
         // Update DB metadata.
         self.active_keys = batch.total_active_keys;
         self.inactivity_floor_loc = batch.bounds.inactivity_floor;
-        self.last_commit_loc = batch.bounds.tip.size - 1;
         self.root = batch.root();
 
         // Return range of operations that were written to the log.
-        let end_loc = self.last_commit_loc + 1;
-        let range = start_loc..end_loc;
+        let range = start_loc..batch.bounds.tip.size;
         self.update_metrics();
         self.metrics
             .operations_applied
@@ -2898,7 +2896,7 @@ where
         level = "info",
         skip_all,
         fields(
-            db_size = *self.last_commit_loc + 1,
+            db_size = *self.log.size(),
             inactivity_floor = *self.inactivity_floor_loc,
             active_keys = self.active_keys as u64,
         ),

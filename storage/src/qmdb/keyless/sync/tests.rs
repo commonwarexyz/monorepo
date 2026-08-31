@@ -987,7 +987,7 @@ pub(crate) mod harnesses {
             .iter()
             .filter(|op| matches!(op, Operation::Append(_)))
             .count() as u64;
-        let new_commit = Location::new(db.last_commit_loc().as_u64() + 1 + appends);
+        let new_commit = db.bounds().end + appends;
         let mut batch = db.new_batch();
         for op in ops {
             match op {

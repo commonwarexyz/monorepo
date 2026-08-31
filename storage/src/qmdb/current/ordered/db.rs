@@ -239,16 +239,17 @@ where
                 // The DB is empty. Use the last CommitFloor to prove emptiness. The Commit proof
                 // variant requires the CommitFloor's floor to equal its own location (genuinely
                 // empty at commit time). If this doesn't hold, the persisted state is inconsistent.
-                let op = self.any.log.read(*self.any.last_commit_loc).await?;
+                let last_commit_loc = self.any.log.size() - 1;
+                let op = self.any.log.read(*last_commit_loc).await?;
                 let Operation::CommitFloor(value, floor) = op else {
                     unreachable!("last_commit_loc should always point to a CommitFloor");
                 };
                 assert_eq!(
-                    floor, self.any.last_commit_loc,
+                    floor, last_commit_loc,
                     "inconsistent commit floor: expected last_commit_loc={}, got floor={}",
-                    self.any.last_commit_loc, floor
+                    last_commit_loc, floor
                 );
-                let op_proof = self.operation_proof(self.any.last_commit_loc).await?;
+                let op_proof = self.operation_proof(last_commit_loc).await?;
                 Ok(super::ExclusionProof::Commit(op_proof, value))
             }
         }

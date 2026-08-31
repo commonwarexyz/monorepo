@@ -2929,7 +2929,7 @@ mod bitmap_tests {
                 .unwrap();
             let (db, _) = db.apply_batch(b1).await.unwrap();
             let db = db.commit().await.unwrap();
-            let size_after_first = db.last_commit_loc + 1;
+            let size_after_first = db.bounds().end;
 
             let b2 = db
                 .new_batch()
@@ -2942,7 +2942,7 @@ mod bitmap_tests {
             // Setup sanity: both keys present, db has advanced past size_after_first.
             assert_eq!(db.get(&k1).await.unwrap(), Some(vec![10]));
             assert_eq!(db.get(&k2).await.unwrap(), Some(vec![20]));
-            assert!(*db.last_commit_loc + 1 > *size_after_first);
+            assert!(*db.bounds().end > *size_after_first);
 
             // Rewind to the state after the first commit.
             let db = db.rewind(size_after_first).await.unwrap();
