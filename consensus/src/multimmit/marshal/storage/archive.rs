@@ -327,6 +327,14 @@ where
         }
     }
 
+    /// Returns the highest retained index, if the archive is non-empty.
+    pub(in crate::multimmit::marshal) fn last_index(&self) -> Option<u64> {
+        match &self.0 {
+            Backend::Prunable(archive) => archive.last_index(),
+            Backend::Immutable(archive) => archive.last_index(),
+        }
+    }
+
     /// Buffers a value at an exact `(index, key)` identity.
     ///
     /// Repeating the same identity is idempotent. Reusing an occupied index with another key is
