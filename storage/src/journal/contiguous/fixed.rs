@@ -1181,6 +1181,22 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     }
 }
 
+/// Whether a batched read admits faulted pages into the page cache.
+#[derive(Clone, Copy)]
+enum Admission {
+    /// Cache faulted pages for future reads.
+    Admit,
+    /// Do not cache faulted pages.
+    #[cfg(not(any(
+        commonware_stability_BETA,
+        commonware_stability_GAMMA,
+        commonware_stability_DELTA,
+        commonware_stability_EPSILON,
+        commonware_stability_RESERVED
+    )))] // ALPHA
+    Bypass,
+}
+
 /// Implementation of [super::Mutable] for fixed-size value journals.
 ///
 /// # Repair
@@ -1205,6 +1221,20 @@ impl<E: Context, A: CodecFixedShared> std::fmt::Debug for Journal<E, A> {
 }
 
 impl<E: Context, A: CodecFixedShared> Journal<E, A> {
+    /// Like [`super::Contiguous::read_many`], but cache misses read from the blobs without
+    /// admitting pages into the page cache. Suited to bulk scans of items that will not be read
+    /// again soon: admission would churn the cache and serialize concurrent scanning tasks on its
+    /// lock.
+    #[commonware_macros::stability(ALPHA)]
+    pub(crate) async fn read_many_uncached(&self, positions: &[u64]) -> Result<Vec<A>, Error> {
+        if positions.is_empty() {
+            return Ok(Vec::new());
+        }
+        let _timer = self.0.metrics.read_many_timer();
+        self.0.metrics.read_many_calls.inc();
+        self.0.reader().read_many_uncached_inner(positions).await
+    }
+
     /// Initialize a new `Journal` instance.
     ///
     /// All backing blobs are opened during initialization. Recovery scans the two newest blobs,
@@ -1416,6 +1446,24 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
     /// reads; the callers record the batch-read metrics, so routing them through `read_many`
     /// would count every batch twice.
     pub(super) async fn read_many_inner(&self, positions: &[u64]) -> Result<Vec<A>, Error> {
+        self.read_many_admission(positions, Admission::Admit).await
+    }
+
+    /// Like [`Self::read_many_inner`], but cache misses do not admit pages into the page cache.
+    /// Suited to bulk scans of items that will not be read again soon.
+    #[commonware_macros::stability(ALPHA)]
+    pub(super) async fn read_many_uncached_inner(
+        &self,
+        positions: &[u64],
+    ) -> Result<Vec<A>, Error> {
+        self.read_many_admission(positions, Admission::Bypass).await
+    }
+
+    async fn read_many_admission(
+        &self,
+        positions: &[u64],
+        admission: Admission,
+    ) -> Result<Vec<A>, Error> {
         if positions.is_empty() {
             return Ok(Vec::new());
         }
@@ -1452,8 +1500,23 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
             let (buf, rest) = remaining_buf.split_at_mut(group.len() * A::SIZE);
             remaining_buf = rest;
             reads.push(async move {
-                blob.read_many_into(buf, &blob_offsets, Inner::<E, A>::CHUNK_SIZE)
-                    .await
+                match admission {
+                    Admission::Admit => {
+                        blob.read_many_into(buf, &blob_offsets, Inner::<E, A>::CHUNK_SIZE)
+                            .await
+                    }
+                    #[cfg(not(any(
+                        commonware_stability_BETA,
+                        commonware_stability_GAMMA,
+                        commonware_stability_DELTA,
+                        commonware_stability_EPSILON,
+                        commonware_stability_RESERVED
+                    )))] // ALPHA
+                    Admission::Bypass => {
+                        blob.read_many_into_uncached(buf, &blob_offsets, Inner::<E, A>::CHUNK_SIZE)
+                            .await
+                    }
+                }
             });
         }
         let hits: u64 = try_join_all(reads)

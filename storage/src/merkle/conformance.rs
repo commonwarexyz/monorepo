@@ -99,6 +99,7 @@ mod tests {
             write_buffer: NZUsize!(1024),
             replay_buffer: NZUsize!(1024),
             strategy: Sequential,
+            node_cache_size: Some(NZUsize!(64)),
             page_cache: CacheRef::from_pooler(pooler, NZU16!(1024), NZUsize!(10)),
         }
     }

@@ -150,6 +150,20 @@ impl<B: Blob> Sealed<B> {
         self.view().read_many_into(buf, offsets, item_size).await
     }
 
+    /// Like [`Self::read_many_into`], but cache misses read from the blob without admitting
+    /// pages into the page cache. Suited to bulk scans of items that will not be read again
+    /// soon.
+    pub async fn read_many_into_uncached(
+        &self,
+        buf: &mut [u8],
+        offsets: &[u64],
+        item_size: NonZeroUsize,
+    ) -> Result<usize, Error> {
+        self.view()
+            .read_many_into_uncached(buf, offsets, item_size)
+            .await
+    }
+
     /// Like [`Self::read_many_into`], but synchronous and cache-only. Returns the indices of
     /// items that require a blob read. Their slots in `buf` hold unspecified bytes.
     pub fn try_read_many_sync_into(
@@ -698,6 +712,52 @@ mod tests {
                     &data[off as usize..off as usize + item_size],
                 );
             }
+        });
+    }
+
+    /// `Sealed::read_many_into_uncached` serves cold reads correctly and leaves the page
+    /// cache cold: a subsequent sync probe of the same offsets still misses everything.
+    /// Offsets cover same-page clusters (served by one page fetch each) and a range that
+    /// crosses a page boundary.
+    #[test_traced("DEBUG")]
+    fn test_sealed_read_many_into_uncached_leaves_cache_cold() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context.open("test_partition", b"rmany_cold").await.unwrap();
+            let cache_ref =
+                super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+
+            let page_size = PAGE_SIZE.get() as usize;
+            let data: Vec<u8> = (0u8..=255).cycle().take(page_size * 4).collect();
+            append.append(&data).await.unwrap();
+            let (sealed, sync) = append.seal().await.unwrap();
+            sync.await.unwrap();
+
+            // Drop pages admitted during the writer's flushes so the uncached read is cold.
+            cache_ref.clear();
+
+            let p = page_size as u64;
+            let offsets = [0u64, 8, 40, p, p + 8, 2 * p - 2, 3 * p];
+            let item_size = 4usize;
+            let mut out = vec![0u8; offsets.len() * item_size];
+            sealed
+                .read_many_into_uncached(&mut out, &offsets, NZUsize!(item_size))
+                .await
+                .unwrap();
+            for (i, &off) in offsets.iter().enumerate() {
+                assert_eq!(
+                    &out[i * item_size..(i + 1) * item_size],
+                    &data[off as usize..off as usize + item_size],
+                );
+            }
+
+            // Nothing was admitted: every offset still requires a blob read.
+            let mut out = vec![0u8; offsets.len() * item_size];
+            let misses = sealed.try_read_many_sync_into(&mut out, &offsets, NZUsize!(item_size));
+            assert_eq!(misses, vec![0, 1, 2, 3, 4, 5, 6]);
         });
     }
 

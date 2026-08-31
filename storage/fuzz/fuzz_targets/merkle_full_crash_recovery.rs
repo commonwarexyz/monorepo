@@ -102,6 +102,7 @@ fn merkle_config(
         write_buffer,
         replay_buffer: NZUsize!(4096),
         strategy: Sequential,
+        node_cache_size: Some(NZUsize!(64)),
         page_cache: CacheRef::from_pooler(pooler, page_size, page_cache_size),
     }
 }

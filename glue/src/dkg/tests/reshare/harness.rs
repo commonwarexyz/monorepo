@@ -1004,6 +1004,7 @@ impl EngineDefinition for ReshareEngine {
                 write_buffer: IO_BUFFER_SIZE,
                 replay_buffer: IO_BUFFER_SIZE,
                 strategy: Sequential,
+                node_cache_size: Some(NZUsize!(64)),
                 page_cache: page_cache.clone(),
             },
             journal_config: FixedLogConfig {

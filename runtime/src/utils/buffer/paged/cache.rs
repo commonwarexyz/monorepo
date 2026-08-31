@@ -328,6 +328,60 @@ impl CacheRef {
         Ok(())
     }
 
+    /// Read many sorted ranges directly from `blob` without admitting their pages into the
+    /// page cache. Suited to bulk scans of pages that will not be read again soon:
+    /// admission would churn the cache and serialize concurrent scanning tasks on its lock.
+    ///
+    /// Each distinct page covered by `ranges` is fetched exactly once, and every range
+    /// (including page-crossing ones) is copied out of the fetched pages.
+    pub(super) async fn read_uncached_many<B: Blob>(
+        &self,
+        blob: &B,
+        ranges: &mut [(&mut [u8], u64)],
+    ) -> Result<(), Error> {
+        // Plan one fetch per distinct page covered by any range. Sorted ranges cover a
+        // non-decreasing page sequence, so deduplication only needs the last entry.
+        let mut pages = Vec::new();
+        for (buf, offset) in ranges.iter() {
+            let first = Cache::offset_to_page(self.page_size, *offset).0;
+            let last = Cache::offset_to_page(self.page_size, offset + buf.len() as u64 - 1).0;
+            for page_num in first..=last {
+                if pages.last() != Some(&page_num) {
+                    pages.push(page_num);
+                }
+            }
+        }
+        let fetched = futures::future::try_join_all(
+            pages
+                .iter()
+                .map(|&page_num| fetch_full_page(blob, page_num, self.page_size)),
+        )
+        .await?;
+
+        // Scatter each range out of the fetched pages, which are all full. The flattened
+        // (range, page) access sequence is non-decreasing in page number, so a single cursor
+        // suffices.
+        let page_size: usize = self.page_size.widen();
+        let mut cursor = 0;
+        for (buf, offset) in ranges.iter_mut() {
+            let mut buf: &mut [u8] = buf;
+            let mut offset = *offset;
+            while !buf.is_empty() {
+                let (page_num, offset_in_page) = Cache::offset_to_page(self.page_size, offset);
+                while pages[cursor] != page_num {
+                    cursor += 1;
+                }
+                let page = fetched[cursor].as_ref();
+                let offset_in_page = offset_in_page as usize;
+                let count = (page_size - offset_in_page).min(buf.len());
+                buf[..count].copy_from_slice(&page[offset_in_page..offset_in_page + count]);
+                offset += count as u64;
+                buf = &mut buf[count..];
+            }
+        }
+        Ok(())
+    }
+
     /// Fetch the requested page after encountering a page fault, which may involve retrieving it
     /// from `blob` & caching the result in the page cache. Returns the number of bytes read, which
     /// should always be non-zero.
@@ -575,21 +629,18 @@ impl Cache {
     }
 }
 
-/// Fetch one logical page for insertion into the page cache, rejecting partial pages because cache
-/// entries must always contain a full logical page.
-async fn fetch_cacheable_page(
+/// Fetch one full logical page, rejecting partial pages. A non-last page can come back short
+/// when it is corrupted and falls back to a partial CRC, or when its footer was rewritten to
+/// vouch for a shorter prefix (a writer resize observed through an older snapshot).
+///
+/// The caller retains the fetched page, so the source page need not remain in the OS page cache.
+async fn fetch_full_page(
     blob: &impl Blob,
     page_num: u64,
     page_size: NonZeroU16,
-) -> Result<IoBuf, Arc<Error>> {
-    // CacheRef retains the page, so the source page need not remain in the OS page cache.
+) -> Result<IoBuf, Error> {
     let width: u64 = page_size.widen();
-    let page = get_page_from_blob(blob, page_num, width, ReadOptions::DONT_CACHE)
-        .await
-        .map_err(Arc::new)?;
-
-    // We should never be fetching partial pages through the page cache. This can happen if a
-    // non-last page is corrupted and falls back to a partial CRC.
+    let page = get_page_from_blob(blob, page_num, width, ReadOptions::DONT_CACHE).await?;
     let len = page.len();
     let expected: usize = page_size.widen();
     if len != expected {
@@ -599,10 +650,21 @@ async fn fetch_cacheable_page(
             actual = len,
             "attempted to fetch partial page from blob"
         );
-        return Err(Arc::new(Error::InvalidChecksum));
+        return Err(Error::InvalidChecksum);
     }
-
     Ok(page)
+}
+
+/// Fetch one logical page for insertion into the page cache, rejecting partial pages because cache
+/// entries must always contain a full logical page.
+async fn fetch_cacheable_page(
+    blob: &impl Blob,
+    page_num: u64,
+    page_size: NonZeroU16,
+) -> Result<IoBuf, Arc<Error>> {
+    fetch_full_page(blob, page_num, page_size)
+        .await
+        .map_err(Arc::new)
 }
 
 #[cfg(test)]
@@ -699,6 +761,143 @@ mod tests {
         async fn start_sync(&self) -> Handle<()> {
             Handle::ready(self.sync().await)
         }
+    }
+
+    /// A blob that serves reads from an in-memory physical image and counts them.
+    #[derive(Clone)]
+    struct CountingBlob {
+        data: Arc<Vec<u8>>,
+        reads: Arc<AtomicUsize>,
+    }
+
+    impl Blob for CountingBlob {
+        async fn read_at(
+            &self,
+            offset: u64,
+            len: usize,
+            options: ReadOptions,
+        ) -> Result<IoBufsMut, Error> {
+            self.read_at_buf(offset, len, IoBufMut::with_capacity(len), options)
+                .await
+        }
+
+        async fn read_at_buf(
+            &self,
+            offset: u64,
+            len: usize,
+            _bufs: impl Into<IoBufsMut> + Send,
+            _options: ReadOptions,
+        ) -> Result<IoBufsMut, Error> {
+            self.reads.fetch_add(1, Ordering::Relaxed);
+            let start = offset as usize;
+            Ok(IoBufsMut::from(self.data[start..start + len].to_vec()))
+        }
+
+        async fn write_at(
+            &self,
+            _offset: u64,
+            _bufs: impl Into<crate::IoBufs> + Send,
+            _options: WriteOptions,
+        ) -> Result<(), Error> {
+            Ok(())
+        }
+
+        async fn resize(&self, _len: u64) -> Result<(), Error> {
+            Ok(())
+        }
+
+        async fn sync(&self) -> Result<(), Error> {
+            Ok(())
+        }
+
+        async fn start_sync(&self) -> Handle<()> {
+            Handle::ready(self.sync().await)
+        }
+    }
+
+    /// `read_uncached_many` fetches each distinct covered page exactly once, including for
+    /// ranges that cross page boundaries.
+    #[test_traced("DEBUG")]
+    fn test_read_uncached_many_fetches_each_page_once() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_context: deterministic::Context| async move {
+            // Three full physical pages with distinct logical bytes per page.
+            let page_size = PAGE_SIZE.get() as usize;
+            let mut image = Vec::new();
+            let mut logical = Vec::new();
+            for page in 0u8..3 {
+                let page_bytes = vec![page + 1; page_size];
+                let crc = Crc32::checksum(&page_bytes);
+                image.extend_from_slice(&page_bytes);
+                image.extend_from_slice(&Checksum::new(PAGE_SIZE.get(), crc).to_bytes());
+                logical.extend_from_slice(&page_bytes);
+            }
+            let reads = Arc::new(AtomicUsize::new(0));
+            let blob = CountingBlob {
+                data: Arc::new(image),
+                reads: reads.clone(),
+            };
+            let cache_ref = CacheRef::new(test_pool(), PAGE_SIZE, NZUsize!(8));
+
+            // Sorted ranges: two on page 0, one crossing pages 0-1, one on page 1, and one
+            // crossing pages 1-2.
+            let p = PAGE_SIZE_U64;
+            let specs = [(0, 8), (100, 16), (p - 4, 8), (p + 50, 8), (2 * p - 4, 8)];
+            let mut bufs: Vec<Vec<u8>> = specs.iter().map(|&(_, len)| vec![0; len]).collect();
+            let mut ranges: Vec<(&mut [u8], u64)> = bufs
+                .iter_mut()
+                .zip(&specs)
+                .map(|(buf, &(offset, _))| (buf.as_mut_slice(), offset))
+                .collect();
+            cache_ref
+                .read_uncached_many(&blob, &mut ranges)
+                .await
+                .unwrap();
+
+            for (buf, &(offset, len)) in bufs.iter().zip(&specs) {
+                assert_eq!(
+                    buf.as_slice(),
+                    &logical[offset as usize..offset as usize + len]
+                );
+            }
+            assert_eq!(
+                reads.load(Ordering::Relaxed),
+                3,
+                "one fetch per covered page"
+            );
+        });
+    }
+
+    /// A mid-blob page whose footer vouches for a shorter prefix (a damaged main CRC slot
+    /// falling back to a partial one, or a footer rewritten by a resize observed through an
+    /// older snapshot) is an `InvalidChecksum` error, never a panic.
+    #[test_traced("DEBUG")]
+    fn test_read_uncached_many_rejects_short_page() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_context: deterministic::Context| async move {
+            let page_size = PAGE_SIZE.get() as usize;
+            let mut image = Vec::new();
+            let page0 = vec![1u8; page_size];
+            image.extend_from_slice(&page0);
+            image.extend_from_slice(
+                &Checksum::new(PAGE_SIZE.get(), Crc32::checksum(&page0)).to_bytes(),
+            );
+            // Page 1 vouches for a 100-byte prefix only.
+            let page1 = vec![2u8; page_size];
+            image.extend_from_slice(&page1);
+            image.extend_from_slice(&Checksum::new(100, Crc32::checksum(&page1[..100])).to_bytes());
+
+            let blob = CountingBlob {
+                data: Arc::new(image),
+                reads: Arc::new(AtomicUsize::new(0)),
+            };
+            let cache_ref = CacheRef::new(test_pool(), PAGE_SIZE, NZUsize!(8));
+
+            let mut buf = vec![0u8; 8];
+            let mut ranges: Vec<(&mut [u8], u64)> = vec![(buf.as_mut_slice(), PAGE_SIZE_U64 + 200)];
+            let result = cache_ref.read_uncached_many(&blob, &mut ranges).await;
+            assert!(matches!(result, Err(Error::InvalidChecksum)));
+        });
     }
 
     #[derive(Clone)]

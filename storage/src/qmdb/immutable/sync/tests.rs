@@ -880,6 +880,7 @@ pub(crate) mod harnesses {
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
+                node_cache_size: Some(NZUsize!(64)),
                 page_cache: page_cache.clone(),
             },
             log: crate::journal::contiguous::variable::Config {
@@ -1274,6 +1275,7 @@ mod compact_variable_mmr {
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
+                node_cache_size: Some(NZUsize!(64)),
                 page_cache: page_cache.clone(),
             },
             log: crate::journal::contiguous::variable::Config {
@@ -2013,6 +2015,7 @@ mod compact_variable_mmb {
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
+                node_cache_size: Some(NZUsize!(64)),
                 page_cache: page_cache.clone(),
             },
             log: crate::journal::contiguous::variable::Config {
