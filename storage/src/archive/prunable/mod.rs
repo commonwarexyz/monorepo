@@ -183,7 +183,8 @@ pub struct Config<T: Translator, C> {
     /// If that is not the case, lookups may be O(n) instead of O(1).
     pub translator: T,
 
-    /// The partition to use for durable value-validation boundaries.
+    /// The partition to use for per-section validation markers. Recovery adopts entries
+    /// below a section's marker without re-validating their values.
     pub metadata_partition: String,
 
     /// The partition to use for the key journal (stores index+key metadata).
