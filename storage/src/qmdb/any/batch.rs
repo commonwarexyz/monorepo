@@ -2198,20 +2198,22 @@ where
                 Operation::Update(data) => data,
                 _ => unreachable!("snapshot should only reference Update operations"),
             };
-            next_candidates.push(next_key);
-            prev_candidates.push((key.clone(), (Some(value), old_loc)));
-
             // A key resolved via the ancestor diff must only match at its ancestor-diff
-            // location. Without this guard, a stale snapshot collision (the pre-parent DB
-            // snapshot still containing the key's old location) can consume the mutation
-            // at a superseded location, misclassifying a parent-deleted key's re-creation
-            // as an update (or its redundant delete as a live delete) before
-            // extract_parent_deleted_creates runs.
+            // location. A stale snapshot collision (the pre-parent DB snapshot still
+            // containing the key's old location) must contribute nothing: consuming its
+            // mutation would misclassify a parent-deleted key's re-creation as an update
+            // (or its redundant delete as a live delete) before extract_parent_deleted_creates
+            // runs, and feeding its next_key or (key, old_loc) into the candidate sets would
+            // steer the predecessor rewrites only on the pending-ancestor path (the
+            // committed-ancestor path never reads the superseded op).
             if let Some(entry) = resolve_in_ancestors(&m.ancestors, &key)
                 && entry.loc() != Some(old_loc)
             {
                 continue;
             }
+
+            next_candidates.push(next_key);
+            prev_candidates.push((key.clone(), (Some(value), old_loc)));
 
             let Some(mutation) = mutations.remove(&key) else {
                 // Snapshot index collision: this operation's key does not match
@@ -2291,6 +2293,16 @@ where
                 Operation::Update(data) => data,
                 _ => unreachable!("expected update operation"),
             };
+
+            // Same stale-location guard as the mutation classifier above: the snapshot scan
+            // sees only committed state, so a key the ancestor diff supersedes at another
+            // location (or deletes) is stale here and must not steer the predecessor search.
+            // The ancestor-diff walk below contributes the live version of such keys.
+            if let Some(entry) = resolve_in_ancestors(&m.ancestors, &data.key)
+                && entry.loc() != Some(old_loc)
+            {
+                continue;
+            }
             next_candidates.push(data.next_key);
             prev_candidates.push((data.key, (Some(data.value), old_loc)));
         }
@@ -5234,6 +5246,88 @@ mod tests {
             assert_eq!(pending_child.root(), committed_child.root());
             assert_eq!(pending_child.total_active_keys, 1);
             assert_eq!(committed_child.total_active_keys, 1);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Reduced from a fuzzer counterexample: a parent deletes keys whose buckets the child
+    /// later touches, and building the child on the pending parent must produce the same
+    /// root as building it on the committed parent. The final key-value state is identical
+    /// either way; a divergence means the emitted operation streams (next-key pointers or
+    /// floor moves) depended on whether the parent was pending.
+    #[test]
+    fn ordered_stale_ancestor_candidates_root_matches() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            type TestDb = OrderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+
+            let config = fixed_db_config::<OneCap>("ordered-stale-candidates", &context);
+            let db = TestDb::init(context, config).await.unwrap();
+
+            let v = |n| colliding_digest(0xB0, n);
+            let initial = db
+                .new_batch()
+                .write(colliding_digest(2, 23), Some(v(0)))
+                .write(colliding_digest(3, 31), Some(v(1)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(initial).await.unwrap();
+            let db = db.commit().await.unwrap();
+
+            // Parent: a no-op delete and a live delete in bucket 3, plus a create in bucket 1.
+            let parent = db
+                .new_batch()
+                .write(colliding_digest(3, 11), None)
+                .write(colliding_digest(3, 31), None)
+                .write(colliding_digest(1, 9), Some(v(2)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            // Child: re-create the parent-deleted key and create in buckets 1 and 0.
+            let pending_child = parent
+                .new_batch::<Sha256>()
+                .write(colliding_digest(3, 31), Some(v(3)))
+                .write(colliding_digest(1, 20), Some(v(4)))
+                .write(colliding_digest(0, 0), Some(v(5)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            let (db, _) = db.apply_batch(parent).await.unwrap();
+            let db = db.commit().await.unwrap();
+
+            let committed_child = db
+                .new_batch()
+                .write(colliding_digest(3, 31), Some(v(3)))
+                .write(colliding_digest(1, 20), Some(v(4)))
+                .write(colliding_digest(0, 0), Some(v(5)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            assert_eq!(
+                pending_child.root(),
+                committed_child.root(),
+                "child root depended on pending-vs-committed parent path"
+            );
+
+            let (db, _) = db.apply_batch(pending_child).await.unwrap();
+            assert_eq!(
+                db.root(),
+                committed_child.root(),
+                "applied pending child root diverged"
+            );
 
             db.destroy().await.unwrap();
         });
