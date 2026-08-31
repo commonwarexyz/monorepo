@@ -1410,6 +1410,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             return Err(ReplayError::Lifecycle);
         }
         self.apply_event(&event)?;
+        self.acked = self.durable.cursor;
         // Replay never externalizes admissions, and the boundary step that follows must not
         // inherit them.
         self.discard_activities();
@@ -2874,9 +2875,11 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             .generation
             .checked_add(1)
             .ok_or(StepError::IdentifierExhausted)?;
-        // Every recovered event was replayed from the synced journal, so the durable prefix
-        // and any recovered signature exposure are both acknowledged already.
-        self.acked = self.durable.cursor;
+        if self.acked != self.durable.cursor {
+            return Err(StepError::Lifecycle);
+        }
+        // Every recovered event was replayed from the synced journal, so any recovered signature
+        // exposure is acknowledged already.
         self.own_exposure = self.durable.cursor;
         let mut step = self.reserve_change(Change::GenerationAdvanced(generation))?;
         // State transitions happen at staging; the acknowledgement releases the recovered

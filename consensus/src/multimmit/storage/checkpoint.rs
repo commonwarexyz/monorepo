@@ -164,7 +164,7 @@ mod tests {
         let codec = SnapshotCodecConfig::from_profile(&profile);
         let snapshot = CoreState::fresh(profile, NonZeroUsize::MIN)
             .unwrap()
-            .snapshot();
+            .live_snapshot_for_test();
         let first = snapshot.clone().at_cursor_for_test(Cursor::new(7));
         let replacement = snapshot.at_cursor_for_test(Cursor::new(11));
 

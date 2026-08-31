@@ -424,7 +424,7 @@ fn discharge_fixture(obligations: usize) -> DischargeFixture {
         add_vote_obligation(&mut machine, header);
     }
 
-    let snapshot = machine.snapshot();
+    let snapshot = machine.live_snapshot_for_test();
     assert_eq!(snapshot.obligations().len(), obligations);
     let retired = snapshot
         .obligations()
@@ -725,7 +725,7 @@ fn run_obligation_discharge(obligations: usize) -> Duration {
     drain_validator(&mut machine, effects);
     assert!(
         !machine
-            .snapshot()
+            .live_snapshot_for_test()
             .obligations()
             .contains_key(&fixture.retired),
         "the indexed successor must retire its exact vote"

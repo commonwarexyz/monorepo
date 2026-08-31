@@ -479,7 +479,7 @@ impl<H: Hasher, V: Variant> CoreState<H, V> {
         self.machine.recovered_payloads()
     }
 
-    pub(crate) fn checkpoint_cut(&self) -> CheckpointCut<H, V> {
+    pub(crate) fn checkpoint_cut(&self) -> Option<CheckpointCut<H, V>> {
         self.machine.checkpoint_cut()
     }
 
@@ -1037,9 +1037,10 @@ impl<H: Hasher, V: Variant> CoreState<H, V> {
         self.machine.staged_barriers()
     }
 
-    /// Mints a checkpoint from the last acknowledged durable cursor.
-    pub(crate) fn snapshot(&self) -> Snapshot<V, H::Digest> {
-        self.machine.snapshot()
+    /// Projects current state for deterministic tests, including staged changes.
+    #[cfg(test)]
+    pub(crate) fn live_snapshot_for_test(&self) -> Snapshot<V, H::Digest> {
+        self.machine.live_snapshot_for_test()
     }
 
     /// Returns whether one more item can be received without consuming its source.

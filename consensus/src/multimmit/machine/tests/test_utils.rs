@@ -156,7 +156,7 @@ impl<H: Hasher, V: Variant> Runner<H, V> {
     /// Creates a runner for a fresh, not-yet-started machine.
     pub fn new(profile: Profile<H, V>) -> Self {
         let machine = Machine::new(profile.clone());
-        let checkpoint = machine.snapshot();
+        let checkpoint = machine.live_snapshot_for_test();
         Self {
             profile,
             machine,
