@@ -401,9 +401,10 @@ impl Checksum {
     /// Encode just a slot's leading `len` field (the first [`CHECKSUM_SLOT_LEN_SIZE`] bytes of
     /// [`Self::slot_bytes`]).
     ///
-    /// Because `len` decides which slot is authoritative, rewriting only this field flips a slot's
-    /// authority without disturbing its already-durable CRC: writing a non-zero `len` commits a
-    /// previously staged slot, while writing 0 retires one.
+    /// Because `len` decides which slot is authoritative, rewriting only this field commits a
+    /// previously staged slot without disturbing its already-durable CRC. Retiring a slot must
+    /// instead zero it entirely with [`Self::slot_bytes`]: a zero length with a durable CRC left
+    /// behind could be reassembled into the retired checksum by a later torn rewrite.
     fn slot_len_bytes(len: u16) -> [u8; CHECKSUM_SLOT_LEN_SIZE] {
         let mut bytes = [0; CHECKSUM_SLOT_LEN_SIZE];
         let mut buf = bytes.as_mut_slice();

@@ -512,8 +512,8 @@ impl<B: Blob> Writer<B> {
         // Make sure the buffer offset and underlying blob agree on the state of the tip.
         assert_eq!(self.current_page * self.cache_ref.page_size(), new_offset);
 
-        // Rewriting a physical page resubmits its committed bytes and protected checksum
-        // unchanged, so a torn write leaves the previous state recoverable.
+        // Rewriting a physical page resubmits its durable bytes and protected checksum
+        // unchanged, so a torn write leaves the durable state recoverable.
         if sync {
             self.sync_state
                 .write_at(
