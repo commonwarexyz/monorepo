@@ -24,25 +24,26 @@
 //! align, regardless of the page size chosen.
 //!
 //! Alignment is a performance property, not a correctness requirement: any page size works, but
-//! physical pages that straddle storage-page boundaries amplify cold random reads, so
-//! [CacheRef::new] logs a warning when configured with one.
+//! physical pages that straddle storage-page boundaries amplify cold random reads.
 //!
 //! Two checksums are stored so that re-writing a partial page cannot destroy the valid checksum
-//! for its previously committed contents. Each rewrite covers the whole physical page: the new
-//! checksum lands in the alternate slot, while the committed prefix and its protected checksum
-//! are resubmitted byte-identically, leaving their durable bytes unchanged even if the write
-//! tears. A checksum over a page is computed over the first [0,len) bytes in the page, with all
-//! other bytes in the page ignored. Ordinary partial-page payload writes 0-pad the range
-//! [len, page_size), but recovery does not depend on bytes outside [0,len). A checksum with
-//! length 0 is never considered valid. If both checksums are valid for the page, the one with the
-//! larger `len` is considered authoritative. Partial-page shrink first makes the shorter checksum
-//! durable in the alternate slot, then invalidates the old longer checksum.
+//! for its last durable contents. Each rewrite covers the whole physical page: the new checksum
+//! lands in the slot not protecting the durable contents, while the durable prefix and its
+//! protected checksum are resubmitted byte-identically, leaving their durable bytes unchanged
+//! even if the write tears. A checksum over a page is computed over the first [0,len) bytes in
+//! the page, with all other bytes in the page ignored. Ordinary partial-page payload writes
+//! 0-pad the range [len, page_size), but recovery does not depend on bytes outside [0,len). A
+//! checksum with length 0 is never considered valid. If both checksums are valid for the page,
+//! the one with the larger `len` is considered authoritative. Partial-page shrink first makes
+//! the shorter checksum durable in the alternate slot, then invalidates the old longer checksum.
 //!
 //! A _full_ page is one whose crc stores a len equal to the logical page size. Otherwise the page
 //! is called _partial_. All pages in a blob are full except for the very last page, which can be
-//! full or partial. A partial page's committed prefix remains recoverable while it is rewritten.
+//! full or partial. A partial page's durable prefix remains recoverable while it is rewritten.
 
 use crate::{Blob, Buf, BufMut, Error, IoBuf, ReadOptions};
+#[cfg(any(test, feature = "test-utils"))]
+use crate::{Storage, WriteOptions};
 use commonware_codec::{EncodeFixed, FixedSize, Read as CodecRead, ReadExt, Write};
 use commonware_cryptography::{Crc32, crc32};
 use std::num::NonZeroU16;
@@ -59,8 +60,8 @@ pub use sealed::Sealed;
 use tracing::{debug, error};
 pub use writer::Writer;
 
-// A checksum record contains two slots. Each slot stores one u16 length and one CRC.
-const CHECKSUM_SIZE: u64 = Checksum::SIZE as u64;
+/// Size in bytes of the checksum record appended to each logical page.
+pub const CHECKSUM_SIZE: u64 = Checksum::SIZE as u64;
 
 /// The storage-page granularity physical pages should align to (see the module docs).
 pub(crate) const STORAGE_PAGE_SIZE: u64 = 4096;
@@ -113,6 +114,41 @@ pub const fn page_size(physical_page_size: u32) -> NonZeroU16 {
 #[cfg(test)]
 pub(crate) fn validate_page_for_tests(page: &[u8]) -> bool {
     Checksum::validate_page(page).is_some()
+}
+
+/// Flip one byte inside physical page `page` of the blob at `name`, leaving every other page
+/// valid. Models a torn interior page: a crash during an in-flight fsync can lose an interior
+/// page while later pages persist. Physical pages are the logical page plus the checksum record.
+#[cfg(any(test, feature = "test-utils"))]
+pub async fn corrupt_page(
+    storage: &impl Storage,
+    partition: &str,
+    name: &[u8],
+    page: u64,
+    logical_page_size: u64,
+) {
+    // Every valid checksum slot covers byte zero, including a shorter fallback slot.
+    let physical_page_size = logical_page_size + CHECKSUM_SIZE;
+    let offset = page * physical_page_size;
+    let (blob, size) = storage.open(partition, name).await.unwrap();
+    assert!(
+        size.checked_sub(physical_page_size)
+            .is_some_and(|remaining| offset < remaining),
+        "corruption target must be an interior page"
+    );
+    let byte = blob
+        .read_at(offset, 1, ReadOptions::default())
+        .await
+        .unwrap()
+        .coalesce();
+    blob.write_at(
+        offset,
+        vec![byte.as_ref()[0] ^ 0xFF],
+        WriteOptions::default(),
+    )
+    .await
+    .unwrap();
+    blob.sync().await.unwrap();
 }
 
 /// Ensure every requested range lies within the blob's size.
@@ -402,9 +438,10 @@ impl Checksum {
     /// Encode just a slot's leading `len` field (the first [`CHECKSUM_SLOT_LEN_SIZE`] bytes of
     /// [`Self::slot_bytes`]).
     ///
-    /// Because `len` decides which slot is authoritative, rewriting only this field flips a slot's
-    /// authority without disturbing its already-durable CRC: writing a non-zero `len` commits a
-    /// previously staged slot, while writing 0 retires one.
+    /// Because `len` decides which slot is authoritative, rewriting only this field commits a
+    /// previously staged slot without disturbing its already-durable CRC. Retiring a slot must
+    /// instead zero it entirely with [`Self::slot_bytes`]: a zero length with a durable CRC left
+    /// behind could be reassembled into the retired checksum by a later torn rewrite.
     fn slot_len_bytes(len: u16) -> [u8; CHECKSUM_SLOT_LEN_SIZE] {
         let mut bytes = [0; CHECKSUM_SLOT_LEN_SIZE];
         let mut buf = bytes.as_mut_slice();
@@ -455,6 +492,15 @@ impl arbitrary::Arbitrary<'_> for Checksum {
 mod tests {
     use super::*;
     use rstest::rstest;
+
+    #[test]
+    #[should_panic(expected = "corruption target must be an interior page")]
+    fn test_corrupt_page_rejects_short_blob() {
+        use crate::Runner as _;
+        crate::deterministic::Runner::default().start(|context| async move {
+            corrupt_page(&context, "short-blob", b"blob", 0, 64).await;
+        });
+    }
 
     enum ValidationExpectation {
         Ok,

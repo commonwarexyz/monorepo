@@ -4,7 +4,7 @@
 //! and running them against both the standard and coding marshal variants.
 
 use crate::{
-    Heightable, Reporter,
+    CertifiableBlock, Heightable, Reporter,
     marshal::{
         Identifier,
         ancestry::BlockProvider,
@@ -24,10 +24,12 @@ use crate::{
     },
     types::{Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta, coding::Commitment},
 };
+use bytes::{Buf, BufMut};
 use commonware_broadcast::buffered;
+use commonware_codec::{EncodeSize, Error as CodecError, Read, Write};
 use commonware_coding::{CodecConfig, ReedSolomon};
 use commonware_cryptography::{
-    Committable, Digest as DigestTrait, Digestible, Hasher as _, Signer,
+    Committable, Digest as DigestTrait, Digestible, Hasher, Signer,
     bls12381::primitives::variant::MinPk,
     certificate::{ConstantProvider, Provider, Scoped, Verifier as _, mocks::Fixture},
     ed25519::{PrivateKey, PublicKey},
@@ -49,7 +51,9 @@ use commonware_storage::{
     archive::{immutable, prunable},
     translator::EightCap,
 };
-use commonware_utils::{NZU16, NZU64, NZUsize, TestRng, probability, test_rng, vec::NonEmptyVec};
+use commonware_utils::{
+    NZU16, NZU64, NZUsize, TestRng, non_empty, probability, test_rng, vec::NonEmptyVec,
+};
 use futures::StreamExt;
 use rand::{
     RngExt as _,
@@ -74,8 +78,70 @@ pub type S = bls12381_threshold_vrf::Scheme<K, V>;
 pub type P = ConstantProvider<S, Epoch>;
 
 // Coding variant type aliases (uses Commitment in context)
-pub type CodingCtx = Context<Commitment, K>;
-pub type CodingB = Block<D, CodingCtx>;
+type TestCommitment = Commitment<CodingB, ReedSolomon<Sha256>, Sha256>;
+pub type CodingCtx = Context<TestCommitment, K>;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CodingB(Block<D, CodingCtx>);
+
+impl CodingB {
+    pub fn new<H: Hasher<Digest = D>>(
+        context: CodingCtx,
+        parent: D,
+        height: Height,
+        timestamp: u64,
+    ) -> Self {
+        Self(Block::new::<H>(context, parent, height, timestamp))
+    }
+}
+
+impl Write for CodingB {
+    fn write(&self, writer: &mut impl BufMut) {
+        self.0.write(writer);
+    }
+}
+
+impl Read for CodingB {
+    type Cfg = ();
+
+    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+        Block::read_cfg(reader, cfg).map(Self)
+    }
+}
+
+impl EncodeSize for CodingB {
+    fn encode_size(&self) -> usize {
+        self.0.encode_size()
+    }
+}
+
+impl Digestible for CodingB {
+    type Digest = D;
+
+    fn digest(&self) -> Self::Digest {
+        self.0.digest()
+    }
+}
+
+impl Heightable for CodingB {
+    fn height(&self) -> Height {
+        self.0.height()
+    }
+}
+
+impl crate::Block for CodingB {
+    fn parent(&self) -> Self::Digest {
+        self.0.parent()
+    }
+}
+
+impl CertifiableBlock for CodingB {
+    type Context = CodingCtx;
+
+    fn context(&self) -> Self::Context {
+        self.0.context()
+    }
+}
 
 // Common test constants
 pub const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
@@ -1833,7 +1899,6 @@ impl TestHarness for StandardHarness {
             peer_provider: oracle.manager(),
             blocker: oracle.control(validator.clone()),
             mailbox_size: config.mailbox_size,
-            initial: Duration::from_secs(1),
             timeout: Duration::from_secs(2),
             fetch_retry_timeout: Duration::from_millis(100),
             priority_requests: false,
@@ -1998,7 +2063,7 @@ impl TestHarness for StandardHarness {
             .take(quorum as usize)
             .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
             .collect();
-        Finalization::from_finalizes(&schemes[0], &finalizes, &Sequential).unwrap()
+        Finalization::from_finalizes(&schemes[0], non_empty![@&finalizes], &Sequential).unwrap()
     }
 
     fn make_notarization(proposal: Proposal<D>, schemes: &[S], quorum: u32) -> Notarization<S, D> {
@@ -2007,7 +2072,7 @@ impl TestHarness for StandardHarness {
             .take(quorum as usize)
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
-        Notarization::from_notarizes(&schemes[0], &notarizes, &Sequential).unwrap()
+        Notarization::from_notarizes(&schemes[0], non_empty![@&notarizes], &Sequential).unwrap()
     }
 
     async fn report_finalization(
@@ -2066,7 +2131,6 @@ impl TestHarness for StandardHarness {
             peer_provider: oracle.manager(),
             blocker: control.clone(),
             mailbox_size: config.mailbox_size,
-            initial: Duration::from_secs(1),
             timeout: Duration::from_secs(2),
             fetch_retry_timeout: Duration::from_millis(100),
             priority_requests: false,
@@ -2542,7 +2606,7 @@ pub const GENESIS_CODING_CONFIG: commonware_coding::Config = commonware_coding::
 };
 
 /// Create a genesis Commitment (all zeros for digests, genesis config).
-pub fn genesis_commitment() -> Commitment {
+pub fn genesis_commitment() -> TestCommitment {
     Commitment::from((
         D::EMPTY,
         D::EMPTY,
@@ -2571,7 +2635,7 @@ impl TestHarness for CodingHarness {
     type Variant = CodingVariant;
     type TestBlock = CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>;
     type ValidatorExtra = ShardsMailbox;
-    type Commitment = Commitment;
+    type Commitment = TestCommitment;
 
     async fn setup_validator(
         context: deterministic::Context,
@@ -2623,7 +2687,6 @@ impl TestHarness for CodingHarness {
             peer_provider: oracle.manager(),
             blocker: oracle.control(validator.clone()),
             mailbox_size: config.mailbox_size,
-            initial: Duration::from_secs(1),
             timeout: Duration::from_secs(2),
             fetch_retry_timeout: Duration::from_millis(100),
             priority_requests: false,
@@ -2750,7 +2813,7 @@ impl TestHarness for CodingHarness {
 
     fn make_test_block(
         parent: D,
-        parent_commitment: Commitment,
+        parent_commitment: TestCommitment,
         height: Height,
         timestamp: u64,
         num_participants: u16,
@@ -2769,7 +2832,7 @@ impl TestHarness for CodingHarness {
         CodedBlock::new(raw, coding_config, &Sequential)
     }
 
-    fn genesis_parent_commitment(_num_participants: u16) -> Commitment {
+    fn genesis_parent_commitment(_num_participants: u16) -> TestCommitment {
         genesis_commitment()
     }
 
@@ -2778,13 +2841,13 @@ impl TestHarness for CodingHarness {
         let commitment = Commitment::from((
             inner.digest(),
             inner.digest(),
-            hash_context::<Sha256, _>(&inner.context),
+            hash_context::<Sha256, _>(&inner.context()),
             GENESIS_CODING_CONFIG,
         ));
         CodedBlock::new_trusted(inner, commitment)
     }
 
-    fn commitment(block: &CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>) -> Commitment {
+    fn commitment(block: &CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>) -> TestCommitment {
         block.commitment()
     }
 
@@ -2814,41 +2877,41 @@ impl TestHarness for CodingHarness {
     }
 
     fn make_finalization(
-        proposal: Proposal<Commitment>,
+        proposal: Proposal<TestCommitment>,
         schemes: &[S],
         quorum: u32,
-    ) -> Finalization<S, Commitment> {
+    ) -> Finalization<S, TestCommitment> {
         let finalizes: Vec<_> = schemes
             .iter()
             .take(quorum as usize)
             .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
             .collect();
-        Finalization::from_finalizes(&schemes[0], &finalizes, &Sequential).unwrap()
+        Finalization::from_finalizes(&schemes[0], non_empty![@&finalizes], &Sequential).unwrap()
     }
 
     fn make_notarization(
-        proposal: Proposal<Commitment>,
+        proposal: Proposal<TestCommitment>,
         schemes: &[S],
         quorum: u32,
-    ) -> Notarization<S, Commitment> {
+    ) -> Notarization<S, TestCommitment> {
         let notarizes: Vec<_> = schemes
             .iter()
             .take(quorum as usize)
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
-        Notarization::from_notarizes(&schemes[0], &notarizes, &Sequential).unwrap()
+        Notarization::from_notarizes(&schemes[0], non_empty![@&notarizes], &Sequential).unwrap()
     }
 
     async fn report_finalization(
         mailbox: &mut Mailbox<S, Self::Variant>,
-        finalization: Finalization<S, Commitment>,
+        finalization: Finalization<S, TestCommitment>,
     ) {
         mailbox.report(Activity::Finalization(finalization));
     }
 
     async fn report_notarization(
         mailbox: &mut Mailbox<S, Self::Variant>,
-        notarization: Notarization<S, Commitment>,
+        notarization: Notarization<S, TestCommitment>,
     ) {
         mailbox.report(Activity::Notarization(notarization));
     }
@@ -2895,7 +2958,6 @@ impl TestHarness for CodingHarness {
             peer_provider: oracle.manager(),
             blocker: control.clone(),
             mailbox_size: config.mailbox_size,
-            initial: Duration::from_secs(1),
             timeout: Duration::from_secs(2),
             fetch_retry_timeout: Duration::from_millis(100),
             priority_requests: false,

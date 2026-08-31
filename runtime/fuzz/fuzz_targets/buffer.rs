@@ -9,7 +9,7 @@ use commonware_runtime::{
     },
     deterministic,
 };
-use commonware_utils::{NZU16, NZU32, NZUsize};
+use commonware_utils::{NZU16, NZU32, NZUsize, Widen};
 use libfuzzer_sys::fuzz_target;
 
 const MAX_SIZE: usize = 1024 * 1024;
@@ -314,8 +314,9 @@ fn fuzz(input: FuzzInput) {
                 } => {
                     if let Some(ref cache) = cache_ref {
                         let offset = offset as u64;
-                        if data.len() >= cache.page_size() as usize {
-                            let data = &data[..cache.page_size() as usize];
+                        let page_size: usize = cache.page_size().widen();
+                        if data.len() >= page_size {
+                            let data = &data[..page_size];
                             if let Some(cache_page_size) = cache_page_size_ref {
                                 let aligned_offset =
                                     (offset / cache_page_size as u64) * cache_page_size as u64;

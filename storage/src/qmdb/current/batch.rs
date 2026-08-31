@@ -770,7 +770,7 @@ where
     let grafted_tree = Arc::clone(grafted_tree);
     strategy
         .clone()
-        .spawn(move |strategy| {
+        .spawn(graft_inputs.len(), move |strategy| {
             let new_leaves = grafting::graft_chunk_digests::<H, _, N>(&strategy, graft_inputs);
             for (chunk_idx, digest) in new_leaves {
                 if chunk_idx < old_grafted_leaves {
@@ -872,9 +872,9 @@ where
     });
 
     // Prefetch each chunk's covering ops-tree node, then run graft hashing and the grafted
-    // MMR build/merkleize as one job on the strategy (against a snapshot of the committed
-    // grafted tree) instead of occupying the calling task. An empty graft set hashes
-    // nothing, so it merkleizes inline rather than paying for a job handoff.
+    // MMR build/merkleize as one job through the strategy (against a snapshot of the
+    // committed grafted tree). An empty graft set hashes nothing, so it merkleizes without
+    // submitting a job.
     let graft_inputs = read_graft_inputs::<F, _, N>(&ops_tree_adapter, chunks_to_update).await?;
     let grafted_batch = if graft_inputs.is_empty() {
         let grafted_hasher = grafting::hasher::<F, H>(grafting_height);
@@ -1061,6 +1061,16 @@ impl<F: Graftable, D: Digest, U: update::Update, const N: usize, S: Strategy>
     /// Return the [`Bounds`] of the batch.
     pub fn bounds(&self) -> &Bounds<F, D> {
         self.inner.bounds()
+    }
+
+    /// Return the operations this batch appends to the ops log and the location of the first.
+    ///
+    /// Delegates to the wrapped ops-level batch. The bitmap state contributes to the
+    /// canonical root but appends no log operations. There is no matching proof method:
+    /// an ops-level proof verifies only against [`Self::ops_root`], never the grafted
+    /// [`Self::root`] that blocks commit to.
+    pub fn operations(&self) -> (Location<F>, Arc<Vec<Operation<F, U>>>) {
+        self.inner.operations()
     }
 
     /// Return the batch's safe sync boundary.
@@ -1327,7 +1337,7 @@ mod tests {
     use crate::{mmb, mmr, utils::detached::block_strategy};
     use commonware_cryptography::Sha256;
     use commonware_macros::test_traced;
-    use commonware_parallel::Rayon;
+    use commonware_parallel::{Manual, Rayon};
     use commonware_utils::{NZUsize, bitmap::Prunable as BitMap};
     use std::{
         future::Future as _,
@@ -1338,7 +1348,8 @@ mod tests {
     // N=4 -> CHUNK_SIZE_BITS = 32
     const N: usize = 4;
     type Bm = BitMap<N>;
-    type GraftedBatch = Arc<GenericMerkleizedBatch<mmb::Family, <Sha256 as Hasher>::Digest, Rayon>>;
+    type GraftedBatch =
+        Arc<GenericMerkleizedBatch<mmb::Family, <Sha256 as Hasher>::Digest, Manual<Rayon>>>;
     type Location = mmr::Location;
 
     fn make_bitmap(bits: &[bool]) -> Bm {
@@ -1350,7 +1361,7 @@ mod tests {
     }
 
     fn grafted_chain(
-        strategy: &Rayon,
+        strategy: &Manual<Rayon>,
         mem: &Arc<Mem<mmb::Family, <Sha256 as Hasher>::Digest>>,
     ) -> (GraftedBatch, GraftedBatch) {
         let hasher = grafting::hasher::<mmb::Family, Sha256>(grafting::height::<1>());
@@ -1370,6 +1381,7 @@ mod tests {
     #[test_traced]
     fn test_grafted_merkleize_retains_ancestors_after_cancellation() {
         let strategy = Rayon::new(NZUsize!(2)).unwrap();
+        let manual = strategy.manual();
         let mem = Arc::new(Mem::<mmb::Family, <Sha256 as Hasher>::Digest>::new());
         let grafting_height = grafting::height::<1>();
         let graft_inputs = || vec![(0, Sha256::hash(&[b"replacement"]), [1u8; 1])];
@@ -1377,11 +1389,11 @@ mod tests {
         let mut context = TaskContext::from_waker(&waker);
 
         // Observe the worker result so a missing grandparent fails the test directly.
-        let (a, b) = grafted_chain(&strategy, &mem);
+        let (a, b) = grafted_chain(&manual, &mem);
         let ancestor = Arc::downgrade(&a);
         let release = block_strategy(&strategy, 2);
         let mut merkleize = Box::pin(merkleize_grafted_batch::<mmb::Family, Sha256, _, 1>(
-            &strategy,
+            &manual,
             Arc::clone(&b),
             &mem,
             graft_inputs(),
@@ -1395,11 +1407,11 @@ mod tests {
         assert!(ancestor.upgrade().is_none());
 
         // Drop the waiter while the worker is queued to prove the guard moved with it.
-        let (a, b) = grafted_chain(&strategy, &mem);
+        let (a, b) = grafted_chain(&manual, &mem);
         let ancestor = Arc::downgrade(&a);
         let release = block_strategy(&strategy, 2);
         let mut merkleize = Box::pin(merkleize_grafted_batch::<mmb::Family, Sha256, _, 1>(
-            &strategy,
+            &manual,
             Arc::clone(&b),
             &mem,
             graft_inputs(),

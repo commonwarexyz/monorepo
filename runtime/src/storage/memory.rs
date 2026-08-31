@@ -1,4 +1,4 @@
-use super::Header;
+use super::{Header, Layout};
 use crate::{
     Buf, BufferPool, Handle, IoBufs, IoBufsMut, ReadOptions, WriteOptions,
     deterministic::AuditHasher,
@@ -106,17 +106,14 @@ impl Storage {
 
         hasher.finalize()
     }
-}
 
-impl crate::Storage for Storage {
-    type Blob = Blob;
-
-    async fn open_versioned(
+    fn open_inner(
         &self,
         partition: &str,
         name: &[u8],
+        layout: Layout,
         versions: RangeInclusive<u16>,
-    ) -> Result<(Self::Blob, u64, u16), crate::Error> {
+    ) -> Result<(Blob, u64, u16), crate::Error> {
         super::validate_partition_name(partition)?;
 
         let key = (partition.to_string(), name.to_vec());
@@ -136,7 +133,7 @@ impl crate::Storage for Storage {
                 generations.get_or_insert(&key),
             ),
             None => {
-                let (region, blob_version) = Header::create(&versions);
+                let (region, blob_version) = Header::create(layout, &versions);
                 let data_offset = region.len() as u64;
                 content.clear();
                 content.extend_from_slice(&region);
@@ -157,6 +154,38 @@ impl crate::Storage for Storage {
             logical_size,
             blob_version,
         ))
+    }
+
+    /// Return a copy of a blob's durable raw contents without interpreting its container header.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn raw_blob(&self, partition: &str, name: &[u8]) -> Option<Vec<u8>> {
+        self.partitions.lock().get(partition)?.get(name).cloned()
+    }
+
+    /// Install durable raw contents without validating the blob's container header.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn set_raw_blob(&self, partition: &str, name: &[u8], content: Vec<u8>) {
+        let key = (partition.to_string(), name.to_vec());
+        let mut generations = self.generations.lock();
+        let mut partitions = self.partitions.lock();
+        generations.current.remove(&key);
+        partitions
+            .entry(partition.into())
+            .or_default()
+            .insert(name.into(), content);
+    }
+}
+
+impl crate::Storage for Storage {
+    type Blob = Blob;
+
+    async fn open_versioned(
+        &self,
+        partition: &str,
+        name: &[u8],
+        versions: RangeInclusive<u16>,
+    ) -> Result<(Self::Blob, u64, u16), crate::Error> {
+        self.open_inner(partition, name, Layout::V1, versions)
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), crate::Error> {
@@ -396,12 +425,14 @@ impl crate::Blob for Blob {
         let offset: usize = offset
             .try_into()
             .map_err(|_| crate::Error::OffsetOverflow)?;
+        let end = offset
+            .checked_add(len)
+            .ok_or(crate::Error::OffsetOverflow)?;
         let content = self.content.read();
-        let content_len = content.len();
-        if offset + len > content_len {
+        if end > content.len() {
             return Err(crate::Error::BlobInsufficientLength);
         }
-        bufs.copy_from_slice(&content[offset..offset + len]);
+        bufs.copy_from_slice(&content[offset..end]);
         Ok(bufs)
     }
 
@@ -464,9 +495,17 @@ mod tests {
     use super::{Header, *};
     use crate::{
         Blob, BufferPoolConfig, Storage as _,
-        storage::{Layout, tests::run_storage_tests},
+        deterministic::BoxDynRng,
+        storage::{
+            Layout,
+            faulty::{
+                Config as FaultConfig, PartialWriteMode, Storage as FaultyStorage, WriteConfig,
+            },
+            tests::run_storage_tests,
+        },
         telemetry::metrics::Registry,
     };
+    use commonware_utils::{ScriptedRng, probability};
 
     fn test_pool() -> BufferPool {
         let mut registry = Registry::default();
@@ -500,6 +539,47 @@ mod tests {
         drop(sync);
         let (_, sync_len) = storage.open("partition", b"sync").await.unwrap();
         assert_eq!(sync_len, 0);
+    }
+
+    #[tokio::test]
+    async fn test_set_raw_blob_retires_live_generation() {
+        const PARTITION: &str = "partition";
+        const NAME: &[u8] = b"blob";
+        const INSTALLED: &[u8] = b"current";
+
+        let storage = Storage::new(test_pool());
+        let (stale, _) = storage.open(PARTITION, NAME).await.unwrap();
+        stale
+            .write_at(0, b"stale", WriteOptions::default())
+            .await
+            .unwrap();
+
+        let installed = crate::storage::header::tests::v1_blob_bytes(0, INSTALLED);
+        storage.set_raw_blob(PARTITION, NAME, installed.clone());
+
+        assert!(matches!(
+            stale.sync().await,
+            Err(crate::Error::BlobMissing(_, _))
+        ));
+        assert_eq!(
+            storage.raw_blob(PARTITION, NAME).as_deref(),
+            Some(installed.as_slice())
+        );
+
+        let (fresh, size, version) = storage
+            .open_versioned(PARTITION, NAME, 0..=0)
+            .await
+            .unwrap();
+        assert_eq!(size, INSTALLED.len() as u64);
+        assert_eq!(version, 0);
+        assert_eq!(
+            fresh
+                .read_at(0, INSTALLED.len(), ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce(),
+            INSTALLED
+        );
     }
 
     #[tokio::test]
@@ -571,6 +651,162 @@ mod tests {
                 .unwrap()
                 .coalesce(),
             b"new!"
+        );
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum SubsetWriteCut {
+        FailedWrite,
+        Crash,
+    }
+
+    async fn assert_subset_write_preserves_header(layout: Layout, cut: SubsetWriteCut) {
+        // Alternating case makes a retained subset distinguishable from a contiguous prefix.
+        const ORIGINAL: &[u8] = b"abcdefghijklmnop";
+        const REPLACEMENT: &[u8] = b"ABCDEFGHIJKLMNOP";
+        const RETAINED: &[u8] = b"AbCdEfGhIjKlMnOp";
+        const PARTITION: &str = "partition";
+        const NAME: &[u8] = b"blob";
+
+        // Seed a canonical image so both layouts enter the same logical blob interface.
+        let inner = Storage::new(test_pool());
+        let raw = match layout {
+            Layout::V0 => crate::storage::header::tests::v0_blob_bytes(0, ORIGINAL),
+            Layout::V1 => crate::storage::header::tests::v1_blob_bytes(0, ORIGINAL),
+        };
+        let data_offset = layout.data_offset() as usize;
+        let expected_header = raw[..data_offset].to_vec();
+        inner.set_raw_blob(PARTITION, NAME, raw);
+
+        // Select whether the subset is retained by a failed write or by a later crash, and script
+        // alternating per-byte retention decisions for an exact expected image.
+        let failure_rate = match cut {
+            SubsetWriteCut::FailedWrite => probability!(1.0),
+            SubsetWriteCut::Crash => probability!(0.0),
+        };
+        let rng: BoxDynRng = Box::new(ScriptedRng::new(
+            (0..REPLACEMENT.len()).map(|index| if index % 2 == 0 { 0 } else { u64::MAX }),
+        ));
+        let faulty = FaultyStorage::new(
+            inner.clone(),
+            Arc::new(Mutex::new(rng)),
+            Arc::new(RwLock::new(FaultConfig::default().write(WriteConfig {
+                failure_rate,
+                retention_rate: probability!(0.5),
+                mode: PartialWriteMode::Subset,
+            }))),
+        );
+
+        // Apply the overwrite through the faulty wrapper and assert the selected write boundary.
+        let (blob, size, version) = faulty.open_versioned(PARTITION, NAME, 0..=0).await.unwrap();
+        assert_eq!(size, ORIGINAL.len() as u64);
+        assert_eq!(version, 0);
+        let result = blob.write_at(0, REPLACEMENT, WriteOptions::default()).await;
+        match cut {
+            SubsetWriteCut::FailedWrite => {
+                assert!(matches!(result, Err(crate::Error::Io(_))));
+            }
+            SubsetWriteCut::Crash => result.unwrap(),
+        }
+        drop(blob);
+
+        // Failed writes retain their subset immediately, while successful unsynchronized writes
+        // remain volatile. Neither path may address bytes in the container header.
+        let raw = inner.raw_blob(PARTITION, NAME).unwrap();
+        assert_eq!(&raw[..data_offset], expected_header);
+        let expected_payload = match cut {
+            SubsetWriteCut::FailedWrite => RETAINED,
+            SubsetWriteCut::Crash => ORIGINAL,
+        };
+        assert_eq!(&raw[data_offset..], expected_payload);
+
+        // Simulating a crash applies the snapshotted retention policy to the durable payload while
+        // leaving the complete container header unchanged.
+        faulty.crash().unwrap();
+        drop(faulty);
+        let recovered = Storage::from_snapshot(inner.take_snapshot(), test_pool());
+        let raw = recovered.raw_blob(PARTITION, NAME).unwrap();
+        assert_eq!(&raw[..data_offset], expected_header);
+        assert_eq!(&raw[data_offset..], RETAINED);
+
+        // Reopen the crashed image through the versioned API to prove the retained subset remains
+        // a valid logical blob under both layouts.
+        let (blob, size, version) = recovered
+            .open_versioned(PARTITION, NAME, 0..=0)
+            .await
+            .unwrap();
+        assert_eq!(size, ORIGINAL.len() as u64);
+        assert_eq!(version, 0);
+        assert_eq!(
+            blob.read_at(0, ORIGINAL.len(), ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce(),
+            RETAINED
+        );
+    }
+
+    #[tokio::test]
+    async fn test_subset_write_preserves_v0_and_v1_headers() {
+        for layout in [Layout::V0, Layout::V1] {
+            for cut in [SubsetWriteCut::FailedWrite, SubsetWriteCut::Crash] {
+                assert_subset_write_preserves_header(layout, cut).await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_v0_writer_reopens_with_current_layout() {
+        const PARTITION: &str = "legacy";
+        const NAME: &[u8] = b"blob";
+        const PAYLOAD: &[u8] = b"payload";
+        const VERSION: u16 = 7;
+
+        let legacy_writer = Storage::new(test_pool());
+        let (blob, size, version) = legacy_writer
+            .open_inner(PARTITION, NAME, Layout::V0, VERSION..=VERSION)
+            .unwrap();
+        assert_eq!(size, 0);
+        assert_eq!(version, VERSION);
+        blob.write_at(0, PAYLOAD, WriteOptions::SYNC).await.unwrap();
+        drop(blob);
+
+        let data_offset = Layout::V0.data_offset() as usize;
+        let raw = legacy_writer.raw_blob(PARTITION, NAME).unwrap();
+        assert_eq!(&raw[..Header::MAGIC_LENGTH], &Layout::V0.magic());
+        assert_eq!(&raw[data_offset..], PAYLOAD);
+
+        let current = Storage::from_snapshot(legacy_writer.take_snapshot(), test_pool());
+        let (blob, size, version) = current
+            .open_versioned(PARTITION, NAME, VERSION..=VERSION)
+            .await
+            .unwrap();
+        assert_eq!(size, PAYLOAD.len() as u64);
+        assert_eq!(version, VERSION);
+        assert_eq!(
+            blob.read_at(0, PAYLOAD.len(), ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce(),
+            PAYLOAD
+        );
+
+        blob.write_at(PAYLOAD.len() as u64, b"!", WriteOptions::SYNC)
+            .await
+            .unwrap();
+        drop(blob);
+        let (blob, size, version) = current
+            .open_versioned(PARTITION, NAME, VERSION..=VERSION)
+            .await
+            .unwrap();
+        assert_eq!(size, (PAYLOAD.len() + 1) as u64);
+        assert_eq!(version, VERSION);
+        assert_eq!(
+            blob.read_at(0, PAYLOAD.len() + 1, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce(),
+            b"payload!"
         );
     }
 
@@ -714,6 +950,95 @@ mod tests {
         assert_ne!(storage_a.audit(), storage_b.audit());
     }
 
+    /// Required recovery outcome for an installed V0 crash image.
+    enum Expect {
+        Recreated,
+        Kept,
+        Rejected,
+    }
+
+    /// Exhaustively verify recovery of every torn V0 creation image against the oracle: the
+    /// V0 prelude is 8 bytes, so the whole crash-image space (every persisted length, every
+    /// zero-hole subset) is enumerable. Recreated images must heal to the canonical V1
+    /// region, kept images must open unchanged, and everything else must fail without
+    /// mutation.
+    #[tokio::test]
+    async fn test_v0_creation_images_exhaustive() {
+        for version in [0u16, 3, 0x0100, 0xFFFF] {
+            let versions = version..=version;
+            let storage = Storage::new(test_pool());
+
+            let (blob, _, _) = storage
+                .open_versioned("partition", b"v1", versions.clone())
+                .await
+                .unwrap();
+            drop(blob);
+            let canonical_v1 = storage.raw_blob("partition", b"v1").unwrap();
+            let (blob, _, _) = storage
+                .open_inner("partition", b"v0", Layout::V0, versions.clone())
+                .unwrap();
+            drop(blob);
+            let canonical_v0 = storage.raw_blob("partition", b"v0").unwrap();
+
+            for len in 0..=canonical_v0.len() {
+                for mask in 0u16..1 << len {
+                    let mut image = canonical_v0[..len].to_vec();
+                    for (bit, byte) in image.iter_mut().enumerate() {
+                        if mask & (1 << bit) != 0 {
+                            *byte = 0;
+                        }
+                    }
+
+                    // Expected outcome per the header spec: a sub-prelude file is always
+                    // recreated, an intact prelude parses (the stamped version decides,
+                    // and only the version bytes can differ once the first six match), and
+                    // anything else heals only as a canonical V1 creation prefix, which a
+                    // V0 image can satisfy just through the shared "CWI" brand.
+                    let written = image
+                        .iter()
+                        .rposition(|&byte| byte != 0)
+                        .map_or(0, |i| i + 1);
+                    let expected = if image.len() < canonical_v0.len() {
+                        Expect::Recreated
+                    } else if image == canonical_v0 {
+                        Expect::Kept
+                    } else if image[..6] == canonical_v0[..6] {
+                        Expect::Rejected
+                    } else if written <= 3 && image[..written] == canonical_v0[..written] {
+                        Expect::Recreated
+                    } else {
+                        Expect::Rejected
+                    };
+
+                    // Install the image, reopen, and hold recovery to the expected outcome.
+                    storage.set_raw_blob("partition", b"v0", image.clone());
+                    let result = storage
+                        .open_versioned("partition", b"v0", versions.clone())
+                        .await;
+                    match expected {
+                        Expect::Recreated => {
+                            let (_, size, opened) =
+                                result.expect("torn creation image did not recover");
+                            assert_eq!(size, 0);
+                            assert_eq!(opened, version);
+                            assert_eq!(storage.raw_blob("partition", b"v0").unwrap(), canonical_v1);
+                        }
+                        Expect::Kept => {
+                            let (_, size, opened) = result.expect("intact image did not open");
+                            assert_eq!(size, 0);
+                            assert_eq!(opened, version);
+                            assert_eq!(storage.raw_blob("partition", b"v0").unwrap(), image);
+                        }
+                        Expect::Rejected => {
+                            assert!(result.is_err(), "non-canonical image was accepted");
+                            assert_eq!(storage.raw_blob("partition", b"v0").unwrap(), image);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     #[tokio::test]
     async fn test_blob_torn_creation_recovers() {
         let storage = Storage::new(test_pool());
@@ -721,7 +1046,7 @@ mod tests {
         // Manually insert a torn-creation leftover: a prefix of a canonical V1 header
         // region (the full state enumeration lives in the Layout::interrupted_creation
         // unit tables)
-        let (region, _) = Header::create(&(0..=0));
+        let (region, _) = Header::create(Layout::V1, &(0..=0));
         let states = [region[..10].to_vec()];
         for (i, state) in states.into_iter().enumerate() {
             let name = format!("torn_{i}").into_bytes();

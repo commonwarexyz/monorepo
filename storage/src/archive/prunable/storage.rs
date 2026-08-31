@@ -180,12 +180,15 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
             value_partition: cfg.value_partition,
             index_page_cache: cfg.key_page_cache,
             index_write_buffer: cfg.key_write_buffer,
+            replay_buffer: cfg.replay_buffer,
             value_write_buffer: cfg.value_write_buffer,
             compression: cfg.compression,
             codec_config: cfg.codec_config,
         };
+        // TODO (#4610): fuse this init's recovery drain with the replay below via tracked
+        // replay, restoring single-scan startup
         let oversized: Oversized<E, Record<K>, V> =
-            Oversized::init(context.child("oversized"), oversized_cfg, None).await?;
+            Oversized::init(context.child("oversized"), oversized_cfg).await?;
 
         // Initialize keys and replay index journal (no values read!)
         let mut indices: BTreeMap<u64, u64> = BTreeMap::new();

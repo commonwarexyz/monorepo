@@ -51,7 +51,7 @@ fn fuzz(input: FuzzInput) {
     let mut rng = TestRng::new(input.rng_seed);
 
     let mut ed25519_batch = Ed25519Batch::new(0);
-    let mut expected_ed25519_result = true;
+    let mut expected_ed25519_result = None;
 
     for op in input.operations {
         match op {
@@ -70,6 +70,7 @@ fn fuzz(input: FuzzInput) {
                 let added =
                     ed25519_batch.add(namespace.as_slice(), &message, &public_key, &signature);
                 assert!(added, "Valid signature should be added to batch");
+                expected_ed25519_result = Some(expected_ed25519_result.unwrap_or(true));
             }
 
             BatchOperation::AddInvalidEd25519 {
@@ -96,7 +97,7 @@ fn fuzz(input: FuzzInput) {
                         &signature,
                     );
                     if added {
-                        expected_ed25519_result = false;
+                        expected_ed25519_result = Some(false);
                     }
                 }
             }
@@ -104,13 +105,14 @@ fn fuzz(input: FuzzInput) {
             BatchOperation::VerifyEd25519 => {
                 let result = ed25519_batch.verify(&mut rng, &Sequential);
                 assert_eq!(
-                    result, expected_ed25519_result,
-                    "Ed25519 batch verification result mismatch: expected {expected_ed25519_result}, got {result}",
+                    result,
+                    expected_ed25519_result.unwrap_or(false),
+                    "Ed25519 batch verification result mismatch",
                 );
 
                 // Reset batch and expectation after verification
                 ed25519_batch = Ed25519Batch::new(0);
-                expected_ed25519_result = true;
+                expected_ed25519_result = None;
             }
         }
     }
@@ -118,7 +120,8 @@ fn fuzz(input: FuzzInput) {
     // Final verification of any remaining items
     let ed25519_result = ed25519_batch.verify(&mut rng, &Sequential);
     assert_eq!(
-        ed25519_result, expected_ed25519_result,
+        ed25519_result,
+        expected_ed25519_result.unwrap_or(false),
         "Final Ed25519 batch verification failed"
     );
 }

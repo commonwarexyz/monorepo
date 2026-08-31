@@ -411,8 +411,8 @@ impl<
     }
 
     /// Attempts to construct a certificate from verified votes: the first kind
-    /// (notarization, then nullification, then finalization) with an unconsumed
-    /// verified quorum. Call repeatedly to drain every constructible kind.
+    /// (notarization, then nullification, then finalization) with a verified
+    /// quorum. Call repeatedly to drain every constructible kind.
     ///
     /// Once recovery starts, it consumes the verified votes. Do not cancel unless the round will
     /// also be discarded.
