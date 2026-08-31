@@ -34,9 +34,6 @@ pub struct Config<
     /// Local identity of the participant (if any).
     pub me: Option<P>,
 
-    /// Initial expected performance for new participants.
-    pub initial: Duration,
-
     /// Timeout for requests.
     pub timeout: Duration,
 

@@ -1073,6 +1073,16 @@ impl<F: Graftable, D: Digest, U: update::Update, const N: usize, S: Strategy>
         self.inner.bounds()
     }
 
+    /// Return the operations this batch appends to the ops log and the location of the first.
+    ///
+    /// Delegates to the wrapped ops-level batch. The bitmap state contributes to the
+    /// canonical root but appends no log operations. There is no matching proof method:
+    /// an ops-level proof verifies only against [`Self::ops_root`], never the grafted
+    /// [`Self::root`] that blocks commit to.
+    pub fn operations(&self) -> (Location<F>, Arc<Vec<Operation<F, U>>>) {
+        self.inner.operations()
+    }
+
     /// Return the batch's safe sync boundary.
     ///
     /// This equals the boundary [`super::db::Db::sync_boundary`] reports once this batch is applied.

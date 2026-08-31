@@ -3,6 +3,7 @@
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::queue::{Config, Queue};
+use commonware_utils::NZUsize;
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::BTreeSet,
@@ -169,6 +170,7 @@ fn fuzz(input: FuzzInput) {
             codec_config: ((0usize..).into(), ()),
             page_cache: CacheRef::from_pooler(&context, page_size, page_cache_size),
             write_buffer,
+            replay_buffer: NZUsize!(4096),
         };
 
         let mut queue = Queue::<_, Vec<u8>>::init(context.child("storage"), cfg)

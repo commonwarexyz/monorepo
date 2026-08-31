@@ -55,9 +55,6 @@ where
     /// Local node identity if available.
     pub me: Option<P>,
 
-    /// Initial expected performance for new peers.
-    pub initial: Duration,
-
     /// Request timeout.
     pub timeout: Duration,
 
@@ -166,7 +163,6 @@ where
                 producer: handler,
                 mailbox_size: self.config.mailbox_size,
                 me: self.config.me.clone(),
-                initial: self.config.initial,
                 timeout: self.config.timeout,
                 fetch_retry_timeout: self.config.fetch_retry_timeout,
                 priority_requests: self.config.priority_requests,
@@ -444,7 +440,6 @@ mod tests {
             database,
             mailbox_size: NZUsize!(16),
             me: None,
-            initial: Duration::from_millis(10),
             timeout: Duration::from_millis(10),
             fetch_retry_timeout: Duration::from_millis(10),
             max_serve_ops: NZU64!(16),
@@ -479,6 +474,7 @@ mod tests {
                 metadata_partition: format!("{suffix}-mmr-metadata"),
                 items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
@@ -487,6 +483,7 @@ mod tests {
                 items_per_blob: NZU64!(7),
                 page_cache,
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
             },
             translator: TwoCap,
             init_cache_size: Some(NZUsize!(1024)),
