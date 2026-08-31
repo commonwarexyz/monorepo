@@ -85,11 +85,11 @@ impl<D: Digest> PromotionState<D> {
         let direct = current.height().next() == reference.height() && parent == current.digest();
         let installed_jump =
             generation > self.generations[chain] && reference.height() > current.height();
-        if generation < self.generations[chain] || (!direct && !installed_jump) {
+        if !direct && !installed_jump {
             return Err("immutable promotion block does not extend its producer frontier");
         }
         self.frontiers[chain] = reference;
-        self.generations[chain] = generation;
+        self.generations[chain] = self.generations[chain].max(generation);
         Ok(())
     }
 }
@@ -327,16 +327,37 @@ mod tests {
         let continued = reference(0, 6, b"continued");
         state.extend(continued, jumped.digest(), 1).unwrap();
 
-        let stale = reference(0, 7, b"stale");
-        assert!(state.extend(stale, continued.digest(), 0).is_err());
+        let stale = reference(0, 7, b"stale direct");
+        state.extend(stale, continued.digest(), 0).unwrap();
+        assert_eq!(state.generations, vec![1]);
+
+        let invalid = reference(0, 8, b"invalid jump");
         assert!(
             state
-                .extend(stale, Sha256::hash(&[b"wrong parent"]), 1)
+                .extend(invalid, Sha256::hash(&[b"wrong parent"]), 0)
+                .is_err()
+        );
+        assert!(
+            state
+                .extend(invalid, Sha256::hash(&[b"wrong parent"]), 1)
                 .is_err()
         );
 
         assert!(!state.install(1, vec![jumped]).unwrap());
-        assert_eq!(state.frontiers, vec![continued]);
+        assert_eq!(state.frontiers, vec![stale]);
+        assert_eq!(state.generations, vec![1]);
+    }
+
+    #[test]
+    fn direct_output_survives_a_newer_floor_generation() {
+        let genesis = reference(0, 0, b"genesis");
+        let mut state = PromotionState::new(None, vec![genesis], vec![0]);
+        assert!(state.install(1, vec![genesis]).unwrap());
+
+        let child = reference(0, 1, b"child");
+        state.extend(child, genesis.digest(), 0).unwrap();
+
+        assert_eq!(state.frontiers, vec![child]);
         assert_eq!(state.generations, vec![1]);
     }
 }
