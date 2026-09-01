@@ -1,6 +1,5 @@
 use crate::{Array, Span};
-use bytes::{Buf, BufMut};
-use commonware_codec::{Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{FixedArray, FixedSize, Read, Write};
 use commonware_formatting::Hex;
 use core::{
     cmp::{Ord, PartialOrd},
@@ -19,7 +18,9 @@ pub enum Error {
 }
 
 /// An `Array` implementation for fixed-length byte arrays.
-#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, FixedArray)]
+#[derive(
+    Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, FixedArray, FixedSize, Read, Write,
+)]
 #[fixed_array(infallible, bytes([u8; N]))]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[repr(transparent)]
@@ -30,24 +31,6 @@ impl<const N: usize> FixedBytes<N> {
     pub const fn new(value: [u8; N]) -> Self {
         Self(value)
     }
-}
-
-impl<const N: usize> Write for FixedBytes<N> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.0.write(buf);
-    }
-}
-
-impl<const N: usize> Read for FixedBytes<N> {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        Ok(Self(<[u8; N]>::read(buf)?))
-    }
-}
-
-impl<const N: usize> FixedSize for FixedBytes<N> {
-    const SIZE: usize = N;
 }
 
 impl<const N: usize> Span for FixedBytes<N> {}
@@ -84,7 +67,7 @@ mod tests {
     use super::*;
     use crate::fixed_bytes;
     use bytes::{Buf, BytesMut};
-    use commonware_codec::{DecodeExt, Encode};
+    use commonware_codec::{DecodeExt, Encode, Error as CodecError, ReadExt};
 
     #[test]
     fn test_codec() {
