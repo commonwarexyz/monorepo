@@ -108,6 +108,21 @@ commonware_macros::stability_scope!(BETA {
     }
 
     impl<S> Manual<S> {
+        /// Wraps `strategy` for manually partitioned work planned at `parallelism`.
+        ///
+        /// The wrapped strategy is stripped of adaptive state via
+        /// [`Strategy::non_adaptive`], so manually partitioned work never consults
+        /// adaptive policy decisions regardless of the strategy passed in.
+        pub fn new(strategy: S, parallelism: NonZeroUsize) -> Self
+        where
+            S: Strategy,
+        {
+            Self {
+                strategy: strategy.non_adaptive(),
+                parallelism: parallelism.get(),
+            }
+        }
+
         /// Returns the parallelism to use for manually partitioned work.
         pub const fn parallelism(&self) -> usize {
             self.parallelism
@@ -124,6 +139,18 @@ commonware_macros::stability_scope!(BETA {
         fn manual(&self) -> Manual<Self>
         where
             Self: Sized;
+
+        /// Returns this strategy with any adaptive decision state disabled.
+        ///
+        /// [`Manual::new`] applies this to the strategy it wraps, so manually partitioned
+        /// work never consults adaptive policy decisions. The default returns a clone;
+        /// only strategies carrying adaptive state need to override it.
+        fn non_adaptive(&self) -> Self
+        where
+            Self: Sized,
+        {
+            self.clone()
+        }
 
         /// Submit one CPU-bound job to this strategy, running it inline on the calling task when
         /// it is measured cheaper than the round trip of offloading it to the pool.
@@ -1025,12 +1052,16 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     impl Strategy for Rayon {
         fn manual(&self) -> Manual<Self> {
             Manual {
-                strategy: Self {
-                    thread_pool: self.thread_pool.clone(),
-                    parallelism: self.parallelism,
-                    policy: None,
-                },
+                strategy: self.non_adaptive(),
                 parallelism: self.parallelism,
+            }
+        }
+
+        fn non_adaptive(&self) -> Self {
+            Self {
+                thread_pool: self.thread_pool.clone(),
+                parallelism: self.parallelism,
+                policy: None,
             }
         }
 
@@ -1361,7 +1392,7 @@ commonware_macros::stability_scope!(ALPHA, cfg(any(feature = "test-utils", test)
 
 #[cfg(test)]
 mod test {
-    use crate::{Rayon, Sequential, Strategy};
+    use crate::{Manual, Rayon, Sequential, Strategy};
     use core::num::NonZeroUsize;
     use futures::FutureExt;
     use proptest::prelude::*;
@@ -1645,6 +1676,17 @@ mod test {
 
         assert_eq!(policy_len(&strategy), 0);
         assert_eq!(policy_len(&manual.strategy), 0);
+    }
+
+    #[test]
+    fn manual_new_strips_adaptive_policy() {
+        let strategy = parallel_strategy();
+        let manual = Manual::new(strategy, NonZeroUsize::new(4).unwrap());
+
+        let _: usize = manual.run(4, || 1, || 2);
+
+        assert_eq!(manual.parallelism(), 4);
+        assert!(manual.strategy.policy.is_none());
     }
 
     #[test]

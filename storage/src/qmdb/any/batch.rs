@@ -552,6 +552,21 @@ where
     (results, unresolved)
 }
 
+/// Record a diff entry's activity: activate the location it wrote (if any) and deactivate the
+/// prior committed location it superseded (if any).
+fn set_activity<F: Family, const N: usize>(
+    bitmap: &mut bitmap::Prunable<N>,
+    loc: Option<Location<F>>,
+    old: Option<Location<F>>,
+) {
+    if let Some(loc) = loc {
+        bitmap.set_bit(*loc, true);
+    }
+    if let Some(old) = old {
+        bitmap.set_bit(*old, false);
+    }
+}
+
 /// Apply a single diff entry to the snapshot index and activity bitmap in lockstep:
 /// install the winning `Active` location and clear the prior committed location.
 fn apply_diff<F: Family, V, I: UnorderedIndex<Value = Location<F>>, const N: usize>(
@@ -572,12 +587,7 @@ fn apply_diff<F: Family, V, I: UnorderedIndex<Value = Location<F>>, const N: usi
             }
         }
     }
-    if let Some(loc) = entry.loc() {
-        bitmap.set_bit(*loc, true);
-    }
-    if let Some(loc) = base_old_loc {
-        bitmap.set_bit(*loc, false);
-    }
+    set_activity(bitmap, entry.loc(), base_old_loc);
 }
 
 /// k-way sorted merge over diff slices in priority order. On equal keys, the lowest-indexed
@@ -662,15 +672,29 @@ impl<'a, K: Ord, F: Family, V> Iterator for DiffMerge<'a, K, F, V> {
     }
 }
 
+/// Maintain the invariant that only the most recent CommitFloor operation can be active: demote
+/// the previous commit at `last_commit_loc` and activate the batch's own at `tip - 1`.
+fn move_commit_bit<const N: usize>(
+    bitmap: &mut bitmap::Prunable<N>,
+    last_commit_loc: u64,
+    tip: u64,
+) {
+    bitmap.set_bit(last_commit_loc, false);
+    bitmap.set_bit(tip - 1, true);
+}
+
 /// Publish `batch`'s key-level changes to the in-memory snapshot index and activity bitmap.
 ///
-/// `snapshot` and `bitmap` must hold the state already applied through `last_commit_loc`, the
+/// `snapshot` and the bitmap must hold the state already applied through `last_commit_loc`, the
 /// location of the commit operation they currently end at. On return they reflect `batch.bounds.tip`.
+///
+/// Takes the bitmap write lock, so the caller must not already hold it.
 fn apply_batch_to_index<F, D, I, U, S, const N: usize>(
     snapshot: &mut I,
-    bitmap: &mut bitmap::Prunable<N>,
+    bitmap: &Shared<N>,
     batch: &MerkleizedBatch<F, D, U, S>,
     last_commit_loc: Location<F>,
+    strategy: &S,
 ) where
     F: Family,
     D: Digest,
@@ -681,13 +705,29 @@ fn apply_batch_to_index<F, D, I, U, S, const N: usize>(
 {
     let db_size = *last_commit_loc + 1;
     let tip = *batch.bounds.tip.size;
+    let mut bitmap = bitmap.write();
     bitmap.extend_to(tip);
 
     if batch.ancestor_diffs.is_empty() {
-        // Fast path: no ancestors to merge, no fixups to look up.
-        for (key, entry) in batch.diff.iter() {
-            apply_diff(snapshot, bitmap, key, entry, entry.base_old_loc());
+        // Fast path: no ancestors to merge, no fixups to look up. Bitmap flips are location-keyed
+        // (not key-range disjoint), so they apply in one serial pass. The index mutations then
+        // apply key-sharded across the strategy where the index supports it (the diff is
+        // key-sorted).
+        for (_, entry) in batch.diff.iter() {
+            set_activity(&mut bitmap, entry.loc(), entry.base_old_loc());
         }
+        move_commit_bit(&mut bitmap, *last_commit_loc, tip);
+        drop(bitmap);
+
+        let diffs: Vec<crate::index::KeyValueDiff<'_, Location<F>>> = batch
+            .diff
+            .iter()
+            .map(|(key, entry)| {
+                let key: &[u8] = key.as_ref();
+                (key, entry.base_old_loc(), entry.loc())
+            })
+            .collect();
+        snapshot.apply_sorted_diffs(strategy, &diffs);
     } else {
         // Partition ancestor diffs into already-applied (provide `base_old_loc` fixups) and pending
         // (still to be applied; merged with the child).
@@ -723,13 +763,10 @@ fn apply_batch_to_index<F, D, I, U, S, const N: usize>(
                 },
                 |ancestor_entry| ancestor_entry.loc(),
             );
-            apply_diff(snapshot, bitmap, key, entry, old);
+            apply_diff(snapshot, &mut bitmap, key, entry, old);
         }
+        move_commit_bit(&mut bitmap, *last_commit_loc, tip);
     }
-
-    // Maintain the invariant that only the most recent CommitFloor operation can be active.
-    bitmap.set_bit(*last_commit_loc, false);
-    bitmap.set_bit(tip - 1, true);
 }
 
 /// Fill `out` with up to `limit` floor-raise candidates in `[floor, tip)` under a single bitmap
@@ -2870,13 +2907,14 @@ where
             .iter()
             .map(|diff| diff.len())
             .fold(batch.diff.len(), usize::saturating_add);
-        let index_job = strategy.spawn(work_hint, move |_| {
+        let index_job = strategy.spawn(work_hint, move |strategy| {
             let mut snapshot = snapshot;
             apply_batch_to_index(
                 &mut snapshot,
-                &mut index_bitmap.write(),
+                &index_bitmap,
                 &index_batch,
                 last_commit_loc,
+                &strategy,
             );
             snapshot
         });
