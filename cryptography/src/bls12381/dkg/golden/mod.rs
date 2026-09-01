@@ -828,8 +828,8 @@ impl SignedDealerLog {
 #[derive(Clone)]
 #[allow(dead_code)]
 pub struct DealerLog {
-    commitments: VrfCommitments,
     dealing: Dealing,
+    commitments: VrfCommitments,
 }
 
 #[cfg(feature = "arbitrary")]
