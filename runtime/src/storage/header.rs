@@ -1061,11 +1061,35 @@ pub(crate) mod tests {
 
     #[cfg(feature = "arbitrary")]
     mod conformance {
-        use super::Header;
+        use super::{Header, v0_blob_bytes, v1_blob_bytes};
         use commonware_codec::conformance::CodecConformance;
+        use commonware_conformance::Conformance;
+
+        /// The image of a V0 blob with a seeded blob version and payload.
+        ///
+        /// Storage conformance fixtures elsewhere pin whatever [crate::DEFAULT_BLOB_LAYOUT]
+        /// produces, so these fixtures pin each layout by name.
+        struct V0Blob;
+
+        impl Conformance for V0Blob {
+            async fn commit(seed: u64) -> Vec<u8> {
+                v0_blob_bytes(seed as u16, &seed.to_le_bytes())
+            }
+        }
+
+        /// The image of a V1 blob with a seeded blob version and payload.
+        struct V1Blob;
+
+        impl Conformance for V1Blob {
+            async fn commit(seed: u64) -> Vec<u8> {
+                v1_blob_bytes(seed as u16, &seed.to_le_bytes())
+            }
+        }
 
         commonware_conformance::conformance_tests! {
-            CodecConformance<Header>
+            CodecConformance<Header>,
+            V0Blob,
+            V1Blob,
         }
     }
 }

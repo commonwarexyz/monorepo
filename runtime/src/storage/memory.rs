@@ -520,54 +520,6 @@ mod tests {
         BufferPool::new(BufferPoolConfig::for_storage(), &mut registry)
     }
 
-    #[cfg(feature = "arbitrary")]
-    mod conformance {
-        use super::{Layout, Storage, test_pool};
-        use crate::{Blob as _, BlobVersion, WriteOptions};
-        use commonware_conformance::{Conformance, conformance_tests};
-
-        /// The raw image of a blob created with `layout`, stamped with a seeded blob version
-        /// and payload.
-        ///
-        /// Storage conformance fixtures elsewhere pin whatever [crate::DEFAULT_BLOB_LAYOUT]
-        /// produces, so these fixtures pin each layout by name.
-        async fn creation(seed: u64, layout: Layout) -> Vec<u8> {
-            let storage = Storage::new(test_pool());
-            let name = seed.to_be_bytes();
-            let version = BlobVersion::new(seed as u16);
-            let (blob, size, stamped) = storage
-                .open_inner("conformance", &name, layout, version..=version)
-                .unwrap();
-            assert_eq!(size, 0);
-            assert_eq!(stamped, version);
-            blob.write_at(0, seed.to_le_bytes().to_vec(), WriteOptions::SYNC)
-                .await
-                .unwrap();
-            storage.raw_blob("conformance", &name).unwrap()
-        }
-
-        struct V0Creation;
-
-        impl Conformance for V0Creation {
-            async fn commit(seed: u64) -> Vec<u8> {
-                creation(seed, Layout::V0).await
-            }
-        }
-
-        struct V1Creation;
-
-        impl Conformance for V1Creation {
-            async fn commit(seed: u64) -> Vec<u8> {
-                creation(seed, Layout::V1).await
-            }
-        }
-
-        conformance_tests! {
-            V0Creation,
-            V1Creation,
-        }
-    }
-
     #[tokio::test]
     async fn test_memory_storage() {
         let storage = Storage::new(test_pool());
