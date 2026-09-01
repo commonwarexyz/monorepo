@@ -9,6 +9,11 @@ BLS multisig certificates form and verify quorum by weight. BLS threshold
 schemes remain count-based and reject non-uniform committees. Certificate
 encoding is unchanged ([#4635]).
 
+### Weighted Aggregation Committees
+
+Aggregation forms certificates and advances its safe tip by committee weight.
+Uniform committees retain their existing behavior ([#4649]).
+
 ### Crash Recovery
 
 Runtime storage now recovers a blob whose initial header write was interrupted.
@@ -33,6 +38,7 @@ after restart ([#4420]).
 [#4275]: https://github.com/commonwarexyz/monorepo/pull/4275
 [#4420]: https://github.com/commonwarexyz/monorepo/pull/4420
 [#4635]: https://github.com/commonwarexyz/monorepo/pull/4635
+[#4649]: https://github.com/commonwarexyz/monorepo/pull/4649
 
 ## v2026.7.0
 
