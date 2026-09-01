@@ -292,6 +292,8 @@ mod tests {
         test_variable_rewind_preserves_collision_bucket => run_rewind_preserves_collision_bucket, open;
         test_variable_rewind_after_reopen_repeated_key_gap => run_rewind_after_reopen_repeated_key_gap, open;
         test_variable_rewind_after_reopen_mixed_gap_retained => run_rewind_after_reopen_mixed_gap_retained, open;
+        test_variable_rewind_repeated_key_live => run_rewind_repeated_key_live, open;
+        test_variable_rewind_after_reopen_repeated_key_retained => run_rewind_after_reopen_repeated_key_retained, open;
     }
 
     #[boxed]

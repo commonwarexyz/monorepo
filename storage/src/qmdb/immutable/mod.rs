@@ -80,8 +80,8 @@ use crate::{
     },
     merkle::{Family, Location, Proof, full::Config as MerkleConfig},
     qmdb::{
-        Error, any::ValueEncoding, batch_chain, build_retained_snapshot_from_log, metrics::Metrics,
-        operation::Key, single_operation_root,
+        Error, any::ValueEncoding, batch_chain, metrics::Metrics, operation::Key,
+        single_operation_root,
     },
     translator::Translator,
 };
@@ -90,8 +90,9 @@ use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
-use commonware_runtime::Handle;
+use commonware_runtime::{Handle, ReadOptions};
 use core::num::{NonZeroU64, NonZeroUsize};
+use futures::{StreamExt, pin_mut};
 use std::{ops::Range, sync::Arc};
 use tracing::warn;
 
@@ -107,6 +108,40 @@ pub use compact::{
     UnmerkleizedBatch as CompactUnmerkleizedBatch,
 };
 pub use operation::Operation;
+
+/// Build the snapshot by replaying the log from `inactivity_floor_loc`, inserting the location of
+/// every retained [Operation::Set] and keeping prior locations of the same key. Assumes the log
+/// is not pruned beyond the inactivity floor.
+///
+/// Repeats of a full key all land in the snapshot, matching a snapshot maintained live, so reads
+/// of a repeated key keep returning one of its written values however the snapshot was built.
+///
+/// `init_buffer` sizes the replay read buffer (in bytes).
+async fn build_snapshot<F, K, V, C, T>(
+    inactivity_floor_loc: Location<F>,
+    log: &C,
+    snapshot: &mut Index<T, Location<F>>,
+    init_buffer: NonZeroUsize,
+) -> Result<(), Error<F>>
+where
+    F: Family,
+    K: Key,
+    V: ValueEncoding,
+    C: Contiguous<Item = Operation<F, K, V>>,
+    T: Translator,
+{
+    let stream = log
+        .replay(*inactivity_floor_loc, init_buffer, ReadOptions::default())
+        .await?;
+    pin_mut!(stream);
+    while let Some(result) = stream.next().await {
+        let (loc, op) = result?;
+        if let Operation::Set(key, _) = op {
+            snapshot.insert(&key, Location::new(loc));
+        }
+    }
+    Ok(())
+}
 
 /// Compute the authenticated root of a newly initialized database without opening storage.
 ///
@@ -251,10 +286,10 @@ where
                 return Err(Error::DataCorrupted("inactivity floor exceeds last commit"));
             }
 
-            // Replay the log from the inactivity floor to build the snapshot. Every keyed
-            // location is retained, mirroring the live apply path, so a repeated key keeps
+            // Replay the log from the inactivity floor to build the snapshot. Every retained
+            // location is inserted, mirroring the live apply path, so a repeated key keeps
             // serving one of its written values across restarts and rewinds.
-            build_retained_snapshot_from_log::<F, _, _>(
+            build_snapshot(
                 inactivity_floor_loc,
                 &journal.journal,
                 &mut snapshot,

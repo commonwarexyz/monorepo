@@ -9,7 +9,6 @@ use crate::{
     qmdb::{
         self, Error,
         any::ValueEncoding,
-        build_retained_snapshot_from_log,
         immutable::{self, CompactDb, Metrics, Operation},
         operation::Key,
         sync,
@@ -105,10 +104,10 @@ where
             )
             .await?;
 
-            // Replay the log from the inactivity floor to build the snapshot. Every keyed
-            // location is retained, mirroring the live apply path, so a repeated key keeps
+            // Replay the log from the inactivity floor to build the snapshot. Every retained
+            // location is inserted, mirroring the live apply path, so a repeated key keeps
             // serving one of its written values across restarts and rewinds.
-            build_retained_snapshot_from_log::<F, _, _>(
+            immutable::build_snapshot(
                 inactivity_floor_loc,
                 &journal.journal,
                 &mut snapshot,
