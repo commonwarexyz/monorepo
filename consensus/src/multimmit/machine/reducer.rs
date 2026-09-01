@@ -674,8 +674,11 @@ pub enum StepStatus<D: Digest> {
     CustodyCancelled,
     /// A matched deterministic block-validation completion was accepted.
     BlockValidated,
-    /// A matched immutable-object resolution attempt completed without decoded protocol input.
-    ResolutionCompleted,
+    /// A matched immutable-object resolution attempt was classified for verification.
+    ResolutionCompleted {
+        /// The proof's pre-verification disposition.
+        admission: ObservationStatus,
+    },
     /// A current producer deadline was accepted.
     ProductionTimerFired,
     /// A matched data-availability recovery completion was accepted.
@@ -1675,7 +1678,6 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         match status {
             ObservationStatus::Scheduled => {
                 self.resolution.begin_verification(view, id);
-                return Ok(step);
             }
             ObservationStatus::Duplicate => {
                 let entry = self
@@ -1684,16 +1686,18 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                     .ok_or(StepError::CompletionMismatch)?;
                 if !matches!(entry.state, ArtifactState::Ready) {
                     self.resolution.begin_verification(view, id);
-                    return Ok(step);
+                } else {
+                    self.cancel_resolution(view);
+                    self.wake_components();
                 }
             }
-            ObservationStatus::Rejected(_) => {}
+            ObservationStatus::Rejected(_) => {
+                self.cancel_resolution(view);
+                self.wake_components();
+            }
         }
-
-        self.cancel_resolution(view);
-        self.wake_components();
         Ok(Step::new(
-            StepStatus::ResolutionCompleted,
+            StepStatus::ResolutionCompleted { admission: status },
             step.into_capabilities(),
         ))
     }
@@ -1763,7 +1767,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         // Assembly retains only the certificate artifact; publication defers separately when
         // the outbox is full, so a saturated outbox must not stall aggregation or leave the
         // component claiming ready work it cannot perform.
-        let aggregate_slots = self.certificate_artifact_slots().min(1);
+        let aggregate_slots = self.view_proof_artifact_slots().min(1);
         self.finality
             .drive_aggregate(self.durable.generation, aggregate_slots)?;
         capabilities.extend(self.take_finality_capabilities());
@@ -1795,8 +1799,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         }
 
         capabilities.extend(self.take_chain_capabilities()?);
-        let certificate_slots = self.certificate_slots();
-        let deferred = (certificate_slots > 0)
+        let deferred = (self.view_proof_slots() > 0)
             .then(|| self.views.deferred_certificate_view(self.durable.view))
             .flatten();
         let reserve_deferred = self.prefer_deferred_view_certificate && deferred.is_some();
@@ -1854,9 +1857,9 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             .certificate_artifact_slots()
             .min(self.certificate_outbox_slots());
         let available = resource_slots.min(cycle.remaining_core() as usize);
-        let blocks = self
-            .chain
-            .ready_da_votes::<H>(&self.profile, available.max(1), DA_VOTE_RUN)?;
+        let blocks =
+            self.chain
+                .ready_da_votes::<H>(&self.profile, available.max(1), DA_VOTE_RUN)?;
         if blocks.is_empty() {
             return Ok((WorkStatus::Complete, Capabilities::None));
         }
@@ -2109,7 +2112,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             &self.profile,
             self.durable.generation,
             self.durable.view,
-            self.certificate_artifact_slots().min(1),
+            self.view_proof_artifact_slots().min(1),
             cycle.remaining_core() as usize,
         )?;
         if drive.processed > 0 {
@@ -2193,7 +2196,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                 &self.profile,
                 self.durable.generation,
                 view,
-                self.certificate_slots(),
+                self.view_proof_slots(),
                 cycle.remaining_core() as usize,
             )?;
             if drive.processed > 0 {
@@ -2440,9 +2443,10 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             return Ok(false);
         }
 
+        let artifact_capacity = self.effect_artifact_capacity(effect);
         let added_reservations = DurableState::effect_reservations(effect);
         if self.artifacts.len() + self.local_artifact_reservations() + added_reservations
-            > self.profile.resources().max_cached_artifacts()
+            > artifact_capacity
         {
             return Ok(false);
         }
@@ -2450,8 +2454,17 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         let occupancy = self
             .durable_occupancy_after_retiring(effect, retired)
             .and_then(|occupancy| occupancy.checked_add(self.pending_artifact_reservations()));
-        Ok(occupancy
-            .is_some_and(|occupancy| occupancy <= self.profile.resources().max_cached_artifacts()))
+        Ok(occupancy.is_some_and(|occupancy| occupancy <= artifact_capacity))
+    }
+
+    fn effect_artifact_capacity(&self, effect: &DurableEffect<V, H::Digest>) -> usize {
+        let resources = self.profile.resources();
+        match effect {
+            DurableEffect::Broadcast(artifact) if artifact.self_certifying_view() => {
+                resources.max_cached_artifacts()
+            }
+            _ => resources.local_artifact_capacity(),
+        }
     }
 
     fn durable_occupancy_after_retiring(
@@ -2483,14 +2496,14 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         self.durable_effect_count() + self.pending_artifact_reservations()
             < self.profile.resources().max_outbox_effects()
             && self.artifacts.len() + self.local_artifact_reservations()
-                < self.profile.resources().max_cached_artifacts()
+                < self.profile.resources().local_artifact_capacity()
             && self.durable_artifact_occupancy().is_some_and(|occupancy| {
-                occupancy < self.profile.resources().max_cached_artifacts()
+                occupancy < self.profile.resources().local_artifact_capacity()
             })
     }
 
-    fn certificate_slots(&self) -> usize {
-        self.certificate_artifact_slots()
+    fn view_proof_slots(&self) -> usize {
+        self.view_proof_artifact_slots()
             .min(self.certificate_outbox_slots())
     }
 
@@ -2522,6 +2535,19 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     }
 
     fn certificate_artifact_slots(&self) -> usize {
+        let resources = self.profile.resources();
+        let volatile_slots = resources
+            .local_artifact_capacity()
+            .saturating_sub(self.artifacts.len() + self.local_artifact_reservations());
+        let durable_slots = self.durable_artifact_occupancy().map_or(0, |occupancy| {
+            resources
+                .local_artifact_capacity()
+                .saturating_sub(occupancy)
+        });
+        volatile_slots.min(durable_slots)
+    }
+
+    fn view_proof_artifact_slots(&self) -> usize {
         let resources = self.profile.resources();
         let volatile_slots = resources
             .max_cached_artifacts()
@@ -2932,7 +2958,6 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         }
 
         let job = JobId::new(self.next_job);
-        let jobs_full = self.jobs.len() >= resources.max_inflight_verifications();
         let local_artifact_reservations = self.local_artifact_reservations();
         let mut single_result = None;
         let mut results = (artifact_count != 1).then(|| Vec::with_capacity(artifact_count));
@@ -2965,8 +2990,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                 artifact.id::<H>(),
                 "artifact identifier matches content"
             );
-            let mut status =
-                self.precheck_identified(&artifact, id, jobs_full, local_artifact_reservations);
+            let mut status = self.precheck_identified(&artifact, id, local_artifact_reservations);
             let dependency_slot =
                 status == ObservationStatus::Scheduled && self.needs_dependency_slot(&artifact);
             if dependency_slot
@@ -3123,7 +3147,6 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         &self,
         artifact: &Artifact<V, H::Digest>,
         id: ArtifactId<H::Digest>,
-        jobs_full: bool,
         local_artifact_reservations: usize,
     ) -> ObservationStatus {
         if let Some(existing) = self.artifacts.get(&id) {
@@ -3139,10 +3162,8 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         }
 
         let resources = self.profile.resources();
-        // A self-certifying view proof is the only artifact that can advance a node whose
-        // retained work is stale, so fullness never rejects one: admission evicts refetchable
-        // gossip instead. Rejecting it deadlocks a lagging node, whose caches drain only by
-        // advancing.
+        // Remote non-proof ingress leaves cache room for the atomic timeout choice and one
+        // self-certifying view proof. Verification separately keeps one job slot for that proof.
         let anchor = artifact.self_certifying_view();
         if !anchor
             && let Some(view) = artifact.view()
@@ -3151,21 +3172,30 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         {
             return ObservationStatus::Rejected(Rejection::FutureArtifactsFull);
         }
-        if self.artifacts.len() + local_artifact_reservations >= resources.max_cached_artifacts() {
-            // With nothing evictable, an anchor is rejected like any artifact: every cached
-            // entry is then current-view work the machine is still consuming.
+        let cache_occupancy = self.artifacts.len() + local_artifact_reservations;
+        let cache_limit = if anchor {
+            resources.max_cached_artifacts()
+        } else {
+            resources.remote_artifact_capacity()
+        };
+        if cache_occupancy >= cache_limit {
+            // Occupancy outside the remote-ingress partition belongs to current-view work or
+            // local protocol reservations and cannot be discarded here.
             if !anchor || self.future.is_empty() {
                 return ObservationStatus::Rejected(Rejection::ArtifactCacheFull);
             }
         }
-        if jobs_full {
+        let verification_limit = resources
+            .max_inflight_verifications()
+            .saturating_sub(usize::from(!anchor));
+        if self.jobs.len() >= verification_limit {
             return ObservationStatus::Rejected(Rejection::VerificationJobsFull);
         }
 
         ObservationStatus::Scheduled
     }
 
-    fn local_artifact_reservations(&self) -> usize {
+    pub(crate) fn local_artifact_reservations(&self) -> usize {
         self.durable_signing_reservations
             + self.chain.build_reservations()
             + self.chain.recovery_reservations()
@@ -5524,6 +5554,9 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                 Err(StepError::EffectMismatch)
             };
         }
+        // Live construction consumes capacity reserved before its work began, while recovery
+        // reconstructs a snapshot already validated against the hard cache bound. The partition
+        // governs work authorization; replacement and reconstruction use the physical ceiling.
         if self.artifacts.len() >= self.profile.resources().max_cached_artifacts() {
             return Err(StepError::LocalArtifactReservation);
         }
@@ -5690,10 +5723,11 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         if !effect.authorized(&self.profile) {
             return Err(StepError::UnauthorizedEffect);
         }
+        let artifact_capacity = self.effect_artifact_capacity(effect);
         let reservations = DurableState::effect_reservations(effect);
         if self.artifacts.len() + self.local_artifact_reservations() + reservations
             - consumed_build_credits
-            > self.profile.resources().max_cached_artifacts()
+            > artifact_capacity
         {
             return Err(StepError::LocalArtifactReservation);
         }
@@ -5704,7 +5738,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         if self
             .durable_occupancy_with_effect(effect)
             .and_then(|occupancy| occupancy.checked_add(promised))
-            .is_none_or(|occupancy| occupancy > self.profile.resources().max_cached_artifacts())
+            .is_none_or(|occupancy| occupancy > artifact_capacity)
         {
             return Err(StepError::LocalArtifactReservation);
         }

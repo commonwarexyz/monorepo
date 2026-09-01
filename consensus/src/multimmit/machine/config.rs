@@ -131,6 +131,16 @@ impl ResourceLimits {
         self.max_cached_artifacts.get()
     }
 
+    /// Returns the cache partition available to untrusted non-proof ingress.
+    pub(crate) const fn remote_artifact_capacity(self) -> usize {
+        self.max_cached_artifacts().saturating_sub(3)
+    }
+
+    /// Returns the cache partition available to locally authorized non-proof work.
+    pub(crate) const fn local_artifact_capacity(self) -> usize {
+        self.max_cached_artifacts().saturating_sub(1)
+    }
+
     /// Returns the pool budget for unfinalized leaders and the normal certified-view window.
     ///
     /// Quorum-authenticated pools may exceed this budget while ordering is stalled. They remain
@@ -360,7 +370,8 @@ impl<H: Hasher, V: Variant> Profile<H, V> {
         // chain, plus the proposal and the certificate that closes it.
         let per_view = committee.saturating_mul(4).saturating_add(4);
         // Live work is bounded by the committee: uncertified future traffic, in-flight
-        // verification, and the publications ordering has not yet retired.
+        // verification, and publications ordering has not yet retired. Three slots form the
+        // liveness partition for an atomic NoVote/Nullify choice and one self-certifying proof.
         let live = quorum
             .saturating_add(committee.saturating_mul(48))
             .saturating_add(3);

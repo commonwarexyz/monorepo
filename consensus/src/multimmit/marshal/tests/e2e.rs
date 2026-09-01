@@ -295,8 +295,14 @@ impl LqcVerifier<Sha256, MinPk> for CommitteeVerifier {
             .is_some();
         let gate = self.gate.take().map(|gate| {
             (
-                gate.started.lock().take().expect("verification gate starts once"),
-                gate.release.lock().take().expect("verification gate releases once"),
+                gate.started
+                    .lock()
+                    .take()
+                    .expect("verification gate starts once"),
+                gate.release
+                    .lock()
+                    .take()
+                    .expect("verification gate releases once"),
             )
         });
         async move {

@@ -1351,7 +1351,10 @@ impl<'a> World<'a> {
                 .replay(event.clone())
                 .expect("every staged world event must replay");
         }
-        assert_eq!(replayed.live_snapshot_for_test(), runner.machine.live_snapshot_for_test());
+        assert_eq!(
+            replayed.live_snapshot_for_test(),
+            runner.machine.live_snapshot_for_test()
+        );
     }
 
     fn record_persist_job(&mut self, replica: usize, job: &PersistJob<MinPk, Digest>) {
@@ -1839,7 +1842,12 @@ impl<'a> World<'a> {
     fn durable_outcome(&self) -> DurableOutcome {
         DurableOutcome {
             journals: from_fn(|replica| self.replicas[replica].runner.journal.clone()),
-            snapshots: from_fn(|replica| self.replicas[replica].runner.machine.live_snapshot_for_test()),
+            snapshots: from_fn(|replica| {
+                self.replicas[replica]
+                    .runner
+                    .machine
+                    .live_snapshot_for_test()
+            }),
             inspections: from_fn(|replica| self.replicas[replica].runner.inspect()),
             finality: from_fn(|replica| {
                 self.replicas[replica].runner.inspect().finality().to_vec()

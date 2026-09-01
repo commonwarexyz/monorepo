@@ -122,7 +122,9 @@ impl<E: Context> Checkpoint<E> {
     /// Whether this checkpoint has never durably recorded anything.
     #[commonware_macros::stability(ALPHA)]
     pub(super) fn is_fresh(&self) -> bool {
-        self.watermark().is_none() && self.boundary_hint().is_none() && self.clear_target().is_none()
+        self.watermark().is_none()
+            && self.boundary_hint().is_none()
+            && self.clear_target().is_none()
     }
 
     /// Durably record the boundary and watermark, writing only entries that changed.

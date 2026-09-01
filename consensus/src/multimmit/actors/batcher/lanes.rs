@@ -501,7 +501,11 @@ mod tests {
             )
             .unwrap();
         lanes
-            .push_group(LaneId::Data(0), peer(2), Group::one(identified(block.clone())))
+            .push_group(
+                LaneId::Data(0),
+                peer(2),
+                Group::one(identified(block.clone())),
+            )
             .unwrap();
 
         // One buffered plane per cohort, in rotation order, regardless of budget headroom.
