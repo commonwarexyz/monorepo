@@ -31,7 +31,7 @@ use commonware_glue::{
     stateful::db::{Shared, SyncEngineConfig},
 };
 use commonware_parallel::Sequential;
-use commonware_runtime::{Buf, BufMut, Quota, buffer::paged::CacheRef};
+use commonware_runtime::{Buf, Quota, buffer::paged::CacheRef};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FixedLogConfig,
     mmr::{self, Location, full::Config as MmrJournalConfig},
@@ -106,7 +106,7 @@ pub const MESSAGE_RATE: Quota = Quota::per_second(NZU32!(128));
 pub const MAX_MESSAGE_SIZE: u32 = 1024 * 1024;
 
 /// Chain block carrying the QMDB state root and an optional reshare payload.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, EncodeSize, Write)]
 pub struct Block {
     pub(crate) context: Context<sha256::Digest, ed25519::PublicKey>,
     pub(crate) parent: sha256::Digest,
@@ -135,28 +135,6 @@ impl Block {
             range: target.range,
             payload: Some(Payload::EpochInfo(info)),
         }
-    }
-}
-
-impl Write for Block {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.context.write(buf);
-        self.parent.write(buf);
-        self.height.write(buf);
-        self.state_root.write(buf);
-        self.range.write(buf);
-        self.payload.write(buf);
-    }
-}
-
-impl EncodeSize for Block {
-    fn encode_size(&self) -> usize {
-        self.context.encode_size()
-            + self.parent.encode_size()
-            + self.height.encode_size()
-            + self.state_root.encode_size()
-            + self.range.encode_size()
-            + self.payload.encode_size()
     }
 }
 

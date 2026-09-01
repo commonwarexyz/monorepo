@@ -1,92 +1,34 @@
 use super::block::BlockFormat;
 use crate::Scheme;
-use commonware_codec::{EncodeSize, Error, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{EncodeSize, FixedSize, Read, Write};
 use commonware_consensus::simplex::types::Finalization;
 use commonware_cryptography::{
     Digest,
     bls12381::primitives::variant::{MinSig, Variant},
 };
-use commonware_runtime::{Buf, BufMut};
 
 /// Enum representing incoming messages from validators to the indexer.
 ///
 /// Used to interact with the indexer's storage of blocks and finality certificates.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, EncodeSize, Read, Write)]
 #[allow(clippy::large_enum_variant)]
 pub enum Inbound<D: Digest> {
     /// Request to store a new block in the indexer's storage.
+    #[codec(tag = 0)]
     PutBlock(PutBlock<D>),
     /// Request to retrieve a block from the indexer's storage.
+    #[codec(tag = 1)]
     GetBlock(GetBlock<D>),
     /// Request to store a finality certificate in the indexer's storage.
+    #[codec(tag = 2)]
     PutFinalization(PutFinalization<D>),
     /// Request to retrieve the latest finality certificate from the indexer's storage.
+    #[codec(tag = 3)]
     GetFinalization(GetFinalization),
 }
 
-impl<D: Digest> Write for Inbound<D> {
-    fn write(&self, buf: &mut impl BufMut) {
-        match self {
-            Self::PutBlock(block) => {
-                buf.put_u8(0);
-                block.write(buf);
-            }
-            Self::GetBlock(block) => {
-                buf.put_u8(1);
-                block.write(buf);
-            }
-            Self::PutFinalization(finalization) => {
-                buf.put_u8(2);
-                finalization.write(buf);
-            }
-            Self::GetFinalization(finalization) => {
-                buf.put_u8(3);
-                finalization.write(buf);
-            }
-        }
-    }
-}
-
-impl<D: Digest> Read for Inbound<D> {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let tag = u8::read(buf)?;
-        match tag {
-            0 => {
-                let block = PutBlock::read_cfg(buf, &())?;
-                Ok(Self::PutBlock(block))
-            }
-            1 => {
-                let block = GetBlock::<D>::read_cfg(buf, &())?;
-                Ok(Self::GetBlock(block))
-            }
-            2 => {
-                let finalization = PutFinalization::read_cfg(buf, &())?;
-                Ok(Self::PutFinalization(finalization))
-            }
-            3 => {
-                let finalization = GetFinalization::read_cfg(buf, &())?;
-                Ok(Self::GetFinalization(finalization))
-            }
-            _ => Err(Error::InvalidEnum(tag)),
-        }
-    }
-}
-
-impl<D: Digest> EncodeSize for Inbound<D> {
-    fn encode_size(&self) -> usize {
-        1 + match self {
-            Self::PutBlock(block) => block.encode_size(),
-            Self::GetBlock(block) => block.encode_size(),
-            Self::PutFinalization(finalization) => finalization.encode_size(),
-            Self::GetFinalization(finalization) => finalization.encode_size(),
-        }
-    }
-}
-
 /// Message to store a new block in the indexer's storage.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, EncodeSize, Read, Write)]
 pub struct PutBlock<D: Digest> {
     /// The network identifier for which the block belongs.
     pub network: <MinSig as Variant>::Public,
@@ -94,31 +36,8 @@ pub struct PutBlock<D: Digest> {
     pub block: BlockFormat<D>,
 }
 
-impl<D: Digest> Write for PutBlock<D> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.network.write(buf);
-        self.block.write(buf);
-    }
-}
-
-impl<D: Digest> Read for PutBlock<D> {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let network = <MinSig as Variant>::Public::read(buf)?;
-        let block = BlockFormat::<D>::read(buf)?;
-        Ok(Self { network, block })
-    }
-}
-
-impl<D: Digest> EncodeSize for PutBlock<D> {
-    fn encode_size(&self) -> usize {
-        <MinSig as Variant>::Public::SIZE + self.block.encode_size()
-    }
-}
-
 /// Message to retrieve a block from the indexer's storage.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, FixedSize, Read, Write)]
 pub struct GetBlock<D: Digest> {
     /// The network identifier for which the block belongs.
     pub network: <MinSig as Variant>::Public,
@@ -126,29 +45,8 @@ pub struct GetBlock<D: Digest> {
     pub digest: D,
 }
 
-impl<D: Digest> Write for GetBlock<D> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.network.write(buf);
-        self.digest.write(buf);
-    }
-}
-
-impl<D: Digest> Read for GetBlock<D> {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let network = <MinSig as Variant>::Public::read(buf)?;
-        let digest = D::read(buf)?;
-        Ok(Self { network, digest })
-    }
-}
-
-impl<D: Digest> FixedSize for GetBlock<D> {
-    const SIZE: usize = <MinSig as Variant>::Public::SIZE + D::SIZE;
-}
-
 /// Message to store a finality certificate in the indexer's storage.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, EncodeSize, Read, Write)]
 pub struct PutFinalization<D: Digest> {
     /// The network identifier for which the finality certificate belongs.
     pub network: <MinSig as Variant>::Public,
@@ -156,58 +54,11 @@ pub struct PutFinalization<D: Digest> {
     pub finalization: Finalization<Scheme, D>,
 }
 
-impl<D: Digest> Write for PutFinalization<D> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.network.write(buf);
-        self.finalization.write(buf);
-    }
-}
-
-impl<D: Digest> Read for PutFinalization<D> {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let network = <MinSig as Variant>::Public::read(buf)?;
-        let finalization = Finalization::read(buf)?;
-        Ok(Self {
-            network,
-            finalization,
-        })
-    }
-}
-
-impl<D: Digest> EncodeSize for PutFinalization<D> {
-    fn encode_size(&self) -> usize {
-        self.network.encode_size() + self.finalization.encode_size()
-    }
-}
-
 /// Message to retrieve the latest finality certificate from the indexer's storage.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, EncodeSize, Read, Write)]
 pub struct GetFinalization {
     /// The network identifier for which to retrieve the finality certificate.
     pub network: <MinSig as Variant>::Public,
-}
-
-impl Write for GetFinalization {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.network.write(buf);
-    }
-}
-
-impl Read for GetFinalization {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let network = <MinSig as Variant>::Public::read(buf)?;
-        Ok(Self { network })
-    }
-}
-
-impl EncodeSize for GetFinalization {
-    fn encode_size(&self) -> usize {
-        <MinSig as Variant>::Public::SIZE
-    }
 }
 
 #[cfg(test)]
