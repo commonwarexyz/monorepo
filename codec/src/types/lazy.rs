@@ -246,13 +246,14 @@ impl<T: Read> Lazy<T> {
 impl<T: Read + Write + EncodeSize> Lazy<T> {
     /// Returns the canonical encoding without decoding deferred bytes.
     fn encoded(&self) -> Bytes {
-        match &self.pending {
-            Some(pending) => pending.bytes.clone(),
-            None => self
-                .get()
-                .expect("Lazy should have a value if pending is None")
-                .encode(),
-        }
+        self.pending.as_ref().map_or_else(
+            || {
+                self.get()
+                    .expect("Lazy should have a value if pending is None")
+                    .encode()
+            },
+            |pending| pending.bytes.clone(),
+        )
     }
 }
 

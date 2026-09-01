@@ -5664,11 +5664,11 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         id: ArtifactId<H::Digest>,
     ) -> Result<(), StepError> {
         if let Some(existing) = self.artifacts.get(&id) {
-            return if existing.artifact.as_ref() == artifact {
-                Ok(())
-            } else {
-                Err(StepError::EffectMismatch)
-            };
+            debug_assert!(
+                existing.artifact.as_ref() == artifact,
+                "two artifacts encode to one identifier"
+            );
+            return Ok(());
         }
         // Live construction consumes capacity reserved before its work began, while recovery
         // reconstructs a snapshot already validated against the hard cache bound. The partition
@@ -5706,9 +5706,10 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         observation: Observation,
     ) -> Result<(), StepError> {
         if let Some(existing) = self.artifacts.get(&id) {
-            if existing.artifact.as_ref() != artifact.as_ref() {
-                return Err(StepError::EffectMismatch);
-            }
+            debug_assert!(
+                existing.artifact.as_ref() == artifact.as_ref(),
+                "two artifacts encode to one identifier"
+            );
             let mut release_dependency_slot = false;
             let state = {
                 let existing = self.artifacts.get_mut(&id).expect("artifact exists");
