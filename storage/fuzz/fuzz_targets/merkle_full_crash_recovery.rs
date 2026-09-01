@@ -24,7 +24,7 @@ const DATA_SIZE: usize = 32;
 const MAX_WRITE_BUF: usize = 2048;
 
 type Merkle<F> =
-commonware_storage::merkle::full::Merkle<F, deterministic::Context, Digest, Sequential>;
+    commonware_storage::merkle::full::Merkle<F, deterministic::Context, Digest, Sequential>;
 
 fn bounded_page_size(u: &mut Unstructured<'_>) -> Result<u16> {
     u.int_in_range(1..=256)
@@ -247,8 +247,8 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                     write_buffer,
                 ),
             )
-                .await
-                .unwrap();
+            .await
+            .unwrap();
 
             let storage_fault_cfg = ctx.storage_fault_config();
             *storage_fault_cfg.write() = deterministic::FaultConfig {
@@ -283,8 +283,8 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                 write_buffer,
             ),
         )
-            .await
-            .expect("recovery should succeed");
+        .await
+        .expect("recovery should succeed");
 
         // Verify recovered state is within expected bounds
         let size = merkle.size().as_u64();
