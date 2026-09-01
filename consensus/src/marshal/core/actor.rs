@@ -1661,10 +1661,8 @@ where
             by_epoch.entry(epoch).or_default().push(i);
         }
 
-        // Verify each epoch group under the scope captured at admission. Every
-        // item in a group was admitted for the same epoch, and the provider is
-        // not consulted again, so retiring the epoch after admission cannot
-        // turn a valid delivery into a peer-blaming rejection.
+        // Verify each epoch group under the scope captured at admission, so a
+        // provider that has since retired the epoch cannot fail the delivery.
         let mut verified = vec![false; delivers.len()];
         for indices in by_epoch.values() {
             let scoped = delivers[indices[0]].scoped();
