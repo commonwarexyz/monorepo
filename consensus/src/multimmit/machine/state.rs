@@ -630,6 +630,15 @@ pub(super) struct Machine<H: Hasher, V: Variant> {
     /// Retained chain artifacts by chain and height, so retirement visits only heights at or
     /// below a chain's retention floor.
     pub(crate) artifacts_by_position: BTreeMap<(ChainId, Height), BTreeSet<ArtifactId<H::Digest>>>,
+    /// Highest view whose retained artifacts retirement has already examined.
+    ///
+    /// Views at or below it are swept exactly once when they retire; an artifact that stays
+    /// retained past that sweep is re-examined only when its own state changes.
+    pub(crate) retirement_swept_view: Option<View>,
+    /// Per-chain highest height whose retained artifacts retirement has already examined.
+    pub(crate) retirement_swept_floors: Vec<Option<Height>>,
+    /// Retained artifacts whose state changed in a way that may make them retirable.
+    pub(crate) retirement_pending: Vec<ArtifactId<H::Digest>>,
     pub(crate) vqcs: BTreeMap<CertificateId<H::Digest>, ArtifactId<H::Digest>>,
     pub(crate) jobs: BTreeMap<JobId, Vec<VerificationTicket<H::Digest>>>,
     pub(crate) future: BTreeSet<(View, ArtifactId<H::Digest>)>,
@@ -736,6 +745,9 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             artifacts: BTreeMap::new(),
             artifacts_by_view: BTreeMap::new(),
             artifacts_by_position: BTreeMap::new(),
+            retirement_swept_view: None,
+            retirement_swept_floors: Vec::new(),
+            retirement_pending: Vec::new(),
             vqcs: BTreeMap::new(),
             jobs: BTreeMap::new(),
             future: BTreeSet::new(),
@@ -955,6 +967,50 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             .count();
         assert_eq!(by_view, expected_views, "view index size");
         assert_eq!(by_position, expected_positions, "position index size");
+
+        // Every retained artifact retirement could forget right now is either queued for the
+        // next pass or sits in a retired range the sweep has not reached yet.
+        for (id, entry) in &self.artifacts {
+            if entry.future || self.durable_artifact_references.contains_key(id) {
+                continue;
+            }
+            let view = entry.artifact.view();
+            let view_retired = view.is_some_and(|view| view <= self.durable.retired_view);
+            let view_unswept = view.is_some_and(|view| {
+                self.retirement_swept_view.is_none_or(|swept| swept < view)
+            });
+            let position = match entry.artifact.as_ref() {
+                Artifact::TransactionBlock(block) => Some(block.header()),
+                Artifact::DaVote(vote) => Some(vote.header()),
+                Artifact::DaCertificate(certificate) => Some(certificate.header()),
+                _ => None,
+            }
+            .map(|header| (header.chain().get() as usize, header.height()));
+            let position_retired = position.is_some_and(|(chain, height)| {
+                height <= self.durable.certified_tips[chain].height()
+            });
+            let position_unswept = position.is_some_and(|(chain, height)| {
+                self.retirement_swept_floors
+                    .get(chain)
+                    .copied()
+                    .flatten()
+                    .is_none_or(|swept| swept < height)
+            });
+            let forgettable = match entry.state {
+                ArtifactState::Ready => view_retired || position_retired,
+                ArtifactState::Waiting(_) => view_retired,
+                _ => false,
+            };
+            if !forgettable {
+                continue;
+            }
+            assert!(
+                self.retirement_pending.contains(id)
+                    || (view_retired && view_unswept)
+                    || (position_retired && position_unswept),
+                "retirable artifact {id:?} escaped the incremental retirement sweep"
+            );
+        }
     }
 
     #[cfg(any(test, feature = "test-utils"))]

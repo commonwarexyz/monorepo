@@ -28,7 +28,10 @@ use crate::{
 };
 use commonware_codec::EncodeSize as _;
 use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
-use core::{mem::take, ops::Deref};
+use core::{
+    mem::take,
+    ops::{Bound, Deref},
+};
 use std::{
     collections::{BTreeMap, BTreeSet},
     num::NonZeroUsize,
@@ -3340,6 +3343,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         }
         self.artifacts.get_mut(&id).expect("artifact exists").state =
             ArtifactState::Waiting(dependencies);
+        self.note_retirement_candidate(id);
         Ok(())
     }
 
@@ -3506,6 +3510,9 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             entry.state = ArtifactState::Ready;
             if promoted {
                 let (observation, artifact) = (entry.observation, Arc::clone(&entry.artifact));
+                if self.retired(&artifact) {
+                    self.retirement_pending.push(id);
+                }
                 self.newly_ready.push((observation, id, artifact));
             }
             if let Artifact::Vqc(certificate) = self.artifacts[&id].artifact.as_ref() {
@@ -4187,6 +4194,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         *references = references.checked_sub(1).ok_or(ReplayError::Transition)?;
         if *references == 0 {
             self.durable_artifact_references.remove(&id);
+            self.note_retirement_candidate(id);
         }
         Ok(())
     }
@@ -4363,6 +4371,9 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     }
 
     /// Records a retained artifact in the retirement indices.
+    ///
+    /// An artifact retained at an already retired view or height missed the sweep of that view or
+    /// height, so it is queued for the next retirement pass instead.
     fn index_artifact(&mut self, id: ArtifactId<H::Digest>, artifact: &Artifact<V, H::Digest>) {
         if let Some(view) = artifact.view() {
             self.artifacts_by_view.entry(view).or_default().insert(id);
@@ -4372,6 +4383,34 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                 .entry(position)
                 .or_default()
                 .insert(id);
+        }
+        if self.retired(artifact) {
+            self.retirement_pending.push(id);
+        }
+    }
+
+    /// Whether `artifact` sits at or below a retention floor: its view is retired or its chain
+    /// position is certified.
+    fn retired(&self, artifact: &Artifact<V, H::Digest>) -> bool {
+        artifact
+            .view()
+            .is_some_and(|view| view <= self.durable.retired_view)
+            || Self::artifact_position(artifact).is_some_and(|(chain, height)| {
+                self.durable
+                    .certified_tips
+                    .get(chain.get() as usize)
+                    .is_some_and(|tip| height <= tip.height())
+            })
+    }
+
+    /// Queues a retained artifact for re-examination if it sits at or below a retention floor.
+    fn note_retirement_candidate(&mut self, id: ArtifactId<H::Digest>) {
+        if self
+            .artifacts
+            .get(&id)
+            .is_some_and(|entry| self.retired(&entry.artifact))
+        {
+            self.retirement_pending.push(id);
         }
     }
 
@@ -4395,30 +4434,47 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         }
     }
 
-    /// Returns the retained artifacts at or below each chain's retention floor.
-    fn artifacts_below_floors<'a>(
-        &'a self,
-        floors: &'a [Height],
-    ) -> impl Iterator<Item = ArtifactId<H::Digest>> + 'a {
-        floors.iter().enumerate().flat_map(move |(chain, floor)| {
-            let chain = ChainId::new(chain as u32);
-            self.artifacts_by_position
-                .range((chain, Height::zero())..=(chain, *floor))
-                .flat_map(|(_, ids)| ids.iter().copied())
-        })
+    /// Appends the retained artifacts of every view retired since the last sweep.
+    fn sweep_retired_views(&mut self, candidates: &mut Vec<ArtifactId<H::Digest>>) {
+        let retired = self.durable.retired_view;
+        if self.retirement_swept_view.is_some_and(|swept| swept >= retired) {
+            return;
+        }
+        let lower = self
+            .retirement_swept_view
+            .map_or(Bound::Unbounded, Bound::Excluded);
+        candidates.extend(
+            self.artifacts_by_view
+                .range((lower, Bound::Included(retired)))
+                .flat_map(|(_, ids)| ids.iter().copied()),
+        );
+        self.retirement_swept_view = Some(retired);
     }
 
-    /// Returns the retained artifacts belonging to views at or below `view`.
-    fn artifacts_through_view(
-        &self,
-        view: View,
-    ) -> impl Iterator<Item = ArtifactId<H::Digest>> + '_ {
-        self.artifacts_by_view
-            .range(..=view)
-            .flat_map(|(_, ids)| ids.iter().copied())
+    /// Appends the retained artifacts of every chain height certified since the last sweep.
+    fn sweep_retired_floors(&mut self, candidates: &mut Vec<ArtifactId<H::Digest>>) {
+        let chains = self.durable.certified_tips.len();
+        self.retirement_swept_floors.resize(chains, None);
+        for chain in 0..chains {
+            let floor = self.chain_retention_height(chain);
+            let swept = self.retirement_swept_floors[chain];
+            if swept.is_some_and(|swept| swept >= floor) {
+                continue;
+            }
+            let id = ChainId::new(chain as u32);
+            let lower = swept.map_or(Bound::Included((id, Height::zero())), |swept| {
+                Bound::Excluded((id, swept))
+            });
+            candidates.extend(
+                self.artifacts_by_position
+                    .range((lower, Bound::Included((id, floor))))
+                    .flat_map(|(_, ids)| ids.iter().copied()),
+            );
+            self.retirement_swept_floors[chain] = Some(floor);
+        }
     }
 
-    /// Forgets the ready, unreferenced artifacts among `candidates`.
+    /// Forgets the retired, ready, unreferenced artifacts among `candidates`.
     fn forget_ready(&mut self, candidates: impl Iterator<Item = ArtifactId<H::Digest>>) {
         let ids = candidates
             .filter(|id| {
@@ -4426,14 +4482,15 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                     !entry.future
                         && !self.durable_artifact_references.contains_key(id)
                         && matches!(entry.state, ArtifactState::Ready)
+                        && self.retired(&entry.artifact)
                 })
             })
             .collect::<Vec<_>>();
         for id in ids {
-            let entry = self
-                .artifacts
-                .remove(&id)
-                .expect("selected ready artifact remains retained");
+            // Candidates may repeat: a queued artifact can also sit in a freshly swept range.
+            let Some(entry) = self.artifacts.remove(&id) else {
+                continue;
+            };
             self.unindex_artifact(id, &entry.artifact);
             if let Artifact::Vqc(certificate) = entry.artifact.as_ref() {
                 let certificate = certificate.id::<H>();
@@ -4458,28 +4515,32 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         }
     }
 
+    /// Forgets retained artifacts that retirement no longer needs.
+    ///
+    /// Each newly retired view and certified height is examined once. An artifact that stays
+    /// retained past that examination (still verifying, durably referenced, or a future artifact)
+    /// returns through the pending queue when its own state changes, so the work tracks state
+    /// changes rather than the retained population.
     fn forget_retired_artifacts(&mut self) -> Result<(), StepError> {
-        let view = self.durable.retired_view;
-        let waiting = self
-            .artifacts_through_view(view)
+        let retired = self.durable.retired_view;
+        let mut candidates = take(&mut self.retirement_pending);
+        self.sweep_retired_views(&mut candidates);
+        self.sweep_retired_floors(&mut candidates);
+        let waiting = candidates
+            .iter()
             .filter(|id| {
                 self.artifacts.get(id).is_some_and(|entry| {
                     !entry.future
                         && !self.durable_artifact_references.contains_key(id)
                         && matches!(entry.state, ArtifactState::Waiting(_))
+                        && entry.artifact.view().is_some_and(|view| view <= retired)
                 })
             })
+            .copied()
             .collect::<Vec<_>>();
         for id in waiting {
             self.remove_terminal_artifact(id)?;
         }
-        let floors = (0..self.durable.certified_tips.len())
-            .map(|chain| self.chain_retention_height(chain))
-            .collect::<Vec<_>>();
-        let candidates = self
-            .artifacts_through_view(view)
-            .chain(self.artifacts_below_floors(&floors))
-            .collect::<Vec<_>>();
         self.forget_ready(candidates.into_iter());
         Ok(())
     }
@@ -4943,10 +5004,8 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                 self.chain
                     .compact_certified::<H>(certificate, retired_height)
                     .map_err(|_| ReplayError::Transition)?;
-                let floors = (0..self.durable.certified_tips.len())
-                    .map(|chain| self.chain_retention_height(chain))
-                    .collect::<Vec<_>>();
-                let candidates = self.artifacts_below_floors(&floors).collect::<Vec<_>>();
+                let mut candidates = Vec::new();
+                self.sweep_retired_floors(&mut candidates);
                 self.forget_ready(candidates.into_iter());
             }
             Change::ViewCertificateCreated { artifact } => {
@@ -5100,6 +5159,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                         .get_mut(&id)
                         .expect("future index references retained artifact")
                         .future = false;
+                    self.note_retirement_candidate(id);
                 }
                 self.compact_view_history()?;
             }
@@ -5177,6 +5237,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                         .get_mut(&id)
                         .expect("future index references retained artifact")
                         .future = false;
+                    self.note_retirement_candidate(id);
                 }
                 self.compact_view_history()?;
             }
