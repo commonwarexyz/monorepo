@@ -332,14 +332,9 @@ impl<P: Ord> Committee<P> {
     pub fn profile<M: Faults>(&self) -> Profile {
         let max_faults = self.max_fault_weight::<M>();
         let quorum = self.quorum_weight::<M>();
-        let max_weight = self
-            .weights()
-            .iter()
-            .copied()
-            .max()
-            .expect("non-empty committee");
         let mut weights = self.weights().to_vec();
         weights.sort_unstable_by(|left, right| right.cmp(left));
+        let max_weight = weights[0];
         let mut accumulated = 0u64;
         let mut minimum_quorum_cardinality = 0u32;
         for weight in weights {
