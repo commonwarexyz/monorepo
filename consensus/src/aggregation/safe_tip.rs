@@ -2,9 +2,8 @@ use crate::types::Height;
 use commonware_cryptography::PublicKey;
 use commonware_utils::{N3f1, ordered::Committee};
 use std::{
-    cmp::Ordering,
-    collections::{HashMap, hash_map::RandomState},
-    hash::BuildHasher,
+    collections::{BTreeMap, HashMap, btree_map::Entry},
+    ops::Bound::{Excluded, Unbounded},
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -16,7 +15,12 @@ struct Tip {
 /// Tracks the greatest height reported by more than the maximum faulty weight.
 pub struct SafeTip<P: PublicKey> {
     tips: HashMap<P, Tip>,
-    heights: WeightedHeights,
+    /// Total committee weight at each reported height.
+    heights: BTreeMap<Height, u64>,
+    /// Greatest height reported by more than the maximum faulty weight.
+    safe: Height,
+    /// Total committee weight strictly above `safe`.
+    above_safe: u64,
     max_fault_weight: u64,
 }
 
@@ -24,7 +28,9 @@ impl<P: PublicKey> Default for SafeTip<P> {
     fn default() -> Self {
         Self {
             tips: HashMap::new(),
-            heights: WeightedHeights::default(),
+            heights: BTreeMap::new(),
+            safe: Height::zero(),
+            above_safe: 0,
             max_fault_weight: 0,
         }
     }
@@ -33,37 +39,12 @@ impl<P: PublicKey> Default for SafeTip<P> {
 impl<P: PublicKey> SafeTip<P> {
     /// Initializes an instance with the given committee.
     pub fn init(&mut self, committee: &Committee<P>) {
-        let max_fault_weight = committee.max_fault_weight::<N3f1>();
-        self.tips = committee
-            .iter()
-            .zip(committee.weights())
-            .map(|(participant, &weight)| {
-                (
-                    participant.clone(),
-                    Tip {
-                        height: Height::zero(),
-                        weight,
-                    },
-                )
-            })
-            .collect();
-        self.heights = WeightedHeights::default();
-        self.heights.add(Height::zero(), committee.total_weight());
-        self.max_fault_weight = max_fault_weight;
+        self.tips.clear();
+        self.reconcile(committee);
     }
 
     /// Updates the committee, preserving retained participants' heights.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the new committee does not have the same participant count.
     pub fn reconcile(&mut self, committee: &Committee<P>) {
-        assert_eq!(
-            committee.len(),
-            self.tips.len(),
-            "committee participant count mismatch"
-        );
-
         let tips = committee
             .iter()
             .zip(committee.weights())
@@ -76,14 +57,39 @@ impl<P: PublicKey> SafeTip<P> {
             })
             .collect::<HashMap<_, _>>();
 
-        let mut heights = WeightedHeights::default();
+        let mut heights = BTreeMap::new();
         for tip in tips.values() {
-            heights.add(tip.height, tip.weight);
+            let weight = heights.entry(tip.height).or_insert(0u64);
+            *weight = weight
+                .checked_add(tip.weight)
+                .expect("height weight overflow");
         }
+
+        let max_fault_weight = committee.max_fault_weight::<N3f1>();
+        let mut above_safe = 0u64;
+        let safe = heights
+            .iter()
+            .rev()
+            .find_map(|(&height, &weight)| {
+                if above_safe
+                    .checked_add(weight)
+                    .expect("height weight overflow")
+                    > max_fault_weight
+                {
+                    return Some(height);
+                }
+                above_safe = above_safe
+                    .checked_add(weight)
+                    .expect("height weight overflow");
+                None
+            })
+            .expect("empty committee");
 
         self.tips = tips;
         self.heights = heights;
-        self.max_fault_weight = committee.max_fault_weight::<N3f1>();
+        self.safe = safe;
+        self.above_safe = above_safe;
+        self.max_fault_weight = max_fault_weight;
     }
 
     /// Updates a participant's tip, returning its previous height.
@@ -106,192 +112,49 @@ impl<P: PublicKey> SafeTip<P> {
             },
         );
 
-        self.heights.remove(old, weight);
-        self.heights.add(new, weight);
+        match self.heights.entry(old) {
+            Entry::Occupied(mut entry) => {
+                let remaining = entry
+                    .get()
+                    .checked_sub(weight)
+                    .expect("insufficient height weight");
+                if remaining == 0 {
+                    entry.remove();
+                } else {
+                    *entry.get_mut() = remaining;
+                }
+            }
+            Entry::Vacant(_) => panic!("cannot remove missing height weight"),
+        }
+        let new_weight = self.heights.entry(new).or_insert(0);
+        *new_weight = new_weight
+            .checked_add(weight)
+            .expect("height weight overflow");
+
+        if old <= self.safe && new > self.safe {
+            self.above_safe = self
+                .above_safe
+                .checked_add(weight)
+                .expect("height weight overflow");
+        }
+        while self.above_safe > self.max_fault_weight {
+            let (&next, &weight) = self
+                .heights
+                .range((Excluded(self.safe), Unbounded))
+                .next()
+                .expect("weight above safe height must have a reported height");
+            self.safe = next;
+            self.above_safe = self
+                .above_safe
+                .checked_sub(weight)
+                .expect("height weight underflow");
+        }
         Some(old)
     }
 
     /// Returns the greatest height reached by weight greater than `f`.
-    pub fn get(&self) -> Height {
-        self.heights
-            .nth_highest(
-                self.max_fault_weight
-                    .checked_add(1)
-                    .expect("fault weight cannot reach u64::MAX"),
-            )
-            .expect("empty committee")
-    }
-}
-
-#[derive(Default)]
-struct WeightedHeights {
-    root: Option<Box<Node>>,
-    hasher: RandomState,
-}
-
-impl WeightedHeights {
-    fn add(&mut self, height: Height, weight: u64) {
-        assert!(weight > 0, "height weight must be positive");
-        let priority = self.hasher.hash_one(height);
-        self.root = Some(Node::insert(self.root.take(), height, weight, priority));
-    }
-
-    fn remove(&mut self, height: Height, weight: u64) {
-        assert!(weight > 0, "height weight must be positive");
-        self.root = Node::remove(self.root.take(), height, weight);
-    }
-
-    fn nth_highest(&self, weight: u64) -> Option<Height> {
-        self.root
-            .as_deref()
-            .and_then(|root| root.nth_highest(weight))
-    }
-}
-
-struct Node {
-    height: Height,
-    weight: u64,
-    subtree_weight: u64,
-    priority: u64,
-    left: Option<Box<Self>>,
-    right: Option<Box<Self>>,
-}
-
-impl Node {
-    fn new(height: Height, weight: u64, priority: u64) -> Box<Self> {
-        Box::new(Self {
-            height,
-            weight,
-            subtree_weight: weight,
-            priority,
-            left: None,
-            right: None,
-        })
-    }
-
-    fn subtree_weight(node: &Option<Box<Self>>) -> u64 {
-        node.as_ref().map_or(0, |node| node.subtree_weight)
-    }
-
-    fn refresh(&mut self) {
-        self.subtree_weight = Self::subtree_weight(&self.left)
-            .checked_add(self.weight)
-            .and_then(|weight| weight.checked_add(Self::subtree_weight(&self.right)))
-            .expect("height weight overflow");
-    }
-
-    fn higher_priority_than(&self, other: &Self) -> bool {
-        (self.priority, self.height) > (other.priority, other.height)
-    }
-
-    fn insert(root: Option<Box<Self>>, height: Height, weight: u64, priority: u64) -> Box<Self> {
-        let Some(mut root) = root else {
-            return Self::new(height, weight, priority);
-        };
-
-        match height.cmp(&root.height) {
-            Ordering::Less => {
-                root.left = Some(Self::insert(root.left.take(), height, weight, priority));
-                if root
-                    .left
-                    .as_ref()
-                    .is_some_and(|left| left.higher_priority_than(&root))
-                {
-                    return Self::rotate_right(root);
-                }
-            }
-            Ordering::Greater => {
-                root.right = Some(Self::insert(root.right.take(), height, weight, priority));
-                if root
-                    .right
-                    .as_ref()
-                    .is_some_and(|right| right.higher_priority_than(&root))
-                {
-                    return Self::rotate_left(root);
-                }
-            }
-            Ordering::Equal => {
-                root.weight = root
-                    .weight
-                    .checked_add(weight)
-                    .expect("height weight overflow");
-            }
-        }
-        root.refresh();
-        root
-    }
-
-    fn remove(root: Option<Box<Self>>, height: Height, weight: u64) -> Option<Box<Self>> {
-        let mut root = root.expect("cannot remove missing height weight");
-        match height.cmp(&root.height) {
-            Ordering::Less => root.left = Self::remove(root.left.take(), height, weight),
-            Ordering::Greater => root.right = Self::remove(root.right.take(), height, weight),
-            Ordering::Equal => {
-                root.weight = root
-                    .weight
-                    .checked_sub(weight)
-                    .expect("insufficient height weight");
-                if root.weight == 0 {
-                    return Self::merge(root.left, root.right);
-                }
-            }
-        }
-        root.refresh();
-        Some(root)
-    }
-
-    fn merge(left: Option<Box<Self>>, right: Option<Box<Self>>) -> Option<Box<Self>> {
-        match (left, right) {
-            (None, right) => right,
-            (left, None) => left,
-            (Some(mut left), Some(mut right)) => {
-                if left.higher_priority_than(&right) {
-                    left.right = Self::merge(left.right.take(), Some(right));
-                    left.refresh();
-                    Some(left)
-                } else {
-                    right.left = Self::merge(Some(left), right.left.take());
-                    right.refresh();
-                    Some(right)
-                }
-            }
-        }
-    }
-
-    fn rotate_left(mut root: Box<Self>) -> Box<Self> {
-        let mut pivot = root.right.take().expect("missing right child");
-        root.right = pivot.left.take();
-        root.refresh();
-        pivot.left = Some(root);
-        pivot.refresh();
-        pivot
-    }
-
-    fn rotate_right(mut root: Box<Self>) -> Box<Self> {
-        let mut pivot = root.left.take().expect("missing left child");
-        root.left = pivot.right.take();
-        root.refresh();
-        pivot.right = Some(root);
-        pivot.refresh();
-        pivot
-    }
-
-    fn nth_highest(&self, weight: u64) -> Option<Height> {
-        if weight == 0 || weight > self.subtree_weight {
-            return None;
-        }
-
-        let right_weight = Self::subtree_weight(&self.right);
-        if weight <= right_weight {
-            return self.right.as_deref()?.nth_highest(weight);
-        }
-        let weight = weight.checked_sub(right_weight).expect("weight underflow");
-        if weight <= self.weight {
-            return Some(self.height);
-        }
-        self.left
-            .as_deref()?
-            .nth_highest(weight.checked_sub(self.weight).expect("weight underflow"))
+    pub const fn get(&self) -> Height {
+        self.safe
     }
 }
 
@@ -302,7 +165,8 @@ mod tests {
         Signer,
         ed25519::{PrivateKey, PublicKey},
     };
-    use commonware_utils::TryCollect;
+    use commonware_utils::{TryCollect, test_rng};
+    use rand::RngExt as _;
 
     fn key(seed: u64) -> PublicKey {
         PrivateKey::from_seed(seed).public_key()
@@ -342,15 +206,17 @@ mod tests {
             .unwrap()
     }
 
-    fn assert_weight(safe_tip: &SafeTip<PublicKey>) {
+    fn assert_invariants(safe_tip: &SafeTip<PublicKey>) {
         let expected = safe_tip.tips.values().map(|tip| tip.weight).sum::<u64>();
+        assert_eq!(safe_tip.heights.values().sum::<u64>(), expected);
+        assert!(safe_tip.heights.values().all(|&weight| weight > 0));
         assert_eq!(
             safe_tip
                 .heights
-                .root
-                .as_ref()
-                .map_or(0, |root| root.subtree_weight),
-            expected
+                .range((Excluded(safe_tip.safe), Unbounded))
+                .map(|(_, weight)| weight)
+                .sum::<u64>(),
+            safe_tip.above_safe
         );
     }
 
@@ -386,8 +252,7 @@ mod tests {
         safe_tip.update(heavy, Height::new(10));
 
         assert_eq!(safe_tip.get(), Height::new(10));
-        assert_eq!(safe_tip.heights.nth_highest(2), Some(Height::new(10)));
-        assert_eq!(safe_tip.heights.nth_highest(3), Some(Height::new(10)));
+        assert_eq!(safe_tip.heights[&Height::new(10)], 5);
     }
 
     #[test]
@@ -432,28 +297,44 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_replaces_members_at_height_zero() {
+    fn reconcile_supports_committee_size_changes() {
         let (mut safe_tip, old) = setup(&[(1, 1), (2, 1), (3, 1), (4, 1)]);
         for participant in old.iter().cloned() {
             safe_tip.update(participant, Height::new(10));
         }
         let retained = old.iter().skip(2).cloned().collect::<Vec<_>>();
-        let replacement = vec![
+        let smaller = vec![
             (retained[0].clone(), 1),
             (retained[1].clone(), 1),
-            (key(5), 1),
-            (key(6), 1),
+            (key(5), 2),
         ]
         .try_into()
         .unwrap();
 
-        safe_tip.reconcile(&replacement);
+        safe_tip.reconcile(&smaller);
+
+        assert_eq!(safe_tip.tips[&retained[0]].height, Height::new(10));
+        assert_eq!(safe_tip.tips[&retained[1]].height, Height::new(10));
+        assert_eq!(safe_tip.tips[&key(5)].height, Height::zero());
+        assert_eq!(safe_tip.get(), Height::new(10));
+
+        let larger = vec![
+            (retained[0].clone(), 1),
+            (retained[1].clone(), 1),
+            (key(5), 2),
+            (key(6), 4),
+            (key(7), 4),
+        ]
+        .try_into()
+        .unwrap();
+        safe_tip.reconcile(&larger);
 
         assert_eq!(safe_tip.tips[&retained[0]].height, Height::new(10));
         assert_eq!(safe_tip.tips[&retained[1]].height, Height::new(10));
         assert_eq!(safe_tip.tips[&key(5)].height, Height::zero());
         assert_eq!(safe_tip.tips[&key(6)].height, Height::zero());
-        assert_eq!(safe_tip.get(), Height::new(10));
+        assert_eq!(safe_tip.tips[&key(7)].height, Height::zero());
+        assert_eq!(safe_tip.get(), Height::zero());
     }
 
     #[test]
@@ -510,7 +391,7 @@ mod tests {
                             }
                         }
                         assert_eq!(safe_tip.get(), oracle(&committee, &heights));
-                        assert_weight(&safe_tip);
+                        assert_invariants(&safe_tip);
                     }
                 }
             }
@@ -518,9 +399,54 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "committee participant count mismatch")]
-    fn reconcile_requires_same_participant_count() {
-        let (mut safe_tip, _) = setup(&[(1, 1), (2, 1), (3, 1), (4, 1)]);
-        safe_tip.reconcile(&committee(&[(1, 1), (2, 1), (3, 1)]));
+    fn randomized_updates_and_reconciles_match_oracle() {
+        let mut rng = test_rng();
+        let entries = (1..=32)
+            .map(|seed| (seed, rng.random_range(1..=20)))
+            .collect::<Vec<_>>();
+        let (mut safe_tip, mut committee) = setup(&entries);
+        let mut heights = committee
+            .iter()
+            .cloned()
+            .map(|participant| (participant, Height::zero()))
+            .collect::<HashMap<_, _>>();
+
+        for step in 0..500 {
+            if step > 0 && step % 100 == 0 {
+                let (start, count) = match step {
+                    100 => (1, 24),
+                    200 => (1, 40),
+                    300 => (9, 32),
+                    _ => (1, 36),
+                };
+                let entries = (start..start + count)
+                    .map(|seed| (seed, rng.random_range(1..=20)))
+                    .collect::<Vec<_>>();
+                let next = self::committee(&entries);
+                heights = next
+                    .iter()
+                    .cloned()
+                    .map(|participant| {
+                        let height = heights
+                            .get(&participant)
+                            .copied()
+                            .unwrap_or_else(Height::zero);
+                        (participant, height)
+                    })
+                    .collect();
+                safe_tip.reconcile(&next);
+                committee = next;
+            } else {
+                let index = rng.random_range(0..committee.len());
+                let participant = committee[index].clone();
+                let old = heights[&participant];
+                let new = Height::new(old.get() + rng.random_range(1..=25));
+                assert_eq!(safe_tip.update(participant.clone(), new), Some(old));
+                heights.insert(participant, new);
+            }
+
+            assert_eq!(safe_tip.get(), oracle(&committee, &heights));
+            assert_invariants(&safe_tip);
+        }
     }
 }

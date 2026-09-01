@@ -119,8 +119,9 @@ mod tests {
         deterministic::{self, Context},
     };
     use commonware_utils::{
-        NZU16, NZUsize, NonZeroDuration, TestRng,
+        NZU16, NZUsize, NonZeroDuration, TestRng, TryCollect,
         channel::{fallible::OneshotExt, oneshot},
+        ordered::Committee,
         probability, test_rng,
     };
     use futures::future::join_all;
@@ -241,6 +242,43 @@ mod tests {
         link_participants(&mut oracle, &fixture.participants, link).await;
 
         (oracle, registrations)
+    }
+
+    fn weighted_ed25519_fixture(
+        rng: &mut deterministic::Context,
+        weights: &[u64],
+    ) -> Fixture<ed25519::Scheme> {
+        let Fixture {
+            participants,
+            private_keys,
+            ..
+        } = ed25519::fixture(
+            rng,
+            TEST_NAMESPACE,
+            u32::try_from(weights.len()).expect("test committee must fit in u32"),
+        );
+        let committee: Committee<_> = participants
+            .iter()
+            .cloned()
+            .zip(weights.iter().copied())
+            .try_collect()
+            .expect("test committee must be valid");
+        let schemes = private_keys
+            .iter()
+            .cloned()
+            .map(|private_key| {
+                ed25519::Scheme::signer(TEST_NAMESPACE, committee.clone(), private_key)
+                    .expect("private key must belong to test committee")
+            })
+            .collect();
+        let verifier = ed25519::Scheme::verifier(TEST_NAMESPACE, committee);
+
+        Fixture {
+            participants,
+            private_keys,
+            schemes,
+            verifier,
+        }
     }
 
     /// Spawn aggregation engines for all validators.
@@ -409,6 +447,40 @@ mod tests {
     }
 
     test_for_all_fixtures!(slow all_online);
+
+    #[test_traced("INFO")]
+    fn test_weighted_quorum_finalizes() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+
+        runner.start(|mut context| async move {
+            let mut fixture = weighted_ed25519_fixture(&mut context, &[4, 1, 1, 1]);
+            let epoch = Epoch::new(111);
+
+            // A weight-4 participant and one weight-1 participant form a quorum of 5.
+            fixture.participants.truncate(2);
+            fixture.schemes.truncate(2);
+
+            let (mut oracle, mut registrations) =
+                initialize_simulation(context.child("simulation"), &fixture, RELIABLE_LINK).await;
+            let reporters = spawn_validator_engines(
+                context.child("validator"),
+                &fixture,
+                &mut registrations,
+                &mut oracle,
+                epoch,
+                Duration::from_secs(5),
+                vec![],
+            );
+
+            await_reporters(
+                context.child("reporter"),
+                &reporters,
+                Height::new(20),
+                epoch,
+            )
+            .await;
+        });
+    }
 
     /// Test consensus resilience to Byzantine behavior.
     fn byzantine_proposer<S, F>(fixture: F)

@@ -537,6 +537,7 @@ impl<
             .values()
             .filter(|a| a.item.digest == ack.item.digest)
             .collect::<Vec<_>>();
+        // BTreeMap iteration preserves the signer order required by sum_ordered_weights.
         if has_quorum_weight(&*scheme, &filtered) {
             let certificate =
                 Certificate::from_acks(&*scheme, non_empty![@filtered], &self.strategy)
