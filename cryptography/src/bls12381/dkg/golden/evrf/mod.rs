@@ -325,28 +325,10 @@ impl FixedSize for PrivateKey {
 /// A Schnorr signature over the Bandersnatch curve.
 ///
 /// Consists of a commitment point K and a scalar response s.
-#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd, FixedArray)]
+#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd, FixedArray, FixedSize, Read, Write)]
+#[fixed_array(bytes([u8; G::SIZE + F::SIZE]))]
 pub struct Signature {
     raw: [u8; G::SIZE + F::SIZE],
-}
-
-impl Write for Signature {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.raw.write(buf);
-    }
-}
-
-impl Read for Signature {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let raw = <[u8; Self::SIZE]>::read(buf)?;
-        Ok(Self { raw })
-    }
-}
-
-impl FixedSize for Signature {
-    const SIZE: usize = G::SIZE + F::SIZE;
 }
 
 #[cfg(feature = "arbitrary")]
@@ -524,7 +506,7 @@ impl Display for PublicKey {
 
 /// Proves that the VRF was correctly evaluated for each receiver and that the
 /// resulting outputs are bound to the accompanying [`VrfCommitments`].
-#[derive(Clone)]
+#[derive(Clone, EncodeSize, Write)]
 struct Proof {
     circuit_proof: circuit::Proof<Scalar, G1>,
     pedersen_to_plain: Vec<pedersen_to_plain::Proof<Scalar, G1>>,
@@ -537,19 +519,6 @@ impl arbitrary::Arbitrary<'_> for Proof {
             circuit_proof: u.arbitrary()?,
             pedersen_to_plain: u.arbitrary()?,
         })
-    }
-}
-
-impl Write for Proof {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.circuit_proof.write(buf);
-        self.pedersen_to_plain.write(buf);
-    }
-}
-
-impl EncodeSize for Proof {
-    fn encode_size(&self) -> usize {
-        self.circuit_proof.encode_size() + self.pedersen_to_plain.encode_size()
     }
 }
 
@@ -588,19 +557,6 @@ impl arbitrary::Arbitrary<'_> for VrfCommitments {
     }
 }
 
-impl Write for VrfCommitments {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.proof.write(buf);
-        self.commitments.write(buf);
-    }
-}
-
-impl EncodeSize for VrfCommitments {
-    fn encode_size(&self) -> usize {
-        self.proof.encode_size() + self.commitments.encode_size()
-    }
-}
-
 impl Read for VrfCommitments {
     type Cfg = NonZeroU32;
 
@@ -616,7 +572,7 @@ impl Read for VrfCommitments {
 ///
 /// These commitments bind the output value for each receiver, without revealing
 /// what it is.
-#[derive(Clone)]
+#[derive(Clone, EncodeSize, Write)]
 pub struct VrfCommitments {
     proof: Proof,
     commitments: Map<PublicKey, G1>,

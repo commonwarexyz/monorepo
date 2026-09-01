@@ -135,7 +135,7 @@ use crate::{
     },
     transcript::{Summary, Transcript, Version},
 };
-use bytes::{Buf, BufMut, Bytes};
+use bytes::{Buf, Bytes};
 use commonware_codec::{Encode, EncodeSize, RangeCfg, Read, ReadExt, Write};
 use commonware_math::{
     algebra::{Additive, CryptoGroup, Random, Space},
@@ -184,7 +184,7 @@ pub enum Error {
 }
 
 /// The output of a successful DKG.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, EncodeSize, Write)]
 pub struct Output<P> {
     summary: Summary,
     public: Sharing<MinPk>,
@@ -259,28 +259,6 @@ where
             players: u.arbitrary()?,
             revealed: u.arbitrary()?,
         })
-    }
-}
-
-impl<P: Write> Write for Output<P> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.summary.write(buf);
-        self.public.write(buf);
-        self.quorum.write(buf);
-        self.dealers.write(buf);
-        self.players.write(buf);
-        self.revealed.write(buf);
-    }
-}
-
-impl<P: EncodeSize> EncodeSize for Output<P> {
-    fn encode_size(&self) -> usize {
-        self.summary.encode_size()
-            + self.public.encode_size()
-            + self.quorum.encode_size()
-            + self.dealers.encode_size()
-            + self.players.encode_size()
-            + self.revealed.encode_size()
     }
 }
 
@@ -740,10 +718,11 @@ pub fn play(
 ///
 /// Use [`SignedDealerLog::identify`] to verify the signature and extract the
 /// dealer's public key and log.
-#[derive(Clone)]
+#[derive(Clone, EncodeSize, Read, Write)]
 pub struct SignedDealerLog {
     dealer: PublicKey,
     signature: Signature,
+    #[codec(cfg)]
     log: DealerLog,
 }
 
@@ -754,35 +733,6 @@ impl arbitrary::Arbitrary<'_> for SignedDealerLog {
             dealer: u.arbitrary()?,
             signature: u.arbitrary()?,
             log: u.arbitrary()?,
-        })
-    }
-}
-
-impl Write for SignedDealerLog {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.dealer.write(buf);
-        self.signature.write(buf);
-        self.log.write(buf);
-    }
-}
-
-impl EncodeSize for SignedDealerLog {
-    fn encode_size(&self) -> usize {
-        self.dealer.encode_size() + self.signature.encode_size() + self.log.encode_size()
-    }
-}
-
-impl Read for SignedDealerLog {
-    type Cfg = (NonZeroU32, ModeVersion);
-
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        let dealer: PublicKey = ReadExt::read(buf)?;
-        let signature: Signature = ReadExt::read(buf)?;
-        let log = Read::read_cfg(buf, cfg)?;
-        Ok(Self {
-            dealer,
-            signature,
-            log,
         })
     }
 }
@@ -825,7 +775,7 @@ impl SignedDealerLog {
 ///
 /// Obtained from [`SignedDealerLog::identify`] after signature verification.
 /// Passed to [`observe`] or [`play`] for finalization.
-#[derive(Clone)]
+#[derive(Clone, EncodeSize, Write)]
 #[allow(dead_code)]
 pub struct DealerLog {
     dealing: Dealing,
@@ -839,19 +789,6 @@ impl arbitrary::Arbitrary<'_> for DealerLog {
             commitments: u.arbitrary()?,
             dealing: u.arbitrary()?,
         })
-    }
-}
-
-impl Write for DealerLog {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.dealing.write(buf);
-        self.commitments.write(buf);
-    }
-}
-
-impl EncodeSize for DealerLog {
-    fn encode_size(&self) -> usize {
-        self.dealing.encode_size() + self.commitments.encode_size()
     }
 }
 
@@ -912,7 +849,7 @@ impl DealerLog {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, EncodeSize, Write)]
 struct Dealing {
     nonce: Summary,
     poly: Poly<G1>,
@@ -927,20 +864,6 @@ impl arbitrary::Arbitrary<'_> for Dealing {
             poly: u.arbitrary()?,
             masked_shares: u.arbitrary()?,
         })
-    }
-}
-
-impl Write for Dealing {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.nonce.write(buf);
-        self.poly.write(buf);
-        self.masked_shares.write(buf);
-    }
-}
-
-impl EncodeSize for Dealing {
-    fn encode_size(&self) -> usize {
-        self.nonce.encode_size() + self.poly.encode_size() + self.masked_shares.encode_size()
     }
 }
 
