@@ -116,8 +116,7 @@ commonware_macros::stability_scope!(BETA {
     pub enum Outcome {
         /// The response is invalid for the peer-visible key.
         ///
-        /// Network resolvers may penalize the serving peer before retrying, and
-        /// retire a fetch left with no peer that could serve it.
+        /// Network resolvers may penalize the serving peer before retrying.
         Invalid,
 
         /// The response is valid and satisfies every delivered subscriber.
@@ -172,10 +171,9 @@ commonware_macros::stability_scope!(BETA {
         /// resolver discards the validation result.
         ///
         /// If the consumer drops the sender without reporting a verdict, the
-        /// response is handed to any subscribers that joined after this delivery
-        /// was snapshotted, and the key is retired without penalizing its source
-        /// once no subscribers remain. The subscribers in the dropped delivery are
-        /// not retried.
+        /// response is handed to the remaining subscribers, or the key is retired
+        /// without penalizing its source when none remain. The subscribers in the
+        /// dropped delivery are not retried.
         ///
         /// Implementations of [`Resolver`] must only invoke `deliver` for keys that were
         /// previously requested via [`Resolver::fetch`] (or [`TargetedResolver`] variants).

@@ -6,8 +6,8 @@
 //! coalescing, retain pruning, retry scheduling, consumer delivery, and
 //! cached-response redelivery. An ignored consumer outcome retires the key
 //! without accepting the value or retrying the source. A verdict the consumer
-//! drops without answering hands the response to subscribers that joined since,
-//! or retires the key when none remain.
+//! drops without answering hands the response to the remaining subscribers, or
+//! retires the key when none remain.
 //!
 //! Target hints supplied through [`crate::TargetedResolver::fetch_targeted`] and
 //! [`crate::TargetedResolver::fetch_all_targeted`] are ignored because opaque
@@ -508,8 +508,8 @@ where
         let accepted = self.deliveries.response_accepted(&key);
 
         // A dropped verdict says nothing about the response, only that the consumer
-        // did not judge it for these subscribers. Hand the response to any
-        // subscribers that joined since, and retire the key once none remain.
+        // did not judge it for these subscribers. Hand the response to the
+        // remaining subscribers, or retire the key when none remain.
         let Some(outcome) = outcome else {
             let remaining = self
                 .subscribers

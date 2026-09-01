@@ -83,8 +83,7 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
     /// Targets are required because this is typically called when a peer claims to
     /// be ahead. If a target returns invalid data, the resolver will block them.
     /// Sending this message multiple times with different targets adds to the
-    /// target set. A hint whose every target has been blocked is retired, and a
-    /// later hint for the same height starts a fresh fetch.
+    /// target set.
     HintFinalized {
         /// The span carried with this request.
         span: Span,
@@ -722,8 +721,6 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     ///
     /// Calling this multiple times for the same height with different targets will
     /// add to the target set if there is an ongoing fetch, allowing more peers to be tried.
-    /// A hint whose every target has been blocked is retired, and a later hint for the
-    /// same height starts a fresh fetch.
     ///
     /// This is fire-and-forget: the finalization will be stored in marshal and delivered
     /// via the normal finalization flow when available.
