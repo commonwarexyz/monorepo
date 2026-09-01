@@ -495,20 +495,12 @@ pub(crate) mod tests {
     use super::{BlobVersion, Header, HeaderError, Layout};
     use commonware_codec::{DecodeExt, Encode};
 
-    const fn version(value: u16) -> BlobVersion {
-        BlobVersion::new(value)
-    }
-
-    fn versions(start: u16, end: u16) -> std::ops::RangeInclusive<BlobVersion> {
-        version(start)..=version(end)
-    }
-
     /// A V0 header with the given blob version, for direct field manipulation in tests.
     fn v0_header(blob_version: u16) -> Header {
         Header {
             magic: Layout::V0.magic(),
             layout_version: Layout::V0.layout_version(),
-            blob_version: version(blob_version),
+            blob_version: BlobVersion::new(blob_version),
         }
     }
 
@@ -516,7 +508,10 @@ pub(crate) mod tests {
     /// pre-V1 writer laid them out.
     pub(crate) fn v0_blob_bytes(blob_version: u16, payload: &[u8]) -> Vec<u8> {
         let layouts = Layout::V0..=Layout::V0;
-        let (mut raw, _) = Header::create(&layouts, &versions(blob_version, blob_version));
+        let (mut raw, _) = Header::create(
+            &layouts,
+            &(BlobVersion::new(blob_version)..=BlobVersion::new(blob_version)),
+        );
         raw.extend_from_slice(payload);
         raw
     }
@@ -524,15 +519,19 @@ pub(crate) mod tests {
     /// Raw bytes of a V1 blob with the given version, followed by `payload`.
     pub(crate) fn v1_blob_bytes(blob_version: u16, payload: &[u8]) -> Vec<u8> {
         let layouts = Layout::V1..=Layout::V1;
-        let (mut raw, _) = Header::create(&layouts, &versions(blob_version, blob_version));
+        let (mut raw, _) = Header::create(
+            &layouts,
+            &(BlobVersion::new(blob_version)..=BlobVersion::new(blob_version)),
+        );
         raw.extend_from_slice(payload);
         raw
     }
 
     #[test]
     fn test_header_create_v1() {
-        let (region, blob_version) = Header::create(&Layout::ALL, &versions(0, 7));
-        assert_eq!(blob_version, version(7));
+        let (region, blob_version) =
+            Header::create(&Layout::ALL, &(BlobVersion::new(0)..=BlobVersion::new(7)));
+        assert_eq!(blob_version, BlobVersion::new(7));
         assert_eq!(region.len(), Layout::V1.data_offset() as usize);
 
         // The padding past the extension is zero.
@@ -543,25 +542,31 @@ pub(crate) mod tests {
             &region,
             Layout::V1.data_offset(),
             &Layout::ALL,
-            &versions(0, 7),
+            &(BlobVersion::new(0)..=BlobVersion::new(7)),
         )
         .unwrap();
         assert_eq!(size, 0);
-        assert_eq!(parsed_blob_version, version(7));
+        assert_eq!(parsed_blob_version, BlobVersion::new(7));
         assert_eq!(data_offset, Layout::V1.data_offset());
     }
 
     #[test]
     fn test_header_create_v0() {
         let layouts = Layout::V0..=Layout::V0;
-        let (region, blob_version) = Header::create(&layouts, &versions(0, 7));
-        assert_eq!(blob_version, version(7));
+        let (region, blob_version) =
+            Header::create(&layouts, &(BlobVersion::new(0)..=BlobVersion::new(7)));
+        assert_eq!(blob_version, BlobVersion::new(7));
         assert_eq!(region, [b'C', b'W', b'I', b'C', 0x00, 0x00, 0x00, 0x07]);
 
-        let (size, parsed_blob_version, data_offset) =
-            Header::parse(&region, region.len() as u64, &layouts, &versions(0, 7)).unwrap();
+        let (size, parsed_blob_version, data_offset) = Header::parse(
+            &region,
+            region.len() as u64,
+            &layouts,
+            &(BlobVersion::new(0)..=BlobVersion::new(7)),
+        )
+        .unwrap();
         assert_eq!(size, 0);
-        assert_eq!(parsed_blob_version, version(7));
+        assert_eq!(parsed_blob_version, BlobVersion::new(7));
         assert_eq!(data_offset, Layout::V0.data_offset());
     }
 
@@ -569,7 +574,10 @@ pub(crate) mod tests {
     /// (the padding is asserted zero in [test_header_create_v1]).
     #[test]
     fn test_header_v1_fixture_bytes() {
-        let (region, _) = Header::create(&(Layout::V1..=Layout::V1), &versions(3, 3));
+        let (region, _) = Header::create(
+            &(Layout::V1..=Layout::V1),
+            &(BlobVersion::new(3)..=BlobVersion::new(3)),
+        );
         let expected = [
             b'C', b'W', b'I', b'K', // V1 magic
             0x00, 0x01, // layout version 1
@@ -583,25 +591,31 @@ pub(crate) mod tests {
 
     #[test]
     fn test_header_extension_rejects_bad_crc() {
-        let (mut region, _) = Header::create(&(Layout::V1..=Layout::V1), &versions(0, 0));
+        let (mut region, _) = Header::create(
+            &(Layout::V1..=Layout::V1),
+            &(BlobVersion::new(0)..=BlobVersion::new(0)),
+        );
         region[Header::PARSE_LEN - 1] ^= 0x01;
         let result = Header::parse(
             &region,
             Layout::V1.data_offset(),
             &Layout::ALL,
-            &versions(0, 0),
+            &(BlobVersion::new(0)..=BlobVersion::new(0)),
         );
         assert!(matches!(result, Err(HeaderError::InvalidChecksum)));
     }
 
     #[test]
     fn test_header_extension_rejects_truncated_region() {
-        let (region, _) = Header::create(&(Layout::V1..=Layout::V1), &versions(0, 0));
+        let (region, _) = Header::create(
+            &(Layout::V1..=Layout::V1),
+            &(BlobVersion::new(0)..=BlobVersion::new(0)),
+        );
         let result = Header::parse(
             &region[..Layout::V1.data_offset() as usize - 1],
             Layout::V1.data_offset() - 1,
             &Layout::ALL,
-            &versions(0, 0),
+            &(BlobVersion::new(0)..=BlobVersion::new(0)),
         );
         assert!(matches!(
             result,
@@ -612,13 +626,16 @@ pub(crate) mod tests {
 
     #[test]
     fn test_header_v1_rejects_nonzero_padding() {
-        let (mut region, _) = Header::create(&(Layout::V1..=Layout::V1), &versions(0, 0));
+        let (mut region, _) = Header::create(
+            &(Layout::V1..=Layout::V1),
+            &(BlobVersion::new(0)..=BlobVersion::new(0)),
+        );
         region[Header::PARSE_LEN] = 0x01;
         let result = Header::parse(
             &region,
             Layout::V1.data_offset(),
             &Layout::ALL,
-            &versions(0, 0),
+            &(BlobVersion::new(0)..=BlobVersion::new(0)),
         );
         assert!(matches!(result, Err(HeaderError::InvalidPadding)));
     }
@@ -632,7 +649,7 @@ pub(crate) mod tests {
                 &header.encode(),
                 Layout::V0.data_offset(),
                 &Layout::ALL,
-                &versions(3, 7),
+                &(BlobVersion::new(3)..=BlobVersion::new(7)),
             )
             .is_ok()
         );
@@ -641,7 +658,7 @@ pub(crate) mod tests {
                 &header.encode(),
                 Layout::V0.data_offset(),
                 &Layout::ALL,
-                &versions(5, 5),
+                &(BlobVersion::new(5)..=BlobVersion::new(5)),
             )
             .is_ok()
         );
@@ -654,7 +671,7 @@ pub(crate) mod tests {
             &v0,
             v0.len() as u64,
             &(Layout::V1..=Layout::V1),
-            &versions(0, 0),
+            &(BlobVersion::new(0)..=BlobVersion::new(0)),
         );
         assert!(matches!(
             result,
@@ -667,7 +684,7 @@ pub(crate) mod tests {
             &v1,
             v1.len() as u64,
             &(Layout::V0..=Layout::V0),
-            &versions(0, 0),
+            &(BlobVersion::new(0)..=BlobVersion::new(0)),
         );
         assert!(matches!(
             result,
@@ -681,7 +698,7 @@ pub(crate) mod tests {
             &outside,
             outside.len() as u64,
             &(Layout::V1..=Layout::V1),
-            &versions(0, 0),
+            &(BlobVersion::new(0)..=BlobVersion::new(0)),
         );
         assert!(matches!(
             result,
@@ -697,7 +714,7 @@ pub(crate) mod tests {
             &malformed,
             malformed.len() as u64,
             &(Layout::V0..=Layout::V0),
-            &versions(0, 0),
+            &(BlobVersion::new(0)..=BlobVersion::new(0)),
         );
         assert!(matches!(result, Err(HeaderError::InvalidPadding)));
     }
@@ -763,13 +780,13 @@ pub(crate) mod tests {
 
         // A version mismatch surfaces as its own error variant.
         let err = HeaderError::VersionMismatch {
-            expected: versions(3, 7),
-            found: version(10),
+            expected: BlobVersion::new(3)..=BlobVersion::new(7),
+            found: BlobVersion::new(10),
         };
         assert!(matches!(
             err.into_error("partition", b"name"),
             crate::Error::BlobVersionMismatch { expected, found }
-            if expected == versions(3, 7) && found == version(10)
+            if expected == (BlobVersion::new(3)..=BlobVersion::new(7)) && found == BlobVersion::new(10)
         ));
 
         let err = HeaderError::LayoutMismatch {
@@ -813,8 +830,8 @@ pub(crate) mod tests {
         );
         assert!(
             !HeaderError::VersionMismatch {
-                expected: versions(0, 0),
-                found: version(1)
+                expected: BlobVersion::new(0)..=BlobVersion::new(0),
+                found: BlobVersion::new(1)
             }
             .may_be_torn_creation()
         );
@@ -840,7 +857,7 @@ pub(crate) mod tests {
         let header = Header {
             magic: Layout::V1.magic(),
             layout_version: 0,
-            blob_version: version(5),
+            blob_version: BlobVersion::new(5),
         };
         let result = header.validate();
         assert!(matches!(
@@ -857,12 +874,12 @@ pub(crate) mod tests {
             &header.encode(),
             Layout::V0.data_offset(),
             &Layout::ALL,
-            &versions(3, 7),
+            &(BlobVersion::new(3)..=BlobVersion::new(7)),
         );
         assert!(matches!(
             result,
             Err(HeaderError::VersionMismatch { expected, found })
-            if expected == versions(3, 7) && found == version(10)
+            if expected == (BlobVersion::new(3)..=BlobVersion::new(7)) && found == BlobVersion::new(10)
         ));
     }
 
@@ -874,17 +891,27 @@ pub(crate) mod tests {
         let raw = v1_blob_bytes(10, b"");
 
         // Intact header, version out of range: mismatch.
-        let result = Header::parse(&raw, raw.len() as u64, &Layout::ALL, &versions(3, 7));
+        let result = Header::parse(
+            &raw,
+            raw.len() as u64,
+            &Layout::ALL,
+            &(BlobVersion::new(3)..=BlobVersion::new(7)),
+        );
         assert!(matches!(
             result,
             Err(HeaderError::VersionMismatch { expected, found })
-            if expected == versions(3, 7) && found == version(10)
+            if expected == (BlobVersion::new(3)..=BlobVersion::new(7)) && found == BlobVersion::new(10)
         ));
 
         // Torn version byte: the CRC fails before any version verdict.
         let mut torn = raw;
         torn[7] = 0;
-        let result = Header::parse(&torn, torn.len() as u64, &Layout::ALL, &versions(3, 7));
+        let result = Header::parse(
+            &torn,
+            torn.len() as u64,
+            &Layout::ALL,
+            &(BlobVersion::new(3)..=BlobVersion::new(7)),
+        );
         assert!(matches!(result, Err(HeaderError::InvalidChecksum)));
     }
 
@@ -935,7 +962,10 @@ pub(crate) mod tests {
     /// integrity metadata, including contents that heal under V1.
     #[test]
     fn test_layout_v0_interrupted_creation_rejects_all() {
-        let (region, _) = Header::create(&(Layout::V1..=Layout::V1), &versions(0, 0));
+        let (region, _) = Header::create(
+            &(Layout::V1..=Layout::V1),
+            &(BlobVersion::new(0)..=BlobVersion::new(0)),
+        );
         assert!(Layout::V1.interrupted_creation(&region[..10]));
         assert!(!Layout::V0.interrupted_creation(&region[..10]));
         assert!(!Layout::V0.interrupted_creation(&[]));

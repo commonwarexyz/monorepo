@@ -38,19 +38,19 @@ async fn sync_dir(path: &Path) -> Result<(), Error> {
 pub struct Config {
     pub storage_directory: PathBuf,
     pub maximum_buffer_size: usize,
-    pub blob_layout: RangeInclusive<Layout>,
+    pub blob_layouts: RangeInclusive<Layout>,
 }
 
 impl Config {
     pub const fn new(
         storage_directory: PathBuf,
         maximum_buffer_size: usize,
-        blob_layout: RangeInclusive<Layout>,
+        blob_layouts: RangeInclusive<Layout>,
     ) -> Self {
         Self {
             storage_directory,
             maximum_buffer_size,
-            blob_layout,
+            blob_layouts,
         }
     }
 }
@@ -135,7 +135,7 @@ impl crate::Storage for Storage {
         let existing = resolve_header(
             &mut file,
             raw_len,
-            &self.cfg.blob_layout,
+            &self.cfg.blob_layouts,
             &versions,
             partition,
             name,
@@ -152,7 +152,7 @@ impl crate::Storage for Storage {
                 // path.
                 let parent = parent.to_path_buf();
                 let storage_directory = self.cfg.storage_directory.clone();
-                let blob_layout = self.cfg.blob_layout.clone();
+                let blob_layouts = self.cfg.blob_layouts.clone();
                 let err_partition = partition.to_string();
                 let err_name = hex(name);
                 let creation = tokio::task::spawn(async move {
@@ -165,7 +165,7 @@ impl crate::Storage for Storage {
                     sync_dir(&storage_directory).await?;
 
                     // Truncate to zero before writing, per the [Header::create] contract.
-                    let (region, blob_version) = Header::create(&blob_layout, &versions);
+                    let (region, blob_version) = Header::create(&blob_layouts, &versions);
                     let data_offset = region.len() as u64;
                     file.set_len(0).await.map_err(|e| {
                         Error::BlobResizeFailed(err_partition.clone(), err_name.clone(), e.into())
@@ -492,7 +492,7 @@ mod tests {
             Config {
                 storage_directory: storage_directory.clone(),
                 maximum_buffer_size: 1024 * 1024,
-                blob_layout: Layout::ALL,
+                blob_layouts: Layout::ALL,
             },
             test_pool(),
         );
@@ -581,7 +581,7 @@ mod tests {
             Config {
                 storage_directory: storage_directory.clone(),
                 maximum_buffer_size: 1024 * 1024,
-                blob_layout: Layout::ALL,
+                blob_layouts: Layout::ALL,
             },
             test_pool(),
         );
@@ -628,7 +628,7 @@ mod tests {
             Config {
                 storage_directory: storage_directory.clone(),
                 maximum_buffer_size: 1024 * 1024,
-                blob_layout: Layout::ALL,
+                blob_layouts: Layout::ALL,
             },
             test_pool(),
         );
@@ -656,7 +656,7 @@ mod tests {
             Config {
                 storage_directory: storage_directory.clone(),
                 maximum_buffer_size: 1024 * 1024,
-                blob_layout: Layout::ALL,
+                blob_layouts: Layout::ALL,
             },
             test_pool(),
         );
@@ -702,7 +702,7 @@ mod tests {
             Config {
                 storage_directory: storage_directory.clone(),
                 maximum_buffer_size: 1024 * 1024,
-                blob_layout: Layout::ALL,
+                blob_layouts: Layout::ALL,
             },
             test_pool(),
         );
@@ -733,7 +733,7 @@ mod tests {
             Config {
                 storage_directory: storage_directory.clone(),
                 maximum_buffer_size: 1024 * 1024,
-                blob_layout: Layout::ALL,
+                blob_layouts: Layout::ALL,
             },
             test_pool(),
         );
@@ -787,7 +787,7 @@ mod tests {
                 Config {
                     storage_directory: storage_directory.clone(),
                     maximum_buffer_size: 1024 * 1024,
-                    blob_layout: Layout::ALL,
+                    blob_layouts: Layout::ALL,
                 },
                 test_pool(),
             );

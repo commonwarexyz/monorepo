@@ -78,7 +78,7 @@ pub struct Config {
     /// Where to store blobs.
     pub storage_directory: PathBuf,
     /// Blob layouts accepted by storage.
-    pub blob_layout: RangeInclusive<Layout>,
+    pub blob_layouts: RangeInclusive<Layout>,
     /// Configuration for the iouring instance.
     pub iouring_config: iouring::Config,
     /// Stack size for the dedicated io_uring worker thread.
@@ -89,7 +89,7 @@ pub struct Config {
 pub struct Storage {
     lock: Arc<Mutex<()>>,
     storage_directory: PathBuf,
-    blob_layout: RangeInclusive<Layout>,
+    blob_layouts: RangeInclusive<Layout>,
     io_handle: iouring::Handle,
     pool: BufferPool,
 }
@@ -99,7 +99,7 @@ impl Storage {
     pub(crate) fn start(cfg: Config, registry: &mut impl Register, pool: BufferPool) -> Self {
         let Config {
             storage_directory,
-            blob_layout,
+            blob_layouts,
             mut iouring_config,
             thread_stack_size,
         } = cfg;
@@ -115,7 +115,7 @@ impl Storage {
         let storage = Self {
             lock: Arc::new(Mutex::new(())),
             storage_directory,
-            blob_layout,
+            blob_layouts,
             io_handle,
             pool,
         };
@@ -164,7 +164,7 @@ impl crate::Storage for Storage {
         let existing = resolve_header(
             &mut file,
             raw_len,
-            &self.blob_layout,
+            &self.blob_layouts,
             &versions,
             partition,
             name,
@@ -181,7 +181,7 @@ impl crate::Storage for Storage {
                 sync_dir(&self.storage_directory)?;
 
                 // Truncate to zero before writing, per the [Header::create] contract.
-                let (region, blob_version) = Header::create(&self.blob_layout, &versions);
+                let (region, blob_version) = Header::create(&self.blob_layouts, &versions);
                 let data_offset = region.len() as u64;
                 file.set_len(0)
                     .map_err(|e| Error::BlobResizeFailed(partition.into(), hex(name), e.into()))?;
@@ -485,7 +485,7 @@ mod tests {
         let storage = Storage::start(
             Config {
                 storage_directory: storage_directory.clone(),
-                blob_layout: Layout::ALL,
+                blob_layouts: Layout::ALL,
                 iouring_config: Default::default(),
                 thread_stack_size: thread::system_thread_stack_size(),
             },
@@ -978,7 +978,7 @@ mod tests {
         let storage = Storage::start(
             Config {
                 storage_directory: storage_root.clone(),
-                blob_layout: Layout::ALL,
+                blob_layouts: Layout::ALL,
                 iouring_config: Default::default(),
                 thread_stack_size: utils::thread::system_thread_stack_size(),
             },
@@ -1014,7 +1014,7 @@ mod tests {
         let storage = Storage::start(
             Config {
                 storage_directory: storage_directory.clone(),
-                blob_layout: Layout::ALL,
+                blob_layouts: Layout::ALL,
                 iouring_config: Default::default(),
                 thread_stack_size: utils::thread::system_thread_stack_size(),
             },

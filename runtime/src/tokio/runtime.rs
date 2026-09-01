@@ -177,7 +177,7 @@ pub struct Config {
     /// the range to the layouts the rollback target supports before the upgraded binary first
     /// opens storage. This is separate from the application-owned blob versions passed to
     /// [crate::Storage::open_versioned]. The configured range must be non-empty.
-    storage_blob_layout: RangeInclusive<BlobLayout>,
+    storage_blob_layouts: RangeInclusive<BlobLayout>,
 
     /// Maximum buffer size for operations on blobs.
     ///
@@ -206,7 +206,7 @@ impl Config {
             thread_stack_size: utils::thread::system_thread_stack_size(),
             catch_panics: false,
             storage_directory,
-            storage_blob_layout: BlobLayout::ALL,
+            storage_blob_layouts: BlobLayout::ALL,
             maximum_buffer_size: 2 * 1024 * 1024, // 2 MB
             network_cfg: NetworkConfig::default(),
             network_buffer_pool_cfg: None,
@@ -270,9 +270,12 @@ impl Config {
     /// # Panics
     ///
     /// Panics if `layouts` is empty.
-    pub fn with_storage_blob_layout(mut self, layouts: RangeInclusive<BlobLayout>) -> Self {
-        assert!(!layouts.is_empty(), "storage blob layout must be non-empty");
-        self.storage_blob_layout = layouts;
+    pub fn with_storage_blob_layouts(mut self, layouts: RangeInclusive<BlobLayout>) -> Self {
+        assert!(
+            !layouts.is_empty(),
+            "storage blob layouts must be non-empty"
+        );
+        self.storage_blob_layouts = layouts;
         self
     }
     /// See [Config]
@@ -333,8 +336,8 @@ impl Config {
         &self.storage_directory
     }
     /// See [Config]
-    pub const fn storage_blob_layout(&self) -> &RangeInclusive<BlobLayout> {
-        &self.storage_blob_layout
+    pub const fn storage_blob_layouts(&self) -> &RangeInclusive<BlobLayout> {
+        &self.storage_blob_layouts
     }
     /// See [Config]
     pub const fn maximum_buffer_size(&self) -> usize {
@@ -507,7 +510,7 @@ impl crate::Runner for Runner {
                     IoUringStorage::start(
                         IoUringConfig {
                             storage_directory: self.cfg.storage_directory.clone(),
-                            blob_layout: self.cfg.storage_blob_layout.clone(),
+                            blob_layouts: self.cfg.storage_blob_layouts.clone(),
                             iouring_config: Default::default(),
                             thread_stack_size: self.cfg.thread_stack_size,
                         },
@@ -522,7 +525,7 @@ impl crate::Runner for Runner {
                         TokioStorageConfig::new(
                             self.cfg.storage_directory.clone(),
                             self.cfg.maximum_buffer_size,
-                            self.cfg.storage_blob_layout.clone(),
+                            self.cfg.storage_blob_layouts.clone(),
                         ),
                         storage_buffer_pool.clone(),
                     ),
@@ -1085,7 +1088,7 @@ mod tests {
         // The default policy accepts legacy V0 blobs while selecting V1 for new blobs.
         let cfg = Config::new();
         let storage_directory = cfg.storage_directory().clone();
-        assert_eq!(cfg.storage_blob_layout(), &BlobLayout::ALL);
+        assert_eq!(cfg.storage_blob_layouts(), &BlobLayout::ALL);
 
         let partition = "layout_restriction";
         let v0_name = b"v0";
@@ -1108,7 +1111,7 @@ mod tests {
         // A V1-only policy rejects V0 without modifying it and creates new blobs as V1.
         let cfg = Config::new()
             .with_storage_directory(storage_directory.clone())
-            .with_storage_blob_layout(BlobLayout::V1..=BlobLayout::V1);
+            .with_storage_blob_layouts(BlobLayout::V1..=BlobLayout::V1);
         Runner::new(cfg).start(|context| async move {
             let result = context.open(partition, v0_name).await;
             assert!(matches!(
@@ -1130,7 +1133,7 @@ mod tests {
         // creates new blobs the rollback target can read and write.
         let cfg = Config::new()
             .with_storage_directory(storage_directory.clone())
-            .with_storage_blob_layout(BlobLayout::V0..=BlobLayout::V0);
+            .with_storage_blob_layouts(BlobLayout::V0..=BlobLayout::V0);
         Runner::new(cfg).start(|context| async move {
             let result = context.open(partition, b"v1").await;
             assert!(matches!(
@@ -1166,7 +1169,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "non-empty")]
     fn test_storage_blob_layout_restriction_rejects_empty_range() {
-        let _ = Config::new().with_storage_blob_layout(BlobLayout::V1..=BlobLayout::V0);
+        let _ = Config::new().with_storage_blob_layouts(BlobLayout::V1..=BlobLayout::V0);
     }
 
     #[test]
