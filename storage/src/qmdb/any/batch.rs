@@ -5337,12 +5337,18 @@ mod tests {
         });
     }
 
-    /// A stale prev-candidate can also enter through the mutation classifier's own read set:
-    /// the child's sibling update pulls the parent-deleted key's committed location into
-    /// `gather_existing_locations`, so the classifier loop must not contribute candidates for
-    /// the op it skips. Otherwise `find_prev_key`'s wrap-around lands on the stale key, its
-    /// rewrite is skipped as batch-created, and the true predecessor's rewrite is emitted at
-    /// a different stream position than on the committed path.
+    /// Pins the stale-ancestor guard's position above the classifier's candidate pushes.
+    ///
+    /// The classifier resolves each mutated key's prior state by scanning its translated
+    /// bucket in the committed snapshot, and the same loop pushes each entry it examines
+    /// into the next/prev candidate sets that stitch the ordered links. In this scenario the
+    /// child updates a sibling that collides with a parent-deleted key, so the scan pulls
+    /// the deleted key's stale committed location into the loop. The guard skips the stale
+    /// entry, and it must do so before the candidate pushes: a stale prev-candidate makes
+    /// `find_prev_key`'s wrap-around land on the deleted key, whose rewrite is then skipped
+    /// as batch-created, and the true predecessor's rewrite is emitted at a different stream
+    /// position than on the committed path, so the roots diverge with identical key-value
+    /// data.
     #[test]
     fn ordered_stale_classifier_candidates_root_matches() {
         let runner = deterministic::Runner::default();
