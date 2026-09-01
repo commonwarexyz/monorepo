@@ -171,12 +171,10 @@ pub struct Config {
 
     /// Blob layouts accepted by storage.
     ///
-    /// Defaults to [BlobLayout::ALL]. New blobs use the latest layout in the configured range.
-    /// Blobs whose recorded layout falls outside the range fail to open with
-    /// [Error::BlobLayoutMismatch] and are not rewritten. To keep a rollback possible, restrict
-    /// the range to the layouts the rollback target supports before the upgraded binary first
-    /// opens storage. This is separate from the application-owned blob versions passed to
-    /// [crate::Storage::open_versioned]. The configured range must be non-empty.
+    /// Defaults to [BlobLayout::ALL] and must be non-empty. New blobs use the latest layout in
+    /// the range. Existing blobs outside it fail to open with [Error::BlobLayoutMismatch], so
+    /// restrict the range to what a rollback target can read before the upgraded binary first
+    /// opens storage.
     storage_blob_layouts: RangeInclusive<BlobLayout>,
 
     /// Maximum buffer size for operations on blobs.
