@@ -350,7 +350,9 @@ stability_scope!(BETA {
             layout.validate_region(raw, raw_len)?;
 
             // Apply policy only after validating the layout-specific region so malformed headers
-            // remain corruption instead of being masked as a configuration mismatch.
+            // remain corruption instead of being masked as a configuration mismatch. Layout policy
+            // is applied before blob version policy, so a blob outside both ranges reports the
+            // layout mismatch.
             if !layouts.contains(&layout) {
                 return Err(HeaderError::LayoutMismatch {
                     expected: layouts.clone(),
@@ -671,6 +673,20 @@ pub(crate) mod tests {
             result,
             Err(HeaderError::LayoutMismatch { expected, found })
             if expected == (Layout::V0..=Layout::V0) && found == Layout::V1
+        ));
+
+        // A blob outside both the layout and version ranges reports the layout mismatch.
+        let outside = v0_blob_bytes(5, b"payload");
+        let result = Header::parse(
+            &outside,
+            outside.len() as u64,
+            &(Layout::V1..=Layout::V1),
+            &versions(0, 0),
+        );
+        assert!(matches!(
+            result,
+            Err(HeaderError::LayoutMismatch { expected, found })
+            if expected == (Layout::V1..=Layout::V1) && found == Layout::V0
         ));
 
         // A malformed excluded layout remains corruption rather than masquerading as a policy

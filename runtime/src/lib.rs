@@ -80,7 +80,8 @@ stability_scope!(BETA {
     /// This determines the container format, including its header and data offset, not the
     /// application-owned contents version passed to [`Storage::open_versioned`].
     ///
-    /// This can be used to orchestrate rollback-safe upgrades.
+    /// Restricting the layouts a runtime accepts can be used to orchestrate rollback-safe
+    /// upgrades.
     #[repr(u16)]
     #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
     pub enum BlobLayout {

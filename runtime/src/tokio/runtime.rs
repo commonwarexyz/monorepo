@@ -172,7 +172,10 @@ pub struct Config {
     /// Blob layouts accepted by storage.
     ///
     /// Defaults to [BlobLayout::ALL]. New blobs use the latest layout in the configured range.
-    /// This is separate from the application-owned blob versions passed to
+    /// Blobs whose recorded layout falls outside the range fail to open with
+    /// [Error::BlobLayoutMismatch] and are not rewritten. To keep a rollback possible, restrict
+    /// the range to the layouts the rollback target supports before the upgraded binary first
+    /// opens storage. This is separate from the application-owned blob versions passed to
     /// [crate::Storage::open_versioned]. The configured range must be non-empty.
     storage_blob_layout: RangeInclusive<BlobLayout>,
 
@@ -266,10 +269,10 @@ impl Config {
     ///
     /// # Panics
     ///
-    /// Panics if `layout` is empty.
-    pub fn with_storage_blob_layout(mut self, layout: RangeInclusive<BlobLayout>) -> Self {
-        assert!(!layout.is_empty(), "storage blob layout must be non-empty");
-        self.storage_blob_layout = layout;
+    /// Panics if `layouts` is empty.
+    pub fn with_storage_blob_layout(mut self, layouts: RangeInclusive<BlobLayout>) -> Self {
+        assert!(!layouts.is_empty(), "storage blob layout must be non-empty");
+        self.storage_blob_layout = layouts;
         self
     }
     /// See [Config]

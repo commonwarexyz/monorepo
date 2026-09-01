@@ -866,7 +866,7 @@ mod tests {
             .unwrap();
         assert_eq!(read_buf.coalesce(), data);
 
-        // A legacy V0 blob (fabricated raw: open_versioned creates V1) places data immediately
+        // A legacy V0 blob (fabricated raw: creation here produces V1) places data immediately
         // after the 8-byte header and stays fully readable and writable.
         {
             let mut partitions = storage.partitions.lock();
