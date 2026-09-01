@@ -9,7 +9,7 @@
 //! V-QCs and L-QCs aggregate the exact ordinary signatures represented by their compact
 //! signer-to-message transcripts. They are not recovered threshold signatures.
 
-use super::{Namespace, Subject, Unverified};
+use super::{Namespace, Subject, Unverified, Verified};
 use crate::{
     Epochable, Viewable,
     multimmit::{
@@ -45,7 +45,10 @@ use commonware_utils::{
 };
 use core::{convert::identity, fmt};
 use rand_core::CryptoRng;
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 /// An error while constructing or verifying a Multimmit cryptographic artifact.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -895,10 +898,35 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         artifacts: &[Unverified<'_, V, D>],
         strategy: &impl Strategy,
     ) -> Vec<bool> {
+        self.verify_artifacts_with_known::<R, H, D>(rng, artifacts, &[], strategy)
+    }
+
+    /// Verifies a batch of artifacts, discharging certificate transcript terms whose signatures
+    /// are already known from the locally verified messages in `known`.
+    ///
+    /// `known[i]` accompanies `artifacts[i]`; missing entries mean nothing is known. Known
+    /// messages only ever remove pairings: a term is discharged when a known message from the
+    /// same signer reproduces the transcript message exactly, and the remaining terms are
+    /// checked against the aggregate signature with the discharged signatures subtracted. A
+    /// forged or mismatched known message can therefore only fail a certificate, never pass one.
+    pub fn verify_artifacts_with_known<R: CryptoRng, H: Hasher<Digest = D>, D: Digest>(
+        &self,
+        rng: &mut R,
+        artifacts: &[Unverified<'_, V, D>],
+        known: &[&[Verified<'_, V, D>]],
+        strategy: &impl Strategy,
+    ) -> Vec<bool> {
         // Structural checks and claim extraction run per artifact; message construction and
         // transcript reconstruction dominate, so they parallelize.
+        let inputs = artifacts
+            .iter()
+            .enumerate()
+            .map(|(index, artifact)| (artifact, known.get(index).copied().unwrap_or(&[])))
+            .collect::<Vec<_>>();
         let claims: Vec<Option<Vec<Claim<'_, V>>>> =
-            strategy.map_collect_vec(artifacts, |artifact| self.artifact_claims::<H, D>(artifact));
+            strategy.map_collect_vec(&inputs, |(artifact, known)| {
+                self.artifact_claims::<H, D>(artifact, known)
+            });
 
         let mut verdicts: Vec<bool> = claims.iter().map(Option::is_some).collect();
         let claim_count = claims.iter().filter_map(Option::as_ref).map(Vec::len).sum();
@@ -935,6 +963,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     fn artifact_claims<'a, H: Hasher<Digest = D>, D: Digest>(
         &'a self,
         artifact: &Unverified<'_, V, D>,
+        known: &[Verified<'_, V, D>],
     ) -> Option<Vec<Claim<'a, V>>> {
         match artifact {
             Unverified::TransactionBlock(block) => self
@@ -1010,8 +1039,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
                 }
                 let transcript =
                     vqc_transcript::<V, D, H>(certificate, self.codec, &self.namespace).ok()?;
-                self.aggregate_claim(&transcript, certificate.signature()?)
-                    .map(|claim| vec![claim])
+                self.reduced_aggregate_claim(&transcript, certificate.signature()?, known)
             }
             Unverified::Lqc(certificate) => {
                 if self.ensure_epoch(certificate.epoch()).is_err()
@@ -1032,10 +1060,77 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
                         subject.message(),
                     ));
                 }
-                self.aggregate_claim(&transcript, certificate.signature()?)
-                    .map(|claim| vec![claim])
+                self.reduced_aggregate_claim(&transcript, certificate.signature()?, known)
             }
         }
+    }
+
+    /// Builds the pairing claims for an aggregate transcript after discharging every term whose
+    /// signature is known from a locally verified message.
+    ///
+    /// BLS signatures are unique per key and message, so a valid aggregate over the transcript
+    /// must contain exactly the known signature for every discharged term. Subtracting those
+    /// leaves an aggregate over the remaining terms alone; an empty remainder must then equal the
+    /// identity. Returns no claims when everything was discharged and the remainder holds.
+    fn reduced_aggregate_claim<'a, D: Digest>(
+        &'a self,
+        transcript: &[TranscriptEntry<'a>],
+        signature: &aggregate::Signature<V>,
+        known: &[Verified<'_, V, D>],
+    ) -> Option<Vec<Claim<'a, V>>> {
+        if known.is_empty() {
+            return self
+                .aggregate_claim(transcript, signature)
+                .map(|claim| vec![claim]);
+        }
+        if transcript.is_empty() || signature.element() == &V::Signature::zero() {
+            return None;
+        }
+        let mut discharged: HashMap<Participant, (&[u8], Bytes, V::Signature)> =
+            HashMap::with_capacity(known.len());
+        for message in known {
+            let (signer, subject, attestation) = match message {
+                Verified::Vote(vote) => (vote.signer(), Subject::vote(vote.body()), vote.attestation()),
+                Verified::NoVote(vote) => {
+                    (vote.signer(), Subject::NoVote(vote.round()), vote.attestation())
+                }
+            };
+            let Ok(known_signature) = decoded(attestation) else {
+                continue;
+            };
+            discharged.insert(
+                signer,
+                (
+                    subject.namespace(&self.namespace),
+                    subject.message(),
+                    known_signature,
+                ),
+            );
+        }
+        let mut publics = HashSet::with_capacity(transcript.len());
+        let mut remainder = *signature.element();
+        let mut terms = Vec::with_capacity(transcript.len());
+        for (signer, namespace, message) in transcript {
+            let public = self.public(*signer)?;
+            if !publics.insert(*public) {
+                return None;
+            }
+            match discharged.get(signer) {
+                Some((known_namespace, known_message, known_signature))
+                    if known_namespace == namespace && known_message == message =>
+                {
+                    remainder -= known_signature;
+                }
+                _ => terms.push((*public, *namespace, message.clone())),
+            }
+        }
+        if terms.is_empty() {
+            return (remainder == V::Signature::zero()).then(Vec::new);
+        }
+        Some(vec![Claim {
+            signature: remainder,
+            terms,
+        }])
     }
 
     /// Builds the claim for one attributed ordinary signature.
@@ -2896,4 +2991,108 @@ mod tests {
         scheme_rejects_context_and_key_material_mismatches::<MinPk>();
         scheme_rejects_context_and_key_material_mismatches::<MinSig>();
     }
+    #[test]
+    fn known_messages_discharge_certificate_transcripts_for_both_variants() {
+        known_messages_discharge_certificate_transcripts::<MinPk>();
+        known_messages_discharge_certificate_transcripts::<MinSig>();
+    }
+
+    fn known_messages_discharge_certificate_transcripts<V: Variant>() {
+        let fixture = Fixture::<V>::new();
+        let verifier = &fixture.verifier;
+        let leader = fixture.leader(7);
+        let quorum = fixture.codec.view_quorum();
+        let votes = (0..quorum)
+            .map(|index| {
+                fixture.signers[index]
+                    .sign_vote(fixture.standard_body(&leader))
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        // The last quorum member abstains in the V-QC, so both message kinds are covered.
+        let novote = fixture.signers[quorum - 1].sign_novote(fixture.round).unwrap();
+        let mut messages = votes[..quorum - 1]
+            .iter()
+            .cloned()
+            .map(ViewMessage::Vote)
+            .collect::<Vec<_>>();
+        messages.push(ViewMessage::NoVote(novote.clone()));
+        let vqc = verifier
+            .assemble_vqc::<Sha256, _>(leader.clone(), &messages, &Sequential)
+            .unwrap();
+        let lqc = verifier
+            .assemble_lqc::<Sha256, _>(leader.clone(), &votes, &Sequential)
+            .unwrap();
+        let bad_vqc = {
+            let mut encoded = vqc.encode().to_vec();
+            *encoded.last_mut().unwrap() ^= 0x01;
+            Vqc::<V, Digest>::decode_cfg(encoded.as_slice(), &fixture.codec).unwrap()
+        };
+        let bad_lqc = {
+            let mut encoded = lqc.encode().to_vec();
+            *encoded.last_mut().unwrap() ^= 0x01;
+            Lqc::<V, Digest>::decode_cfg(encoded.as_slice(), &fixture.codec).unwrap()
+        };
+        let all_known = votes
+            .iter()
+            .map(Verified::Vote)
+            .chain(std::iter::once(Verified::NoVote(&novote)))
+            .collect::<Vec<_>>();
+        let half_known = all_known[..quorum / 2].to_vec();
+        // A signer's vote for another proposal reproduces no transcript term and falls back to
+        // pairing instead of corrupting the remainder.
+        let other_leader = fixture.leader(8);
+        let mismatched = fixture.signers[0]
+            .sign_vote(fixture.standard_body(&other_leader))
+            .unwrap();
+        let mut mismatched_known = all_known.clone();
+        mismatched_known[0] = Verified::Vote(&mismatched);
+        // A signer outside the transcript is ignored.
+        let stranger = fixture.signers[quorum]
+            .sign_vote(fixture.standard_body(&leader))
+            .unwrap();
+        let mut with_stranger = all_known.clone();
+        with_stranger.push(Verified::Vote(&stranger));
+
+        let artifacts = [
+            Unverified::Vqc(&vqc),
+            Unverified::Lqc(&lqc),
+            Unverified::Vqc(&bad_vqc),
+            Unverified::Lqc(&bad_lqc),
+            Unverified::Vqc(&vqc),
+            Unverified::Lqc(&lqc),
+            Unverified::Vqc(&vqc),
+            Unverified::Lqc(&lqc),
+            Unverified::Vqc(&vqc),
+        ];
+        let known: [&[Verified<'_, V, Digest>]; 9] = [
+            &all_known,
+            &all_known,
+            &all_known,
+            &all_known,
+            &half_known,
+            &half_known,
+            &mismatched_known,
+            &mismatched_known,
+            &with_stranger,
+        ];
+        let verdicts = verifier.verify_artifacts_with_known::<_, Sha256, Digest>(
+            &mut test_rng(),
+            &artifacts,
+            &known,
+            &Sequential,
+        );
+        assert_eq!(
+            verdicts,
+            [true, true, false, false, true, true, true, true, true],
+            "known messages must never change a verdict"
+        );
+        let baseline = verifier.verify_artifacts::<_, Sha256, Digest>(
+            &mut test_rng(),
+            &artifacts,
+            &Sequential,
+        );
+        assert_eq!(baseline, verdicts);
+    }
+
 }
