@@ -446,6 +446,16 @@ jobs:
     - name: Check publish order
       run: python3 .github/scripts/check_publish_order.py
 
+  properties-evidence:
+    name: Check PROPERTIES Evidence Paths
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+    - name: Check PROPERTIES evidence paths
+      run: python3 .github/scripts/check_properties.py
+
   zepter:
     name: Feature Propagation
     runs-on: ubuntu-latest
