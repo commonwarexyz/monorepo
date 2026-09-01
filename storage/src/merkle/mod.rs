@@ -27,7 +27,6 @@ pub mod storage;
 pub mod verification;
 
 use alloc::vec::Vec;
-use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Read, Write};
 use commonware_cryptography::Digest;
 use core::fmt::Debug;
@@ -157,29 +156,8 @@ pub trait Family: Copy + Clone + Debug + Default + Send + Sync + 'static {
 }
 
 /// Pending-chunk slot for Merkle families that do not carry a pending chunk (e.g. MMR).
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, EncodeSize, Read, Write)]
 pub struct Unused;
-
-impl Write for Unused {
-    #[inline]
-    fn write(&self, _: &mut impl BufMut) {}
-}
-
-impl EncodeSize for Unused {
-    #[inline]
-    fn encode_size(&self) -> usize {
-        0
-    }
-}
-
-impl Read for Unused {
-    type Cfg = ();
-
-    #[inline]
-    fn read_cfg(_: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        Ok(Self)
-    }
-}
 
 impl<D: Digest> TryFrom<Option<D>> for Unused {
     type Error = commonware_codec::Error;

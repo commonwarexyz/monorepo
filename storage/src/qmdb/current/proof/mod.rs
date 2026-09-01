@@ -147,9 +147,10 @@ where
 }
 
 /// A proof that a range of operations exist in the database.
-#[derive(Clone, Eq, PartialEq, Debug)]
+#[derive(Clone, Eq, PartialEq, Debug, EncodeSize, Read, Write)]
 pub struct RangeProof<F: Graftable, D: Digest> {
     /// The Merkle digest material required to verify the proof.
+    #[codec(cfg)]
     pub proof: Proof<F, D>,
 
     /// The pending-chunk contribution, if any.
@@ -475,45 +476,6 @@ where
     Ok(collected)
 }
 
-impl<F: Graftable, D: Digest> Write for RangeProof<F, D> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.proof.write(buf);
-        self.pending_chunk_digest.write(buf);
-        self.partial_chunk_digest.write(buf);
-        self.ops_root.write(buf);
-    }
-}
-
-impl<F: Graftable, D: Digest> EncodeSize for RangeProof<F, D> {
-    fn encode_size(&self) -> usize {
-        self.proof.encode_size()
-            + self.pending_chunk_digest.encode_size()
-            + self.partial_chunk_digest.encode_size()
-            + self.ops_root.encode_size()
-    }
-}
-
-impl<F: Graftable, D: Digest> Read for RangeProof<F, D> {
-    /// The maximum number of digests in the embedded Merkle proof.
-    type Cfg = usize;
-
-    fn read_cfg(
-        buf: &mut impl Buf,
-        max_digests: &Self::Cfg,
-    ) -> Result<Self, commonware_codec::Error> {
-        let proof = Proof::<F, D>::read_cfg(buf, max_digests)?;
-        let pending_chunk_digest = F::PendingChunk::<D>::read(buf)?;
-        let partial_chunk_digest = Option::<D>::read(buf)?;
-        let ops_root = D::read(buf)?;
-        Ok(Self {
-            proof,
-            pending_chunk_digest,
-            partial_chunk_digest,
-            ops_root,
-        })
-    }
-}
-
 #[cfg(feature = "arbitrary")]
 impl<F: Graftable, D: Digest> arbitrary::Arbitrary<'_> for RangeProof<F, D>
 where
@@ -531,7 +493,7 @@ where
 }
 
 /// A proof that a specific operation is currently active in the database.
-#[derive(Clone, Eq, PartialEq, Debug)]
+#[derive(Clone, Eq, PartialEq, Debug, EncodeSize, Read, Write)]
 pub struct OperationProof<F: Graftable, D: Digest, const N: usize> {
     /// The location of the operation in the db.
     pub loc: Location<F>,
@@ -540,6 +502,7 @@ pub struct OperationProof<F: Graftable, D: Digest, const N: usize> {
     pub chunk: [u8; N],
 
     /// The range proof that incorporates activity status for the operation designated by `loc`.
+    #[codec(cfg)]
     pub range_proof: RangeProof<F, D>,
 }
 
@@ -587,39 +550,6 @@ impl<F: Graftable, D: Digest, const N: usize> OperationProof<F, D, N> {
 
         self.range_proof
             .verify::<H, O, N>(self.loc, &[operation], &[self.chunk], root)
-    }
-}
-
-impl<F: Graftable, D: Digest, const N: usize> Write for OperationProof<F, D, N> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.loc.write(buf);
-        self.chunk.write(buf);
-        self.range_proof.write(buf);
-    }
-}
-
-impl<F: Graftable, D: Digest, const N: usize> EncodeSize for OperationProof<F, D, N> {
-    fn encode_size(&self) -> usize {
-        self.loc.encode_size() + self.chunk.encode_size() + self.range_proof.encode_size()
-    }
-}
-
-impl<F: Graftable, D: Digest, const N: usize> Read for OperationProof<F, D, N> {
-    /// The maximum number of digests forwarded to the embedded range proof.
-    type Cfg = usize;
-
-    fn read_cfg(
-        buf: &mut impl Buf,
-        max_digests: &Self::Cfg,
-    ) -> Result<Self, commonware_codec::Error> {
-        let loc = Location::<F>::read(buf)?;
-        let chunk = <[u8; N]>::read(buf)?;
-        let range_proof = RangeProof::<F, D>::read_cfg(buf, max_digests)?;
-        Ok(Self {
-            loc,
-            chunk,
-            range_proof,
-        })
     }
 }
 

@@ -8,9 +8,9 @@ use crate::{
     },
     rmap::RMap,
 };
-use commonware_codec::{CodecShared, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{CodecShared, FixedSize, Read, Write};
 use commonware_runtime::{
-    Buf, BufMut, Handle,
+    Handle,
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
 use commonware_utils::Array;
@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, BTreeSet, btree_map};
 use tracing::debug;
 
 /// Index entry for the archive.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, FixedSize, Read, Write)]
 struct Record<K: Array> {
     /// The index for this entry.
     index: u64,
@@ -40,37 +40,6 @@ impl<K: Array> Record<K> {
             value_size,
         }
     }
-}
-
-impl<K: Array> Write for Record<K> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.index.write(buf);
-        self.key.write(buf);
-        self.value_offset.write(buf);
-        self.value_size.write(buf);
-    }
-}
-
-impl<K: Array> Read for Record<K> {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        let index = u64::read(buf)?;
-        let key = K::read(buf)?;
-        let value_offset = u64::read(buf)?;
-        let value_size = u32::read(buf)?;
-        Ok(Self {
-            index,
-            key,
-            value_offset,
-            value_size,
-        })
-    }
-}
-
-impl<K: Array> FixedSize for Record<K> {
-    // index + key + value_offset + value_size
-    const SIZE: usize = u64::SIZE + K::SIZE + u64::SIZE + u32::SIZE;
 }
 
 impl<K: Array> OversizedRecord for Record<K> {

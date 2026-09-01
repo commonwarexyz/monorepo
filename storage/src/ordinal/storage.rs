@@ -1,10 +1,10 @@
 use super::{Config, Error};
 use crate::{Context, rmap::RMap};
 use commonware_codec::{CodecFixed, FixedSize, Read, ReadExt, Write as CodecWrite};
-use commonware_cryptography::{Crc32, crc32};
+use commonware_cryptography::Crc32;
 use commonware_formatting::hex;
 use commonware_runtime::{
-    Blob, Buf, BufMut, Error as RError, WriteOptions,
+    Blob, Error as RError, WriteOptions,
     buffer::{Read as ReadBuffer, Write},
     telemetry::metrics::{Counter, MetricsExt as _},
 };
@@ -17,7 +17,7 @@ use std::{
 use tracing::{debug, warn};
 
 /// Value stored in the index file.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, CodecWrite, FixedSize, Read)]
 struct Record<V: CodecFixed<Cfg = ()>> {
     value: V,
     crc: u32,
@@ -40,28 +40,6 @@ impl<V: CodecFixed<Cfg = ()>> Record<V> {
         let crc = Crc32::checksum(buf.get(..V::SIZE)?);
         let record = Self::read(&mut buf).ok()?;
         (record.crc == crc).then_some(record.value)
-    }
-}
-
-impl<V: CodecFixed<Cfg = ()>> FixedSize for Record<V> {
-    const SIZE: usize = V::SIZE + crc32::Digest::SIZE;
-}
-
-impl<V: CodecFixed<Cfg = ()>> CodecWrite for Record<V> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.value.write(buf);
-        self.crc.write(buf);
-    }
-}
-
-impl<V: CodecFixed<Cfg = ()>> Read for Record<V> {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        let value = V::read(buf)?;
-        let crc = u32::read(buf)?;
-
-        Ok(Self { value, crc })
     }
 }
 
