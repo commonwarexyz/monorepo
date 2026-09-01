@@ -1685,6 +1685,17 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
         self.drive_view_certificates(profile, generation, current, slots, budget)
     }
 
+    /// Returns every verified vote and novote retained for `view`, in participant order.
+    pub(crate) fn verified_messages(&self, view: View) -> Vec<Arc<Artifact<V, D>>> {
+        self.messages.get(&view).map_or_else(Vec::new, |messages| {
+            messages
+                .values()
+                .flatten()
+                .map(|record| Arc::clone(&record.artifact))
+                .collect()
+        })
+    }
+
     pub(crate) fn deferred_certificate_view(&self, current: View) -> Option<View> {
         self.ready_certificate_views
             .iter()

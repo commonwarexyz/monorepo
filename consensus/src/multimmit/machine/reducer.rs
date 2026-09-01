@@ -3067,9 +3067,21 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                 self.chain
                     .register_transaction_block::<H>(id, observation, block)?;
             }
+            // A certificate over messages this node already verified needs no pairings: the
+            // executor discharges every transcript term a known signature reproduces.
+            let known = match artifact.as_ref() {
+                Artifact::Vqc(certificate) => self.views.verified_messages(certificate.view()),
+                Artifact::Lqc(certificate) => self.views.verified_messages(certificate.view()),
+                _ => Vec::new(),
+            };
             items
                 .get_or_insert_with(|| Vec::with_capacity(artifact_count))
-                .push(VerificationItem::new(ticket, artifact, peer_attributed));
+                .push(VerificationItem::new(
+                    ticket,
+                    artifact,
+                    peer_attributed,
+                    known,
+                ));
             push_result(ObservationResult {
                 id: Some(id),
                 observation,

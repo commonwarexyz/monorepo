@@ -86,6 +86,21 @@ pub enum Unverified<'a, V: Variant, D: Digest> {
     Lqc(&'a Lqc<V, D>),
 }
 
+/// A locally verified view message whose signature can discharge a certificate transcript term.
+///
+/// A node that verified a vote or novote individually already holds the unique signature over
+/// that exact message. When a certificate's transcript reproduces the message, the known
+/// signature is subtracted from the aggregate instead of being paid for again with a pairing,
+/// so a certificate built from messages the node has already seen verifies without any
+/// pairing at all.
+#[derive(Copy, Clone, Debug)]
+pub enum Verified<'a, V: Variant, D: Digest> {
+    /// An ordinary vote whose signature has been verified.
+    Vote(&'a Vote<V, D>),
+    /// An attributed abstention whose signature has been verified.
+    NoVote(&'a NoVote<V>),
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum Subject {
     TransactionBlock(Epoch, Bytes),

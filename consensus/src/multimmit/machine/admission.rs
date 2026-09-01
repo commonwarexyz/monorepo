@@ -4,7 +4,7 @@ use super::algebra::{ValidatedVqc, validate_lqc, validate_vqc};
 use crate::{
     Epochable, Viewable,
     multimmit::{
-        scheme::{Unverified, bls12381_threshold::Scheme},
+        scheme::{Unverified, Verified, bls12381_threshold::Scheme},
         types::{
             CertificateId, DaCertificate, DaVote, Lqc, NoVote, Nullification, Nullify,
             SignedLeaderBlock, SignedTransactionBlock, Vote, Vqc,
@@ -494,6 +494,11 @@ pub struct VerificationItem<V: Variant, D: Digest> {
     ticket: VerificationTicket<D>,
     artifact: Arc<Artifact<V, D>>,
     peer_attributed: bool,
+    /// Locally verified votes and novotes for the artifact's view, when it is a certificate.
+    ///
+    /// The executor discharges every certificate transcript term these messages reproduce, so
+    /// a certificate over messages the node already verified costs no pairings.
+    known: Vec<Arc<Artifact<V, D>>>,
 }
 
 impl<V: Variant, D: Digest> VerificationItem<V, D> {
@@ -501,12 +506,19 @@ impl<V: Variant, D: Digest> VerificationItem<V, D> {
         ticket: VerificationTicket<D>,
         artifact: Arc<Artifact<V, D>>,
         peer_attributed: bool,
+        known: Vec<Arc<Artifact<V, D>>>,
     ) -> Self {
         Self {
             ticket,
             artifact,
             peer_attributed,
+            known,
         }
+    }
+
+    /// Returns the locally verified view messages attached for transcript discharge.
+    pub(crate) fn known(&self) -> &[Arc<Artifact<V, D>>] {
+        &self.known
     }
 
     /// Returns the exact correlation ticket.
@@ -584,9 +596,24 @@ impl<V: Variant, D: Digest> VerifyJob<V, D> {
             .iter()
             .map(|item| item.artifact().unverified())
             .collect::<Vec<_>>();
+        let known = self
+            .items
+            .iter()
+            .map(|item| {
+                item.known()
+                    .iter()
+                    .filter_map(|artifact| match artifact.as_ref() {
+                        Artifact::Vote(vote) => Some(Verified::Vote(vote)),
+                        Artifact::NoVote(vote) => Some(Verified::NoVote(vote)),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let known = known.iter().map(Vec::as_slice).collect::<Vec<_>>();
         let mut validated_vqcs = Vec::new();
         let verdicts = scheme
-            .verify_artifacts::<R, H, D>(rng, &artifacts, strategy)
+            .verify_artifacts_with_known::<R, H, D>(rng, &artifacts, &known, strategy)
             .into_iter()
             .zip(&self.items)
             .enumerate()
