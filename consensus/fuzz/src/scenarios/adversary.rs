@@ -43,7 +43,7 @@ use commonware_p2p::{
 use commonware_parallel::Sequential;
 use commonware_resolver::p2p::mocks::{Message as ResolverMessage, Payload as ResolverPayload};
 use commonware_runtime::{Clock as _, Spawner as _, Supervisor as _, deterministic};
-use commonware_utils::NZUsize;
+use commonware_utils::{NZUsize, iter::NonEmpty};
 use std::{sync::Arc, time::Duration};
 
 /// Marshal backfill and block-broadcast channel ids.
@@ -293,8 +293,11 @@ async fn serve_backfill<P: Simplex>(
                             .take(QUORUM as usize)
                             .filter_map(|scheme| Notarize::sign(scheme, proposal.clone()))
                             .collect();
-                        let Some(notarization) =
-                            Notarization::from_notarizes(&schemes[0], &notarizes, &Sequential)
+                        let Some(notarizes) = NonEmpty::try_new(notarizes.iter()) else {
+                            continue;
+                        };
+                        let Ok(notarization) =
+                            Notarization::from_notarizes(&schemes[0], notarizes, &Sequential)
                         else {
                             continue;
                         };

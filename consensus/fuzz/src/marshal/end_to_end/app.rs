@@ -19,7 +19,7 @@ use super::input::MAX_TWINS_ROUNDS;
 use commonware_actor::Feedback;
 use commonware_codec::Codec;
 use commonware_consensus::{
-    Application, Epochable, Heightable, Reporter, Viewable,
+    Application, Block as ConsensusBlock, CertifiableBlock, Epochable, Reporter, Viewable,
     marshal::{
         Update,
         ancestry::Ancestry,
@@ -27,9 +27,7 @@ use commonware_consensus::{
     },
     types::{Height, Round, View},
 };
-use commonware_cryptography::{
-    Digestible, Sha256, certificate::Scheme, sha256::Digest as Sha256Digest,
-};
+use commonware_cryptography::{Sha256, certificate::Scheme, sha256::Digest as Sha256Digest};
 use commonware_runtime::{Clock as _, deterministic};
 use commonware_utils::{FuzzRng, channel::mpsc, sync::Mutex};
 use futures::StreamExt;
@@ -94,26 +92,44 @@ impl ProgressHandle {
     }
 }
 
-#[derive(Clone)]
-pub(crate) struct DeliveryReporter<C>
+/// A block an end-to-end application can build for its consensus context.
+///
+/// The coding stack's block is a newtype over the mock block (its context
+/// embeds a commitment over the block itself), so applications build blocks
+/// through this trait rather than naming the mock block directly.
+pub(crate) trait BuildableBlock: CertifiableBlock<Digest = Sha256Digest> {
+    fn build(context: Self::Context, parent: Sha256Digest, height: Height, timestamp: u64) -> Self;
+}
+
+impl<C> BuildableBlock for Block<Sha256Digest, C>
 where
     C: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
 {
+    fn build(context: Self::Context, parent: Sha256Digest, height: Height, timestamp: u64) -> Self {
+        Self::new::<Sha256>(context, parent, height, timestamp)
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct DeliveryReporter<B>
+where
+    B: ConsensusBlock<Digest = Sha256Digest>,
+{
     validator: usize,
-    application: SinkApplication<Block<Sha256Digest, C>>,
+    application: SinkApplication<B>,
     tips: Arc<Mutex<Vec<(Round, Height, Sha256Digest)>>>,
     max_pending_acks: Option<NonZeroUsize>,
     stack: Arc<str>,
     progress: Option<ProgressHandle>,
 }
 
-impl<C> DeliveryReporter<C>
+impl<B> DeliveryReporter<B>
 where
-    C: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
+    B: ConsensusBlock<Digest = Sha256Digest>,
 {
     pub(crate) fn new(
         validator: usize,
-        application: SinkApplication<Block<Sha256Digest, C>>,
+        application: SinkApplication<B>,
         max_pending_acks: Option<NonZeroUsize>,
         stack: Arc<str>,
     ) -> Self {
@@ -135,11 +151,11 @@ where
     }
 }
 
-impl<C> Reporter for DeliveryReporter<C>
+impl<B> Reporter for DeliveryReporter<B>
 where
-    C: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
+    B: ConsensusBlock<Digest = Sha256Digest>,
 {
-    type Activity = Update<Block<Sha256Digest, C>>;
+    type Activity = Update<B>;
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
         match &activity {
@@ -250,19 +266,21 @@ impl<C: Clone> BlockContextRegistry<C> {
 }
 
 /// Honest block-building application, generic over the consensus context type.
-pub struct AlwaysAcceptBlockBuilderApp<C, S>
+pub struct AlwaysAcceptBlockBuilderApp<C, S, B = Block<Sha256Digest, C>>
 where
     C: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
+    B: ConsensusBlock<Digest = Sha256Digest>,
 {
     verification_delay: Option<(View, Duration)>,
     block_contexts: Option<BlockContextRegistry<C>>,
-    reporter: Option<DeliveryReporter<C>>,
-    _marker: PhantomData<fn() -> (C, S)>,
+    reporter: Option<DeliveryReporter<B>>,
+    _marker: PhantomData<fn() -> S>,
 }
 
-impl<C, S> Default for AlwaysAcceptBlockBuilderApp<C, S>
+impl<C, S, B> Default for AlwaysAcceptBlockBuilderApp<C, S, B>
 where
     C: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
+    B: ConsensusBlock<Digest = Sha256Digest>,
 {
     fn default() -> Self {
         Self {
@@ -274,9 +292,10 @@ where
     }
 }
 
-impl<C, S> Clone for AlwaysAcceptBlockBuilderApp<C, S>
+impl<C, S, B> Clone for AlwaysAcceptBlockBuilderApp<C, S, B>
 where
     C: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
+    B: ConsensusBlock<Digest = Sha256Digest>,
 {
     fn clone(&self) -> Self {
         Self {
@@ -288,9 +307,10 @@ where
     }
 }
 
-impl<C, S> AlwaysAcceptBlockBuilderApp<C, S>
+impl<C, S, B> AlwaysAcceptBlockBuilderApp<C, S, B>
 where
     C: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
+    B: ConsensusBlock<Digest = Sha256Digest>,
 {
     /// Delay verification at `view`, then return the normal successful verdict.
     pub const fn with_verification_delay(view: View, delay: Duration) -> Self {
@@ -307,20 +327,21 @@ where
         self
     }
 
-    pub(crate) fn with_reporter(mut self, reporter: DeliveryReporter<C>) -> Self {
+    pub(crate) fn with_reporter(mut self, reporter: DeliveryReporter<B>) -> Self {
         self.reporter = Some(reporter);
         self
     }
 }
 
-impl<C, S> Application<deterministic::Context> for AlwaysAcceptBlockBuilderApp<C, S>
+impl<C, S, B> Application<deterministic::Context> for AlwaysAcceptBlockBuilderApp<C, S, B>
 where
     C: Codec<Cfg = ()> + Epochable + Viewable + Clone + PartialEq + Send + Sync + 'static,
     S: Scheme,
+    B: BuildableBlock<Context = C>,
 {
     type SigningScheme = S;
     type Context = C;
-    type Block = Block<Sha256Digest, C>;
+    type Block = B;
     type Input = ();
 
     async fn propose(
@@ -334,14 +355,9 @@ where
         // the stream with the parent it already fetched for this round.
         let parent = ancestry.next().await?;
         let height = parent.height().next();
-        let block = Block::<Sha256Digest, C>::new::<Sha256>(
-            consensus_context,
-            parent.digest(),
-            height,
-            height.get(),
-        );
+        let block = B::build(consensus_context, parent.digest(), height, height.get());
         if let Some(block_contexts) = &self.block_contexts {
-            block_contexts.record(block.digest(), block.context.clone());
+            block_contexts.record(block.digest(), block.context());
         }
         Some(block)
     }
@@ -361,12 +377,13 @@ where
     }
 }
 
-impl<C, S> Reporter for AlwaysAcceptBlockBuilderApp<C, S>
+impl<C, S, B> Reporter for AlwaysAcceptBlockBuilderApp<C, S, B>
 where
     C: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
     S: Send + 'static,
+    B: ConsensusBlock<Digest = Sha256Digest>,
 {
-    type Activity = Update<Block<Sha256Digest, C>>;
+    type Activity = Update<B>;
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
         let Some(reporter) = &mut self.reporter else {
@@ -490,17 +507,19 @@ impl FaultyConfig {
 
 /// Block-building application that explores transient construction failures,
 /// verification latency, and deterministic application rejection.
-pub(crate) struct FaultyBlockBuilderApp<C, S>
+pub(crate) struct FaultyBlockBuilderApp<C, S, B = Block<Sha256Digest, C>>
 where
     C: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
+    B: ConsensusBlock<Digest = Sha256Digest>,
 {
-    inner: AlwaysAcceptBlockBuilderApp<C, S>,
+    inner: AlwaysAcceptBlockBuilderApp<C, S, B>,
     config: FaultyConfig,
 }
 
-impl<C, S> FaultyBlockBuilderApp<C, S>
+impl<C, S, B> FaultyBlockBuilderApp<C, S, B>
 where
     C: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
+    B: ConsensusBlock<Digest = Sha256Digest>,
 {
     pub(crate) fn new(config: FaultyConfig, verification_delay: Option<(View, Duration)>) -> Self {
         let inner = match verification_delay {
@@ -517,15 +536,16 @@ where
         self
     }
 
-    pub(crate) fn with_reporter(mut self, reporter: DeliveryReporter<C>) -> Self {
+    pub(crate) fn with_reporter(mut self, reporter: DeliveryReporter<B>) -> Self {
         self.inner = self.inner.with_reporter(reporter);
         self
     }
 }
 
-impl<C, S> Clone for FaultyBlockBuilderApp<C, S>
+impl<C, S, B> Clone for FaultyBlockBuilderApp<C, S, B>
 where
     C: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
+    B: ConsensusBlock<Digest = Sha256Digest>,
 {
     fn clone(&self) -> Self {
         Self {
@@ -535,26 +555,28 @@ where
     }
 }
 
-impl<C, S> Reporter for FaultyBlockBuilderApp<C, S>
+impl<C, S, B> Reporter for FaultyBlockBuilderApp<C, S, B>
 where
     C: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
     S: Send + 'static,
+    B: ConsensusBlock<Digest = Sha256Digest>,
 {
-    type Activity = Update<Block<Sha256Digest, C>>;
+    type Activity = Update<B>;
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
         self.inner.report(activity)
     }
 }
 
-impl<C, S> Application<deterministic::Context> for FaultyBlockBuilderApp<C, S>
+impl<C, S, B> Application<deterministic::Context> for FaultyBlockBuilderApp<C, S, B>
 where
     C: Codec<Cfg = ()> + Epochable + Viewable + Clone + PartialEq + Send + Sync + 'static,
     S: Scheme,
+    B: BuildableBlock<Context = C>,
 {
     type SigningScheme = S;
     type Context = C;
-    type Block = Block<Sha256Digest, C>;
+    type Block = B;
     type Input = ();
 
     async fn propose(
@@ -588,17 +610,19 @@ where
 }
 
 /// Runtime-selected application for the shared general Twins corpus.
-pub(crate) enum SelectedBlockBuilderApp<C, S>
+pub(crate) enum SelectedBlockBuilderApp<C, S, B = Block<Sha256Digest, C>>
 where
     C: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
+    B: ConsensusBlock<Digest = Sha256Digest>,
 {
-    AlwaysAccept(AlwaysAcceptBlockBuilderApp<C, S>),
-    Faulty(FaultyBlockBuilderApp<C, S>),
+    AlwaysAccept(AlwaysAcceptBlockBuilderApp<C, S, B>),
+    Faulty(FaultyBlockBuilderApp<C, S, B>),
 }
 
-impl<C, S> SelectedBlockBuilderApp<C, S>
+impl<C, S, B> SelectedBlockBuilderApp<C, S, B>
 where
     C: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
+    B: ConsensusBlock<Digest = Sha256Digest>,
 {
     pub(crate) fn new(
         choice: ApplicationChoice,
@@ -632,7 +656,7 @@ where
         }
     }
 
-    pub(crate) fn with_reporter(self, reporter: DeliveryReporter<C>) -> Self {
+    pub(crate) fn with_reporter(self, reporter: DeliveryReporter<B>) -> Self {
         match self {
             Self::AlwaysAccept(inner) => Self::AlwaysAccept(inner.with_reporter(reporter)),
             Self::Faulty(inner) => Self::Faulty(inner.with_reporter(reporter)),
@@ -650,9 +674,10 @@ where
     }
 }
 
-impl<C, S> Clone for SelectedBlockBuilderApp<C, S>
+impl<C, S, B> Clone for SelectedBlockBuilderApp<C, S, B>
 where
     C: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
+    B: ConsensusBlock<Digest = Sha256Digest>,
 {
     fn clone(&self) -> Self {
         match self {
@@ -662,12 +687,13 @@ where
     }
 }
 
-impl<C, S> Reporter for SelectedBlockBuilderApp<C, S>
+impl<C, S, B> Reporter for SelectedBlockBuilderApp<C, S, B>
 where
     C: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
     S: Send + 'static,
+    B: ConsensusBlock<Digest = Sha256Digest>,
 {
-    type Activity = Update<Block<Sha256Digest, C>>;
+    type Activity = Update<B>;
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
         match self {
@@ -677,14 +703,15 @@ where
     }
 }
 
-impl<C, S> Application<deterministic::Context> for SelectedBlockBuilderApp<C, S>
+impl<C, S, B> Application<deterministic::Context> for SelectedBlockBuilderApp<C, S, B>
 where
     C: Codec<Cfg = ()> + Epochable + Viewable + Clone + PartialEq + Send + Sync + 'static,
     S: Scheme,
+    B: BuildableBlock<Context = C>,
 {
     type SigningScheme = S;
     type Context = C;
-    type Block = Block<Sha256Digest, C>;
+    type Block = B;
     type Input = ();
 
     async fn propose(
@@ -715,6 +742,7 @@ where
 mod tests {
     use super::*;
     use commonware_consensus::types::Epoch;
+    use commonware_cryptography::Digestible as _;
     use commonware_utils::{Acknowledgement as _, acknowledgement::Exact};
 
     fn digest(byte: u8) -> Sha256Digest {
@@ -725,7 +753,7 @@ mod tests {
         Round::new(Epoch::zero(), View::new(view))
     }
 
-    fn reporter() -> DeliveryReporter<u8> {
+    fn reporter() -> DeliveryReporter<Block<Sha256Digest, u8>> {
         DeliveryReporter::new(0, SinkApplication::default(), None, "test".into())
     }
 

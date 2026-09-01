@@ -11,11 +11,14 @@ use commonware_cryptography::{
     bls12381::{
         certificate::threshold::Certificate,
         dkg::feldman_desmedt as dkg,
-        primitives::variant::{MinPk, MinSig, Variant},
+        primitives::{
+            sharing::Mode,
+            variant::{MinPk, MinSig, Variant},
+        },
     },
     certificate::{
-        Attestation, ConstantProvider, Provider, Scheme as CertScheme, Scoped, Signers, Subject,
-        Verifier,
+        AssemblyError, Attestation, ConstantProvider, Provider, Scheme as CertScheme, Scoped,
+        Signers, Subject, Verifier,
     },
     ed25519::{self, PrivateKey as Ed25519PrivateKey},
     impl_certificate_bls12381_threshold,
@@ -23,7 +26,9 @@ use commonware_cryptography::{
 };
 use commonware_math::algebra::{Additive, Random};
 use commonware_parallel::Sequential;
-use commonware_utils::{Faults, N3f1, Participant, TestRng, TryCollect, ordered::Set};
+use commonware_utils::{
+    Faults, N3f1, Participant, TestRng, TryCollect, iter::NonEmpty, non_empty, ordered::Set,
+};
 use libfuzzer_sys::fuzz_target;
 use std::{collections::BTreeSet, num::NonZeroU32, sync::Arc};
 
@@ -133,7 +138,8 @@ where
         return;
     };
     let total = NonZeroU32::new(n).unwrap();
-    let (polynomial, shares) = dkg::deal_anonymous::<V, N3f1>(&mut rng, Default::default(), total);
+    let (polynomial, shares) =
+        dkg::deal_anonymous::<V, N3f1>(&mut rng, Mode::NonZeroCounter, total);
 
     let signers: Vec<Scheme<ed25519::PublicKey, V>> = shares
         .into_iter()
@@ -235,13 +241,24 @@ where
                     .into_iter()
                     .filter_map(|i| signers[i].sign::<Sha256Digest>(subject(message)))
                     .collect();
-                if attestations.len() < quorum {
-                    assert!(signers[0].assemble(attestations, &Sequential).is_none());
+                let signed = attestations.len();
+                if signed < quorum {
+                    let Some(attestations) = NonEmpty::try_new(attestations.into_iter()) else {
+                        continue;
+                    };
+                    // Distinct signers below quorum must be reported as insufficient.
+                    assert_eq!(
+                        signers[0].assemble(attestations, &Sequential),
+                        Err(AssemblyError::InsufficientAttestations(
+                            quorum as u32,
+                            signed as u32
+                        ))
+                    );
                 } else {
                     // Exactly a quorum of valid, distinct partials must assemble.
                     attestations.truncate(quorum);
                     let certificate = signers[0]
-                        .assemble(attestations, &Sequential)
+                        .assemble(non_empty![@attestations], &Sequential)
                         .expect("quorum-valid attestations assemble");
                     assert!(verifier.verify_certificate::<_, Sha256Digest>(
                         &mut rng,
@@ -284,13 +301,16 @@ where
                 }
             }
             Op::VerifyStoredCertificates => {
-                let items: Vec<(TestSubject<'_>, &Certificate<V>)> = certs
-                    .iter()
-                    .map(|(message, certificate)| (subject(message), certificate))
-                    .collect();
+                let Some(items) = NonEmpty::try_new(
+                    certs
+                        .iter()
+                        .map(|(message, certificate)| (subject(message), certificate)),
+                ) else {
+                    continue;
+                };
                 assert!(verifier.verify_certificates::<_, Sha256Digest, _>(
                     &mut rng,
-                    items.into_iter(),
+                    items,
                     &Sequential,
                 ));
             }

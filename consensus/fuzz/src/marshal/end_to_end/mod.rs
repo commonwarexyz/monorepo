@@ -35,7 +35,7 @@ use commonware_consensus::marshal::mocks::harness::BLOCKS_PER_EPOCH;
 pub(crate) mod app;
 mod block_disrupter;
 mod coding_disrupter;
-pub(crate) mod coding_stack;
+pub mod coding_stack;
 mod input;
 pub(crate) mod invariants;
 mod runner;

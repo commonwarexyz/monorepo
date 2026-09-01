@@ -51,7 +51,7 @@ use commonware_macros::select;
 use commonware_p2p::Recipients;
 use commonware_parallel::Sequential;
 use commonware_runtime::{Clock as _, Handle, deterministic};
-use commonware_utils::{channel::oneshot, sync::Mutex};
+use commonware_utils::{channel::oneshot, non_empty, sync::Mutex};
 use std::{
     sync::{
         Arc,
@@ -863,8 +863,12 @@ pub(crate) fn build_finalization<P: Simplex>(
         .iter()
         .map(|idx| Finalize::sign(&schemes[*idx], proposal.clone()).expect("finalize sign failed"))
         .collect();
-    Finalization::from_finalizes(&schemes[signer_idxs[0]], &finalizes, &Sequential)
-        .expect("finalization assembly failed")
+    Finalization::from_finalizes(
+        &schemes[signer_idxs[0]],
+        non_empty![@&finalizes],
+        &Sequential,
+    )
+    .expect("finalization assembly failed")
 }
 
 /// Build a quorum notarization from explicit parts.
@@ -880,8 +884,12 @@ pub(crate) fn build_notarization<P: Simplex>(
         .iter()
         .map(|idx| Notarize::sign(&schemes[*idx], proposal.clone()).expect("notarize sign failed"))
         .collect();
-    Notarization::from_notarizes(&schemes[signer_idxs[0]], &notarizes, &Sequential)
-        .expect("notarization assembly failed")
+    Notarization::from_notarizes(
+        &schemes[signer_idxs[0]],
+        non_empty![@&notarizes],
+        &Sequential,
+    )
+    .expect("notarization assembly failed")
 }
 
 fn node_from_idx(idx: usize) -> Node {

@@ -19,13 +19,12 @@ use crate::{
 use commonware_actor::Feedback;
 use commonware_broadcast::buffered;
 use commonware_consensus::{
-    Automaton, CertifiableAutomaton, Relay, Reporter,
+    Automaton, CertifiableAutomaton, CertifiableBlock, Relay, Reporter,
     marshal::{
         Config, Start, Update,
         core::{Actor, Buffer, Mailbox},
         mocks::{
             application::Application,
-            block::Block as MockBlock,
             harness::{BLOCKS_PER_EPOCH, LINK, PAGE_CACHE_SIZE, PAGE_SIZE, TEST_QUOTA},
         },
         resolver::{handler, p2p as resolver},
@@ -90,7 +89,7 @@ pub(crate) trait TwinsBlockBuilder<P: Simplex>:
         config: FaultyConfig,
         verification_delay: Option<(View, Duration)>,
         block_contexts: BlockContextRegistry<Ctx<P>>,
-        reporter: DeliveryReporter<Ctx<P>>,
+        reporter: DeliveryReporter<B<P>>,
     ) -> Self;
 
     fn rejects(choice: ApplicationChoice, config: FaultyConfig, context: &Ctx<P>) -> bool;
@@ -102,7 +101,7 @@ impl<P: Simplex> TwinsBlockBuilder<P> for AlwaysAcceptBlockBuilderApp<Ctx<P>, Sc
         _config: FaultyConfig,
         verification_delay: Option<(View, Duration)>,
         block_contexts: BlockContextRegistry<Ctx<P>>,
-        reporter: DeliveryReporter<Ctx<P>>,
+        reporter: DeliveryReporter<B<P>>,
     ) -> Self {
         let application = match verification_delay {
             Some((view, delay)) => Self::with_verification_delay(view, delay),
@@ -124,7 +123,7 @@ impl<P: Simplex> TwinsBlockBuilder<P> for SelectedBlockBuilderApp<Ctx<P>, Scheme
         config: FaultyConfig,
         verification_delay: Option<(View, Duration)>,
         block_contexts: BlockContextRegistry<Ctx<P>>,
-        reporter: DeliveryReporter<Ctx<P>>,
+        reporter: DeliveryReporter<B<P>>,
     ) -> Self {
         Self::new(choice, config, verification_delay)
             .with_block_contexts(block_contexts)
@@ -322,7 +321,6 @@ type MarshalResolver<P> = (
     handler::Receiver<Sha256Digest>,
     resolver::Mailbox<Sha256Digest, PublicKeyOf<P>>,
 );
-type AuditedApplication<D, K> = Application<MockBlock<Sha256Digest, SimplexContext<D, K>>>;
 
 pub(crate) struct Validator<P: Simplex> {
     pub(crate) mailbox: Mailbox<SchemeOf<P>, Standard<B<P>>>,
@@ -486,7 +484,6 @@ pub(crate) async fn setup_validator<P: Simplex>(
                     peer_provider: oracle.manager(),
                     blocker: oracle.control(validator.clone()),
                     mailbox_size: config.mailbox_size,
-                    initial: Duration::from_secs(1),
                     timeout: Duration::from_secs(2),
                     fetch_retry_timeout: Duration::from_millis(100),
                     priority_requests: false,
@@ -737,24 +734,30 @@ pub(crate) fn start_engine_with_floor<P: Simplex, EC, A, R>(
     engine.start(vote, certificate, resolver);
 }
 
-fn trailing_blocks<D: Digest, K: PublicKey>(
-    application: &AuditedApplication<D, K>,
-    prefix_end: View,
-) -> usize {
+fn trailing_blocks<B, D, K>(application: &Application<B>, prefix_end: View) -> usize
+where
+    B: CertifiableBlock<Context = SimplexContext<D, K>>,
+    D: Digest,
+    K: PublicKey,
+{
     application
         .blocks()
         .values()
-        .filter(|block| block.context.round.view() > prefix_end)
+        .filter(|block| block.context().round.view() > prefix_end)
         .count()
 }
 
-pub(crate) async fn wait_for_liveness<D: Digest, K: PublicKey>(
+pub(crate) async fn wait_for_liveness<B, D, K>(
     context: &deterministic::Context,
-    honest: &[(usize, AuditedApplication<D, K>)],
+    honest: &[(usize, Application<B>)],
     prefix_end: View,
     required: usize,
     stack: Arc<str>,
-) {
+) where
+    B: CertifiableBlock<Context = SimplexContext<D, K>>,
+    D: Digest,
+    K: PublicKey,
+{
     select! {
         _ = context.sleep(MARSHAL_TWINS_LIVENESS_WINDOW) => {
             let progress = honest

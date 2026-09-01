@@ -470,7 +470,7 @@ mod tests {
         ed25519::PublicKey as Ed25519PublicKey, sha256::Digest as Sha256Digest,
     };
     use commonware_runtime::{Runner as _, deterministic};
-    use commonware_utils::{ordered::Set, test_rng};
+    use commonware_utils::{non_empty, ordered::Set, test_rng};
 
     const N: u32 = 4;
     const QUORUM: usize = 3;
@@ -524,7 +524,8 @@ mod tests {
             .iter()
             .map(|scheme| Notarize::sign(scheme, proposal_a.clone()).unwrap())
             .collect();
-        let notarization = Notarization::from_notarizes(&schemes[0], &votes, &Sequential).unwrap();
+        let notarization =
+            Notarization::from_notarizes(&schemes[0], non_empty![@&votes], &Sequential).unwrap();
         reporter.report(Activity::Notarization(notarization.clone()));
 
         reporter.set_generation(1);

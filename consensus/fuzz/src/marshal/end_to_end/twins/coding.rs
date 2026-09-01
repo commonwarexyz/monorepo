@@ -12,7 +12,7 @@ use super::{
         },
         coding_disrupter,
         coding_stack::{
-            CodingB, CodingCtx, CodingValidator, coding_genesis, coding_marshaled,
+            CodingB, CodingCtx, CodingValidator, CommitmentOf, coding_genesis, coding_marshaled,
             setup_validator_coding, start_engine_coding_with_networks,
         },
         input::MarshalTwinsInput,
@@ -30,9 +30,10 @@ use crate::{
     run_twins_with_backend, simplex::Simplex,
 };
 use commonware_consensus::{
+    CertifiableBlock as _,
     marshal::mocks::{application::Application, harness::NUM_VALIDATORS},
     simplex::{mocks::twins, scheme::Scheme as SimplexScheme},
-    types::{TermLength, View, coding::Commitment},
+    types::{TermLength, View},
 };
 use commonware_cryptography::{Committable as _, Digestible as _, certificate::ConstantProvider};
 use commonware_p2p::{Receiver, Sender, simulated::Oracle};
@@ -40,8 +41,8 @@ use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
 use commonware_utils::{FuzzRng, NZUsize};
 use std::{collections::HashMap, marker::PhantomData, num::NonZeroUsize, sync::Arc};
 
-type PrimaryApp<P> = AlwaysAcceptBlockBuilderApp<CodingCtx<P>, SchemeOf<P>>;
-type HonestApp<P> = SelectedBlockBuilderApp<CodingCtx<P>, SchemeOf<P>>;
+type PrimaryApp<P> = AlwaysAcceptBlockBuilderApp<CodingCtx<P>, SchemeOf<P>, CodingB<P>>;
+type HonestApp<P> = SelectedBlockBuilderApp<CodingCtx<P>, SchemeOf<P>, CodingB<P>>;
 
 struct CodingTwinsBackend<P: Simplex> {
     input: MarshalTwinsInput,
@@ -57,10 +58,10 @@ struct CodingTwinsState<P: Simplex> {
     validators: Vec<CodingValidator<P>>,
     honest: Vec<(usize, Application<CodingB<P>>)>,
     primaries: Vec<(usize, Application<CodingB<P>>)>,
-    certification_agreement: CertificationAgreementInvariant<Commitment>,
+    certification_agreement: CertificationAgreementInvariant<CommitmentOf<P>>,
     block_contexts: BlockContextRegistry<CodingCtx<P>>,
     genesis_digest: commonware_cryptography::sha256::Digest,
-    genesis_commitment: Commitment,
+    genesis_commitment: CommitmentOf<P>,
 }
 
 impl<P: Simplex> CodingTwinsBackend<P> {
@@ -99,11 +100,11 @@ impl<P: Simplex> CodingTwinsBackend<P> {
 impl<P> TwinsBackend<P> for CodingTwinsBackend<P>
 where
     P: Simplex,
-    SchemeOf<P>: SimplexScheme<Commitment>,
+    SchemeOf<P>: SimplexScheme<CommitmentOf<P>>,
 {
     type State = CodingTwinsState<P>;
     type Case = ();
-    type Digest = Commitment;
+    type Digest = CommitmentOf<P>;
 
     async fn setup(&mut self, context: &mut deterministic::Context) -> TwinsSetup<P, Self::State> {
         let (participants, schemes) = P::setup(context, NAMESPACE, NUM_VALIDATORS);
@@ -114,7 +115,7 @@ where
         let genesis_digest = genesis.inner().digest();
         let genesis_commitment = genesis.commitment();
         let block_contexts = BlockContextRegistry::default();
-        block_contexts.record(genesis_digest, genesis.inner().context.clone());
+        block_contexts.record(genesis_digest, genesis.inner().context());
         let mut validators = Vec::with_capacity(participants.len());
         let mut registrations = HashMap::with_capacity(participants.len());
         for (idx, validator) in participants.iter().enumerate() {
@@ -316,7 +317,7 @@ where
             )),
             inner: marshaled.clone(),
             certification_agreement: state.certification_agreement.clone(),
-            header_mismatch: HeaderMismatchInvariant::<P, FaultyConfig, Commitment>::coding(
+            header_mismatch: HeaderMismatchInvariant::<P, FaultyConfig, CommitmentOf<P>>::coding(
                 self.application_choice,
                 self.app_config,
                 HonestApp::<P>::rejects,
@@ -407,13 +408,13 @@ fn select_coding_stack(raw_bytes: &[u8]) -> (ApplicationChoice, NonZeroUsize, Ve
 /// Crypto: `P`. Marshal: coding. Cluster: `N4F1C3` Twins, general campaign.
 /// Liveness: checked. App: selected by fuzz input.
 ///
-/// Coding's consensus payload is a [`Commitment`]. The secondary signs both an
+/// Coding's consensus payload is a [`CommitmentOf`]. The secondary signs both an
 /// observed proposal and a conflicting coding commitment with the compromised
 /// identity's key, producing real double votes across the Twins partition.
 pub fn fuzz_marshal_coding_twins<P>(input: MarshalTwinsInput)
 where
     P: Simplex,
-    SchemeOf<P>: SimplexScheme<Commitment>,
+    SchemeOf<P>: SimplexScheme<CommitmentOf<P>>,
 {
     let (application_choice, max_pending_acks, entropy) = select_coding_stack(&input.raw_bytes);
     let stack_label: Arc<str> = format!(

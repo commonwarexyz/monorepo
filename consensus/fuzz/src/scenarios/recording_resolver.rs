@@ -329,7 +329,6 @@ pub(crate) async fn init_injectable<P: Simplex>(
             producer: handler.clone(),
             mailbox_size: NZUsize!(100),
             me: Some(validator),
-            initial: Duration::from_secs(1),
             timeout: Duration::from_secs(2),
             fetch_retry_timeout: Duration::from_millis(100),
             priority_requests: false,

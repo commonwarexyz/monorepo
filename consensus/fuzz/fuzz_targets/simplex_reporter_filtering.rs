@@ -25,7 +25,7 @@ use commonware_cryptography::{
     sha256,
 };
 use commonware_parallel::Sequential;
-use commonware_utils::{FuzzRng, sync::Mutex};
+use commonware_utils::{FuzzRng, iter::NonEmpty, sync::Mutex};
 use libfuzzer_sys::fuzz_target;
 use std::sync::Arc;
 
@@ -175,7 +175,12 @@ where
         .iter()
         .map(|scheme| Notarize::sign(scheme, proposal.clone()))
         .collect::<Option<Vec<_>>>()?;
-    Notarization::from_notarizes(&schemes[0], notarizes.iter(), &Sequential)
+    Notarization::from_notarizes(
+        &schemes[0],
+        NonEmpty::try_new(notarizes.iter())?,
+        &Sequential,
+    )
+    .ok()
 }
 
 fn nullification<S>(schemes: &[S], proposal: Proposal<sha256::Digest>) -> Option<Nullification<S>>
@@ -186,7 +191,12 @@ where
         .iter()
         .map(|scheme| Nullify::sign::<sha256::Digest>(scheme, proposal.round))
         .collect::<Option<Vec<_>>>()?;
-    Nullification::from_nullifies(&schemes[0], nullifies.iter(), &Sequential)
+    Nullification::from_nullifies(
+        &schemes[0],
+        NonEmpty::try_new(nullifies.iter())?,
+        &Sequential,
+    )
+    .ok()
 }
 
 fn finalization<S>(
@@ -200,7 +210,12 @@ where
         .iter()
         .map(|scheme| Finalize::sign(scheme, proposal.clone()))
         .collect::<Option<Vec<_>>>()?;
-    Finalization::from_finalizes(&schemes[0], finalizes.iter(), &Sequential)
+    Finalization::from_finalizes(
+        &schemes[0],
+        NonEmpty::try_new(finalizes.iter())?,
+        &Sequential,
+    )
+    .ok()
 }
 
 fn activity<S>(

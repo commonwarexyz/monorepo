@@ -51,7 +51,7 @@ use super::{
     },
     block_disrupter, coding_disrupter,
     coding_stack::{
-        CodingB, CodingCtx, coding_genesis, coding_marshaled, setup_validator_coding,
+        CodingB, CodingCtx, CommitmentOf, coding_genesis, coding_marshaled, setup_validator_coding,
         start_engine_coding_with_networks,
     },
     input::MarshalDisrupterInput,
@@ -73,7 +73,7 @@ use crate::{
     utils::{Partition, SetPartition, apply_partition},
 };
 use commonware_consensus::{
-    Block,
+    Block, CertifiableBlock as _,
     marshal::{
         Start,
         mocks::{
@@ -82,7 +82,7 @@ use commonware_consensus::{
         },
     },
     simplex::scheme::Scheme as SimplexScheme,
-    types::{Epoch, TermLength, View, coding::Commitment},
+    types::{Epoch, TermLength, View},
 };
 use commonware_cryptography::{
     Committable as _, Digestible as _, certificate::ConstantProvider,
@@ -565,7 +565,7 @@ fn run_standard_disrupter<P: Simplex>(
 pub fn fuzz_marshal_coding_disrupter<P>(input: MarshalDisrupterInput)
 where
     P: Simplex,
-    SchemeOf<P>: SimplexScheme<Commitment>,
+    SchemeOf<P>: SimplexScheme<CommitmentOf<P>>,
 {
     let rng = FuzzRng::new(input.raw_bytes.clone());
     let cfg = deterministic::Config::new().with_rng(Box::new(rng));
@@ -591,7 +591,7 @@ where
         let genesis_digest = genesis.inner().digest();
         let genesis_commitment = genesis.commitment();
         let block_contexts = BlockContextRegistry::<CodingCtx<P>>::default();
-        block_contexts.record(genesis_digest, genesis.inner().context.clone());
+        block_contexts.record(genesis_digest, genesis.inner().context());
         let mut fault_rng = FuzzRng::new(input.raw_bytes.clone());
         let faulty_config = FaultyConfig::new(&mut fault_rng, View::new(0));
         let stack_label: Arc<str> =
@@ -643,7 +643,7 @@ where
             let marshaled = coding_marshaled::<P, _>(
                 &validator_ctx,
                 provider,
-                AlwaysAcceptBlockBuilderApp::<CodingCtx<P>, SchemeOf<P>>::default()
+                AlwaysAcceptBlockBuilderApp::<CodingCtx<P>, SchemeOf<P>, CodingB<P>>::default()
                     .with_block_contexts(block_contexts.clone()),
                 node.mailbox.clone(),
                 node.shards,
@@ -654,13 +654,14 @@ where
                 context: Arc::new(Mutex::new(validator_ctx.child("automaton_invariants"))),
                 inner: marshaled.clone(),
                 certification_agreement: certification_agreement.clone(),
-                header_mismatch: HeaderMismatchInvariant::<P, FaultyConfig, Commitment>::coding(
-                    ApplicationChoice::AlwaysAccept,
-                    faulty_config,
-                    always_accepts::<CodingCtx<P>>,
-                    block_contexts.clone(),
-                    stack_label.clone(),
-                ),
+                header_mismatch:
+                    HeaderMismatchInvariant::<P, FaultyConfig, CommitmentOf<P>>::coding(
+                        ApplicationChoice::AlwaysAccept,
+                        faulty_config,
+                        always_accepts::<CodingCtx<P>>,
+                        block_contexts.clone(),
+                        stack_label.clone(),
+                    ),
             };
             start_engine_coding_with_networks::<P, _, _, _>(
                 validator_ctx,

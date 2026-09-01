@@ -1,6 +1,9 @@
 //! Commitment-typed Byzantine actor for coding end-to-end targets.
 
-use super::twins::{PublicKeyOf, SchemeOf};
+use super::{
+    coding_stack::CommitmentOf,
+    twins::{PublicKeyOf, SchemeOf},
+};
 use crate::{
     simplex::Simplex,
     strategy::{AnyScope, FutureScope, SmallScope, Strategy as _, StrategyChoice},
@@ -12,7 +15,7 @@ use commonware_consensus::{
         scheme::Scheme as SimplexScheme,
         types::{Finalize, Notarize, Nullify, Proposal, Vote},
     },
-    types::{Epoch, Round, View, coding::Commitment},
+    types::{Epoch, Round, View},
 };
 use commonware_cryptography::{Digest, Hasher as _, Sha256, sha256::Digest as Sha256Digest};
 use commonware_p2p::{Receiver, Recipients, Sender};
@@ -49,14 +52,16 @@ fn fault_views(
     }
 }
 
-fn conflicting_proposal(proposal: &Proposal<Commitment>) -> Proposal<Commitment> {
+fn conflicting_proposal<P: Simplex>(
+    proposal: &Proposal<CommitmentOf<P>>,
+) -> Proposal<CommitmentOf<P>> {
     let payload = proposal.payload;
     let block: Sha256Digest = payload.block();
     let conflicting_block = Sha256::hash(&[b"coding-twin", block.as_ref()]);
-    let payload = Commitment::from((
+    let payload = CommitmentOf::<P>::from((
         conflicting_block,
-        payload.root::<Sha256Digest>(),
-        payload.context::<Sha256Digest>(),
+        payload.root(),
+        payload.context(),
         payload.config(),
     ));
     Proposal::new(proposal.round, proposal.parent, payload)
@@ -65,28 +70,28 @@ fn conflicting_proposal(proposal: &Proposal<Commitment>) -> Proposal<Commitment>
 fn send_notarize<P: Simplex>(
     scheme: &SchemeOf<P>,
     sender: &mut impl Sender<PublicKey = PublicKeyOf<P>>,
-    proposal: Proposal<Commitment>,
+    proposal: Proposal<CommitmentOf<P>>,
 ) where
-    SchemeOf<P>: SimplexScheme<Commitment>,
+    SchemeOf<P>: SimplexScheme<CommitmentOf<P>>,
 {
     let Some(vote) = Notarize::sign(scheme, proposal) else {
         return;
     };
-    let message = Vote::<SchemeOf<P>, Commitment>::Notarize(vote).encode();
+    let message = Vote::<SchemeOf<P>, CommitmentOf<P>>::Notarize(vote).encode();
     let _ = sender.send(Recipients::All, message, true);
 }
 
 fn send_finalize<P: Simplex>(
     scheme: &SchemeOf<P>,
     sender: &mut impl Sender<PublicKey = PublicKeyOf<P>>,
-    proposal: Proposal<Commitment>,
+    proposal: Proposal<CommitmentOf<P>>,
 ) where
-    SchemeOf<P>: SimplexScheme<Commitment>,
+    SchemeOf<P>: SimplexScheme<CommitmentOf<P>>,
 {
     let Some(vote) = Finalize::sign(scheme, proposal) else {
         return;
     };
-    let message = Vote::<SchemeOf<P>, Commitment>::Finalize(vote).encode();
+    let message = Vote::<SchemeOf<P>, CommitmentOf<P>>::Finalize(vote).encode();
     let _ = sender.send(Recipients::All, message, true);
 }
 
@@ -114,9 +119,9 @@ pub(crate) fn start<P: Simplex>(
         impl Receiver<PublicKey = PublicKeyOf<P>>,
     ),
 ) where
-    SchemeOf<P>: SimplexScheme<Commitment>,
+    SchemeOf<P>: SimplexScheme<CommitmentOf<P>>,
 {
-    let seed = Commitment::from((
+    let seed = CommitmentOf::<P>::from((
         Sha256::hash(&[b"coding-disrupter-seed-block"]),
         Sha256::hash(&[b"coding-disrupter-seed-root"]),
         Sha256::hash(&[b"coding-disrupter-seed-context"]),
@@ -144,13 +149,13 @@ pub(crate) fn start<P: Simplex>(
                 View::new(view.get().saturating_sub(1)),
                 seed,
             );
-            for proposal in [proposal.clone(), conflicting_proposal(&proposal)] {
+            for proposal in [proposal.clone(), conflicting_proposal::<P>(&proposal)] {
                 emitted.insert((0u8, proposal.clone()));
                 send_notarize::<P>(&scheme, &mut vote_sender, proposal);
             }
         }
         while let Ok((_, message)) = vote_receiver.recv().await {
-            let Ok(vote) = Vote::<SchemeOf<P>, Commitment>::decode(message) else {
+            let Ok(vote) = Vote::<SchemeOf<P>, CommitmentOf<P>>::decode(message) else {
                 continue;
             };
             if faulty_views
@@ -161,7 +166,10 @@ pub(crate) fn start<P: Simplex>(
             }
             match vote {
                 Vote::Notarize(vote) => {
-                    let proposals = [vote.proposal.clone(), conflicting_proposal(&vote.proposal)];
+                    let proposals = [
+                        vote.proposal.clone(),
+                        conflicting_proposal::<P>(&vote.proposal),
+                    ];
                     for proposal in proposals {
                         if emitted.insert((0u8, proposal.clone())) {
                             send_notarize::<P>(&scheme, &mut vote_sender, proposal);
@@ -169,7 +177,10 @@ pub(crate) fn start<P: Simplex>(
                     }
                 }
                 Vote::Finalize(vote) => {
-                    let proposals = [vote.proposal.clone(), conflicting_proposal(&vote.proposal)];
+                    let proposals = [
+                        vote.proposal.clone(),
+                        conflicting_proposal::<P>(&vote.proposal),
+                    ];
                     for proposal in proposals {
                         if emitted.insert((1u8, proposal.clone())) {
                             send_finalize::<P>(&scheme, &mut vote_sender, proposal);
@@ -179,14 +190,14 @@ pub(crate) fn start<P: Simplex>(
                 Vote::Nullify(vote) => {
                     if !emitted.insert((
                         2u8,
-                        Proposal::new(vote.round, View::zero(), Commitment::EMPTY),
+                        Proposal::new(vote.round, View::zero(), CommitmentOf::<P>::EMPTY),
                     )) {
                         continue;
                     }
-                    let Some(vote) = Nullify::sign::<Commitment>(&scheme, vote.round) else {
+                    let Some(vote) = Nullify::sign::<CommitmentOf<P>>(&scheme, vote.round) else {
                         continue;
                     };
-                    let message = Vote::<SchemeOf<P>, Commitment>::Nullify(vote).encode();
+                    let message = Vote::<SchemeOf<P>, CommitmentOf<P>>::Nullify(vote).encode();
                     let _ = vote_sender.send(Recipients::All, message, true);
                 }
             }
@@ -197,11 +208,14 @@ pub(crate) fn start<P: Simplex>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::SimplexCertificateMock;
+
+    type TestCommitment = CommitmentOf<SimplexCertificateMock>;
 
     #[test]
     fn conflicting_coding_proposal_preserves_shape_but_changes_payload() {
         let digest = Sha256::hash(&[b"block"]);
-        let payload = Commitment::from((
+        let payload = TestCommitment::from((
             digest,
             Sha256::hash(&[b"root"]),
             Sha256::hash(&[b"context"]),
@@ -213,7 +227,7 @@ mod tests {
             payload,
         );
 
-        let conflicting = conflicting_proposal(&proposal);
+        let conflicting = conflicting_proposal::<SimplexCertificateMock>(&proposal);
         assert_eq!(conflicting.round, proposal.round);
         assert_eq!(conflicting.parent, proposal.parent);
         assert_ne!(conflicting.payload, proposal.payload);

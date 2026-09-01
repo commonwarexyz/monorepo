@@ -16,13 +16,16 @@ use super::{
     twins::stack::MarshalChoice,
 };
 use crate::{network::CertificatePoison, simplex::Simplex};
+use commonware_coding::Scheme as CodingScheme;
 use commonware_consensus::{
-    Block,
-    marshal::mocks::{application::Application, block::Block as MockBlock},
+    Block, CertifiableBlock,
+    marshal::mocks::application::Application,
     simplex::types::Context as SimplexContext,
     types::{Height, Round, coding::Commitment},
 };
-use commonware_cryptography::{Digest, Digestible, PublicKey, sha256::Digest as Sha256Digest};
+use commonware_cryptography::{
+    Digest, Digestible, Hasher, PublicKey, sha256::Digest as Sha256Digest,
+};
 use commonware_utils::sync::Mutex;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -40,9 +43,6 @@ type GenericCtx<P, D> = SimplexContext<D, PublicKeyOf<P>>;
 type VerifiedContexts<P, D> = HashMap<(Round, D), Vec<GenericCtx<P, D>>>;
 type CertifyVerdicts<D> = HashMap<(Round, D), (usize, bool)>;
 type ProposedBlocks<D> = HashSet<(usize, Round, D)>;
-type AuditedBlock<D, P> = MockBlock<Sha256Digest, SimplexContext<D, P>>;
-type AuditedApplication<D, P> = Application<AuditedBlock<D, P>>;
-type AuditedBlocks<D, P> = BTreeMap<Height, Arc<AuditedBlock<D, P>>>;
 
 pub(crate) trait ConsensusParentDigest: Digest {
     fn block_digest(&self) -> Sha256Digest;
@@ -54,7 +54,9 @@ impl ConsensusParentDigest for Sha256Digest {
     }
 }
 
-impl ConsensusParentDigest for Commitment {
+impl<B: Digestible<Digest = Sha256Digest>, C: CodingScheme, H: Hasher> ConsensusParentDigest
+    for Commitment<B, C, H>
+{
     fn block_digest(&self) -> Sha256Digest {
         self.block()
     }
@@ -349,12 +351,16 @@ pub(super) fn check_certificate_backfill_retry<P: commonware_cryptography::Publi
 ///
 /// `floor` is the height every honest node started from (0 for genesis-started
 /// clusters); it anchors [`check_in_order`]'s first-delivery check.
-pub(crate) fn check_all_blocks<D: ConsensusParentDigest, P: PublicKey>(
-    honest_apps: &[(usize, AuditedApplication<D, P>)],
+pub(crate) fn check_all_blocks<B, D, K>(
+    honest_apps: &[(usize, Application<B>)],
     genesis: Sha256Digest,
     floor: Height,
     stack: Option<&str>,
-) {
+) where
+    B: CertifiableBlock<Digest = Sha256Digest, Context = SimplexContext<D, K>>,
+    D: ConsensusParentDigest,
+    K: PublicKey,
+{
     let stack = stack.unwrap_or("unspecified");
     for (idx, app) in honest_apps {
         check_local_blocks(*idx, app, genesis, floor, stack);
@@ -365,13 +371,17 @@ pub(crate) fn check_all_blocks<D: ConsensusParentDigest, P: PublicKey>(
 /// Run block-ordering and parent-linkage invariants for one node.
 ///
 /// `floor` is the height the node started from (0 for a genesis-started node).
-pub(crate) fn check_local_blocks<D: ConsensusParentDigest, P: PublicKey>(
+pub(crate) fn check_local_blocks<B, D, K>(
     idx: usize,
-    app: &AuditedApplication<D, P>,
+    app: &Application<B>,
     genesis: Sha256Digest,
     floor: Height,
     stack: &str,
-) {
+) where
+    B: CertifiableBlock<Digest = Sha256Digest, Context = SimplexContext<D, K>>,
+    D: ConsensusParentDigest,
+    K: PublicKey,
+{
     check_in_order(idx, &app.delivered(), floor, stack);
     check_parent_linkage(idx, &app.blocks(), genesis, stack);
 }
@@ -380,12 +390,16 @@ pub(crate) fn check_local_blocks<D: ConsensusParentDigest, P: PublicKey>(
 ///
 /// [`check_in_order`] runs first and guarantees that after exact duplicate
 /// deliveries are collapsed, the by-height snapshot is one contiguous chain.
-pub(crate) fn check_parent_linkage<D: ConsensusParentDigest, P: PublicKey>(
+pub(crate) fn check_parent_linkage<B, D, K>(
     idx: usize,
-    blocks: &AuditedBlocks<D, P>,
+    blocks: &BTreeMap<Height, Arc<B>>,
     genesis: Sha256Digest,
     stack: &str,
-) {
+) where
+    B: CertifiableBlock<Digest = Sha256Digest, Context = SimplexContext<D, K>>,
+    D: ConsensusParentDigest,
+    K: PublicKey,
+{
     if let Some((height, block)) = blocks.first_key_value() {
         if *height == Height::zero() {
             assert_eq!(
@@ -405,12 +419,12 @@ pub(crate) fn check_parent_linkage<D: ConsensusParentDigest, P: PublicKey>(
                 block.parent(),
             );
             assert_eq!(
-                block.context.parent.1.block_digest(),
+                block.context().parent.1.block_digest(),
                 genesis,
                 "node{idx} delivered a chain whose first embedded consensus parent is not \
                  genesis: first_height={} context_parent={} expected={genesis}; stack={stack}",
                 height.get(),
-                block.context.parent.1.block_digest(),
+                block.context().parent.1.block_digest(),
             );
         }
     }
@@ -433,23 +447,23 @@ pub(crate) fn check_parent_linkage<D: ConsensusParentDigest, P: PublicKey>(
             next.parent(),
         );
         assert_eq!(
-            next.context.parent.1.block_digest(),
+            next.context().parent.1.block_digest(),
             block.digest(),
             "node{idx} delivered a chain with a broken embedded consensus parent: height {} \
              digest={} but height {} context_parent={}; stack={stack}",
             height.get(),
             block.digest(),
             next_height.get(),
-            next.context.parent.1.block_digest(),
+            next.context().parent.1.block_digest(),
         );
         assert!(
-            next.context.round > block.context.round,
+            next.context().round > block.context().round,
             "node{idx} delivered a chain with non-increasing consensus rounds: height {} \
              round={} but height {} round={}; stack={stack}",
             height.get(),
-            block.context.round,
+            block.context().round,
             next_height.get(),
-            next.context.round,
+            next.context().round,
         );
     }
 }
@@ -652,7 +666,10 @@ pub(super) fn check_scenario_progress(outcome: &ScenarioOutcome) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        super::coding_stack::{CodingCtx, CommitmentOf},
+        *,
+    };
     use crate::{SimplexCertificateMock, simplex_certificate_mock};
     use commonware_consensus::{
         Reporter as _,
@@ -667,6 +684,7 @@ mod tests {
 
     type TestContext = SimplexContext<Sha256Digest, Ed25519PublicKey>;
     type ContextBlock = MockBlock<Sha256Digest, TestContext>;
+    type TestCommitment = CommitmentOf<SimplexCertificateMock>;
 
     fn digest(byte: u8) -> Sha256Digest {
         Sha256Digest([byte; 32])
@@ -690,8 +708,8 @@ mod tests {
         }
     }
 
-    fn commitment(byte: u8) -> Commitment {
-        Commitment::from((
+    fn commitment(byte: u8) -> TestCommitment {
+        TestCommitment::from((
             digest(byte),
             digest(byte.wrapping_add(1)),
             digest(byte.wrapping_add(2)),
@@ -699,10 +717,7 @@ mod tests {
         ))
     }
 
-    fn coding_context(
-        view: u64,
-        parent: Commitment,
-    ) -> SimplexContext<Commitment, Ed25519PublicKey> {
+    fn coding_context(view: u64, parent: TestCommitment) -> CodingCtx<SimplexCertificateMock> {
         SimplexContext {
             round: Round::new(Epoch::zero(), View::new(view)),
             leader: leader(),
@@ -993,13 +1008,14 @@ mod tests {
         let payload = commitment(0xA);
         let embedded = coding_context(2, commitment(0xB));
         registry.record(payload.block(), embedded.clone());
-        let invariant = HeaderMismatchInvariant::<SimplexCertificateMock, (), Commitment>::coding(
-            ApplicationChoice::AlwaysAccept,
-            (),
-            |_, _, _| false,
-            registry,
-            "test".into(),
-        );
+        let invariant =
+            HeaderMismatchInvariant::<SimplexCertificateMock, (), TestCommitment>::coding(
+                ApplicationChoice::AlwaysAccept,
+                (),
+                |_, _, _| false,
+                registry,
+                "test".into(),
+            );
         let mut mutated = embedded;
         mutated.parent.0 = View::zero();
         invariant.record_verify(mutated, payload);

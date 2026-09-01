@@ -4116,6 +4116,7 @@ pub fn fuzz_twins_audit<P: simplex::Simplex, M: FuzzMode>(input: FuzzInput) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_utils::non_empty;
 
     /// The deadline must outlast the costliest workload the sampler can draw.
     /// A twins campaign under stable leaders was measured at ~12s of simulated
@@ -4292,7 +4293,8 @@ mod tests {
                 .map(|s| Notarize::sign(s, proposal.clone()).unwrap())
                 .collect();
             let cert = Certificate::Notarization(
-                Notarization::from_notarizes(&schemes[0], &votes, &Sequential).unwrap(),
+                Notarization::from_notarizes(&schemes[0], non_empty![@&votes], &Sequential)
+                    .unwrap(),
             );
             let response = ResolverMessage::<U64> {
                 id: 9,

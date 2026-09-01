@@ -1,20 +1,22 @@
 //! Coding-variant validator and engine setup for the multi-node liveness
 //! runner, generic over the consensus scheme.
 //!
-//! Mirrors the standard stack in [`super::twins::stack`], with two differences
+//! Mirrors the standard stack in `twins::stack`, with two differences
 //! the coding variant requires: shard dissemination replaces the buffered
 //! broadcast engine on the block channel, and the Simplex automaton/relay is
 //! the [`Marshaled`] wrapper (whose consensus payload is a `Commitment` rather
 //! than a `Sha256Digest`).
 
 use super::{
-    app::DeliveryReporter,
+    app::{BuildableBlock, DeliveryReporter},
     twins::{PublicKeyOf, SchemeOf},
 };
 use crate::simplex::Simplex;
+use bytes::{Buf, BufMut};
+use commonware_codec::{EncodeSize, Error as CodecError, Read, Write};
 use commonware_coding::{CodecConfig, ReedSolomon};
 use commonware_consensus::{
-    CertifiableAutomaton, Relay,
+    Block, CertifiableAutomaton, CertifiableBlock, Heightable, Relay,
     marshal::{
         Config, Start,
         coding::{
@@ -39,7 +41,7 @@ use commonware_consensus::{
     types::{Delta, Epoch, FixedEpocher, Height, Round, View, ViewDelta, coding::Commitment},
 };
 use commonware_cryptography::{
-    Digest as _, Digestible as _, Hasher as _, Sha256,
+    Digest as _, Digestible, Hasher, Sha256,
     certificate::{ConstantProvider, Verifier as _},
     sha256::Digest as Sha256Digest,
 };
@@ -48,13 +50,95 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{Spawner as _, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::archive::immutable;
 use commonware_utils::{NZU64, NZUsize};
-use std::{num::NonZeroUsize, sync::Arc, time::Duration};
+use std::{fmt, num::NonZeroUsize, sync::Arc, time::Duration};
 
-/// Consensus context for the coding variant: the payload is a `Commitment`.
-pub(crate) type CodingCtx<P> = SimplexContext<Commitment, PublicKeyOf<P>>;
+/// Consensus payload for the coding variant: a commitment over the block, its
+/// coding root, and its context.
+pub type CommitmentOf<P> = Commitment<CodingB<P>, ReedSolomon<Sha256>, Sha256>;
+
+/// Consensus context for the coding variant: the payload is a [`CommitmentOf`].
+pub type CodingCtx<P> = SimplexContext<CommitmentOf<P>, PublicKeyOf<P>>;
 
 /// Application block carried by the coding stack.
-pub(crate) type CodingB<P> = MockBlock<Sha256Digest, CodingCtx<P>>;
+///
+/// A block's context carries the commitment over that same block, so the block
+/// type appears inside its own definition. A newtype breaks the cycle a type
+/// alias cannot express; every trait it needs forwards to the inner mock block.
+pub struct CodingB<P: Simplex>(MockBlock<Sha256Digest, CodingCtx<P>>);
+
+impl<P: Simplex> BuildableBlock for CodingB<P> {
+    fn build(context: CodingCtx<P>, parent: Sha256Digest, height: Height, timestamp: u64) -> Self {
+        Self(MockBlock::new::<Sha256>(context, parent, height, timestamp))
+    }
+}
+
+impl<P: Simplex> Clone for CodingB<P> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl<P: Simplex> fmt::Debug for CodingB<P> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("CodingB").field(&self.0).finish()
+    }
+}
+
+impl<P: Simplex> PartialEq for CodingB<P> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl<P: Simplex> Eq for CodingB<P> {}
+
+impl<P: Simplex> Write for CodingB<P> {
+    fn write(&self, writer: &mut impl BufMut) {
+        self.0.write(writer);
+    }
+}
+
+impl<P: Simplex> Read for CodingB<P> {
+    type Cfg = ();
+
+    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+        MockBlock::read_cfg(reader, cfg).map(Self)
+    }
+}
+
+impl<P: Simplex> EncodeSize for CodingB<P> {
+    fn encode_size(&self) -> usize {
+        self.0.encode_size()
+    }
+}
+
+impl<P: Simplex> Digestible for CodingB<P> {
+    type Digest = Sha256Digest;
+
+    fn digest(&self) -> Self::Digest {
+        self.0.digest()
+    }
+}
+
+impl<P: Simplex> Heightable for CodingB<P> {
+    fn height(&self) -> Height {
+        self.0.height()
+    }
+}
+
+impl<P: Simplex> Block for CodingB<P> {
+    fn parent(&self) -> Self::Digest {
+        self.0.parent()
+    }
+}
+
+impl<P: Simplex> CertifiableBlock for CodingB<P> {
+    type Context = CodingCtx<P>;
+
+    fn context(&self) -> Self::Context {
+        self.0.context()
+    }
+}
 
 /// Marshal variant for the coding stack.
 pub(crate) type CodingVariant<P> = Coding<CodingB<P>, ReedSolomon<Sha256>, Sha256, PublicKeyOf<P>>;
@@ -103,7 +187,7 @@ pub(crate) async fn setup_validator_coding<P: Simplex>(
     stack: Arc<str>,
 ) -> CodingValidator<P>
 where
-    SchemeOf<P>: SimplexScheme<Commitment>,
+    SchemeOf<P>: SimplexScheme<CommitmentOf<P>>,
 {
     let application = Application::<CodingB<P>>::manual_ack();
     let acknowledger = application.clone();
@@ -145,7 +229,6 @@ where
             peer_provider: oracle.manager(),
             blocker: oracle.control(validator.clone()),
             mailbox_size: config.mailbox_size,
-            initial: Duration::from_secs(1),
             timeout: Duration::from_secs(2),
             fetch_retry_timeout: Duration::from_millis(100),
             priority_requests: false,
@@ -269,7 +352,7 @@ pub(crate) fn coding_marshaled<P: Simplex, A>(
     shards: ShardsMailbox<P>,
 ) -> CodingMarshaled<P, A>
 where
-    SchemeOf<P>: SimplexScheme<Commitment>,
+    SchemeOf<P>: SimplexScheme<CommitmentOf<P>>,
     A: commonware_consensus::Application<
             deterministic::Context,
             SigningScheme = SchemeOf<P>,
@@ -305,7 +388,7 @@ pub(crate) fn start_engine_coding_with_networks<P: Simplex, EC, A, R>(
     automaton: A,
     relay: R,
     marshal_mailbox: Mailbox<SchemeOf<P>, CodingVariant<P>>,
-    genesis_commitment: Commitment,
+    genesis_commitment: CommitmentOf<P>,
     forwarding: ForwardPolicy,
     vote: (
         impl Sender<PublicKey = PublicKeyOf<P>>,
@@ -320,10 +403,10 @@ pub(crate) fn start_engine_coding_with_networks<P: Simplex, EC, A, R>(
         impl Receiver<PublicKey = PublicKeyOf<P>>,
     ),
 ) where
-    SchemeOf<P>: SimplexScheme<Commitment>,
+    SchemeOf<P>: SimplexScheme<CommitmentOf<P>>,
     EC: ElectorConfig<SchemeOf<P>> + Clone + Send + 'static,
-    A: CertifiableAutomaton<Context = CodingCtx<P>, Digest = Commitment>,
-    R: Relay<Digest = Commitment, PublicKey = PublicKeyOf<P>, Plan = Plan<PublicKeyOf<P>>>,
+    A: CertifiableAutomaton<Context = CodingCtx<P>, Digest = CommitmentOf<P>>,
+    R: Relay<Digest = CommitmentOf<P>, PublicKey = PublicKeyOf<P>, Plan = Plan<PublicKeyOf<P>>>,
 {
     let engine = Engine::new(
         context.child("engine"),
@@ -361,7 +444,7 @@ pub(crate) fn start_engine_coding_with_networks<P: Simplex, EC, A, R>(
 /// Genesis coded block shared by every coding validator and by the consensus
 /// floor, so view-1 proposals link to the block marshal already holds.
 pub(crate) fn coding_genesis<P: Simplex>(leader: PublicKeyOf<P>) -> CodingCoded<P> {
-    let genesis_parent = Commitment::from((
+    let genesis_parent = CommitmentOf::<P>::from((
         Sha256Digest::EMPTY,
         Sha256Digest::EMPTY,
         Sha256Digest::EMPTY,
@@ -372,11 +455,11 @@ pub(crate) fn coding_genesis<P: Simplex>(leader: PublicKeyOf<P>) -> CodingCoded<
         leader,
         parent: (View::zero(), genesis_parent),
     };
-    let inner = MockBlock::new::<Sha256>(context, Sha256::hash(&[b""]), Height::zero(), 0);
-    let commitment = Commitment::from((
+    let inner = CodingB::<P>::build(context, Sha256::hash(&[b""]), Height::zero(), 0);
+    let commitment = CommitmentOf::<P>::from((
         inner.digest(),
         inner.digest(),
-        hash_context::<Sha256, _>(&inner.context),
+        hash_context::<Sha256, _>(&inner.context()),
         GENESIS_CODING_CONFIG,
     ));
     CodedBlock::new_trusted(inner, commitment)

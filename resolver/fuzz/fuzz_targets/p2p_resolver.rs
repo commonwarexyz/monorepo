@@ -51,8 +51,6 @@ const MIN_MAILBOX_SIZE: usize = 1;
 const MAX_MAILBOX_SIZE: usize = 128;
 const MIN_QUOTA_PER_SECOND: u32 = 1;
 const MAX_QUOTA_PER_SECOND: u32 = 64;
-const MIN_FETCH_INITIAL_MS: u64 = 1;
-const MAX_FETCH_INITIAL_MS: u64 = 100;
 const MIN_FETCH_TIMEOUT_MS: u64 = 10;
 const MAX_FETCH_TIMEOUT_MS: u64 = 300;
 const MIN_FETCH_RETRY_TIMEOUT_MS: u64 = 1;
@@ -157,7 +155,6 @@ struct FuzzInput {
     mailbox_size: usize,
     small_mailbox: bool,
     quota_per_second: u32,
-    fetch_initial_ms: u64,
     fetch_timeout_ms: u64,
     fetch_retry_timeout_ms: u64,
     completion_window_ms: u64,
@@ -338,11 +335,6 @@ impl<'a> Arbitrary<'a> for FuzzInput {
         } else {
             u.int_in_range(MIN_QUOTA_PER_SECOND..=MAX_QUOTA_PER_SECOND)?
         };
-        let fetch_initial_ms = if u.is_empty() {
-            MIN_FETCH_INITIAL_MS
-        } else {
-            u.int_in_range(MIN_FETCH_INITIAL_MS..=MAX_FETCH_INITIAL_MS)?
-        };
         let fetch_timeout_ms = if u.is_empty() {
             DEFAULT_FETCH_TIMEOUT_MS
         } else {
@@ -378,7 +370,6 @@ impl<'a> Arbitrary<'a> for FuzzInput {
             mailbox_size,
             small_mailbox,
             quota_per_second,
-            fetch_initial_ms,
             fetch_timeout_ms,
             fetch_retry_timeout_ms,
             completion_window_ms,
@@ -567,7 +558,6 @@ fn run(input: FuzzInput) -> String {
                     producer: producers[index].clone(),
                     mailbox_size: NonZeroUsize::new(mailbox_size).unwrap(),
                     me: Some(scheme.public_key()),
-                    initial: Duration::from_millis(input.fetch_initial_ms),
                     timeout: Duration::from_millis(input.fetch_timeout_ms),
                     fetch_retry_timeout: Duration::from_millis(input.fetch_retry_timeout_ms),
                     priority_requests: input.priority_requests,

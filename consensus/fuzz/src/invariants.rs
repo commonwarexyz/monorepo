@@ -2754,7 +2754,7 @@ mod tests {
         Sha256, bls12381::primitives::variant::MinPk, ed25519::PublicKey as Ed25519PublicKey,
     };
     use commonware_parallel::Sequential;
-    use commonware_utils::{NZU32, TestRng, ordered::Set, test_rng};
+    use commonware_utils::{NZU32, TestRng, non_empty, ordered::Set, test_rng};
     use std::time::Duration;
 
     const N: u32 = 4;
@@ -3727,7 +3727,7 @@ mod tests {
                 Notarize::sign(&schemes[signer], proposal(view, parent, payload)).unwrap()
             })
             .collect();
-        SimplexNotarization::from_notarizes(&schemes[0], &votes, &Sequential).unwrap()
+        SimplexNotarization::from_notarizes(&schemes[0], non_empty![@&votes], &Sequential).unwrap()
     }
 
     fn finalization_activity_from(
@@ -3744,7 +3744,7 @@ mod tests {
                 Finalize::sign(&schemes[signer], proposal(view, parent, payload)).unwrap()
             })
             .collect();
-        SimplexFinalization::from_finalizes(&schemes[0], &votes, &Sequential).unwrap()
+        SimplexFinalization::from_finalizes(&schemes[0], non_empty![@&votes], &Sequential).unwrap()
     }
 
     /// Assembles a quorum-backed nullification certificate for `view`.
@@ -3756,7 +3756,7 @@ mod tests {
             .iter()
             .map(|scheme| Nullify::sign::<Sha256Digest>(scheme, round(view)).unwrap())
             .collect();
-        SimplexNullification::from_nullifies(&schemes[0], &votes, &Sequential).unwrap()
+        SimplexNullification::from_nullifies(&schemes[0], non_empty![@&votes], &Sequential).unwrap()
     }
 
     /// Assembles a quorum-backed finalization certificate over `proposal(view, parent, payload)`.
@@ -3770,7 +3770,7 @@ mod tests {
             .iter()
             .map(|scheme| Finalize::sign(scheme, proposal(view, parent, payload)).unwrap())
             .collect();
-        SimplexFinalization::from_finalizes(&schemes[0], &votes, &Sequential).unwrap()
+        SimplexFinalization::from_finalizes(&schemes[0], non_empty![@&votes], &Sequential).unwrap()
     }
 
     type AuditReporter = RecordingReporter<TestRng, MockScheme, RoundRobin, Sha256Digest>;
@@ -4714,7 +4714,8 @@ mod tests {
             .map(|&signer| Finalize::sign(&schemes[signer], foreign.clone()).unwrap())
             .collect();
         let finalization =
-            SimplexFinalization::from_finalizes(&schemes[0], &votes, &Sequential).unwrap();
+            SimplexFinalization::from_finalizes(&schemes[0], non_empty![@&votes], &Sequential)
+                .unwrap();
         reporter.report(Activity::Finalization(finalization));
         reporter.report(Activity::Finalize(
             Finalize::sign(&schemes[0], proposal_in_gap).unwrap(),
@@ -5667,7 +5668,7 @@ mod tests {
             .map(|scheme| Notarize::sign(scheme, proposal(5, 4, payload)).unwrap())
             .collect();
 
-        SimplexNotarization::from_notarizes(&schemes[0], &votes, &Sequential).unwrap()
+        SimplexNotarization::from_notarizes(&schemes[0], non_empty![@&votes], &Sequential).unwrap()
     }
 
     fn threshold_nullification(
@@ -5678,7 +5679,7 @@ mod tests {
             .iter()
             .map(|scheme| Nullify::sign::<Sha256Digest>(scheme, round(view)).unwrap())
             .collect();
-        SimplexNullification::from_nullifies(&schemes[0], &votes, &Sequential).unwrap()
+        SimplexNullification::from_nullifies(&schemes[0], non_empty![@&votes], &Sequential).unwrap()
     }
 
     fn threshold_finalization(
@@ -5691,7 +5692,7 @@ mod tests {
             .iter()
             .map(|scheme| Finalize::sign(scheme, proposal(view, parent, payload)).unwrap())
             .collect();
-        SimplexFinalization::from_finalizes(&schemes[0], &votes, &Sequential).unwrap()
+        SimplexFinalization::from_finalizes(&schemes[0], non_empty![@&votes], &Sequential).unwrap()
     }
 
     type ThresholdAuditReporter =

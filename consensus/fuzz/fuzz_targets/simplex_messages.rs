@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_codec::{Decode, DecodeExt, Encode, EncodeSize, FixedSize, Read};
-use commonware_coding::Config as CodingConfig;
+use commonware_coding::{Config as CodingConfig, ReedSolomon};
 use commonware_consensus::{
     Epochable, Viewable,
     simplex::{
@@ -25,6 +25,7 @@ use commonware_consensus::{
 #[cfg(feature = "mocks")]
 use commonware_consensus_fuzz::simplex_certificate_mock;
 use commonware_cryptography::{
+    Digestible, Sha256,
     bls12381::primitives::variant::{MinPk, MinSig},
     certificate::Scheme as CertificateScheme,
     ed25519::PublicKey,
@@ -32,7 +33,7 @@ use commonware_cryptography::{
 };
 use commonware_math::algebra::Random;
 use commonware_parallel::Sequential;
-use commonware_utils::{TestRng, sequence::U64};
+use commonware_utils::{TestRng, non_empty, sequence::U64};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::hash_map::DefaultHasher,
@@ -41,6 +42,20 @@ use std::{
     num::NonZeroU64,
     ops::Deref,
 };
+
+/// Stand-in block: a [`Commitment`] only needs it to bind the block digest type.
+#[derive(Clone)]
+struct CommitmentBlock;
+
+impl Digestible for CommitmentBlock {
+    type Digest = sha256::Digest;
+
+    fn digest(&self) -> Self::Digest {
+        unreachable!("only binds the commitment's block digest type")
+    }
+}
+
+type TestCommitment = Commitment<CommitmentBlock, ReedSolomon<Sha256>, Sha256>;
 
 type Ed25519Scheme = ed25519::Scheme;
 type Bls12381MultisigMinPk = bls12381_multisig::Scheme<PublicKey, MinPk>;
@@ -426,18 +441,18 @@ where
     else {
         return;
     };
-    let Some(notarization) =
-        Notarization::from_notarizes(&schemes[0], notarizes.iter(), &Sequential)
+    let Ok(notarization) =
+        Notarization::from_notarizes(&schemes[0], non_empty![@notarizes.iter()], &Sequential)
     else {
         return;
     };
-    let Some(nullification) =
-        Nullification::from_nullifies(&schemes[0], nullifies.iter(), &Sequential)
+    let Ok(nullification) =
+        Nullification::from_nullifies(&schemes[0], non_empty![@nullifies.iter()], &Sequential)
     else {
         return;
     };
-    let Some(finalization) =
-        Finalization::from_finalizes(&schemes[0], finalizes.iter(), &Sequential)
+    let Ok(finalization) =
+        Finalization::from_finalizes(&schemes[0], non_empty![@finalizes.iter()], &Sequential)
     else {
         return;
     };
@@ -549,8 +564,8 @@ fn structured<S>(
             else {
                 return;
             };
-            let Some(certificate) =
-                Notarization::from_notarizes(&schemes[0], votes.iter(), &Sequential)
+            let Ok(certificate) =
+                Notarization::from_notarizes(&schemes[0], non_empty![@votes.iter()], &Sequential)
             else {
                 return;
             };
@@ -565,8 +580,8 @@ fn structured<S>(
             else {
                 return;
             };
-            let Some(certificate) =
-                Nullification::from_nullifies(&schemes[0], votes.iter(), &Sequential)
+            let Ok(certificate) =
+                Nullification::from_nullifies(&schemes[0], non_empty![@votes.iter()], &Sequential)
             else {
                 return;
             };
@@ -581,8 +596,8 @@ fn structured<S>(
             else {
                 return;
             };
-            let Some(certificate) =
-                Finalization::from_finalizes(&schemes[0], votes.iter(), &Sequential)
+            let Ok(certificate) =
+                Finalization::from_finalizes(&schemes[0], non_empty![@votes.iter()], &Sequential)
             else {
                 return;
             };
@@ -616,8 +631,8 @@ fn structured<S>(
             else {
                 return;
             };
-            let Some(certificate) =
-                Notarization::from_notarizes(&schemes[0], votes.iter(), &Sequential)
+            let Ok(certificate) =
+                Notarization::from_notarizes(&schemes[0], non_empty![@votes.iter()], &Sequential)
             else {
                 return;
             };
@@ -632,8 +647,8 @@ fn structured<S>(
             else {
                 return;
             };
-            let Some(certificate) =
-                Nullification::from_nullifies(&schemes[0], votes.iter(), &Sequential)
+            let Ok(certificate) =
+                Nullification::from_nullifies(&schemes[0], non_empty![@votes.iter()], &Sequential)
             else {
                 return;
             };
@@ -648,8 +663,8 @@ fn structured<S>(
             else {
                 return;
             };
-            let Some(certificate) =
-                Finalization::from_finalizes(&schemes[0], votes.iter(), &Sequential)
+            let Ok(certificate) =
+                Finalization::from_finalizes(&schemes[0], non_empty![@votes.iter()], &Sequential)
             else {
                 return;
             };
@@ -689,8 +704,8 @@ fn structured<S>(
             else {
                 return;
             };
-            let Some(certificate) =
-                Notarization::from_notarizes(&schemes[0], votes.iter(), &Sequential)
+            let Ok(certificate) =
+                Notarization::from_notarizes(&schemes[0], non_empty![@votes.iter()], &Sequential)
             else {
                 return;
             };
@@ -710,8 +725,8 @@ fn structured<S>(
             else {
                 return;
             };
-            let Some(certificate) =
-                Nullification::from_nullifies(&schemes[0], votes.iter(), &Sequential)
+            let Ok(certificate) =
+                Nullification::from_nullifies(&schemes[0], non_empty![@votes.iter()], &Sequential)
             else {
                 return;
             };
@@ -726,8 +741,8 @@ fn structured<S>(
             else {
                 return;
             };
-            let Some(certificate) =
-                Finalization::from_finalizes(&schemes[0], votes.iter(), &Sequential)
+            let Ok(certificate) =
+                Finalization::from_finalizes(&schemes[0], non_empty![@votes.iter()], &Sequential)
             else {
                 return;
             };
@@ -793,14 +808,18 @@ fn structured<S>(
             else {
                 return;
             };
-            let Some(notarization) =
-                Notarization::from_notarizes(&schemes[0], notarizes.iter(), &Sequential)
-            else {
+            let Ok(notarization) = Notarization::from_notarizes(
+                &schemes[0],
+                non_empty![@notarizes.iter()],
+                &Sequential,
+            ) else {
                 return;
             };
-            let Some(nullification) =
-                Nullification::from_nullifies(&schemes[0], nullifies.iter(), &Sequential)
-            else {
+            let Ok(nullification) = Nullification::from_nullifies(
+                &schemes[0],
+                non_empty![@nullifies.iter()],
+                &Sequential,
+            ) else {
                 return;
             };
             assert_structural(&notarization);
@@ -915,7 +934,7 @@ fn arbitrary_case(kind: ArbitraryKind, participants: u8, data: Vec<u8>) {
             );
         }
         ArbitraryKind::Activity => assert_arbitrary_activity(&data, participants, selector),
-        ArbitraryKind::Commitment => assert_arbitrary_byte_roundtrip::<Commitment>(&mut u, &()),
+        ArbitraryKind::Commitment => assert_arbitrary_byte_roundtrip::<TestCommitment>(&mut u, &()),
     }
 }
 
@@ -1049,43 +1068,47 @@ fn consensus_types(
 
 fn commitment_surface(seed: u64, data: &[u8], minimum_shards: u16, extra_shards: u16) {
     let mut rng = TestRng::new(seed);
-    let commitment = Commitment::random(&mut rng);
-    assert_eq!(commitment.as_ref().len(), Commitment::SIZE);
-    let decoded = Commitment::decode(commitment.as_ref()).expect("random commitment should decode");
+    let commitment = TestCommitment::random(&mut rng);
+    assert_eq!(commitment.as_ref().len(), TestCommitment::SIZE);
+    let decoded =
+        TestCommitment::decode(commitment.as_ref()).expect("random commitment should decode");
     assert_eq!(decoded.as_ref(), commitment.as_ref());
-    assert_eq!(Deref::deref(&commitment).len(), Commitment::SIZE);
+    assert_eq!(Deref::deref(&commitment).len(), TestCommitment::SIZE);
     let _ = format!("{commitment}");
     let _ = format!("{commitment:?}");
-    assert_eq!(Commitment::default().as_ref().len(), Commitment::SIZE);
+    assert_eq!(
+        TestCommitment::default().as_ref().len(),
+        TestCommitment::SIZE
+    );
 
-    let short_len = data.len() % Commitment::SIZE;
-    assert!(Commitment::decode(&data[..short_len]).is_err());
+    let short_len = data.len() % TestCommitment::SIZE;
+    assert!(TestCommitment::decode(&data[..short_len]).is_err());
 
-    let mut buffer = [0u8; Commitment::SIZE];
+    let mut buffer = [0u8; TestCommitment::SIZE];
     for (i, byte) in buffer.iter_mut().enumerate() {
         *byte = data.get(i).copied().unwrap_or_default();
     }
     let minimum_shards = minimum_shards % 4;
     let extra_shards = extra_shards % 4;
-    let config_offset = Commitment::SIZE - CodingConfig::SIZE;
+    let config_offset = TestCommitment::SIZE - CodingConfig::SIZE;
     buffer[config_offset..config_offset + u16::SIZE].copy_from_slice(&minimum_shards.to_be_bytes());
     buffer[config_offset + u16::SIZE..config_offset + CodingConfig::SIZE]
         .copy_from_slice(&extra_shards.to_be_bytes());
-    let decoded = Commitment::decode(&buffer[..]);
+    let decoded = TestCommitment::decode(&buffer[..]);
     let valid = minimum_shards != 0 && extra_shards != 0;
     assert_eq!(decoded.is_ok(), valid);
     if let Ok(decoded) = decoded {
         assert_eq!(decoded.as_ref(), &buffer[..]);
     }
 
-    let mut arbitrary = [0u8; Commitment::SIZE + 16];
+    let mut arbitrary = [0u8; TestCommitment::SIZE + 16];
     for (i, byte) in arbitrary.iter_mut().enumerate() {
         *byte = data.get(i).copied().unwrap_or_default();
     }
     let mut u = arbitrary::Unstructured::new(&arbitrary);
-    if let Ok(commitment) = Commitment::arbitrary(&mut u) {
-        let decoded =
-            Commitment::decode(commitment.as_ref()).expect("arbitrary commitment should decode");
+    if let Ok(commitment) = TestCommitment::arbitrary(&mut u) {
+        let decoded = TestCommitment::decode(commitment.as_ref())
+            .expect("arbitrary commitment should decode");
         assert_eq!(decoded.as_ref(), commitment.as_ref());
     }
 }

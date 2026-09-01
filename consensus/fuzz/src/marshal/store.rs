@@ -37,7 +37,7 @@ use commonware_storage::{
     archive::{Identifier as ArchiveIdentifier, prunable},
     translator::EightCap,
 };
-use commonware_utils::{FuzzRng, NZU64, NZUsize};
+use commonware_utils::{FuzzRng, NZU64, NZUsize, non_empty};
 use std::time::Duration;
 
 /// The store fuzzer runs on the cheap certificate mock; `K` is unchanged
@@ -89,7 +89,6 @@ async fn setup_prunable_validator_cert_mock(
             peer_provider: oracle.manager(),
             blocker: control.clone(),
             mailbox_size: config.mailbox_size,
-            initial: Duration::from_secs(1),
             timeout: Duration::from_secs(2),
             fetch_retry_timeout: Duration::from_millis(100),
             priority_requests: false,
@@ -116,6 +115,7 @@ async fn setup_prunable_validator_cert_mock(
         context.child("finalizations_by_height"),
         prunable::Config {
             translator: EightCap,
+            metadata_partition: format!("{partition_prefix}-finalizations-by-height-metadata"),
             key_partition: format!("{partition_prefix}-finalizations-by-height-key"),
             key_page_cache: page_cache.clone(),
             value_partition: format!("{partition_prefix}-finalizations-by-height-value"),
@@ -134,6 +134,7 @@ async fn setup_prunable_validator_cert_mock(
         context.child("finalized_blocks"),
         prunable::Config {
             translator: EightCap,
+            metadata_partition: format!("{partition_prefix}-finalized-blocks-metadata"),
             key_partition: format!("{partition_prefix}-finalized-blocks-key"),
             key_page_cache: page_cache.clone(),
             value_partition: format!("{partition_prefix}-finalized-blocks-value"),
@@ -367,7 +368,7 @@ fn make_finalization(block: &B, schemes: &[CertScheme]) -> Finalization<CertSche
         .take(QUORUM as usize)
         .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
         .collect();
-    Finalization::from_finalizes(&schemes[0], &finalizes, &Sequential).unwrap()
+    Finalization::from_finalizes(&schemes[0], non_empty![@&finalizes], &Sequential).unwrap()
 }
 
 fn assert_returned_block(block: &B, returned: B, label: &str) {
@@ -409,6 +410,7 @@ pub fn fuzz_marshal_actor_store(input: MarshalActorStoreInput) {
             context.child("direct_finalizations"),
             prunable::Config {
                 translator: EightCap,
+                metadata_partition: format!("{partition_prefix}-direct-finalizations-metadata"),
                 key_partition: format!("{partition_prefix}-direct-finalizations-key"),
                 key_page_cache: page_cache.clone(),
                 value_partition: format!("{partition_prefix}-direct-finalizations-value"),
@@ -426,6 +428,7 @@ pub fn fuzz_marshal_actor_store(input: MarshalActorStoreInput) {
             context.child("direct_blocks"),
             prunable::Config {
                 translator: EightCap,
+                metadata_partition: format!("{partition_prefix}-direct-blocks-metadata"),
                 key_partition: format!("{partition_prefix}-direct-blocks-key"),
                 key_page_cache: page_cache.clone(),
                 value_partition: format!("{partition_prefix}-direct-blocks-value"),

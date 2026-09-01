@@ -32,7 +32,7 @@ use commonware_p2p::{Message, Receiver, simulated::SplitTarget};
 use commonware_parallel::Sequential;
 use commonware_resolver::p2p::mocks::{Message as ResolverMessage, Payload as ResolverPayload};
 use commonware_runtime::{Clock, deterministic};
-use commonware_utils::{sequence::U64, sync::Mutex};
+use commonware_utils::{iter::NonEmpty, sequence::U64, sync::Mutex};
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     fmt,
@@ -463,8 +463,12 @@ where
             .take(quorum)
             .map(|scheme| Notarize::sign(scheme, proposal.clone()))
             .collect::<Option<Vec<_>>>()?;
-        let notarization =
-            Notarization::from_notarizes(forge.schemes.first()?, &notarizes, &Sequential)?;
+        let notarization = Notarization::from_notarizes(
+            forge.schemes.first()?,
+            NonEmpty::try_new(notarizes.iter())?,
+            &Sequential,
+        )
+        .ok()?;
         Some(
             ResolverMessage::<U64> {
                 id,
@@ -1402,6 +1406,7 @@ mod tests {
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::IoBuf;
+    use commonware_utils::non_empty;
     use std::{collections::VecDeque, io};
 
     type MockScheme = cert_mock::Scheme<Ed25519PublicKey>;
@@ -1480,7 +1485,8 @@ mod tests {
             .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
             .collect();
         let finalization = Certificate::Finalization(
-            Finalization::from_finalizes(&schemes[0], &finalizes, &Sequential).unwrap(),
+            Finalization::from_finalizes(&schemes[0], non_empty![@&finalizes], &Sequential)
+                .unwrap(),
         )
         .encode();
         let notarizes: Vec<_> = schemes[..3]
@@ -1488,7 +1494,8 @@ mod tests {
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
         let notarization = Certificate::Notarization(
-            Notarization::from_notarizes(&schemes[0], &notarizes, &Sequential).unwrap(),
+            Notarization::from_notarizes(&schemes[0], non_empty![@&notarizes], &Sequential)
+                .unwrap(),
         )
         .encode();
         let omitted = Arc::new(AtomicUsize::new(0));
@@ -1560,7 +1567,8 @@ mod tests {
             })
             .collect();
         let nullification = Certificate::<MockScheme, Sha256Digest>::Nullification(
-            Nullification::from_nullifies(&schemes[0], &nullifies, &Sequential).unwrap(),
+            Nullification::from_nullifies(&schemes[0], non_empty![@&nullifies], &Sequential)
+                .unwrap(),
         )
         .encode();
         let response = |id: u64| {

@@ -18,7 +18,7 @@ use commonware_cryptography::{
         ops::{aggregate, compute_public},
         variant::Variant,
     },
-    certificate::{Scheme as CertScheme, Subject, Verifier as CertVerifier},
+    certificate::{AssemblyError, Scheme as CertScheme, Subject, Verifier as CertVerifier},
     ed25519::{self, PrivateKey as Ed25519PrivateKey},
     secp256r1::standard::PrivateKey as SecpPrivateKey,
     sha256::Digest as Sha256Digest,
@@ -27,6 +27,7 @@ use commonware_math::algebra::Random;
 use commonware_parallel::Sequential;
 use commonware_utils::{
     Faults, FuzzRng, N3f1, Participant, TryCollect,
+    iter::NonEmpty,
     ordered::{BiMap, Set},
 };
 use core::marker::PhantomData;
@@ -452,8 +453,19 @@ where
                     .into_iter()
                     .filter_map(|i| signers[i].sign::<Sha256Digest>(F::subject(message)))
                     .collect();
-                if attestations.len() < quorum {
-                    assert!(signers[0].assemble(attestations, &Sequential).is_none());
+                let signed = attestations.len();
+                let Some(attestations) = NonEmpty::try_new(attestations.into_iter()) else {
+                    continue;
+                };
+                if signed < quorum {
+                    // Distinct signers below quorum must be reported as insufficient.
+                    assert_eq!(
+                        signers[0].assemble(attestations, &Sequential),
+                        Err(AssemblyError::InsufficientAttestations(
+                            quorum as u32,
+                            signed as u32
+                        ))
+                    );
                 } else {
                     let certificate = signers[0]
                         .assemble(attestations, &Sequential)
@@ -497,9 +509,13 @@ where
                 }
             }
             Op::VerifyStoredCertificates => {
-                let items = certs
-                    .iter()
-                    .map(|(message, certificate)| (F::subject(message), certificate));
+                let Some(items) = NonEmpty::try_new(
+                    certs
+                        .iter()
+                        .map(|(message, certificate)| (F::subject(message), certificate)),
+                ) else {
+                    continue;
+                };
                 assert!(verifier.verify_certificates::<_, Sha256Digest, _>(
                     &mut rng,
                     items,
