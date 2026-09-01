@@ -64,10 +64,9 @@ use commonware_storage::journal::{
     },
 };
 use commonware_storage_fuzz::{
-    bounded_buffer, bounded_entropy, bounded_items, bounded_page_cache_size, bounded_page_size,
-    faulted_recovery,
+    bounded_buffer, bounded_items, bounded_page_cache_size, bounded_page_size, faulted_recovery,
 };
-use commonware_utils::{FuzzRng, NZU64, NZUsize, Probability, probability, sequence::FixedBytes};
+use commonware_utils::{Entropy, NZU64, NZUsize, Probability, probability, sequence::FixedBytes};
 use futures::StreamExt;
 use libfuzzer_sys::fuzz_target;
 use std::{
@@ -184,8 +183,7 @@ struct FuzzInput {
     operations: Vec<JournalOperation>,
     /// Byte stream driving the runtime rng: all in-run randomness, fault sampling, and the
     /// faulted recovery chain's depth and shapes.
-    #[arbitrary(with = bounded_entropy)]
-    entropy: Vec<u8>,
+    entropy: Entropy,
 }
 
 /// Journal config plus fault-injection rates, shared by every cycle.
@@ -1087,7 +1085,7 @@ fn split_into_cycles(ops: &[JournalOperation]) -> Vec<Cycle> {
     cycles
 }
 
-fn run<J: FuzzJournal + Send + 'static>(input: &FuzzInput, tag: &str)
+fn run<J: FuzzJournal + Send + 'static>(input: FuzzInput, tag: &str)
 where
     J::Config: Send,
 {
@@ -1108,8 +1106,7 @@ where
 
     // First cycle starts from a fresh runtime and recovers an empty journal, so the expectation is
     // empty too.
-    let cfg =
-        deterministic::Config::default().with_rng(Box::new(FuzzRng::new(input.entropy.clone())));
+    let cfg = deterministic::Config::default().with_rng(input.entropy);
     let mut runner = deterministic::Runner::new(cfg);
     let mut expected = Expected::default();
     for (i, cycle) in cycles.iter().enumerate() {
@@ -1172,9 +1169,9 @@ where
 
 fn fuzz(input: FuzzInput) {
     match input.journal_type {
-        JournalType::Fixed => run::<FixedJournal<deterministic::Context, Item>>(&input, "fixed"),
+        JournalType::Fixed => run::<FixedJournal<deterministic::Context, Item>>(input, "fixed"),
         JournalType::Variable => {
-            run::<VariableJournal<deterministic::Context, Item>>(&input, "variable")
+            run::<VariableJournal<deterministic::Context, Item>>(input, "variable")
         }
     }
 }

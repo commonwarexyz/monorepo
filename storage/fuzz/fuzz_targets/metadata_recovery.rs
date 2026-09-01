@@ -16,8 +16,8 @@ use commonware_runtime::{
     mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs},
 };
 use commonware_storage::metadata::{Config, Metadata};
-use commonware_storage_fuzz::{bounded_entropy, faulted_recovery};
-use commonware_utils::{FuzzRng, Probability, sequence::U64};
+use commonware_storage_fuzz::faulted_recovery;
+use commonware_utils::{Entropy, Probability, sequence::U64};
 use libfuzzer_sys::fuzz_target;
 use std::collections::BTreeMap;
 
@@ -53,8 +53,7 @@ struct FuzzInput {
     payload: [u8; 32],
     /// Byte stream driving the runtime rng: all in-run randomness, fault sampling, and the
     /// faulted recovery chain's depth and shapes.
-    #[arbitrary(with = bounded_entropy)]
-    entropy: Vec<u8>,
+    entropy: Entropy,
 }
 
 fn config() -> Config<<Vec<u8> as Read>::Cfg> {
@@ -92,8 +91,7 @@ fn run(input: &FuzzInput, mode: PartialWriteMode) {
     let crash = input.crash;
     let path = input.path;
     let retention_percent = input.retention % 101;
-    let cfg =
-        deterministic::Config::default().with_rng(Box::new(FuzzRng::new(input.entropy.clone())));
+    let cfg = deterministic::Config::default().with_rng(input.entropy.clone());
     let runner = deterministic::Runner::new(cfg);
     let ((baseline, candidate), checkpoint) = runner.start_and_recover(move |context| {
         let fault_config = context.storage_fault_config();

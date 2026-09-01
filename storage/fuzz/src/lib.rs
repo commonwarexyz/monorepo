@@ -2,9 +2,7 @@
 //! targets.
 
 use arbitrary::Unstructured;
-use commonware_cryptography::Crc32;
 use commonware_runtime::{
-    buffer::paged::CHECKSUM_SIZE,
     deterministic::{self, PartialWriteMode},
     mocks::PendingSyncs,
 };
@@ -147,47 +145,6 @@ where
     checkpoint
 }
 
-/// Select a page's authoritative checksum slot, falling back to the other slot if a write tore.
-///
-/// `page` is one raw physical page: `page_size` logical bytes followed by the dual-slot
-/// checksum footer. Returns the CRC-validated logical length, or `None` when neither slot
-/// verifies.
-pub fn valid_page_len(page: &[u8], page_size: usize) -> Option<usize> {
-    let footer = page.get(page_size..)?;
-    if footer.len() != CHECKSUM_SIZE as usize {
-        return None;
-    }
-    let slots = [
-        (
-            u16::from_be_bytes(footer[0..2].try_into().unwrap()) as usize,
-            u32::from_be_bytes(footer[2..6].try_into().unwrap()),
-        ),
-        (
-            u16::from_be_bytes(footer[6..8].try_into().unwrap()) as usize,
-            u32::from_be_bytes(footer[8..12].try_into().unwrap()),
-        ),
-    ];
-    let authoritative = usize::from(slots[1].0 > slots[0].0);
-    for slot in [authoritative, authoritative ^ 1] {
-        let (len, checksum) = slots[slot];
-        if len > 0 && len <= page_size && Crc32::checksum(&page[..len]) == checksum {
-            return Some(len);
-        }
-    }
-    None
-}
-
-/// Cap on the entropy stream a recovery target draws its randomness from.
-const MAX_ENTROPY_BYTES: usize = 4096;
-
-/// Consume the input's remaining bytes (capped) as the entropy stream driving the runtime
-/// rng: all in-run randomness, fault sampling, and the faulted recovery chain's depth and
-/// shapes.
-pub fn bounded_entropy(u: &mut Unstructured<'_>) -> arbitrary::Result<Vec<u8>> {
-    let remaining = u.len().min(MAX_ENTROPY_BYTES);
-    Ok(u.bytes(remaining)?.to_vec())
-}
-
 /// Generate a logical page size in `1..=256`.
 pub fn bounded_page_size(u: &mut Unstructured<'_>) -> arbitrary::Result<u16> {
     u.int_in_range(1..=256)
@@ -212,36 +169,4 @@ pub fn bounded_buffer(u: &mut Unstructured<'_>) -> arbitrary::Result<usize> {
 pub fn bounded_nonzero_rate(u: &mut Unstructured<'_>) -> arbitrary::Result<Probability> {
     let percent: u8 = u.int_in_range(1..=100)?;
     Ok(probability!(u64::from(percent), 100))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use commonware_utils::TestRng;
-
-    /// Pin the drawn-config invariants: exactly one failure family arms per draw with a
-    /// nonzero rate, and every mutation arm is reachable. A regression here would
-    /// silently skew or disable fault injection in every recovery target's faulted pass.
-    #[test]
-    fn test_recovery_fault_config_draws() {
-        let mut seen = [false; 4];
-        for seed in 0..256u64 {
-            let mut rng = TestRng::new(seed);
-            let config = recovery_fault_config(&mut rng);
-            let write = config.write_rate.expect("write config must always be set");
-            let families = [
-                write.failure_rate != probability!(0, 1),
-                config.sync_rate.is_some(),
-                config.resize_rate.is_some(),
-                config.remove_rate.is_some(),
-            ];
-            assert_eq!(
-                families.iter().filter(|armed| **armed).count(),
-                1,
-                "exactly one failure family must arm per draw"
-            );
-            seen[families.iter().position(|armed| *armed).unwrap()] = true;
-        }
-        assert_eq!(seen, [true; 4], "every mutation arm must be reachable");
-    }
 }

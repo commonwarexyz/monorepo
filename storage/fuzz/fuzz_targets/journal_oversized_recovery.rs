@@ -15,7 +15,7 @@ use commonware_cryptography::Crc32;
 use commonware_runtime::{
     Blob as _, Buf, BufMut, BufferPooler, Handle, ReadOptions, Runner, Storage as _,
     Supervisor as _,
-    buffer::paged::CacheRef,
+    buffer::paged::{CacheRef, page_len},
     deterministic::{self, PartialWriteMode, WriteConfig},
     mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs, release_pending_syncs},
 };
@@ -27,10 +27,8 @@ use commonware_storage::{
     },
     metadata::{Config as MetadataConfig, Metadata},
 };
-use commonware_storage_fuzz::{
-    bounded_entropy, faulted_recovery, poll_interrupted, valid_page_len,
-};
-use commonware_utils::{FuzzRng, NZU16, NZUsize, Probability, sequence::U64};
+use commonware_storage_fuzz::{faulted_recovery, poll_interrupted};
+use commonware_utils::{Entropy, NZU16, NZUsize, Probability, sequence::U64};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -141,8 +139,7 @@ struct FuzzInput {
     remove_failure: u8,
     /// Byte stream driving the runtime rng: all in-run randomness, fault sampling, and the
     /// faulted recovery chain's depth and shapes.
-    #[arbitrary(with = bounded_entropy)]
-    entropy: Vec<u8>,
+    entropy: Entropy,
 }
 
 fn config(pooler: &impl BufferPooler) -> Config<()> {
@@ -277,7 +274,7 @@ async fn recover_expected(
                 .await
                 .expect("oracle index read failed")
                 .coalesce();
-            let Some(len) = valid_page_len(physical.as_ref(), page_size) else {
+            let Some(len) = page_len(physical.as_ref(), page_size) else {
                 break;
             };
             logical.extend_from_slice(&physical.as_ref()[..len]);
@@ -430,8 +427,7 @@ fn fuzz(input: FuzzInput) {
     let tracked = input.tracked;
 
     let first_phase_input = input.clone();
-    let cfg =
-        deterministic::Config::default().with_rng(Box::new(FuzzRng::new(input.entropy.clone())));
+    let cfg = deterministic::Config::default().with_rng(input.entropy);
     let runner = deterministic::Runner::new(cfg);
     let ((durable, model, flushed_all), checkpoint) =
         runner.start_and_recover(move |context| async move {

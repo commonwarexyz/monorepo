@@ -17,7 +17,7 @@ use commonware_codec::{DecodeExt as _, FixedSize, Read, ReadExt as _};
 use commonware_cryptography::Crc32;
 use commonware_runtime::{
     Blob as _, Buf, BufferPooler, Handle, ReadOptions, Runner, Storage as _, Supervisor as _,
-    buffer::paged::CacheRef,
+    buffer::paged::{CacheRef, page_len},
     deterministic::{self, PartialWriteMode, WriteConfig},
     mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs, release_pending_syncs},
 };
@@ -26,10 +26,8 @@ use commonware_storage::{
     rmap::RMap,
     translator::EightCap,
 };
-use commonware_storage_fuzz::{
-    bounded_entropy, faulted_recovery, poll_interrupted, valid_page_len,
-};
-use commonware_utils::{FuzzRng, NZUsize, Probability, sequence::FixedBytes};
+use commonware_storage_fuzz::{faulted_recovery, poll_interrupted};
+use commonware_utils::{Entropy, NZUsize, Probability, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -68,8 +66,7 @@ struct FuzzInput {
     remove_failure: u8,
     /// Byte stream driving the runtime rng: all in-run randomness, fault sampling, and the
     /// faulted recovery chain's depth and shapes.
-    #[arbitrary(with = bounded_entropy)]
-    entropy: Vec<u8>,
+    entropy: Entropy,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -222,7 +219,7 @@ async fn read_index_sections(
                 .await
                 .expect("oracle index read failed")
                 .coalesce();
-            let Some(len) = valid_page_len(physical.as_ref(), INDEX_PAGE_SIZE) else {
+            let Some(len) = page_len(physical.as_ref(), INDEX_PAGE_SIZE) else {
                 break;
             };
             logical.extend_from_slice(&physical.as_ref()[..len]);
@@ -458,8 +455,7 @@ fn fuzz(input: FuzzInput) {
     let baseline_count = intended.len() / 2;
     let first_phase_entries = intended.clone();
     let first_phase_input = input.clone();
-    let cfg =
-        deterministic::Config::default().with_rng(Box::new(FuzzRng::new(input.entropy.clone())));
+    let cfg = deterministic::Config::default().with_rng(input.entropy);
     let runner = deterministic::Runner::new(cfg);
     let ((durable, exempt_below, pruned), checkpoint) =
         runner.start_and_recover(move |context| async move {

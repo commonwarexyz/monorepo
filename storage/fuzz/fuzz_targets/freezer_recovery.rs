@@ -23,8 +23,8 @@ use commonware_runtime::{
     deterministic::{self, PartialWriteMode, WriteConfig},
 };
 use commonware_storage::freezer::{Config, Freezer, Identifier};
-use commonware_storage_fuzz::{bounded_entropy, faulted_recovery};
-use commonware_utils::{FuzzRng, NZU16, NZUsize, Probability, sequence::FixedBytes};
+use commonware_storage_fuzz::faulted_recovery;
+use commonware_utils::{Entropy, NZU16, NZUsize, Probability, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 
 type Key = FixedBytes<32>;
@@ -60,8 +60,7 @@ struct FuzzInput {
     deepen: bool,
     /// Byte stream driving the runtime rng: all in-run randomness, fault sampling, and the
     /// faulted recovery chain's depth and shapes.
-    #[arbitrary(with = bounded_entropy)]
-    entropy: Vec<u8>,
+    entropy: Entropy,
 }
 
 /// Build the deterministic Freezer configuration used by the recovery scenario.
@@ -137,8 +136,7 @@ async fn assert_values<E: commonware_storage::Context>(
 /// Run one crash/recovery scenario for the selected partial-write mode.
 fn run(input: &FuzzInput, mode: PartialWriteMode) {
     let phase_input = input.clone();
-    let cfg =
-        deterministic::Config::default().with_rng(Box::new(FuzzRng::new(input.entropy.clone())));
+    let cfg = deterministic::Config::default().with_rng(input.entropy.clone());
     let runner = deterministic::Runner::new(cfg);
     let ((freezer_checkpoint, baseline, candidate_cursors), runtime_checkpoint) = runner
         .start_and_recover(move |context| async move {

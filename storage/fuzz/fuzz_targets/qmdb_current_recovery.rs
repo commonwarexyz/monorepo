@@ -25,10 +25,10 @@ use commonware_storage::{
     translator::TwoCap,
 };
 use commonware_storage_fuzz::{
-    bounded_buffer, bounded_entropy, bounded_items, bounded_nonzero_rate, bounded_page_cache_size,
+    bounded_buffer, bounded_items, bounded_nonzero_rate, bounded_page_cache_size,
     bounded_page_size, faulted_recovery,
 };
-use commonware_utils::{FuzzRng, NZU64, NZUsize, Probability, sequence::FixedBytes};
+use commonware_utils::{Entropy, NZU64, NZUsize, Probability, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::{BTreeSet, HashMap},
@@ -87,8 +87,7 @@ struct FuzzInput {
     operations: Vec<CurrentOperation>,
     /// Byte stream driving the runtime rng: all in-run randomness, fault sampling, and the
     /// faulted recovery chain's depth and shapes.
-    #[arbitrary(with = bounded_entropy)]
-    entropy: Vec<u8>,
+    entropy: Entropy,
 }
 
 #[derive(Clone, Copy)]
@@ -252,8 +251,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
     let operations = input.operations.clone();
     let suffix = suffix_base.to_string();
 
-    let cfg =
-        deterministic::Config::default().with_rng(Box::new(FuzzRng::new(input.entropy.clone())));
+    let cfg = deterministic::Config::default().with_rng(input.entropy.clone());
     let runner = deterministic::Runner::new(cfg);
 
     // Phase 1: Execute operations with fault injection until crash.

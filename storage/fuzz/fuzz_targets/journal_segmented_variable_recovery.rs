@@ -21,15 +21,13 @@
 use arbitrary::Arbitrary;
 use commonware_runtime::{
     Blob as _, BufferPooler, ReadOptions, Runner, Storage as _, Supervisor as _,
-    buffer::paged::CacheRef,
+    buffer::paged::{CacheRef, page_len},
     deterministic::{self, PartialWriteMode, WriteConfig},
     mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs},
 };
 use commonware_storage::journal::{Error, segmented::variable};
-use commonware_storage_fuzz::{
-    bounded_entropy, faulted_recovery, poll_interrupted, valid_page_len,
-};
-use commonware_utils::{FuzzRng, NZUsize, Probability};
+use commonware_storage_fuzz::{faulted_recovery, poll_interrupted};
+use commonware_utils::{Entropy, NZUsize, Probability};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -70,8 +68,7 @@ struct FuzzInput {
     final_polls: u8,
     /// Byte stream driving the runtime rng: all in-run randomness, fault sampling, and the
     /// faulted recovery chain's depth and shapes.
-    #[arbitrary(with = bounded_entropy)]
-    entropy: Vec<u8>,
+    entropy: Entropy,
 }
 
 fn config(
@@ -160,7 +157,7 @@ async fn recover_expected(
                 .await
                 .expect("oracle read failed")
                 .coalesce();
-            match valid_page_len(physical.as_ref(), PAGE_SIZE) {
+            match page_len(physical.as_ref(), PAGE_SIZE) {
                 Some(len) => {
                     any_valid = true;
                     if prefix_open {
@@ -266,8 +263,7 @@ fn fuzz(input: FuzzInput) {
     let baseline = usize::from(input.baseline) % (script.len() + 1);
     let phase_script = script;
     let phase_input = input.clone();
-    let cfg =
-        deterministic::Config::default().with_rng(Box::new(FuzzRng::new(input.entropy.clone())));
+    let cfg = deterministic::Config::default().with_rng(input.entropy);
     let runner = deterministic::Runner::new(cfg);
     let ((durable, effective, live, doomed), checkpoint) =
         runner.start_and_recover(move |context| async move {

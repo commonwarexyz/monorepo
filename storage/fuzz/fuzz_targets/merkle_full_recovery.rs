@@ -20,10 +20,10 @@ use commonware_storage::merkle::{
     hasher::Standard as StandardHasher, mem::Mem, mmb, mmr,
 };
 use commonware_storage_fuzz::{
-    bounded_buffer, bounded_entropy, bounded_items, bounded_nonzero_rate, bounded_page_cache_size,
+    bounded_buffer, bounded_items, bounded_nonzero_rate, bounded_page_cache_size,
     bounded_page_size, faulted_recovery,
 };
-use commonware_utils::{FuzzRng, NZU64, Probability, sync::RwLock};
+use commonware_utils::{Entropy, NZU64, Probability, sync::RwLock};
 use libfuzzer_sys::fuzz_target;
 use std::{
     num::{NonZeroU16, NonZeroUsize},
@@ -84,8 +84,7 @@ struct FuzzInput {
     operations: Vec<MerkleOperation>,
     /// Byte stream driving the runtime rng: all in-run randomness, fault sampling, and the
     /// faulted recovery chain's depth and shapes.
-    #[arbitrary(with = bounded_entropy)]
-    entropy: Vec<u8>,
+    entropy: Entropy,
 }
 
 fn merkle_config(
@@ -308,8 +307,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
     let items_per_blob = input.items_per_blob;
     let write_buffer = NonZeroUsize::new(input.write_buffer).unwrap();
     let replay_buffer = NonZeroUsize::new(input.replay_buffer).unwrap();
-    let cfg =
-        deterministic::Config::default().with_rng(Box::new(FuzzRng::new(input.entropy.clone())));
+    let cfg = deterministic::Config::default().with_rng(input.entropy.clone());
     let partition_suffix = format!("crash-{suffix}");
     let runner = deterministic::Runner::new(cfg);
     let operations = input.operations.clone();

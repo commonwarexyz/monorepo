@@ -17,10 +17,10 @@ use arbitrary::Arbitrary;
 use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::queue::{Config, Queue};
 use commonware_storage_fuzz::{
-    bounded_buffer, bounded_entropy, bounded_items, bounded_nonzero_rate, bounded_page_cache_size,
+    bounded_buffer, bounded_items, bounded_nonzero_rate, bounded_page_cache_size,
     bounded_page_size, faulted_recovery,
 };
-use commonware_utils::{FuzzRng, Probability, sync::RwLock};
+use commonware_utils::{Entropy, Probability, sync::RwLock};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::BTreeMap,
@@ -84,8 +84,7 @@ struct FuzzInput {
     operations: Vec<QueueOperation>,
     /// Byte stream driving the runtime rng: all in-run randomness, fault sampling, and the
     /// faulted recovery chain's depth and shapes.
-    #[arbitrary(with = bounded_entropy)]
-    entropy: Vec<u8>,
+    entropy: Entropy,
 }
 
 /// Tracking state for verifying recovery.
@@ -523,8 +522,7 @@ fn fuzz(input: FuzzInput) {
     let items_per_section = NonZeroU64::new(input.items_per_section).unwrap();
     let write_buffer = NonZeroUsize::new(input.write_buffer).unwrap();
     let replay_buffer = NonZeroUsize::new(input.replay_buffer).unwrap();
-    let cfg =
-        deterministic::Config::default().with_rng(Box::new(FuzzRng::new(input.entropy.clone())));
+    let cfg = deterministic::Config::default().with_rng(input.entropy);
     let partition_name = "queue-crash-recovery".to_string();
     let operations = input.operations.clone();
     let sync_failure_rate = input.sync_failure_rate;
