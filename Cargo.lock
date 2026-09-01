@@ -1613,6 +1613,7 @@ dependencies = [
  "clap",
  "commonware-cryptography",
  "commonware-macros",
+ "commonware-utils",
  "futures",
  "reqwest",
  "serde",
@@ -1974,6 +1975,7 @@ name = "commonware-runtime-fuzz"
 version = "2026.7.0"
 dependencies = [
  "arbitrary",
+ "commonware-cryptography",
  "commonware-runtime",
  "commonware-utils",
  "libfuzzer-sys",

@@ -1497,6 +1497,35 @@ mod tests {
         db.commit().await.unwrap()
     }
 
+    /// `operations()` on a current batch must cover exactly the batch's own applied range
+    /// in the ops log.
+    #[test_traced]
+    fn test_operations_match_applied_range() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            let db = MmrDb::init(
+                ctx.child("db"),
+                fixed_config::<OneCap>("operations-match-applied-range", &ctx),
+            )
+            .await
+            .unwrap();
+            let db = populate_fixed_db::<mmr::Family, _>(db, 0, 8).await;
+
+            let mut batch = db.new_batch();
+            for idx in 0..4u64 {
+                let key = Sha256::hash(&[&idx.to_be_bytes()]);
+                let value = Sha256::hash(&[&(idx + 100).to_be_bytes()]);
+                batch = batch.write(key, Some(value));
+            }
+            let merkleized = batch.merkleize(&db, None).await.unwrap();
+            let (start, ops) = merkleized.operations();
+            let (db, range) = db.apply_batch(merkleized).await.unwrap();
+            assert_eq!(start, range.start);
+            assert_eq!(*start + ops.len() as u64, *range.end);
+            db.destroy().await.unwrap();
+        });
+    }
+
     /// State committed via an awaited start_sync handle is recovered on reopen, including the
     /// grafted bitmap contribution to the root.
     #[test_traced]

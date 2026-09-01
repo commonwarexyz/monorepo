@@ -342,6 +342,7 @@ impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
                 params.page_cache_size,
             ),
             write_buffer: params.write_buffer,
+            replay_buffer: NZUsize!(4096),
         }
     }
 
@@ -409,6 +410,7 @@ impl FuzzJournal for VariableJournal<deterministic::Context, Item> {
                 params.page_cache_size,
             ),
             write_buffer: params.write_buffer,
+            replay_buffer: NZUsize!(4096),
         }
     }
 

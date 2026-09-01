@@ -136,6 +136,10 @@ impl<D: Digest> From<archive::Identifier<'_, D>> for Identifier<D> {
 #[derive(Clone, Debug)]
 pub enum Update<B: Block, A: Acknowledgement = Exact> {
     /// A new finalized tip and the finalization round.
+    ///
+    /// This update can be reported before the finalized block and finalization archives complete
+    /// a durable sync. Applications must not use this update as a storage durability signal.
+    /// [`Update::Block`] provides that guarantee.
     Tip(Round, Height, B::Digest),
     /// A new finalized block and an [Acknowledgement] for the application to signal once processed.
     ///

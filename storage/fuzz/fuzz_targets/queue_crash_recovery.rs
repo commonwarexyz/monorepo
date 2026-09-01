@@ -11,7 +11,7 @@
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::queue::{Config, Queue};
-use commonware_utils::{FuzzRng, Probability, probability};
+use commonware_utils::{NZUsize, Probability, probability};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::BTreeMap,
@@ -93,7 +93,6 @@ struct FuzzInput {
     write_failure_rate: Probability,
     /// Sequence of operations to execute.
     operations: Vec<QueueOperation>,
-    raw_bytes: Vec<u8>,
 }
 
 /// Tracking state for verifying recovery.
@@ -459,7 +458,7 @@ fn fuzz(input: FuzzInput) {
     let page_cache_size = NonZeroUsize::new(input.page_cache_size).unwrap();
     let items_per_section = NonZeroU64::new(input.items_per_section).unwrap();
     let write_buffer = NonZeroUsize::new(input.write_buffer).unwrap();
-    let cfg = deterministic::Config::new().with_rng(Box::new(FuzzRng::new(input.raw_bytes)));
+    let cfg = deterministic::Config::default().with_seed(input.seed);
     let partition_name = format!("queue-crash-recovery-{}", input.seed);
     let operations = input.operations.clone();
     let sync_failure_rate = input.sync_failure_rate;
@@ -478,6 +477,7 @@ fn fuzz(input: FuzzInput) {
                 codec_config: ((0usize..).into(), ()),
                 page_cache: CacheRef::from_pooler(&ctx, page_size, page_cache_size),
                 write_buffer,
+                replay_buffer: NZUsize!(4096),
             };
 
             let queue = Queue::<_, Vec<u8>>::init(ctx.child("storage"), queue_cfg)
@@ -514,6 +514,7 @@ fn fuzz(input: FuzzInput) {
             codec_config: ((0usize..).into(), ()),
             page_cache: CacheRef::from_pooler(&ctx, page_size, page_cache_size),
             write_buffer,
+            replay_buffer: NZUsize!(4096),
         };
 
         let queue = Queue::<_, Vec<u8>>::init(ctx.child("storage"), queue_cfg)

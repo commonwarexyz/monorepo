@@ -13,7 +13,7 @@ use commonware_storage::merkle::{
     Bagging::ForwardFold, Family as MerkleFamily, Location, full::Config,
     hasher::Standard as StandardHasher, mmb, mmr,
 };
-use commonware_utils::{FuzzRng, NZU64, Probability, probability};
+use commonware_utils::{NZU64, NZUsize, Probability, probability};
 use libfuzzer_sys::fuzz_target;
 use std::num::{NonZeroU16, NonZeroUsize};
 
@@ -24,7 +24,7 @@ const DATA_SIZE: usize = 32;
 const MAX_WRITE_BUF: usize = 2048;
 
 type Merkle<F> =
-    commonware_storage::merkle::full::Merkle<F, deterministic::Context, Digest, Sequential>;
+commonware_storage::merkle::full::Merkle<F, deterministic::Context, Digest, Sequential>;
 
 fn bounded_page_size(u: &mut Unstructured<'_>) -> Result<u16> {
     u.int_in_range(1..=256)
@@ -85,7 +85,6 @@ struct FuzzInput {
     write_failure_rate: Probability,
     /// Sequence of operations to execute.
     operations: Vec<MerkleOperation>,
-    raw_bytes: Vec<u8>,
 }
 
 fn merkle_config(
@@ -101,6 +100,7 @@ fn merkle_config(
         metadata_partition: format!("metadata-{partition_suffix}"),
         items_per_blob: NZU64!(items_per_blob),
         write_buffer,
+        replay_buffer: NZUsize!(4096),
         strategy: Sequential,
         page_cache: CacheRef::from_pooler(pooler, page_size, page_cache_size),
     }
@@ -222,8 +222,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
     let page_cache_size = NonZeroUsize::new(input.page_cache_size).unwrap();
     let items_per_blob = input.items_per_blob;
     let write_buffer = NonZeroUsize::new(input.write_buffer).unwrap();
-    let cfg =
-        deterministic::Config::new().with_rng(Box::new(FuzzRng::new(input.raw_bytes.clone())));
+    let cfg = deterministic::Config::default().with_seed(input.seed);
     let partition_suffix = format!("crash-{suffix}-{}", input.seed);
     let runner = deterministic::Runner::new(cfg);
     let operations = input.operations.clone();
@@ -248,8 +247,8 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                     write_buffer,
                 ),
             )
-            .await
-            .unwrap();
+                .await
+                .unwrap();
 
             let storage_fault_cfg = ctx.storage_fault_config();
             *storage_fault_cfg.write() = deterministic::FaultConfig {
@@ -284,8 +283,8 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                 write_buffer,
             ),
         )
-        .await
-        .expect("recovery should succeed");
+            .await
+            .expect("recovery should succeed");
 
         // Verify recovered state is within expected bounds
         let size = merkle.size().as_u64();

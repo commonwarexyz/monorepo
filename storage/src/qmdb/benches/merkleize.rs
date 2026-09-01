@@ -9,7 +9,9 @@
 //!   update operations above the inactivity floor — the workload the floor-raise bitmap-skip
 //!   optimizes for.
 
-use crate::common::{CHUNK_SIZE, Digest, WRITE_BUFFER_SIZE, seed_db, write_random_updates};
+use crate::common::{
+    CHUNK_SIZE, Digest, REPLAY_BUFFER_SIZE, WRITE_BUFFER_SIZE, seed_db, write_random_updates,
+};
 use commonware_bench::{Benchmark, Metric, Workload};
 use commonware_cryptography::Sha256;
 use commonware_macros::boxed;
@@ -293,6 +295,7 @@ fn merkle_cfg(ctx: &(impl BufferPooler + Strategizer), pc: CacheRef) -> full::Co
         metadata_partition: format!("metadata-{PARTITION}"),
         items_per_blob: ITEMS_PER_BLOB,
         write_buffer: WRITE_BUFFER_SIZE,
+        replay_buffer: REPLAY_BUFFER_SIZE,
         strategy: ctx.strategy(THREADS),
         page_cache: pc,
     }
@@ -304,6 +307,7 @@ fn fix_log_cfg(pc: CacheRef) -> FConfig {
         items_per_blob: ITEMS_PER_BLOB,
         page_cache: pc,
         write_buffer: WRITE_BUFFER_SIZE,
+        replay_buffer: REPLAY_BUFFER_SIZE,
     }
 }
 
@@ -315,6 +319,7 @@ fn var_log_cfg(pc: CacheRef) -> VConfig<((), ())> {
         codec_config: ((), ()),
         page_cache: pc,
         write_buffer: WRITE_BUFFER_SIZE,
+        replay_buffer: REPLAY_BUFFER_SIZE,
     }
 }
 

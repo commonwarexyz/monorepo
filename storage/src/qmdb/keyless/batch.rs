@@ -4,7 +4,7 @@ use super::{Keyless, operation::Operation};
 use crate::{
     Context,
     journal::{authenticated, contiguous::Mutable},
-    merkle::{Family, Location},
+    merkle::{Family, Location, Proof},
     qmdb::{
         Error,
         any::value::ValueEncoding,
@@ -46,6 +46,12 @@ where
 
 /// A speculative batch of operations whose root digest has been computed,
 /// in contrast to [`UnmerkleizedBatch`].
+///
+/// # Branch validity
+///
+/// Reads through the chain, constructing child batches, and applying the batch later are
+/// only valid while every batch applied to the DB since this batch was merkleized is an
+/// ancestor of this batch (see [`crate::qmdb::batch_chain`] for more details).
 #[derive(Clone)]
 pub struct MerkleizedBatch<F: Family, D: Digest, V: ValueEncoding, S: Strategy>
 where
@@ -285,8 +291,8 @@ where
         let total_size = self.base.size + ops.len() as u64;
         let inactive_peaks = F::inactive_peaks(total_size, inactivity_floor);
 
-        // Leaf and node hashing dominate merkleization, so run them as one job on the
-        // strategy instead of occupying the calling task (see `Journal::merkleize`).
+        // Leaf and node hashing dominate merkleization, so run them as one job through the
+        // strategy (see `Journal::merkleize`).
         let (journal, root) = db
             .journal
             .merkleize(self.journal_batch, ops, inactive_peaks)
@@ -326,6 +332,33 @@ where
     /// Return the [`Bounds`] of the batch.
     pub const fn bounds(&self) -> &Bounds<F, D> {
         &self.bounds
+    }
+
+    /// Return the operations this batch appends to the log and the location of the first.
+    pub fn operations(&self) -> (Location<F>, Arc<Vec<Operation<F, V>>>) {
+        (
+            self.bounds.base.size,
+            Arc::clone(self.journal_batch.items()),
+        )
+    }
+
+    /// Inclusion proof for the operations returned by [`Self::operations`], anchored at
+    /// this batch's tip. The pair verifies against [`Self::root`] via
+    /// [`crate::qmdb::verify_proof`].
+    ///
+    /// Nodes below this batch chain are read from `db`'s
+    /// [Merkle store][crate::merkle::mem::Mem], which retains them at least until
+    /// this batch's changes are flushed (by a commit or sync after apply).
+    pub fn proof<E, C, H>(&self, db: &Keyless<F, E, V, C, H, S>) -> Result<Proof<F, D>, Error<F>>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, V>>,
+        H: Hasher<Digest = D>,
+    {
+        let inactive_peaks = F::inactive_peaks(self.bounds.tip.size, self.bounds.inactivity_floor);
+        db.journal
+            .speculative_proof(&self.journal_batch, inactive_peaks)
+            .map_err(Into::into)
     }
 
     /// Read a value at `loc`.

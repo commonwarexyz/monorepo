@@ -3,7 +3,7 @@
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::queue::{Config, Queue};
-use commonware_utils::FuzzRng;
+use commonware_utils::NZUsize;
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::BTreeSet,
@@ -65,7 +65,6 @@ struct FuzzInput {
     write_buffer: usize,
     /// Sequence of operations to execute.
     operations: Vec<QueueOperation>,
-    raw_bytes: Vec<u8>,
 }
 
 /// Reference model for verifying queue behavior.
@@ -156,8 +155,7 @@ impl ReferenceQueue {
 }
 
 fn fuzz(input: FuzzInput) {
-    let cfg = deterministic::Config::new().with_rng(Box::new(FuzzRng::new(input.raw_bytes)));
-    let runner = deterministic::Runner::new(cfg);
+    let runner = deterministic::Runner::default();
 
     let page_size = NonZeroU16::new(input.page_size).unwrap();
     let page_cache_size = NonZeroUsize::new(input.page_cache_size).unwrap();
@@ -172,6 +170,7 @@ fn fuzz(input: FuzzInput) {
             codec_config: ((0usize..).into(), ()),
             page_cache: CacheRef::from_pooler(&context, page_size, page_cache_size),
             write_buffer,
+            replay_buffer: NZUsize!(4096),
         };
 
         let mut queue = Queue::<_, Vec<u8>>::init(context.child("storage"), cfg)

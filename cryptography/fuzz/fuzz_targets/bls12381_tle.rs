@@ -160,7 +160,8 @@ fn fuzz(op: FuzzOperation) {
                 master_public,
                 (&namespace, &target),
                 &message_block,
-            );
+            )
+            .expect("encryption should succeed");
 
             let signature = sign_message::<MinPk>(&master_secret, &namespace, &target);
             let decrypted = decrypt::<MinPk>(&signature, &ciphertext);
@@ -188,7 +189,8 @@ fn fuzz(op: FuzzOperation) {
                 master_public,
                 (&namespace, &target),
                 &message_block,
-            );
+            )
+            .expect("encryption should succeed");
 
             let signature = sign_message::<MinSig>(&master_secret, &namespace, &target);
             let decrypted = decrypt::<MinSig>(&signature, &ciphertext);
@@ -217,7 +219,8 @@ fn fuzz(op: FuzzOperation) {
                 master_public1,
                 (&namespace, &target),
                 &message_block,
-            );
+            )
+            .expect("encryption should succeed");
 
             let wrong_signature = sign_message::<MinPk>(&master_secret2, &namespace, &target);
             let _ = decrypt::<MinPk>(&wrong_signature, &ciphertext);
@@ -240,7 +243,8 @@ fn fuzz(op: FuzzOperation) {
                 master_public1,
                 (&namespace, &target),
                 &message_block,
-            );
+            )
+            .expect("encryption should succeed");
 
             let wrong_signature = sign_message::<MinSig>(&master_secret2, &namespace, &target);
             let _ = decrypt::<MinSig>(&wrong_signature, &ciphertext);
@@ -264,7 +268,8 @@ fn fuzz(op: FuzzOperation) {
                 master_public,
                 (&namespace, &target),
                 &message_block,
-            );
+            )
+            .expect("encryption should succeed");
 
             let mut encoded = Vec::new();
             commonware_codec::Write::write(&ciphertext, &mut encoded);
@@ -296,7 +301,8 @@ fn fuzz(op: FuzzOperation) {
                 master_public,
                 (&namespace, &target),
                 &message_block,
-            );
+            )
+            .expect("encryption should succeed");
 
             let mut encoded = Vec::new();
             commonware_codec::Write::write(&ciphertext, &mut encoded);

@@ -20,6 +20,7 @@ use oversized::Record;
 use rand::RngExt as _;
 
 const WRITE_BUFFER: NonZeroUsize = NZUsize!(1024);
+const REPLAY_BUFFER: NonZeroUsize = NZUsize!(1024);
 const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(4096);
 const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
@@ -33,6 +34,7 @@ fn authenticated_merkle_config(
         metadata_partition: format!("{prefix}-merkle-metadata"),
         items_per_blob: NZU64!(11),
         write_buffer: WRITE_BUFFER,
+        replay_buffer: REPLAY_BUFFER,
         strategy: Sequential,
         page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
     }
@@ -44,6 +46,7 @@ fn authenticated_journal_config(prefix: &str, pooler: &impl BufferPooler) -> fix
         items_per_blob: NZU64!(11),
         page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         write_buffer: WRITE_BUFFER,
+        replay_buffer: REPLAY_BUFFER,
     }
 }
 
@@ -97,6 +100,7 @@ impl StorageWorkload for ContiguousFixedWorkload {
             items_per_blob: ITEMS_PER_BLOB,
             page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             write_buffer: WRITE_BUFFER,
+            replay_buffer: REPLAY_BUFFER,
         };
         let mut journal = fixed::Journal::<_, u64>::init(context.child("journal"), config).await?;
 
@@ -126,6 +130,7 @@ impl StorageWorkload for ContiguousVariableWorkload {
             items_per_section: ITEMS_PER_BLOB,
             page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             write_buffer: WRITE_BUFFER,
+            replay_buffer: REPLAY_BUFFER,
             compression: None,
             codec_config: (RangeCfg::new(0..256), ()),
         };
@@ -314,15 +319,13 @@ impl StorageWorkload for SegmentedOversizedWorkload {
             index_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             index_write_buffer: WRITE_BUFFER,
             value_write_buffer: WRITE_BUFFER,
+            replay_buffer: REPLAY_BUFFER,
             compression: None,
             codec_config: (RangeCfg::new(0..256), ()),
         };
-        let mut journal = oversized::Oversized::<_, TestEntry, Vec<u8>>::init(
-            context.child("journal"),
-            config,
-            None,
-        )
-        .await?;
+        let mut journal =
+            oversized::Oversized::<_, TestEntry, Vec<u8>>::init(context.child("journal"), config)
+                .await?;
 
         let items_count = context.random_range(0..(ITEMS_PER_BLOB.get() as usize) * 4);
         let mut data_to_write = vec![Vec::new(); items_count];

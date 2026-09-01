@@ -96,8 +96,8 @@ stability_scope!(BETA {
     /// contents: the application-owned blob version passed to
     /// [crate::Storage::open_versioned] is a separate field and is unaffected by the layout.
     ///
-    /// New blobs are always created with the latest layout. Reopening an existing blob honors
-    /// the layout recorded in its header.
+    /// Production storage creates new blobs with the latest layout. Reopening an existing blob
+    /// honors the layout recorded in its header.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub(crate) enum Layout {
         /// An 8-byte header, with data beginning immediately after it.
@@ -193,8 +193,8 @@ stability_scope!(BETA {
         /// Returns true if a blob's raw contents are consistent with the creation of a
         /// blob with this layout that was interrupted before its header became durable.
         ///
-        /// This runtime never creates [Layout::V0] blobs, so no contents qualify for V0 (a
-        /// pre-V1 writer's torn creation is a sub-prelude file, healed as new before any
+        /// Production storage never creates [Layout::V0] blobs, so no contents qualify for V0
+        /// (a pre-V1 writer's torn creation is a sub-prelude file, healed as new before any
         /// parsing).
         ///
         /// [Layout::V1] creation writes the region with set_len(0) -> write -> sync, and
@@ -310,26 +310,34 @@ stability_scope!(BETA {
             }
         }
 
-        /// Creates the header region for a new blob using the latest version from the range and
-        /// the latest header layout. Returns (encoded header region, blob version); the data
-        /// offset is the region's length.
+        /// Creates the header region for a new blob in the given layout using the latest version
+        /// from the range. Returns (encoded header region, blob version); the data offset is the
+        /// region's length. Production storage creates [Layout::V1] regions; other layouts exist
+        /// for compatibility tests.
         ///
         /// Callers writing this region over an existing blob must truncate it to zero first, so
         /// a torn write cannot splice old bytes into a fully valid header with a wrong version:
         /// every partial state in the canonical-prefix model then remains classifiable as an
         /// interrupted creation.
-        pub(crate) fn create(versions: &RangeInclusive<u16>) -> (Vec<u8>, u16) {
-            let layout = Layout::V1;
+        pub(crate) fn create(
+            layout: Layout,
+            versions: &RangeInclusive<u16>,
+        ) -> (Vec<u8>, u16) {
             let blob_version = *versions.end();
             let header = Self {
                 magic: layout.magic(),
                 runtime_version: layout.runtime_version(),
                 blob_version,
             };
-            let mut region = Vec::with_capacity(Layout::V1.data_offset() as usize);
+            let mut region = Vec::with_capacity(layout.data_offset() as usize);
             region.extend_from_slice(&header.encode());
-            let crc = Crc32::checksum(&region);
-            region.extend_from_slice(&crc.to_be_bytes());
+            match layout {
+                Layout::V0 => {}
+                Layout::V1 => {
+                    let crc = Crc32::checksum(&region);
+                    region.extend_from_slice(&crc.to_be_bytes());
+                }
+            }
             region.resize(layout.data_offset() as usize, 0);
             (region, blob_version)
         }
@@ -493,30 +501,47 @@ pub(crate) mod tests {
     /// Raw bytes of a legacy V0 blob: an 8-byte header followed immediately by `payload`, as a
     /// pre-V1 writer laid them out.
     pub(crate) fn v0_blob_bytes(blob_version: u16, payload: &[u8]) -> Vec<u8> {
-        let mut raw = v0_header(blob_version).encode().to_vec();
+        let (mut raw, _) = Header::create(Layout::V0, &(blob_version..=blob_version));
         raw.extend_from_slice(payload);
         raw
     }
 
     /// Raw bytes of a V1 blob with the given version, followed by `payload`.
     pub(crate) fn v1_blob_bytes(blob_version: u16, payload: &[u8]) -> Vec<u8> {
-        let header = Header {
-            magic: Layout::V1.magic(),
-            runtime_version: Layout::V1.runtime_version(),
-            blob_version,
-        };
-        let mut raw = Vec::with_capacity(Layout::V1.data_offset() as usize + payload.len());
-        raw.extend_from_slice(&header.encode());
-        let crc = commonware_cryptography::Crc32::checksum(&raw);
-        raw.extend_from_slice(&crc.to_be_bytes());
-        raw.resize(Layout::V1.data_offset() as usize, 0);
+        let (mut raw, _) = Header::create(Layout::V1, &(blob_version..=blob_version));
         raw.extend_from_slice(payload);
         raw
     }
 
     #[test]
+    fn test_header_create_v0() {
+        let (region, blob_version) = Header::create(Layout::V0, &(0..=7));
+        assert_eq!(blob_version, 7);
+        assert_eq!(region.len(), Layout::V0.data_offset() as usize);
+
+        let (size, parsed_blob_version, data_offset) =
+            Header::parse(&region, Layout::V0.data_offset(), &(0..=7)).unwrap();
+        assert_eq!(size, 0);
+        assert_eq!(parsed_blob_version, 7);
+        assert_eq!(data_offset, Layout::V0.data_offset());
+    }
+
+    #[test]
+    fn test_header_v0_fixture_bytes() {
+        let (region, _) = Header::create(Layout::V0, &(3..=3));
+        assert_eq!(
+            region,
+            [
+                b'C', b'W', b'I', b'C', // V0 magic
+                0x00, 0x00, // runtime version 0
+                0x00, 0x03, // blob version 3
+            ]
+        );
+    }
+
+    #[test]
     fn test_header_create_v1() {
-        let (region, blob_version) = Header::create(&(0..=7));
+        let (region, blob_version) = Header::create(Layout::V1, &(0..=7));
         assert_eq!(blob_version, 7);
         assert_eq!(region.len(), Layout::V1.data_offset() as usize);
 
@@ -535,7 +560,7 @@ pub(crate) mod tests {
     /// (the padding is asserted zero in [test_header_create_v1]).
     #[test]
     fn test_header_v1_fixture_bytes() {
-        let (region, _) = Header::create(&(3..=3));
+        let (region, _) = Header::create(Layout::V1, &(3..=3));
         let expected = [
             b'C', b'W', b'I', b'K', // V1 magic
             0x00, 0x01, // runtime version 1
@@ -549,7 +574,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_header_extension_rejects_bad_crc() {
-        let (mut region, _) = Header::create(&(0..=0));
+        let (mut region, _) = Header::create(Layout::V1, &(0..=0));
         region[Header::PARSE_LEN - 1] ^= 0x01;
         let result = Header::parse(&region, Layout::V1.data_offset(), &(0..=0));
         assert!(matches!(result, Err(HeaderError::InvalidChecksum)));
@@ -557,7 +582,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_header_extension_rejects_truncated_region() {
-        let (region, _) = Header::create(&(0..=0));
+        let (region, _) = Header::create(Layout::V1, &(0..=0));
         let result = Header::parse(
             &region[..Layout::V1.data_offset() as usize - 1],
             Layout::V1.data_offset() - 1,
@@ -572,7 +597,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_header_v1_rejects_nonzero_padding() {
-        let (mut region, _) = Header::create(&(0..=0));
+        let (mut region, _) = Header::create(Layout::V1, &(0..=0));
         region[Header::PARSE_LEN] = 0x01;
         let result = Header::parse(&region, Layout::V1.data_offset(), &(0..=0));
         assert!(matches!(result, Err(HeaderError::InvalidPadding)));
@@ -793,11 +818,11 @@ pub(crate) mod tests {
         }
     }
 
-    /// This runtime never creates V0 blobs, so no contents qualify as an interrupted V0
+    /// Production storage never creates V0 blobs, so no contents qualify as an interrupted V0
     /// creation, including ones that heal under V1.
     #[test]
     fn test_layout_v0_interrupted_creation_rejects_all() {
-        let (region, _) = Header::create(&(0..=0));
+        let (region, _) = Header::create(Layout::V1, &(0..=0));
         assert!(Layout::V1.interrupted_creation(&region[..10]));
         assert!(!Layout::V0.interrupted_creation(&region[..10]));
         assert!(!Layout::V0.interrupted_creation(&[]));

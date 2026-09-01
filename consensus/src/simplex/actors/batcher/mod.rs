@@ -91,7 +91,9 @@ mod tests {
         telemetry::traces::{TracedExt as _, collector::TraceStorage},
         tokio,
     };
-    use commonware_utils::{NZUsize, TestRng, ordered::Set, probability, sync::Mutex, test_rng};
+    use commonware_utils::{
+        NZUsize, TestRng, non_empty, ordered::Set, probability, sync::Mutex, test_rng,
+    };
     use std::{marker::PhantomData, num::NonZeroU32, sync::Arc, time::Duration};
     use tracing::{Level, Span};
 
@@ -326,7 +328,7 @@ mod tests {
             .take(count)
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
-        Notarization::from_notarizes(&schemes[0], &votes, &Sequential)
+        Notarization::from_notarizes(&schemes[0], non_empty![@&votes], &Sequential)
             .expect("notarization requires a quorum of votes")
     }
 
@@ -340,7 +342,7 @@ mod tests {
             .take(count)
             .map(|scheme| Nullify::sign::<Sha256Digest>(scheme, round).unwrap())
             .collect();
-        Nullification::from_nullifies(&schemes[0], &votes, &Sequential)
+        Nullification::from_nullifies(&schemes[0], non_empty![@&votes], &Sequential)
             .expect("nullification requires a quorum of votes")
     }
 
@@ -354,7 +356,7 @@ mod tests {
             .take(count)
             .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
             .collect();
-        Finalization::from_finalizes(&schemes[0], &votes, &Sequential)
+        Finalization::from_finalizes(&schemes[0], non_empty![@&votes], &Sequential)
             .expect("finalization requires a quorum of votes")
     }
 
