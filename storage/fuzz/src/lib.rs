@@ -6,7 +6,7 @@ use commonware_runtime::{
     mocks::PendingSyncs,
 };
 use commonware_utils::{Probability, probability};
-use rand::{Rng as _, RngExt as _};
+use rand::{Rng, RngExt as _};
 use std::future::Future;
 
 /// Complete the oldest parked durability completion, if any.
@@ -28,20 +28,21 @@ pub fn release_oldest_pending_sync(pending: &PendingSyncs) {
     }
 }
 
-/// Decode one faulted recovery attempt's fault config from `seed`'s selector bytes.
+/// Draw one faulted recovery attempt's fault config from `rng`.
 ///
-/// Byte 0 selects one of four mutations (write, sync, resize, or remove failures), byte 1
-/// its failure rate, byte 2 the crash retention rate, byte 3 the resize partial rate, and
-/// byte 4 the partial-write mode. Crash retention and mode stay live for every mutation so
-/// the crash after the attempt can still tear whatever the attempt wrote.
-fn recovery_fault_config(seed: u64) -> deterministic::FaultConfig {
-    let selectors = seed.to_le_bytes();
-    let mutation = selectors[0] & 0x03;
-    let failure_rate = Probability::new(u64::from(selectors[1] % 100) + 1, 100)
-        .expect("a percentage in 1..=100 is valid");
-    let rate = |selector: u8| {
-        Probability::new(u64::from(selector) % 101, 100).expect("a percentage in 0..=100 is valid")
-    };
+/// Separate draws select the mutation (write, sync, resize, or remove failures), its
+/// failure rate, the crash retention rate, the resize partial rate, and the partial-write
+/// mode, so each knob stays independently steerable by the fuzzer. Crash retention and
+/// mode stay live for every mutation so the crash after the attempt can still tear
+/// whatever the attempt wrote.
+fn recovery_fault_config(rng: &mut impl Rng) -> deterministic::FaultConfig {
+    fn rate(rng: &mut impl Rng, from: u64) -> Probability {
+        Probability::new(rng.random_range(from..=100), 100)
+            .expect("a percentage in 0..=100 is valid")
+    }
+
+    let mutation: u8 = rng.random_range(0..4);
+    let failure_rate = rate(rng, 1);
     let mut config = deterministic::FaultConfig {
         write_rate: Some(deterministic::WriteConfig {
             failure_rate: if mutation == 0 {
@@ -49,8 +50,8 @@ fn recovery_fault_config(seed: u64) -> deterministic::FaultConfig {
             } else {
                 probability!(0, 1)
             },
-            retention_rate: rate(selectors[2]),
-            mode: if selectors[4] & 1 == 0 {
+            retention_rate: rate(rng, 0),
+            mode: if rng.random_range(0..2) == 0 {
                 PartialWriteMode::Prefix
             } else {
                 PartialWriteMode::Subset
@@ -64,11 +65,11 @@ fn recovery_fault_config(seed: u64) -> deterministic::FaultConfig {
         2 => {
             config.resize_rate = Some(deterministic::ResizeConfig {
                 failure_rate,
-                partial_rate: rate(selectors[3]),
+                partial_rate: rate(rng, 0),
             });
         }
         3 => config.remove_rate = Some(failure_rate),
-        _ => unreachable!("two bits select one of four mutations"),
+        _ => unreachable!("the draw range spans four mutations"),
     }
     config
 }
@@ -104,9 +105,9 @@ where
                     None => context.random_range(1..=4u32) - 1,
                     Some(left) => left - 1,
                 };
-                let seed = context.next_u64();
+                let fault_config = recovery_fault_config(&mut context);
                 let config = context.storage_fault_config();
-                *config.write() = recovery_fault_config(seed);
+                *config.write() = fault_config;
                 drop(recover(context).await);
                 *config.write() = deterministic::FaultConfig::default();
                 left
@@ -161,56 +162,31 @@ pub fn bounded_nonzero_rate(u: &mut Unstructured<'_>) -> arbitrary::Result<Proba
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_runtime::deterministic::PartialWriteMode;
+    use commonware_utils::TestRng;
 
-    /// Build a fault seed from the selector bytes the decoder consumes.
-    fn seed(mutation: u8, failure: u8, retention: u8, partial: u8, mode: u8) -> u64 {
-        u64::from_le_bytes([mutation, failure, retention, partial, mode, 0, 0, 0])
-    }
-
-    /// Pin the seed-to-config decoding: a regression here would silently skew or
-    /// disable fault injection in every recovery target's faulted pass.
+    /// Pin the drawn-config invariants: exactly one failure family arms per draw with a
+    /// nonzero rate, and every mutation arm is reachable. A regression here would
+    /// silently skew or disable fault injection in every recovery target's faulted pass.
     #[test]
-    fn test_recovery_fault_config_decoding() {
-        // Mutation 0 injects write failures with the selected retention and mode.
-        let config = recovery_fault_config(seed(0, 49, 25, 0, 0));
-        let write = config.write_rate.unwrap();
-        assert_eq!(write.failure_rate, probability!(50, 100));
-        assert_eq!(write.retention_rate, probability!(25, 100));
-        assert_eq!(write.mode, PartialWriteMode::Prefix);
-        assert!(config.sync_rate.is_none());
-        assert!(config.resize_rate.is_none());
-        assert!(config.remove_rate.is_none());
-
-        // Mutations 1..=3 zero the write failure rate but keep crash retention and
-        // mode, routing the failure rate to sync, resize, or remove respectively.
-        let config = recovery_fault_config(seed(1, 99, 100, 0, 1));
-        let write = config.write_rate.unwrap();
-        assert_eq!(write.failure_rate, probability!(0, 1));
-        assert_eq!(write.retention_rate, probability!(100, 100));
-        assert_eq!(write.mode, PartialWriteMode::Subset);
-        assert_eq!(config.sync_rate, Some(probability!(100, 100)));
-        assert!(config.resize_rate.is_none());
-        assert!(config.remove_rate.is_none());
-
-        let config = recovery_fault_config(seed(2, 0, 0, 75, 0));
-        let resize = config.resize_rate.unwrap();
-        assert_eq!(resize.failure_rate, probability!(1, 100));
-        assert_eq!(resize.partial_rate, probability!(75, 100));
-        assert_eq!(config.write_rate.unwrap().failure_rate, probability!(0, 1));
-        assert!(config.sync_rate.is_none());
-        assert!(config.remove_rate.is_none());
-
-        let config = recovery_fault_config(seed(3, 199, 0, 0, 0));
-        assert_eq!(config.remove_rate, Some(probability!(100, 100)));
-        assert!(config.sync_rate.is_none());
-        assert!(config.resize_rate.is_none());
-
-        // Selector bits above the two-bit mutation mask are ignored.
-        let config = recovery_fault_config(seed(0x04, 0, 0, 0, 0));
-        assert_eq!(
-            config.write_rate.unwrap().failure_rate,
-            probability!(1, 100)
-        );
+    fn test_recovery_fault_config_draws() {
+        let mut seen = [false; 4];
+        for seed in 0..256u64 {
+            let mut rng = TestRng::new(seed);
+            let config = recovery_fault_config(&mut rng);
+            let write = config.write_rate.expect("write config must always be set");
+            let families = [
+                write.failure_rate != probability!(0, 1),
+                config.sync_rate.is_some(),
+                config.resize_rate.is_some(),
+                config.remove_rate.is_some(),
+            ];
+            assert_eq!(
+                families.iter().filter(|armed| **armed).count(),
+                1,
+                "exactly one failure family must arm per draw"
+            );
+            seen[families.iter().position(|armed| *armed).unwrap()] = true;
+        }
+        assert_eq!(seen, [true; 4], "every mutation arm must be reachable");
     }
 }

@@ -45,6 +45,10 @@ struct FuzzInput {
     /// Shape of the faulted crash: an abandoned sync request, an interrupted blocking sync,
     /// or an interrupted prune.
     final_op: u8,
+    /// Remove failure rate (percent) armed around every prune, sampled per section-blob
+    /// removal so a prune can fail after removing an index section but before its value
+    /// section, leaving an orphan value section for recovery to clean.
+    remove_failure: u8,
     /// Byte stream driving the runtime rng: all in-run randomness, fault sampling, and the
     /// faulted recovery chain's depth and shapes.
     #[arbitrary(with = bounded_entropy)]
@@ -430,7 +434,6 @@ fn fuzz(input: FuzzInput) {
     let final_op = input.final_op;
     let intended = entries(&input, items_per_section.get());
     let baseline_count = intended.len() / 2;
-    let baseline = intended[..baseline_count].to_vec();
     let first_phase_entries = intended.clone();
     let first_phase_input = input.clone();
     let cfg =
@@ -439,6 +442,8 @@ fn fuzz(input: FuzzInput) {
     let ((durable, exempt_below, pruned), checkpoint) =
         runner.start_and_recover(move |context| async move {
             let fault_config = context.storage_fault_config();
+            let remove_rate =
+                Probability::new(u64::from(first_phase_input.remove_failure) % 101, 100).unwrap();
             let pending = PendingSyncs::default();
             let context = DelayedSyncContext {
                 inner: context,
@@ -520,14 +525,32 @@ fn fuzz(input: FuzzInput) {
                             handle.await.expect("pipelined sync failed");
                             durable = durable.max(covered);
                         }
-                        let min = u64::from(op >> 3);
-                        archive = drive_pending_syncs(&pending, archive.prune(min))
-                            .await
-                            .expect("prune failed");
 
                         // The archive rounds prune requests down to a section boundary, so only
-                        // indices below that boundary can actually disappear.
+                        // indices below that boundary can actually disappear. Input-driven
+                        // remove faults can fail the prune partway, leaving an index section
+                        // deleted while its value section survives, an orphan image the
+                        // recovery assertions must observe being cleaned.
+                        let min = u64::from(op >> 3);
                         let floor = (min / items_per_section) * items_per_section.get();
+                        *fault_config.write() = deterministic::FaultConfig {
+                            remove_rate: Some(remove_rate),
+                            ..Default::default()
+                        };
+                        let result = drive_pending_syncs(&pending, archive.prune(min)).await;
+                        *fault_config.write() = deterministic::FaultConfig::default();
+                        match result {
+                            Ok(next) => archive = next,
+                            Err(_) => {
+                                // The failed prune consumed the archive after durably removing
+                                // the markers below the floor, so sections below it may be
+                                // partially removed. The exemption covers the lost indices and
+                                // the prune flag disables the full-retention assertion, since
+                                // the run crashes here with nothing flushed by a final op.
+                                exempt_below = exempt_below.max(floor);
+                                return (durable, exempt_below, true);
+                            }
+                        }
                         pruned |= floor > 0;
                         exempt_below = exempt_below.max(floor);
                     }
@@ -557,6 +580,9 @@ fn fuzz(input: FuzzInput) {
                         PartialWriteMode::Prefix
                     },
                 }),
+                // Removes happen only inside the interrupted-prune arm, where a fault can
+                // fail the prune between the two journals' section removals.
+                remove_rate: Some(remove_rate),
                 ..Default::default()
             };
             match first_phase_input.final_op % 3 {
@@ -581,10 +607,13 @@ fn fuzz(input: FuzzInput) {
                 2 => {
                     // Interrupt a prune mid-flight: the armed gate parks it at the
                     // marker-removal metadata sync (the only parking point, so a second
-                    // poll after the release runs the prune to completion). Markers must
-                    // be removed durably before any section storage disappears, so both
-                    // cut points must recover. Only indices below the section-rounded
-                    // floor can disappear.
+                    // poll after the release runs the prune onward). Markers must be
+                    // removed durably before any section storage disappears, so both cut
+                    // points must recover. The armed remove faults can also fail the prune
+                    // between section removals, consuming the archive with them partially
+                    // applied. Only indices below the section-rounded floor can disappear,
+                    // and the exemption below covers completed, abandoned, and failed
+                    // prunes alike.
                     let min = u64::from(first_phase_input.final_op >> 2);
                     let floor = (min / items_per_section) * items_per_section.get();
                     pruned |= floor > 0;
@@ -594,7 +623,7 @@ fn fuzz(input: FuzzInput) {
                     for _ in 0..usize::from(first_phase_input.final_op >> 5) % 2 + 1 {
                         if let Some(result) = futures::future::poll_immediate(prune.as_mut()).await
                         {
-                            drop(result.expect("interrupted prune failed"));
+                            drop(result);
                             break;
                         }
                         release_oldest_pending_sync(&pending);
@@ -619,7 +648,6 @@ fn fuzz(input: FuzzInput) {
     });
 
     let recovery_intended = intended.clone();
-    let recovery_baseline = baseline.clone();
     let ((expected, expected_index_sizes, expected_value_sizes), checkpoint) =
         deterministic::Runner::from(checkpoint).start_and_recover(move |context| async move {
             *context.storage_fault_config().write() = deterministic::FaultConfig::default();
@@ -630,10 +658,10 @@ fn fuzz(input: FuzzInput) {
                 .await
                 .expect("archive recovery failed");
 
-            for entry in recovery_baseline
-                .iter()
-                .chain(recovery_intended[..durable.min(recovery_intended.len())].iter())
-            {
+            // The baseline sync's coverage is carried by `durable`, which a failed op-phase
+            // prune caps at the point the run crashed, so no entry is claimed before its
+            // sync actually completed.
+            for entry in &recovery_intended[..durable.min(recovery_intended.len())] {
                 assert!(
                     expected.contains(entry) || entry.index < exempt_below,
                     "a value from a completed sync was lost",

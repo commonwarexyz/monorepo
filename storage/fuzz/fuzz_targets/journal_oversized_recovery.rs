@@ -116,12 +116,16 @@ struct FuzzInput {
     /// held completion, settle everything held, sync one section, or sync everything. Tracked
     /// mode adds an empty flush that publishes marker debt, a prune, and a section rewind.
     /// These ops complete before the fault window opens, so the marker-before-data ordering
-    /// inside prune and rewind is not falsifiable here. Prune's ordering is made falsifiable
-    /// by the interrupted-prune final op.
+    /// inside rewind is not falsifiable here. Prune's ordering is made falsifiable by the
+    /// interrupted-prune final op and by the remove faults armed around every prune.
     ops: [u8; 24],
     /// Shape of the faulted crash: flush everything then abandon the requests, interrupt a
     /// blocking sync mid-flight, or abandon a tracked prune mid-flight.
     final_op: u8,
+    /// Remove failure rate (percent) armed around every prune, sampled per section-blob
+    /// removal so a prune can fail after removing an index section but before its value
+    /// section, leaving an orphan value section for recovery to clean.
+    remove_failure: u8,
     /// Byte stream driving the runtime rng: all in-run randomness, fault sampling, and the
     /// faulted recovery chain's depth and shapes.
     #[arbitrary(with = bounded_entropy)]
@@ -437,282 +441,312 @@ async fn blob_sizes(context: &deterministic::Context) -> BTreeMap<(bool, u64), u
 fn fuzz(input: FuzzInput) {
     let intended = items(&input);
     let retention_percent = input.retention % 101;
-    let final_op = input.final_op;
     let tracked = input.tracked;
-
-    // The flush-everything final op is dispatch arm 0, and arm 3 also falls through to it in
-    // inferred mode.
-    let flushed_all = final_op.is_multiple_of(4) || (!tracked && final_op % 4 == 3);
 
     let first_phase_input = input.clone();
     let cfg =
         deterministic::Config::default().with_rng(Box::new(FuzzRng::new(input.entropy.clone())));
     let runner = deterministic::Runner::new(cfg);
-    let ((durable, model), checkpoint) = runner.start_and_recover(move |context| async move {
-        let fault_config = context.storage_fault_config();
-        let pending = PendingSyncs::default();
-        let context = DelayedSyncContext {
-            inner: context,
-            pending: pending.clone(),
-        };
-        let cfg = config(&context);
-        let mut oversized: Oversized<_, TestEntry, TestValue> = if tracked {
-            init_tracked(context.child("initial"), cfg)
-                .await
-                .expect("initial tracked init failed")
-        } else {
-            Oversized::init(context.child("initial"), cfg)
-                .await
-                .expect("initial init failed")
-        };
-
-        // Every sync completion below stays parked until an op resolves it, so requests pipeline
-        // and completions resolve in op-chosen order. The model mirrors each section's logical
-        // ids through appends, prunes, and rewinds.
-        let mut counts: BTreeMap<u64, u64> = BTreeMap::new();
-        let mut durable: BTreeMap<u64, u64> = BTreeMap::new();
-        let mut model: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
-        let mut held: Vec<(u64, u64, Handle<()>)> = Vec::new();
-        let mut prune_floor = 0u64;
-        for (offset, &(section, id)) in intended.iter().enumerate() {
-            // Route appends above the prune floor: mutating a pruned section fails.
-            let section = if section < prune_floor {
-                prune_floor + section % (SECTIONS - prune_floor)
-            } else {
-                section
+    let ((durable, model, flushed_all), checkpoint) =
+        runner.start_and_recover(move |context| async move {
+            let fault_config = context.storage_fault_config();
+            let remove_rate =
+                Probability::new(u64::from(first_phase_input.remove_failure) % 101, 100).unwrap();
+            let pending = PendingSyncs::default();
+            let context = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
             };
-            let value: TestValue = [id as u8; 16];
-            (oversized, _, _, _) = oversized
-                .append(section, TestEntry::new(id), &value)
-                .await
-                .expect("append failed");
-            *counts.entry(section).or_default() += 1;
-            model.entry(section).or_default().push(id);
+            let cfg = config(&context);
+            let mut oversized: Oversized<_, TestEntry, TestValue> = if tracked {
+                init_tracked(context.child("initial"), cfg)
+                    .await
+                    .expect("initial tracked init failed")
+            } else {
+                Oversized::init(context.child("initial"), cfg)
+                    .await
+                    .expect("initial init failed")
+            };
 
-            let op = first_phase_input.ops[offset % first_phase_input.ops.len()];
-            match op & 0x07 {
-                1 => {
-                    // Release (without observing) any parked completions so the new request
-                    // cannot block on a prior fsync of the same section.
-                    release_pending_syncs(&pending);
-                    let handle;
-                    (oversized, handle) = oversized
-                        .start_sync(section)
-                        .await
-                        .expect("pipelined start_sync failed");
-                    held.push((section, counts[&section], handle));
-                }
-                2 => {
-                    // Resolve one parked completion out of order without observing it.
-                    let mut parked = pending.lock();
-                    if !parked.is_empty() {
-                        let idx = usize::from(op >> 3) % parked.len();
-                        let sync = parked.remove(idx);
-                        let _ = sync.release.send(Ok(()));
-                    }
-                }
-                3 => {
-                    // Settle every held pipeline, crediting the entries each request covered.
-                    release_pending_syncs(&pending);
-                    for (covered_section, covered, handle) in held.drain(..) {
-                        handle.await.expect("pipelined sync failed");
-                        let durable = durable.entry(covered_section).or_default();
-                        *durable = (*durable).max(covered);
-                    }
-                }
-                4 => {
-                    // Complete a blocking sync of this entry's section, driving it through any
-                    // parked completions it stalls on.
-                    oversized = drive_pending_syncs(&pending, oversized.sync(section))
-                        .await
-                        .expect("section sync failed");
-                    durable.insert(section, counts[&section]);
-                }
-                5 => {
-                    // Complete a blocking sync of every section: everything appended so far
-                    // becomes durable.
-                    oversized = drive_pending_syncs(&pending, oversized.sync_all())
-                        .await
-                        .expect("sync_all failed");
-                    durable = counts.clone();
-                }
-                6 if tracked => {
-                    // Empty flush: with no active sections, every settled durability proof
-                    // publishes as a marker generation under the parked completions.
-                    oversized = drive_pending_syncs(&pending, oversized.sync(Vec::<u64>::new()))
-                        .await
-                        .expect("empty flush failed");
-                }
-                7 if tracked => {
-                    // Settle held pipelines first: a completion credited after the truncation
-                    // below would claim durability for entries the operation removed.
-                    release_pending_syncs(&pending);
-                    for (covered_section, covered, handle) in held.drain(..) {
-                        handle.await.expect("pipelined sync failed");
-                        let durable = durable.entry(covered_section).or_default();
-                        *durable = (*durable).max(covered);
-                    }
-                    if op & 0x08 == 0 {
-                        // Prune: tracked floors are durably removed before section data
-                        // disappears.
-                        let min = u64::from(op >> 4) % SECTIONS;
-                        let did_prune;
-                        (oversized, did_prune) =
-                            drive_pending_syncs(&pending, oversized.prune(min))
-                                .await
-                                .expect("prune failed");
-                        if did_prune {
-                            prune_floor = prune_floor.max(min);
-                            counts.retain(|&section, _| section >= min);
-                            durable.retain(|&section, _| section >= min);
-                            model.retain(|&section, _| section >= min);
-                        }
-                    } else {
-                        // Rewind one live section below its current length: its tracked floor
-                        // durably lowers before the freed index and value ranges can be reused.
-                        let live: Vec<u64> = counts.keys().copied().collect();
-                        if let Some(&section) = live.get(usize::from(op >> 4) % live.len().max(1)) {
-                            let count = counts[&section];
-                            let keep = count * u64::from(op >> 6) / 4;
-                            oversized = drive_pending_syncs(
-                                &pending,
-                                oversized.rewind_section(section, keep * TestEntry::SIZE as u64),
-                            )
+            // Every sync completion below stays parked until an op resolves it, so requests pipeline
+            // and completions resolve in op-chosen order. The model mirrors each section's logical
+            // ids through appends, prunes, and rewinds.
+            let mut counts: BTreeMap<u64, u64> = BTreeMap::new();
+            let mut durable: BTreeMap<u64, u64> = BTreeMap::new();
+            let mut model: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
+            let mut held: Vec<(u64, u64, Handle<()>)> = Vec::new();
+            let mut prune_floor = 0u64;
+            for (offset, &(section, id)) in intended.iter().enumerate() {
+                // Route appends above the prune floor: mutating a pruned section fails.
+                let section = if section < prune_floor {
+                    prune_floor + section % (SECTIONS - prune_floor)
+                } else {
+                    section
+                };
+                let value: TestValue = [id as u8; 16];
+                (oversized, _, _, _) = oversized
+                    .append(section, TestEntry::new(id), &value)
+                    .await
+                    .expect("append failed");
+                *counts.entry(section).or_default() += 1;
+                model.entry(section).or_default().push(id);
+
+                let op = first_phase_input.ops[offset % first_phase_input.ops.len()];
+                match op & 0x07 {
+                    1 => {
+                        // Release (without observing) any parked completions so the new request
+                        // cannot block on a prior fsync of the same section.
+                        release_pending_syncs(&pending);
+                        let handle;
+                        (oversized, handle) = oversized
+                            .start_sync(section)
                             .await
-                            .expect("rewind failed");
-                            counts.insert(section, keep);
-                            model
-                                .get_mut(&section)
-                                .expect("rewound section is modeled")
-                                .truncate(keep as usize);
-                            if let Some(durable) = durable.get_mut(&section) {
-                                *durable = (*durable).min(keep);
+                            .expect("pipelined start_sync failed");
+                        held.push((section, counts[&section], handle));
+                    }
+                    2 => {
+                        // Resolve one parked completion out of order without observing it.
+                        let mut parked = pending.lock();
+                        if !parked.is_empty() {
+                            let idx = usize::from(op >> 3) % parked.len();
+                            let sync = parked.remove(idx);
+                            let _ = sync.release.send(Ok(()));
+                        }
+                    }
+                    3 => {
+                        // Settle every held pipeline, crediting the entries each request covered.
+                        release_pending_syncs(&pending);
+                        for (covered_section, covered, handle) in held.drain(..) {
+                            handle.await.expect("pipelined sync failed");
+                            let durable = durable.entry(covered_section).or_default();
+                            *durable = (*durable).max(covered);
+                        }
+                    }
+                    4 => {
+                        // Complete a blocking sync of this entry's section, driving it through any
+                        // parked completions it stalls on.
+                        oversized = drive_pending_syncs(&pending, oversized.sync(section))
+                            .await
+                            .expect("section sync failed");
+                        durable.insert(section, counts[&section]);
+                    }
+                    5 => {
+                        // Complete a blocking sync of every section: everything appended so far
+                        // becomes durable.
+                        oversized = drive_pending_syncs(&pending, oversized.sync_all())
+                            .await
+                            .expect("sync_all failed");
+                        durable = counts.clone();
+                    }
+                    6 if tracked => {
+                        // Empty flush: with no active sections, every settled durability proof
+                        // publishes as a marker generation under the parked completions.
+                        oversized =
+                            drive_pending_syncs(&pending, oversized.sync(Vec::<u64>::new()))
+                                .await
+                                .expect("empty flush failed");
+                    }
+                    7 if tracked => {
+                        // Settle held pipelines first: a completion credited after the truncation
+                        // below would claim durability for entries the operation removed.
+                        release_pending_syncs(&pending);
+                        for (covered_section, covered, handle) in held.drain(..) {
+                            handle.await.expect("pipelined sync failed");
+                            let durable = durable.entry(covered_section).or_default();
+                            *durable = (*durable).max(covered);
+                        }
+                        if op & 0x08 == 0 {
+                            // Prune: tracked floors are durably removed before section data
+                            // disappears. Input-driven remove faults can fail the prune partway,
+                            // leaving an index section deleted while its value section survives,
+                            // an orphan image the recovery assertions must observe being cleaned.
+                            let min = u64::from(op >> 4) % SECTIONS;
+                            *fault_config.write() = deterministic::FaultConfig {
+                                remove_rate: Some(remove_rate),
+                                ..Default::default()
+                            };
+                            let result = drive_pending_syncs(&pending, oversized.prune(min)).await;
+                            *fault_config.write() = deterministic::FaultConfig::default();
+                            match result {
+                                Ok((journal, did_prune)) => {
+                                    oversized = journal;
+                                    if did_prune {
+                                        prune_floor = prune_floor.max(min);
+                                        counts.retain(|&section, _| section >= min);
+                                        durable.retain(|&section, _| section >= min);
+                                        model.retain(|&section, _| section >= min);
+                                    }
+                                }
+                                Err(_) => {
+                                    // The failed prune consumed the journal after durably removing
+                                    // the markers below the floor, so sections below it may be
+                                    // partially removed. Durability claims below the floor are
+                                    // dropped while the intended stream is kept, since surviving
+                                    // records must stay authentic. The run crashes here with
+                                    // nothing flushed by a final op.
+                                    durable.retain(|&section, _| section >= min);
+                                    return (durable, model, false);
+                                }
+                            }
+                        } else {
+                            // Rewind one live section below its current length: its tracked floor
+                            // durably lowers before the freed index and value ranges can be reused.
+                            let live: Vec<u64> = counts.keys().copied().collect();
+                            if let Some(&section) =
+                                live.get(usize::from(op >> 4) % live.len().max(1))
+                            {
+                                let count = counts[&section];
+                                let keep = count * u64::from(op >> 6) / 4;
+                                oversized = drive_pending_syncs(
+                                    &pending,
+                                    oversized
+                                        .rewind_section(section, keep * TestEntry::SIZE as u64),
+                                )
+                                .await
+                                .expect("rewind failed");
+                                counts.insert(section, keep);
+                                model
+                                    .get_mut(&section)
+                                    .expect("rewound section is modeled")
+                                    .truncate(keep as usize);
+                                if let Some(durable) = durable.get_mut(&section) {
+                                    *durable = (*durable).min(keep);
+                                }
                             }
                         }
                     }
+                    _ => {}
                 }
-                _ => {}
             }
-        }
 
-        // Settle every pipelined sync before the fault window opens: an abandoned lazy handle
-        // never runs its underlying fsync, which would silently discard flushed bytes at the
-        // crash. After the window opens, completions are no longer credited as durable.
-        release_pending_syncs(&pending);
-        for (covered_section, covered, handle) in held.drain(..) {
-            handle.await.expect("pipelined sync failed");
-            let durable = durable.entry(covered_section).or_default();
-            *durable = (*durable).max(covered);
-        }
-        *fault_config.write() = deterministic::FaultConfig {
-            write_rate: Some(WriteConfig {
-                failure_rate: Probability::new(0, 1).unwrap(),
-                retention_rate: Probability::new(u64::from(retention_percent), 100).unwrap(),
-                mode: if first_phase_input.subset {
-                    PartialWriteMode::Subset
-                } else {
-                    PartialWriteMode::Prefix
-                },
-            }),
-            ..Default::default()
-        };
-        match first_phase_input.final_op % 4 {
-            1 => {
-                // Interrupt a blocking sync of every section behind the armed one-shot
-                // gate: the first barrier to arrive parks with its blob's flush left
-                // volatile while every other blob syncs durably. Releasing the gate and
-                // polling again instead completes the sync before the crash.
-                pending.arm();
-                let mut sync = Box::pin(oversized.sync_all());
-                for _ in 0..usize::from(first_phase_input.final_op >> 2) % 2 + 1 {
-                    if let Some(result) = futures::future::poll_immediate(sync.as_mut()).await {
-                        // A sync that ran to completion is an observed barrier: it must
-                        // succeed and every appended entry becomes durable.
-                        drop(result.expect("interrupted sync_all failed"));
-                        durable = counts.clone();
-                        break;
-                    }
-                    release_oldest_pending_sync(&pending);
-                }
-                drop(sync);
+            // Settle every pipelined sync before the fault window opens: an abandoned lazy handle
+            // never runs its underlying fsync, which would silently discard flushed bytes at the
+            // crash. After the window opens, completions are no longer credited as durable.
+            release_pending_syncs(&pending);
+            for (covered_section, covered, handle) in held.drain(..) {
+                handle.await.expect("pipelined sync failed");
+                let durable = durable.entry(covered_section).or_default();
+                *durable = (*durable).max(covered);
             }
-            2 => {
-                // Interrupt a blocking sync of one section behind the armed gate, with
-                // the same parked-or-completed split as above. Pruned sections reject
-                // mutations, so the target is remapped above the floor.
-                pending.arm();
-                let mut section = u64::from(first_phase_input.final_op >> 2) % SECTIONS;
-                if section < prune_floor {
-                    section = prune_floor + section % (SECTIONS - prune_floor);
-                }
-                let mut sync = Box::pin(oversized.sync(section));
-                for _ in 0..usize::from(first_phase_input.final_op >> 5) % 2 + 1 {
-                    if let Some(result) = futures::future::poll_immediate(sync.as_mut()).await {
-                        // A completed section sync must succeed and makes that section's
-                        // appended entries durable.
-                        drop(result.expect("interrupted section sync failed"));
-                        if let Some(&count) = counts.get(&section) {
-                            durable.insert(section, count);
+            *fault_config.write() = deterministic::FaultConfig {
+                write_rate: Some(WriteConfig {
+                    failure_rate: Probability::new(0, 1).unwrap(),
+                    retention_rate: Probability::new(u64::from(retention_percent), 100).unwrap(),
+                    mode: if first_phase_input.subset {
+                        PartialWriteMode::Subset
+                    } else {
+                        PartialWriteMode::Prefix
+                    },
+                }),
+                // Removes happen only inside the interrupted-prune arm, where a fault can fail
+                // the prune between the two journals' section removals.
+                remove_rate: Some(remove_rate),
+                ..Default::default()
+            };
+            let mut flushed_all = false;
+            match first_phase_input.final_op % 4 {
+                1 => {
+                    // Interrupt a blocking sync of every section behind the armed one-shot
+                    // gate: the first barrier to arrive parks with its blob's flush left
+                    // volatile while every other blob syncs durably. Releasing the gate and
+                    // polling again instead completes the sync before the crash.
+                    pending.arm();
+                    let mut sync = Box::pin(oversized.sync_all());
+                    for _ in 0..usize::from(first_phase_input.final_op >> 2) % 2 + 1 {
+                        if let Some(result) = futures::future::poll_immediate(sync.as_mut()).await {
+                            // A sync that ran to completion is an observed barrier: it must
+                            // succeed and every appended entry becomes durable.
+                            drop(result.expect("interrupted sync_all failed"));
+                            durable = counts.clone();
+                            break;
                         }
-                        break;
+                        release_oldest_pending_sync(&pending);
                     }
-                    release_oldest_pending_sync(&pending);
+                    drop(sync);
                 }
-                drop(sync);
-            }
-            3 if tracked => {
-                // Interrupt a prune behind the armed gate and abandon it mid-flight. This arm
-                // makes prune's internal ordering falsifiable: the marker removal must be
-                // durably synced before any section blob is removed, or a crash image can hold
-                // a positive marker naming a section it no longer contains. The input-derived
-                // poll count lands the crash before the future first runs, while its marker
-                // sync is parked at the gate, or after the whole prune completed.
-                pending.arm();
-                let min = u64::from(first_phase_input.final_op >> 2) % SECTIONS;
-                let polls = usize::from(first_phase_input.final_op >> 4) % 3;
-                let mut prune = Box::pin(oversized.prune(min));
-                let mut completed = false;
-                for _ in 0..polls {
-                    if let Some(result) = futures::future::poll_immediate(prune.as_mut()).await {
-                        // A prune that ran to completion durably removed the markers and
-                        // section blobs below the floor before returning.
-                        let (journal, did_prune) = result.expect("interrupted prune failed");
-                        drop(journal);
-                        if did_prune {
-                            durable.retain(|&section, _| section >= min);
-                            model.retain(|&section, _| section >= min);
+                2 => {
+                    // Interrupt a blocking sync of one section behind the armed gate, with
+                    // the same parked-or-completed split as above. Pruned sections reject
+                    // mutations, so the target is remapped above the floor.
+                    pending.arm();
+                    let mut section = u64::from(first_phase_input.final_op >> 2) % SECTIONS;
+                    if section < prune_floor {
+                        section = prune_floor + section % (SECTIONS - prune_floor);
+                    }
+                    let mut sync = Box::pin(oversized.sync(section));
+                    for _ in 0..usize::from(first_phase_input.final_op >> 5) % 2 + 1 {
+                        if let Some(result) = futures::future::poll_immediate(sync.as_mut()).await {
+                            // A completed section sync must succeed and makes that section's
+                            // appended entries durable.
+                            drop(result.expect("interrupted section sync failed"));
+                            if let Some(&count) = counts.get(&section) {
+                                durable.insert(section, count);
+                            }
+                            break;
                         }
-                        completed = true;
-                        break;
+                        release_oldest_pending_sync(&pending);
                     }
-                    release_oldest_pending_sync(&pending);
+                    drop(sync);
                 }
-                drop(prune);
+                3 if tracked => {
+                    // Interrupt a prune behind the armed gate and abandon it mid-flight. This arm
+                    // makes prune's internal ordering falsifiable: the marker removal must be
+                    // durably synced before any section blob is removed, or a crash image can hold
+                    // a positive marker naming a section it no longer contains. The input-derived
+                    // poll count lands the crash before the future first runs, while its marker
+                    // sync is parked at the gate, or after the whole prune completed. The armed
+                    // remove faults can also fail the prune between section removals.
+                    pending.arm();
+                    let min = u64::from(first_phase_input.final_op >> 2) % SECTIONS;
+                    let polls = usize::from(first_phase_input.final_op >> 4) % 3;
+                    let mut prune = Box::pin(oversized.prune(min));
+                    let mut completed = false;
+                    for _ in 0..polls {
+                        if let Some(result) = futures::future::poll_immediate(prune.as_mut()).await
+                        {
+                            // A prune that ran to completion durably removed the markers and
+                            // section blobs below the floor before returning. One that failed on a
+                            // section removal consumed the journal with those removals partially
+                            // applied, which the post-loop durability drop below covers.
+                            if let Ok((journal, did_prune)) = result {
+                                drop(journal);
+                                if did_prune {
+                                    durable.retain(|&section, _| section >= min);
+                                    model.retain(|&section, _| section >= min);
+                                }
+                                completed = true;
+                            }
+                            break;
+                        }
+                        release_oldest_pending_sync(&pending);
+                    }
+                    drop(prune);
 
-                // The oracle must not depend on where the abandoned future stopped, so
-                // durability claims below the floor are dropped rather than assuming the
-                // removals never started. The intended stream is kept because the sections
-                // may equally have survived, and surviving records must stay authentic.
-                if !completed && polls > 0 {
-                    durable.retain(|&section, _| section >= min);
+                    // The oracle must not depend on where the abandoned or failed future stopped,
+                    // so durability claims below the floor are dropped rather than assuming the
+                    // removals never started. The intended stream is kept because the sections
+                    // may equally have survived, and surviving records must stay authentic.
+                    if !completed && polls > 0 {
+                        durable.retain(|&section, _| section >= min);
+                    }
+                }
+                _ => {
+                    // Flush every buffered append through the fault layer, then abandon the sync
+                    // requests so the crash discards their barriers but samples their writes.
+                    flushed_all = true;
+                    for section in prune_floor..SECTIONS {
+                        let handle;
+                        (oversized, handle) = oversized
+                            .start_sync(section)
+                            .await
+                            .expect("final start_sync failed");
+                        drop(handle);
+                    }
+                    drop(oversized);
                 }
             }
-            _ => {
-                // Flush every buffered append through the fault layer, then abandon the sync
-                // requests so the crash discards their barriers but samples their writes.
-                for section in prune_floor..SECTIONS {
-                    let handle;
-                    (oversized, handle) = oversized
-                        .start_sync(section)
-                        .await
-                        .expect("final start_sync failed");
-                    drop(handle);
-                }
-                drop(oversized);
-            }
-        }
-        (durable, model)
-    });
+            (durable, model, flushed_all)
+        });
 
     let checkpoint = if tracked {
         faulted_recovery(checkpoint, |context| async move {

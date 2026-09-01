@@ -31,9 +31,11 @@
 //! # Expected
 //!
 //! A crash can land anywhere in a range, so `Expected` tracks conservative bounds (a
-//! guaranteed-durable prefix plus size/pruning ceilings), not an exact state.
-//! `assert_matches_expected` checks recovery falls within them; `to_expected` then snapshots it as the
-//! next cycle's start.
+//! guaranteed-durable prefix plus size/pruning ceilings), not an exact state. Retained positions
+//! above the durable prefix are still content-checked: every readable frame is CRC-gated and
+//! composed of old or new bytes only, so a recovered item must be one of the values recorded at
+//! that position (see `candidates`). `assert_matches_expected` checks recovery falls within
+//! them; `to_expected` then snapshots it as the next cycle's start.
 //!
 //! # Faults
 //!
@@ -67,6 +69,7 @@ use commonware_utils::{FuzzRng, NZU64, NZUsize, Probability, probability, sequen
 use futures::StreamExt;
 use libfuzzer_sys::fuzz_target;
 use std::{
+    collections::HashMap,
     future::Future,
     num::{NonZeroU16, NonZeroUsize},
     ops::Range,
@@ -211,6 +214,8 @@ impl Params {
 /// Conservative bounds on what a recovery may produce after an unclean shutdown:
 /// - positions `[0, durable_prune)` are pruned (reads return `ItemPruned`),
 /// - positions `[max_prune, durable_len)` hold the exact content `values[pos]`,
+/// - positions `[durable_len, max_size)` are absent or hold a value recorded at that position,
+///   either the latest append `values[pos]` or an alternate in `candidates[pos]`,
 /// - the recovered size is in `[durable_len, max_size]`,
 /// - the recovered pruning boundary is in `[durable_prune, max_prune]`.
 #[derive(Clone, Default)]
@@ -225,11 +230,15 @@ struct Expected {
     max_prune: u64,
     /// Latest value appended at each position (index == position).
     values: Vec<Item>,
+    /// Alternate values a crash may legally retain at a position: values displaced by a rewind
+    /// whose truncation is not yet durable, and values whose append failed after possibly
+    /// persisting. Cleared by every barrier that pins content exactly.
+    candidates: HashMap<u64, Vec<Item>>,
 }
 
 impl Expected {
     /// State after a completed `init_at_size(target)`: fully pruned at `target` with no items.
-    /// `values` can stay empty because content is only checked on `[boundary, durable_len)`,
+    /// `values` can stay empty because content is only checked on `[boundary, size)`,
     /// an empty range here.
     fn reset(target: u64) -> Self {
         Self {
@@ -238,6 +247,7 @@ impl Expected {
             durable_prune: target,
             max_prune: target,
             values: Vec::new(),
+            candidates: HashMap::new(),
         }
     }
 
@@ -247,9 +257,11 @@ impl Expected {
         self.max_size = self.max_size.max(self.values.len() as u64);
     }
 
-    /// Failed append: the item may have partially persisted, so only raise the ceiling.
-    fn append_failed(&mut self, size_before: u64) {
+    /// Failed append: the item may have partially persisted, so raise the ceiling and keep the
+    /// item admissible at the position it targeted.
+    fn append_failed(&mut self, size_before: u64, item: Item) {
         self.max_size = self.max_size.max(size_before + 1);
+        self.candidates.entry(size_before).or_default().push(item);
     }
 
     /// Sync pins size, content, and pruning boundary exactly.
@@ -258,6 +270,10 @@ impl Expected {
         self.max_size = bounds.end;
         self.durable_prune = bounds.start;
         self.max_prune = bounds.start;
+
+        // The barrier makes prior truncations durable and every recorded value exact, so no
+        // alternate values remain admissible.
+        self.candidates.clear();
     }
 
     /// A completed data barrier (commit, or the sync inside a successful prune) pins size and
@@ -265,10 +281,29 @@ impl Expected {
     fn committed(&mut self, size: u64) {
         self.durable_len = size;
         self.max_size = size;
+
+        // The barrier makes prior truncations durable and every recorded value exact, so no
+        // alternate values remain admissible.
+        self.candidates.clear();
     }
 
-    /// Rewind: the truncated tail may or may not persist, so recovered size is in `[target, prev]`.
+    /// Successful rewind: the truncated tail may or may not persist, so recovered size is in
+    /// `[target, prev]`. Until a durability barrier a crash can resurface the pre-rewind bytes,
+    /// so each truncated value stays admissible at the position it held.
     fn rewound(&mut self, target: u64, prev_size: u64) {
+        self.durable_len = self.durable_len.min(target);
+        self.max_size = self.max_size.max(prev_size);
+        for (offset, item) in self.values.drain(target as usize..).enumerate() {
+            self.candidates
+                .entry(target + offset as u64)
+                .or_default()
+                .push(item);
+        }
+    }
+
+    /// Failed rewind: like a successful one it may or may not have truncated, but no value was
+    /// recorded afterward (the cycle ends), so surviving positions keep their exact content.
+    fn rewind_failed(&mut self, target: u64, prev_size: u64) {
         self.durable_len = self.durable_len.min(target);
         self.max_size = self.max_size.max(prev_size);
     }
@@ -540,8 +575,11 @@ async fn assert_matches_expected<J: FuzzJournal>(journal: &J, expected: &Expecte
         }
     }
 
-    // Within [boundary, size) every position is readable; content is pinned only for the durable
-    // prefix. Items are saved for the replay cross-check below.
+    // Within [boundary, size) every position is readable. The durable prefix must hold exactly
+    // the recorded content. Every retained position above it must hold a value the run actually
+    // wrote there: the latest recorded append, or an alternate the crash may legally surface (a
+    // value displaced by a non-durable rewind, or a failed append that persisted). Items are
+    // saved for the replay cross-check below.
     let mut read_items = Vec::with_capacity((size - boundary) as usize);
     for pos in boundary..size {
         let item = journal
@@ -552,6 +590,16 @@ async fn assert_matches_expected<J: FuzzJournal>(journal: &J, expected: &Expecte
             assert_eq!(
                 item, expected.values[pos as usize],
                 "content mismatch at durable pos {pos}"
+            );
+        } else {
+            let admissible = expected.values.get(pos as usize) == Some(&item)
+                || expected
+                    .candidates
+                    .get(&pos)
+                    .is_some_and(|alternates| alternates.contains(&item));
+            assert!(
+                admissible,
+                "content at retained pos {pos} was never written there: {item:?}"
             );
         }
         read_items.push(item);
@@ -595,6 +643,7 @@ async fn to_expected<J: FuzzJournal>(journal: &J) -> Expected {
         durable_prune: bounds.start,
         max_prune: bounds.start,
         values,
+        candidates: HashMap::new(),
     }
 }
 
@@ -677,7 +726,7 @@ async fn run_ops<J: FuzzJournal>(
                             !matches!(err, Error::Corruption(_)),
                             "append reported corruption mid-cycle: {err:?}"
                         );
-                        expected.append_failed(size_before);
+                        expected.append_failed(size_before, item);
                         return;
                     }
                 }
@@ -751,7 +800,6 @@ async fn run_ops<J: FuzzJournal>(
                     match journal.rewind(target).await {
                         Ok(journal) => {
                             expected.rewound(target, bounds.end);
-                            expected.values.truncate(target as usize);
                             journal
                         }
                         // Any error ends the cycle. Validation errors reject before
@@ -773,7 +821,7 @@ async fn run_ops<J: FuzzJournal>(
                                 !matches!(err, Error::Corruption(_)),
                                 "rewind reported corruption mid-cycle: {err:?}"
                             );
-                            expected.rewound(target.min(bounds.end), bounds.end);
+                            expected.rewind_failed(target.min(bounds.end), bounds.end);
                             return;
                         }
                     }
