@@ -9,18 +9,8 @@ use rand_core::CryptoRng;
 const P: u64 = u64::wrapping_neg(1 << 32) + 1;
 
 /// An element of the [Goldilocks field](https://xn--2-umb.com/22/goldilocks/).
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, FixedSize, Write)]
 pub struct F(u64);
-
-impl FixedSize for F {
-    const SIZE: usize = u64::SIZE;
-}
-
-impl Write for F {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.0.write(buf)
-    }
-}
 
 impl Read for F {
     type Cfg = <u64 as Read>::Cfg;

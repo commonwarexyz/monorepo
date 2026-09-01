@@ -697,25 +697,11 @@ impl<F: FieldNTT> PolynomialColumn<F> {
 ///
 /// This is in row major order, so consider processing elements in the same
 /// row first, for locality.
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, EncodeSize, Write)]
 pub struct Matrix<F> {
     rows: usize,
     cols: usize,
     data: Vec<F>,
-}
-
-impl<F: EncodeSize> EncodeSize for Matrix<F> {
-    fn encode_size(&self) -> usize {
-        self.rows.encode_size() + self.cols.encode_size() + self.data.encode_size()
-    }
-}
-
-impl<F: Write> Write for Matrix<F> {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.rows.write(buf);
-        self.cols.write(buf);
-        self.data.write(buf);
-    }
 }
 
 impl<F: Read> Read for Matrix<F> {

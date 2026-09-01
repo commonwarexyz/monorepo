@@ -14,21 +14,11 @@ fn mul_mod(a: u64, b: u64, p: u64) -> u64 {
 }
 
 /// The prime field F_p for the test modulus `p`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, FixedSize, Write)]
 pub struct F(u64);
 
 impl F {
     pub const MAX: u64 = P - 1;
-}
-
-impl FixedSize for F {
-    const SIZE: usize = 8;
-}
-
-impl Write for F {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.0.write(buf);
-    }
 }
 
 impl Read for F {
@@ -151,18 +141,8 @@ impl arbitrary::Arbitrary<'_> for F {
 /// This is constructed as a subgroup of the units in `F_q`.
 ///
 /// `q = 2p + 1`, so the group of units has a subgroup of order `p`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, FixedSize, Write)]
 pub struct G(u64);
-
-impl FixedSize for G {
-    const SIZE: usize = 8;
-}
-
-impl Write for G {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.0.write(buf);
-    }
-}
 
 impl Read for G {
     type Cfg = ();

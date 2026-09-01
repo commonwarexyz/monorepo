@@ -20,7 +20,7 @@ use std::borrow::Cow;
 const MIN_POINTS_FOR_MSM: usize = 2;
 
 /// A polynomial, with coefficients in `K`.
-#[derive(Clone)]
+#[derive(Clone, EncodeSize, Write)]
 pub struct Poly<K> {
     // Invariant: (1..=u32::MAX).contains(coeffs.len())
     coeffs: NonEmptyVec<K>,
@@ -188,18 +188,6 @@ impl<K: Debug> Debug for Poly<K> {
         }
         write!(f, ")")?;
         Ok(())
-    }
-}
-
-impl<K: EncodeSize> EncodeSize for Poly<K> {
-    fn encode_size(&self) -> usize {
-        self.coeffs.encode_size()
-    }
-}
-
-impl<K: Write> Write for Poly<K> {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.coeffs.write(buf);
     }
 }
 
