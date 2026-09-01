@@ -5,6 +5,7 @@
 use arbitrary::{Arbitrary, Unstructured};
 use simplex::{ConnectedPlan, Scheme};
 
+pub mod multimmit;
 pub mod simplex;
 
 /// A generated scenario for exercising consensus invariants.
