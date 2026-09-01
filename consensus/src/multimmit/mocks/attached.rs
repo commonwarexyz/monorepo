@@ -276,6 +276,22 @@ impl MockApplication {
         (application, gates)
     }
 
+    /// Holds the next `count` verifications on a running application until the returned
+    /// gates are released or dropped.
+    pub fn gate_verifications(&self, count: usize) -> Vec<MockBuildGate> {
+        let mut states = self.verify_gates.lock();
+        (0..count)
+            .map(|_| {
+                let (state, gate) = ApplicationGateState::one_shot();
+                states.push_back(VerificationGate {
+                    height: None,
+                    state,
+                });
+                gate
+            })
+            .collect()
+    }
+
     /// Creates an application with one fixed verification response.
     pub fn with_verification_result(result: Option<bool>) -> Self {
         Self {

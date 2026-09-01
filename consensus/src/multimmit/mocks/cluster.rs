@@ -152,6 +152,8 @@ pub struct Cluster<V: Variant> {
     #[cfg(test)]
     blocked_consensus_recipients: Vec<Arc<Mutex<Vec<ed25519::PublicKey>>>>,
     #[cfg(test)]
+    blocked_data_recipients: Vec<Arc<Mutex<Vec<ed25519::PublicKey>>>>,
+    #[cfg(test)]
     blocked_certificate_recipients: Vec<Arc<Mutex<Vec<ed25519::PublicKey>>>>,
     #[cfg(test)]
     checkpoint_interval: Option<NonZeroU64>,
@@ -309,6 +311,8 @@ impl<V: Variant> Cluster<V> {
             #[cfg(test)]
             blocked_consensus_recipients: Vec::new(),
             #[cfg(test)]
+            blocked_data_recipients: Vec::new(),
+            #[cfg(test)]
             blocked_certificate_recipients: Vec::new(),
             #[cfg(test)]
             checkpoint_interval: None,
@@ -378,6 +382,9 @@ impl<V: Variant> Cluster<V> {
             self.task_prefixes.push(None);
             #[cfg(test)]
             self.blocked_consensus_recipients
+                .push(Arc::new(Mutex::new(Vec::new())));
+            #[cfg(test)]
+            self.blocked_data_recipients
                 .push(Arc::new(Mutex::new(Vec::new())));
             #[cfg(test)]
             self.blocked_certificate_recipients
@@ -476,6 +483,9 @@ impl<V: Variant> Cluster<V> {
             self.blocked_consensus_recipients
                 .push(Arc::new(Mutex::new(Vec::new())));
             #[cfg(test)]
+            self.blocked_data_recipients
+                .push(Arc::new(Mutex::new(Vec::new())));
+            #[cfg(test)]
             self.blocked_certificate_recipients
                 .push(Arc::new(Mutex::new(Vec::new())));
             self.generations.push(0);
@@ -513,6 +523,16 @@ impl<V: Variant> Cluster<V> {
             planes.next().unwrap(),
             planes.next().unwrap(),
             planes.next().unwrap(),
+        );
+        #[cfg(test)]
+        let data = (
+            BlockingSender {
+                inner: data.0,
+                me: me.clone(),
+                identities: self.identities.clone(),
+                blocked: Arc::clone(&self.blocked_data_recipients[index]),
+            },
+            data.1,
         );
         #[cfg(test)]
         let consensus = (
@@ -908,6 +928,25 @@ impl<V: Variant> Cluster<V> {
         if !blocked.contains(&recipient) {
             blocked.push(recipient);
         }
+    }
+
+    /// Drops data-plane sends from one engine to one identity.
+    #[cfg(test)]
+    pub fn block_data(&self, from: usize, to: usize) {
+        let recipient = self.identities[to].clone();
+        let mut blocked = self.blocked_data_recipients[from].lock();
+        if !blocked.contains(&recipient) {
+            blocked.push(recipient);
+        }
+    }
+
+    /// Restores data-plane sends from one engine to one identity.
+    #[cfg(test)]
+    pub fn unblock_data(&self, from: usize, to: usize) {
+        let recipient = self.identities[to].clone();
+        self.blocked_data_recipients[from]
+            .lock()
+            .retain(|blocked| blocked != &recipient);
     }
 
     /// Drops consensus-plane sends from one engine to one identity.

@@ -1664,3 +1664,222 @@ fn three_sequential_committees_rotate() {
         }
     });
 }
+
+#[test_traced]
+fn node_with_hung_verifications_keeps_following_finality() {
+    // Reproduces the n=50 straggler wedge: application verifications that never
+    // resolve (bodies the network no longer serves) must not consume the node's
+    // ingress. The node must keep observing certificates, follow the finality
+    // frontier past its stuck views, and retire the dead work.
+    let executor = DeterministicRunner::timed(Duration::from_secs(1800));
+    executor.start(|context| async move {
+        let mut cluster = Cluster::<MinPk>::new(
+            &context,
+            ClusterOptions {
+                view_retention: Some(ViewDelta::new(16)),
+                ..options(4242, 6)
+            },
+        )
+        .await;
+        cluster.set_checkpoint_interval(NonZeroU64::new(32).expect("non-zero"));
+        cluster.start_all().await;
+        cluster.produce_every(10);
+
+        let all = [0usize, 1, 2, 3, 4, 5];
+        let chains = (0..6u32).collect::<Vec<_>>();
+        cluster.wait_finalized(&all, &chains, 1, 600).await;
+
+        // Every future verification on node 5 hangs, exactly like a block body
+        // the rest of the network has already evicted. Chain 5 is node 5's own
+        // producer chain, so its production may stall; every other chain and
+        // node 5's followership must be unaffected.
+        let _held = cluster.app(5).gate_verifications(512);
+
+        // The cluster keeps finalizing; node 5 must keep following views and the
+        // finality floor on certificate evidence alone, through several of its
+        // own checkpoint cadences and past its view-retention window.
+        let held = cluster
+            .inspect(0)
+            .await
+            .expect("engine remains live")
+            .view();
+        let target = View::new(held.get() + 128);
+        cluster.wait_view(&all, target, 9_600).await;
+        cluster
+            .wait_finalized(&[0, 1, 2, 3, 4], &[0, 1, 2, 3, 4], 3, 2400)
+            .await;
+
+        // The follower's finality floor must track the cluster, not its oldest
+        // unresolved verification.
+        let wedged = cluster.inspect(5).await.expect("engine remains live");
+        eprintln!(
+            "node5 wedge state: view={} floor={} retired={} cursor={:?} live={} recovering={} \
+             cached={} pending={} waiting={} dropped={} future={} ready={} verification_jobs={} \
+             pending_barrier={:?} outbox={} resolution_jobs={}",
+            wedged.view(),
+            wedged.finality_floor(),
+            wedged.retired_view(),
+            wedged.cursor(),
+            wedged.is_live(),
+            wedged.is_recovering(),
+            wedged.cached_artifacts(),
+            wedged.pending_artifacts(),
+            wedged.waiting_artifacts(),
+            wedged.dropped_artifacts(),
+            wedged.future_artifacts(),
+            wedged.ready_artifacts().len(),
+            wedged.verification_jobs().len(),
+            wedged.pending_barrier(),
+            wedged.outbox().len(),
+            wedged.resolution_jobs(),
+        );
+        let floor = wedged.finality_floor();
+        assert!(
+            floor.get() + 64 >= target.get(),
+            "node 5 finality floor {floor} fell behind the cluster at view {target}"
+        );
+    });
+}
+
+#[test_traced]
+fn late_first_start_catches_up_beyond_retention() {
+    // A validator that starts for the first time long after the committee has
+    // advanced past its retention window must catch up on L-QC evidence alone.
+    let executor = DeterministicRunner::timed(Duration::from_secs(1800));
+    executor.start(|context| async move {
+        let producers = (0..4).map(Participant::new).collect::<Vec<_>>();
+        let mut cluster = Cluster::<MinPk>::new_with_producers(
+            &context,
+            ClusterOptions {
+                view_retention: Some(ViewDelta::new(16)),
+                ..options(4260, 7)
+            },
+            producers,
+        )
+        .await;
+        cluster.set_checkpoint_interval(NonZeroU64::new(32).expect("non-zero"));
+        for index in 0..6 {
+            cluster.start_one(index).await;
+        }
+        cluster.produce_every(10);
+
+        let running = [0usize, 1, 2, 3, 4, 5];
+        let chains = (0..4u32).collect::<Vec<_>>();
+        cluster.wait_finalized(&running, &chains, 1, 600).await;
+        let held = cluster
+            .inspect(0)
+            .await
+            .expect("engine remains live")
+            .view();
+        cluster
+            .wait_view(&running, View::new(held.get() + 128), 9_600)
+            .await;
+
+        // Node 6 starts fresh into a committee whose views 0..128 are long retired.
+        cluster.start_one(6).await;
+        let all = [0usize, 1, 2, 3, 4, 5, 6];
+        let target = cluster
+            .inspect(0)
+            .await
+            .expect("engine remains live")
+            .view();
+        cluster.wait_view(&all, target, 9_600).await;
+        cluster.wait_finalized(&all, &chains, 3, 2400).await;
+    });
+}
+
+#[test_traced]
+fn early_crash_long_gap_restart_catches_up() {
+    // A validator that crashes at its earliest views and restarts only after the
+    // committee has advanced far past retention must rejoin on L-QC evidence.
+    let executor = DeterministicRunner::timed(Duration::from_secs(1800));
+    executor.start(|context| async move {
+        let producers = (0..4).map(Participant::new).collect::<Vec<_>>();
+        let mut cluster = Cluster::<MinPk>::new_with_producers(
+            &context,
+            ClusterOptions {
+                view_retention: Some(ViewDelta::new(16)),
+                ..options(4261, 7)
+            },
+            producers,
+        )
+        .await;
+        cluster.set_checkpoint_interval(NonZeroU64::new(32).expect("non-zero"));
+        cluster.start_all().await;
+        cluster.produce_every(10);
+
+        let all = [0usize, 1, 2, 3, 4, 5, 6];
+        let chains = (0..4u32).collect::<Vec<_>>();
+        cluster.wait_finalized(&all, &chains, 1, 600).await;
+        cluster.crash(6).await;
+
+        let rest = [0usize, 1, 2, 3, 4, 5];
+        let held = cluster
+            .inspect(0)
+            .await
+            .expect("engine remains live")
+            .view();
+        cluster
+            .wait_view(&rest, View::new(held.get() + 128), 9_600)
+            .await;
+
+        cluster.restart(6).await;
+        let target = cluster
+            .inspect(0)
+            .await
+            .expect("engine remains live")
+            .view();
+        cluster.wait_view(&all, target, 9_600).await;
+        cluster.wait_finalized(&all, &chains, 3, 2400).await;
+    });
+}
+
+#[test_traced]
+fn stranded_follower_with_hung_verifications_rejoins() {
+    // The production wedge shape: a validator falls behind while its remaining
+    // verifications hang, then the network heals. It must jump forward on the
+    // newer certificates rather than wait on work nobody can complete.
+    let executor = DeterministicRunner::timed(Duration::from_secs(1800));
+    executor.start(|context| async move {
+        let producers = (0..4).map(Participant::new).collect::<Vec<_>>();
+        let mut cluster = Cluster::<MinPk>::new_with_producers(
+            &context,
+            ClusterOptions {
+                view_retention: Some(ViewDelta::new(16)),
+                ..options(4262, 7)
+            },
+            producers,
+        )
+        .await;
+        cluster.set_checkpoint_interval(NonZeroU64::new(32).expect("non-zero"));
+        cluster.start_all().await;
+        cluster.produce_every(10);
+
+        let all = [0usize, 1, 2, 3, 4, 5, 6];
+        let majority = [0usize, 1, 2, 3, 4, 5];
+        let chains = (0..4u32).collect::<Vec<_>>();
+        cluster.wait_finalized(&all, &chains, 1, 600).await;
+
+        // Node 6 falls silent mid-flight with hung verifications, exactly like a
+        // node whose peers evicted the bodies it still waits on.
+        let _held = cluster.app(6).gate_verifications(512);
+        cluster.partition(&majority, &[6]).await;
+        let held = cluster
+            .inspect(0)
+            .await
+            .expect("engine remains live")
+            .view();
+        cluster
+            .wait_view(&majority, View::new(held.get() + 128), 9_600)
+            .await;
+
+        cluster.heal().await;
+        let target = cluster
+            .inspect(0)
+            .await
+            .expect("engine remains live")
+            .view();
+        cluster.wait_view(&all, target, 9_600).await;
+        cluster.wait_finalized(&all, &chains, 3, 2400).await;
+    });
+}

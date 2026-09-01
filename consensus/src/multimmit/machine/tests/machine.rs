@@ -15569,3 +15569,87 @@ fn runner_models_before_and_after_append_crash_cuts() {
     };
     assert_eq!(actual.as_ref(), &artifact);
 }
+
+#[test]
+fn far_future_lqc_reanchors_a_lagging_machine() {
+    // The n=50 straggler: a validator stuck at its boot views receives an L-QC from a
+    // view far past its retention window. L-QCs are self-certifying finality evidence,
+    // so possession alone must re-anchor the machine at the newer frontier.
+    let (mut machine, _) = start_profile(profile_for(Role::Validator(Participant::new(5)), 6, 2));
+    assert_eq!(machine.inspect().view(), View::new(1));
+
+    let proposed = leader(&machine, 300);
+    let votes = (0..5)
+        .map(|signer| view_vote(&machine, &proposed, signer))
+        .collect::<Vec<_>>();
+    let certificate = Artifact::Lqc(lqc(&machine, proposed, &votes));
+    let verification = observe(&mut machine, certificate);
+    let completed = complete_with_step(&mut machine, &verification, true);
+    drive_poll_and_persist(&mut machine, completed);
+
+    let inspection = machine.inspect();
+    assert!(
+        inspection.finality_floor() >= View::new(300),
+        "far-future L-QC did not re-anchor: floor {} view {}",
+        inspection.finality_floor(),
+        inspection.view()
+    );
+}
+
+#[test]
+fn future_vote_flood_does_not_starve_reanchoring_lqcs() {
+    // The n=50 straggler wedge: a node far behind the cluster receives a flood of
+    // future-view votes that fills the bounded future index before the once-per-view
+    // L-QC arrives. Finality evidence must still be admissible: rejecting it leaves
+    // the node deaf forever, since only an anchor can drain the future index.
+    let limits = resources_with_future_views(64, 8)
+        .with_max_finality_pools(NonZeroUsize::new(69).unwrap());
+    let profile = profile_with_retention(
+        Role::Validator(Participant::new(5)),
+        6,
+        2,
+        limits,
+        ViewDelta::new(2),
+    );
+    let (mut machine, _) = start_profile(profile);
+    assert_eq!(machine.inspect().view(), View::new(1));
+
+    // Eight future votes for distinct far views exhaust the future index.
+    for view in 30..38u64 {
+        let proposed = leader(&machine, view);
+        let artifact = Artifact::Vote(view_vote(&machine, &proposed, 0));
+        let verification = observe(&mut machine, artifact);
+        complete_with_step(&mut machine, &verification, true);
+    }
+
+    // The re-anchoring L-QC arrives after the flood. It must be admitted and must
+    // advance the machine, not be rejected for a full future index.
+    let proposed = leader(&machine, 60);
+    let votes = (0..5)
+        .map(|signer| view_vote(&machine, &proposed, signer))
+        .collect::<Vec<_>>();
+    let certificate = Artifact::Lqc(lqc(&machine, proposed, &votes));
+    let step = machine.step(cohort::<Sha256, _>(vec![certificate])).unwrap();
+    let StepStatus::Observed(results) = step.status() else {
+        panic!("one observed artifact must return an observation result");
+    };
+    assert_eq!(
+        results[0].status(),
+        ObservationStatus::Scheduled,
+        "a full future index must not reject self-certifying finality evidence"
+    );
+    let [Capability::Verification(VerificationCapability::Verify(job))] = step.capabilities()
+    else {
+        panic!("the admitted L-QC must emit one verification job");
+    };
+    let job = job.clone();
+    let completed = complete_with_step(&mut machine, &job, true);
+    drive_poll_and_persist(&mut machine, completed);
+    let inspection = machine.inspect();
+    assert!(
+        inspection.finality_floor() >= View::new(60),
+        "admitted L-QC did not re-anchor: floor {} view {}",
+        inspection.finality_floor(),
+        inspection.view()
+    );
+}

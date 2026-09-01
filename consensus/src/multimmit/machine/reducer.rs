@@ -2995,6 +2995,19 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
 
             let future_view = artifact.view().filter(|view| *view > self.durable.view);
             let future = future_view.is_some();
+            // An admitted view proof reclaims its room from refetchable future gossip; see
+            // [`Self::evict_future_gossip`]. Both bounds hold again once it lands.
+            if artifact.self_certifying_view() {
+                let resources = self.profile.resources();
+                while (future && self.future.len() >= resources.max_future_artifacts())
+                    || self.artifacts.len() + self.local_artifact_reservations()
+                        >= resources.max_cached_artifacts()
+                {
+                    if !self.evict_future_gossip()? {
+                        break;
+                    }
+                }
+            }
             let artifact = Arc::new(artifact);
             // A proposal is actionable only with its parent certificate. Keeping an unresolved
             // proposal as a transition claim would order later V-QCs and nullifications behind a
@@ -3126,14 +3139,24 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         }
 
         let resources = self.profile.resources();
-        if let Some(view) = artifact.view()
+        // A self-certifying view proof is the only artifact that can advance a node whose
+        // retained work is stale, so fullness never rejects one: admission evicts refetchable
+        // gossip instead. Rejecting it deadlocks a lagging node, whose caches drain only by
+        // advancing.
+        let anchor = artifact.self_certifying_view();
+        if !anchor
+            && let Some(view) = artifact.view()
             && view > self.durable.view
             && self.future.len() >= resources.max_future_artifacts()
         {
             return ObservationStatus::Rejected(Rejection::FutureArtifactsFull);
         }
         if self.artifacts.len() + local_artifact_reservations >= resources.max_cached_artifacts() {
-            return ObservationStatus::Rejected(Rejection::ArtifactCacheFull);
+            // With nothing evictable, an anchor is rejected like any artifact: every cached
+            // entry is then current-view work the machine is still consuming.
+            if !anchor || self.future.is_empty() {
+                return ObservationStatus::Rejected(Rejection::ArtifactCacheFull);
+            }
         }
         if jobs_full {
             return ObservationStatus::Rejected(Rejection::VerificationJobsFull);
@@ -3333,6 +3356,30 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
 
     fn has_retained_provider(&self, dependency: Dependency<H::Digest>) -> bool {
         self.providers.contains_key(&dependency)
+    }
+
+    /// Evicts one refetchable future-view artifact to admit a self-certifying view proof.
+    ///
+    /// The farthest-ahead gossip goes first: it is the least likely to become actionable
+    /// before redelivery. When only view proofs remain, the lowest-view proof goes: every
+    /// higher retained proof re-anchors at least as far. Returns whether an entry was evicted.
+    fn evict_future_gossip(&mut self) -> Result<bool, StepError> {
+        let victim = self
+            .future
+            .iter()
+            .rev()
+            .find(|(_, id)| {
+                self.artifacts
+                    .get(id)
+                    .is_some_and(|entry| !entry.artifact.self_certifying_view())
+            })
+            .or_else(|| self.future.iter().next())
+            .map(|(_, id)| *id);
+        let Some(id) = victim else {
+            return Ok(false);
+        };
+        self.remove_terminal_artifact(id)?;
+        Ok(true)
     }
 
     fn remove_terminal_artifact(&mut self, id: ArtifactId<H::Digest>) -> Result<(), StepError> {
