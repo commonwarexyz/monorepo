@@ -535,7 +535,7 @@ pub trait Provider: Clone + Send + Sync + 'static {
 /// Bitmap wrapper that tracks which participants signed a certificate.
 ///
 /// Internally, it stores bits in 1-byte chunks for compact encoding.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, EncodeSize, Write)]
 pub struct Signers {
     bitmap: BitMap<1>,
 }
@@ -607,18 +607,6 @@ where
     fn try_from((participants, signers): (&'a Set<P>, I)) -> Result<Self, Self::Error> {
         let total = u32::try_from(participants.len()).expect("participant count exceeds u32::MAX");
         Self::new(total, signers)
-    }
-}
-
-impl Write for Signers {
-    fn write(&self, writer: &mut impl BufMut) {
-        self.bitmap.write(writer);
-    }
-}
-
-impl EncodeSize for Signers {
-    fn encode_size(&self) -> usize {
-        self.bitmap.encode_size()
     }
 }
 

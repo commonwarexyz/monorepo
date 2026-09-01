@@ -345,7 +345,7 @@ impl VerifyingKey {
 /// For an honestly generated [`VerifyingKey`], successful verification demonstrates approval by
 /// the holder of the corresponding [`SigningKey`]. A maliciously generated verifying key can
 /// admit a signature that verifies for any message.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, FixedSize, Read, Write)]
 pub struct Signature {
     bytes: [u8; 64],
 }
@@ -365,26 +365,6 @@ impl Display for Signature {
 impl AsRef<[u8]> for Signature {
     fn as_ref(&self) -> &[u8] {
         &self.bytes
-    }
-}
-
-impl Write for Signature {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.bytes.write(buf);
-    }
-}
-
-impl FixedSize for Signature {
-    const SIZE: usize = 64;
-}
-
-impl Read for Signature {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        Ok(Self {
-            bytes: <[u8; Self::SIZE]>::read_cfg(buf, cfg)?,
-        })
     }
 }
 

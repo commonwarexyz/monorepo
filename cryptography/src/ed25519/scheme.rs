@@ -236,31 +236,12 @@ impl arbitrary::Arbitrary<'_> for PublicKey {
 /// one message also verify against another. This property does not hold for maliciously
 /// generated public keys. In particular, it's possible to craft public keys (which would
 /// otherwise not be honestly generatable) for which a signature will verify against any message.
-#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd, FixedArray)]
+#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd, FixedArray, FixedSize, Read, Write)]
 pub struct Signature {
     raw: [u8; SIGNATURE_LENGTH],
 }
 
 impl crate::Signature for Signature {}
-
-impl Write for Signature {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.raw.write(buf);
-    }
-}
-
-impl Read for Signature {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let raw = <[u8; Self::SIZE]>::read(buf)?;
-        Ok(Self { raw })
-    }
-}
-
-impl FixedSize for Signature {
-    const SIZE: usize = SIGNATURE_LENGTH;
-}
 
 impl Span for Signature {}
 

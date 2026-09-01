@@ -280,7 +280,7 @@ impl<G> Setup<G> {
 ///
 /// We claim that our commitment `P` is equal to `<a_i, G_i> + <b_i, y^i H_i>`,
 /// and that our product `c` is equal to `<a_i, b_i>`.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, EncodeSize, Write)]
 pub struct Claim<F, G> {
     pub commitment: G,
     pub product: F,
@@ -290,24 +290,6 @@ pub struct Claim<F, G> {
     /// Inner product arguments require power-of-two vector lengths, so storing
     /// the logarithm is enough to recover the full claimed length.
     pub log_len: u8,
-}
-
-impl<F: Write, G: Write> Write for Claim<F, G> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.commitment.write(buf);
-        self.product.write(buf);
-        self.y.write(buf);
-        self.log_len.write(buf);
-    }
-}
-
-impl<F: EncodeSize, G: EncodeSize> EncodeSize for Claim<F, G> {
-    fn encode_size(&self) -> usize {
-        self.commitment.encode_size()
-            + self.product.encode_size()
-            + self.y.encode_size()
-            + self.log_len.encode_size()
-    }
 }
 
 impl<F: Read, G: Read> Read for Claim<F, G> {
@@ -409,7 +391,7 @@ impl<F: Field> Witness<F> {
 }
 
 /// A proof for the inner product argument.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, EncodeSize, Write)]
 pub struct Proof<F, G> {
     l_r_coms: Vec<(G, G)>,
     /// Summary of the transcript after the public statement and all proof messages.
@@ -418,24 +400,6 @@ pub struct Proof<F, G> {
     transcript_summary: Summary,
     a_final: F,
     b_final: F,
-}
-
-impl<F: Write, G: Write> Write for Proof<F, G> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.l_r_coms.write(buf);
-        self.transcript_summary.write(buf);
-        self.a_final.write(buf);
-        self.b_final.write(buf);
-    }
-}
-
-impl<F: EncodeSize, G: EncodeSize> EncodeSize for Proof<F, G> {
-    fn encode_size(&self) -> usize {
-        self.l_r_coms.encode_size()
-            + self.transcript_summary.encode_size()
-            + self.a_final.encode_size()
-            + self.b_final.encode_size()
-    }
 }
 
 impl<F: Read, G: Read> Read for Proof<F, G> {

@@ -14,8 +14,7 @@ use super::{
     super::{Error, variant::Variant},
     hash_with_namespace,
 };
-use bytes::{Buf, BufMut};
-use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{FixedSize, Read, Write};
 use commonware_math::algebra::Additive;
 use commonware_parallel::Strategy;
 use commonware_utils::iter::NonEmpty;
@@ -30,7 +29,7 @@ use commonware_utils::iter::NonEmpty;
 /// Before using this key with [`verify_same_message`], callers must group-check every public key
 /// included in it, verify each key's PoP, and ensure the keys are unique. Decoding an aggregate
 /// public key does not perform these checks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FixedSize, Read, Write)]
 pub struct PublicKey<V: Variant>(V::Public);
 
 impl<V: Variant> PublicKey<V> {
@@ -50,24 +49,6 @@ impl<V: Variant> PublicKey<V> {
     }
 }
 
-impl<V: Variant> Write for PublicKey<V> {
-    fn write(&self, writer: &mut impl BufMut) {
-        self.0.write(writer);
-    }
-}
-
-impl<V: Variant> Read for PublicKey<V> {
-    type Cfg = ();
-
-    fn read_cfg(reader: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        Ok(Self(V::Public::read(reader)?))
-    }
-}
-
-impl<V: Variant> FixedSize for PublicKey<V> {
-    const SIZE: usize = V::Public::SIZE;
-}
-
 #[cfg(feature = "arbitrary")]
 impl<V: Variant> arbitrary::Arbitrary<'_> for PublicKey<V>
 where
@@ -82,7 +63,7 @@ where
 ///
 /// This type is returned by [`combine_signatures`] and ensures that
 /// aggregated signatures are not confused with individual signatures.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, FixedSize, Read, Write)]
 pub struct Signature<V: Variant>(V::Signature);
 
 impl<V: Variant> Signature<V> {
@@ -102,24 +83,6 @@ impl<V: Variant> Signature<V> {
     }
 }
 
-impl<V: Variant> Write for Signature<V> {
-    fn write(&self, writer: &mut impl BufMut) {
-        self.0.write(writer);
-    }
-}
-
-impl<V: Variant> Read for Signature<V> {
-    type Cfg = ();
-
-    fn read_cfg(reader: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        Ok(Self(V::Signature::read(reader)?))
-    }
-}
-
-impl<V: Variant> FixedSize for Signature<V> {
-    const SIZE: usize = V::Signature::SIZE;
-}
-
 #[cfg(feature = "arbitrary")]
 impl<V: Variant> arbitrary::Arbitrary<'_> for Signature<V>
 where
@@ -134,7 +97,7 @@ where
 ///
 /// This type is returned by [`combine_messages`] and ensures that
 /// combined message hashes are not confused with individual message hashes.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, FixedSize, Read, Write)]
 pub struct Message<V: Variant>(V::Signature);
 
 impl<V: Variant> Message<V> {
@@ -157,24 +120,6 @@ impl<V: Variant> Message<V> {
     pub(crate) fn combine(&mut self, other: &Self) {
         self.0 += &other.0;
     }
-}
-
-impl<V: Variant> Write for Message<V> {
-    fn write(&self, writer: &mut impl BufMut) {
-        self.0.write(writer);
-    }
-}
-
-impl<V: Variant> Read for Message<V> {
-    type Cfg = ();
-
-    fn read_cfg(reader: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        Ok(Self(V::Signature::read(reader)?))
-    }
-}
-
-impl<V: Variant> FixedSize for Message<V> {
-    const SIZE: usize = V::Signature::SIZE;
 }
 
 #[cfg(feature = "arbitrary")]

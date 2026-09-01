@@ -97,7 +97,7 @@
 //! ```
 
 use crate::transcript::Transcript;
-use bytes::{Buf, BufMut};
+use bytes::Buf;
 use commonware_codec::{Encode, EncodeSize, Error, Read, Write};
 use commonware_math::{
     algebra::{CryptoGroup, Field, Random, Space},
@@ -109,25 +109,12 @@ use rand_core::CryptoRng;
 ///
 /// The blinding generator must not have a known discrete-log relationship
 /// relative to the value generator.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, EncodeSize, Write)]
 pub struct Setup<G> {
     /// The generator used in both the plain and Pedersen commitments.
     pub value_generator: G,
     /// The generator used only for the Pedersen blinding term.
     pub blinding_generator: G,
-}
-
-impl<G: Write> Write for Setup<G> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.value_generator.write(buf);
-        self.blinding_generator.write(buf);
-    }
-}
-
-impl<G: EncodeSize> EncodeSize for Setup<G> {
-    fn encode_size(&self) -> usize {
-        self.value_generator.encode_size() + self.blinding_generator.encode_size()
-    }
 }
 
 impl<G: Read> Read for Setup<G>
@@ -176,23 +163,10 @@ impl<F> Witness<F> {
 }
 
 /// The public statement for the protocol.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, EncodeSize, Write)]
 pub struct Claim<G> {
     pub plain: G,
     pub pedersen: G,
-}
-
-impl<G: Write> Write for Claim<G> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.plain.write(buf);
-        self.pedersen.write(buf);
-    }
-}
-
-impl<G: EncodeSize> EncodeSize for Claim<G> {
-    fn encode_size(&self) -> usize {
-        self.plain.encode_size() + self.pedersen.encode_size()
-    }
 }
 
 impl<G: Read> Read for Claim<G>
@@ -223,30 +197,12 @@ where
 }
 
 /// A proof that the plain and Pedersen commitments share the same committed value.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, EncodeSize, Write)]
 pub struct Proof<F, G> {
     plain_mask: G,
     pedersen_mask: G,
     value_response: F,
     blinding_response: F,
-}
-
-impl<F: Write, G: Write> Write for Proof<F, G> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.plain_mask.write(buf);
-        self.pedersen_mask.write(buf);
-        self.value_response.write(buf);
-        self.blinding_response.write(buf);
-    }
-}
-
-impl<F: EncodeSize, G: EncodeSize> EncodeSize for Proof<F, G> {
-    fn encode_size(&self) -> usize {
-        self.plain_mask.encode_size()
-            + self.pedersen_mask.encode_size()
-            + self.value_response.encode_size()
-            + self.blinding_response.encode_size()
-    }
 }
 
 impl<F: Read, G: Read> Read for Proof<F, G>

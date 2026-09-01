@@ -10,8 +10,7 @@ use super::{
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use blst::{blst_final_exp, blst_fp12, blst_miller_loop};
-use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write};
+use commonware_codec::{EncodeSize, FixedSize, Read, Write};
 use commonware_math::algebra::{Additive, CryptoGroup, HashToGroup, Space};
 use commonware_parallel::Strategy;
 use commonware_utils::Participant;
@@ -290,33 +289,10 @@ impl Debug for MinSig {
 /// A partial signature.
 ///
 /// c.f. [`super::ops`] for how to manipulate these.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, EncodeSize, Read, Write)]
 pub struct PartialSignature<V: Variant> {
     pub index: Participant,
     pub value: V::Signature,
-}
-
-impl<V: Variant> Write for PartialSignature<V> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.index.write(buf);
-        self.value.write(buf);
-    }
-}
-
-impl<V: Variant> Read for PartialSignature<V> {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let index = Participant::read(buf)?;
-        let value = V::Signature::read(buf)?;
-        Ok(Self { index, value })
-    }
-}
-
-impl<V: Variant> EncodeSize for PartialSignature<V> {
-    fn encode_size(&self) -> usize {
-        self.index.encode_size() + V::Signature::SIZE
-    }
 }
 
 #[cfg(feature = "arbitrary")]

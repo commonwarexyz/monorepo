@@ -18,7 +18,6 @@
 //! ```
 
 use crate::curve::{F, montgomery};
-use bytes::{Buf, BufMut};
 use commonware_codec::{FixedSize, Read, Write};
 use commonware_math::algebra::Random;
 use subtle::ConstantTimeEq;
@@ -79,7 +78,7 @@ impl SecretKey {
 ///
 /// Equality compares decoded u-coordinates. Distinct encodings that X25519 processes as the same
 /// field element therefore compare equal, while serialization preserves the original bytes.
-#[derive(Clone)]
+#[derive(Clone, FixedSize, Read, Write)]
 pub struct PublicKey {
     /// The little-endian u-coordinate of a point on the Montgomery form of the curve.
     ///
@@ -99,26 +98,6 @@ impl Eq for PublicKey {}
 impl AsRef<[u8]> for PublicKey {
     fn as_ref(&self) -> &[u8] {
         &self.bytes
-    }
-}
-
-impl Write for PublicKey {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.bytes.write(buf);
-    }
-}
-
-impl FixedSize for PublicKey {
-    const SIZE: usize = 32;
-}
-
-impl Read for PublicKey {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        Ok(Self {
-            bytes: <[u8; Self::SIZE]>::read_cfg(buf, cfg)?,
-        })
     }
 }
 

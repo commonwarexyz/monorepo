@@ -76,8 +76,7 @@ use crate::{
     Hasher as _,
     blake3::{Blake3, CoreBlake3, Digest},
 };
-use bytes::{Buf, BufMut};
-use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{FixedSize, Read, Write};
 
 /// Size of the internal [LtHash] state in bytes.
 const LTHASH_SIZE: usize = 2048;
@@ -86,7 +85,7 @@ const LTHASH_SIZE: usize = 2048;
 const LTHASH_ELEMENTS: usize = LTHASH_SIZE / 2; // each u16 is 2 bytes
 
 /// An additive homomorphic hash function over [crate::Blake3].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, FixedSize, Read, Write)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct LtHash {
     /// Internal state as 1024 16-bit unsigned integers
@@ -179,30 +178,6 @@ impl Default for LtHash {
     fn default() -> Self {
         Self::new()
     }
-}
-
-impl Write for LtHash {
-    fn write(&self, buf: &mut impl BufMut) {
-        for &val in &self.state {
-            val.write(buf);
-        }
-    }
-}
-
-impl Read for LtHash {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let mut state = [0u16; LTHASH_ELEMENTS];
-        for val in state.iter_mut() {
-            *val = u16::read(buf)?;
-        }
-        Ok(Self { state })
-    }
-}
-
-impl FixedSize for LtHash {
-    const SIZE: usize = LTHASH_SIZE;
 }
 
 #[cfg(test)]

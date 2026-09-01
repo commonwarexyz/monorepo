@@ -565,7 +565,7 @@ pub enum FinalizeError<P> {
 }
 
 /// The output of a successful DKG.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, EncodeSize, Write)]
 pub struct Output<V: Variant, P> {
     summary: Summary,
     public: Sharing<V>,
@@ -606,26 +606,6 @@ impl<V: Variant, P: Ord> Output<V, P> {
     /// These are players whose shares can be reconstructed from the selected dealer reveals.
     pub const fn revealed(&self) -> &Set<P> {
         &self.revealed
-    }
-}
-
-impl<V: Variant, P: PublicKey> EncodeSize for Output<V, P> {
-    fn encode_size(&self) -> usize {
-        self.summary.encode_size()
-            + self.public.encode_size()
-            + self.dealers.encode_size()
-            + self.players.encode_size()
-            + self.revealed.encode_size()
-    }
-}
-
-impl<V: Variant, P: PublicKey> Write for Output<V, P> {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.summary.write(buf);
-        self.public.write(buf);
-        self.dealers.write(buf);
-        self.players.write(buf);
-        self.revealed.write(buf);
     }
 }
 
@@ -992,7 +972,7 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, EncodeSize, Write)]
 pub struct DealerPubMsg<V: Variant> {
     commitment: Poly<V::Public>,
 }
@@ -1004,18 +984,6 @@ impl<V: Variant> PartialEq for DealerPubMsg<V> {
 }
 
 impl<V: Variant> Eq for DealerPubMsg<V> {}
-
-impl<V: Variant> EncodeSize for DealerPubMsg<V> {
-    fn encode_size(&self) -> usize {
-        self.commitment.encode_size()
-    }
-}
-
-impl<V: Variant> Write for DealerPubMsg<V> {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.commitment.write(buf);
-    }
-}
 
 impl<V: Variant> Read for DealerPubMsg<V> {
     type Cfg = NonZeroU32;
@@ -1088,7 +1056,7 @@ impl arbitrary::Arbitrary<'_> for DealerPrivMsg {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, EncodeSize, Read, Write)]
 pub struct PlayerAck<P: PublicKey> {
     sig: P::Signature,
 }
@@ -1096,31 +1064,6 @@ pub struct PlayerAck<P: PublicKey> {
 impl<P: PublicKey> PartialEq for PlayerAck<P> {
     fn eq(&self, other: &Self) -> bool {
         self.sig == other.sig
-    }
-}
-
-impl<P: PublicKey> EncodeSize for PlayerAck<P> {
-    fn encode_size(&self) -> usize {
-        self.sig.encode_size()
-    }
-}
-
-impl<P: PublicKey> Write for PlayerAck<P> {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.sig.write(buf);
-    }
-}
-
-impl<P: PublicKey> Read for PlayerAck<P> {
-    type Cfg = ();
-
-    fn read_cfg(
-        buf: &mut impl bytes::Buf,
-        _cfg: &Self::Cfg,
-    ) -> Result<Self, commonware_codec::Error> {
-        Ok(Self {
-            sig: ReadExt::read(buf)?,
-        })
     }
 }
 
@@ -1135,9 +1078,11 @@ where
     }
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, EncodeSize, Read, Write)]
 enum AckOrReveal<P: PublicKey> {
+    #[codec(tag = 0)]
     Ack(PlayerAck<P>),
+    #[codec(tag = 1)]
     Reveal(DealerPrivMsg),
 }
 
@@ -1152,46 +1097,6 @@ impl<P: PublicKey> std::fmt::Debug for AckOrReveal<P> {
         match self {
             Self::Ack(x) => write!(f, "Ack({x:?})"),
             Self::Reveal(_) => write!(f, "Reveal(REDACTED)"),
-        }
-    }
-}
-
-impl<P: PublicKey> EncodeSize for AckOrReveal<P> {
-    fn encode_size(&self) -> usize {
-        1 + match self {
-            Self::Ack(x) => x.encode_size(),
-            Self::Reveal(x) => x.encode_size(),
-        }
-    }
-}
-
-impl<P: PublicKey> Write for AckOrReveal<P> {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
-        match self {
-            Self::Ack(x) => {
-                0u8.write(buf);
-                x.write(buf);
-            }
-            Self::Reveal(x) => {
-                1u8.write(buf);
-                x.write(buf);
-            }
-        }
-    }
-}
-
-impl<P: PublicKey> Read for AckOrReveal<P> {
-    type Cfg = ();
-
-    fn read_cfg(
-        buf: &mut impl bytes::Buf,
-        _cfg: &Self::Cfg,
-    ) -> Result<Self, commonware_codec::Error> {
-        let tag = u8::read(buf)?;
-        match tag {
-            0 => Ok(Self::Ack(ReadExt::read(buf)?)),
-            1 => Ok(Self::Reveal(ReadExt::read(buf)?)),
-            x => Err(commonware_codec::Error::InvalidEnum(x)),
         }
     }
 }
@@ -1218,9 +1123,11 @@ where
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, EncodeSize, Write)]
 enum DealerResult<P: PublicKey> {
+    #[codec(tag = 0)]
     Ok(Map<P, AckOrReveal<P>>),
+    #[codec(tag = 1)]
     TooManyReveals,
 }
 
@@ -1230,29 +1137,6 @@ impl<P: PublicKey> PartialEq for DealerResult<P> {
             (Self::Ok(x), Self::Ok(y)) => x == y,
             (Self::TooManyReveals, Self::TooManyReveals) => true,
             _ => false,
-        }
-    }
-}
-
-impl<P: PublicKey> EncodeSize for DealerResult<P> {
-    fn encode_size(&self) -> usize {
-        1 + match self {
-            Self::Ok(r) => r.encode_size(),
-            Self::TooManyReveals => 0,
-        }
-    }
-}
-
-impl<P: PublicKey> Write for DealerResult<P> {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
-        match self {
-            Self::Ok(r) => {
-                0u8.write(buf);
-                r.write(buf);
-            }
-            Self::TooManyReveals => {
-                1u8.write(buf);
-            }
         }
     }
 }
@@ -1301,7 +1185,7 @@ where
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, EncodeSize, Write)]
 pub struct DealerLog<V: Variant, P: PublicKey> {
     pub_msg: DealerPubMsg<V>,
     results: DealerResult<P>,
@@ -1310,19 +1194,6 @@ pub struct DealerLog<V: Variant, P: PublicKey> {
 impl<V: Variant, P: PublicKey> PartialEq for DealerLog<V, P> {
     fn eq(&self, other: &Self) -> bool {
         self.pub_msg == other.pub_msg && self.results == other.results
-    }
-}
-
-impl<V: Variant, P: PublicKey> EncodeSize for DealerLog<V, P> {
-    fn encode_size(&self) -> usize {
-        self.pub_msg.encode_size() + self.results.encode_size()
-    }
-}
-
-impl<V: Variant, P: PublicKey> Write for DealerLog<V, P> {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.pub_msg.write(buf);
-        self.results.write(buf);
     }
 }
 
@@ -1436,9 +1307,10 @@ where
 ///
 /// This avoids having to trust some other party or process for knowing that a
 /// dealer actually produced a log.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, EncodeSize, Read, Write)]
 pub struct SignedDealerLog<V: Variant, S: Signer> {
     dealer: S::PublicKey,
+    #[codec(cfg)]
     log: DealerLog<V, S::PublicKey>,
     sig: S::Signature,
 }
@@ -1474,35 +1346,6 @@ impl<V: Variant, S: Signer> SignedDealerLog<V, S> {
             return None;
         }
         Some((self.dealer, self.log))
-    }
-}
-
-impl<V: Variant, S: Signer> EncodeSize for SignedDealerLog<V, S> {
-    fn encode_size(&self) -> usize {
-        self.dealer.encode_size() + self.log.encode_size() + self.sig.encode_size()
-    }
-}
-
-impl<V: Variant, S: Signer> Write for SignedDealerLog<V, S> {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.dealer.write(buf);
-        self.log.write(buf);
-        self.sig.write(buf);
-    }
-}
-
-impl<V: Variant, S: Signer> Read for SignedDealerLog<V, S> {
-    type Cfg = NonZeroU32;
-
-    fn read_cfg(
-        buf: &mut impl bytes::Buf,
-        cfg: &Self::Cfg,
-    ) -> Result<Self, commonware_codec::Error> {
-        Ok(Self {
-            dealer: ReadExt::read(buf)?,
-            log: Read::read_cfg(buf, cfg)?,
-            sig: ReadExt::read(buf)?,
-        })
     }
 }
 

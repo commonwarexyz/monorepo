@@ -92,8 +92,7 @@ use crate::{
 };
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
-use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{EncodeSize, FixedSize, Read, Write};
 use commonware_math::algebra::{Additive, CryptoGroup};
 use commonware_utils::sequence::FixedBytes;
 use rand_core::CryptoRng;
@@ -124,7 +123,7 @@ impl From<Digest> for Block {
 }
 
 /// Encrypted message.
-#[derive(Hash, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Hash, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, EncodeSize, Read, Write)]
 pub struct Ciphertext<V: Variant> {
     /// First group element U = r * Public::generator().
     pub u: V::Public,
@@ -132,31 +131,6 @@ pub struct Ciphertext<V: Variant> {
     pub v: Block,
     /// Encrypted message W = M XOR H4(sigma).
     pub w: Block,
-}
-
-impl<V: Variant> Write for Ciphertext<V> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.u.write(buf);
-        buf.put_slice(self.v.as_ref());
-        buf.put_slice(self.w.as_ref());
-    }
-}
-
-impl<V: Variant> Read for Ciphertext<V> {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, commonware_codec::Error> {
-        let u = V::Public::read(buf)?;
-        let v = Block::read(buf)?;
-        let w = Block::read(buf)?;
-        Ok(Self { u, v, w })
-    }
-}
-
-impl<V: Variant> EncodeSize for Ciphertext<V> {
-    fn encode_size(&self) -> usize {
-        self.u.encode_size() + self.v.encode_size() + self.w.encode_size()
-    }
 }
 
 #[cfg(feature = "arbitrary")]
