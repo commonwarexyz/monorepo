@@ -498,6 +498,61 @@ impl<B: RBlob> SealedBlobs<'_, B> {
     }
 }
 
+/// Retains exactly the blobs backing positions `0..size` of a sealed journal, tolerating the one
+/// empty successor the rollover pipeline may have opened. Returns the last item-bearing blob.
+///
+/// Blobs holding data past the sealed size are not provably sealed; per-blob length or content
+/// checks remain the caller's responsibility.
+#[commonware_macros::stability(ALPHA)]
+pub(super) fn retain_sealed_prefix<B: RBlob>(
+    pending: &mut BTreeMap<u64, Writer<B>>,
+    items_per_blob: u64,
+    size: u64,
+) -> Result<u64, Error> {
+    if size == 0 {
+        return Err(Error::Unsealed("a sealed journal cannot be empty".into()));
+    }
+    let last_blob = super::position_to_blob(size - 1, items_per_blob);
+    if let Some((&newest, writer)) = pending.last_key_value()
+        && newest > last_blob
+        && (newest > last_blob + 1 || writer.size() != 0)
+    {
+        return Err(Error::Unsealed(format!(
+            "blob {newest} extends past the sealed size {size}"
+        )));
+    }
+    pending.retain(|&blob, _| blob <= last_blob);
+    Ok(last_blob)
+}
+
+impl<B: RBlob> Blobs<'static, B> {
+    /// Snapshot a contiguous run of recovered writers into an owned read-only view.
+    ///
+    /// The newest writer serves as the tail view. Unlike [Writable::recover], nothing is
+    /// sealed, synced, or created: reopened writers hold no buffered bytes, so each snapshot
+    /// only captures an immutable handle. Callers prove the run's presence and contiguity.
+    #[commonware_macros::stability(ALPHA)]
+    pub(super) async fn snapshot_writers(
+        mut writers: BTreeMap<u64, Writer<B>>,
+    ) -> Result<Self, Error> {
+        let oldest = *writers.keys().next().expect("callers pass a non-empty run");
+        debug_assert!(
+            writers.keys().zip(oldest..).all(|(&blob, run)| blob == run),
+            "callers pass a contiguous run"
+        );
+        let (_, mut tail) = writers.pop_last().expect("writers is non-empty");
+        let mut sealed = Vec::with_capacity(writers.len());
+        for (_, mut writer) in writers {
+            sealed.push(writer.snapshot().await?);
+        }
+        Ok(Self {
+            oldest_blob_index: oldest,
+            sealed: SealedBlobs::Owned(sealed.into()),
+            tail: Blob::Sealed(tail.snapshot().await?),
+        })
+    }
+}
+
 /// A read handle for one journal blob.
 pub(super) enum Blob<'a, B: RBlob> {
     /// Writable tail, read through the writer's cache-aware logical view.

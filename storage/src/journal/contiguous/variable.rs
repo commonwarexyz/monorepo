@@ -375,6 +375,16 @@ impl<C> Config<C> {
     fn offsets_partition(&self) -> String {
         format!("{}{}", self.partition, OFFSETS_SUFFIX)
     }
+
+    /// Returns the configuration for the offsets journal.
+    fn offsets_config(&self) -> fixed::Config {
+        fixed::Config {
+            partition: self.offsets_partition(),
+            items_per_blob: self.items_per_section,
+            page_cache: self.page_cache.clone(),
+            write_buffer: self.write_buffer,
+        }
+    }
 }
 
 /// The journal's state, boxed so the public [Journal] handle stays pointer-sized.
@@ -1051,12 +1061,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         // that reset so stale data is never replayed past the reset size.
         let offsets = fixed::Inner::<E, u64>::init_cleared(
             context.child("offsets"),
-            fixed::Config {
-                partition: cfg.offsets_partition(),
-                items_per_blob: cfg.items_per_section,
-                page_cache: cfg.page_cache.clone(),
-                write_buffer: cfg.write_buffer,
-            },
+            cfg.offsets_config(),
             || Partition::<E>::remove_all(&data_context, &data_partition),
         )
         .await?;
@@ -1176,6 +1181,97 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             codec_config: cfg.codec_config,
             metrics: Arc::new(metrics),
             barrier,
+        })
+    }
+
+    /// See [Journal::init_sealed].
+    #[commonware_macros::stability(ALPHA)]
+    pub(crate) async fn init_sealed(
+        context: E,
+        cfg: Config<V::Cfg>,
+        size: u64,
+    ) -> Result<Reader<'static, E, V>, Error> {
+        // The offsets checkpoint watermark is the joint durability proof: it only ever advances
+        // to sizes proven durable in both journals (see `start_sync`), so a watermark of exactly
+        // `size` proves every frame in `0..size` and its offset entry are durable. Interior torn
+        // pages below a completed fsync are external corruption, surfaced by page CRCs at read
+        // time exactly as `init` leaves them for fully acknowledged blobs. The offsets and data
+        // halves are independent until the frame checks below, so they open concurrently.
+        let items_per_blob = cfg.items_per_section.get();
+        let partition = Partition::new(
+            context.child("data"),
+            cfg.data_partition(),
+            cfg.page_cache.clone(),
+            cfg.write_buffer,
+        );
+        let (offsets, mut pending) = futures::try_join!(
+            fixed::Inner::<E, u64>::init_sealed(context.child("offsets"), cfg.offsets_config(), size),
+            partition.open_all(),
+        )?;
+
+        // Positions `0..size` occupy data blobs `0..=last_blob`. Every retained blob must be
+        // present and physically extend past its last durable frame's start; frame lengths are
+        // validated against the offset gaps on every read.
+        let last_blob = super::blobs::retain_sealed_prefix(&mut pending, items_per_blob, size)?;
+        let last_positions = (0..=last_blob)
+            .map(|blob| super::blob_end_position(blob, items_per_blob, size) - 1)
+            .collect::<Vec<_>>();
+        let last_offsets = offsets.read_many_inner(&last_positions).await?;
+        let final_offset = *last_offsets.last().expect("positions are non-empty");
+        for (blob, offset) in last_offsets.iter().copied().enumerate() {
+            let blob = blob as u64;
+            let Some(writer) = pending.get(&blob) else {
+                return Err(Error::Unsealed(format!("data blob {blob} is missing")));
+            };
+            if offset >= writer.size() {
+                return Err(Error::Unsealed(format!(
+                    "data blob {blob} ends at {} before its last frame at {offset}",
+                    writer.size()
+                )));
+            }
+        }
+
+        let data = Blobs::snapshot_writers(pending).await?;
+
+        // The proof also bounds the data exactly: the final indexed frame must end at its
+        // blob's last byte, else content beyond `size` (an append after sealing, or a torn
+        // final frame) would be hidden from this reader but recovered by [Journal::init]. One
+        // frame-header read resolves the frame's extent; any failure defers to recovery.
+        let handle = data
+            .get(last_blob)
+            .expect("the last retained blob was just verified");
+        let header_len = usize::try_from(
+            (handle.size() - final_offset).min(MAX_U32_VARINT_SIZE as u64),
+        )
+        .expect("frame headers are small");
+        let exact = handle
+            .read_at(final_offset, header_len)
+            .await
+            .ok()
+            .and_then(|bytes| {
+                let bytes = bytes.coalesce();
+                let (item_size, varint_len) =
+                    decode_length_prefix(&mut Cursor::new(bytes.as_ref())).ok()?;
+                final_offset
+                    .checked_add(varint_len as u64)?
+                    .checked_add(item_size as u64)
+            })
+            .is_some_and(|end| end == handle.size());
+        if !exact {
+            return Err(Error::Unsealed(format!(
+                "data blob {last_blob} does not end exactly at its final sealed frame"
+            )));
+        }
+        let metrics = Metrics::new(context);
+        metrics.update(size, 0, items_per_blob);
+        Ok(Reader {
+            data,
+            bounds: 0..size,
+            offsets,
+            items_per_blob: cfg.items_per_section,
+            codec_config: cfg.codec_config,
+            compressed: cfg.compression.is_some(),
+            metrics: Arc::new(metrics),
         })
     }
 
@@ -1594,6 +1690,15 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         );
 
         Ok((self, true))
+    }
+
+    /// See [Journal::start_seal].
+    #[commonware_macros::stability(ALPHA)]
+    pub(crate) async fn start_seal(mut self: Box<Self>) -> Result<(Box<Self>, Handle<()>), Error> {
+        let size = self.barrier.size();
+        let (offsets, handle) = self.offsets.start_watermark_sync(size).await?;
+        self.offsets = offsets;
+        Ok((self, handle))
     }
 
     /// See [Journal::start_sync].
@@ -2180,6 +2285,51 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// it will be updated to match the data blobs.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         Ok(Self(Box::new(Inner::init(context, cfg).await?)))
+    }
+
+    /// Open a read-only [Reader] over a never-pruned journal proven to hold exactly `size`
+    /// durable items, without replaying any data frames.
+    ///
+    /// The proof is the offsets journal's persisted recovery watermark, which only ever advances
+    /// to jointly durable data/offsets sizes, plus an exact-length check on the final frame.
+    /// Work is proportional to index metadata, never to the journal's data bytes. No
+    /// journal-level repair runs (no offset rebuilds, truncation, or watermark writes); on
+    /// damaged blobs, lower layers may still perform the same idempotent page-level open
+    /// recovery every open performs.
+    ///
+    /// The caller asserts the journal was sealed: no append, rewind, prune, or clear may run
+    /// concurrently or after the point that proved `size`. The proof is persisted by
+    /// [Journal::sync], or by [Journal::start_seal] once a [Journal::start_sync] covering the
+    /// final size has completed.
+    ///
+    /// Returns [Error::Unsealed] when the durable state does not prove `size`; recover such a
+    /// journal with [Journal::init] instead (which also re-establishes the proof).
+    ///
+    /// External corruption of interior pages below the proof surfaces as a read error on the
+    /// affected item rather than at open time, matching how [Journal::init] leaves fully
+    /// acknowledged blobs to page CRCs at read time.
+    #[commonware_macros::stability(ALPHA)]
+    pub async fn init_sealed(
+        context: E,
+        cfg: Config<V::Cfg>,
+        size: u64,
+    ) -> Result<Reader<'static, E, V>, Error> {
+        Inner::init_sealed(context, cfg, size).await
+    }
+
+    /// Begin durably recording the already-proven durable size as the recovery watermark,
+    /// without forcing any new data sync.
+    ///
+    /// Awaiting the returned [Handle] guarantees the watermark write survived a crash. Once a
+    /// watermark covering a journal's final size is durable and no further mutation runs, the
+    /// journal is provably sealed and [Journal::init_sealed] opens it without replay. A crash
+    /// before the write lands merely loses the proof; [Journal::init] recovery remains
+    /// authoritative either way.
+    #[commonware_macros::stability(ALPHA)]
+    pub async fn start_seal(mut self) -> Result<(Self, Handle<()>), Error> {
+        let (inner, handle) = self.0.start_seal().await?;
+        self.0 = inner;
+        Ok((self, handle))
     }
 
     /// Initialize an empty [Journal] at the given logical `size`.
@@ -2916,6 +3066,313 @@ mod tests {
                     .is_err(),
                 "init must sync adopted data before advancing rebuilt offsets"
             );
+        });
+    }
+
+    /// Appends `items` under `label` and proves the final size with one full `sync`.
+    async fn seed_sealed(
+        context: &deterministic::Context,
+        cfg: &Config<()>,
+        label: &'static str,
+        items: &[FixedBytes<32>],
+    ) {
+        let mut journal = Journal::<_, FixedBytes<32>>::init(context.child(label), cfg.clone())
+            .await
+            .unwrap();
+        (journal, _) = journal.append_many(Many::Flat(items)).await.unwrap();
+        drop(journal.sync().await.unwrap());
+    }
+
+    #[test_traced]
+    fn test_init_sealed_opens_without_replay_or_writes() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "init-sealed-clean".into(),
+                items_per_section: NZU64!(4),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(8)),
+                write_buffer: NZUsize!(2048),
+            };
+            let items: Vec<FixedBytes<32>> = (0..4u8).map(|i| FixedBytes::new([i; 32])).collect();
+            seed_sealed(&context, &cfg, "writer", &items).await;
+
+            // The sealed open must not repair, rewind, or sync anything: a recovery pass would
+            // rebuild and sync offsets, which shows up as writes.
+            let before = context.encode();
+            let reader =
+                Journal::<_, FixedBytes<32>>::init_sealed(context.child("sealed"), cfg.clone(), 4)
+                    .await
+                    .unwrap();
+            let after = context.encode();
+            assert_eq!(
+                counter(&after, "storage_writes"),
+                counter(&before, "storage_writes"),
+                "sealed open must not write"
+            );
+            assert_eq!(
+                counter(&after, "storage_syncs"),
+                counter(&before, "storage_syncs"),
+                "sealed open must not sync"
+            );
+
+            assert_eq!(reader.bounds(), 0..4);
+            for (position, item) in items.iter().enumerate() {
+                assert_eq!(reader.read(position as u64).await.unwrap(), *item);
+            }
+            assert_eq!(
+                reader.read_many(&[0, 3]).await.unwrap(),
+                vec![items[0].clone(), items[3].clone()]
+            );
+            assert!(matches!(
+                reader.read(4).await,
+                Err(Error::ItemOutOfRange(4))
+            ));
+
+            // A mid-section sealed size is proven the same way.
+            let cfg_mid = Config {
+                partition: "init-sealed-mid".into(),
+                ..cfg.clone()
+            };
+            seed_sealed(&context, &cfg_mid, "mid_writer", &items[..2]).await;
+            let reader = Journal::<_, FixedBytes<32>>::init_sealed(
+                context.child("mid_sealed"),
+                cfg_mid,
+                2,
+            )
+            .await
+            .unwrap();
+            assert_eq!(reader.bounds(), 0..2);
+            assert_eq!(reader.read(1).await.unwrap(), items[1]);
+            drop(reader);
+
+            // `start_seal` after a completed `start_sync` proves the size without a full sync.
+            let cfg_seal = Config {
+                partition: "init-sealed-started".into(),
+                ..cfg
+            };
+            let mut journal =
+                Journal::<_, FixedBytes<32>>::init(context.child("seal_writer"), cfg_seal.clone())
+                    .await
+                    .unwrap();
+            (journal, _) = journal.append_many(Many::Flat(&items)).await.unwrap();
+            let (journal, handle) = journal.start_sync().await.unwrap();
+            handle.await.unwrap();
+            let (journal, handle) = journal.start_seal().await.unwrap();
+            handle.await.unwrap();
+            drop(journal);
+            let reader = Journal::<_, FixedBytes<32>>::init_sealed(
+                context.child("seal_sealed"),
+                cfg_seal,
+                4,
+            )
+            .await
+            .unwrap();
+            assert_eq!(reader.bounds(), 0..4);
+        });
+    }
+
+    #[test_traced]
+    fn test_init_sealed_reads_index_metadata_only() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "init-sealed-read-bound".into(),
+                items_per_section: NZU64!(64),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(8)),
+                write_buffer: NZUsize!(2048),
+            };
+            let items: Vec<FixedBytes<4096>> =
+                (0..64u8).map(|i| FixedBytes::new([i; 4096])).collect();
+            let data_bytes = 64 * 4096;
+            let mut journal =
+                Journal::<_, FixedBytes<4096>>::init(context.child("writer"), cfg.clone())
+                    .await
+                    .unwrap();
+            (journal, _) = journal.append_many(Many::Flat(&items)).await.unwrap();
+            drop(journal.sync().await.unwrap());
+
+            // The open must read index metadata only, never the journal's data bytes: the whole
+            // point of the sealed proof is skipping the recovery scan over them.
+            let before = counter(&context.encode(), "storage_read_bytes");
+            let reader = Journal::<_, FixedBytes<4096>>::init_sealed(
+                context.child("sealed"),
+                cfg.clone(),
+                64,
+            )
+            .await
+            .unwrap();
+            let opened = counter(&context.encode(), "storage_read_bytes") - before;
+            assert!(
+                opened < data_bytes / 8,
+                "sealed open read {opened} bytes against {data_bytes} data bytes"
+            );
+            assert_eq!(reader.read(63).await.unwrap(), items[63]);
+        });
+    }
+
+    #[test_traced]
+    fn test_start_seal_reports_only_durable_proofs() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = PendingSyncs::default();
+            let cfg = Config {
+                partition: "start-seal-durability".into(),
+                items_per_section: NZU64!(4),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(8)),
+                write_buffer: NZUsize!(2048),
+            };
+            let mut journal = Journal::<_, u64>::init(
+                DelayedSyncContext {
+                    inner: context.child("journal"),
+                    pending: pending.clone(),
+                },
+                cfg,
+            )
+            .await
+            .unwrap();
+            (journal, _) = journal.append_many(Many::Flat(&[1, 2, 3, 4])).await.unwrap();
+            let (journal, cut) = journal.start_sync().await.unwrap();
+            drive_pending_syncs(&pending, cut).await.unwrap();
+
+            // Both handles observe the same parked watermark write: a later call must never
+            // report a proof the earlier write can still fail to persist.
+            let (journal, first) = journal.start_seal().await.unwrap();
+            let (journal, second) = journal.start_seal().await.unwrap();
+            fail_pending_syncs(&pending);
+            assert!(first.await.is_err());
+            assert!(second.await.is_err(), "a staged watermark was reported durable");
+            drop(journal);
+        });
+    }
+
+    #[test_traced]
+    fn test_init_sealed_rejects_unproven_state() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "init-sealed-unproven".into(),
+                items_per_section: NZU64!(4),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(8)),
+                write_buffer: NZUsize!(2048),
+            };
+            let items: Vec<FixedBytes<32>> = (0..4u8).map(|i| FixedBytes::new([i; 32])).collect();
+            let mut journal =
+                Journal::<_, FixedBytes<32>>::init(context.child("writer"), cfg.clone())
+                    .await
+                    .unwrap();
+            (journal, _) = journal.append_many(Many::Flat(&items)).await.unwrap();
+
+            // `start_sync` proves durability but records the previously proven watermark, so the
+            // final size is not yet provable.
+            let (journal, handle) = journal.start_sync().await.unwrap();
+            handle.await.unwrap();
+            drop(journal);
+            assert!(matches!(
+                Journal::<_, FixedBytes<32>>::init_sealed(context.child("lagged"), cfg.clone(), 4)
+                    .await,
+                Err(Error::Unsealed(_))
+            ));
+
+            // Authoritative recovery replays the tail and re-establishes the proof, so the next
+            // sealed open succeeds without another explicit sync.
+            let journal = Journal::<_, FixedBytes<32>>::init(context.child("heal"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.size(), 4);
+            drop(journal);
+            let reader =
+                Journal::<_, FixedBytes<32>>::init_sealed(context.child("healed"), cfg.clone(), 4)
+                    .await
+                    .unwrap();
+            assert_eq!(reader.bounds(), 0..4);
+            drop(reader);
+
+            // A size the proof does not name exactly is rejected in both directions.
+            for size in [3, 5] {
+                assert!(matches!(
+                    Journal::<_, FixedBytes<32>>::init_sealed(
+                        context.child("mismatch"),
+                        cfg.clone(),
+                        size
+                    )
+                    .await,
+                    Err(Error::Unsealed(_))
+                ));
+            }
+
+            // Data holding a complete frame past the proof is not provably sealed, even though
+            // every proven position remains readable; authoritative recovery discovers it.
+            let cfg_extra = Config {
+                partition: "init-sealed-extra".into(),
+                ..cfg.clone()
+            };
+            seed_sealed(&context, &cfg_extra, "extra_writer", &items[..2]).await;
+            let mut journal = Journal::<_, FixedBytes<32>>::init(
+                context.child("extra_reopen"),
+                cfg_extra.clone(),
+            )
+            .await
+            .unwrap();
+            journal
+                .test_append_data(0, FixedBytes::new([9; 32]))
+                .await
+                .unwrap();
+            journal.test_sync_data_blob(0).await.unwrap();
+            drop(journal);
+            assert!(matches!(
+                Journal::<_, FixedBytes<32>>::init_sealed(
+                    context.child("extra_sealed"),
+                    cfg_extra.clone(),
+                    2
+                )
+                .await,
+                Err(Error::Unsealed(_))
+            ));
+            let journal =
+                Journal::<_, FixedBytes<32>>::init(context.child("extra_heal"), cfg_extra)
+                    .await
+                    .unwrap();
+            assert_eq!(journal.size(), 3);
+            drop(journal);
+
+            // Pruned journals are outside the sealed contract.
+            let cfg_pruned = Config {
+                partition: "init-sealed-pruned".into(),
+                items_per_section: NZU64!(2),
+                ..cfg.clone()
+            };
+            let mut journal =
+                Journal::<_, FixedBytes<32>>::init(context.child("pruner"), cfg_pruned.clone())
+                    .await
+                    .unwrap();
+            (journal, _) = journal.append_many(Many::Flat(&items)).await.unwrap();
+            let journal = journal.sync().await.unwrap();
+            let (journal, _) = journal.prune(2).await.unwrap();
+            drop(journal.sync().await.unwrap());
+            assert!(matches!(
+                Journal::<_, FixedBytes<32>>::init_sealed(context.child("pruned"), cfg_pruned, 4)
+                    .await,
+                Err(Error::Unsealed(_))
+            ));
+
+            // An absent journal is unproven, not corrupt.
+            let cfg_absent = Config {
+                partition: "init-sealed-absent".into(),
+                ..cfg
+            };
+            assert!(matches!(
+                Journal::<_, FixedBytes<32>>::init_sealed(context.child("absent"), cfg_absent, 4)
+                    .await,
+                Err(Error::Unsealed(_))
+            ));
         });
     }
 

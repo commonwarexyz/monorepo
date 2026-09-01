@@ -420,6 +420,83 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         Self::init_with_checkpoint(context, cfg, checkpoint).await
     }
 
+    /// Opens the selected blob partition and its recovered writers.
+    async fn open_blobs(
+        context: &E,
+        cfg: &Config,
+    ) -> Result<(Partition<E>, BTreeMap<u64, Writer<E::Blob>>), Error> {
+        let (blob_partition, names) = Partition::select(context, &cfg.partition).await?;
+        let partition = Partition::new(
+            context.child("blobs"),
+            blob_partition,
+            cfg.page_cache.clone(),
+            cfg.write_buffer,
+        );
+        let pending = partition.open_many(names).await?;
+        Ok((partition, pending))
+    }
+
+    /// Open a read-only [Reader] over a never-pruned journal proven to hold exactly `size`
+    /// durable items.
+    ///
+    /// The proof is the persisted recovery watermark: it only advances after the data it covers
+    /// is durable, so a watermark of `size` together with blob lengths that walk to exactly
+    /// `size` items proves every position in `0..size` is durably backed. Nothing is repaired,
+    /// written, or created. Any deviation returns [Error::Unsealed]; the caller must then use
+    /// [Journal::init] for authoritative recovery.
+    #[commonware_macros::stability(ALPHA)]
+    pub(crate) async fn init_sealed(
+        context: E,
+        cfg: Config,
+        size: u64,
+    ) -> Result<Reader<'static, E, A>, Error> {
+        if size == 0 {
+            return Err(Error::Unsealed("a sealed journal cannot be empty".into()));
+        }
+        let checkpoint = Checkpoint::open(context.child("meta"), &cfg.partition).await?;
+        if checkpoint.clear_target().is_some() {
+            return Err(Error::Unsealed("journal has a staged clear".into()));
+        }
+        if checkpoint.boundary_hint().is_some() {
+            return Err(Error::Unsealed("journal was pruned mid-blob".into()));
+        }
+        let watermark = checkpoint.watermark();
+        if watermark != Some(size) {
+            return Err(Error::Unsealed(format!(
+                "recovery watermark {watermark:?} does not prove size {size}"
+            )));
+        }
+
+        let (_, mut pending) = Self::open_blobs(&context, &cfg).await?;
+
+        // Every retained blob must hold exactly its expected items: fewer lost acknowledged
+        // data, more means the journal advanced past the watermark after sealing.
+        let items_per_blob = cfg.items_per_blob.get();
+        let last_blob = super::blobs::retain_sealed_prefix(&mut pending, items_per_blob, size)?;
+        for blob in 0..=last_blob {
+            let expected = super::blob_end_position(blob, items_per_blob, size)
+                - super::blob_first_position(blob, items_per_blob)?;
+            let expected = Self::items_to_bytes(expected)?;
+            let actual = pending.get(&blob).map(Writer::size);
+            if actual != Some(expected) {
+                return Err(Error::Unsealed(format!(
+                    "blob {blob} holds {actual:?} bytes, sealed size {size} requires {expected}"
+                )));
+            }
+        }
+
+        let blobs = Blobs::snapshot_writers(pending).await?;
+        let metrics = Metrics::new(context);
+        metrics.update(size, 0, items_per_blob);
+        Ok(Reader {
+            blobs,
+            bounds: 0..size,
+            items_per_blob: cfg.items_per_blob,
+            metrics: Arc::new(metrics),
+            _phantom: PhantomData,
+        })
+    }
+
     /// Finish initialization using an already-open checkpoint.
     async fn init_with_checkpoint(
         context: E,
@@ -432,14 +509,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             return Self::complete_staged_clear(context, cfg, checkpoint, clear_target).await;
         }
 
-        let (blob_partition, names) = Partition::select(&context, &cfg.partition).await?;
-        let partition = Partition::new(
-            context.child("blobs"),
-            blob_partition,
-            cfg.page_cache,
-            cfg.write_buffer,
-        );
-        let mut pending = partition.open_many(names).await?;
+        let (partition, mut pending) = Self::open_blobs(&context, &cfg).await?;
 
         // Truncate any trailing non-chunk-aligned bytes on every blob before recovery. Items
         // are fixed size, so a blob ending in fewer than `CHUNK_SIZE` trailing bytes is junk
@@ -1997,19 +2067,16 @@ mod tests {
             fail_pending_syncs(&pending);
             assert!(h2.await.is_err());
 
-            // An advance at or below the staged value is skipped, so the next handle succeeds:
-            // the failure is observed only by the next checkpoint write.
+            // A failed advance is never silently skipped: the staged value is not proven, so
+            // the next advance retries the checkpoint write, which observes the failure and
+            // fails. A staged-but-unproven watermark reported as durable would let a later
+            // caller acknowledge a proof the earlier write lost.
             journal.append(&4).await.unwrap();
-            let (journal, h3) = journal.start_sync().await.unwrap();
-            drive_pending_syncs(&pending, h3).await.unwrap();
-
-            // The failed advance's completion stays pending until observed: commit (which
-            // does not write the checkpoint) still succeeds, and the next checkpoint write
-            // observes the failure and fails.
-            let journal = drive_pending_syncs(&pending, journal.commit())
-                .await
-                .unwrap();
-            assert!(drive_pending_syncs(&pending, journal.sync()).await.is_err());
+            assert!(
+                drive_pending_syncs(&pending, journal.start_sync())
+                    .await
+                    .is_err()
+            );
         });
     }
 
