@@ -13,7 +13,7 @@
 
 use super::Error;
 use commonware_runtime::{Handle, ReadOptions};
-use futures::{Stream, StreamExt as _, stream};
+use futures::{Stream, StreamExt as _, future::BoxFuture, stream};
 use std::{future::Future, num::NonZeroUsize, ops::Range};
 use tracing::warn;
 
@@ -38,6 +38,41 @@ fn batch_count_to_blob_boundary(position: u64, remaining: usize, items_per_blob:
     remaining_space.min(remaining as u64) as usize
 }
 
+/// Read `[from, to)` from `sealed` in concurrently issued chunks, charging `budget` per
+/// byte. Returns false when the budget is exhausted or a read fails (both end the
+/// prefetch). Chunk reads run a few at a time: the paged read path fetches faulted pages
+/// one await at a time, so concurrency across chunks is what keeps device queues busy.
+#[commonware_macros::stability(ALPHA)]
+async fn warm_range<B: commonware_runtime::Blob>(
+    sealed: &commonware_runtime::buffer::paged::Sealed<B>,
+    from: u64,
+    to: u64,
+    budget: &mut u64,
+) -> bool {
+    const CHUNK: u64 = 1 << 18;
+    const CONCURRENCY: usize = 8;
+
+    // Charge the whole clamped range up front so concurrent chunks need no shared state.
+    let to = to.min(from.saturating_add(*budget));
+    if to <= from {
+        return *budget > 0;
+    }
+    let exhausted = *budget <= to - from;
+    *budget -= to - from;
+
+    let chunks = (from..to).step_by(CHUNK as usize).map(|at| {
+        let len = (to - at).min(CHUNK) as usize;
+        async move { sealed.read_at(at, len).await.map(|_| ()) }
+    });
+    use futures::stream::TryStreamExt as _;
+    let ok = futures::stream::iter(chunks)
+        .buffer_unordered(CONCURRENCY)
+        .try_collect::<Vec<()>>()
+        .await
+        .is_ok();
+    ok && !exhausted
+}
+
 /// Return the blob containing `position`.
 ///
 /// # Examples
@@ -52,6 +87,15 @@ fn batch_count_to_blob_boundary(position: u64, remaining: usize, items_per_blob:
 /// ```
 const fn position_to_blob(position: u64, items_per_blob: u64) -> u64 {
     position / items_per_blob
+}
+
+/// Return the first retained logical position in `blob`: the oldest retained blob may
+/// begin mid-grid (a mid-blob pruning boundary or an `init_at_size` start), and its items
+/// are stored from physical offset zero.
+#[inline]
+fn first_in_blob(pruning_boundary: u64, blob: u64, items_per_blob: u64) -> Result<u64, Error> {
+    let start = blob_first_position(blob, items_per_blob)?;
+    Ok(pruning_boundary.max(start))
 }
 
 /// Return the first position stored in `blob`.
@@ -187,6 +231,15 @@ pub trait Contiguous: Send + Sync {
     /// that require I/O, fail to decode, or fall outside `bounds()` decline to `None`. The
     /// async read paths are the sole error authority for declined positions.
     fn try_read_many_sync(&self, positions: &[u64]) -> Vec<Option<Self::Item>>;
+
+    /// Return a future that warms caches for up to `max_items` items starting at `start`,
+    /// without reading them into the caller, or None when the implementation cannot
+    /// prefetch any of the range. The future is owned and best effort: the caller chooses
+    /// where to run it, and it may cover only part of the range.
+    fn start_prefetch(&self, start: u64, max_items: u64) -> Option<BoxFuture<'static, ()>> {
+        let _ = (start, max_items);
+        None
+    }
 
     /// Return a stream of all items starting from `start_pos`, bounded by `bounds()`.
     ///
