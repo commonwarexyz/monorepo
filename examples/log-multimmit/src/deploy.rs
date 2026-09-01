@@ -106,6 +106,10 @@ pub struct Deploy {
     #[arg(long, default_value_t = default_extension_bound())]
     extension_bound: u32,
 
+    /// Whether leaders propose producer-attested headers beyond their own DA-voted blocks.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    frontier_proposals: bool,
+
     /// Bytes reserved for live producer blocks awaiting ordered delivery.
     #[arg(long, default_value_t = DEFAULT_MARSHAL_LIVE_CACHE_BYTES)]
     marshal_live_cache_bytes: usize,
@@ -153,6 +157,8 @@ pub struct NodeConfig {
     pub pipeline_depth: u32,
     #[serde(default = "default_extension_bound")]
     pub extension_bound: u32,
+    #[serde(default = "default_frontier_proposals")]
+    pub frontier_proposals: bool,
     pub marshal_live_cache_bytes: usize,
     pub marshal_materialized_cache_bytes: usize,
     pub storage_dir: PathBuf,
@@ -167,6 +173,11 @@ const fn default_pipeline_depth() -> u32 {
 /// Default maximum blocks carried by one vote extension per chain.
 const fn default_extension_bound() -> u32 {
     16
+}
+
+/// Leaders propose attested headers beyond their DA frontier unless told otherwise.
+const fn default_frontier_proposals() -> bool {
+    true
 }
 
 impl Deploy {
@@ -279,6 +290,7 @@ impl Deploy {
                 body_size: self.body_size,
                 pipeline_depth: self.pipeline_depth,
                 extension_bound: self.extension_bound,
+                frontier_proposals: self.frontier_proposals,
                 marshal_live_cache_bytes: self.marshal_live_cache_bytes,
                 marshal_materialized_cache_bytes: self.marshal_materialized_cache_bytes,
                 storage_dir: PathBuf::from("/home/ubuntu/data"),

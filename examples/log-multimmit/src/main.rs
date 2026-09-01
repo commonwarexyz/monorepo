@@ -253,6 +253,10 @@ struct Cli {
     #[arg(long, default_value_t = EXTENSION_BOUND)]
     extension_bound: u32,
 
+    /// Whether leaders propose producer-attested headers beyond their own DA-voted blocks.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    frontier_proposals: bool,
+
     /// Bytes reserved for live producer blocks awaiting ordered delivery.
     #[arg(long, default_value_t = deploy::DEFAULT_MARSHAL_LIVE_CACHE_BYTES)]
     marshal_live_cache_bytes: usize,
@@ -291,6 +295,7 @@ struct RunConfig {
     body_size: usize,
     pipeline_depth: u32,
     extension_bound: u32,
+    frontier_proposals: bool,
     marshal_live_cache_bytes: usize,
     marshal_materialized_cache_bytes: usize,
     headless: bool,
@@ -317,7 +322,11 @@ impl Reporter for ApplicationReporter {
 }
 
 /// Builds the immutable profile every node in the committee shares.
-fn profile(committee: &Committee<MinPk>, index: usize) -> Profile<Sha256, MinPk> {
+fn profile(
+    committee: &Committee<MinPk>,
+    index: usize,
+    frontier_proposals: bool,
+) -> Profile<Sha256, MinPk> {
     Profile::new(
         committee.config.clone(),
         Role::Validator(Participant::new(index as u32)),
@@ -325,6 +334,7 @@ fn profile(committee: &Committee<MinPk>, index: usize) -> Profile<Sha256, MinPk>
             view_timeout: Duration::from_secs(2),
             production_interval: PRODUCTION_RETRY_INTERVAL,
             view_retention: ViewDelta::new(VIEW_RETENTION),
+            frontier_proposals,
             ..Tuning::default()
         },
     )
@@ -677,7 +687,7 @@ fn main() {
         );
 
         // Match the in-memory body window to consensus's bound on live publication effects.
-        let profile = profile(&committee, index);
+        let profile = profile(&committee, index, config.frontier_proposals);
         let publication_retention = NonZeroUsize::new(profile.resources().max_outbox_effects())
             .expect("the consensus outbox bound is non-zero");
         let producer_chain = profile
@@ -847,6 +857,7 @@ fn load_run_config(cli: Cli) -> RunConfig {
         body_size: cli.body_size,
         pipeline_depth: cli.pipeline_depth,
         extension_bound: cli.extension_bound,
+        frontier_proposals: cli.frontier_proposals,
         marshal_live_cache_bytes: cli.marshal_live_cache_bytes,
         marshal_materialized_cache_bytes: cli.marshal_materialized_cache_bytes,
         headless: cli.headless,
@@ -907,6 +918,7 @@ fn load_remote_config(config_path: PathBuf, hosts_path: PathBuf) -> RunConfig {
         body_size: config.body_size,
         pipeline_depth: config.pipeline_depth,
         extension_bound: config.extension_bound,
+        frontier_proposals: config.frontier_proposals,
         marshal_live_cache_bytes: config.marshal_live_cache_bytes,
         marshal_materialized_cache_bytes: config.marshal_materialized_cache_bytes,
         headless: true,
@@ -932,8 +944,8 @@ mod tests {
                 vec![Participant::new(1), Participant::new(participants - 1)],
                 Limits::new(PIPELINE_DEPTH, EXTENSION_BOUND).expect("limits are valid"),
             );
-            let _ = profile(&committee, 0);
-            let _ = profile(&committee, 1);
+            let _ = profile(&committee, 0, true);
+            let _ = profile(&committee, 1, true);
         }
     }
 
