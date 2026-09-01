@@ -115,7 +115,6 @@
 //! 1. Given n checked shards, you have n S encoded rows, which can be Reed-Solomon decoded.
 
 use crate::{Config, PhasedScheme, ValidatingScheme};
-use bytes::BufMut;
 use commonware_codec::{Encode, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
 use commonware_cryptography::{
     Digest, Hasher,
@@ -192,7 +191,7 @@ mod topology;
 use topology::Topology;
 
 /// A shard of data produced by the encoding scheme.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, EncodeSize, Write)]
 pub struct StrongShard<D: Digest> {
     data_bytes: usize,
     root: D,
@@ -212,26 +211,6 @@ impl<D: Digest> PartialEq for StrongShard<D> {
 }
 
 impl<D: Digest> Eq for StrongShard<D> {}
-
-impl<D: Digest> EncodeSize for StrongShard<D> {
-    fn encode_size(&self) -> usize {
-        self.data_bytes.encode_size()
-            + self.root.encode_size()
-            + self.inclusion_proof.encode_size()
-            + self.rows.encode_size()
-            + self.checksum.encode_size()
-    }
-}
-
-impl<D: Digest> Write for StrongShard<D> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.data_bytes.write(buf);
-        self.root.write(buf);
-        self.inclusion_proof.write(buf);
-        self.rows.write(buf);
-        self.checksum.write(buf);
-    }
-}
 
 impl<D: Digest> Read for StrongShard<D> {
     type Cfg = crate::CodecConfig;
@@ -268,7 +247,7 @@ where
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, EncodeSize, Write)]
 pub struct WeakShard<D: Digest> {
     inclusion_proof: Proof<D>,
     shard: Matrix<F>,
@@ -281,19 +260,6 @@ impl<D: Digest> PartialEq for WeakShard<D> {
 }
 
 impl<D: Digest> Eq for WeakShard<D> {}
-
-impl<D: Digest> EncodeSize for WeakShard<D> {
-    fn encode_size(&self) -> usize {
-        self.inclusion_proof.encode_size() + self.shard.encode_size()
-    }
-}
-
-impl<D: Digest> Write for WeakShard<D> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.inclusion_proof.write(buf);
-        self.shard.write(buf);
-    }
-}
 
 impl<D: Digest> Read for WeakShard<D> {
     type Cfg = crate::CodecConfig;

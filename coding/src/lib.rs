@@ -24,7 +24,7 @@ commonware_macros::stability_scope!(ALPHA {
     pub use zoda::{Error as ZodaError, Zoda};
 
     /// Configuration common to all encoding schemes.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, FixedSize, Read, Write)]
     pub struct Config {
         /// The minimum number of shards needed to encode the data.
         pub minimum_shards: NonZeroU16,
@@ -40,28 +40,6 @@ commonware_macros::stability_scope!(ALPHA {
         /// Returns the total number of shards produced by this configuration.
         pub fn total_shards(&self) -> u32 {
             u32::from(self.minimum_shards.get()) + u32::from(self.extra_shards.get())
-        }
-    }
-
-    impl FixedSize for Config {
-        const SIZE: usize = 2 * <NonZeroU16 as FixedSize>::SIZE;
-    }
-
-    impl Write for Config {
-        fn write(&self, buf: &mut impl bytes::BufMut) {
-            self.minimum_shards.write(buf);
-            self.extra_shards.write(buf);
-        }
-    }
-
-    impl Read for Config {
-        type Cfg = ();
-
-        fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-            Ok(Self {
-                minimum_shards: NonZeroU16::read_cfg(buf, cfg)?,
-                extra_shards: NonZeroU16::read_cfg(buf, cfg)?,
-            })
         }
     }
 

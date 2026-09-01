@@ -1,6 +1,6 @@
 use crate::{Config, Scheme};
-use bytes::{Buf, BufMut, Bytes};
-use commonware_codec::{BufsMut, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
+use bytes::{Buf, Bytes};
+use commonware_codec::{EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
 use commonware_cryptography::{
     Digest, Hasher,
     reed_solomon::{Decoder, Encoder, Error as RsError, SHARD_CHUNK_BYTES},
@@ -52,7 +52,7 @@ fn total_shards(config: &Config) -> Result<u16, Error> {
 }
 
 /// A piece of data from a Reed-Solomon encoded object.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, EncodeSize, Write)]
 pub struct Chunk<D: Digest> {
     /// The shard of encoded data.
     shard: Bytes,
@@ -122,20 +122,6 @@ impl<D: Digest> CheckedChunk<D> {
     }
 }
 
-impl<D: Digest> Write for Chunk<D> {
-    fn write(&self, writer: &mut impl BufMut) {
-        self.shard.write(writer);
-        self.index.write(writer);
-        self.proof.write(writer);
-    }
-
-    fn write_bufs(&self, buf: &mut impl BufsMut) {
-        self.shard.write_bufs(buf);
-        self.index.write(buf);
-        self.proof.write(buf);
-    }
-}
-
 impl<D: Digest> Read for Chunk<D> {
     /// The maximum size of the shard.
     type Cfg = crate::CodecConfig;
@@ -149,16 +135,6 @@ impl<D: Digest> Read for Chunk<D> {
             index,
             proof,
         })
-    }
-}
-
-impl<D: Digest> EncodeSize for Chunk<D> {
-    fn encode_size(&self) -> usize {
-        self.shard.encode_size() + self.index.encode_size() + self.proof.encode_size()
-    }
-
-    fn encode_inline_size(&self) -> usize {
-        self.shard.encode_inline_size() + self.index.encode_size() + self.proof.encode_size()
     }
 }
 
