@@ -249,8 +249,15 @@ where
                                     // Only add targets if this is a new fetch OR the existing
                                     // fetch already has targets. Don't restrict an "all" fetch
                                     // (no targets) to specific targets.
-                                    if is_new || self.fetcher.has_targets(&key) {
-                                        self.fetcher.add_targets(key.clone(), targets);
+                                    if (is_new || self.fetcher.has_targets(&key))
+                                        && !self.fetcher.add_targets(key.clone(), targets)
+                                    {
+                                        // Every target is already blocked, so this new fetch
+                                        // can never be served.
+                                        warn!(?key, "every target blocked, retiring fetch");
+                                        self.metrics.fetch.inc(Status::Failure);
+                                        self.subscribers.remove(&key);
+                                        continue;
                                     }
                                 }
                                 None => self.fetcher.clear_targets(&key),
@@ -414,6 +421,7 @@ where
         let Some(subscribers) = self.subscribers.pending(&key) else {
             warn!(?key, "response for fetch with no subscribers");
             self.inflight.cancel(&key);
+            self.fetcher.clear_targets(&key);
             return;
         };
         let delivery = Delivery { key, subscribers };
@@ -429,15 +437,34 @@ where
         elapsed: std::time::Duration,
         bytes: usize,
         delivery: Delivery<Key, Con::Subscriber>,
-        outcome: Outcome,
+        outcome: Option<Outcome>,
     ) {
         let Delivery {
             key,
             subscribers: delivered,
             ..
         } = delivery;
-
         let already_accepted = self.inflight.response_accepted(&key);
+
+        // A dropped verdict says nothing about the response, only that the consumer
+        // did not judge it for these subscribers. Hand the response to any
+        // subscribers that joined since, and retire the key once none remain.
+        let Some(outcome) = outcome else {
+            let remaining = self
+                .subscribers
+                .remove_delivered(&key, delivered.map_into(|(subscriber, _)| subscriber));
+            if let Some(subscribers) = remaining {
+                self.inflight.redeliver(Delivery { key, subscribers });
+                return;
+            }
+            if !already_accepted {
+                self.metrics.fetch.inc(Status::Dropped);
+            }
+            self.inflight.cancel(&key);
+            self.fetcher.clear_targets(&key);
+            return;
+        };
+
         if !already_accepted && outcome != Outcome::Ignored {
             self.fetcher.record_response(&peer, elapsed, bytes);
         }
@@ -496,15 +523,17 @@ where
                     return;
                 }
 
-                // If the data is invalid, block the peer and try again. Blocking the
-                // peer also removes it from every target set, and a key left with
-                // no targets can never be served, so such fetches are retired.
+                // The data is invalid, so block the peer. Blocking removes it from
+                // every target set, and a key left with no targets can never be
+                // served, so such fetches are retired instead of retried.
                 commonware_p2p::block!(self.blocker, peer.clone(), "invalid data received");
                 self.metrics.fetch.inc(Status::Failure);
                 self.inflight.discard_response(&key);
                 let retired = self.fetcher.block(peer);
                 for unservable in &retired {
                     warn!(key = ?unservable, "every target blocked, retiring fetch");
+
+                    // The rejected response already counted a failure for this key.
                     if *unservable != key {
                         self.metrics.fetch.inc(Status::Failure);
                     }

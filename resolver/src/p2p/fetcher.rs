@@ -15,7 +15,7 @@ use rand::seq::SliceRandom;
 use rand_core::Rng;
 use std::{
     cmp::Reverse,
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, hash_map::Entry},
     marker::PhantomData,
     mem,
     time::{Duration, SystemTime},
@@ -88,10 +88,11 @@ pub struct Config<P: PublicKey> {
 /// Targets persist through transient failures (timeout, "no data" response, send failure) since
 /// the peer might be slow or might receive the data later. Targets are only removed when:
 /// - A peer is blocked (sent invalid data)
-/// - The fetch succeeds (all targets for that key are cleared)
+/// - The caller clears them (a response was accepted or the fetch is otherwise retired)
 ///
-/// A blocked peer never becomes eligible again, so a key whose every target has been blocked can
-/// never be served. Blocking drops such fetches and returns their keys for the caller to retire.
+/// A blocked peer never becomes eligible again and is never added as a target. A key whose every
+/// target has been blocked can never be served, so blocking drops such fetches and returns their
+/// keys for the caller to retire, and adding only blocked targets to a new key reports the same.
 pub struct Fetcher<E, P, Key, NetS>
 where
     E: Clock + Rng + Metrics,
@@ -143,9 +144,9 @@ where
     priority_requests: bool,
 
     /// Per-key target peers restricting which peers are used to fetch each key.
-    /// Only target peers are tried, waiting for them if unavailable. There is no
-    /// fallback to other peers. Targets persist through transient failures, they are
-    /// only removed when blocked (invalid data) or cleared on successful fetch.
+    /// Only target peers are tried, and the fetch waits while they are unavailable.
+    /// There is no fallback to other peers. Entries are never empty: blocking drops
+    /// an entry it empties, and the caller clears entries it no longer needs.
     targets: HashMap<Key, HashSet<P>>,
 
     /// Per-peer performance metric (exponential moving average of throughput in bytes per second)
@@ -518,20 +519,39 @@ where
             }
             self.pending.remove(key);
         }
+        if !retired.is_empty() {
+            // Clear waiter since the key that caused it may have been removed
+            self.waiter = None;
+        }
         self.excluded.insert(peer);
         retired
     }
 
     /// Add target peers for fetching a key.
     ///
-    /// Targets are added to any existing targets for this key.
+    /// Targets are added to any existing targets for this key. Blocked peers are
+    /// skipped. Returns false if the key is left with no targets, which can only
+    /// happen for a key that had none: such a fetch can never be served and the
+    /// caller should retire it.
     ///
     /// Clears the waiter to allow immediate retry if the fetch was blocked waiting for targets.
-    pub fn add_targets(&mut self, key: Key, peers: impl IntoIterator<Item = P>) {
-        self.targets.entry(key).or_default().extend(peers);
+    pub fn add_targets(&mut self, key: Key, peers: impl IntoIterator<Item = P>) -> bool {
+        let excluded = &self.excluded;
+        let peers = peers.into_iter().filter(|peer| !excluded.contains(peer));
+        match self.targets.entry(key) {
+            Entry::Occupied(mut entry) => entry.get_mut().extend(peers),
+            Entry::Vacant(entry) => {
+                let peers: HashSet<P> = peers.collect();
+                if peers.is_empty() {
+                    return false;
+                }
+                entry.insert(peers);
+            }
+        }
 
         // Clear waiter to allow retry with new targets
         self.waiter = None;
+        true
     }
 
     /// Clear targeting for a key.
@@ -1452,7 +1472,8 @@ mod tests {
         runner.start(|context| async move {
             let public_key = PrivateKey::from_seed(0).public_key();
             let peer1 = PrivateKey::from_seed(1).public_key();
-            let blocked_peer = PrivateKey::from_seed(99).public_key();
+            // Not in the peer set, so a fetch targeting it has no eligible participants.
+            let absent_peer = PrivateKey::from_seed(99).public_key();
             let config = Config {
                 me: Some(public_key.clone()),
                 timeout: Duration::from_secs(5),
@@ -1467,12 +1488,9 @@ mod tests {
                 FailMockSender::default(),
             );
 
-            // Block the peer we'll use as target, so fetch has no eligible participants
-            fetcher.block(blocked_peer.clone());
-
-            // Add key with targets pointing only to blocked peer
+            // Add key with targets pointing only to the absent peer
             fetcher.add_ready(MockKey(1));
-            fetcher.add_targets(MockKey(1), [blocked_peer.clone()]);
+            fetcher.add_targets(MockKey(1), [absent_peer.clone()]);
             fetcher.fetch(&mut sender);
 
             // Waiter should be set to far future (no eligible peers at all)
@@ -1488,9 +1506,9 @@ mod tests {
             let deadline = fetcher.get_pending_deadline().unwrap();
             assert!(deadline <= context.current() + Duration::from_millis(100));
 
-            // Set waiter again by targeting blocked peer
+            // Set waiter again by targeting the absent peer
             fetcher.clear_targets(&MockKey(1));
-            fetcher.add_targets(MockKey(1), [blocked_peer]);
+            fetcher.add_targets(MockKey(1), [absent_peer]);
             fetcher.fetch(&mut sender);
             assert!(fetcher.waiter.is_some());
 
@@ -1856,6 +1874,32 @@ mod tests {
     }
 
     #[test]
+    fn test_add_targets_skips_blocked_peers() {
+        let runner = Runner::default();
+        runner.start(|context| async {
+            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
+            let peer1 = PrivateKey::from_seed(1).public_key();
+            let peer2 = PrivateKey::from_seed(2).public_key();
+            assert!(fetcher.block(peer1.clone()).is_empty());
+
+            // A key whose only targets are blocked gets no entry.
+            assert!(!fetcher.add_targets(MockKey(1), [peer1.clone()]));
+            assert!(!fetcher.has_targets(&MockKey(1)));
+
+            // Blocked peers are dropped from a mixed set.
+            assert!(fetcher.add_targets(MockKey(2), [peer1.clone(), peer2.clone()]));
+            assert_eq!(
+                fetcher.targets.get(&MockKey(2)).unwrap(),
+                &HashSet::from([peer2])
+            );
+
+            // Adding only blocked peers to an existing entry leaves it intact.
+            assert!(fetcher.add_targets(MockKey(2), [peer1]));
+            assert_eq!(fetcher.targets.get(&MockKey(2)).unwrap().len(), 1);
+        });
+    }
+
+    #[test]
     fn test_block_retires_unservable_fetches() {
         let runner = Runner::default();
         runner.start(|context| async {
@@ -1863,7 +1907,7 @@ mod tests {
             let peer1 = PrivateKey::from_seed(1).public_key();
             let peer2 = PrivateKey::from_seed(2).public_key();
 
-            // A pending fetch and an active fetch target only peer1, a third
+            // A pending fetch and an active fetch target only peer1. A third
             // fetch also targets peer2.
             fetcher.add_targets(MockKey(1), [peer1.clone()]);
             fetcher.add_ready(MockKey(1));

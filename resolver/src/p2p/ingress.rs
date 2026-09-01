@@ -108,10 +108,10 @@ where
     ///
     /// To clear targeting and fall back to any peer, call [`fetch`](Self::fetch).
     ///
-    /// Targets are automatically cleared when the fetch succeeds or is canceled.
-    /// When a peer is blocked for invalid data, only that peer is removed from
-    /// the target set. A fetch whose every target has been blocked can never be
-    /// served and is retired.
+    /// Targets are cleared once a response is accepted or the fetch is canceled.
+    /// Blocking a peer for invalid data removes it from every target set. A fetch
+    /// left with no targets, or targeted only at already blocked peers, can never
+    /// be served and is retired.
     ///
     /// If the engine has shut down, this is a no-op.
     fn fetch_targeted(

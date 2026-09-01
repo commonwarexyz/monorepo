@@ -6466,6 +6466,10 @@ mod tests {
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
+            assert!(
+                !provider.retired(Epoch::zero()),
+                "no lookup may consume the scope before admission"
+            );
 
             let (response, response_rx) = oneshot::channel();
             assert!(
@@ -6526,6 +6530,10 @@ mod tests {
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
+            assert!(
+                !provider.retired(Epoch::zero()),
+                "no lookup may consume the scope before admission"
+            );
 
             let (response, response_rx) = oneshot::channel();
             assert!(
@@ -6558,6 +6566,70 @@ mod tests {
                     .map(|cached| cached.digest()),
                 Some(block.digest()),
                 "notarized block verified under the admission scope must be cached"
+            );
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_finalized_delivery_rejects_foreign_certificate_after_scope_retires() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let Fixture {
+                schemes: foreign, ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            // The certificate decodes under epoch 0's scope but was signed by a
+            // committee marshal does not know.
+            let height = Height::new(1);
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let block = make_raw_block(Sha256::hash(&[b""]), height, 100);
+            let proposal = Proposal::new(round, View::zero(), StandardHarness::commitment(&block));
+            let finalization = StandardHarness::make_finalization(proposal, &foreign, QUORUM);
+
+            // Retiring the scope after admission must not turn the rejection into
+            // an acceptance: the retained scope still verifies the certificate.
+            let provider = RetiringProvider::default().with(Epoch::zero(), schemes[0].clone(), 1);
+            let (_mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "finalized-delivery-foreign-certificate-scope-retires",
+                provider.clone(),
+                Application::<B>::manual_ack(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+            )
+            .await;
+            assert!(
+                !provider.retired(Epoch::zero()),
+                "no lookup may consume the scope before admission"
+            );
+
+            let (response, response_rx) = oneshot::channel();
+            assert!(
+                resolver
+                    .enqueue(handler::Message::Deliver {
+                        delivery: Delivery {
+                            key: handler::Key::Finalized { height },
+                            subscribers: NonEmptyVec::new((
+                                handler::Annotation::Finalized(handler::Finalized::ByHeight {
+                                    height
+                                }),
+                                tracing::Span::none(),
+                            )),
+                        },
+                        value: (finalization, block).encode(),
+                        response,
+                    })
+                    .accepted()
+            );
+            assert!(
+                !response_rx.await.expect("delivery response missing"),
+                "certificate from a foreign committee must be rejected"
+            );
+            assert!(
+                provider.retired(Epoch::zero()),
+                "admission must have consumed the scope"
             );
         });
     }
@@ -6613,6 +6685,10 @@ mod tests {
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
+            assert!(
+                !provider.retired(Epoch::zero()),
+                "no lookup may consume the scope before admission"
+            );
 
             let mut responses = Vec::new();
             for (height, finalization, block) in [

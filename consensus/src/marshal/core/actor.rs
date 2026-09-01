@@ -1564,7 +1564,8 @@ where
             }
             Key::Notarized { round } => {
                 // The payload check below needs the epoch's participant set, so a
-                // scope without the full scheme is acknowledged like a retired one.
+                // scope without the full scheme counts as unavailable and the
+                // delivery is acknowledged as stale.
                 let Some(scheme) = self.provider.scheme(round.epoch()) else {
                     debug!(
                         ?round,

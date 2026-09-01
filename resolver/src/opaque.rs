@@ -371,7 +371,7 @@ where
         self.requests.insert(key, Attempt::Delivering { id });
     }
 
-    /// Deliver an already accepted response to subscribers that arrived later.
+    /// Deliver the cached response to subscribers that arrived later.
     fn redeliver(&mut self, key: F::Key, delivered: NonEmptyVec<(Con::Subscriber, tracing::Span)>) {
         self.deliveries.redeliver(Delivery {
             key,
@@ -501,9 +501,28 @@ where
         &mut self,
         key: F::Key,
         delivered: NonEmptyVec<(Con::Subscriber, tracing::Span)>,
-        outcome: Outcome,
+        outcome: Option<Outcome>,
     ) {
         let accepted = self.deliveries.response_accepted(&key);
+
+        // A dropped verdict says nothing about the response, only that the consumer
+        // did not judge it for these subscribers. Hand the response to any
+        // subscribers that joined since, and retire the key once none remain.
+        let Some(outcome) = outcome else {
+            let remaining = self
+                .subscribers
+                .remove_delivered(&key, delivered.map_into(|(subscriber, _)| subscriber));
+            if let Some(subscribers) = remaining {
+                self.redeliver(key, subscribers);
+                return;
+            }
+            if !accepted {
+                self.fetch.inc(Status::Dropped);
+            }
+            self.requests.remove(&key);
+            self.deliveries.remove(&key);
+            return;
+        };
 
         match outcome {
             Outcome::Complete => {
@@ -1041,6 +1060,65 @@ mod tests {
                 .send(Outcome::Complete)
                 .expect("response dropped");
             assert_eq!(fetcher.calls(), 2);
+        });
+    }
+
+    #[test]
+    fn dropped_verdict_hands_response_to_late_subscriber() {
+        Runner::default().start(|context| async move {
+            let fetcher = MockFetcher::default();
+            fetcher.push(1, Some(Bytes::from_static(b"unjudged")));
+            let consumer = MockConsumer::default();
+            let mut resolver =
+                start_resolver(context.child("resolver"), fetcher.clone(), consumer.clone());
+
+            assert!(
+                resolver
+                    .fetch(Fetch {
+                        key: 1,
+                        subscriber: 10,
+                        span: tracing::Span::none(),
+                    })
+                    .accepted()
+            );
+            let first = wait_for_delivery(&context, &consumer).await;
+            assert_eq!(first.value, Bytes::from_static(b"unjudged"));
+
+            // A late subscriber joins while the first delivery is unjudged, then
+            // that delivery's verdict is dropped. The late subscriber is handed
+            // the same response without another source fetch.
+            assert!(
+                resolver
+                    .fetch(Fetch {
+                        key: 1,
+                        subscriber: 11,
+                        span: tracing::Span::none(),
+                    })
+                    .accepted()
+            );
+            context.sleep(Duration::from_millis(10)).await;
+            drop(first);
+            let second = wait_for_delivery(&context, &consumer).await;
+            assert_eq!(
+                second
+                    .delivery
+                    .subscribers
+                    .iter()
+                    .map(|(subscriber, _)| *subscriber)
+                    .collect::<Vec<_>>(),
+                vec![11]
+            );
+            assert_eq!(second.value, Bytes::from_static(b"unjudged"));
+            second
+                .response
+                .send(Outcome::Complete)
+                .expect("response dropped");
+
+            context
+                .sleep(RETRY_TIMEOUT + Duration::from_millis(10))
+                .await;
+            assert_eq!(fetcher.calls(), 1);
+            assert_eq!(consumer.len(), 0);
         });
     }
 
