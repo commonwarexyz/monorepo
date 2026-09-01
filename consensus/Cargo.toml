@@ -46,13 +46,16 @@ tracing.workspace = true
 
 [dev-dependencies]
 arbitrary = { workspace = true, features = ["derive"] }
+commonware-allocator = { workspace = true, features = ["mimalloc"] }
 commonware-conformance.workspace = true
 commonware-consensus = { path = ".", features = ["mocks"] }
 commonware-invariants.workspace = true
 commonware-parallel = { workspace = true, features = ["test-utils"] }
 commonware-resolver = { workspace = true, features = ["mocks"] }
 commonware-runtime = { workspace = true, features = ["test-utils"] }
+criterion.workspace = true
 paste.workspace = true
+proptest.workspace = true
 rand = { workspace = true, features = ["alloc"] }
 rand_chacha.workspace = true
 rstest.workspace = true
@@ -63,6 +66,11 @@ development = ["commonware-consensus"]
 
 [lib]
 bench = false
+
+[[bench]]
+name = "multimmit"
+harness = false
+path = "src/multimmit/benches/bench.rs"
 
 [features]
 fuzz = [ "dep:arbitrary", "mocks" ]
