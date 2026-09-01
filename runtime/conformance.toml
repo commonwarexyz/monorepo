@@ -1,11 +1,19 @@
 ["commonware_runtime::iobuf::buf::tests::conformance::CodecConformance<IoBuf>"]
-hash = "b9218555b17220499ccf2b9dc98ce40132e4cd674ea4add3faa90e24731e907c"
 n_cases = 65536
+hash = "b9218555b17220499ccf2b9dc98ce40132e4cd674ea4add3faa90e24731e907c"
 
 ["commonware_runtime::storage::header::tests::conformance::CodecConformance<Header>"]
-hash = "541c356728d47b13f1d3ac800926ef3ae2396c82f5d4e043f5c7641c4c22b4b9"
 n_cases = 65536
+hash = "581a52a12fe60284c37c62a6324263ffc0a4f1d6833f37bbfc0c572331058cc1"
+
+["commonware_runtime::storage::memory::tests::conformance::V0Creation"]
+n_cases = 65536
+hash = "646a303a6586548c9f3ce9ee82dd71e4a0157c4fc822c679d19ee947849626f3"
+
+["commonware_runtime::storage::memory::tests::conformance::V1Creation"]
+n_cases = 65536
+hash = "6b5ea90d7a557f9c5c470a6d534a75576de766d84d8cae997a6205a23416ea0e"
 
 ["commonware_runtime::utils::buffer::paged::tests::conformance::CodecConformance<Checksum>"]
-hash = "2ca927141b521b7cccc541ec0df8614e418d317fc864ce11f428aefb330cf256"
 n_cases = 65536
+hash = "2ca927141b521b7cccc541ec0df8614e418d317fc864ce11f428aefb330cf256"

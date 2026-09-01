@@ -480,10 +480,11 @@ stability_scope!(BETA {
 #[allow(deprecated)]
 impl arbitrary::Arbitrary<'_> for Header {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let layout = *u.choose(&[Layout::V0, Layout::V1])?;
         let version: u16 = u.arbitrary()?;
         Ok(Self {
-            magic: Layout::V0.magic(),
-            layout_version: Layout::V0.layout_version(),
+            magic: layout.magic(),
+            layout_version: layout.layout_version(),
             blob_version: BlobVersion::new(version),
         })
     }
