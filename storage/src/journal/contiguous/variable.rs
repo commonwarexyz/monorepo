@@ -2572,7 +2572,8 @@ mod tests {
     use crate::journal::contiguous::tests::run_contiguous_tests;
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        Metrics as _, ReadOptions, Runner, Spawner as _, Storage, Supervisor as _, WriteOptions,
+        BufferPooler, Metrics as _, ReadOptions, Runner, Spawner as _, Storage, Supervisor as _,
+        WriteOptions,
         buffer::paged::{CacheRef, Writer, corrupt_page},
         deterministic,
         mocks::{
@@ -3894,6 +3895,55 @@ mod tests {
                 .boxed()
             })
             .await;
+        });
+    }
+
+    /// A prune that returns true has made every pre-prune item durable: a crash immediately
+    /// after must recover the full pre-prune size even when every unsynced write is lost.
+    #[test_traced]
+    fn test_variable_prune_durability_survives_crash() {
+        fn cfg(pooler: &impl BufferPooler) -> Config<()> {
+            Config {
+                partition: "variable-prune-durability".into(),
+                items_per_section: NZU64!(3),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(pooler, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
+            }
+        }
+
+        let executor = deterministic::Runner::default();
+        let (_, checkpoint) = executor.start_and_recover(|context| async move {
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg(&context))
+                .await
+                .unwrap();
+
+            // Fill two sections plus an unsynced tail, then prune into section 1. The crash
+            // drops every write not covered by a completed sync, so the prune's internal
+            // sync is the only durability point covering these items.
+            for i in 0..8u64 {
+                (journal, _) = journal.append(&(i * 100)).await.unwrap();
+            }
+            let (journal, pruned) = journal.prune(3).await.unwrap();
+            assert!(pruned);
+            drop(journal);
+        });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let journal = Journal::<_, u64>::init(context.child("recover"), cfg(&context))
+                .await
+                .unwrap();
+            assert_eq!(
+                journal.bounds(),
+                3..8,
+                "pruned journal lost acknowledged items"
+            );
+            for i in 3..8u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i * 100);
+            }
+            journal.destroy().await.unwrap();
         });
     }
 

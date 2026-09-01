@@ -293,7 +293,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
     /// The caller must drain the replay and call [Replay::finish_tracked]. Entries below each
     /// durable marker are retained after their cross-journal boundary is proven. Entries above it
     /// are value-validated in order and the first invalid entry truncates its section.
-    pub(crate) async fn init_with_metadata(
+    pub async fn init_with_metadata(
         context: &E,
         cfg: Config<V::Cfg>,
         metadata_partition: String,
@@ -1108,8 +1108,10 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Replay<E, I, V> {
     /// Returns the next `(section, position, entry)`, or `None` once every section is
     /// exhausted.
     ///
-    /// An error ends the section that produced it, and iteration continues with the
-    /// next section. Errors while mutating storage to repair a section, and
+    /// An index error ends the section that produced it, and iteration continues with
+    /// the next section. A value-verification error is returned without ending its
+    /// section and dooms the tracked replay: finishing it fails with
+    /// [Error::ReplayFailed]. Errors while mutating storage to repair a section, and
     /// [Error::ReplayInterrupted], end the replay.
     pub async fn next(&mut self) -> Option<Result<(u64, u64, I), Error>> {
         loop {
@@ -1174,7 +1176,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Replay<E, I, V> {
     }
 
     /// Finish marker-aware startup recovery and return the tracked journal.
-    pub(crate) async fn finish_tracked(self) -> Result<Oversized<E, I, V>, Error> {
+    pub async fn finish_tracked(self) -> Result<Oversized<E, I, V>, Error> {
         let Some(validation) = self.validation else {
             return Err(Error::ReplayFailed);
         };

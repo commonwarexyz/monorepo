@@ -32,6 +32,9 @@ enum Op {
 }
 
 /// Selects how submitted bytes are retained from a write.
+///
+/// Per the [crate::Blob] durability contract, both modes leave bytes outside the written
+/// range untouched.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PartialWriteMode {
     /// Retain bytes from the beginning of the write until the first omitted byte.
