@@ -57,14 +57,7 @@ impl<F: Family, E: Context, K: Key, V: VariableValue, H: Hasher, T: Translator, 
             ROOT_BAGGING,
         )
         .await?;
-        Self::init_from_journal(
-            journal,
-            context,
-            cfg.translator,
-            cfg.init_buffer,
-            cfg.init_cache_size,
-        )
-        .await
+        Self::init_from_journal(journal, context, cfg.translator, cfg.init_buffer).await
     }
 }
 
@@ -137,7 +130,6 @@ mod tests {
                 replay_buffer: NZUsize!(1024),
             },
             translator: TwoCap,
-            init_cache_size: Some(NZUsize!(1024)),
             init_buffer: NZUsize!(1 << 21),
         }
     }
@@ -300,6 +292,8 @@ mod tests {
         test_variable_rewind_preserves_collision_bucket => run_rewind_preserves_collision_bucket, open;
         test_variable_rewind_after_reopen_repeated_key_gap => run_rewind_after_reopen_repeated_key_gap, open;
         test_variable_rewind_after_reopen_mixed_gap_retained => run_rewind_after_reopen_mixed_gap_retained, open;
+        test_variable_rewind_repeated_key_live => run_rewind_repeated_key_live, open;
+        test_variable_rewind_after_reopen_repeated_key_retained => run_rewind_after_reopen_repeated_key_retained, open;
     }
 
     #[boxed]
