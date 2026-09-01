@@ -433,6 +433,17 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             .collect()
     }
 
+    /// Returns the peers that are currently blocked.
+    pub fn blocked_peers(&self) -> Set<C> {
+        let now = self.context.current();
+        Set::from_iter_dedup(
+            self.blocked
+                .iter()
+                .filter(|(_, until)| **until > now)
+                .map(|(peer, _)| peer.clone()),
+        )
+    }
+
     /// Unblock all peers whose block has expired.
     ///
     /// Returns `true` if any peers were unblocked.

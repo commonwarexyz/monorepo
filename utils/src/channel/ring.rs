@@ -70,6 +70,7 @@ struct Shared<T: Send + Sync> {
 ///
 /// This type can be cloned to create multiple producers for the same channel.
 /// The channel remains open until all senders are dropped.
+#[derive(Debug)]
 pub struct Sender<T: Send + Sync> {
     shared: Arc<Mutex<Shared<T>>>,
 }

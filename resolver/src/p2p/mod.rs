@@ -8,8 +8,10 @@
 //!
 //! The peer handles an arbitrarily large number of concurrent fetches by sending requests
 //! to other peers and processing their responses. It selects peers based on performance, retrying
-//! with another peer if one fails or provides invalid data. Fetches persist until pruned,
-//! fulfilled, or reported as no longer needed by the `Consumer`.
+//! with another peer if one fails or provides invalid data. Blocked peers are learned from the
+//! network through [`Blocker::blocked`](commonware_p2p::Blocker::blocked), so a peer becomes eligible
+//! again when its block expires. Fetches persist until pruned, fulfilled, or reported as no longer
+//! needed by the `Consumer`.
 //!
 //! The `Consumer` returns a [`crate::Outcome`], checking data integrity and authenticity unless it
 //! no longer needs the key. A complete response retires its delivered subscribers, an ambiguous
@@ -39,10 +41,10 @@
 //! - [`Resolver::fetch`](crate::Resolver::fetch) clears all targets, allowing fallback to any peer
 //!
 //! These modifications only apply to in-progress fetches. Once a fetch succeeds, is pruned, or is
-//! ignored by the consumer, the targets for that key are cleared automatically. Blocking a peer
-//! removes that peer from every target set while leaving other targets available for retries. A
-//! fetch whose every target has been blocked stays outstanding until new targets are added,
-//! targeting is cleared, or the fetch is pruned.
+//! ignored by the consumer, the targets for that key are cleared automatically. A blocked peer is
+//! skipped until the network unblocks it, so a fetch whose every target is blocked stays
+//! outstanding and resumes when one of them is unblocked, new targets are added, or targeting is
+//! cleared.
 //!
 //! # Subscribers
 //!
@@ -2134,6 +2136,75 @@ mod tests {
                 status_metric_total(&metrics, "actor_fetch_total", "Success"),
                 1
             );
+        });
+    }
+
+    #[test_traced]
+    fn test_unblocked_peer_becomes_eligible_again() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2]).await;
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+
+            let key = Key(1);
+            let data = Bytes::from("data for key 1");
+            let mut prod2 = Producer::default();
+            prod2.insert(key.clone(), data.clone());
+
+            // The first response is judged invalid, the second one is accepted.
+            let (first_gate_sender, first_gate_receiver) = oneshot::channel();
+            let (second_gate_sender, second_gate_receiver) = oneshot::channel();
+            let (cons1, mut cons_out1, mut started) = BlockingConsumer::new(
+                context.child("consumer"),
+                vec![
+                    (first_gate_receiver, Outcome::Invalid),
+                    (second_gate_receiver, Outcome::Complete),
+                ],
+            );
+
+            let scheme = schemes.remove(0);
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            );
+
+            let scheme = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                dummy_consumer(),
+                prod2,
+            );
+
+            mailbox1.fetch_targeted(key.clone(), non_empty_vec![peers[1].clone()]);
+            assert_eq!(started.recv().await.unwrap(), key);
+            first_gate_sender.send(()).unwrap();
+            wait_for_blocked(&context, &oracle, &peers[0], &peers[1]).await;
+
+            // The only target is blocked, so the fetch waits.
+            select! {
+                _ = started.recv() => panic!("blocked target was retried"),
+                _ = context.sleep(Duration::from_secs(1)) => {},
+            };
+
+            // Once the network lifts the block, the same target is tried again.
+            oracle
+                .unblock(peers[0].clone(), peers[1].clone())
+                .await
+                .unwrap();
+            assert_eq!(started.recv().await.unwrap(), key);
+            second_gate_sender.send(()).unwrap();
+            assert_eq!(cons_out1.recv().await.unwrap(), (key, data));
         });
     }
 

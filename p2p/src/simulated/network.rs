@@ -203,6 +203,9 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     // Subscribers to the connectable peer list (used by PeerSource for LimitedSender)
     peer_subscribers: Vec<(P, ring::Sender<Vec<P>>)>,
 
+    // Subscribers to the set of peers a given peer blocks (used by `Blocker::blocked`).
+    blocked_subscribers: Vec<(P, ring::Sender<Set<P>>)>,
+
     // Metrics for received and sent messages
     received_messages: CounterFamily<metrics::Message>,
     sent_messages: CounterFamily<metrics::Message>,
@@ -247,6 +250,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 transmitter: transmitter::State::new(),
                 subscribers: Vec::new(),
                 peer_subscribers: Vec::new(),
+                blocked_subscribers: Vec::new(),
                 received_messages,
                 sent_messages,
             },
@@ -591,10 +595,26 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 send_result(result, Ok(()))
             }
             ingress::Message::Block { from, to } => {
-                self.blocks.insert((from, to));
+                if self.blocks.insert((from.clone(), to)) {
+                    self.notify_blocked(&from);
+                }
+            }
+            ingress::Message::Unblock { from, to, result } => {
+                if self.blocks.remove(&(from.clone(), to)) {
+                    self.notify_blocked(&from);
+                }
+                send_result(result, Ok(()));
             }
             ingress::Message::Blocked { result } => {
                 send_result(result, Ok(self.blocks.iter().cloned().collect()))
+            }
+            ingress::Message::SubscribeBlocked { from, mut sender } => {
+                if Pin::new(&mut sender)
+                    .start_send(self.blocked_by(&from))
+                    .is_ok()
+                {
+                    self.blocked_subscribers.push((from, sender));
+                }
             }
         }
     }
@@ -628,6 +648,25 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         if Pin::new(&mut sender).start_send(peers).is_ok() {
             self.peer_subscribers.push((exclude, sender));
         }
+    }
+
+    /// Returns the peers that `from` currently blocks.
+    fn blocked_by(&self, from: &P) -> Set<P> {
+        Set::from_iter_dedup(
+            self.blocks
+                .iter()
+                .filter(|(blocker, _)| blocker == from)
+                .map(|(_, blocked)| blocked.clone()),
+        )
+    }
+
+    /// Send the set of peers `from` blocks to its blocked-set subscribers, dropping
+    /// subscribers that have gone away.
+    fn notify_blocked(&mut self, from: &P) {
+        let blocked = self.blocked_by(from);
+        self.blocked_subscribers.retain_mut(|(subscriber, sender)| {
+            subscriber != from || Pin::new(sender).start_send(blocked.clone()).is_ok()
+        });
     }
 
     /// Broadcast updated peer list to all connected peer subscribers.

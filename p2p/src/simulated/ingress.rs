@@ -1,14 +1,15 @@
 use super::{Error, Receiver, Sender};
 use crate::{
-    Address, AddressableTrackedPeers, Channel, PeerSetSubscription, Recipients, TrackedPeers,
+    Address, AddressableTrackedPeers, BlockedSubscription, Channel, PeerSetSubscription,
+    Recipients, TrackedPeers,
 };
 use commonware_actor::Feedback;
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, IoBuf, Quota};
 use commonware_utils::{
-    Probability,
+    NZUsize, Probability,
     channel::{fallible::FallibleExt, mpsc, oneshot, ring},
-    ordered::Map,
+    ordered::{Map, Set},
 };
 use rand_distr::Normal;
 use std::time::Duration;
@@ -67,8 +68,20 @@ pub enum Message<P: PublicKey, E: Clock> {
         /// The public key of the peer to block.
         to: P,
     },
+    Unblock {
+        /// The public key of the peer lifting the block.
+        from: P,
+        /// The public key of the peer to unblock.
+        to: P,
+        result: oneshot::Sender<Result<(), Error>>,
+    },
     Blocked {
         result: oneshot::Sender<Result<Vec<(P, P)>, Error>>,
+    },
+    SubscribeBlocked {
+        /// The public key of the peer whose blocked set is subscribed to.
+        from: P,
+        sender: ring::Sender<Set<P>>,
     },
 }
 
@@ -98,7 +111,16 @@ impl<P: PublicKey, E: Clock> std::fmt::Debug for Message<P, E> {
                 .field("from", from)
                 .field("to", to)
                 .finish(),
+            Self::Unblock { from, to, .. } => f
+                .debug_struct("Unblock")
+                .field("from", from)
+                .field("to", to)
+                .finish_non_exhaustive(),
             Self::Blocked { .. } => f.debug_struct("Blocked").finish_non_exhaustive(),
+            Self::SubscribeBlocked { from, .. } => f
+                .debug_struct("SubscribeBlocked")
+                .field("from", from)
+                .finish_non_exhaustive(),
         }
     }
 }
@@ -195,6 +217,13 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
     /// Return a list of all blocked peers.
     pub async fn blocked(&self) -> Result<Vec<(P, P)>, Error> {
         request(&self.sender, |result| Message::Blocked { result })
+            .await
+            .ok_or(Error::NetworkClosed)?
+    }
+
+    /// Lift a block that `from` placed on `to`, as the network does when a block expires.
+    pub async fn unblock(&self, from: P, to: P) -> Result<(), Error> {
+        request(&self.sender, |result| Message::Unblock { from, to, result })
             .await
             .ok_or(Error::NetworkClosed)?
     }
@@ -451,5 +480,17 @@ impl<P: PublicKey, E: Clock> crate::Blocker for Control<P, E> {
                 to: public_key,
             },
         )
+    }
+
+    fn blocked(&mut self) -> BlockedSubscription<P> {
+        let (sender, receiver) = ring::channel(NZUsize!(1));
+        let _ = enqueue(
+            &self.sender,
+            Message::SubscribeBlocked {
+                from: self.me.clone(),
+                sender,
+            },
+        );
+        receiver
     }
 }

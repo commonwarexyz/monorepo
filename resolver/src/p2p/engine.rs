@@ -20,7 +20,10 @@ use commonware_runtime::{
     telemetry::metrics::{GaugeExt, histogram, status::Status},
 };
 use commonware_utils::{Span, channel::oneshot, futures::Pool as FuturesPool};
-use futures::future::{self, Either};
+use futures::{
+    StreamExt,
+    future::{self, Either},
+};
 use rand_core::Rng;
 use std::marker::PhantomData;
 use tracing::{debug, error, trace, warn};
@@ -161,10 +164,18 @@ where
             network.1,
         );
         let mut peer_set_subscription = self.peer_provider.subscribe().await;
+        let mut blocked_subscription = Some(self.blocker.blocked());
 
         select_loop! {
             self.context,
             on_start => {
+                // Wait for the next blocked-set update, or forever once the
+                // network stops publishing them.
+                let blocked_update = blocked_subscription.as_mut().map_or_else(
+                    || Either::Right(future::pending()),
+                    |subscription| Either::Left(subscription.next()),
+                );
+
                 // Update metrics
                 let _ = self
                     .metrics
@@ -203,6 +214,16 @@ where
                 if self.last_peer_set_id < Some(update.index) {
                     self.last_peer_set_id = Some(update.index);
                     self.fetcher.reconcile(update.latest.primary.as_ref());
+                }
+            },
+            // Handle blocked-set updates
+            blocked = blocked_update => {
+                match blocked {
+                    Some(blocked) => self.fetcher.set_blocked(blocked),
+                    None => {
+                        debug!("blocked subscription closed");
+                        blocked_subscription = None;
+                    }
                 }
             },
             // Handle active deadline
@@ -511,8 +532,8 @@ where
                     return;
                 }
 
-                // If the data is invalid, block the peer and try again. Blocking the
-                // peer also removes any targets associated with it.
+                // If the data is invalid, block the peer and try again. The peer
+                // stays ineligible until the network reports it unblocked.
                 commonware_p2p::block!(self.blocker, peer.clone(), "invalid data received");
                 self.fetcher.block(peer);
                 self.metrics.fetch.inc(Status::Failure);

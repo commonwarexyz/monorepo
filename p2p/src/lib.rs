@@ -18,7 +18,7 @@ stability_scope!(BETA {
     use commonware_cryptography::PublicKey;
     use commonware_runtime::{IoBuf, IoBufs};
     use commonware_utils::{
-        channel::mpsc,
+        channel::{mpsc, ring},
         ordered::{Map, Set},
     };
     use std::{error::Error as StdError, fmt::Debug, future::Future, time::SystemTime};
@@ -211,6 +211,11 @@ stability_scope!(BETA {
     /// Alias for the subscription type returned by [`Provider::subscribe`].
     pub type PeerSetSubscription<P> = mpsc::UnboundedReceiver<PeerSetUpdate<P>>;
 
+    /// Alias for the subscription type returned by [`Blocker::blocked`].
+    ///
+    /// Each value is the full set of peers this node currently blocks.
+    pub type BlockedSubscription<P> = ring::Receiver<Set<P>>;
+
     /// Primary and secondary peers provided together to [`Manager::track`].
     ///
     /// The same public key may appear in both `primary` and `secondary`. [`Manager::track`]
@@ -378,6 +383,12 @@ stability_scope!(BETA {
 
         /// Block a peer, disconnecting them if currently connected and preventing future connections.
         fn block(&mut self, peer: Self::PublicKey) -> Feedback;
+
+        /// Subscribe to the set of peers this node currently blocks.
+        ///
+        /// A new subscription receives the current set promptly, and every later
+        /// value replaces the previous one as peers are blocked or unblocked.
+        fn blocked(&mut self) -> BlockedSubscription<Self::PublicKey>;
     }
 });
 
