@@ -21,10 +21,7 @@
 use crate::Hasher;
 #[cfg(not(feature = "std"))]
 use alloc::vec;
-use bytes::{Buf, BufMut};
-use commonware_codec::{
-    DecodeExt, Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write,
-};
+use commonware_codec::{DecodeExt, FixedArray, FixedSize, Read, Write};
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
 use commonware_utils::{Array, Span};
@@ -206,7 +203,7 @@ impl Hasher for Sha256 {
 }
 
 /// Digest of a SHA-256 hashing operation.
-#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash, FixedArray)]
+#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash, FixedArray, FixedSize, Read, Write)]
 #[fixed_array(infallible)]
 #[repr(transparent)]
 pub struct Digest(pub [u8; DIGEST_LENGTH]);
@@ -219,25 +216,6 @@ impl<'a> arbitrary::Arbitrary<'a> for Digest {
         let data = u.bytes(len)?;
         Ok(Sha256::hash(&[data]))
     }
-}
-
-impl Write for Digest {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.0.write(buf);
-    }
-}
-
-impl Read for Digest {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let array = <[u8; DIGEST_LENGTH]>::read(buf)?;
-        Ok(Self(array))
-    }
-}
-
-impl FixedSize for Digest {
-    const SIZE: usize = DIGEST_LENGTH;
 }
 
 impl Span for Digest {}

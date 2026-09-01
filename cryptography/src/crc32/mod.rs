@@ -27,8 +27,7 @@
 //! ```
 
 use crate::Hasher;
-use bytes::{Buf, BufMut};
-use commonware_codec::{Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{FixedArray, FixedSize, Read, Write};
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
 use commonware_utils::{Array, Span};
@@ -106,7 +105,7 @@ impl Hasher for Crc32 {
 }
 
 /// Digest of a CRC32 hashing operation (4 bytes).
-#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash, FixedArray)]
+#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash, FixedArray, FixedSize, Read, Write)]
 #[fixed_array(infallible)]
 #[repr(transparent)]
 pub struct Digest(pub [u8; SIZE]);
@@ -127,25 +126,6 @@ impl Digest {
     pub const fn as_u32(&self) -> u32 {
         u32::from_be_bytes(self.0)
     }
-}
-
-impl Write for Digest {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.0.write(buf);
-    }
-}
-
-impl Read for Digest {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let array = <[u8; SIZE]>::read(buf)?;
-        Ok(Self(array))
-    }
-}
-
-impl FixedSize for Digest {
-    const SIZE: usize = SIZE;
 }
 
 impl Span for Digest {}
