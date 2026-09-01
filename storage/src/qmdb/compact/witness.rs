@@ -33,7 +33,7 @@ use futures::FutureExt as _;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// An applied state persisted by the witness journal.
-#[derive(Clone)]
+#[derive(Clone, EncodeSize, Write)]
 pub(crate) struct Witness<F: Family, D: Digest> {
     /// The encoded last commit operation at `size - 1`.
     pub(crate) op_bytes: Vec<u8>,
@@ -42,20 +42,6 @@ pub(crate) struct Witness<F: Family, D: Digest> {
     /// Pinned nodes at the commit operation, in the order returned by
     /// [`Family::nodes_to_pin`].
     pub(crate) pinned_nodes: Vec<D>,
-}
-
-impl<F: Family, D: Digest> EncodeSize for Witness<F, D> {
-    fn encode_size(&self) -> usize {
-        self.op_bytes.encode_size() + self.size.encode_size() + self.pinned_nodes.encode_size()
-    }
-}
-
-impl<F: Family, D: Digest> Write for Witness<F, D> {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.op_bytes.write(buf);
-        self.size.write(buf);
-        self.pinned_nodes.write(buf);
-    }
 }
 
 impl<F: Family, D: Digest> Read for Witness<F, D> {

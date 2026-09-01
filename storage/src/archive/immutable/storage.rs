@@ -5,9 +5,9 @@ use crate::{
     metadata::{self, Metadata},
     ordinal::{self, Ordinal},
 };
-use commonware_codec::{CodecShared, EncodeSize, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{CodecShared, EncodeSize, Read, ReadExt, Write};
 use commonware_runtime::{
-    Buf, BufMut,
+    Buf,
     telemetry::metrics::{Counter, MetricsExt as _},
 };
 use commonware_utils::{Array, bitmap::BitMap, sequence::prefixed_u64::U64};
@@ -22,9 +22,12 @@ const FREEZER_PREFIX: u8 = 0;
 const ORDINAL_PREFIX: u8 = 1;
 
 /// Item stored in [Metadata] to ensure [Freezer] and [Ordinal] remain consistent.
+#[derive(EncodeSize, Write)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 enum Record {
+    #[codec(tag = 0)]
     Freezer(Checkpoint),
+    #[codec(tag = 1)]
     Ordinal(Option<BitMap>),
 }
 
@@ -46,21 +49,6 @@ impl Record {
     }
 }
 
-impl Write for Record {
-    fn write(&self, buf: &mut impl BufMut) {
-        match self {
-            Self::Freezer(checkpoint) => {
-                buf.put_u8(0);
-                checkpoint.write(buf);
-            }
-            Self::Ordinal(indices) => {
-                buf.put_u8(1);
-                indices.write(buf);
-            }
-        }
-    }
-}
-
 impl Read for Record {
     type Cfg = ();
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
@@ -72,15 +60,6 @@ impl Read for Record {
                 &(usize::MAX as u64),
             )?)),
             _ => Err(commonware_codec::Error::InvalidEnum(tag)),
-        }
-    }
-}
-
-impl EncodeSize for Record {
-    fn encode_size(&self) -> usize {
-        1 + match self {
-            Self::Freezer(_) => Checkpoint::SIZE,
-            Self::Ordinal(indices) => indices.encode_size(),
         }
     }
 }

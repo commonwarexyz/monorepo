@@ -16,7 +16,7 @@ use crate::{
         operation::Key,
     },
 };
-use bytes::{Buf, BufMut};
+use bytes::Buf;
 use commonware_codec::{EncodeSize, Read, ReadExt as _, Write};
 use commonware_cryptography::Digest;
 
@@ -33,61 +33,23 @@ pub mod variable;
 /// no active keys through the most recent commit operation.
 ///
 /// Verify using [Db::verify_exclusion_proof](fixed::Db::verify_exclusion_proof).
-#[derive(Clone, Eq, PartialEq, Debug)]
+#[derive(Clone, Eq, PartialEq, Debug, EncodeSize, Write)]
 pub enum ExclusionProof<F: Graftable, K: Key, V: ValueEncoding, D: Digest, const N: usize> {
     /// Proves that two keys are active in the database and adjacent to each other in the key
     /// ordering. Any key falling between them (non-inclusively) can be proven excluded.
+    #[codec(tag = 0)]
     KeyValue(OperationProof<F, D, N>, Update<K, V>),
 
     /// Proves that the database has no active keys, allowing any key to be proven excluded.
     /// Specifically, the proof establishes the most recent Commit operation has an activity floor
     /// equal to its own location, which is a necessary and sufficient condition for an empty
     /// database.
+    #[codec(tag = 1)]
     Commit(OperationProof<F, D, N>, Option<V::Value>),
 }
 
 const KEY_VALUE_CONTEXT: u8 = 0;
 const COMMIT_CONTEXT: u8 = 1;
-
-impl<F, K, V, D, const N: usize> Write for ExclusionProof<F, K, V, D, N>
-where
-    F: Graftable,
-    K: Key,
-    V: ValueEncoding,
-    D: Digest,
-    Update<K, V>: Write,
-{
-    fn write(&self, buf: &mut impl BufMut) {
-        match self {
-            Self::KeyValue(op_proof, update) => {
-                KEY_VALUE_CONTEXT.write(buf);
-                op_proof.write(buf);
-                update.write(buf);
-            }
-            Self::Commit(op_proof, value) => {
-                COMMIT_CONTEXT.write(buf);
-                op_proof.write(buf);
-                value.write(buf);
-            }
-        }
-    }
-}
-
-impl<F, K, V, D, const N: usize> EncodeSize for ExclusionProof<F, K, V, D, N>
-where
-    F: Graftable,
-    K: Key,
-    V: ValueEncoding,
-    D: Digest,
-    Update<K, V>: EncodeSize,
-{
-    fn encode_size(&self) -> usize {
-        1 + match self {
-            Self::KeyValue(op_proof, update) => op_proof.encode_size() + update.encode_size(),
-            Self::Commit(op_proof, value) => op_proof.encode_size() + value.encode_size(),
-        }
-    }
-}
 
 impl<F, K, V, D, const N: usize> Read for ExclusionProof<F, K, V, D, N>
 where

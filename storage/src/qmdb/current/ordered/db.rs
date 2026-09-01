@@ -18,32 +18,17 @@ use crate::{
         operation::Key,
     },
 };
-use bytes::{Buf, BufMut};
+use bytes::Buf;
 use commonware_codec::{Codec, EncodeSize, Read, Write};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use futures::stream::Stream;
 
 /// Proof information for verifying a key has a particular value in the database.
-#[derive(Clone, Eq, PartialEq, Debug)]
+#[derive(Clone, Eq, PartialEq, Debug, EncodeSize, Write)]
 pub struct KeyValueProof<F: merkle::Graftable, K: Key, D: Digest, const N: usize> {
     pub proof: OperationProof<F, D, N>,
     pub next_key: K,
-}
-
-impl<F: merkle::Graftable, K: Key, D: Digest, const N: usize> Write for KeyValueProof<F, K, D, N> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.proof.write(buf);
-        self.next_key.write(buf);
-    }
-}
-
-impl<F: merkle::Graftable, K: Key, D: Digest, const N: usize> EncodeSize
-    for KeyValueProof<F, K, D, N>
-{
-    fn encode_size(&self) -> usize {
-        self.proof.encode_size() + self.next_key.encode_size()
-    }
 }
 
 impl<F: merkle::Graftable, K: Key, D: Digest, const N: usize> Read for KeyValueProof<F, K, D, N> {

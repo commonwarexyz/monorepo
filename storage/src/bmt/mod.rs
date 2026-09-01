@@ -47,7 +47,7 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use bytes::{Buf, BufMut};
+use bytes::Buf;
 use commonware_codec::{EncodeSize, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_utils::{non_empty_vec, vec::NonEmptyVec};
@@ -301,7 +301,7 @@ impl<D: Digest> Tree<D> {
 /// The proof contains the leaf count and sibling digests required for verification.
 /// The leaf count is incorporated into the root hash during finalization, so
 /// modifying it will cause verification to fail (preventing malleability attacks).
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, EncodeSize, Write)]
 pub struct Proof<D: Digest> {
     /// The number of leaves in the tree.
     ///
@@ -323,13 +323,6 @@ impl<D: Digest> Default for Proof<D> {
     }
 }
 
-impl<D: Digest> Write for Proof<D> {
-    fn write(&self, writer: &mut impl BufMut) {
-        self.leaf_count.write(writer);
-        self.siblings.write(writer);
-    }
-}
-
 impl<D: Digest> Read for Proof<D> {
     /// The maximum number of items being proven.
     ///
@@ -347,12 +340,6 @@ impl<D: Digest> Read for Proof<D> {
             leaf_count,
             siblings,
         })
-    }
-}
-
-impl<D: Digest> EncodeSize for Proof<D> {
-    fn encode_size(&self) -> usize {
-        self.leaf_count.encode_size() + self.siblings.encode_size()
     }
 }
 
