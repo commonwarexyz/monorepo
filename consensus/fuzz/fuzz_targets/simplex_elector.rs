@@ -38,7 +38,7 @@ struct FuzzInput {
 fn fuzz<S, L>(input: &FuzzInput, elector_config: L, certificate: Option<&S::Certificate>)
 where
     S: Scheme<PublicKey = PublicKey>,
-    L: elector::Config<S>,
+    L: elector::Config<S::PublicKey, S::Certificate>,
 {
     let Ok(participants) = (1..=input.participants_count)
         .map(|i| {

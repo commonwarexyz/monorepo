@@ -50,6 +50,9 @@ use core::{
     ops::RangeInclusive,
 };
 
+pub mod attributable;
+pub use attributable::{Attributable, AttributableMap};
+
 /// Represents a distinct segment of a contiguous sequence of views.
 ///
 /// An epoch increments when the validator set changes, providing a reconfiguration boundary.
