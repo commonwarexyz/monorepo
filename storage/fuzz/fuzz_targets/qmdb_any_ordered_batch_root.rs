@@ -265,7 +265,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                 let batch = apply_mutations(a.new_batch::<Sha256>(), &input.child);
                 let b = batch.merkleize(&db, None).await.unwrap();
 
-                // Applying A consumes its last strong reference; B retains only a Weak parent.
+                // Applying A consumes its last strong reference. B retains only a Weak parent.
                 let (db, _) = db.apply_batch(a).await.unwrap();
                 let db = db.commit().await.unwrap();
 
@@ -302,10 +302,9 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
             }
             Schedule::PendingChain => {
                 // Build parent -> child -> grandchild with parent and child both still
-                // pending, so the grandchild merkleizes with two live ancestors. This is the
-                // only schedule where ancestor resolution walks more than one diff
-                // (closest-first shadowing), which single-pending-ancestor schedules never
-                // exercise.
+                // pending, so the grandchild merkleizes with two live ancestors
+                // (closest-first shadowing). This is the only schedule that checks a
+                // multi-diff ancestor walk against a committed-only reference.
                 let batch = apply_mutations(db.new_batch(), &input.parent);
                 let parent = batch.merkleize(&db, None).await.unwrap();
                 let batch = apply_mutations(parent.new_batch::<Sha256>(), &input.child);
@@ -356,7 +355,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                 let batch = apply_mutations(b.new_batch::<Sha256>(), &input.parent);
                 let c = batch.merkleize(&db, None).await.unwrap();
 
-                // Applying A consumes its last strong reference; B retains only a Weak parent.
+                // Applying A consumes its last strong reference. B retains only a Weak parent.
                 let (db, _) = db.apply_batch(a).await.unwrap();
                 let db = db.commit().await.unwrap();
 
@@ -401,6 +400,7 @@ fuzz_target!(|input: FuzzInput| {
             fuzz_family::<mmb::Family>(&input, "fuzz-mmb-qmdb-ordered-batch-root");
         }
         Schedule::DroppedCommittedPrefix => {
+            fuzz_family::<mmr::Family>(&input, "fuzz-mmr-qmdb-ordered-dropped-prefix");
             fuzz_family::<mmb::Family>(&input, "fuzz-mmb-qmdb-ordered-dropped-prefix");
         }
         Schedule::PendingChain => {
@@ -408,6 +408,7 @@ fuzz_target!(|input: FuzzInput| {
             fuzz_family::<mmb::Family>(&input, "fuzz-mmb-qmdb-ordered-pending-chain");
         }
         Schedule::DroppedPrefixChain => {
+            fuzz_family::<mmr::Family>(&input, "fuzz-mmr-qmdb-ordered-dropped-chain");
             fuzz_family::<mmb::Family>(&input, "fuzz-mmb-qmdb-ordered-dropped-chain");
         }
     }

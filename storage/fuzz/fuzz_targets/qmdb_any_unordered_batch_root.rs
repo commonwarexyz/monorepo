@@ -212,7 +212,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                 let batch = apply_mutations(a.new_batch::<Sha256>(), &input.child);
                 let b = batch.merkleize(&db, None).await.unwrap();
 
-                // Applying A consumes its last strong reference; B retains only a Weak parent.
+                // Applying A consumes its last strong reference. B retains only a Weak parent.
                 let (db, _) = db.apply_batch(a).await.unwrap();
                 let db = db.commit().await.unwrap();
 
@@ -242,8 +242,8 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
             Schedule::PendingChain => {
                 // Build parent -> child -> grandchild with parent and child both still
                 // pending, so the grandchild merkleizes with two live ancestor diffs and
-                // resolves between them closest first, which single-pending-ancestor
-                // schedules never exercise.
+                // resolves between them closest first. This is the only schedule that
+                // checks a multi-diff ancestor walk against a committed-only reference.
                 let batch = apply_mutations(db.new_batch(), &input.parent);
                 let parent = batch.merkleize(&db, None).await.unwrap();
                 let batch = apply_mutations(parent.new_batch::<Sha256>(), &input.child);
@@ -289,7 +289,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                 let batch = apply_mutations(b.new_batch::<Sha256>(), &input.parent);
                 let c = batch.merkleize(&db, None).await.unwrap();
 
-                // Applying A consumes its last strong reference; B retains only a Weak parent.
+                // Applying A consumes its last strong reference. B retains only a Weak parent.
                 let (db, _) = db.apply_batch(a).await.unwrap();
                 let db = db.commit().await.unwrap();
 
@@ -327,6 +327,7 @@ fuzz_target!(|input: FuzzInput| {
             fuzz_family::<mmb::Family>(&input, "fuzz-mmb-qmdb-unordered-batch-root");
         }
         Schedule::DroppedCommittedPrefix => {
+            fuzz_family::<mmr::Family>(&input, "fuzz-mmr-qmdb-unordered-dropped-prefix");
             fuzz_family::<mmb::Family>(&input, "fuzz-mmb-qmdb-unordered-dropped-prefix");
         }
         Schedule::PendingChain => {
@@ -334,6 +335,7 @@ fuzz_target!(|input: FuzzInput| {
             fuzz_family::<mmb::Family>(&input, "fuzz-mmb-qmdb-unordered-pending-chain");
         }
         Schedule::DroppedPrefixChain => {
+            fuzz_family::<mmr::Family>(&input, "fuzz-mmr-qmdb-unordered-dropped-chain");
             fuzz_family::<mmb::Family>(&input, "fuzz-mmb-qmdb-unordered-dropped-chain");
         }
     }

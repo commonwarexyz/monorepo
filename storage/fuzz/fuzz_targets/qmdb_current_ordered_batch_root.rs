@@ -227,7 +227,8 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
             Schedule::PendingChain => {
                 // Build parent -> child -> grandchild with parent and child both pending, so
                 // the grandchild's grafted layer overlays two live ancestor diffs on the
-                // committed bitmap, which single-pending-ancestor schedules never exercise.
+                // committed bitmap. This is the only schedule that checks a multi-diff
+                // ancestor walk against a committed-only reference.
                 let batch = apply_mutations(db.new_batch(), &input.parent);
                 let parent = batch.merkleize(&db, None).await.unwrap();
                 let batch = apply_mutations(parent.new_batch::<Sha256>(), &input.child);
@@ -260,6 +261,11 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
                     committed_grandchild.root(),
                     "pending grandchild canonical root diverged"
                 );
+                assert_eq!(
+                    db.ops_root(),
+                    committed_grandchild.ops_root(),
+                    "pending grandchild ops root diverged"
+                );
 
                 db.destroy().await.unwrap();
             }
@@ -275,7 +281,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
                 let batch = apply_mutations(b.new_batch::<Sha256>(), &input.parent);
                 let c = batch.merkleize(&db, None).await.unwrap();
 
-                // Applying A consumes its last strong reference; B retains only a Weak parent.
+                // Applying A consumes its last strong reference. B retains only a Weak parent.
                 let (db, _) = db.apply_batch(a).await.unwrap();
                 let db = db.commit().await.unwrap();
 
@@ -307,6 +313,11 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
                     rebuilt_d.root(),
                     "retained-chain canonical root diverged"
                 );
+                assert_eq!(
+                    db.ops_root(),
+                    rebuilt_d.ops_root(),
+                    "retained-chain ops root diverged"
+                );
 
                 db.destroy().await.unwrap();
             }
@@ -321,6 +332,7 @@ fuzz_target!(|input: FuzzInput| {
             fuzz_family::<mmb::Family>(&input, "fuzz-mmb-current-ordered-batch-root");
         }
         Schedule::DroppedPrefixChain => {
+            fuzz_family::<mmr::Family>(&input, "fuzz-mmr-current-ordered-dropped-chain");
             fuzz_family::<mmb::Family>(&input, "fuzz-mmb-current-ordered-dropped-chain");
         }
     }
