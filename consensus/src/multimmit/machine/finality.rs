@@ -1019,9 +1019,12 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
             }
             return Ok(Vec::new());
         };
-        if artifact.as_ref() != claim.artifact.as_ref() {
-            return Err(FinalityError::Algebra);
-        }
+        // The identifier hashes the exact encoding, so the retained claim holds this artifact;
+        // comparing the values would force both copies' lazy signature decodes on every verdict.
+        debug_assert!(
+            artifact.as_ref() == claim.artifact.as_ref(),
+            "two artifacts encode to one identifier"
+        );
         // Validation is content-addressed, so duplicate completions share one verdict while the
         // claim retains its earliest observation for deterministic arrival ordering.
         if observation < claim.observation {
