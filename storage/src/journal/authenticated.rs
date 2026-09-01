@@ -11,6 +11,10 @@
 //! method returns an error, or its future is dropped before it finishes, the journal is
 //! gone: state that was not yet durable is discarded, but everything already on disk stays
 //! recoverable.
+//!
+//! Merkle batches retain ancestor nodes after parents are dropped. Journal batches require
+//! uncommitted ancestors to remain alive until descendants are merkleized so their items can be
+//! retained separately.
 
 use crate::{
     Context,
@@ -209,8 +213,9 @@ impl<F: Family, D: Digest, Item: Send + Sync, S: Strategy> MerkleizedBatch<F, D,
 
     /// Create a new speculative batch of operations with this batch as its parent.
     ///
-    /// The batch becomes invalid if any ancestor is dropped before being applied, or a sibling
-    /// fork has been applied.
+    /// Uncommitted ancestors must remain alive until the descendant is merkleized so their journal
+    /// items can be retained. Dropping them afterward is safe. Applying a sibling fork
+    /// invalidates the batch.
     pub fn new_batch<H: Hasher<Digest = D>>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, Item, S>
     where
         Item: Encode,
@@ -341,7 +346,6 @@ where
     where
         C::Item: 'static,
     {
-        let ancestors = batch.inner.retain_ancestors();
         let mem = self.merkle.snapshot();
         let hasher = self.hasher.clone();
         let strategy = self.strategy().clone();
@@ -349,7 +353,6 @@ where
             .spawn(items.len(), move |_| {
                 let merkleized = batch.add_many(items).merkleize(&mem);
                 let root = merkleized.root(&mem, &hasher, inactive_peaks)?;
-                drop(ancestors);
                 Ok((merkleized, root))
             })
             .await
@@ -3669,9 +3672,9 @@ mod tests {
         executor.start(test_merkleize_after_committed_prefix_dropped_inner::<mmb::Family>);
     }
 
-    /// A detached merkleization job owns the full ancestor chain after its waiter is dropped.
+    /// A detached merkleization job finishes cleanly after its waiter is dropped.
     #[test_traced("INFO")]
-    fn test_merkleize_retains_ancestors_after_cancellation() {
+    fn test_merkleize_finishes_after_cancellation() {
         deterministic::Runner::default().start(|context| async move {
             let strategy = Rayon::new(NZUsize!(2)).unwrap();
             let merkle_cfg = merkle_config_with("cancelled-merkleize", &context, strategy);
@@ -3706,7 +3709,6 @@ mod tests {
             let b_batch = a.new_batch::<Sha256>().add_many(b_items);
             let b = journal.merkle.with_mem(|mem| b_batch.merkleize(mem));
 
-            let ancestor = Arc::downgrade(&a.inner);
             let c_batch = b.new_batch::<Sha256>();
             drop(b);
 
@@ -3717,7 +3719,6 @@ mod tests {
             drop(merkleize);
             drop(a);
 
-            assert!(ancestor.upgrade().is_some());
             drop(release);
             assert!(
                 clean_drop
@@ -3725,7 +3726,6 @@ mod tests {
                     .expect("detached merkleization did not finish"),
                 "detached merkleization panicked"
             );
-            assert!(ancestor.upgrade().is_none());
         });
     }
 }

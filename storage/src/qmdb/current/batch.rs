@@ -751,7 +751,7 @@ where
     overlay
 }
 
-/// Merkleize grafted chunk digests while retaining the live ancestor chain.
+/// Merkleize grafted chunk digests.
 async fn merkleize_grafted_batch<F, H, S, const N: usize>(
     strategy: &S,
     grafted_parent: Arc<GenericMerkleizedBatch<F, H::Digest, S>>,
@@ -766,7 +766,6 @@ where
 {
     let old_grafted_leaves = *grafted_parent.leaves() as usize;
     let mut grafted_batch = grafted_parent.new_batch();
-    let ancestors = grafted_batch.retain_ancestors();
     let grafted_tree = Arc::clone(grafted_tree);
     strategy
         .clone()
@@ -782,9 +781,7 @@ where
                 }
             }
             let grafted_hasher = grafting::hasher::<F, H>(grafting_height);
-            let merkleized = grafted_batch.merkleize(&grafted_tree, &grafted_hasher);
-            drop(ancestors);
-            merkleized
+            grafted_batch.merkleize(&grafted_tree, &grafted_hasher)
         })
         .await
 }
@@ -1094,9 +1091,9 @@ where
 {
     /// Create a new speculative batch of operations with this batch as its parent.
     ///
-    /// All uncommitted ancestors in the chain must be kept alive until the child (or any
-    /// descendant) is merkleized. Dropping an uncommitted ancestor causes data
-    /// loss detected at `apply_batch` time.
+    /// Uncommitted operation ancestors in the authenticated journal chain must remain alive until
+    /// the child or any descendant is merkleized so their items can be retained. Grafted Merkle
+    /// nodes are retained independently.
     ///
     /// This is only valid while `self` is still on the winning branch. If a different branch has
     /// been applied since `self` was created, `self` is no longer a valid parent and must not be
@@ -1377,9 +1374,9 @@ mod tests {
         (a, b)
     }
 
-    /// A detached grafted-tree merkleization owns the full ancestor chain after cancellation.
+    /// A detached grafted-tree merkleization finishes after its waiter is dropped.
     #[test_traced]
-    fn test_grafted_merkleize_retains_ancestors_after_cancellation() {
+    fn test_grafted_merkleize_finishes_after_cancellation() {
         let strategy = Rayon::new(NZUsize!(2)).unwrap();
         let manual = strategy.manual();
         let mem = Arc::new(Mem::<mmb::Family, <Sha256 as Hasher>::Digest>::new());
@@ -1388,9 +1385,9 @@ mod tests {
         let waker = futures::task::noop_waker();
         let mut context = TaskContext::from_waker(&waker);
 
-        // Observe the worker result so a missing grandparent fails the test directly.
+        // Observe the result to prove retained snapshots let the worker finish successfully after
+        // its ancestor handles are dropped.
         let (a, b) = grafted_chain(&manual, &mem);
-        let ancestor = Arc::downgrade(&a);
         let release = block_strategy(&strategy, 2);
         let mut merkleize = Box::pin(merkleize_grafted_batch::<mmb::Family, Sha256, _, 1>(
             &manual,
@@ -1403,13 +1400,12 @@ mod tests {
         drop(b);
         drop(a);
         drop(release);
-        let _ = futures::executor::block_on(merkleize);
-        assert!(ancestor.upgrade().is_none());
+        drop(futures::executor::block_on(merkleize));
 
-        // Drop the waiter while the worker is queued to prove the guard moved with it.
+        // Drop the waiter while an equivalent worker is queued to prove detached work terminates.
         let (a, b) = grafted_chain(&manual, &mem);
-        let ancestor = Arc::downgrade(&a);
         let release = block_strategy(&strategy, 2);
+        let worker_tree = Arc::downgrade(&mem);
         let mut merkleize = Box::pin(merkleize_grafted_batch::<mmb::Family, Sha256, _, 1>(
             &manual,
             Arc::clone(&b),
@@ -1421,14 +1417,14 @@ mod tests {
         drop(merkleize);
         drop(b);
         drop(a);
-        assert!(ancestor.upgrade().is_some());
+        drop(mem);
 
         drop(release);
         let deadline = Instant::now() + Duration::from_secs(10);
-        while ancestor.upgrade().is_some() {
+        while worker_tree.upgrade().is_some() {
             assert!(
                 Instant::now() < deadline,
-                "detached grafted merkleization did not release its ancestors"
+                "detached grafted merkleization did not finish"
             );
             std::thread::yield_now();
         }

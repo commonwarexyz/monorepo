@@ -361,13 +361,16 @@ pub enum Error<F: Family> {
         actual: Position<F>,
     },
 
-    /// An ancestor batch was dropped before this batch was applied, causing
-    /// data loss. All ancestors must be kept alive until descendants are applied.
+    /// Applying a batch could not reconstruct its expected ancestry.
+    ///
+    /// Merkle batches retain ancestor nodes, so this indicates use against an incompatible fork.
+    /// Higher-level structures such as authenticated journals can also report it when separately
+    /// retained ancestor items were dropped before a descendant was merkleized.
     #[error("ancestor dropped: expected size {expected}, actual size {actual}")]
     AncestorDropped {
-        /// The expected size after applying all ancestors + this batch.
+        /// The expected size after applying all ancestors and this batch.
         expected: Position<F>,
-        /// The actual size (less than expected due to missing ancestor data).
+        /// The actual size after applying the available ancestor data.
         actual: Position<F>,
     },
 

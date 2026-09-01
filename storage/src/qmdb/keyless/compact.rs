@@ -28,7 +28,7 @@ pub use crate::qmdb::compact::Config;
 use crate::{
     Context,
     journal::contiguous::variable::{self, Config as JournalConfig},
-    merkle::{Family, Location, batch, compact as compact_merkle},
+    merkle::{Family, Location, Proof, batch, compact as compact_merkle},
     qmdb::{
         self, Error,
         any::value::ValueEncoding,
@@ -108,6 +108,7 @@ where
     Operation<F, V>: EncodeShared,
 {
     pub(super) merkle_batch: Arc<batch::MerkleizedBatch<F, D, S>>,
+    operations: Arc<Vec<Operation<F, V>>>,
     pub(super) commit_metadata: Option<V::Value>,
     pub(super) parent: Option<Weak<Self>>,
     pub(super) bounds: batch_chain::Bounds<F, D>,
@@ -134,6 +135,67 @@ where
     /// Return the [`Bounds`] of the batch.
     pub const fn bounds(&self) -> &Bounds<F, D> {
         &self.bounds
+    }
+
+    /// Return the operations this batch appends to the log and the location of the first.
+    pub fn operations(&self) -> (Location<F>, Arc<Vec<Operation<F, V>>>) {
+        (self.bounds.base.size, Arc::clone(&self.operations))
+    }
+
+    /// Inclusion proof for the operations returned by [`Self::operations`], anchored at
+    /// this batch's tip. The operations, proof, and [`Self::pinned_nodes`] verify against
+    /// [`Self::root`] via [`crate::qmdb::verify_proof_and_pinned_nodes`].
+    ///
+    /// Nodes below this batch chain are read from `db`'s
+    /// [Merkle store][crate::merkle::mem::Mem]. Capture the proof before calling
+    /// [`Db::apply_batch`], which may prune those nodes.
+    pub fn proof<E, C, H>(&self, db: &Db<F, E, V, H, C, S>) -> Result<Proof<F, D>, Error<F>>
+    where
+        E: Context,
+        H: Hasher<Digest = D>,
+        C: Clone + Send + Sync + 'static,
+        Operation<F, V>: Read<Cfg = C>,
+    {
+        let inactive_peaks = F::inactive_peaks(self.bounds.tip.size, self.bounds.inactivity_floor);
+        let hasher = qmdb::hasher::<H>();
+        db.merkle
+            .with_mem(|base| {
+                self.merkle_batch.range_proof(
+                    base,
+                    &hasher,
+                    self.bounds.base.size..self.bounds.tip.size,
+                    inactive_peaks,
+                )
+            })
+            .map_err(Into::into)
+    }
+
+    /// Pinned nodes for the operations returned by [`Self::operations`]. The operations,
+    /// [`Self::proof`], and pinned nodes verify against [`Self::root`] via
+    /// [`crate::qmdb::verify_proof_and_pinned_nodes`].
+    ///
+    /// Nodes below this batch chain are read from `db`'s
+    /// [Merkle store][crate::merkle::mem::Mem]. Capture the pinned nodes before calling
+    /// [`Db::apply_batch`], which may prune them.
+    pub fn pinned_nodes<E, C, H>(&self, db: &Db<F, E, V, H, C, S>) -> Result<Vec<D>, Error<F>>
+    where
+        E: Context,
+        H: Hasher<Digest = D>,
+        C: Clone + Send + Sync + 'static,
+        Operation<F, V>: Read<Cfg = C>,
+    {
+        db.merkle
+            .with_mem(|base| {
+                F::nodes_to_pin(self.bounds.base.size)
+                    .map(|pos| {
+                        self.merkle_batch
+                            .get_node(pos)
+                            .or_else(|| base.get_node(pos))
+                            .ok_or(crate::merkle::Error::ElementPruned(pos))
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .map_err(Into::into)
     }
 
     /// Create a new speculative batch with this one as its parent.
@@ -227,12 +289,13 @@ where
         }
         ops.push(Operation::Commit(metadata.clone(), inactivity_floor));
 
-        let total_size = self.base.size + ops.len() as u64;
+        let operations = Arc::new(ops);
+        let total_size = self.base.size + operations.len() as u64;
         let inactive_peaks = F::inactive_peaks(total_size, inactivity_floor);
         let (merkle, root) = compact_batch::merkleize_ops::<F, H, S, _>(
             &db.merkle,
             self.merkle_batch,
-            ops,
+            Arc::clone(&operations),
             inactive_peaks,
         )
         .await
@@ -246,6 +309,7 @@ where
 
         Arc::new(MerkleizedBatch {
             merkle_batch: merkle,
+            operations,
             commit_metadata: metadata,
             parent: self.parent.as_ref().map(Arc::downgrade),
             bounds: batch_chain::Bounds {
@@ -415,6 +479,7 @@ where
     {
         Arc::new(MerkleizedBatch {
             merkle_batch: self.merkle.to_batch(),
+            operations: Arc::new(Vec::new()),
             commit_metadata: self.last_commit_metadata.clone(),
             parent: None,
             bounds: batch_chain::Bounds::from_db(self.commitment(), self.inactivity_floor_loc),
@@ -616,8 +681,8 @@ where
 mod tests {
     use super::*;
     use crate::{
-        merkle::mmr,
-        qmdb::{any::value::FixedEncoding, compact::witness},
+        merkle::{mmb, mmr},
+        qmdb::{any::value::FixedEncoding, compact::witness, verify_proof_and_pinned_nodes},
     };
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::test_traced;
@@ -657,6 +722,170 @@ mod tests {
         Db::init_from_merkle(merkle, context.child("witness"), witness_cfg, ())
             .await
             .unwrap()
+    }
+
+    async fn operations_and_proof_cover_own_suffix_inner<F: Family>(
+        context: deterministic::Context,
+    ) {
+        let db = open_db::<F>(context.child("db"), "keyless-operations-and-proof").await;
+
+        let mut seed = db.new_batch();
+        for value in 1u64..=6 {
+            seed = seed.append(U64::new(value));
+        }
+        let seed = seed
+            .merkleize(&db, Some(U64::new(7)), Location::new(0))
+            .await;
+        let (db, _) = db.apply_batch(seed).await.unwrap();
+        let db = db.sync().await.unwrap();
+        let floor = db.size();
+        assert_eq!(floor, Location::new(8));
+
+        let mut parent = db.new_batch();
+        for value in 8u64..=12 {
+            parent = parent.append(U64::new(value));
+        }
+        let parent = parent.merkleize(&db, Some(U64::new(13)), floor).await;
+        let child = parent
+            .new_batch::<Sha256>()
+            .append(U64::new(14))
+            .merkleize(&db, Some(U64::new(15)), floor)
+            .await;
+
+        let parent_end = parent.bounds().tip.size;
+        drop(parent);
+
+        let (child_start, child_ops) = child.operations();
+        let (_, child_ops_again) = child.operations();
+        let child_end = child.bounds().tip.size;
+        let child_root = child.root();
+        let child_proof = child.proof(&db).unwrap();
+        let child_pins = child.pinned_nodes(&db).unwrap();
+        let expected_child_pins = db.merkle.with_mem(|base| {
+            F::nodes_to_pin(child_start)
+                .map(|pos| {
+                    child
+                        .merkle_batch
+                        .get_node(pos)
+                        .or_else(|| base.get_node(pos))
+                        .unwrap()
+                })
+                .collect::<Vec<_>>()
+        });
+
+        assert!(Arc::ptr_eq(&child_ops, &child_ops_again));
+        assert_eq!(child_start, parent_end);
+        assert_eq!(*child_start + child_ops.len() as u64, *child_end);
+        assert_eq!(child_end, Location::new(16));
+        assert!(matches!(
+            child_ops.as_slice(),
+            [Operation::Append(value), Operation::Commit(Some(metadata), operation_floor)]
+                if value == &U64::new(14)
+                    && metadata == &U64::new(15)
+                    && operation_floor == &floor
+        ));
+        assert_eq!(child_proof.leaves, child_end);
+        assert_eq!(
+            child_proof.inactive_peaks,
+            F::inactive_peaks(child_end, floor),
+        );
+        assert_eq!(child_pins, expected_child_pins);
+        assert!(verify_proof_and_pinned_nodes::<Sha256, _, _>(
+            &child_proof,
+            child_start,
+            &child_ops,
+            &child_pins,
+            &child_root
+        ));
+
+        assert!(child_pins.len() > 1);
+        let mut reordered_child_pins = child_pins.clone();
+        reordered_child_pins.swap(0, 1);
+        assert!(!verify_proof_and_pinned_nodes::<Sha256, _, _>(
+            &child_proof,
+            child_start,
+            &child_ops,
+            &reordered_child_pins,
+            &child_root
+        ));
+
+        let (db, child_range) = db.apply_batch(child).await.unwrap();
+        assert_eq!(child_range, floor..child_end);
+
+        let commit_floor = db.size();
+        let commit_only = db
+            .new_batch()
+            .merkleize(&db, Some(U64::new(16)), commit_floor)
+            .await;
+        let (commit_start, commit_ops) = commit_only.operations();
+        let commit_end = commit_only.bounds().tip.size;
+        let commit_root = commit_only.root();
+        let commit_proof = commit_only.proof(&db).unwrap();
+        let commit_pins = commit_only.pinned_nodes(&db).unwrap();
+
+        assert_eq!(commit_start, commit_floor);
+        assert!(matches!(
+            commit_ops.as_slice(),
+            [Operation::Commit(Some(metadata), operation_floor)]
+                if metadata == &U64::new(16) && operation_floor == &commit_floor
+        ));
+        assert_eq!(*commit_start + commit_ops.len() as u64, *commit_end);
+        assert_eq!(commit_proof.leaves, commit_end);
+        assert_eq!(
+            commit_proof.inactive_peaks,
+            F::inactive_peaks(commit_end, commit_floor)
+        );
+        assert!(verify_proof_and_pinned_nodes::<Sha256, _, _>(
+            &commit_proof,
+            commit_start,
+            &commit_ops,
+            &commit_pins,
+            &commit_root
+        ));
+
+        let (db, commit_range) = db.apply_batch(commit_only).await.unwrap();
+        assert_eq!(commit_range, commit_start..commit_end);
+        let db = db.sync().await.unwrap();
+        assert!(verify_proof_and_pinned_nodes::<Sha256, _, _>(
+            &commit_proof,
+            commit_start,
+            &commit_ops,
+            &commit_pins,
+            &commit_root
+        ));
+
+        let late = db
+            .new_batch()
+            .append(U64::new(17))
+            .merkleize(&db, Some(U64::new(18)), db.size())
+            .await;
+        let (late_start, late_ops) = late.operations();
+        let late_root = late.root();
+        let (db, _) = db.apply_batch(Arc::clone(&late)).await.unwrap();
+        let db = db.sync().await.unwrap();
+        if let (Ok(proof), Ok(pinned_nodes)) = (late.proof(&db), late.pinned_nodes(&db)) {
+            assert!(verify_proof_and_pinned_nodes::<Sha256, _, _>(
+                &proof,
+                late_start,
+                &late_ops,
+                &pinned_nodes,
+                &late_root
+            ));
+        }
+
+        db.destroy().await.unwrap();
+    }
+
+    #[test_traced]
+    fn test_operations_and_proof_cover_own_suffix_mmr() {
+        deterministic::Runner::default()
+            .start(operations_and_proof_cover_own_suffix_inner::<mmr::Family>);
+    }
+
+    #[test_traced]
+    fn test_operations_and_proof_cover_own_suffix_mmb() {
+        deterministic::Runner::default()
+            .start(operations_and_proof_cover_own_suffix_inner::<mmb::Family>);
     }
 
     /// Open the persisted witness journal directly so tests can corrupt the tip entry.

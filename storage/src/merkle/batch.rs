@@ -38,15 +38,10 @@
 //! [`Mem::apply_batch`] to replay uncommitted ancestors without requiring the
 //! ancestor batches to still be alive.
 //!
-//! A `Weak` pointer to the parent is kept for [`MerkleizedBatch::get_node`] lookups
-//! (used during a child's merkleize) and for walking the chain to collect ancestor
-//! batch data. Committed-and-dropped ancestors truncate the `Weak` walk, leaving their
-//! data in the committed [`Mem`]. `ancestor_base_size` records the position before the
-//! oldest retained ancestor so the remaining suffix is replayed at the correct offset.
-//!
-//! During [`UnmerkleizedBatch::merkleize`], the parent is held as a strong `Arc`
-//! (keeping it alive for the walk), and the `Weak` chain is walked to collect
-//! ancestor data. After merkleize, the parent is downgraded to `Weak`.
+//! Each batch retains `Arc` refs to the ancestor data needed by [`MerkleizedBatch::get_node`] and
+//! [`Mem::apply_batch`]. These snapshots are inherited by the next generation, so dropping an
+//! ancestor batch does not lose uncommitted data. `ancestor_base_size` records the position before
+//! the oldest retained ancestor so the remaining suffix is replayed at the correct offset.
 //!
 //! In a pipelining pattern (build next batch from prev, apply prev, repeat), each batch
 //! holds at most one ancestor batch (its immediate parent's data, as an `Arc` ref).
@@ -59,9 +54,8 @@
 //!
 //! # Batch invalidation
 //!
-//! A batch becomes _invalid_ when an unapplied ancestor is dropped, or a sibling fork has been
-//! applied. Invalid batches must not be used: their methods may return incorrect data rather than
-//! erroring.
+//! A batch becomes _invalid_ when a sibling fork is applied. Invalid batches must not be used.
+//! Their methods may return incorrect data rather than errors.
 //!
 //! # Example (MMR)
 //!
@@ -85,10 +79,7 @@ use crate::merkle::{
     Error, Family, Location, Position, Readable, hasher::Hasher, mem::Mem, path, proof::Proof,
 };
 use ahash::RandomState;
-use alloc::{
-    sync::{Arc, Weak},
-    vec::Vec,
-};
+use alloc::{sync::Arc, vec::Vec};
 #[cfg(feature = "std")]
 use commonware_codec::Write;
 use commonware_cryptography::Digest;
@@ -138,20 +129,6 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     /// Return a reference to the batch's strategy.
     pub fn strategy(&self) -> &S {
         &self.parent.strategy
-    }
-
-    /// Retain the live parent chain up to the first dropped weak link.
-    ///
-    /// Nodes beyond that link are read from committed state.
-    #[cfg(feature = "std")]
-    pub(crate) fn retain_ancestors(&self) -> Vec<Arc<MerkleizedBatch<F, D, S>>> {
-        let mut ancestors = Vec::new();
-        let mut current = Some(Arc::clone(&self.parent));
-        while let Some(batch) = current {
-            current = batch.parent.as_ref().and_then(Weak::upgrade);
-            ancestors.push(batch);
-        }
-        ancestors
     }
 
     /// The total number of nodes visible through this batch.
@@ -386,13 +363,12 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
             self.merkleize_bucket(base, hasher, positions, height as u32);
         }
 
-        // Collect ancestor data by walking the parent chain (strong Arc + Weak walk).
+        // Inherit the parent's snapshot so dropping the batch cannot lose older ancestors.
         let (ancestor_base_size, ancestor_appended, ancestor_overwrites) =
-            collect_ancestor_batches(&self.parent);
+            collect_ancestor_batches(&self.parent, base);
 
         let parent_size = self.parent.size();
         Arc::new(MerkleizedBatch {
-            parent: Some(Arc::downgrade(&self.parent)),
             appended: Arc::new(self.appended),
             overwrites: Arc::new(self.overwrites),
             parent_size,
@@ -475,36 +451,65 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     }
 }
 
-/// Collect ancestor batch data by walking the parent + its Weak chain.
+/// Inherit the parent's retained snapshot and append the parent's own data.
+///
 /// Returns the size before the oldest retained ancestor followed by its appended nodes and
-/// overwrites in root-to-tip order. Skips empty batches (e.g. root batches from `from_mem`).
+/// overwrites in root-to-tip order. A committed prefix ending in an append is discarded. An
+/// overwrite-only prefix is discarded when its changes are already visible in committed state.
 #[allow(clippy::type_complexity)]
 fn collect_ancestor_batches<F: Family, D: Digest, S: Strategy>(
     parent: &Arc<MerkleizedBatch<F, D, S>>,
+    base: &Mem<F, D>,
 ) -> (Position<F>, Vec<Arc<Vec<D>>>, Vec<Arc<Overwrites<F, D>>>) {
-    let mut appended = Vec::new();
-    let mut overwrites = Vec::new();
-    let mut base_size = parent.parent_size;
-
-    // Parent is alive (strong Arc held by UnmerkleizedBatch).
+    let mut appended = parent.ancestor_appended.clone();
+    let mut overwrites = parent.ancestor_overwrites.clone();
+    let mut base_size = parent.ancestor_base_size;
     if !parent.appended.is_empty() || !parent.overwrites.is_empty() {
         appended.push(Arc::clone(&parent.appended));
         overwrites.push(Arc::clone(&parent.overwrites));
     }
+    let committed_size = base.size();
+    let pruning_boundary = Position::try_from(base.pruning_boundary()).expect("valid boundary");
 
-    // Walk Weak chain for grandparents+.
-    let mut current = parent.parent.as_ref().and_then(Weak::upgrade);
-    while let Some(batch) = current {
-        base_size = batch.parent_size;
-        if !batch.appended.is_empty() || !batch.overwrites.is_empty() {
-            appended.push(Arc::clone(&batch.appended));
-            overwrites.push(Arc::clone(&batch.overwrites));
+    let mut cursor = base_size;
+    let mut retained_start = 0;
+    let mut pending_overwrites = Overwrites::default();
+    let mut mismatches = 0usize;
+    for (index, ancestor) in appended.iter().enumerate() {
+        cursor += ancestor.len() as u64;
+        if cursor > committed_size {
+            break;
         }
-        current = batch.parent.as_ref().and_then(Weak::upgrade);
+
+        if !ancestor.is_empty() {
+            retained_start = index + 1;
+            base_size = cursor;
+            pending_overwrites.clear();
+            mismatches = 0;
+            continue;
+        }
+
+        for (&position, &digest) in overwrites[index].iter() {
+            let represented =
+                |value| position < pruning_boundary || base.get_node(position) == Some(value);
+            if let Some(previous) = pending_overwrites.insert(position, digest) {
+                mismatches -= usize::from(!represented(previous));
+            }
+            mismatches += usize::from(!represented(digest));
+        }
+        if mismatches != 0 {
+            continue;
+        }
+
+        retained_start = index + 1;
+        base_size = cursor;
+        pending_overwrites.clear();
+    }
+    if retained_start > 0 {
+        appended.drain(..retained_start);
+        overwrites.drain(..retained_start);
     }
 
-    appended.reverse();
-    overwrites.reverse();
     (base_size, appended, overwrites)
 }
 
@@ -516,9 +521,6 @@ fn collect_ancestor_batches<F: Family, D: Digest, S: Strategy>(
 /// [`UnmerkleizedBatch`].
 #[derive(Debug)]
 pub struct MerkleizedBatch<F: Family, D: Digest, S: Strategy> {
-    /// The parent batch in the chain, if any.
-    parent: Option<Weak<Self>>,
-
     /// This batch's appended nodes only (not accumulated from ancestors).
     pub(crate) appended: Arc<Vec<D>>,
 
@@ -539,12 +541,11 @@ pub struct MerkleizedBatch<F: Family, D: Digest, S: Strategy> {
     /// unchanged by all descendants, like `base_size`.
     pruning_boundary: Location<F>,
 
-    /// Arc refs to each ancestor's appended nodes, collected during merkleize while
-    /// ancestors are alive. Root-to-tip order.
+    /// Arc refs to each ancestor's appended nodes, inherited during merkleize in root-to-tip
+    /// order.
     pub(crate) ancestor_appended: Vec<Arc<Vec<D>>>,
 
-    /// Arc refs to each ancestor's overwrites, collected during merkleize while
-    /// ancestors are alive. Root-to-tip order.
+    /// Arc refs to each ancestor's overwrites, inherited during merkleize in root-to-tip order.
     pub(crate) ancestor_overwrites: Vec<Arc<Overwrites<F, D>>>,
 
     pub(crate) strategy: S,
@@ -563,7 +564,6 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
     /// for merkleization.
     pub fn from_mem_with_strategy(mem: &Mem<F, D>, strategy: S) -> Arc<Self> {
         Arc::new(Self {
-            parent: None,
             appended: Arc::new(Vec::new()),
             overwrites: Arc::new(Overwrites::default()),
             parent_size: mem.size(),
@@ -581,7 +581,7 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
         Position::new(*self.parent_size + self.appended.len() as u64)
     }
 
-    /// Resolve a node: own data -> Weak parent chain.
+    /// Resolve a node from this batch or its retained ancestors.
     ///
     /// Returns `None` for positions that only exist in the committed [`Mem`].
     /// Callers that need committed data should fall back to [`Mem::get_node`]
@@ -597,18 +597,21 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
             let i = (*pos - *self.parent_size) as usize;
             return self.appended.get(i).copied();
         }
-        // Walk Weak parent chain.
-        let mut current = self.parent.as_ref().and_then(Weak::upgrade);
-        while let Some(batch) = current {
-            if let Some(d) = batch.overwrites.get(&pos) {
-                return Some(*d);
+        for overwrites in self.ancestor_overwrites.iter().rev() {
+            if let Some(digest) = overwrites.get(&pos) {
+                return Some(*digest);
             }
-            if pos >= batch.parent_size {
-                let i = (*pos - *batch.parent_size) as usize;
-                return batch.appended.get(i).copied();
-            }
-            current = batch.parent.as_ref().and_then(Weak::upgrade);
         }
+
+        let mut start = self.ancestor_base_size;
+        for appended in &self.ancestor_appended {
+            let end = start + appended.len() as u64;
+            if pos >= start && pos < end {
+                return appended.get((*pos - *start) as usize).copied();
+            }
+            start = end;
+        }
+        debug_assert_eq!(start, self.parent_size);
         None
     }
 
@@ -681,8 +684,7 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
 
     /// Create a child batch on top of this merkleized batch.
     ///
-    /// The batch becomes invalid if any ancestor is dropped before being applied, or a sibling
-    /// fork has been applied.
+    /// The batch becomes invalid if a sibling fork has been applied.
     pub fn new_batch(self: &Arc<Self>) -> UnmerkleizedBatch<F, D, S> {
         UnmerkleizedBatch::new(Arc::clone(self))
     }
@@ -1120,6 +1122,86 @@ mod tests {
         });
     }
 
+    fn dropped_grandparent_snapshot<F: Family>() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let hasher: H = Standard::new(ForwardFold);
+            let mut base = build_reference::<F>(&hasher, 50);
+            let updated = b"grandparent-update";
+            let mut grandparent_batch = base
+                .new_batch()
+                .update_leaf(&hasher, Location::new(5), updated)
+                .unwrap();
+            for i in 50u64..60 {
+                let element = hasher.digest(&i.to_be_bytes());
+                grandparent_batch = grandparent_batch.add(&hasher, &element);
+            }
+            let grandparent = grandparent_batch.merkleize(&base, &hasher);
+
+            let mut parent_batch = grandparent.new_batch();
+            for i in 60u64..70 {
+                let element = hasher.digest(&i.to_be_bytes());
+                parent_batch = parent_batch.add(&hasher, &element);
+            }
+            let parent = parent_batch.merkleize(&base, &hasher);
+
+            let mut child_batch = parent.new_batch();
+            for i in 70u64..80 {
+                let element = hasher.digest(&i.to_be_bytes());
+                child_batch = child_batch.add(&hasher, &element);
+            }
+
+            let grandparent_ref = Arc::downgrade(&grandparent);
+            drop(grandparent);
+            assert!(grandparent_ref.upgrade().is_none());
+
+            let child = child_batch.merkleize(&base, &hasher);
+            drop(parent);
+            let root = batch_root(&base, &child, &hasher);
+            let updated_location = Location::new(5);
+            let updated_position = Position::<F>::try_from(updated_location).unwrap();
+            assert_eq!(
+                child.get_node(updated_position),
+                Some(hasher.leaf_digest(updated_position, updated)),
+            );
+
+            let appended_location = Location::new(55);
+            let appended_position = Position::<F>::try_from(appended_location).unwrap();
+            let appended_element = hasher.digest(&55u64.to_be_bytes());
+            assert_eq!(
+                child.get_node(appended_position),
+                Some(hasher.leaf_digest(appended_position, &appended_element)),
+            );
+
+            let updated_proof = child.proof(&base, &hasher, updated_location, 0).unwrap();
+            assert!(updated_proof.verify_element_inclusion(
+                &hasher,
+                updated,
+                updated_location,
+                &root,
+            ));
+            let appended_proof = child.proof(&base, &hasher, appended_location, 0).unwrap();
+            assert!(appended_proof.verify_element_inclusion(
+                &hasher,
+                &appended_element,
+                appended_location,
+                &root,
+            ));
+
+            base.apply_batch(&child).unwrap();
+            assert_eq!(mem_root(&base, &hasher), root);
+
+            let mut reference = build_reference::<F>(&hasher, 80);
+            let update = reference
+                .new_batch()
+                .update_leaf(&hasher, updated_location, updated)
+                .unwrap()
+                .merkleize(&reference, &hasher);
+            reference.apply_batch(&update).unwrap();
+            assert_eq!(mem_root(&base, &hasher), mem_root(&reference, &hasher));
+        });
+    }
+
     fn overwrite_collision<F: Family>() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
@@ -1274,6 +1356,10 @@ mod tests {
         three_deep_stacking::<crate::mmr::Family>();
     }
     #[test]
+    fn mmr_dropped_grandparent_snapshot() {
+        dropped_grandparent_snapshot::<crate::mmr::Family>();
+    }
+    #[test]
     fn mmr_overwrite_collision() {
         overwrite_collision::<crate::mmr::Family>();
     }
@@ -1396,6 +1482,10 @@ mod tests {
     #[test]
     fn mmb_three_deep_stacking() {
         three_deep_stacking::<crate::mmb::Family>();
+    }
+    #[test]
+    fn mmb_dropped_grandparent_snapshot() {
+        dropped_grandparent_snapshot::<crate::mmb::Family>();
     }
     #[test]
     fn mmb_overwrite_collision() {

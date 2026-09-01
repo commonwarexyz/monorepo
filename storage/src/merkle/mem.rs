@@ -460,10 +460,8 @@ impl<F: Family, D: Digest> Mem<F, D> {
             self.nodes.push_back(digest);
         }
 
-        // Detect missing ancestor data. If an uncommitted ancestor was dropped
-        // before this batch was merkleized, its appended nodes are absent and the
-        // Mem ends up smaller than expected. This does not catch dropped
-        // overwrite-only ancestors (they don't change the size).
+        // Merkle batches own their ancestor nodes. A size mismatch means the batch ancestry does
+        // not connect to the current structure, which indicates use against an incompatible fork.
         if self.size() != batch.size() {
             return Err(Error::AncestorDropped {
                 expected: batch.size(),
@@ -1124,27 +1122,6 @@ mod tests {
         assert_eq!(plain_root(&mem, &hasher), plain_root(&reference, &hasher));
     }
 
-    /// Dropping an uncommitted ancestor before merkleizing a descendant must
-    /// be detected at apply time, not silently corrupt data.
-    fn apply_batch_detects_dropped_ancestor<F: Family>() {
-        let hasher: H = Standard::new(ForwardFold);
-        let mut mem = Mem::<F, D>::new();
-
-        let a = mem.new_batch().add(&hasher, b"a").merkleize(&mem, &hasher);
-        let b = a.new_batch().add(&hasher, b"b").merkleize(&mem, &hasher);
-        drop(a); // A dropped before C is merkleized, so its data is lost
-        let c = b.new_batch().add(&hasher, b"c").merkleize(&mem, &hasher);
-
-        let result = mem.apply_batch(&c);
-        assert!(
-            matches!(
-                result,
-                Err(Error::AncestorDropped { expected, .. }) if expected == c.size()
-            ),
-            "expected AncestorDropped, got {result:?}"
-        );
-    }
-
     /// Dropping a committed ancestor before merkleizing a descendant must not
     /// shift the retained uncommitted suffix back to the original fork point.
     fn apply_batch_after_committed_ancestor_dropped<F: Family>() {
@@ -1283,6 +1260,36 @@ mod tests {
         );
     }
 
+    fn sequential_overwrite_apply_bounds_retained_ancestors<F: Family>() {
+        let hasher: H = Standard::new(ForwardFold);
+        let mut mem = build_raw::<F>(&hasher, 10);
+
+        let first = mem
+            .new_batch()
+            .update_leaf(&hasher, Location::new(0), b"first")
+            .unwrap()
+            .merkleize(&mem, &hasher);
+        let oldest = alloc::sync::Arc::downgrade(&first.overwrites);
+        mem.apply_batch(&first).unwrap();
+
+        let second = first
+            .new_batch()
+            .update_leaf(&hasher, Location::new(1), b"second")
+            .unwrap()
+            .merkleize(&mem, &hasher);
+        mem.apply_batch(&second).unwrap();
+        drop(first);
+
+        let third = second
+            .new_batch()
+            .update_leaf(&hasher, Location::new(2), b"third")
+            .unwrap()
+            .merkleize(&mem, &hasher);
+
+        assert!(third.ancestor_overwrites.is_empty());
+        assert!(oldest.upgrade().is_none());
+    }
+
     fn split_root_matches_recompute<F: Family>() {
         let hasher: H = Standard::new(ForwardFold);
         let plain = build::<F>(&hasher, 49);
@@ -1389,12 +1396,12 @@ mod tests {
         apply_batch_skips_only_committed_ancestors::<crate::mmr::Family>();
     }
     #[test]
-    fn mmr_apply_batch_detects_dropped_ancestor() {
-        apply_batch_detects_dropped_ancestor::<crate::mmr::Family>();
-    }
-    #[test]
     fn mmr_apply_batch_overwrite_only_ancestor() {
         apply_batch_overwrite_only_ancestor::<crate::mmr::Family>();
+    }
+    #[test]
+    fn mmr_sequential_overwrite_apply_bounds_retained_ancestors() {
+        sequential_overwrite_apply_bounds_retained_ancestors::<crate::mmr::Family>();
     }
     #[test]
     fn mmr_split_root_matches_recompute() {
@@ -1488,10 +1495,6 @@ mod tests {
         apply_batch_skips_only_committed_ancestors::<crate::mmb::Family>();
     }
     #[test]
-    fn mmb_apply_batch_detects_dropped_ancestor() {
-        apply_batch_detects_dropped_ancestor::<crate::mmb::Family>();
-    }
-    #[test]
     fn mmb_apply_batch_after_committed_ancestor_dropped() {
         apply_batch_after_committed_ancestor_dropped::<crate::mmb::Family>();
     }
@@ -1502,6 +1505,10 @@ mod tests {
     #[test]
     fn mmb_apply_batch_overwrite_only_ancestor() {
         apply_batch_overwrite_only_ancestor::<crate::mmb::Family>();
+    }
+    #[test]
+    fn mmb_sequential_overwrite_apply_bounds_retained_ancestors() {
+        sequential_overwrite_apply_bounds_retained_ancestors::<crate::mmb::Family>();
     }
     #[test]
     fn mmb_split_root_matches_recompute() {
