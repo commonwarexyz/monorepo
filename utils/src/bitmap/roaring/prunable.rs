@@ -42,11 +42,11 @@ const CONTAINER_MASK: u64 = CONTAINER_SIZE - 1;
 /// See the module-level documentation for semantics and granularity.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Prunable {
-    /// The underlying bitmap. Invariant: contains no values `< pruned_below`.
-    bitmap: Bitmap,
-
     /// The lowest value that may exist in the bitmap. Always a multiple of 65536.
     pruned_below: u64,
+
+    /// The underlying bitmap. Invariant: contains no values `< pruned_below`.
+    bitmap: Bitmap,
 }
 
 impl Prunable {
