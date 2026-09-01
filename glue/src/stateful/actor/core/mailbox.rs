@@ -228,13 +228,7 @@ where
             retry_mailbox,
         }
     }
-}
 
-impl<E, A> Mailbox<E, A>
-where
-    E: Rng + Spawner + Metrics + Clock,
-    A: Application<E>,
-{
     /// Wait for the attached database set.
     ///
     /// This resolves once startup handoff has attached the database set to the

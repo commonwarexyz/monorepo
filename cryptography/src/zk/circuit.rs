@@ -320,9 +320,7 @@ impl<'ctx, F> Context<'ctx, F> {
     fn witness(self, init: impl for<'a> FnOnce(Values<'a, F>) -> F) -> CircuitIdx {
         self.allocate(|values| Some(init(values)), Circuit::next_witness)
     }
-}
 
-impl<'ctx, F> Context<'ctx, F> {
     fn constant(self, x: F) -> CircuitIdx {
         self.allocate(|_| None, |circuit| circuit.next_constant(x))
     }

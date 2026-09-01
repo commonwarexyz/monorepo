@@ -708,9 +708,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     fn is_connectable(&self, peer: &P) -> bool {
         self.peer_ref_counts.contains_key(peer)
     }
-}
 
-impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> {
     /// Process completions from the transmitter.
     fn process_completions(&mut self, completions: Vec<Completion<P>>) {
         for completion in completions {

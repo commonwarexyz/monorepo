@@ -260,9 +260,7 @@ impl Transcript {
     const fn unflushed(&self) -> bool {
         self.pending != 0
     }
-}
 
-impl Transcript {
     /// Create a new transcript.
     ///
     /// The namespace serves to disambiguate two transcripts, so that even if they record
