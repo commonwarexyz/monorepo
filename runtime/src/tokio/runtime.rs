@@ -165,13 +165,13 @@ pub struct Config {
     /// Whether or not to catch panics.
     catch_panics: bool,
 
-    /// Base directory for all storage operations.
-    storage_directory: PathBuf,
-
-    /// Maximum buffer size for operations on blobs.
+    /// Base directory for all storage operations, created at start if missing.
     ///
-    /// Tokio sets the default value to 2MB.
-    maximum_buffer_size: usize,
+    /// The runtime holds an exclusive advisory lock on a `.hold` file at its
+    /// root until its storage and every operation the storage dispatched have
+    /// finished. While a previous runtime still holds the directory,
+    /// [crate::Runner::start] blocks until that hold releases.
+    storage_directory: PathBuf,
 
     /// Network configuration.
     network_cfg: NetworkConfig,
@@ -195,7 +195,6 @@ impl Config {
             thread_stack_size: utils::thread::system_thread_stack_size(),
             catch_panics: false,
             storage_directory,
-            maximum_buffer_size: 2 * 1024 * 1024, // 2 MB
             network_cfg: NetworkConfig::default(),
             network_buffer_pool_cfg: None,
             storage_buffer_pool_cfg: None,
@@ -254,11 +253,6 @@ impl Config {
         self
     }
     /// See [Config]
-    pub const fn with_maximum_buffer_size(mut self, n: usize) -> Self {
-        self.maximum_buffer_size = n;
-        self
-    }
-    /// See [Config]
     pub fn with_network_buffer_pool_config(mut self, cfg: BufferPoolConfig) -> Self {
         self.network_buffer_pool_cfg = Some(cfg);
         self
@@ -309,10 +303,6 @@ impl Config {
     /// See [Config]
     pub const fn storage_directory(&self) -> &PathBuf {
         &self.storage_directory
-    }
-    /// See [Config]
-    pub const fn maximum_buffer_size(&self) -> usize {
-        self.maximum_buffer_size
     }
 
     /// Returns the network buffer pool config, deriving pool parallelism from
@@ -464,16 +454,13 @@ impl crate::Runner for Runner {
             &mut runtime_registry.sub_registry("storage_buffer_pool"),
         );
 
-        // Make any storage a prior process left in the page cache crash-durable before we open it,
-        // so the data read during init is durable.
-        if let Err(e) = crate::storage::sync(&self.cfg.storage_directory) {
-            panic!(
-                "failed to sync storage filesystem at startup ({}): {e}",
-                self.cfg.storage_directory.display()
-            );
-        }
+        // A directory that does not exist yet holds nothing a prior process
+        // could have left unsynced, so the flush below is skipped for it.
+        let fresh = !self.cfg.storage_directory.exists();
 
-        // Initialize storage
+        // Initialize storage. Construction acquires the storage directory
+        // hold, waiting for any operations still finishing from a previous
+        // run before the flush below.
         cfg_if::cfg_if! {
             if #[cfg(feature = "iouring-storage")] {
                 let mut iouring_registry = runtime_registry.sub_registry("iouring_storage");
@@ -492,15 +479,22 @@ impl crate::Runner for Runner {
             } else {
                 let storage = MeteredStorage::new(
                     TokioStorage::new(
-                        TokioStorageConfig::new(
-                            self.cfg.storage_directory.clone(),
-                            self.cfg.maximum_buffer_size,
-                        ),
+                        TokioStorageConfig::new(self.cfg.storage_directory.clone()),
                         storage_buffer_pool.clone(),
                     ),
                     &mut runtime_registry,
                 );
             }
+        }
+
+        // Make any storage a prior process left in the page cache crash-durable before we open it,
+        // so the data read during init is durable. This runs under the hold, after any straggling
+        // writes from a previous run have landed, so the flush covers them too.
+        if !fresh && let Err(e) = crate::storage::sync(&self.cfg.storage_directory) {
+            panic!(
+                "failed to sync storage filesystem at startup ({}): {e}",
+                self.cfg.storage_directory.display()
+            );
         }
 
         // Initialize network
@@ -916,11 +910,13 @@ impl crate::BufferPooler for Context {
 mod tests {
     use super::*;
     use crate::{
-        Metrics, Network, Resolver, Runner as _, Sink, Spawner as _, Strategizer as _, Stream,
-        Supervisor as _, telemetry::metrics::raw::Counter, tokio::telemetry,
+        Blob as _, Metrics, Network, Resolver, Runner as _, Sink, Spawner as _, Storage as _,
+        Strategizer as _, Stream, Supervisor as _, WriteOptions, telemetry::metrics::raw::Counter,
+        tokio::telemetry,
     };
     use bytes::Bytes;
     use commonware_parallel::Strategy as _;
+    use futures::FutureExt as _;
     use std::{
         self,
         collections::HashMap,
@@ -1094,6 +1090,42 @@ mod tests {
                 assert_runner_drains_spawned_task(execution, root_exit);
             }
         }
+    }
+
+    #[test]
+    fn test_runner_restart_waits_for_straggling_write() {
+        let cfg = Config::new();
+        let storage_directory = cfg.storage_directory().clone();
+        const LEN: usize = 64 * 1024 * 1024;
+
+        // The first run dispatches a large write and returns with the write's
+        // future dropped, leaving the write to finish on the blocking pool.
+        Runner::new(cfg.clone()).start(|context| async move {
+            let (blob, _) = context.open("partition", b"blob").await.unwrap();
+            let mut write = Box::pin(blob.write_at(0, vec![7u8; LEN], WriteOptions::default()));
+            assert!(
+                (&mut write).now_or_never().is_none(),
+                "write completed before it could straggle"
+            );
+        });
+
+        // A run releases its hold before returning, so a second run on the
+        // same directory neither blocks nor observes the write mid-flight. Run
+        // it on a helper thread so a hold that never releases fails the test
+        // instead of hanging it.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let len = Runner::new(cfg).start(|context| async move {
+                let (_, len) = context.open("partition", b"blob").await.unwrap();
+                len
+            });
+            tx.send(len).unwrap();
+        });
+        let len = rx
+            .recv_timeout(Duration::from_secs(60))
+            .expect("second run did not start after the first returned");
+        assert_eq!(len, LEN as u64);
+        let _ = std::fs::remove_dir_all(storage_directory);
     }
 
     #[test]

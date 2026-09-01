@@ -43,6 +43,8 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
             }
         }
     }
+
+    pub(crate) mod hold;
 });
 
 stability_scope!(ALPHA {

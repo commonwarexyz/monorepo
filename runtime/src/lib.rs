@@ -599,6 +599,16 @@ stability_scope!(BETA {
     /// recovery: data read at initialization can be assumed to survive a
     /// subsequent crash without an explicit [`Blob::sync`].
     ///
+    /// # Instances
+    ///
+    /// Dropping an in-flight operation's future does not cancel it: the
+    /// operation may still take effect later, and a caller that drops a future
+    /// and then reads through the same instance may observe that late effect.
+    ///
+    /// Runtimes must ensure that no operation issued through a storage instance
+    /// takes effect after a successor instance rooted at the same location has
+    /// been constructed.
+    ///
     /// # Partition Names
     ///
     /// Partition names must be non-empty and contain only ASCII alphanumeric
