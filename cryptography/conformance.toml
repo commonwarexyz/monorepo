@@ -66,6 +66,34 @@ hash = "14018760cf847e7ae80218c5d6885b219faab804bf25f05a3faabda0cb353d30"
 n_cases = 16
 hash = "0df6a13f2cf9f9868d18d1c81a99a4a6190c0fea1f4c394a64713b7b26efaea6"
 
+["commonware_cryptography::bls12381::dkg::golden::conformance::CodecConformance<DealerLog>"]
+n_cases = 65536
+hash = "b8cf32460244e544c06b679f79da55109227dc8b7f512f247df864a844d34bdc"
+
+["commonware_cryptography::bls12381::dkg::golden::conformance::CodecConformance<Dealing>"]
+n_cases = 65536
+hash = "b5ef6afca24879730552442a0546be7753123a5298f2003b496c65ea7fe64aba"
+
+["commonware_cryptography::bls12381::dkg::golden::conformance::CodecConformance<Output<PublicKey>>"]
+n_cases = 65536
+hash = "6444d9e38a8c5fe7046adff0e80677edad529086dd9fc7b9e0873f88100711ca"
+
+["commonware_cryptography::bls12381::dkg::golden::conformance::CodecConformance<SignedDealerLog>"]
+n_cases = 65536
+hash = "4b26b9519527d48807173a139c5047f085e089b97de7f498ecfbb1ec4b54706e"
+
+["commonware_cryptography::bls12381::dkg::golden::evrf::conformance::CodecConformance<Proof>"]
+n_cases = 65536
+hash = "3348ee006ade359d67d72dd0c28ae4074fcccd623871e156dc0691ef34675ed3"
+
+["commonware_cryptography::bls12381::dkg::golden::evrf::conformance::CodecConformance<Signature>"]
+n_cases = 65536
+hash = "531e2ab4737f7f537ff85f70911ba454a184d90a2b5349eb4488ab81b26f0cfc"
+
+["commonware_cryptography::bls12381::dkg::golden::evrf::conformance::CodecConformance<VrfCommitments>"]
+n_cases = 65536
+hash = "832f0d4d2f06ecce28105e4663844dd9d1e035f8be26cf1fafdf060c2b6c1bd9"
+
 ["commonware_cryptography::bls12381::primitives::group::tests::conformance::CodecConformance<G1>"]
 n_cases = 65536
 hash = "ba2d888e6d1050e6a361aa79430c1bb03d90eb8e74b9715b1d7d01c35a495e1d"

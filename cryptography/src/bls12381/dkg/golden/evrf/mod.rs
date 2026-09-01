@@ -349,6 +349,15 @@ impl FixedSize for Signature {
     const SIZE: usize = G::SIZE + F::SIZE;
 }
 
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for Signature {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            raw: u.arbitrary()?,
+        })
+    }
+}
+
 impl crate::Signature for Signature {}
 
 impl Span for Signature {}
@@ -421,6 +430,18 @@ impl crate::Verifier for PublicKey {
         let lhs = G::generator() * &s;
         let rhs = k_big + &(self.point.clone() * &e);
         lhs == rhs
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for PublicKey {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let x: F = u.arbitrary()?;
+        let point = G::generator() * &x;
+        Ok(Self {
+            raw: point.encode_fixed(),
+            point,
+        })
     }
 }
 
@@ -509,6 +530,16 @@ struct Proof {
     pedersen_to_plain: Vec<pedersen_to_plain::Proof<Scalar, G1>>,
 }
 
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for Proof {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            circuit_proof: u.arbitrary()?,
+            pedersen_to_plain: u.arbitrary()?,
+        })
+    }
+}
+
 impl Write for Proof {
     fn write(&self, buf: &mut impl BufMut) {
         self.circuit_proof.write(buf);
@@ -543,6 +574,16 @@ impl Read for Proof {
         Ok(Self {
             circuit_proof,
             pedersen_to_plain,
+        })
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for VrfCommitments {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            proof: u.arbitrary()?,
+            commitments: u.arbitrary()?,
         })
     }
 }
@@ -959,5 +1000,17 @@ mod tests {
         assert_eq!(decoded.max_players(), s.max_players());
         // Re-encode and compare to make sure the roundtrip is bit-exact.
         assert_eq!(decoded.encode(), bytes);
+    }
+}
+
+#[cfg(all(test, feature = "arbitrary"))]
+mod conformance {
+    use super::*;
+    use commonware_codec::conformance::CodecConformance;
+
+    commonware_conformance::conformance_tests! {
+        CodecConformance<Signature>,
+        CodecConformance<Proof>,
+        CodecConformance<VrfCommitments>,
     }
 }

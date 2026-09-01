@@ -1193,6 +1193,27 @@ pub struct Proof<F, G> {
     ipa_proof: ipa::Proof<F, G>,
 }
 
+#[cfg(any(test, feature = "arbitrary"))]
+impl<F, G> arbitrary::Arbitrary<'_> for Proof<F, G>
+where
+    F: for<'a> arbitrary::Arbitrary<'a>,
+    G: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            m_big: u.arbitrary()?,
+            o_big: u.arbitrary()?,
+            m_big_tilde: u.arbitrary()?,
+            t_big: u.arbitrary()?,
+            s_tilde: u.arbitrary()?,
+            t_x: u.arbitrary()?,
+            t_tilde_x: u.arbitrary()?,
+            p_big: u.arbitrary()?,
+            ipa_proof: u.arbitrary()?,
+        })
+    }
+}
+
 impl<F: Write, G: Write> Write for Proof<F, G> {
     fn write(&self, buf: &mut impl BufMut) {
         self.m_big.write(buf);

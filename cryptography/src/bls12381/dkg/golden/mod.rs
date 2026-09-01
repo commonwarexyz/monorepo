@@ -245,6 +245,23 @@ impl<P: Ord + Clone> Output<P> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<P> arbitrary::Arbitrary<'_> for Output<P>
+where
+    P: for<'a> arbitrary::Arbitrary<'a> + Ord,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            summary: u.arbitrary()?,
+            public: u.arbitrary()?,
+            quorum: u.arbitrary()?,
+            dealers: u.arbitrary()?,
+            players: u.arbitrary()?,
+            revealed: u.arbitrary()?,
+        })
+    }
+}
+
 impl<P: Write> Write for Output<P> {
     fn write(&self, buf: &mut impl BufMut) {
         self.summary.write(buf);
@@ -730,6 +747,17 @@ pub struct SignedDealerLog {
     log: DealerLog,
 }
 
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for SignedDealerLog {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            dealer: u.arbitrary()?,
+            signature: u.arbitrary()?,
+            log: u.arbitrary()?,
+        })
+    }
+}
+
 impl Write for SignedDealerLog {
     fn write(&self, buf: &mut impl BufMut) {
         self.dealer.write(buf);
@@ -802,6 +830,16 @@ impl SignedDealerLog {
 pub struct DealerLog {
     commitments: VrfCommitments,
     dealing: Dealing,
+}
+
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for DealerLog {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            commitments: u.arbitrary()?,
+            dealing: u.arbitrary()?,
+        })
+    }
 }
 
 impl Write for DealerLog {
@@ -879,6 +917,17 @@ struct Dealing {
     nonce: Summary,
     poly: Poly<G1>,
     masked_shares: Map<PublicKey, Scalar>,
+}
+
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for Dealing {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            nonce: u.arbitrary()?,
+            poly: u.arbitrary()?,
+            masked_shares: u.arbitrary()?,
+        })
+    }
 }
 
 impl Write for Dealing {
@@ -2242,5 +2291,18 @@ mod tests {
                     .expect("plan should not panic");
                 Ok(())
             });
+    }
+}
+
+#[cfg(all(test, feature = "arbitrary"))]
+mod conformance {
+    use super::*;
+    use commonware_codec::conformance::CodecConformance;
+
+    commonware_conformance::conformance_tests! {
+        CodecConformance<Output<PublicKey>>,
+        CodecConformance<SignedDealerLog>,
+        CodecConformance<DealerLog>,
+        CodecConformance<Dealing>,
     }
 }
