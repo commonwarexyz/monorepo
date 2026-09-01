@@ -16,12 +16,13 @@
 //!
 //! # Storage-page alignment
 //!
-//! Physical page `p` begins at blob offset `p * physical_page_size`, and a newly created blob
-//! begins its data on a 4096-byte boundary. Choosing a logical page size such that the physical
-//! page size is a power of two (see [page_size]) therefore makes every physical page either fit
-//! within a single 4096-byte storage page or start on a 4096-byte boundary and span whole
-//! storage pages. Blobs created before the aligned layout begin their data at offset 8 and never
-//! align, regardless of the page size chosen.
+//! Physical page `p` begins at blob offset `p * physical_page_size`, and a blob created with
+//! the default layout ([crate::DEFAULT_BLOB_LAYOUT]) begins its data on a 4096-byte boundary.
+//! Choosing a logical page size such that the physical page size is a power of two (see
+//! [page_size]) therefore makes every physical page either fit within a single 4096-byte
+//! storage page or start on a 4096-byte boundary and span whole storage pages. Blobs with the
+//! unaligned [crate::BlobLayout::V0] layout begin their data at offset 8 and never align,
+//! regardless of the page size chosen.
 //!
 //! Alignment is a performance property, not a correctness requirement: any page size works, but
 //! physical pages that straddle storage-page boundaries amplify cold random reads.
@@ -65,10 +66,11 @@ pub const CHECKSUM_SIZE: u64 = Checksum::SIZE as u64;
 
 /// The storage-page granularity physical pages should align to (see the module docs).
 pub(crate) const STORAGE_PAGE_SIZE: u64 = 4096;
-// The alignment reasoning above assumes newly created blobs place their data on a
-// storage-page boundary.
+
+// The alignment reasoning above assumes blobs created with the default layout place their
+// data on a storage-page boundary.
 const _: () = assert!(
-    crate::storage::Layout::V1
+    crate::DEFAULT_BLOB_LAYOUT
         .data_offset()
         .is_multiple_of(STORAGE_PAGE_SIZE)
 );

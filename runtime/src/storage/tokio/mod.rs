@@ -1,5 +1,5 @@
-use super::{Header, hold::Hold};
-use crate::{BufferPool, Error};
+use super::{Header, Layout, hold::Hold};
+use crate::{BlobVersion, BufferPool, Error};
 use commonware_formatting::{from_hex, hex};
 use std::{
     io::{Read as _, Seek as _, SeekFrom, Write as _},
@@ -34,11 +34,15 @@ fn sync_dir(path: &Path) -> Result<(), Error> {
 #[derive(Clone)]
 pub struct Config {
     pub storage_directory: PathBuf,
+    pub blob_layouts: RangeInclusive<Layout>,
 }
 
 impl Config {
-    pub const fn new(storage_directory: PathBuf) -> Self {
-        Self { storage_directory }
+    pub const fn new(storage_directory: PathBuf, blob_layouts: RangeInclusive<Layout>) -> Self {
+        Self {
+            storage_directory,
+            blob_layouts,
+        }
     }
 }
 
@@ -54,15 +58,16 @@ pub struct Storage {
 fn resolve_header(
     file: &mut std::fs::File,
     raw_len: u64,
-    versions: &RangeInclusive<u16>,
+    layouts: &RangeInclusive<Layout>,
+    versions: &RangeInclusive<BlobVersion>,
     partition: &str,
     name: &[u8],
-) -> Result<Option<(u64, u16, u64)>, Error> {
+) -> Result<Option<(u64, BlobVersion, u64)>, Error> {
     let mut raw = vec![0u8; Header::resolve_len(raw_len)];
     file.seek(SeekFrom::Start(0))
         .map_err(|_| Error::ReadFailed)?;
     file.read_exact(&mut raw).map_err(|_| Error::ReadFailed)?;
-    super::header::resolve(&raw, raw_len, versions, partition, name)
+    super::header::resolve(&raw, raw_len, layouts, versions, partition, name)
 }
 
 impl Storage {
@@ -98,8 +103,8 @@ impl crate::Storage for Storage {
         &self,
         partition: &str,
         name: &[u8],
-        versions: RangeInclusive<u16>,
-    ) -> Result<(Self::Blob, u64, u16), Error> {
+        versions: RangeInclusive<BlobVersion>,
+    ) -> Result<(Self::Blob, u64, BlobVersion), Error> {
         super::validate_partition_name(partition)?;
 
         // Acquire the filesystem lock, owned so the open runs serialized to
@@ -117,6 +122,7 @@ impl crate::Storage for Storage {
         let storage_directory = self.cfg.storage_directory.clone();
         let partition = partition.to_string();
         let name = name.to_vec();
+        let blob_layouts = self.cfg.blob_layouts.clone();
         let hold = self.hold.clone();
         let open = tokio::task::spawn_blocking(move || {
             let _hold = hold;
@@ -144,7 +150,14 @@ impl crate::Storage for Storage {
 
             // Handle the header. Existing blobs have their header read. New blobs and blobs
             // left torn by an interrupted creation get a fresh header written.
-            let existing = resolve_header(&mut file, raw_len, &versions, &partition, &name)?;
+            let existing = resolve_header(
+                &mut file,
+                raw_len,
+                &blob_layouts,
+                &versions,
+                &partition,
+                &name,
+            )?;
             let resolved = match existing {
                 Some(resolved) => resolved,
                 None => {
@@ -157,8 +170,7 @@ impl crate::Storage for Storage {
                     sync_dir(&storage_directory)?;
 
                     // Truncate to zero before writing, per the [Header::create] contract.
-                    let (region, blob_version) =
-                        Header::create(crate::storage::Layout::V1, &versions);
+                    let (region, blob_version) = Header::create(&blob_layouts, &versions);
                     let data_offset = region.len() as u64;
                     file.set_len(0).map_err(|e| {
                         Error::BlobResizeFailed(partition.clone(), hex(&name), e.into())
@@ -282,6 +294,7 @@ impl crate::Storage for Storage {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::{Header, *};
     use crate::{
@@ -308,7 +321,7 @@ mod tests {
     async fn test_hold_waits_for_straggling_remove() {
         let storage_directory =
             env::temp_dir().join(format!("storage_tokio_hold_remove_{}", random_suffix()));
-        let config = Config::new(storage_directory.clone());
+        let config = Config::new(storage_directory.clone(), Layout::ALL);
         let storage = Storage::new(config.clone(), test_pool());
 
         // Fill the partition with enough blobs that its removal takes a while,
@@ -347,7 +360,7 @@ mod tests {
     async fn test_hold_retained_by_open_blob() {
         let storage_directory =
             env::temp_dir().join(format!("storage_tokio_hold_blob_{}", random_suffix()));
-        let config = Config::new(storage_directory.clone());
+        let config = Config::new(storage_directory.clone(), Layout::ALL);
         let storage = Storage::new(config.clone(), test_pool());
 
         // An open blob holds a clone of the directory hold, since a write or
@@ -379,7 +392,7 @@ mod tests {
     fn test_hold_blocks_second_instance() {
         let storage_directory =
             env::temp_dir().join(format!("storage_tokio_hold_block_{}", random_suffix()));
-        let config = Config::new(storage_directory.clone());
+        let config = Config::new(storage_directory.clone(), Layout::ALL);
         let first = Storage::new(config.clone(), test_pool());
 
         // A second instance on the same directory cannot acquire the hold
@@ -407,7 +420,7 @@ mod tests {
         let mut rng = sys_rng();
         let storage_directory =
             env::temp_dir().join(format!("storage_tokio_{}", rng.random::<u64>()));
-        let config = Config::new(storage_directory);
+        let config = Config::new(storage_directory, Layout::ALL);
         let storage = Storage::new(config, test_pool());
         run_storage_tests(storage).await;
     }
@@ -419,7 +432,7 @@ mod tests {
         let mut rng = sys_rng();
         let storage_directory =
             env::temp_dir().join(format!("storage_tokio_start_sync_{}", rng.random::<u64>()));
-        let config = Config::new(storage_directory);
+        let config = Config::new(storage_directory, Layout::ALL);
         let storage = Storage::new(config, test_pool());
 
         let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();
@@ -449,7 +462,7 @@ mod tests {
         let mut rng = sys_rng();
         let storage_directory =
             env::temp_dir().join(format!("storage_tokio_header_{}", rng.random::<u64>()));
-        let config = Config::new(storage_directory.clone());
+        let config = Config::new(storage_directory.clone(), Layout::ALL);
         let storage = Storage::new(config, test_pool());
 
         // Test 1: New blob (V1 by default) returns logical size 0 and correct app version
@@ -483,7 +496,7 @@ mod tests {
         // Header version (bytes 4-5) and App version (bytes 6-7)
         assert_eq!(
             &raw_content[4..6],
-            &Layout::V1.runtime_version().to_be_bytes()
+            &Layout::V1.layout_version().to_be_bytes()
         );
         // Data should start at the data offset
         assert_eq!(&raw_content[data_offset as usize..], data);
@@ -557,7 +570,7 @@ mod tests {
     async fn test_v1_paged_alignment() {
         let storage_directory =
             env::temp_dir().join(format!("storage_tokio_aligned_{}", random_suffix()));
-        let config = Config::new(storage_directory.clone());
+        let config = Config::new(storage_directory.clone(), Layout::ALL);
         let storage = Storage::new(config, test_pool());
 
         // A logical page size whose physical page is exactly one 4096-byte storage page.
@@ -610,7 +623,10 @@ mod tests {
     async fn test_blob_torn_creation_recovers() {
         let storage_directory =
             env::temp_dir().join(format!("test_torn_creation_{}", random_suffix()));
-        let storage = Storage::new(Config::new(storage_directory.clone()), test_pool());
+        let storage = Storage::new(
+            Config::new(storage_directory.clone(), Layout::ALL),
+            test_pool(),
+        );
 
         // Create a durable V1 blob to obtain the canonical header region bytes.
         let (blob, _) = storage.open("partition", b"torn").await.unwrap();
@@ -692,7 +708,10 @@ mod tests {
 
         let storage_directory =
             env::temp_dir().join(format!("test_dropped_open_{}", random_suffix()));
-        let storage = Storage::new(Config::new(storage_directory.clone()), test_pool());
+        let storage = Storage::new(
+            Config::new(storage_directory.clone(), Layout::ALL),
+            test_pool(),
+        );
 
         for depth in 0..64 {
             let name = format!("blob{depth}");
@@ -732,7 +751,10 @@ mod tests {
     async fn test_blob_v1_rejects_nonzero_header_padding() {
         let storage_directory =
             env::temp_dir().join(format!("test_v1_header_padding_{}", random_suffix()));
-        let storage = Storage::new(Config::new(storage_directory.clone()), test_pool());
+        let storage = Storage::new(
+            Config::new(storage_directory.clone(), Layout::ALL),
+            test_pool(),
+        );
 
         let partition_dir = storage_directory.join("partition");
         std::fs::create_dir_all(&partition_dir).unwrap();
@@ -753,19 +775,18 @@ mod tests {
     async fn test_blob_v0_legacy_read() {
         let storage_directory =
             env::temp_dir().join(format!("test_v0_legacy_read_{}", random_suffix()));
-        let storage = Storage::new(Config::new(storage_directory.clone()), test_pool());
+        let storage = Storage::new(
+            Config::new(storage_directory.clone(), Layout::ALL),
+            test_pool(),
+        );
 
-        // Fabricate a legacy V0 blob on disk (creation is always V1): an 8-byte header
+        // Fabricate a legacy V0 blob on disk (creation here produces V1): an 8-byte header
         // followed immediately by the payload.
         let payload = b"hello world";
         let partition_dir = storage_directory.join("partition");
         std::fs::create_dir_all(&partition_dir).unwrap();
         let file_path = partition_dir.join(hex(b"v0"));
-        std::fs::write(
-            &file_path,
-            crate::storage::header::tests::v0_blob_bytes(0, payload),
-        )
-        .unwrap();
+        std::fs::write(&file_path, crate::storage::tests::v0_blob_bytes(0, payload)).unwrap();
 
         // The blob opens with its data intact and remains readable and writable in place.
         let (blob, size) = storage.open("partition", b"v0").await.unwrap();
@@ -796,7 +817,10 @@ mod tests {
     async fn test_blob_magic_mismatch() {
         let storage_directory =
             env::temp_dir().join(format!("test_magic_mismatch_{}", random_suffix()));
-        let storage = Storage::new(Config::new(storage_directory.clone()), test_pool());
+        let storage = Storage::new(
+            Config::new(storage_directory.clone(), Layout::ALL),
+            test_pool(),
+        );
 
         // Create the partition directory and a file whose magic bytes are foreign (not a
         // prefix of any canonical header, so not a torn creation)
@@ -820,7 +844,10 @@ mod tests {
     async fn test_blob_partial_header_reset() {
         let storage_directory =
             env::temp_dir().join(format!("test_partial_header_reset_{}", random_suffix()));
-        let storage = Storage::new(Config::new(storage_directory.clone()), test_pool());
+        let storage = Storage::new(
+            Config::new(storage_directory.clone(), Layout::ALL),
+            test_pool(),
+        );
         let partition_path = storage_directory.join("partition");
         std::fs::create_dir_all(&partition_path).unwrap();
 
@@ -867,7 +894,10 @@ mod tests {
                 bad_name.replace([' ', '0', 'x', 'X'], "_"),
                 random_suffix()
             ));
-            let storage = Storage::new(Config::new(storage_directory.clone()), test_pool());
+            let storage = Storage::new(
+                Config::new(storage_directory.clone(), Layout::ALL),
+                test_pool(),
+            );
 
             let partition_path = storage_directory.join("partition");
             std::fs::create_dir_all(&partition_path).unwrap();

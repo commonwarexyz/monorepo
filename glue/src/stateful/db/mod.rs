@@ -2249,7 +2249,6 @@ mod tests {
                 merkle_config: merkle_config(context, suffix),
                 log: fixed_journal_config(context, suffix),
                 translator: TwoCap,
-                init_cache_size: Some(NZUsize!(1024)),
                 init_buffer: NZUsize!(1 << 21),
             }
         }
@@ -2262,7 +2261,6 @@ mod tests {
                 merkle_config: merkle_config(context, suffix),
                 log: variable_journal_config(context, suffix, ((), ())),
                 translator: TwoCap,
-                init_cache_size: Some(NZUsize!(1024)),
                 init_buffer: NZUsize!(1 << 21),
             }
         }
