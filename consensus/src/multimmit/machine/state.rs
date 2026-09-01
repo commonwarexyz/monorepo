@@ -330,6 +330,15 @@ pub(crate) struct Progress {
     pub proposal_anchor_view: View,
     pub produced_blocks: u64,
     pub producer: Option<ProducerProgress>,
+    pub artifact_cache_occupancy: usize,
+    pub artifact_cache_capacity: usize,
+    pub remote_artifact_capacity: usize,
+    pub local_artifact_capacity: usize,
+    pub verification_jobs: usize,
+    pub verification_job_capacity: usize,
+    pub future_artifacts: usize,
+    pub timeout_cutoff_vote: bool,
+    pub timeout_cutoff_timeout: bool,
 }
 
 impl<D: Digest> Inspection<D> {
@@ -1003,6 +1012,9 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     }
 
     pub(crate) fn progress(&self) -> Progress {
+        let resources = self.profile.resources();
+        let (timeout_cutoff_vote, timeout_cutoff_timeout) =
+            self.views.timeout_cutoff_flags(self.durable.view);
         Progress {
             view: self.durable.view,
             retired_view: self.durable.retired_view,
@@ -1010,6 +1022,15 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             proposal_anchor_view: self.proposal_anchor_view(),
             produced_blocks: self.durable.produced_blocks,
             producer: self.producer_progress(),
+            artifact_cache_occupancy: self.artifacts.len() + self.local_artifact_reservations(),
+            artifact_cache_capacity: resources.max_cached_artifacts(),
+            remote_artifact_capacity: resources.remote_artifact_capacity(),
+            local_artifact_capacity: resources.local_artifact_capacity(),
+            verification_jobs: self.jobs.len(),
+            verification_job_capacity: resources.max_inflight_verifications(),
+            future_artifacts: self.future.len(),
+            timeout_cutoff_vote,
+            timeout_cutoff_timeout,
         }
     }
 

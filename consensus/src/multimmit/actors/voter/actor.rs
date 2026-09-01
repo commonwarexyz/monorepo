@@ -5,7 +5,10 @@ use super::{
         Admission as JournalAdmission, Durable as JournalDurable, JournalClient, JournalFailure,
         JournalMonitor, Response as JournalResponse,
     },
-    metrics::Metrics as ActorMetrics,
+    metrics::{
+        Metrics as ActorMetrics, ViewProofAdmission, ViewProofAdmissionOutcome, ViewProofKind,
+        ViewProofSource,
+    },
 };
 use crate::{
     Automaton, Epochable as _, Relay, Reporter, Viewable as _,
@@ -24,10 +27,10 @@ use crate::{
             DurableEffect, EffectId, IdentifiedArtifact, InputTicket, JobId, LeaderCapability,
             LqcAggregateCompletion, NullificationRecoveryCompletion, Observation,
             ObservationStatus, PersistDirective, ProducerCapability, ProducerProgress,
-            ProductionTimer, Profile, ResolverCapability, Role, SignRequest, StepError, StepStatus,
-            TaskClass, TaskError, TaskPermit, TaskTerminal, Timer, ValidationCompletion,
-            ValidationId, ValidationJob, VerificationCapability, VqcAggregateCompletion,
-            contracts::Lane,
+            ProductionTimer, Profile, Rejection, ResolverCapability, Role, SignRequest, StepError,
+            StepStatus, TaskClass, TaskError, TaskPermit, TaskTerminal, Timer,
+            ValidationCompletion, ValidationId, ValidationJob, VerificationCapability, ViewProof,
+            VqcAggregateCompletion, contracts::Lane,
         },
         scheme::bls12381_threshold::{Error as SchemeError, Scheme},
         storage::{CheckpointError, CheckpointStore},
@@ -335,6 +338,7 @@ struct InputContext<D: Digest> {
     application: Option<(AppCompletionKey<D>, AppCompletionTiming)>,
     sign: Option<TimedSign>,
     publication: Option<TimedPublication>,
+    view_proof: Option<(ViewProofSource, ViewProofKind)>,
 }
 
 /// One signature, certificate assembly, or recovery as it returns from the compute pool.
@@ -422,7 +426,7 @@ impl<P: PublicKey, V: Variant, D: Digest> PendingVerification<P, V, D> {
 struct ObservationSources<P> {
     /// Sources in reverse observation order. Each core prefix consumes the tail, so
     /// resumable observation does not allocate, shift, or copy source metadata.
-    items: Vec<P>,
+    items: Vec<(P, Option<ViewProofKind>)>,
 }
 
 /// Bounded first-arrival times for network-observed transaction blocks.
@@ -1076,6 +1080,31 @@ const fn sign_request_kind<V: Variant, D: Digest>(request: &SignRequest<V, D>) -
         SignRequest::Vote(_) => "vote",
         SignRequest::NoVote { .. } => "no_vote",
         SignRequest::Nullify { .. } => "nullify",
+    }
+}
+
+const fn view_proof_kind<V: Variant, D: Digest>(
+    artifact: &Artifact<V, D>,
+) -> Option<ViewProofKind> {
+    match artifact {
+        Artifact::Nullification(_) => Some(ViewProofKind::Nullification),
+        Artifact::Vqc(_) => Some(ViewProofKind::Vqc),
+        Artifact::Lqc(_) => Some(ViewProofKind::Lqc),
+        _ => None,
+    }
+}
+
+const fn view_proof_admission_outcome(status: ObservationStatus) -> ViewProofAdmissionOutcome {
+    match status {
+        ObservationStatus::Scheduled => ViewProofAdmissionOutcome::Scheduled,
+        ObservationStatus::Duplicate => ViewProofAdmissionOutcome::Duplicate,
+        ObservationStatus::Rejected(Rejection::ArtifactCacheFull) => {
+            ViewProofAdmissionOutcome::ArtifactCacheFull
+        }
+        ObservationStatus::Rejected(Rejection::VerificationJobsFull) => {
+            ViewProofAdmissionOutcome::VerificationJobsFull
+        }
+        ObservationStatus::Rejected(_) => ViewProofAdmissionOutcome::OtherRejected,
     }
 }
 
@@ -1796,6 +1825,19 @@ where
                     {
                         self.pending_signs.push(sign);
                     }
+                    if let Some((source, kind)) = input_context.view_proof
+                        && let StepStatus::ResolutionCompleted { admission } =
+                            serviced.transition.status()
+                    {
+                        self.metrics
+                            .view_proof_admissions
+                            .get_or_create(&ViewProofAdmission {
+                                source,
+                                kind,
+                                outcome: view_proof_admission_outcome(*admission),
+                            })
+                            .inc();
+                    }
                     self.pending_publication = input_context.publication;
                     input_context
                         .span
@@ -1867,6 +1909,7 @@ where
                     application: None,
                     sign: None,
                     publication: None,
+                    view_proof: None,
                 },
             )
             .is_some()
@@ -1954,7 +1997,7 @@ where
         count: usize,
         final_chunk: bool,
     ) -> Result<(), Fatal> {
-        let (scheduled, complete) = {
+        let (scheduled, admissions, complete) = {
             let sources = self
                 .observation_sources
                 .get_mut(&ticket)
@@ -1964,7 +2007,7 @@ where
                 .len()
                 .checked_sub(count)
                 .ok_or(StepError::CompletionMismatch)?;
-            let scheduled = match status {
+            let classified = match status {
                 StepStatus::Observed(results) => {
                     if results.len() != count {
                         return Err(StepError::CompletionMismatch.into());
@@ -1974,10 +2017,7 @@ where
                         .iter()
                         .copied()
                         .zip(consumed)
-                        .filter_map(|(result, source)| {
-                            (result.status() == ObservationStatus::Scheduled)
-                                .then_some((result.observation(), source))
-                        })
+                        .map(|(result, (source, kind))| (result, source, kind))
                         .collect::<Vec<_>>()
                 }
                 _ => {
@@ -1985,7 +2025,18 @@ where
                     Vec::new()
                 }
             };
-            (scheduled, sources.items.is_empty())
+            let scheduled = classified
+                .iter()
+                .filter_map(|(result, source, _)| {
+                    (result.status() == ObservationStatus::Scheduled)
+                        .then_some((result.observation(), source.clone()))
+                })
+                .collect::<Vec<_>>();
+            let admissions = classified
+                .into_iter()
+                .filter_map(|(result, _, kind)| kind.map(|kind| (kind, result.status())))
+                .collect::<Vec<_>>();
+            (scheduled, admissions, sources.items.is_empty())
         };
         if final_chunk != complete {
             return Err(StepError::CompletionMismatch.into());
@@ -1994,6 +2045,16 @@ where
             self.observation_sources
                 .remove(&ticket)
                 .ok_or(StepError::CompletionMismatch)?;
+        }
+        for (kind, status) in admissions {
+            self.metrics
+                .view_proof_admissions
+                .get_or_create(&ViewProofAdmission {
+                    source: ViewProofSource::Network,
+                    kind,
+                    outcome: view_proof_admission_outcome(status),
+                })
+                .inc();
         }
         for (observation, source) in scheduled {
             if self
@@ -2065,6 +2126,46 @@ where
             .metrics
             .produced_blocks
             .try_set(progress.produced_blocks);
+        let _ = self
+            .metrics
+            .artifact_cache_occupancy
+            .try_set(progress.artifact_cache_occupancy);
+        let _ = self
+            .metrics
+            .artifact_cache_capacity
+            .try_set(progress.artifact_cache_capacity);
+        let _ = self
+            .metrics
+            .remote_artifact_capacity
+            .try_set(progress.remote_artifact_capacity);
+        let _ = self
+            .metrics
+            .local_artifact_capacity
+            .try_set(progress.local_artifact_capacity);
+        let _ = self
+            .metrics
+            .verification_jobs
+            .try_set(progress.verification_jobs);
+        let _ = self
+            .metrics
+            .verification_job_capacity
+            .try_set(progress.verification_job_capacity);
+        let _ = self
+            .metrics
+            .future_artifacts
+            .try_set(progress.future_artifacts);
+        let _ = self
+            .metrics
+            .view_timer_armed
+            .try_set(usize::from(self.view_timer.is_some()));
+        let _ = self
+            .metrics
+            .view_timeout_cutoff_vote
+            .try_set(usize::from(progress.timeout_cutoff_vote));
+        let _ = self
+            .metrics
+            .view_timeout_cutoff_timeout
+            .try_set(usize::from(progress.timeout_cutoff_timeout));
         let (active_validations, pending_validations) = self.core().validation_counts();
         let _ = self
             .metrics
@@ -2359,7 +2460,7 @@ where
     fn observe_network(
         &mut self,
         artifacts: Vec<IdentifiedArtifact<V, H::Digest>>,
-        mut sources: Vec<P>,
+        sources: Vec<P>,
     ) -> Result<(), Fatal> {
         if artifacts.len() != sources.len() {
             return Err(StepError::CompletionMismatch.into());
@@ -2371,6 +2472,14 @@ where
                     .record(block.header().block_ref::<H>(), arrived_at);
             }
         }
+        let mut sources = sources
+            .into_iter()
+            .zip(
+                artifacts
+                    .iter()
+                    .map(|(_, artifact)| view_proof_kind(artifact)),
+            )
+            .collect::<Vec<_>>();
         let resident_bytes = artifacts.iter().try_fold(0usize, |total, (id, artifact)| {
             total
                 .checked_add(id.encode_size())?
@@ -2421,6 +2530,11 @@ where
                 round,
                 completion,
             } => {
+                let kind = match completion.proof() {
+                    ViewProof::Nullification(_) => ViewProofKind::Nullification,
+                    ViewProof::Vqc(_) => ViewProofKind::Vqc,
+                    ViewProof::Lqc(_) => ViewProofKind::Lqc,
+                };
                 let resolved = info_span!(
                     parent: &span,
                     "multimmit.voter.resolve.complete",
@@ -2428,7 +2542,12 @@ where
                     view = round.view().get().traced()
                 );
                 resolved.in_scope(|| {
-                    self.track_transition(|core| core.leader_resolution_completed(completion))?;
+                    let ticket =
+                        self.track_transition(|core| core.leader_resolution_completed(completion))?;
+                    self.input_spans
+                        .get_mut(&ticket)
+                        .ok_or(CoreError::SchedulerInvariant)?
+                        .view_proof = Some((ViewProofSource::Resolver, kind));
                     Ok(())
                 })
             }
@@ -2465,41 +2584,41 @@ where
             origin,
         } = due;
         let attempt_number = retries.saturating_add(1);
-            let attempt = if retries == 0 {
-                info_span!(
-                    parent: None,
-                    "multimmit.voter.publish",
-                    epoch = self.protocol_epoch.get().traced(),
-                    view = origin.view.get().traced(),
-                    id = id.get().traced(),
-                    generation = generation.traced(),
-                    attempt = attempt_number.traced(),
-                    previously_delivered = delivered,
-                    transmit_due,
-                    relay_due,
-                    relay_ready = tracing::field::Empty,
-                    sender_accepted = tracing::field::Empty,
-                    sender_complete = tracing::field::Empty,
-                    first_accepted = tracing::field::Empty,
-                )
-            } else {
-                debug_span!(
-                    parent: None,
-                    "multimmit.voter.publish.retry",
-                    epoch = self.protocol_epoch.get().traced(),
-                    view = origin.view.get().traced(),
-                    id = id.get().traced(),
-                    generation = generation.traced(),
-                    attempt = attempt_number.traced(),
-                    previously_delivered = delivered,
-                    transmit_due,
-                    relay_due,
-                    relay_ready = tracing::field::Empty,
-                    sender_accepted = tracing::field::Empty,
-                    sender_complete = tracing::field::Empty,
-                    first_accepted = tracing::field::Empty,
-                )
-            };
+        let attempt = if retries == 0 {
+            info_span!(
+                parent: None,
+                "multimmit.voter.publish",
+                epoch = self.protocol_epoch.get().traced(),
+                view = origin.view.get().traced(),
+                id = id.get().traced(),
+                generation = generation.traced(),
+                attempt = attempt_number.traced(),
+                previously_delivered = delivered,
+                transmit_due,
+                relay_due,
+                relay_ready = tracing::field::Empty,
+                sender_accepted = tracing::field::Empty,
+                sender_complete = tracing::field::Empty,
+                first_accepted = tracing::field::Empty,
+            )
+        } else {
+            debug_span!(
+                parent: None,
+                "multimmit.voter.publish.retry",
+                epoch = self.protocol_epoch.get().traced(),
+                view = origin.view.get().traced(),
+                id = id.get().traced(),
+                generation = generation.traced(),
+                attempt = attempt_number.traced(),
+                previously_delivered = delivered,
+                transmit_due,
+                relay_due,
+                relay_ready = tracing::field::Empty,
+                sender_accepted = tracing::field::Empty,
+                sender_complete = tracing::field::Empty,
+                first_accepted = tracing::field::Empty,
+            )
+        };
         let _guard = attempt.enter();
         // Relay closure withholds only the transmissions that carry a Relay obligation. A
         // publication may bundle consensus-critical artifacts with a transaction block, and a
@@ -2509,9 +2628,7 @@ where
         let mut sender_accepted = false;
         let mut sender_complete = transmit_due && !transmissions.is_empty();
         for transmission in transmissions.iter() {
-            if relay_due
-                && let Some(header_digest) = transmission.relay
-            {
+            if relay_due && let Some(header_digest) = transmission.relay {
                 self.metrics.relay_attempts.inc();
                 if self.relay.broadcast(header_digest, ()) == Feedback::Closed {
                     self.metrics.relay_closed.inc();
@@ -2536,12 +2653,8 @@ where
         attempt.record("sender_accepted", sender_accepted);
         attempt.record("sender_complete", sender_complete);
         let (first, sign_ready_at) = if transmit_due {
-            self.egress.submitted(
-                id,
-                self.context.current(),
-                sender_accepted,
-                sender_complete,
-            )
+            self.egress
+                .submitted(id, self.context.current(), sender_accepted, sender_complete)
         } else {
             (false, None)
         };
@@ -2561,11 +2674,7 @@ where
     ///
     /// Retries count into a separate per-plane byte family, so each plane's traffic splits
     /// into first attempts and retry amplification.
-    fn transmit(
-        &mut self,
-        transmission: &Transmission<P, H::Digest>,
-        retry: bool,
-    ) -> Submission {
+    fn transmit(&mut self, transmission: &Transmission<P, H::Digest>, retry: bool) -> Submission {
         let recipients = transmission
             .recipient
             .as_ref()
@@ -2597,11 +2706,12 @@ where
                     .and_then(|participant| participants.get(participant.into()));
                 let accepted = sent
                     .iter()
-                    .filter(|peer| {
-                        local != Some(*peer) && participants.position(peer).is_some()
-                    })
+                    .filter(|peer| local != Some(*peer) && participants.position(peer).is_some())
                     .count();
-                accepted == participants.len().saturating_sub(usize::from(local.is_some()))
+                accepted
+                    == participants
+                        .len()
+                        .saturating_sub(usize::from(local.is_some()))
             }
         };
         let accepted = !sent.is_empty();
@@ -3137,5 +3247,4 @@ mod tests {
             assert!(matches!(outcome.1, Err(CryptoTaskPanicked)));
         });
     }
-
 }

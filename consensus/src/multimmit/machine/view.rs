@@ -1557,6 +1557,14 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
         Some(SignRequest::Vote(request.clone()))
     }
 
+    pub(crate) fn timeout_cutoff_flags(&self, view: View) -> (bool, bool) {
+        match self.timeout_cutoffs.get(&view) {
+            Some(TimeoutCutoff::Vote(_)) => (true, false),
+            Some(TimeoutCutoff::Timeout) => (false, true),
+            None => (false, false),
+        }
+    }
+
     pub(crate) fn exit<H: Hasher<Digest = D>>(
         &self,
         profile: &Profile<H, V>,
@@ -3039,18 +3047,10 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
             )
         });
         nullification = nullification.filter(|(observation, _)| {
-            !self.unresolved_exit_blocks(
-                view,
-                (observation.cohort(), 1),
-                wait_for_vqc,
-                true,
-            )
+            !self.unresolved_exit_blocks(view, (observation.cohort(), 1), wait_for_vqc, true)
         });
         if vqc.is_none() && nullification.is_none() {
-            return ForwardCandidates {
-                vqc,
-                nullification,
-            };
+            return ForwardCandidates { vqc, nullification };
         }
 
         let scan = self.complete_certificate_scan(view);
@@ -3063,17 +3063,9 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
             )
         });
         nullification = nullification.filter(|(observation, _)| {
-            !self.local_exit_blocks(
-                &scan,
-                (observation.cohort(), 1),
-                wait_for_vqc,
-                true,
-            )
+            !self.local_exit_blocks(&scan, (observation.cohort(), 1), wait_for_vqc, true)
         });
-        ForwardCandidates {
-            vqc,
-            nullification,
-        }
+        ForwardCandidates { vqc, nullification }
     }
 
     fn unresolved_exit_blocks(

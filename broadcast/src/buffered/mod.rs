@@ -1213,7 +1213,8 @@ mod tests {
                 blocker: oracle.control(peer.clone()),
                 strategy: Sequential,
             };
-            let (engine, engine_mailbox) = Engine::<_, PublicKey, TestMessage, _, _, _>::new(ctx, config);
+            let (engine, engine_mailbox) =
+                Engine::<_, PublicKey, TestMessage, _, _, _>::new(ctx, config);
             mailboxes.insert(peer.clone(), engine_mailbox);
             handles.push(engine.start(network));
         }
@@ -1364,8 +1365,10 @@ mod tests {
                 blocker: oracle.control(peer_b.clone()),
                 strategy: Sequential,
             };
-            let (engine_b, mailbox_b) =
-                Engine::<_, PublicKey, TestMessage, _, _, _>::new(context.child("peer_b"), config_b);
+            let (engine_b, mailbox_b) = Engine::<_, PublicKey, TestMessage, _, _, _>::new(
+                context.child("peer_b"),
+                config_b,
+            );
             engine_b.start(network_b);
 
             // Spawn remaining peer engines.
@@ -1383,7 +1386,8 @@ mod tests {
                     blocker: oracle.control(peer.clone()),
                     strategy: Sequential,
                 };
-                let (engine, mailbox) = Engine::<_, PublicKey, TestMessage, _, _, _>::new(ctx, config);
+                let (engine, mailbox) =
+                    Engine::<_, PublicKey, TestMessage, _, _, _>::new(ctx, config);
                 mailboxes.insert(peer, mailbox);
                 engine.start(network);
             }
@@ -1482,8 +1486,10 @@ mod tests {
                 blocker: oracle.control(peer_b.clone()),
                 strategy: Sequential,
             };
-            let (engine_b, mailbox_b) =
-                Engine::<_, PublicKey, TestMessage, _, _, _>::new(context.child("peer_b"), config_b);
+            let (engine_b, mailbox_b) = Engine::<_, PublicKey, TestMessage, _, _, _>::new(
+                context.child("peer_b"),
+                config_b,
+            );
             engine_b.start(network_b);
 
             let mut mailboxes = BTreeMap::new();
@@ -1500,7 +1506,8 @@ mod tests {
                     blocker: oracle.control(peer.clone()),
                     strategy: Sequential,
                 };
-                let (engine, mailbox) = Engine::<_, PublicKey, TestMessage, _, _, _>::new(ctx, config);
+                let (engine, mailbox) =
+                    Engine::<_, PublicKey, TestMessage, _, _, _>::new(ctx, config);
                 mailboxes.insert(peer, mailbox);
                 engine.start(network);
             }
@@ -1755,7 +1762,8 @@ mod tests {
                     blocker: oracle.control(peer.clone()),
                     strategy: Sequential,
                 };
-                let (engine, mailbox) = Engine::<_, PublicKey, TestMessage, _, _, _>::new(ctx, config);
+                let (engine, mailbox) =
+                    Engine::<_, PublicKey, TestMessage, _, _, _>::new(ctx, config);
                 mailboxes.insert(peer, mailbox);
                 engine.start(network);
             }
@@ -1823,8 +1831,10 @@ mod tests {
                 blocker: oracle.control(peer_b.clone()),
                 strategy: Sequential,
             };
-            let (engine_b, mailbox_b) =
-                Engine::<_, PublicKey, TestMessage, _, _, _>::new(context.child("peer_b"), config_b);
+            let (engine_b, mailbox_b) = Engine::<_, PublicKey, TestMessage, _, _, _>::new(
+                context.child("peer_b"),
+                config_b,
+            );
             engine_b.start(network_b);
 
             // Spawn remaining peer engines.
@@ -1842,7 +1852,8 @@ mod tests {
                     blocker: oracle.control(peer.clone()),
                     strategy: Sequential,
                 };
-                let (engine, mailbox) = Engine::<_, PublicKey, TestMessage, _, _, _>::new(ctx, config);
+                let (engine, mailbox) =
+                    Engine::<_, PublicKey, TestMessage, _, _, _>::new(ctx, config);
                 mailboxes.insert(peer, mailbox);
                 engine.start(network);
             }

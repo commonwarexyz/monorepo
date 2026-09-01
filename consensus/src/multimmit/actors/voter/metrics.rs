@@ -1,8 +1,56 @@
 use crate::{LATENCY, multimmit::actors::metrics::Traffic};
 use commonware_runtime::{
     Metrics as MetricsTrait,
-    telemetry::metrics::{Counter, CounterFamily, Gauge, Histogram, MetricsExt as _, histogram},
+    telemetry::metrics::{
+        Counter, CounterFamily, EncodeLabelSet, EncodeLabelValue, Gauge, Histogram,
+        MetricsExt as _, histogram,
+    },
 };
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
+pub(super) enum ViewProofSource {
+    Network,
+    Resolver,
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
+pub(super) enum ViewProofKind {
+    Nullification,
+    Vqc,
+    Lqc,
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
+pub(super) enum ViewProofAdmissionOutcome {
+    Scheduled,
+    Duplicate,
+    ArtifactCacheFull,
+    VerificationJobsFull,
+    OtherRejected,
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub(super) struct ViewProofAdmission {
+    pub source: ViewProofSource,
+    pub kind: ViewProofKind,
+    pub outcome: ViewProofAdmissionOutcome,
+}
+
+impl ViewProofAdmission {
+    const SOURCES: [ViewProofSource; 2] = [ViewProofSource::Network, ViewProofSource::Resolver];
+    const KINDS: [ViewProofKind; 3] = [
+        ViewProofKind::Nullification,
+        ViewProofKind::Vqc,
+        ViewProofKind::Lqc,
+    ];
+    const OUTCOMES: [ViewProofAdmissionOutcome; 5] = [
+        ViewProofAdmissionOutcome::Scheduled,
+        ViewProofAdmissionOutcome::Duplicate,
+        ViewProofAdmissionOutcome::ArtifactCacheFull,
+        ViewProofAdmissionOutcome::VerificationJobsFull,
+        ViewProofAdmissionOutcome::OtherRejected,
+    ];
+}
 
 /// Stable attribution labels for the voter loop's runtime-event sources.
 pub(super) const EVENT_KINDS: [&str; 13] = [
@@ -48,6 +96,13 @@ pub(super) struct Metrics {
     pub retained_events: Gauge,
     pub staged_batches: Gauge,
     pub retained_artifacts: Gauge,
+    pub artifact_cache_occupancy: Gauge,
+    pub artifact_cache_capacity: Gauge,
+    pub remote_artifact_capacity: Gauge,
+    pub local_artifact_capacity: Gauge,
+    pub verification_jobs: Gauge,
+    pub verification_job_capacity: Gauge,
+    pub future_artifacts: Gauge,
     pub nullification_suffix: Gauge,
     pub current_view: Gauge,
     pub retired_view: Gauge,
@@ -64,6 +119,10 @@ pub(super) struct Metrics {
     pub custody_active_gauge: Gauge,
     pub chains: Vec<ChainMetrics>,
     pub view_timeouts: Counter,
+    pub view_timer_armed: Gauge,
+    pub view_timeout_cutoff_vote: Gauge,
+    pub view_timeout_cutoff_timeout: Gauge,
+    pub view_proof_admissions: CounterFamily<ViewProofAdmission>,
     pub production_stalls: Counter,
     pub builds: Counter,
     pub build_declines: Counter,
@@ -111,8 +170,7 @@ const COVERAGE: [f64; 10] = [0.0, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 2
 
 /// Byte-size buckets for encoded certificate histograms.
 const ENCODED_BYTES: [f64; 12] = [
-    64.0, 128.0, 256.0, 512.0, 1024.0, 2048.0, 4096.0, 8192.0, 16384.0, 32768.0, 65536.0,
-    131072.0,
+    64.0, 128.0, 256.0, 512.0, 1024.0, 2048.0, 4096.0, 8192.0, 16384.0, 32768.0, 65536.0, 131072.0,
 ];
 
 impl Metrics {
@@ -135,6 +193,29 @@ impl Metrics {
             "retained_artifacts",
             "artifacts pinned by durable safety state",
         );
+        let artifact_cache_occupancy = context.gauge(
+            "artifact_cache_occupancy",
+            "retained artifacts plus local protocol reservations",
+        );
+        let artifact_cache_capacity = context.gauge(
+            "artifact_cache_capacity",
+            "configured artifact cache capacity",
+        );
+        let remote_artifact_capacity = context.gauge(
+            "remote_artifact_capacity",
+            "artifact capacity available to untrusted non-proof ingress",
+        );
+        let local_artifact_capacity = context.gauge(
+            "local_artifact_capacity",
+            "artifact capacity available to locally authorized non-proof work",
+        );
+        let verification_jobs =
+            context.gauge("verification_jobs", "machine verification jobs in flight");
+        let verification_job_capacity = context.gauge(
+            "verification_job_capacity",
+            "configured machine verification-job capacity",
+        );
+        let future_artifacts = context.gauge("future_artifacts", "retained future-view artifacts");
         let nullification_suffix = context.gauge(
             "nullification_suffix",
             "exact nullifications retained above the proposal anchor",
@@ -182,6 +263,33 @@ impl Metrics {
             })
             .collect();
         let view_timeouts = context.counter("view_timeouts", "leader-chain view timeouts");
+        let view_timer_armed = context.gauge(
+            "view_timer_armed",
+            "whether the current leader-chain view timer is armed",
+        );
+        let view_timeout_cutoff_vote = context.gauge(
+            "view_timeout_cutoff_vote",
+            "whether the current view timeout selected an ordinary vote",
+        );
+        let view_timeout_cutoff_timeout = context.gauge(
+            "view_timeout_cutoff_timeout",
+            "whether the current view timeout selected NoVote and Nullify",
+        );
+        let view_proof_admissions = context.family(
+            "view_proof_admissions",
+            "self-certifying view proofs classified before verification",
+        );
+        for source in ViewProofAdmission::SOURCES {
+            for kind in ViewProofAdmission::KINDS {
+                for outcome in ViewProofAdmission::OUTCOMES {
+                    let _ = view_proof_admissions.get_or_create(&ViewProofAdmission {
+                        source,
+                        kind,
+                        outcome,
+                    });
+                }
+            }
+        }
         let production_stalls =
             context.counter("production_stalls", "local producer deadlines reached");
         let builds = context.counter("builds", "application blocks produced");
@@ -357,6 +465,13 @@ impl Metrics {
             retained_events,
             staged_batches,
             retained_artifacts,
+            artifact_cache_occupancy,
+            artifact_cache_capacity,
+            remote_artifact_capacity,
+            local_artifact_capacity,
+            verification_jobs,
+            verification_job_capacity,
+            future_artifacts,
             nullification_suffix,
             current_view,
             retired_view,
@@ -373,6 +488,10 @@ impl Metrics {
             custody_active_gauge,
             chains,
             view_timeouts,
+            view_timer_armed,
+            view_timeout_cutoff_vote,
+            view_timeout_cutoff_timeout,
+            view_proof_admissions,
             production_stalls,
             builds,
             build_declines,
@@ -411,5 +530,69 @@ impl Metrics {
             headers_after_seal,
             header_restarts,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
+
+    #[test]
+    fn deployment_diagnostics_have_bounded_stable_labels() {
+        deterministic::Runner::default().start(|context| async move {
+            let voter = context.child("engine").child("voter");
+            let metrics = Metrics::new(&voter, 1);
+            metrics.artifact_cache_occupancy.set(7);
+            metrics.artifact_cache_capacity.set(8);
+            metrics.remote_artifact_capacity.set(5);
+            metrics.local_artifact_capacity.set(7);
+            metrics.verification_jobs.set(1);
+            metrics.verification_job_capacity.set(2);
+            metrics.future_artifacts.set(3);
+            metrics.view_timer_armed.set(1);
+            metrics.view_timeout_cutoff_timeout.set(1);
+            metrics
+                .view_proof_admissions
+                .get_or_create(&ViewProofAdmission {
+                    source: ViewProofSource::Resolver,
+                    kind: ViewProofKind::Lqc,
+                    outcome: ViewProofAdmissionOutcome::VerificationJobsFull,
+                })
+                .inc();
+
+            let encoded = context.encode();
+            for name in [
+                "engine_voter_artifact_cache_occupancy",
+                "engine_voter_artifact_cache_capacity",
+                "engine_voter_remote_artifact_capacity",
+                "engine_voter_local_artifact_capacity",
+                "engine_voter_verification_jobs",
+                "engine_voter_verification_job_capacity",
+                "engine_voter_future_artifacts",
+                "engine_voter_view_timer_armed",
+                "engine_voter_view_timeout_cutoff_vote",
+                "engine_voter_view_timeout_cutoff_timeout",
+            ] {
+                assert!(
+                    encoded.lines().any(|line| line.starts_with(name)),
+                    "missing metric {name}: {encoded}"
+                );
+            }
+            assert_eq!(
+                encoded
+                    .lines()
+                    .filter(|line| line.starts_with("engine_voter_view_proof_admissions_total{"))
+                    .count(),
+                30
+            );
+            assert!(encoded.lines().any(|line| {
+                line.starts_with("engine_voter_view_proof_admissions_total{")
+                    && line.contains("source=\"Resolver\"")
+                    && line.contains("kind=\"Lqc\"")
+                    && line.contains("outcome=\"VerificationJobsFull\"")
+                    && line.ends_with(" 1")
+            }));
+        });
     }
 }

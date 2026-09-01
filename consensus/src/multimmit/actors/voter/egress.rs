@@ -446,7 +446,10 @@ impl<P: Clone, D: Digest> Egress<P, D> {
         let removed = self.deadlines.remove(&(prior, id));
         debug_assert!(removed, "every publication has one retry deadline");
         let inserted = self.deadlines.insert((next, id));
-        debug_assert!(inserted, "a submitted publication retains one repair deadline");
+        debug_assert!(
+            inserted,
+            "a submitted publication retains one repair deadline"
+        );
         (first, sign_ready_at)
     }
 }
@@ -515,12 +518,7 @@ mod tests {
 
     fn installed_egress(
         epoch: u64,
-    ) -> (
-        Egress<(), Sha256Digest>,
-        EffectId,
-        SystemTime,
-        VoterLimits,
-    ) {
+    ) -> (Egress<(), Sha256Digest>, EffectId, SystemTime, VoterLimits) {
         let limits = retry_limits();
         let now = SystemTime::UNIX_EPOCH;
         let id = EffectId::from_cursor(Cursor::zero());
@@ -716,9 +714,16 @@ mod tests {
         );
 
         let retry_at = egress.next_attempt().expect("retry remains scheduled");
-        let retry = egress.due(retry_at, usize::MAX).pop().expect("retry is due");
+        let retry = egress
+            .due(retry_at, usize::MAX)
+            .pop()
+            .expect("retry is due");
         assert_eq!(retry.retries, 1);
-        assert!(egress.claim(EffectId::from_cursor(Cursor::new(9)), now).is_none());
+        assert!(
+            egress
+                .claim(EffectId::from_cursor(Cursor::new(9)), now)
+                .is_none()
+        );
     }
 
     #[test]
@@ -752,9 +757,9 @@ mod tests {
 
             for op in 0..600u32 {
                 let attempt = |egress: &mut Egress<(), Sha256Digest>,
-                                   rng: &mut rand::rngs::StdRng,
-                                   now: SystemTime,
-                                   due: Due<(), Sha256Digest>| {
+                               rng: &mut rand::rngs::StdRng,
+                               now: SystemTime,
+                               due: Due<(), Sha256Digest>| {
                     if due.relay_due && rng.random_bool(0.2) {
                         egress.relay_rejected(due.id);
                         return;
@@ -798,8 +803,8 @@ mod tests {
                         }
                     }
                     3 => {
-                        if let Some(index) = (!live.is_empty())
-                            .then(|| rng.random_range(0..live.len()))
+                        if let Some(index) =
+                            (!live.is_empty()).then(|| rng.random_range(0..live.len()))
                         {
                             let id = live.swap_remove(index);
                             egress.retire(&[id]);
@@ -871,7 +876,11 @@ mod tests {
             + limits
                 .retry_initial
                 .saturating_mul(FIRST_COMPLETE_REPAIR_MULTIPLIER);
-        assert!(egress.due(repair_at - Duration::from_nanos(1), 1).is_empty());
+        assert!(
+            egress
+                .due(repair_at - Duration::from_nanos(1), 1)
+                .is_empty()
+        );
         let repair = egress.due(repair_at, 1).pop().expect("repair is due");
         assert!(repair.transmit_due);
         assert_eq!(repair.retries, 1);

@@ -659,7 +659,10 @@ impl<D: Digest> VerificationCompletion<D> {
     ///
     /// Production completions are built by [`VerifyJob::verify`], which attaches reusable
     /// V-QC validation derivations; this constructor serves tests and benchmarks.
-    #[cfg(any(test, all(feature = "test-utils", feature = "mocks", not(target_arch = "wasm32"))))]
+    #[cfg(any(
+        test,
+        all(feature = "test-utils", feature = "mocks", not(target_arch = "wasm32"))
+    ))]
     pub const fn new(job: JobId, generation: u64, verdicts: Vec<Verdict<D>>) -> Self {
         Self {
             job,
