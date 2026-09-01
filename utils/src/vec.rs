@@ -938,4 +938,14 @@ mod tests {
         let vec_ref: &Vec<i32> = v.as_ref();
         assert_eq!(vec_ref, &vec![1, 2, 3]);
     }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<NonEmptyVec<u32>>,
+        }
+    }
 }
