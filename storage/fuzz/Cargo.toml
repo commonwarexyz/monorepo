@@ -39,6 +39,20 @@ doc = false
 bench = false
 
 [[bin]]
+name = "qmdb_any_ordered_batch_root"
+path = "fuzz_targets/qmdb_any_ordered_batch_root.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "qmdb_current_ordered_batch_root"
+path = "fuzz_targets/qmdb_current_ordered_batch_root.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "qmdb_any_ordered_operations"
 path = "fuzz_targets/qmdb_any_ordered_operations.rs"
 test = false

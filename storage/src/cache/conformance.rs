@@ -1,6 +1,9 @@
 //! Cache storage conformance tests.
 
-use crate::cache::{Cache, Config, Error};
+use crate::{
+    cache::{Cache, Config},
+    journal::Error,
+};
 use commonware_codec::RangeCfg;
 use commonware_conformance::conformance_tests;
 use commonware_runtime::{
