@@ -14,6 +14,7 @@ use commonware_utils::{
 use governor::clock::{Clock as GovernorClock, ReasonablyRealtime};
 use rand::{TryCryptoRng, TryRng};
 use std::{
+    collections::VecDeque,
     future::{Future, poll_fn},
     mem,
     sync::Arc,
@@ -367,6 +368,8 @@ struct State {
     entered: usize,
     /// Started syncs that completed durably.
     completions: usize,
+    /// Start the inner sync before parking its completion.
+    completion_delayed: bool,
 }
 
 impl State {
@@ -501,6 +504,160 @@ macro_rules! forward_context {
     };
 }
 
+/// A read deferred by a [DelayedReadBlob], held open until explicitly released.
+pub struct DeferredRead {
+    /// Allows the deferred read to access the inner blob.
+    pub release: oneshot::Sender<()>,
+
+    /// Resolves once the deferred read reaches the gate.
+    pub blocked: oneshot::Receiver<()>,
+}
+
+/// Coordinates one-shot read gates for a [DelayedReadContext] or [DelayedReadBlob].
+#[derive(Clone, Default)]
+pub struct PendingReads {
+    waiters: Arc<Mutex<VecDeque<ReadWaiter>>>,
+}
+
+impl PendingReads {
+    /// Blocks the next blob read and returns handles for observing and releasing it.
+    pub fn arm(&self) -> DeferredRead {
+        let (release, release_rx) = oneshot::channel();
+        let (entered, blocked) = oneshot::channel();
+        self.waiters.lock().push_back(ReadWaiter {
+            entered,
+            release: release_rx,
+        });
+        DeferredRead { release, blocked }
+    }
+
+    async fn wait(&self) -> Result<(), Error> {
+        let Some(waiter) = self.waiters.lock().pop_front() else {
+            return Ok(());
+        };
+        waiter.entered.send_lossy(());
+        waiter.release.await.map_err(|_| Error::Closed)
+    }
+}
+
+struct ReadWaiter {
+    entered: oneshot::Sender<()>,
+    release: oneshot::Receiver<()>,
+}
+
+/// Context wrapper whose blobs can gate the next [Blob] read in tests.
+#[derive(Clone)]
+pub struct DelayedReadContext<E> {
+    pub inner: E,
+    pub pending: PendingReads,
+}
+
+forward_context!(DelayedReadContext, pending);
+
+impl<E: Spawner> Spawner for DelayedReadContext<E> {
+    fn shared(mut self, blocking: bool) -> Self {
+        self.inner = self.inner.shared(blocking);
+        self
+    }
+
+    fn dedicated(mut self) -> Self {
+        self.inner = self.inner.dedicated();
+        self
+    }
+
+    fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
+    where
+        F: FnOnce(Self) -> Fut + Send + 'static,
+        Fut: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let pending = self.pending;
+        self.inner.spawn(move |inner| f(Self { inner, pending }))
+    }
+
+    async fn stop(self, value: i32, timeout: Option<std::time::Duration>) -> Result<(), Error> {
+        self.inner.stop(value, timeout).await
+    }
+
+    fn stopped(&self) -> Signal {
+        self.inner.stopped()
+    }
+}
+
+impl<E: Storage> Storage for DelayedReadContext<E> {
+    type Blob = DelayedReadBlob<E::Blob>;
+
+    async fn open_versioned(
+        &self,
+        partition: &str,
+        name: &[u8],
+        versions: std::ops::RangeInclusive<u16>,
+    ) -> Result<(Self::Blob, u64, u16), Error> {
+        let (inner, len, version) = self.inner.open_versioned(partition, name, versions).await?;
+        Ok((
+            DelayedReadBlob {
+                inner,
+                pending: self.pending.clone(),
+            },
+            len,
+            version,
+        ))
+    }
+
+    async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
+        self.inner.remove(partition, name).await
+    }
+
+    async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
+        self.inner.scan(partition).await
+    }
+}
+
+/// Blob wrapper that can gate the next read before accessing the inner blob.
+#[derive(Clone)]
+pub struct DelayedReadBlob<B> {
+    inner: B,
+    pending: PendingReads,
+}
+
+impl<B: Blob> Blob for DelayedReadBlob<B> {
+    async fn read_at_buf(
+        &self,
+        offset: u64,
+        len: usize,
+        bufs: impl Into<IoBufsMut> + Send,
+    ) -> Result<IoBufsMut, Error> {
+        self.pending.wait().await?;
+        self.inner.read_at_buf(offset, len, bufs).await
+    }
+
+    async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
+        self.pending.wait().await?;
+        self.inner.read_at(offset, len).await
+    }
+
+    async fn write_at(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+        options: WriteOptions,
+    ) -> Result<(), Error> {
+        self.inner.write_at(offset, bufs, options).await
+    }
+
+    async fn resize(&self, len: u64) -> Result<(), Error> {
+        self.inner.resize(len).await
+    }
+
+    async fn sync(&self) -> Result<(), Error> {
+        self.inner.sync().await
+    }
+
+    async fn start_sync(&self) -> Handle<()> {
+        self.inner.start_sync().await
+    }
+}
+
 /// Context wrapper whose blobs defer [Blob::start_sync] and can gate blocking syncs in tests.
 #[derive(Clone)]
 pub struct DelayedSyncContext<E> {
@@ -631,11 +788,19 @@ impl<B: Blob> Blob for DelayedSyncBlob<B> {
     async fn start_sync(&self) -> Handle<()> {
         let pending = self.pending.clone();
         let inner = self.inner.clone();
-        let waiter = {
+        let (waiter, completion_delayed) = {
             let mut state = pending.state.lock();
             state.starts += 1;
             // An armed gate takes precedence over parking.
-            state.observe().or_else(|| state.park())
+            (
+                state.observe().or_else(|| state.park()),
+                state.completion_delayed,
+            )
+        };
+        let started = if completion_delayed {
+            Some(self.inner.start_sync().await)
+        } else {
+            None
         };
         Handle::from_future(async move {
             let fail = {
@@ -648,7 +813,10 @@ impl<B: Blob> Blob for DelayedSyncBlob<B> {
                 None if fail => return Err(injected_sync_failure()),
                 None => {}
             }
-            inner.sync().await?;
+            match started {
+                Some(started) => started.await?,
+                None => inner.sync().await?,
+            }
             pending.state.lock().completions += 1;
             Ok(())
         })
@@ -734,6 +902,13 @@ struct SyncGateState {
 }
 
 impl PendingSyncs {
+    /// Creates a gate that starts inner syncs immediately and delays only their completion.
+    pub fn completion_delayed() -> Self {
+        let pending = Self::default();
+        pending.state.lock().completion_delayed = true;
+        pending
+    }
+
     /// Locks the deferred sync queue.
     pub fn lock(&self) -> commonware_utils::sync::MappedMutexGuard<'_, Vec<DeferredSync>> {
         commonware_utils::sync::MutexGuard::map(self.state.lock(), |state| &mut state.syncs)
@@ -1039,6 +1214,42 @@ mod tests {
     use crate::{Clock, Runner, Sink, Spawner, Stream, deterministic};
     use commonware_macros::select;
     use std::{thread::sleep, time::Duration};
+
+    #[test]
+    fn completion_delayed_sync_starts_before_release() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let storage =
+                crate::storage::memory::Storage::new(context.storage_buffer_pool().clone());
+            let (inner, _) = storage.open("partition", b"blob").await.unwrap();
+            inner
+                .write_at(0, b"old", WriteOptions::default())
+                .await
+                .unwrap();
+
+            let pending = PendingSyncs::completion_delayed();
+            let blob = DelayedSyncBlob {
+                inner,
+                pending: pending.clone(),
+            };
+            let completion = blob.start_sync().await;
+
+            assert_eq!(pending.starts(), 1);
+            assert_eq!(pending.lock().len(), 1);
+
+            blob.write_at(0, b"new", WriteOptions::default())
+                .await
+                .unwrap();
+            drop(blob);
+
+            let (reopened, len) = storage.open("partition", b"blob").await.unwrap();
+            assert_eq!(len, 3);
+            assert_eq!(reopened.read_at(0, 3).await.unwrap().coalesce(), b"old");
+
+            release_pending_syncs(&pending);
+            completion.await.unwrap();
+        });
+    }
 
     #[test]
     fn test_send_recv() {
