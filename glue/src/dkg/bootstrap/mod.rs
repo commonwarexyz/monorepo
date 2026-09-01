@@ -163,6 +163,21 @@ impl<V: Variant, D: Directory<ed25519::PublicKey>> Block<V, D> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<V: Variant, D: Directory<ed25519::PublicKey>> arbitrary::Arbitrary<'_> for Block<V, D>
+where
+    Payload<V, ed25519::PrivateKey, D>: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            context: u.arbitrary()?,
+            parent: u.arbitrary()?,
+            height: u.arbitrary()?,
+            payload: u.arbitrary()?,
+        })
+    }
+}
+
 impl<V: Variant, D: Directory<ed25519::PublicKey>> Write for Block<V, D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.context.write(buf);
@@ -680,5 +695,16 @@ mod tests {
         };
 
         let _ = Engine::<_, MinPk, _, _, _, _, _>::new((), config);
+    }
+}
+
+#[cfg(all(test, feature = "arbitrary"))]
+mod conformance {
+    use super::*;
+    use commonware_codec::conformance::CodecConformance;
+    use commonware_cryptography::bls12381::primitives::variant::MinPk;
+
+    commonware_conformance::conformance_tests! {
+        CodecConformance<Block<MinPk>> => 8192,
     }
 }

@@ -1,3 +1,7 @@
+["commonware_glue::dkg::bootstrap::conformance::CodecConformance<Block<MinPk>>"]
+n_cases = 8192
+hash = "04d32aff60368249bfc3e8c339b8f299845f8e6893207c5f4249e1abf57baef7"
+
 ["commonware_glue::dkg::network::conformance::CodecConformance<Addresses<ed25519::PublicKey>>"]
 n_cases = 65536
 hash = "4aff4b0fed288c9009e3a533f285ca61cafdfe51e09d7e31c8edfa42f238c8b2"
