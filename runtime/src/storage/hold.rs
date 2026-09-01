@@ -97,7 +97,8 @@ impl Hold {
 #[cfg(test)]
 mod tests {
     use super::HOLD_NAME;
-    use crate::storage::validate_partition_name;
+    use crate::storage::{has_partitions, validate_partition_name};
+    use std::fs;
 
     #[test]
     fn test_hold_name_rejected_as_partition() {
@@ -105,5 +106,27 @@ mod tests {
         // directories, so its name must never pass partition validation. A
         // partition named after it would occupy the hold's own path.
         assert!(validate_partition_name(HOLD_NAME).is_err());
+    }
+
+    #[test]
+    fn test_has_partitions() {
+        let base =
+            std::env::temp_dir().join(format!("commonware_has_partitions_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+
+        // An unreadable (here, missing) directory is reported as holding
+        // partitions so the startup flush is never skipped by accident.
+        assert!(has_partitions(&base));
+
+        // A directory holding only the hold file has no partitions.
+        fs::create_dir_all(&base).unwrap();
+        fs::write(base.join(HOLD_NAME), b"1\n").unwrap();
+        assert!(!has_partitions(&base));
+
+        // A subdirectory is a partition that could hold unsynced blob data.
+        fs::create_dir(base.join("partition")).unwrap();
+        assert!(has_partitions(&base));
+
+        let _ = fs::remove_dir_all(&base);
     }
 }

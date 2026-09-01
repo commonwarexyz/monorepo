@@ -454,10 +454,6 @@ impl crate::Runner for Runner {
             &mut runtime_registry.sub_registry("storage_buffer_pool"),
         );
 
-        // A directory that does not exist yet holds nothing a prior process
-        // could have left unsynced, so the flush below is skipped for it.
-        let fresh = !self.cfg.storage_directory.exists();
-
         // Initialize storage. Construction acquires the storage directory
         // hold, waiting for any operations still finishing from a previous
         // run before the flush below.
@@ -489,8 +485,13 @@ impl crate::Runner for Runner {
 
         // Make any storage a prior process left in the page cache crash-durable before we open it,
         // so the data read during init is durable. This runs under the hold, after any straggling
-        // writes from a previous run have landed, so the flush covers them too.
-        if !fresh && let Err(e) = crate::storage::sync(&self.cfg.storage_directory) {
+        // writes from a previous run have landed, so the flush covers them too. A directory holding
+        // no partitions has nothing to flush, so the flush is skipped for it. Freshness is judged
+        // here, under the hold, rather than before acquiring it, so a directory another instance
+        // populated while we waited is not mistaken for empty.
+        if crate::storage::has_partitions(&self.cfg.storage_directory)
+            && let Err(e) = crate::storage::sync(&self.cfg.storage_directory)
+        {
             panic!(
                 "failed to sync storage filesystem at startup ({}): {e}",
                 self.cfg.storage_directory.display()
