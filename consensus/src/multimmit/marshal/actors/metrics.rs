@@ -122,6 +122,10 @@ pub(in crate::multimmit::marshal) struct Synchronizer {
     pub local_outputs: Counter,
     pub fetched_outputs: Counter,
     pub blocked_prefixes: Counter,
+    pub final_sweeps: Counter,
+    pub emission_halts: Counter,
+    pub unsettled_chains: Counter,
+    pub emitted_slots: Counter,
     lookup_pages: Gauge,
     fetches: Gauge,
     ready_outputs: Gauge,
@@ -146,6 +150,22 @@ impl Synchronizer {
             blocked_prefixes: context.counter(
                 "custody_blocked_prefixes",
                 "Transitions to ready custody work beyond an unresolved prefix",
+            ),
+            final_sweeps: context.counter(
+                "final_sweeps",
+                "Emission sweeps started from finality facts at the finalized floor",
+            ),
+            emission_halts: context.counter(
+                "emission_halts",
+                "Final sweeps cut short by an unsettled chain, deferring later slots to a following view",
+            ),
+            unsettled_chains: context.counter(
+                "unsettled_chains",
+                "Chains reported unsettled by the finality facts behind final sweeps",
+            ),
+            emitted_slots: context.counter(
+                "emitted_slots",
+                "Ordered slots planned by final sweeps",
             ),
             lookup_pages: context.gauge(
                 "custody_lookup_pages",
