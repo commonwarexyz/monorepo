@@ -5,8 +5,8 @@ use crate::{
     aggregation::scheme,
     types::{Epoch, Height},
 };
-use bytes::{Buf, BufMut, Bytes};
-use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write};
+use bytes::Bytes;
+use commonware_codec::{Encode, EncodeSize, Read, Write};
 use commonware_cryptography::{
     Digest,
     certificate::{AssemblyError, Attestation, Namespace as CertificateNamespace, Scheme, Subject},
@@ -95,7 +95,7 @@ impl CertificateNamespace for Namespace {
 
 /// Item represents a single element being aggregated in the protocol.
 /// Each item has a unique height and contains a digest that validators sign.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, EncodeSize, Read, Write)]
 pub struct Item<D: Digest> {
     /// Sequential position of this item within the current epoch
     pub height: Height,
@@ -106,29 +106,6 @@ pub struct Item<D: Digest> {
 impl<D: Digest> Heightable for Item<D> {
     fn height(&self) -> Height {
         self.height
-    }
-}
-
-impl<D: Digest> Write for Item<D> {
-    fn write(&self, writer: &mut impl BufMut) {
-        self.height.write(writer);
-        self.digest.write(writer);
-    }
-}
-
-impl<D: Digest> Read for Item<D> {
-    type Cfg = ();
-
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let height = Height::read(reader)?;
-        let digest = D::read(reader)?;
-        Ok(Self { height, digest })
-    }
-}
-
-impl<D: Digest> EncodeSize for Item<D> {
-    fn encode_size(&self) -> usize {
-        self.height.encode_size() + self.digest.encode_size()
     }
 }
 
@@ -160,7 +137,7 @@ where
 
 /// Acknowledgment (ack) represents a validator's vote on an item.
 /// Multiple acks can be recovered into a certificate for consensus.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, EncodeSize, Read, Write)]
 pub struct Ack<S: Scheme, D: Digest> {
     /// The item being acknowledged
     pub item: Item<D>,
@@ -208,35 +185,6 @@ impl<S: Scheme, D: Digest> Ack<S, D> {
     }
 }
 
-impl<S: Scheme, D: Digest> Write for Ack<S, D> {
-    fn write(&self, writer: &mut impl BufMut) {
-        self.item.write(writer);
-        self.epoch.write(writer);
-        self.attestation.write(writer);
-    }
-}
-
-impl<S: Scheme, D: Digest> Read for Ack<S, D> {
-    type Cfg = ();
-
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let item = Item::read(reader)?;
-        let epoch = Epoch::read(reader)?;
-        let attestation = Attestation::read(reader)?;
-        Ok(Self {
-            item,
-            epoch,
-            attestation,
-        })
-    }
-}
-
-impl<S: Scheme, D: Digest> EncodeSize for Ack<S, D> {
-    fn encode_size(&self) -> usize {
-        self.item.encode_size() + self.epoch.encode_size() + self.attestation.encode_size()
-    }
-}
-
 #[cfg(feature = "arbitrary")]
 impl<S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Ack<S, D>
 where
@@ -257,36 +205,13 @@ where
 
 /// Message exchanged between peers containing an acknowledgment and tip information.
 /// This combines a validator's vote with their view of consensus progress.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, EncodeSize, Read, Write)]
 pub struct TipAck<S: Scheme, D: Digest> {
     /// The peer's local view of the tip (the lowest height that is not yet confirmed).
     pub tip: Height,
 
     /// The peer's acknowledgement (vote) for an item.
     pub ack: Ack<S, D>,
-}
-
-impl<S: Scheme, D: Digest> Write for TipAck<S, D> {
-    fn write(&self, writer: &mut impl BufMut) {
-        self.tip.write(writer);
-        self.ack.write(writer);
-    }
-}
-
-impl<S: Scheme, D: Digest> Read for TipAck<S, D> {
-    type Cfg = ();
-
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let tip = Height::read(reader)?;
-        let ack = Ack::read(reader)?;
-        Ok(Self { tip, ack })
-    }
-}
-
-impl<S: Scheme, D: Digest> EncodeSize for TipAck<S, D> {
-    fn encode_size(&self) -> usize {
-        self.tip.encode_size() + self.ack.encode_size()
-    }
 }
 
 #[cfg(feature = "arbitrary")]
@@ -303,11 +228,12 @@ where
 }
 
 /// A recovered certificate for some [Item].
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, EncodeSize, Read, Write)]
 pub struct Certificate<S: Scheme, D: Digest> {
     /// The item that was recovered.
     pub item: Item<D>,
     /// The recovered certificate.
+    #[codec(cfg)]
     pub certificate: S::Certificate,
 }
 
@@ -344,29 +270,6 @@ impl<S: Scheme, D: Digest> Certificate<S, D> {
     }
 }
 
-impl<S: Scheme, D: Digest> Write for Certificate<S, D> {
-    fn write(&self, writer: &mut impl BufMut) {
-        self.item.write(writer);
-        self.certificate.write(writer);
-    }
-}
-
-impl<S: Scheme, D: Digest> Read for Certificate<S, D> {
-    type Cfg = <S::Certificate as Read>::Cfg;
-
-    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        let item = Item::read(reader)?;
-        let certificate = S::Certificate::read_cfg(reader, cfg)?;
-        Ok(Self { item, certificate })
-    }
-}
-
-impl<S: Scheme, D: Digest> EncodeSize for Certificate<S, D> {
-    fn encode_size(&self) -> usize {
-        self.item.encode_size() + self.certificate.encode_size()
-    }
-}
-
 #[cfg(feature = "arbitrary")]
 impl<S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Certificate<S, D>
 where
@@ -383,61 +286,19 @@ where
 /// Used as [Reporter::Activity](crate::Reporter::Activity) to report activities that occur during
 /// aggregation. Also used to journal events that are needed to initialize the aggregation engine
 /// when the node restarts.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, EncodeSize, Read, Write)]
 pub enum Activity<S: Scheme, D: Digest> {
     /// Received an ack from a participant.
+    #[codec(tag = 0)]
     Ack(Ack<S, D>),
 
     /// Certified an [Item].
-    Certified(Certificate<S, D>),
+    #[codec(tag = 1)]
+    Certified(#[codec(cfg)] Certificate<S, D>),
 
     /// Moved the tip to a new height.
+    #[codec(tag = 2)]
     Tip(Height),
-}
-
-impl<S: Scheme, D: Digest> Write for Activity<S, D> {
-    fn write(&self, writer: &mut impl BufMut) {
-        match self {
-            Self::Ack(ack) => {
-                0u8.write(writer);
-                ack.write(writer);
-            }
-            Self::Certified(certificate) => {
-                1u8.write(writer);
-                certificate.write(writer);
-            }
-            Self::Tip(height) => {
-                2u8.write(writer);
-                height.write(writer);
-            }
-        }
-    }
-}
-
-impl<S: Scheme, D: Digest> Read for Activity<S, D> {
-    type Cfg = <S::Certificate as Read>::Cfg;
-
-    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        match u8::read(reader)? {
-            0 => Ok(Self::Ack(Ack::read(reader)?)),
-            1 => Ok(Self::Certified(Certificate::read_cfg(reader, cfg)?)),
-            2 => Ok(Self::Tip(Height::read(reader)?)),
-            _ => Err(CodecError::Invalid(
-                "consensus::aggregation::Activity",
-                "Invalid type",
-            )),
-        }
-    }
-}
-
-impl<S: Scheme, D: Digest> EncodeSize for Activity<S, D> {
-    fn encode_size(&self) -> usize {
-        1 + match self {
-            Self::Ack(ack) => ack.encode_size(),
-            Self::Certified(certificate) => certificate.encode_size(),
-            Self::Tip(height) => height.encode_size(),
-        }
-    }
 }
 
 #[cfg(feature = "arbitrary")]
@@ -465,7 +326,7 @@ mod tests {
         Scheme, bls12381_multisig, bls12381_threshold, ed25519, secp256r1,
     };
     use bytes::BytesMut;
-    use commonware_codec::{Decode, DecodeExt, Encode};
+    use commonware_codec::{Decode, DecodeExt, Encode, Error as CodecError, Write};
     use commonware_cryptography::{
         Hasher, Sha256,
         bls12381::primitives::variant::{MinPk, MinSig},
@@ -609,13 +470,7 @@ mod tests {
 
         let cfg = fixture.schemes[0].certificate_codec_config();
         let result = Activity::<S, Sha256Digest>::read_cfg(&mut &buf[..], &cfg);
-        assert!(matches!(
-            result,
-            Err(CodecError::Invalid(
-                "consensus::aggregation::Activity",
-                "Invalid type"
-            ))
-        ));
+        assert!(matches!(result, Err(CodecError::InvalidEnum(3))));
     }
 
     #[test]
