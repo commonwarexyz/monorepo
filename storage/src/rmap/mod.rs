@@ -148,8 +148,8 @@ impl RMap {
     /// # Complexity
     ///
     /// O((M + 1) log N), where N is the number of ranges in the map and M is the number of ranges
-    /// that overlap the removal range. One seek finds the first candidate. Each overlapping range
-    /// then costs one removal and at most two insertions.
+    /// overlapping the removal range. Each overlapping range costs one removal, plus at most two
+    /// insertions in total for the pieces that stick out.
     ///
     /// # Example
     ///
@@ -171,16 +171,10 @@ impl RMap {
             return;
         }
 
-        // Candidates: the range starting at or before `start`, then any starting within `[start, end]`.
-        let first = self
-            .ranges
-            .range(..=start)
-            .next_back()
-            .map_or(start, |(&r_start, _)| r_start);
+        // Every range that overlaps or follows `start`, cut off past `end`.
         let overlapping: Vec<(u64, u64)> = self
-            .ranges
-            .range(first..=end)
-            .filter(|&(_, &r_end)| r_end >= start)
+            .iter_from(start)
+            .take_while(|&(&r_start, _)| r_start <= end)
             .map(|(&r_start, &r_end)| (r_start, r_end))
             .collect();
 
@@ -374,9 +368,8 @@ impl RMap {
     ///
     /// # Complexity
     ///
-    /// O(log N + G + M) where N is the number of ranges in [RMap], G is the number of gaps
-    /// visited (at most N), and M is the number of missing items returned (at most `max`).
-    /// One seek positions the scan. The gaps are then visited in order without further lookups.
+    /// O(log N + M) where N is the number of ranges in [RMap] and M is the number of missing items
+    /// returned (at most `max`).
     ///
     /// # Example
     ///
@@ -405,24 +398,12 @@ impl RMap {
         assert!(max > 0, "max must be greater than 0");
         let mut missing = Vec::with_capacity(max);
 
-        // Step past the range containing `start`, if any.
-        let mut current = match self.ranges.range(..=start).next_back() {
-            Some((_, &end)) if end >= start => match end.checked_add(1) {
-                Some(next) => next,
-                None => return missing,
-            },
-            _ => start,
-        };
-
-        // Each range at or after `current` closes one gap. Collect from it, then step past the range.
-        for (&r_start, &r_end) in self.ranges.range(current..) {
-            if r_start > current {
-                let remaining = (max - missing.len()) as u64;
-                let gap_end = (r_start - 1).min(current.saturating_add(remaining - 1));
-                missing.extend(current..=gap_end);
-                if missing.len() >= max {
-                    break;
-                }
+        // Each range closes the gap before it. The scan then resumes past it.
+        let mut current = start;
+        for (&r_start, &r_end) in self.iter_from(start) {
+            missing.extend((current..r_start).take(max - missing.len()));
+            if missing.len() == max {
+                break;
             }
             let Some(next) = r_end.checked_add(1) else {
                 break;
