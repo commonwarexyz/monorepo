@@ -173,3 +173,13 @@ mod tests {
         StorageConformance<MmbFullWorkload> => 256,
     }
 }
+
+#[cfg(feature = "arbitrary")]
+mod codec {
+    use crate::merkle::Unused;
+    use commonware_codec::conformance::CodecConformance;
+
+    commonware_conformance::conformance_tests! {
+        CodecConformance<Unused>,
+    }
+}

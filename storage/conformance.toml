@@ -82,6 +82,10 @@ hash = "e8eab39bfc0d5284d617f832f513c895c28771d80b2554f20611f39edce9c8c9"
 n_cases = 512
 hash = "a9656e53e1f4682a218c715f6c5fb665452d0d06f634254fce44a0a11472e7c4"
 
+["commonware_storage::merkle::conformance::codec::CodecConformance<Unused>"]
+n_cases = 65536
+hash = "07854d2fef297a06ba81685e660c332de36d5d18d546927d30daad6d7fda1541"
+
 ["commonware_storage::merkle::conformance::tests::MmbRootStability"]
 n_cases = 200
 hash = "7db87b0f0b2d10f3571bfc38a9bb0aa0045b8ef884da5a10dd2e758f9b3399a5"
