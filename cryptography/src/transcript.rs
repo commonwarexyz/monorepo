@@ -438,26 +438,8 @@ impl Transcript {
         };
         Summary { hash }
     }
-}
 
-/// Sample a uniform value in `0..bound` from an infallible RNG.
-#[commonware_macros::stability(ALPHA)]
-fn sample(mut rng: impl CryptoRng, bound: NonZeroU64) -> u64 {
-    let bound = bound.get();
-
-    // Accept only draws below the largest multiple of `bound`, so that the
-    // modulo is unbiased. Fewer than two draws are needed on average.
-    let zone = bound * (u64::MAX / bound);
-    loop {
-        let v = rng.next_u64();
-        if v < zone {
-            return v % bound;
-        }
-    }
-}
-
-// Utility methods which can be created using the other methods.
-impl Transcript {
+    // Utility methods which can be created using the other methods.
     /// Use a signer to create a signature over this transcript.
     ///
     /// Conceptually, this is the same as:
@@ -480,6 +462,22 @@ impl Transcript {
         signature: &<B::PublicKey as Verifier>::Signature,
     ) -> bool {
         self.summarize().add_to_batch(batch, public_key, signature)
+    }
+}
+
+/// Sample a uniform value in `0..bound` from an infallible RNG.
+#[commonware_macros::stability(ALPHA)]
+fn sample(mut rng: impl CryptoRng, bound: NonZeroU64) -> u64 {
+    let bound = bound.get();
+
+    // Accept only draws below the largest multiple of `bound`, so that the
+    // modulo is unbiased. Fewer than two draws are needed on average.
+    let zone = bound * (u64::MAX / bound);
+    loop {
+        let v = rng.next_u64();
+        if v < zone {
+            return v % bound;
+        }
     }
 }
 

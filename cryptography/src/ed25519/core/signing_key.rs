@@ -33,6 +33,34 @@ impl SigningKey {
     pub const fn verification_key(&self) -> VerificationKey {
         self.vk
     }
+
+    /// Generate a new signing key.
+    pub fn new<R: Rng + CryptoRng>(mut rng: R) -> Self {
+        let mut bytes = [0u8; 32];
+        rng.fill_bytes(&mut bytes[..]);
+        bytes.into()
+    }
+
+    /// Create a signature on `msg` using this key.
+    #[allow(non_snake_case)]
+    pub fn sign(&self, msg: &[u8]) -> Signature {
+        let r = Scalar::from_hash(Sha512::default().chain(&self.prefix[..]).chain(msg));
+
+        let R_bytes = (&r * constants::ED25519_BASEPOINT_TABLE)
+            .compress()
+            .to_bytes();
+
+        let k = Scalar::from_hash(
+            Sha512::default()
+                .chain(&R_bytes[..])
+                .chain(&self.vk.A_bytes.0[..])
+                .chain(msg),
+        );
+
+        let s_bytes = (r + k * self.s).to_bytes();
+
+        Signature { R_bytes, s_bytes }
+    }
 }
 
 impl core::fmt::Debug for SigningKey {
@@ -126,35 +154,5 @@ impl zeroize::Zeroize for SigningKey {
         self.seed.zeroize();
         self.s.zeroize();
         self.prefix.zeroize()
-    }
-}
-
-impl SigningKey {
-    /// Generate a new signing key.
-    pub fn new<R: Rng + CryptoRng>(mut rng: R) -> Self {
-        let mut bytes = [0u8; 32];
-        rng.fill_bytes(&mut bytes[..]);
-        bytes.into()
-    }
-
-    /// Create a signature on `msg` using this key.
-    #[allow(non_snake_case)]
-    pub fn sign(&self, msg: &[u8]) -> Signature {
-        let r = Scalar::from_hash(Sha512::default().chain(&self.prefix[..]).chain(msg));
-
-        let R_bytes = (&r * constants::ED25519_BASEPOINT_TABLE)
-            .compress()
-            .to_bytes();
-
-        let k = Scalar::from_hash(
-            Sha512::default()
-                .chain(&R_bytes[..])
-                .chain(&self.vk.A_bytes.0[..])
-                .chain(msg),
-        );
-
-        let s_bytes = (r + k * self.s).to_bytes();
-
-        Signature { R_bytes, s_bytes }
     }
 }

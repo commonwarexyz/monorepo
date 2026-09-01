@@ -1272,44 +1272,6 @@ where
     }
 }
 
-impl<F: Family, H, U, S: Strategy> UnmerkleizedBatch<F, H, U, S>
-where
-    U: update::Update,
-    H: Hasher,
-    Operation<F, U>: Codec,
-{
-    /// Record a mutation. Use `Some(value)` for update/create, `None` for delete.
-    ///
-    /// If the same key is written multiple times within a batch, the last value wins.
-    pub fn write(mut self, key: U::Key, value: Option<U::Value>) -> Self {
-        self.mutations.insert(key, value);
-        self
-    }
-
-    /// Split into pending mutations and the merkleization machinery.
-    #[allow(clippy::type_complexity)]
-    fn into_parts(self) -> (BTreeMap<U::Key, Option<U::Value>>, Merkleizer<F, H, U, S>) {
-        let ancestors: Vec<_> = self.base.parent().map_or_else(Vec::new, |parent| {
-            let mut v = vec![Arc::clone(parent)];
-            v.extend(parent.ancestors());
-            v
-        });
-        let db_state = batch_chain::effective_boundary(
-            self.base.db(),
-            ancestors.last().map(|oldest| oldest.bounds.base),
-        );
-        let m = Merkleizer {
-            journal_batch: self.journal_batch,
-            ancestors,
-            base_state: self.base.base_state(),
-            db_state,
-            base_inactivity_floor_loc: self.base.inactivity_floor_loc(),
-            base_active_keys: self.base.active_keys(),
-        };
-        (self.mutations, m)
-    }
-}
-
 impl<F: Family, H, U, S: Strategy> Staged<F, H, U, S>
 where
     U: update::Update,
@@ -1670,13 +1632,44 @@ where
     }
 }
 
-// Generic get() for both ordered and unordered UnmerkleizedBatch.
 impl<F: Family, H, U, S: Strategy> UnmerkleizedBatch<F, H, U, S>
 where
     U: update::Update,
     H: Hasher,
     Operation<F, U>: Codec,
 {
+    /// Record a mutation. Use `Some(value)` for update/create, `None` for delete.
+    ///
+    /// If the same key is written multiple times within a batch, the last value wins.
+    pub fn write(mut self, key: U::Key, value: Option<U::Value>) -> Self {
+        self.mutations.insert(key, value);
+        self
+    }
+
+    /// Split into pending mutations and the merkleization machinery.
+    #[allow(clippy::type_complexity)]
+    fn into_parts(self) -> (BTreeMap<U::Key, Option<U::Value>>, Merkleizer<F, H, U, S>) {
+        let ancestors: Vec<_> = self.base.parent().map_or_else(Vec::new, |parent| {
+            let mut v = vec![Arc::clone(parent)];
+            v.extend(parent.ancestors());
+            v
+        });
+        let db_state = batch_chain::effective_boundary(
+            self.base.db(),
+            ancestors.last().map(|oldest| oldest.bounds.base),
+        );
+        let m = Merkleizer {
+            journal_batch: self.journal_batch,
+            ancestors,
+            base_state: self.base.base_state(),
+            db_state,
+            base_inactivity_floor_loc: self.base.inactivity_floor_loc(),
+            base_active_keys: self.base.active_keys(),
+        };
+        (self.mutations, m)
+    }
+
+    // Generic get() for both ordered and unordered UnmerkleizedBatch.
     /// Return true when reads can bypass uncommitted overlay resolution and go directly to the DB.
     fn reads_committed_only(&self) -> bool {
         self.mutations.is_empty() && self.base.parent().is_none()
@@ -2747,6 +2740,31 @@ where
             },
         }
     }
+
+    /// Create an initial [`MerkleizedBatch`] from the committed DB state.
+    ///
+    /// This is the starting point for building owned batch chains.
+    #[tracing::instrument(
+        name = "qmdb.any.db.to_batch",
+        level = "info",
+        skip_all,
+        fields(
+            db_size = *self.last_commit_loc + 1,
+            inactivity_floor = *self.inactivity_floor_loc,
+            active_keys = self.active_keys as u64,
+        ),
+    )]
+    pub fn to_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, U, S>> {
+        Arc::new(MerkleizedBatch {
+            journal_batch: self.log.to_merkleized_batch(),
+            diff: Arc::new(Vec::new()),
+            parent: None,
+            total_active_keys: self.active_keys,
+            ancestor_diffs: Vec::new(),
+            ancestor_base_locs: Vec::new(),
+            bounds: batch_chain::Bounds::from_db(self.commitment(), self.inactivity_floor_loc),
+        })
+    }
 }
 
 impl<F, E, C, I, H, U, const N: usize, S> Db<F, E, C, I, H, U, N, S>
@@ -2899,43 +2917,6 @@ where
             .operations_applied
             .inc_by(*range.end - *range.start);
         Ok((self, range))
-    }
-}
-
-impl<F, E, C, I, H, U, const N: usize, S> Db<F, E, C, I, H, U, N, S>
-where
-    F: Family,
-    E: Context,
-    C: Contiguous<Item = Operation<F, U>>,
-    I: UnorderedIndex<Value = Location<F>>,
-    H: Hasher,
-    U: update::Update,
-    S: Strategy,
-    Operation<F, U>: Codec,
-{
-    /// Create an initial [`MerkleizedBatch`] from the committed DB state.
-    ///
-    /// This is the starting point for building owned batch chains.
-    #[tracing::instrument(
-        name = "qmdb.any.db.to_batch",
-        level = "info",
-        skip_all,
-        fields(
-            db_size = *self.last_commit_loc + 1,
-            inactivity_floor = *self.inactivity_floor_loc,
-            active_keys = self.active_keys as u64,
-        ),
-    )]
-    pub fn to_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, U, S>> {
-        Arc::new(MerkleizedBatch {
-            journal_batch: self.log.to_merkleized_batch(),
-            diff: Arc::new(Vec::new()),
-            parent: None,
-            total_active_keys: self.active_keys,
-            ancestor_diffs: Vec::new(),
-            ancestor_base_locs: Vec::new(),
-            bounds: batch_chain::Bounds::from_db(self.commitment(), self.inactivity_floor_loc),
-        })
     }
 }
 
