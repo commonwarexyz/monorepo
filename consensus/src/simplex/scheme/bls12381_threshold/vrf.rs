@@ -959,7 +959,7 @@ mod tests {
     use commonware_math::algebra::{Additive, CryptoGroup, Random};
     use commonware_parallel::Sequential;
     use commonware_utils::{
-        N3f1, N5f1, NZU32,
+        N3f1, N5f1, NZU32, TryCollect,
         ordered::{Committee, Set},
         test_rng,
     };
@@ -974,14 +974,12 @@ mod tests {
         participants: &Set<ed25519::PublicKey>,
         weights: impl IntoIterator<Item = u64>,
     ) -> Committee<ed25519::PublicKey> {
-        Committee::try_from(
-            participants
-                .iter()
-                .cloned()
-                .zip(weights)
-                .collect::<Vec<_>>(),
-        )
-        .expect("committee must be valid")
+        participants
+            .iter()
+            .cloned()
+            .zip(weights)
+            .try_collect()
+            .expect("committee must be valid")
     }
 
     fn uniform_committee(

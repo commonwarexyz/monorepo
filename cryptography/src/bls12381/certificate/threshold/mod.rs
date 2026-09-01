@@ -1546,14 +1546,11 @@ mod tests {
     }
 
     fn committee_from_set(participants: Set<ed25519::PublicKey>) -> Committee<ed25519::PublicKey> {
-        let participants: Vec<_> = participants.into();
-        Committee::try_from(
-            participants
-                .into_iter()
-                .map(|participant| (participant, 1))
-                .collect::<Vec<_>>(),
-        )
-        .expect("participants are unique and non-empty")
+        participants
+            .into_iter()
+            .map(|participant| (participant, 1))
+            .try_collect()
+            .expect("participants are unique and non-empty")
     }
 
     fn make_participants<R: rand_core::CryptoRng>(
@@ -1571,14 +1568,12 @@ mod tests {
         participants: &Committee<ed25519::PublicKey>,
         weights: impl IntoIterator<Item = u64>,
     ) -> Committee<ed25519::PublicKey> {
-        Committee::try_from(
-            participants
-                .iter()
-                .cloned()
-                .zip(weights)
-                .collect::<Vec<_>>(),
-        )
-        .expect("weights must define a valid committee")
+        participants
+            .iter()
+            .cloned()
+            .zip(weights)
+            .try_collect()
+            .expect("weights must define a valid committee")
     }
 
     fn constructors_reject_nonuniform_weights<V: Variant>() {

@@ -44,9 +44,8 @@ pub struct Generic<P: crate::PublicKey, N: Namespace> {
 impl<P: crate::PublicKey, N: Namespace> Generic<P, N> {
     /// Creates a new scheme instance with the provided key material.
     ///
-    /// Participants have both an identity key and a signing key. The identity key
-    /// is used for participant set ordering and indexing, while the signing key is used for
-    /// signing and verification.
+    /// The identity key determines committee order and participant indices. The signing key
+    /// signs and verifies messages.
     ///
     /// Returns `None` if the committee and signing-key identities differ or the private key does
     /// not match a signing key.
@@ -70,9 +69,8 @@ impl<P: crate::PublicKey, N: Namespace> Generic<P, N> {
 
     /// Builds a verifier that can authenticate signatures and certificates.
     ///
-    /// Participants have both an identity key and a signing key. The identity key
-    /// is used for participant set ordering and indexing, while the signing key is used for
-    /// verification.
+    /// The identity key determines committee order and participant indices. The signing key
+    /// verifies messages.
     ///
     /// Returns `None` if the committee and signing-key identities differ.
     pub fn verifier(

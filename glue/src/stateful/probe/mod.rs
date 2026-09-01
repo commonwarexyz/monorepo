@@ -151,8 +151,8 @@ mod test {
     use commonware_cryptography::{
         Digest as _, Digestible, Signer as _,
         certificate::{
-            self, Attestation, ConstantProvider, Provider, Scoped, Verification, Verifier,
-            mocks::Fixture,
+            ConstantProvider, Provider, Scoped,
+            mocks::{Fixture, Shared},
         },
         ed25519,
         sha256::Digest as Sha256Digest,
@@ -162,15 +162,15 @@ mod test {
         Recipients, Sender as _,
         simulated::{Config as SimConfig, Link, Network, Oracle, Sender},
     };
-    use commonware_parallel::{Sequential, Strategy as ParallelStrategy};
+    use commonware_parallel::Sequential;
     use commonware_runtime::{
         Clock, Handle, Metrics, Quota, Runner as _, Supervisor, buffer::paged::CacheRef,
         deterministic, telemetry::traces::collector::TraceStorage,
     };
     use commonware_storage::archive::immutable;
     use commonware_utils::{
-        Acknowledgement, NZDuration, NZU16, NZU64, NZUsize, NonZeroDuration, TestRng,
-        channel::oneshot, iter::NonEmpty, non_empty, probability, sync::Mutex, test_rng,
+        Acknowledgement, NZDuration, NZU16, NZU64, NZUsize, NonZeroDuration, TestRng, TryCollect,
+        channel::oneshot, non_empty, probability, sync::Mutex, test_rng,
     };
     use std::{
         collections::BTreeMap,
@@ -310,183 +310,22 @@ mod test {
         }
     }
 
-    /// Wraps the mock scheme for provider-role tests.
-    #[derive(Clone, Debug)]
-    struct ProviderScheme {
-        inner: Scheme,
-    }
-
-    impl ProviderScheme {
-        const fn new(inner: Scheme) -> Self {
-            Self { inner }
-        }
-
-        fn wrap_attestation(attestation: Attestation<Scheme>) -> Attestation<Self> {
-            Attestation {
-                signer: attestation.signer,
-                signature: attestation.signature,
-            }
-        }
-
-        fn unwrap_attestation(attestation: Attestation<Self>) -> Attestation<Scheme> {
-            Attestation {
-                signer: attestation.signer,
-                signature: attestation.signature,
-            }
-        }
-    }
-
-    impl Verifier for ProviderScheme {
-        type Subject<'a, D: commonware_cryptography::Digest> =
-            commonware_consensus::simplex::types::Subject<'a, D>;
-        type Faults = <Scheme as Verifier>::Faults;
-        type PublicKey = ed25519::PublicKey;
-        type Certificate = <Scheme as Verifier>::Certificate;
-
-        fn verify_certificate<R, D>(
-            &self,
-            rng: &mut R,
-            subject: Self::Subject<'_, D>,
-            certificate: &Self::Certificate,
-            strategy: &impl ParallelStrategy,
-        ) -> bool
-        where
-            R: rand_core::CryptoRng,
-            D: commonware_cryptography::Digest,
-        {
-            self.inner
-                .verify_certificate(rng, subject, certificate, strategy)
-        }
-
-        fn verify_certificates<'a, R, D, I>(
-            &self,
-            rng: &mut R,
-            certificates: NonEmpty<I>,
-            strategy: &impl ParallelStrategy,
-        ) -> bool
-        where
-            R: rand_core::CryptoRng,
-            D: commonware_cryptography::Digest,
-            I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
-        {
-            self.inner.verify_certificates(rng, certificates, strategy)
-        }
-
-        fn is_batchable() -> bool {
-            Scheme::is_batchable()
-        }
-
-        fn certificate_codec_config(&self) -> <Self::Certificate as commonware_codec::Read>::Cfg {
-            self.inner.certificate_codec_config()
-        }
-
-        fn certificate_codec_config_unbounded() -> <Self::Certificate as commonware_codec::Read>::Cfg
-        {
-            Scheme::certificate_codec_config_unbounded()
-        }
-    }
-
-    impl certificate::Scheme for ProviderScheme {
-        type Signature = <Scheme as certificate::Scheme>::Signature;
-
-        fn me(&self) -> Option<commonware_utils::Participant> {
-            self.inner.me()
-        }
-
-        fn participants(&self) -> &commonware_utils::ordered::Committee<Self::PublicKey> {
-            self.inner.participants()
-        }
-
-        fn sign<D: commonware_cryptography::Digest>(
-            &self,
-            subject: Self::Subject<'_, D>,
-        ) -> Option<Attestation<Self>> {
-            self.inner.sign(subject).map(Self::wrap_attestation)
-        }
-
-        fn verify_attestation<R, D>(
-            &self,
-            rng: &mut R,
-            subject: Self::Subject<'_, D>,
-            attestation: &Attestation<Self>,
-            strategy: &impl ParallelStrategy,
-        ) -> bool
-        where
-            R: rand_core::CryptoRng,
-            D: commonware_cryptography::Digest,
-        {
-            let attestation = Attestation::<Scheme> {
-                signer: attestation.signer,
-                signature: attestation.signature.clone(),
-            };
-            self.inner
-                .verify_attestation(rng, subject, &attestation, strategy)
-        }
-
-        fn verify_attestations<R, D, I>(
-            &self,
-            rng: &mut R,
-            subject: Self::Subject<'_, D>,
-            attestations: I,
-            strategy: &impl ParallelStrategy,
-        ) -> Verification<Self>
-        where
-            R: rand_core::CryptoRng,
-            D: commonware_cryptography::Digest,
-            I: IntoIterator<Item = Attestation<Self>>,
-            I::IntoIter: Send,
-        {
-            let verification = self.inner.verify_attestations(
-                rng,
-                subject,
-                attestations.into_iter().map(Self::unwrap_attestation),
-                strategy,
-            );
-            Verification::new(
-                verification
-                    .verified
-                    .into_iter()
-                    .map(Self::wrap_attestation)
-                    .collect(),
-                verification.invalid,
-            )
-        }
-
-        fn assemble<I>(
-            &self,
-            attestations: NonEmpty<I>,
-            strategy: &impl ParallelStrategy,
-        ) -> Result<Self::Certificate, certificate::AssemblyError>
-        where
-            I: Iterator<Item = Attestation<Self>> + Send,
-        {
-            self.inner.assemble(
-                non_empty![@attestations.into_iter().map(Self::unwrap_attestation)],
-                strategy,
-            )
-        }
-
-        fn is_attributable() -> bool {
-            Scheme::is_attributable()
-        }
-    }
-
-    /// Serves a participant-less verifier from `scoped` and the full signing scheme from `scheme`.
+    /// Serves the verifier and signing-scheme provider roles independently.
     #[derive(Clone)]
-    struct ParticipantlessAllProvider {
-        verifier: Arc<ProviderScheme>,
-        scheme: Arc<ProviderScheme>,
+    struct SplitRoleProvider {
+        verifier: Arc<Scheme>,
+        scheme: Arc<Scheme>,
     }
 
-    impl Provider for ParticipantlessAllProvider {
+    impl Provider for SplitRoleProvider {
         type Scope = Epoch;
-        type Scheme = ProviderScheme;
+        type Scheme = Scheme;
 
-        fn scoped(&self, _: Epoch) -> Option<Scoped<ProviderScheme>> {
+        fn scoped(&self, _: Epoch) -> Option<Scoped<Scheme>> {
             Some(Scoped::verifier(self.verifier.clone()))
         }
 
-        fn scheme(&self, _: Epoch) -> Option<Arc<ProviderScheme>> {
+        fn scheme(&self, _: Epoch) -> Option<Arc<Scheme>> {
             Some(self.scheme.clone())
         }
     }
@@ -1492,10 +1331,9 @@ mod test {
         });
     }
 
-    /// An all-epoch verifier may be unable to enumerate participants. Probe must verify with it
-    /// but size peer samples from the epoch-scoped committee.
+    /// Probe sizes peer samples from the full signing scheme, not the scoped verifier.
     #[test]
-    fn test_sample_size_uses_scoped_scheme_with_participantless_all_verifier() {
+    fn test_sample_size_uses_full_scheme() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|context| async move {
             let mut rng = test_rng();
@@ -1505,10 +1343,22 @@ mod test {
                 verifier,
                 ..
             } = scheme_mocks::fixture(&mut rng, b"_COMMONWARE_GLUE_FD_ALL_VERIFIER", 4);
-            let schemes: Vec<_> = schemes.into_iter().map(ProviderScheme::new).collect();
-            let provider = ParticipantlessAllProvider {
-                verifier: Arc::new(ProviderScheme::new(verifier.clone())),
-                scheme: Arc::new(ProviderScheme::new(verifier)),
+            let extra_participants = ed25519::certificate::mocks::participants(&mut rng, 3);
+            let full_committee = participants
+                .iter()
+                .cloned()
+                .chain(extra_participants.keys().iter().cloned())
+                .map(|participant| (participant, 1))
+                .try_collect()
+                .expect("participants are unique");
+            let full_scheme = Scheme::verifier(
+                b"_COMMONWARE_GLUE_FD_FULL_SCHEME",
+                full_committee,
+                Shared::default(),
+            );
+            let provider = SplitRoleProvider {
+                verifier: Arc::new(verifier),
+                scheme: Arc::new(full_scheme),
             };
 
             let (network, oracle) = Network::new_with_peers(
@@ -1539,28 +1389,23 @@ mod test {
                 .register(PROBE_CHANNEL, TEST_QUOTA)
                 .await
                 .expect("failed to register probe channel");
-            let (probe, probe_mailbox) = Probe::<
-                _,
-                ProviderScheme,
-                ParticipantlessAllProvider,
-                Variant,
-                _,
-                ed25519::PublicKey,
-                _,
-            >::new(Config {
-                context: context.child("probe"),
-                provider,
-                strategy: Sequential,
-                capacity: NZUsize!(100),
-                blocker: oracle.control(participants[0].clone()),
-                minimum_epoch: Epoch::zero(),
-                retry_timeout: NZDuration!(Duration::from_secs(3600)),
-            });
+            let (probe, probe_mailbox) =
+                Probe::<_, Scheme, SplitRoleProvider, Variant, _, ed25519::PublicKey, _>::new(
+                    Config {
+                        context: context.child("probe"),
+                        provider,
+                        strategy: Sequential,
+                        capacity: NZUsize!(100),
+                        blocker: oracle.control(participants[0].clone()),
+                        minimum_epoch: Epoch::zero(),
+                        retry_timeout: NZDuration!(Duration::from_secs(3600)),
+                    },
+                );
             let _probe = probe.start(probe_network);
             let mut subscription = probe_mailbox.subscribe();
 
             let mut peer_channels = Vec::new();
-            for public_key in participants.iter().take(3).skip(1) {
+            for public_key in participants.iter().skip(1) {
                 peer_channels.push(
                     oracle
                         .control(public_key.clone())
@@ -1570,7 +1415,7 @@ mod test {
                 );
             }
             let (_, finalization) = build_finalization_at(&schemes, Epoch::zero(), 1, 1);
-            for (sender, _) in &peer_channels {
+            for (sender, _) in peer_channels.iter().take(2) {
                 let mut sender = sender.clone();
                 sender.send(
                     Recipients::One(participants[0].clone()),
@@ -1579,6 +1424,18 @@ mod test {
                 );
             }
 
+            context.sleep(Duration::from_millis(100)).await;
+            assert!(matches!(
+                subscription.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ));
+
+            let mut sender = peer_channels[2].0.clone();
+            sender.send(
+                Recipients::One(participants[0].clone()),
+                finalization_bytes(finalization.clone()),
+                false,
+            );
             context.sleep(Duration::from_millis(100)).await;
             let floor = subscription.try_recv().expect("floor resolved");
             assert_eq!(floor, finalization);

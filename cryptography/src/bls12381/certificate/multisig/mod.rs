@@ -60,9 +60,8 @@ pub struct Generic<P: PublicKey, V: Variant, N: Namespace> {
 impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     /// Creates a new scheme instance with the provided key material.
     ///
-    /// Participants have both an identity key and a signing key. The identity key
-    /// is used for participant set ordering and indexing, while the signing key is used for
-    /// signing and verification.
+    /// The identity key determines committee order and participant indices. The signing key
+    /// signs and verifies messages.
     ///
     /// Returns `None` if the committee identity keys do not exactly match the signing-key map or
     /// if the provided private key does not match any signing key.
@@ -92,9 +91,8 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
 
     /// Builds a verifier that can authenticate signatures and certificates.
     ///
-    /// Participants have both an identity key and a signing key. The identity key
-    /// is used for participant set ordering and indexing, while the signing key is used for
-    /// verification.
+    /// The identity key determines committee order and participant indices. The signing key
+    /// verifies messages.
     ///
     /// Returns `None` if the committee identity keys do not exactly match the signing-key map.
     ///
@@ -743,13 +741,11 @@ mod tests {
         let n = u32::try_from(weights.len()).expect("participant count exceeds u32::MAX");
         assert!(n > 0);
 
-        // Generate identity keys (ed25519) and consensus keys (BLS).
         let identity_keys: Vec<_> = (0..n)
             .map(|_| Ed25519PrivateKey::random(&mut *rng))
             .collect();
         let consensus_keys: Vec<Private> = (0..n).map(|_| Private::random(&mut *rng)).collect();
 
-        // Build BiMap of identity public keys -> consensus public keys
         let participants: BiMap<ed25519::PublicKey, V::Public> = identity_keys
             .iter()
             .zip(consensus_keys.iter())
