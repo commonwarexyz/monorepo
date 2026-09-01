@@ -638,7 +638,9 @@ mod test {
                     page_cache,
                     replay_buffer: NZUsize!(2048),
                     key_write_buffer: NZUsize!(2048),
+                    key_max_open_blobs: NZUsize!(64),
                     value_write_buffer: NZUsize!(2048),
+                    value_max_open_blobs: NZUsize!(64),
                     block_codec_config: (),
                     max_repair: NZUsize!(10),
                     max_pending_acks: NZUsize!(1),
@@ -829,7 +831,9 @@ mod test {
             codec_config: (),
             replay_buffer: NZUsize!(2048),
             freezer_key_write_buffer: NZUsize!(2048),
+            freezer_key_max_open_blobs: NZUsize!(64),
             freezer_value_write_buffer: NZUsize!(2048),
+            freezer_value_max_open_blobs: NZUsize!(64),
             ordinal_write_buffer: NZUsize!(2048),
         }
     }

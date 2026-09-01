@@ -184,6 +184,8 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
             replay_buffer: cfg.replay_buffer,
             compression: cfg.compression,
             codec_config: cfg.codec_config,
+            index_max_open_blobs: cfg.key_max_open_blobs,
+            value_max_open_blobs: cfg.value_max_open_blobs,
         };
         let mut replay = Oversized::<E, Record<K>, V>::init_with_metadata(
             &context,

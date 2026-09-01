@@ -88,6 +88,12 @@ where
     /// The size of the write buffer for the value journal of storage archives.
     pub value_write_buffer: NonZeroUsize,
 
+    /// The maximum number of key journal blobs to keep open per tier.
+    pub key_max_open_blobs: NonZeroUsize,
+
+    /// The maximum number of value journal blobs to keep open per tier.
+    pub value_max_open_blobs: NonZeroUsize,
+
     /// Codec configuration for block type.
     pub block_codec_config: AB::Cfg,
 

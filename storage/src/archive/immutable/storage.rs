@@ -142,6 +142,8 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
                 table_resize_chunk_size: cfg.freezer_table_resize_chunk_size,
                 table_replay_buffer: cfg.replay_buffer,
                 codec_config: cfg.codec_config,
+                key_max_open_blobs: cfg.freezer_key_max_open_blobs,
+                value_max_open_blobs: cfg.freezer_value_max_open_blobs,
             },
             checkpoint,
         )

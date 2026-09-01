@@ -181,10 +181,12 @@
 //!     let cfg = Config {
 //!         key_partition: "freezer-key-index".into(),
 //!         key_write_buffer: NZUsize!(1024 * 1024), // 1MB
+//!         key_max_open_blobs: NZUsize!(64),
 //!         key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
 //!         value_partition: "freezer-value-journal".into(),
 //!         value_compression: Some(3),
 //!         value_write_buffer: NZUsize!(1024 * 1024), // 1MB
+//!         value_max_open_blobs: NZUsize!(64),
 //!         value_target_size: 100 * 1024 * 1024, // 100MB
 //!         table_partition: "freezer-table".into(),
 //!         table_initial_size: 65_536, // ~3MB initial table size
@@ -281,6 +283,12 @@ pub struct Config<C> {
 
     /// The codec configuration to use for the value stored in the freezer.
     pub codec_config: C,
+
+    /// The maximum number of key index journal blobs to keep open per tier.
+    pub key_max_open_blobs: NonZeroUsize,
+
+    /// The maximum number of value journal blobs to keep open per tier.
+    pub value_max_open_blobs: NonZeroUsize,
 }
 
 #[cfg(test)]
@@ -322,10 +330,12 @@ mod tests {
             let cfg = Config {
                 key_partition: "test-key-index".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_max_open_blobs: NZUsize!(64),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value-journal".into(),
                 value_compression: compression,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_max_open_blobs: NZUsize!(64),
                 value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test-table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
@@ -396,10 +406,12 @@ mod tests {
             let cfg = Config {
                 key_partition: "test-key-index".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_max_open_blobs: NZUsize!(64),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value-journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_max_open_blobs: NZUsize!(64),
                 value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test-table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
@@ -448,10 +460,12 @@ mod tests {
             let cfg = Config {
                 key_partition: "test-key-index".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_max_open_blobs: NZUsize!(64),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value-journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_max_open_blobs: NZUsize!(64),
                 value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test-table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
@@ -505,10 +519,12 @@ mod tests {
             let cfg = Config {
                 key_partition: "test-key-index".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_max_open_blobs: NZUsize!(64),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value-journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_max_open_blobs: NZUsize!(64),
                 value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test-table".into(),
                 table_initial_size: 4, // Very small to force collisions
@@ -572,10 +588,12 @@ mod tests {
             let cfg = Config {
                 key_partition: "test-key-index".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_max_open_blobs: NZUsize!(64),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value-journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_max_open_blobs: NZUsize!(64),
                 value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test-table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
@@ -647,10 +665,12 @@ mod tests {
             let cfg = Config {
                 key_partition: "test-key-index".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_max_open_blobs: NZUsize!(64),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value-journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_max_open_blobs: NZUsize!(64),
                 value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test-table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
@@ -751,10 +771,12 @@ mod tests {
             let cfg = Config {
                 key_partition: "test-key-index".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_max_open_blobs: NZUsize!(64),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value-journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_max_open_blobs: NZUsize!(64),
                 value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test-table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
@@ -823,10 +845,12 @@ mod tests {
             let cfg = Config {
                 key_partition: "test-key-index".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_max_open_blobs: NZUsize!(64),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value-journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_max_open_blobs: NZUsize!(64),
                 value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test-table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
@@ -887,10 +911,12 @@ mod tests {
             let cfg = Config {
                 key_partition: "test-key-index".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_max_open_blobs: NZUsize!(64),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value-journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_max_open_blobs: NZUsize!(64),
                 value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test-table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
@@ -957,10 +983,12 @@ mod tests {
             let cfg = Config {
                 key_partition: "test-key-index".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_max_open_blobs: NZUsize!(64),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value-journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_max_open_blobs: NZUsize!(64),
                 value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test-table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
@@ -1035,10 +1063,12 @@ mod tests {
             let cfg = Config {
                 key_partition: "test-key-index".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_max_open_blobs: NZUsize!(64),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value-journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_max_open_blobs: NZUsize!(64),
                 value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test-table".into(),
                 table_initial_size: 2, // Very small initial size to force multiple resizes
@@ -1109,10 +1139,12 @@ mod tests {
             let cfg = Config {
                 key_partition: "test-key-index".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_max_open_blobs: NZUsize!(64),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value-journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_max_open_blobs: NZUsize!(64),
                 value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test-table".into(),
                 table_initial_size: 2,
@@ -1190,10 +1222,12 @@ mod tests {
             let cfg = Config {
                 key_partition: "test-key-index".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_max_open_blobs: NZUsize!(64),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value-journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_max_open_blobs: NZUsize!(64),
                 value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test-table".into(),
                 table_initial_size: 2,
@@ -1256,10 +1290,12 @@ mod tests {
             let cfg = Config {
                 key_partition: "test-key-index".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_max_open_blobs: NZUsize!(64),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value-journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_max_open_blobs: NZUsize!(64),
                 value_target_size: 128, // Force multiple journal sections
                 table_partition: "test-table".into(),
                 table_initial_size: 8,     // Small table to force collisions
@@ -1419,10 +1455,12 @@ mod tests {
             let cfg = Config {
                 key_partition: "test-key-index".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_max_open_blobs: NZUsize!(64),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value-journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_max_open_blobs: NZUsize!(64),
                 value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test-table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,

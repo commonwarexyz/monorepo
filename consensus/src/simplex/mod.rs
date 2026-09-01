@@ -1103,6 +1103,7 @@ mod tests {
                 actor.start();
                 let blocker = oracle.control(validator.clone());
                 let cfg = config::Config {
+                    max_open_blobs: NZUsize!(64),
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
                     blocker,
@@ -1366,6 +1367,7 @@ mod tests {
                 actor.start();
 
                 let cfg = config::Config {
+                    max_open_blobs: NZUsize!(64),
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
                     blocker: oracle.control(validator.clone()),
@@ -1491,6 +1493,7 @@ mod tests {
             actor.start();
 
             let cfg = config::Config {
+                max_open_blobs: NZUsize!(64),
                 scheme: schemes[joiner_idx].clone(),
                 elector,
                 blocker: oracle.control(joiner.clone()),
@@ -1639,6 +1642,7 @@ mod tests {
 
                 let blocker = oracle.control(validator.clone());
                 let cfg = config::Config {
+                    max_open_blobs: NZUsize!(64),
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
                     blocker,
@@ -1789,6 +1793,7 @@ mod tests {
 
             let blocker = oracle.control(validator.clone());
             let cfg = config::Config {
+                max_open_blobs: NZUsize!(64),
                 scheme: schemes[idx].clone(),
                 elector: elector.clone(),
                 blocker,
@@ -2074,6 +2079,7 @@ mod tests {
                 actor.start();
                 let blocker = oracle.control(validator.clone());
                 let cfg = config::Config {
+                    max_open_blobs: NZUsize!(64),
                     scheme: signing.clone(),
                     elector: elector.clone(),
                     blocker,
@@ -2240,6 +2246,7 @@ mod tests {
                     actor.start();
                     let blocker = oracle.control(validator.clone());
                     let cfg = config::Config {
+                        max_open_blobs: NZUsize!(64),
                         scheme: schemes[idx].clone(),
                         elector: elector.clone(),
                         blocker,
@@ -2440,6 +2447,7 @@ mod tests {
                 actor.start();
                 let blocker = oracle.control(validator.clone());
                 let cfg = config::Config {
+                    max_open_blobs: NZUsize!(64),
                     scheme: schemes[idx_scheme].clone(),
                     elector: elector.clone(),
                     blocker,
@@ -2564,6 +2572,7 @@ mod tests {
             actor.start();
             let blocker = oracle.control(me.clone());
             let cfg = config::Config {
+                max_open_blobs: NZUsize!(64),
                 scheme: schemes[0].clone(),
                 elector: elector.clone(),
                 blocker,
@@ -2718,6 +2727,7 @@ mod tests {
                 actor.start();
                 let blocker = oracle.control(validator.clone());
                 let cfg = config::Config {
+                    max_open_blobs: NZUsize!(64),
                     scheme: schemes[idx_scheme].clone(),
                     elector: elector.clone(),
                     blocker,
@@ -2958,6 +2968,7 @@ mod tests {
                 actor.start();
                 let blocker = oracle.control(validator.clone());
                 let cfg = config::Config {
+                    max_open_blobs: NZUsize!(64),
                     scheme: schemes[idx_scheme].clone(),
                     elector: elector.clone(),
                     blocker,
@@ -3121,6 +3132,7 @@ mod tests {
                 actor.start();
                 let blocker = oracle.control(validator.clone());
                 let cfg = config::Config {
+                    max_open_blobs: NZUsize!(64),
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
                     blocker,
@@ -3316,6 +3328,7 @@ mod tests {
                 actor.start();
                 let blocker = oracle.control(validator.clone());
                 let cfg = config::Config {
+                    max_open_blobs: NZUsize!(64),
                     scheme: schemes[idx_scheme].clone(),
                     elector: elector.clone(),
                     blocker,
@@ -3436,6 +3449,7 @@ mod tests {
                 actor.start();
                 let blocker = oracle.control(validator.clone());
                 let cfg = config::Config {
+                    max_open_blobs: NZUsize!(64),
                     scheme: schemes[idx_scheme].clone(),
                     elector: elector.clone(),
                     blocker,
@@ -3567,6 +3581,7 @@ mod tests {
                 actor.start();
                 let blocker = oracle.control(validator.clone());
                 let cfg = config::Config {
+                    max_open_blobs: NZUsize!(64),
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
                     blocker,
@@ -3782,6 +3797,7 @@ mod tests {
                 actor.start();
                 let blocker = oracle.control(validator.clone());
                 let cfg = config::Config {
+                    max_open_blobs: NZUsize!(64),
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
                     blocker,
@@ -3993,6 +4009,7 @@ mod tests {
                     actor.start();
                     let blocker = oracle.control(validator.clone());
                     let cfg = config::Config {
+                        max_open_blobs: NZUsize!(64),
                         scheme: schemes[idx_scheme].clone(),
                         elector: elector.clone(),
                         blocker,
@@ -4164,6 +4181,7 @@ mod tests {
                 actor.start();
                 let blocker = oracle.control(validator.clone());
                 let cfg = config::Config {
+                    max_open_blobs: NZUsize!(64),
                     scheme: schemes[idx_scheme].clone(),
                     elector: elector.clone(),
                     blocker,
@@ -4330,6 +4348,7 @@ mod tests {
                 actor.start();
                 let blocker = oracle.control(validator.clone());
                 let cfg = config::Config {
+                    max_open_blobs: NZUsize!(64),
                     scheme: schemes[idx_scheme].clone(),
                     elector: elector.clone(),
                     blocker,
@@ -4520,6 +4539,7 @@ mod tests {
             application_actor.start();
 
             let cfg = config::Config {
+                max_open_blobs: NZUsize!(64),
                 scheme: schemes[0].clone(),
                 elector,
                 blocker: oracle.control(me.clone()),
@@ -4641,6 +4661,7 @@ mod tests {
                     actor.start();
                     let blocker = oracle.control(validator.clone());
                     let cfg = config::Config {
+                        max_open_blobs: NZUsize!(64),
                         scheme: schemes[idx_scheme].clone(),
                         elector: elector.clone(),
                         blocker,
@@ -4805,6 +4826,7 @@ mod tests {
                     actor.start();
                     let blocker = oracle.control(validator.clone());
                     let cfg = config::Config {
+                        max_open_blobs: NZUsize!(64),
                         scheme: schemes[idx_scheme].clone(),
                         elector: elector.clone(),
                         blocker,
@@ -4901,6 +4923,7 @@ mod tests {
             actor.start();
             let blocker = oracle.control(validator.clone());
             let cfg = config::Config {
+                max_open_blobs: NZUsize!(64),
                 scheme: schemes[idx].clone(),
                 elector: elector.clone(),
                 blocker,
@@ -5076,6 +5099,7 @@ mod tests {
                     actor.start();
                     let blocker = oracle.control(validator.clone());
                     let cfg = config::Config {
+                        max_open_blobs: NZUsize!(64),
                         scheme: schemes[idx_scheme].clone(),
                         elector: elector.clone(),
                         blocker,
@@ -5223,6 +5247,7 @@ mod tests {
                     actor.start();
                     let blocker = oracle.control(validator.clone());
                     let cfg = config::Config {
+                        max_open_blobs: NZUsize!(64),
                         scheme: schemes[idx_scheme].clone(),
                         elector: elector.clone(),
                         blocker,
@@ -5387,6 +5412,7 @@ mod tests {
                     actor.start();
                     let blocker = oracle.control(validator.clone());
                     let cfg = config::Config {
+                        max_open_blobs: NZUsize!(64),
                         scheme: schemes[idx_scheme].clone(),
                         elector: elector.clone(),
                         blocker,
@@ -5517,6 +5543,7 @@ mod tests {
                 actor.start();
                 let blocker = oracle.control(validator.clone());
                 let cfg = config::Config {
+                    max_open_blobs: NZUsize!(64),
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
                     blocker,
@@ -5641,6 +5668,7 @@ mod tests {
             actor.start();
             let blocker = oracle.control(participants[0].clone());
             let cfg = config::Config {
+                max_open_blobs: NZUsize!(64),
                 scheme: schemes[0].clone(),
                 elector: elector.clone(),
                 blocker,
@@ -5818,6 +5846,7 @@ mod tests {
                 actor.start();
                 let blocker = oracle.control(validator.clone());
                 let cfg = config::Config {
+                    max_open_blobs: NZUsize!(64),
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
                     blocker,
@@ -6136,6 +6165,7 @@ mod tests {
                     actor.start();
                     let blocker = oracle.control(validator.clone());
                     let cfg = config::Config {
+                        max_open_blobs: NZUsize!(64),
                         scheme: schemes[idx].clone(),
                         elector: elector.clone(),
                         blocker,
@@ -6381,6 +6411,7 @@ mod tests {
             actor.start();
 
             let cfg = config::Config {
+                max_open_blobs: NZUsize!(64),
                 scheme: schemes[idx].clone(),
                 elector: elector.clone(),
                 blocker: oracle.control(validator.clone()),
@@ -7489,6 +7520,7 @@ mod tests {
                 actor.start();
                 let blocker = oracle.control(validator.clone());
                 let cfg = config::Config {
+                    max_open_blobs: NZUsize!(64),
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
                     blocker,
@@ -7639,6 +7671,7 @@ mod tests {
                 actor.start();
                 let blocker = oracle.control(validator.clone());
                 let cfg = config::Config {
+                    max_open_blobs: NZUsize!(64),
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
                     blocker,
@@ -7743,6 +7776,7 @@ mod tests {
                 reporters.insert(idx, selected_reporter.clone());
                 let blocker = oracle.control(validator.clone());
                 let cfg = config::Config {
+                    max_open_blobs: NZUsize!(64),
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
                     blocker,
@@ -8178,6 +8212,7 @@ mod tests {
 
                         let blocker = oracle.control(validator.clone());
                         let cfg = config::Config {
+                            max_open_blobs: NZUsize!(64),
                             scheme: schemes[idx].clone(),
                             elector: elector.clone(),
                             blocker,
@@ -8250,6 +8285,7 @@ mod tests {
 
                     let blocker = oracle.control(validator.clone());
                     let cfg = config::Config {
+                        max_open_blobs: NZUsize!(64),
                         scheme: schemes[idx].clone(),
                         elector: elector.clone(),
                         blocker,

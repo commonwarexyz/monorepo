@@ -55,6 +55,9 @@ pub struct Config {
 
     /// The size of the write buffer to use for each blob.
     pub write_buffer: NonZeroUsize,
+
+    /// The maximum number of blobs to keep open per tier.
+    pub max_open_blobs: NonZeroUsize,
 }
 
 /// The journal's state, boxed so the public [Journal] handle stays pointer-sized.
@@ -109,11 +112,14 @@ impl<E: Storage + Metrics, A: CodecFixedShared> RecoveryPreflight<E, A> {
 }
 
 impl<E: Storage + Metrics, A: CodecFixed> Inner<E, A> {
-    /// The section's writer. A replayed section cannot be removed while the replay owns the journal.
-    fn writer(&mut self, section: u64) -> &mut Writer<E::Blob> {
-        self.manager
-            .get_mut(section)
-            .expect("replayed section is present")
+    /// The section's writer, opening it if it is not resident. A replayed section cannot be
+    /// removed while the replay owns the journal.
+    async fn writer(&mut self, section: u64) -> Result<&mut Writer<E::Blob>, Error> {
+        Ok(self
+            .manager
+            .resident_mut(section)
+            .await?
+            .expect("replayed section is present"))
     }
 }
 
@@ -295,6 +301,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
                 write_buffer: cfg.write_buffer,
                 page_cache_ref: cfg.page_cache,
             },
+            max_open_blobs: cfg.max_open_blobs,
         };
         let mut manager = Manager::init(context, manager_cfg).await?;
         if let Some((section, size)) = restore {
@@ -356,7 +363,8 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
     async fn get(&self, section: u64, position: u64) -> Result<A, Error> {
         let blob = self
             .manager
-            .get(section)?
+            .get(section)
+            .await?
             .ok_or(Error::SectionOutOfRange(section))?;
 
         let offset = position
@@ -396,7 +404,8 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         let buf = &mut buf[..positions.len() * Self::CHUNK_SIZE];
         let blob = self
             .manager
-            .get(section)?
+            .get(section)
+            .await?
             .ok_or(Error::SectionOutOfRange(section))?;
 
         let offsets: Vec<u64> = positions
@@ -421,7 +430,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
 
     /// See [Journal::try_get_sync].
     fn try_get_sync(&self, section: u64, position: u64) -> Option<A> {
-        let blob = self.manager.get(section).ok()??;
+        let blob = self.manager.try_get(section)?;
         let offset = position.checked_mul(Self::CHUNK_SIZE_U64)?;
         let remaining = blob.size().checked_sub(offset)?;
         if remaining < Self::CHUNK_SIZE_U64 {
@@ -438,7 +447,8 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
     async fn last(&self, section: u64) -> Result<Option<A>, Error> {
         let blob = self
             .manager
-            .get(section)?
+            .get(section)
+            .await?
             .ok_or(Error::SectionOutOfRange(section))?;
 
         let size = blob.size();
@@ -651,6 +661,9 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     }
 
     /// Get an item if it can be done synchronously (e.g. without I/O), returning `None` otherwise.
+    ///
+    /// A section whose blob the journal is not currently holding open also returns `None`,
+    /// since reopening it is I/O. Use [Self::get] to read such a section.
     pub fn try_get_sync(&self, section: u64, position: u64) -> Option<A> {
         self.0.try_get_sync(section, position)
     }
@@ -685,33 +698,41 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         buffer: NonZeroUsize,
         read_options: ReadOptions,
     ) -> Result<Replay<E, A>, Error> {
-        let mut sections = VecDeque::new();
-        for (&section, blob) in self.0.manager.sections_from(start_section) {
-            let blob_size = blob.size();
-            let mut reader = blob.replay(buffer, read_options).await?;
-            // For the first section, seek to the start position
-            let position = if section == start_section {
-                let start = start_position
-                    .checked_mul(Inner::<E, A>::CHUNK_SIZE_U64)
-                    .ok_or(Error::ItemOutOfRange(start_position))?;
-                if start > blob_size {
-                    return Err(Error::ItemOutOfRange(start_position));
-                }
-                reader.seek_to(start)?;
-                start_position
-            } else {
-                0
-            };
-            sections.push_back(SectionReplay {
-                section,
-                reader,
-                position,
-            });
-        }
-        let finished = sections.is_empty();
+        let mut remaining: VecDeque<u64> = self.0.manager.sections_from(start_section).collect();
+
+        // Open only the first section: the rest are opened as the reader reaches them, so a
+        // replay holds one section's blob open at a time however many sections it spans.
+        let current = match remaining.pop_front() {
+            Some(section) => {
+                let blob = self.0.writer(section).await?;
+                let blob_size = blob.size();
+                let mut reader = blob.replay(buffer, read_options).await?;
+                // For the first section, seek to the start position
+                let position = if section == start_section {
+                    let start = start_position
+                        .checked_mul(Inner::<E, A>::CHUNK_SIZE_U64)
+                        .ok_or(Error::ItemOutOfRange(start_position))?;
+                    if start > blob_size {
+                        return Err(Error::ItemOutOfRange(start_position));
+                    }
+                    reader.seek_to(start)?;
+                    start_position
+                } else {
+                    0
+                };
+                Some(SectionReplay {
+                    section,
+                    reader,
+                    position,
+                })
+            }
+            None => None,
+        };
+        let finished = current.is_none();
         Ok(Replay {
             journal: self,
-            sections,
+            remaining,
+            current,
             recovered_from: if start_position == 0 {
                 Some(start_section)
             } else {
@@ -826,7 +847,10 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 /// exhausted reader to get the journal back.
 pub struct Replay<E: Storage + Metrics, A: CodecFixed> {
     journal: Journal<E, A>,
-    sections: VecDeque<SectionReplay<E::Blob>>,
+    /// Sections not yet opened, in ascending order.
+    remaining: VecDeque<u64>,
+    /// The section being replayed, opened from [Self::remaining] on demand.
+    current: Option<SectionReplay<E::Blob>>,
     /// The first section this replay fully covers: [Replay::finish] marks it and every
     /// later section recovered.
     recovered_from: Option<u64>,
@@ -848,7 +872,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
         }
 
         // The bytes already replayed are validated: they bound the truncation from below.
-        let current = self.sections.front().expect("replayed section is present");
+        let current = self.current.as_ref().expect("replayed section is present");
         let section = current.section;
         let position = current.position;
         let size = current.reader.blob_size();
@@ -861,6 +885,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
             .journal
             .0
             .writer(section)
+            .await?
             .recoverable_prefix_len(valid_size, self.buffer, self.read_options)
             .await?;
 
@@ -887,12 +912,12 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
         let (valid_size, target) = match self.plan_repair(source).await {
             Ok(plan) => plan,
             Err(err) => {
-                self.sections.pop_front();
+                self.current = None;
                 return Err(err);
             }
         };
 
-        let current = self.sections.front().expect("replayed section is present");
+        let current = self.current.as_ref().expect("replayed section is present");
         let (section, position) = (current.section, current.position);
         warn!(
             section,
@@ -903,20 +928,18 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
 
         // Keep the interruption guard set until a new reader has replaced the stale view.
         self.repairing = true;
-        let current = self
-            .sections
-            .pop_front()
-            .expect("repaired section is present");
+        let current = self.current.take().expect("repaired section is present");
         drop(current.reader);
         repair_blob(&mut self.journal, section, target).await?;
         let mut reader = self
             .journal
             .0
             .writer(section)
+            .await?
             .replay(self.buffer, self.read_options)
             .await?;
         reader.seek_to(valid_size)?;
-        self.sections.push_front(SectionReplay {
+        self.current = Some(SectionReplay {
             section,
             reader,
             position,
@@ -936,6 +959,27 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
         Ok(())
     }
 
+    /// Open the next pending section's reader, returning false once every section has been
+    /// replayed.
+    async fn open_next(&mut self) -> Result<bool, Error> {
+        let Some(section) = self.remaining.pop_front() else {
+            return Ok(false);
+        };
+        let reader = self
+            .journal
+            .0
+            .writer(section)
+            .await?
+            .replay(self.buffer, self.read_options)
+            .await?;
+        self.current = Some(SectionReplay {
+            section,
+            reader,
+            position: 0,
+        });
+        Ok(true)
+    }
+
     /// Returns the next `(section, position, item)`, or `None` once every section is
     /// exhausted.
     ///
@@ -946,12 +990,26 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
         // A cancelled repair leaves the section's writer unusable.
         if self.repairing {
             self.repairing = false;
-            self.sections.clear();
+            self.current = None;
+            self.remaining.clear();
             if !self.errored {
                 return self.fail(Error::ReplayInterrupted);
             }
         }
-        while let Some(current) = self.sections.front_mut() {
+        loop {
+            // Open the next section only once the current one is exhausted, so a replay holds
+            // one section's blob open however many sections it spans.
+            if self.current.is_none() {
+                let opened = match self.open_next().await {
+                    Ok(opened) => opened,
+                    Err(err) => return self.fail(err),
+                };
+                if !opened {
+                    break;
+                }
+            }
+            let current = self.current.as_mut().expect("replayed section is open");
+
             // Ensure we have enough data for one item
             match current.reader.ensure(Inner::<E, A>::CHUNK_SIZE).await {
                 Ok(true) => {}
@@ -962,10 +1020,10 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
                             None => return self.fail(Error::OffsetOverflow),
                         };
                     let blob_size = current.reader.blob_size();
+                    let section = current.section;
                     if valid_size < blob_size {
-                        let section = current.section;
                         if let Err(err) = self.ensure_above_floor(section, valid_size) {
-                            self.sections.pop_front();
+                            self.current = None;
                             return self.fail(err);
                         }
                         warn!(
@@ -977,12 +1035,12 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
                         self.repairing = true;
                         if let Err(err) = repair_blob(&mut self.journal, section, valid_size).await
                         {
-                            self.sections.pop_front();
+                            self.current = None;
                             return self.fail(err);
                         }
                         self.repairing = false;
                     }
-                    self.sections.pop_front();
+                    self.current = None;
                     continue;
                 }
                 Err(err) => {
@@ -994,6 +1052,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
             }
 
             // Decode the item at the current position
+            let current = self.current.as_mut().expect("replayed section is open");
             match A::read(&mut current.reader) {
                 Ok(item) => {
                     let yielded = (current.section, current.position, item);
@@ -1001,7 +1060,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
                     return Some(Ok(yielded));
                 }
                 Err(err) => {
-                    self.sections.pop_front();
+                    self.current = None;
                     return self.fail(Error::Codec(err));
                 }
             }
@@ -1040,7 +1099,7 @@ async fn repair_blob<E: Storage + Metrics, A: CodecFixed>(
     section: u64,
     size: u64,
 ) -> Result<(), Error> {
-    let blob = journal.0.writer(section);
+    let blob = journal.0.writer(section).await?;
     blob.resize(size).await?;
     blob.sync().await?;
     Ok(())
@@ -1060,6 +1119,7 @@ mod tests {
             DelayedSyncContext, PendingSyncs, RecordingContext, fail_pending_syncs,
             release_pending_syncs,
         },
+        telemetry::metrics::has_metric_value,
     };
     use commonware_utils::{NZU16, NZUsize};
     use core::num::NonZeroU16;
@@ -1083,6 +1143,7 @@ mod tests {
             partition: "test-partition".into(),
             page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
             write_buffer: NZUsize!(2048),
+            max_open_blobs: NZUsize!(64),
         }
     }
 
@@ -1091,6 +1152,7 @@ mod tests {
             partition: "segmented-fixed-aligned".into(),
             page_cache: CacheRef::from_pooler(pooler, NZU16!(16), NZUsize!(4)),
             write_buffer: NZUsize!(128),
+            max_open_blobs: NZUsize!(64),
         }
     }
 
@@ -1099,6 +1161,7 @@ mod tests {
             partition: partition.into(),
             page_cache: CacheRef::from_pooler(pooler, NZU16!(16), NZUsize!(4)),
             write_buffer: NZUsize!(1),
+            max_open_blobs: NZUsize!(64),
         }
     }
 
@@ -2092,6 +2155,188 @@ mod tests {
         });
     }
 
+    /// A configuration that keeps at most `max_open_blobs` blobs open per tier.
+    fn bounded_cfg(
+        pooler: &impl BufferPooler,
+        partition: &str,
+        max_open_blobs: NonZeroUsize,
+    ) -> Config {
+        Config {
+            partition: partition.into(),
+            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+            write_buffer: NZUsize!(2048),
+            max_open_blobs,
+        }
+    }
+
+    /// Append one item to each section in `sections`, syncing each before opening the next.
+    async fn seed_durable_sections<E: Storage + Metrics>(
+        mut journal: Journal<E, Digest>,
+        sections: RangeInclusive<u64>,
+    ) -> Journal<E, Digest> {
+        for section in sections {
+            (journal, _) = journal
+                .append(section, &test_digest(section))
+                .await
+                .expect("failed to append");
+            journal = journal.sync(section).await.expect("failed to sync");
+        }
+        journal
+    }
+
+    #[test_traced]
+    fn test_segmented_fixed_bounds_open_blobs() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            const LIMIT: usize = 2;
+            let cfg = bounded_cfg(&context, "bounded-open", NZUsize!(LIMIT));
+            let journal = Journal::init(context.child("storage"), cfg)
+                .await
+                .expect("failed to init");
+
+            // Each section is synced before the next opens, so every section but the newest is
+            // flushed and therefore eligible for eviction.
+            let journal = seed_durable_sections(journal, 1..=8).await;
+            assert!(
+                has_metric_value(&context.encode(), "storage_opened", LIMIT),
+                "writable tier must not exceed the limit"
+            );
+
+            // Every section still reads back: evicted sections reopen on demand.
+            for section in 1u64..=8 {
+                assert_eq!(
+                    journal.get(section, 0).await.expect("failed to get"),
+                    test_digest(section)
+                );
+            }
+
+            // Reads of evicted sections are served by the reopened tier, which is bounded too.
+            assert!(
+                has_metric_value(&context.encode(), "storage_opened", 2 * LIMIT),
+                "both tiers together must not exceed twice the limit"
+            );
+
+            journal.destroy().await.expect("failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_segmented_fixed_init_bounds_open_blobs() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            const LIMIT: usize = 2;
+            let cfg = bounded_cfg(&context, "bounded-init", NZUsize!(LIMIT));
+            let journal = Journal::init(context.child("first"), cfg.clone())
+                .await
+                .expect("failed to init");
+            let journal = seed_durable_sections(journal, 1..=6).await;
+            drop(journal);
+
+            // Reopening records every section without holding every blob open.
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg)
+                .await
+                .expect("failed to re-init");
+            assert!(
+                has_metric_value(&context.encode(), "second_opened", LIMIT),
+                "init must not open every stored blob"
+            );
+
+            // Section metadata is complete for sections whose blob is closed.
+            assert_eq!(journal.oldest_section(), Some(1));
+            assert_eq!(journal.newest_section(), Some(6));
+            assert_eq!(
+                journal.sections().collect::<Vec<_>>(),
+                (1u64..=6).collect::<Vec<_>>()
+            );
+            for section in 1u64..=6 {
+                assert_eq!(
+                    journal.size(section).expect("failed to size"),
+                    Digest::SIZE as u64
+                );
+                assert_eq!(
+                    journal.get(section, 0).await.expect("failed to get"),
+                    test_digest(section)
+                );
+            }
+
+            journal.destroy().await.expect("failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_segmented_fixed_keeps_unflushed_sections_open() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            const SECTIONS: u64 = 6;
+            let cfg = bounded_cfg(&context, "unflushed-open", NZUsize!(2));
+            let mut journal = Journal::init(context.child("storage"), cfg)
+                .await
+                .expect("failed to init");
+
+            // One sub-page item per section stays buffered until synced. Closing such a section
+            // would either drop the item or make it durable ahead of the caller's own sync, so
+            // the limit yields instead.
+            for section in 1..=SECTIONS {
+                (journal, _) = journal
+                    .append(section, &test_digest(section))
+                    .await
+                    .expect("failed to append");
+            }
+            assert!(
+                has_metric_value(&context.encode(), "storage_opened", SECTIONS),
+                "a section holding unflushed writes must stay open"
+            );
+
+            // No append was lost to the limit.
+            for section in 1..=SECTIONS {
+                assert_eq!(
+                    journal.get(section, 0).await.expect("failed to get"),
+                    test_digest(section)
+                );
+            }
+
+            journal.destroy().await.expect("failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_segmented_fixed_replay_bounds_open_blobs() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            const LIMIT: usize = 2;
+            let cfg = bounded_cfg(&context, "bounded-replay", NZUsize!(LIMIT));
+            let journal = Journal::init(context.child("first"), cfg.clone())
+                .await
+                .expect("failed to init");
+            let journal = seed_durable_sections(journal, 1..=8).await;
+            drop(journal);
+
+            // Replay opens each section as it reaches it rather than all of them up front.
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg)
+                .await
+                .expect("failed to re-init");
+            let mut replay = journal
+                .replay(0, 0, NZUsize!(1024), ReadOptions::default())
+                .await
+                .expect("failed to start replay");
+            let mut replayed = Vec::new();
+            while let Some(item) = replay.next().await {
+                let (section, position, item) = item.expect("failed to replay");
+                assert_eq!(position, 0);
+                assert_eq!(item, test_digest(section));
+                replayed.push(section);
+                assert!(
+                    has_metric_value(&context.encode(), "second_opened", LIMIT),
+                    "replay must not open every section at once"
+                );
+            }
+            assert_eq!(replayed, (1u64..=8).collect::<Vec<_>>());
+
+            let journal = replay.finish().expect("failed to finish replay");
+            journal.destroy().await.expect("failed to destroy");
+        });
+    }
+
     #[test_traced]
     fn test_segmented_fixed_section_len() {
         let executor = deterministic::Runner::default();
@@ -2315,6 +2560,7 @@ mod tests {
                     NZUsize!(4),
                 ),
                 write_buffer: NZUsize!(128),
+                max_open_blobs: NZUsize!(64),
             };
             let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
                 .await
@@ -2507,6 +2753,7 @@ mod tests {
                 partition: "clear-test".into(),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
+                max_open_blobs: NZUsize!(64),
             };
 
             let mut journal: Journal<_, Digest> =

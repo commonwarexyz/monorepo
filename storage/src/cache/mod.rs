@@ -54,6 +54,7 @@
 //!         codec_config: (),
 //!         items_per_blob: NZU64!(1024),
 //!         write_buffer: NZUsize!(1024 * 1024),
+//!         max_open_blobs: NZUsize!(64),
 //!         replay_buffer: NZUsize!(4096),
 //!         page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
 //!     };
@@ -109,6 +110,9 @@ pub struct Config<C> {
 
     /// The page cache to use for the underlying [crate::journal] storage.
     pub page_cache: CacheRef,
+
+    /// The maximum number of journal blobs to keep open per tier.
+    pub max_open_blobs: NonZeroUsize,
 }
 
 #[cfg(test)]
@@ -141,6 +145,7 @@ mod tests {
                 codec_config: (),
                 compression: Some(3),
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                max_open_blobs: NZUsize!(64),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -163,6 +168,7 @@ mod tests {
                 codec_config: (),
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                max_open_blobs: NZUsize!(64),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -183,6 +189,7 @@ mod tests {
                 codec_config: (),
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                max_open_blobs: NZUsize!(64),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_blob: NZU64!(1), // no mask - each item is its own section
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -253,6 +260,7 @@ mod tests {
                 codec_config: (),
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                max_open_blobs: NZUsize!(64),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_blob: NZU64!(items_per_blob),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -298,6 +306,7 @@ mod tests {
                 codec_config: (),
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                max_open_blobs: NZUsize!(64),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_blob: NZU64!(items_per_blob),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -362,6 +371,7 @@ mod tests {
                 codec_config: (),
                 compression: None,
                 write_buffer: NZUsize!(256),
+                max_open_blobs: NZUsize!(64),
                 replay_buffer: NZUsize!(1024),
                 items_per_blob: NZU64!(64),
                 page_cache: CacheRef::from_pooler(context, NZU16!(64), NZUsize!(10)),
@@ -413,6 +423,7 @@ mod tests {
                 codec_config: (),
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                max_open_blobs: NZUsize!(64),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -467,6 +478,7 @@ mod tests {
                 codec_config: (),
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                max_open_blobs: NZUsize!(64),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -546,6 +558,7 @@ mod tests {
                 codec_config: (),
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                max_open_blobs: NZUsize!(64),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -595,6 +608,7 @@ mod tests {
                 codec_config: (),
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                max_open_blobs: NZUsize!(64),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_blob: NZU64!(100), // Smaller sections for easier testing
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -647,6 +661,7 @@ mod tests {
                 codec_config: (),
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                max_open_blobs: NZUsize!(64),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_blob: NZU64!(100), // Smaller sections for testing
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -705,6 +720,7 @@ mod tests {
                 codec_config: (),
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                max_open_blobs: NZUsize!(64),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -758,6 +774,7 @@ mod tests {
                 codec_config: (),
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                max_open_blobs: NZUsize!(64),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),

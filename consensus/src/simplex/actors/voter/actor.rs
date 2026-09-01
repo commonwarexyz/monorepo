@@ -132,6 +132,7 @@ pub struct Actor<
     partition: String,
     replay_buffer: NonZeroUsize,
     write_buffer: NonZeroUsize,
+    max_open_blobs: NonZeroUsize,
     page_cache: CacheRef,
     journal: Option<Journal<E, Artifact<S, D>>>,
     dirty_section: Option<View>,
@@ -194,6 +195,7 @@ impl<
                 partition: cfg.partition,
                 replay_buffer: cfg.replay_buffer,
                 write_buffer: cfg.write_buffer,
+                max_open_blobs: cfg.max_open_blobs,
                 page_cache: cfg.page_cache,
                 journal: None,
                 dirty_section: None,
@@ -989,6 +991,7 @@ impl<
                 codec_config: self.certificate_config.clone(),
                 page_cache: self.page_cache.clone(),
                 write_buffer: self.write_buffer,
+                max_open_blobs: self.max_open_blobs,
             },
         )
         .await

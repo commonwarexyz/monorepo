@@ -40,7 +40,9 @@ impl StorageWorkload for ArchivePrunableWorkload {
             codec_config: (),
             items_per_section: ITEMS_PER_SECTION,
             key_write_buffer: WRITE_BUFFER,
+            key_max_open_blobs: NZUsize!(64),
             value_write_buffer: WRITE_BUFFER,
+            value_max_open_blobs: NZUsize!(64),
             replay_buffer: REPLAY_BUFFER,
         };
         let mut archive =
@@ -83,7 +85,9 @@ impl StorageWorkload for ArchiveImmutableWorkload {
             ordinal_partition: format!("archive-immutable-ordinal-{seed}"),
             items_per_section: ITEMS_PER_SECTION,
             freezer_key_write_buffer: WRITE_BUFFER,
+            freezer_key_max_open_blobs: NZUsize!(64),
             freezer_value_write_buffer: WRITE_BUFFER,
+            freezer_value_max_open_blobs: NZUsize!(64),
             ordinal_write_buffer: WRITE_BUFFER,
             replay_buffer: REPLAY_BUFFER,
             codec_config: (),

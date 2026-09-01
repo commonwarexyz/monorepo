@@ -189,6 +189,8 @@ where
             replay_buffer: config.replay_buffer,
             key_write_buffer: config.key_write_buffer,
             value_write_buffer: config.value_write_buffer,
+            key_max_open_blobs: config.key_max_open_blobs,
+            value_max_open_blobs: config.value_max_open_blobs,
             key_page_cache: config.page_cache.clone(),
         };
         let cache = cache::Manager::init(
