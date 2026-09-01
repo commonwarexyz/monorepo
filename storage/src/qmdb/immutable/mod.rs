@@ -80,7 +80,7 @@ use crate::{
     },
     merkle::{Family, Location, Proof, full::Config as MerkleConfig},
     qmdb::{
-        Error, any::ValueEncoding, batch_chain, build_snapshot_from_log, metrics::Metrics,
+        Error, any::ValueEncoding, batch_chain, build_retained_snapshot_from_log, metrics::Metrics,
         operation::Key, single_operation_root,
     },
     translator::Translator,
@@ -230,7 +230,6 @@ where
         context: E,
         translator: T,
         init_buffer: NonZeroUsize,
-        cache_size: Option<NonZeroUsize>,
     ) -> Result<Self, Error<F>> {
         if journal.size() == 0 {
             warn!("Authenticated log is empty, initialized new db.");
@@ -256,14 +255,14 @@ where
                 return Err(Error::DataCorrupted("inactivity floor exceeds last commit"));
             }
 
-            // Replay the log from the inactivity floor to build the snapshot.
-            build_snapshot_from_log::<F, _, _, _>(
+            // Replay the log from the inactivity floor to build the snapshot. Every keyed
+            // location is retained, mirroring the live apply path, so a repeated key keeps
+            // serving one of its written values across restarts and rewinds.
+            build_retained_snapshot_from_log::<F, _, _>(
                 inactivity_floor_loc,
                 &journal.journal,
                 &mut snapshot,
                 init_buffer,
-                cache_size,
-                |_, _| {},
             )
             .await?;
 
@@ -3505,6 +3504,83 @@ pub(super) mod tests {
 
         // Rewind further to commit A: the v2 entry is dropped and get() must
         // serve v1, proving the gap fill restored the v1 location.
+        let db = db.rewind(first_size).await.unwrap();
+        assert_eq!(db.get(&key).await.unwrap(), Some(v1));
+
+        db.destroy().await.unwrap();
+    }
+
+    /// A live db retains every location of a repeated key, so rewinding across the newer
+    /// write keeps serving the older retained one with no reopen involved.
+    #[boxed]
+    pub(crate) async fn run_rewind_repeated_key_live<F: Family, V, C>(
+        context: deterministic::Context,
+        open_db: impl Fn(
+            deterministic::Context,
+        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+    ) where
+        V: ValueEncoding<Value = Digest>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
+        C::Item: EncodeShared,
+    {
+        let db = open_db(context.child("first")).await;
+
+        let key = Sha256::fill(7u8);
+        let v1 = Sha256::fill(17u8);
+        let v2 = Sha256::fill(18u8);
+
+        // Commit A: Set(key, v1) with floor=0.
+        let (db, _) = commit_sets(db, [(key, v1)], None).await;
+        let first_size = db.bounds().end;
+
+        // Commit B: Set(key, v2) with floor=0. Either written value may be served.
+        let (db, _) = commit_sets(db, [(key, v2)], None).await;
+        let live = db.get(&key).await.unwrap().unwrap();
+        assert!(live == v1 || live == v2);
+
+        // Rewind to commit A: the v2 location is dropped and the retained v1
+        // location keeps serving the key.
+        let db = db.rewind(first_size).await.unwrap();
+        assert_eq!(db.get(&key).await.unwrap(), Some(v1));
+
+        db.destroy().await.unwrap();
+    }
+
+    /// Replay keeps only a repeated key's newest location, so a reopened db must still honor
+    /// the repeated-key read contract after a rewind that crosses the newer write: the older
+    /// write stays retained at an unchanged floor, and reads of the key may return any of its
+    /// written values, never `None`.
+    #[boxed]
+    pub(crate) async fn run_rewind_after_reopen_repeated_key_retained<F: Family, V, C>(
+        context: deterministic::Context,
+        open_db: impl Fn(
+            deterministic::Context,
+        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+    ) where
+        V: ValueEncoding<Value = Digest>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
+        C::Item: EncodeShared,
+    {
+        let db = open_db(context.child("first")).await;
+
+        let key = Sha256::fill(7u8);
+        let v1 = Sha256::fill(17u8);
+        let v2 = Sha256::fill(18u8);
+
+        // Commit A: Set(key, v1) with floor=0.
+        let (db, _) = commit_sets(db, [(key, v1)], None).await;
+        let first_size = db.bounds().end;
+
+        // Commit B: Set(key, v2) with floor=0, then persist for the reopen.
+        let (db, _) = commit_sets(db, [(key, v2)], None).await;
+        db.sync().await.unwrap();
+
+        // Reopen: replay visits both writes and keeps only the newer location.
+        let db = open_db(context.child("second")).await;
+        assert_eq!(db.get(&key).await.unwrap(), Some(v2));
+
+        // Rewind to commit A with an unchanged floor: the newer location is dropped, and the
+        // older write, still retained in the restored journal, must keep the key readable.
         let db = db.rewind(first_size).await.unwrap();
         assert_eq!(db.get(&key).await.unwrap(), Some(v1));
 

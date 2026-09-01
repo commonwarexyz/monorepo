@@ -57,14 +57,7 @@ impl<F: Family, E: Context, K: Key, V: VariableValue, H: Hasher, T: Translator, 
             ROOT_BAGGING,
         )
         .await?;
-        Self::init_from_journal(
-            journal,
-            context,
-            cfg.translator,
-            cfg.init_buffer,
-            cfg.init_cache_size,
-        )
-        .await
+        Self::init_from_journal(journal, context, cfg.translator, cfg.init_buffer).await
     }
 }
 

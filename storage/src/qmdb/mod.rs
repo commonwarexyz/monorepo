@@ -257,6 +257,41 @@ impl<F: Family> From<crate::journal::authenticated::Error<F>> for Error<F> {
     }
 }
 
+/// Builds a snapshot by replaying the log starting at `inactivity_floor_loc`, inserting the
+/// location of every keyed operation and retaining prior locations of the same key. Assumes the
+/// log is not pruned beyond the inactivity floor.
+///
+/// Suitable only for logs without update or delete operations, where every retained keyed
+/// operation stays readable. Repeats of a full key all land in the snapshot, matching a snapshot
+/// maintained live, so reads keep returning one of the key's written values however the snapshot
+/// was built.
+///
+/// `init_buffer` sizes the replay read buffer (in bytes).
+pub(super) async fn build_retained_snapshot_from_log<F, C, I>(
+    inactivity_floor_loc: crate::merkle::Location<F>,
+    reader: &C,
+    snapshot: &mut I,
+    init_buffer: NonZeroUsize,
+) -> Result<(), Error<F>>
+where
+    F: crate::merkle::Family,
+    C: Contiguous<Item: Operation<F>>,
+    I: Index<Value = crate::merkle::Location<F>>,
+{
+    let stream = reader
+        .replay(*inactivity_floor_loc, init_buffer, ReadOptions::default())
+        .await?;
+    pin_mut!(stream);
+    while let Some(result) = stream.next().await {
+        let (loc, op) = result?;
+        debug_assert!(!op.is_delete());
+        if let Some(key) = op.key() {
+            snapshot.insert(key, crate::merkle::Location::new(loc));
+        }
+    }
+    Ok(())
+}
+
 /// Builds the database's snapshot by replaying the log starting at the inactivity floor. Assumes
 /// the log is not pruned beyond the inactivity floor. The callback is invoked for each replayed
 /// operation, indicating activity status updates. The first argument of the callback is the
