@@ -4,7 +4,6 @@
 use commonware_macros::stability_scope;
 
 stability_scope!(BETA {
-    use crate::{Buf, BufMut};
     use commonware_codec::{DecodeExt, Encode, FixedSize, Read as CodecRead, Write as CodecWrite};
     use commonware_cryptography::Crc32;
     use commonware_formatting::hex;
@@ -274,7 +273,7 @@ stability_scope!(BETA {
     /// The blob version is opaque to the runtime: creation stamps the newest version the caller
     /// requested, reopening rejects versions outside the caller's range, and the stored value is
     /// returned by [crate::Storage::open_versioned].
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, CodecRead, CodecWrite, FixedSize)]
     pub(crate) struct Header {
         magic: [u8; Self::MAGIC_LENGTH],
         runtime_version: u16,
@@ -389,36 +388,6 @@ stability_scope!(BETA {
                 });
             }
             Ok(layout)
-        }
-    }
-
-    impl FixedSize for Header {
-        const SIZE: usize = Self::PRELUDE_SIZE;
-    }
-
-    impl CodecWrite for Header {
-        fn write(&self, buf: &mut impl BufMut) {
-            buf.put_slice(&self.magic);
-            buf.put_u16(self.runtime_version);
-            buf.put_u16(self.blob_version);
-        }
-    }
-
-    impl CodecRead for Header {
-        type Cfg = ();
-        fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-            if buf.remaining() < Self::PRELUDE_SIZE {
-                return Err(commonware_codec::Error::EndOfBuffer);
-            }
-            let mut magic = [0u8; Self::MAGIC_LENGTH];
-            buf.copy_to_slice(&mut magic);
-            let runtime_version = buf.get_u16();
-            let blob_version = buf.get_u16();
-            Ok(Self {
-                magic,
-                runtime_version,
-                blob_version,
-            })
         }
     }
 

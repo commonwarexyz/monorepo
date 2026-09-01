@@ -41,7 +41,7 @@
 //! is called _partial_. All pages in a blob are full except for the very last page, which can be
 //! full or partial. A partial page's durable prefix remains recoverable while it is rewritten.
 
-use crate::{Blob, Buf, BufMut, Error, IoBuf, ReadOptions};
+use crate::{Blob, Error, IoBuf, ReadOptions};
 #[cfg(any(test, feature = "test-utils"))]
 use crate::{Storage, WriteOptions};
 use commonware_codec::{EncodeFixed, FixedSize, Read as CodecRead, ReadExt, Write};
@@ -318,6 +318,7 @@ impl ActiveChecksum {
 ///
 /// The CRC with the larger length is authoritative. Two slots let a partial-page rewrite preserve
 /// the checksum covering the previously committed bytes while writing the new checksum elsewhere.
+#[derive(CodecRead, FixedSize, Write)]
 struct Checksum {
     len1: u16,
     crc1: u32,
@@ -448,32 +449,6 @@ impl Checksum {
         len.write(&mut buf);
         bytes
     }
-}
-
-impl Write for Checksum {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.len1.write(buf);
-        self.crc1.write(buf);
-        self.len2.write(buf);
-        self.crc2.write(buf);
-    }
-}
-
-impl CodecRead for Checksum {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        Ok(Self {
-            len1: u16::read(buf)?,
-            crc1: u32::read(buf)?,
-            len2: u16::read(buf)?,
-            crc2: u32::read(buf)?,
-        })
-    }
-}
-
-impl FixedSize for Checksum {
-    const SIZE: usize = 2 * u16::SIZE + 2 * crc32::Digest::SIZE;
 }
 
 #[cfg(feature = "arbitrary")]
