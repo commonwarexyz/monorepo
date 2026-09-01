@@ -77,7 +77,10 @@
 //! # Implementing for Custom Types
 //!
 //! You typically need to implement [Write], [EncodeSize] (unless [FixedSize]), and [Read]
-//! for your custom structs and enums.
+//! for your custom structs and enums. When the encoding is a plain field-order fold with no
+//! decode-time validation, derive them instead (see [Write](macro@Write), [EncodeSize](macro@EncodeSize),
+//! [FixedSize](macro@FixedSize), and [Read](macro@Read)). A hand-written [Read] signals that the
+//! type checks something beyond structure.
 //!
 //! ## Example 1. Fixed-Size Type
 //!
@@ -214,6 +217,10 @@
 )]
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
 
+// Let derive-generated `::commonware_codec` paths resolve inside this crate itself.
+#[allow(unused_extern_crates)]
+extern crate self as commonware_codec;
+
 commonware_macros::stability_scope!(BETA {
     #[cfg(not(feature = "std"))]
     extern crate alloc;
@@ -234,6 +241,126 @@ commonware_macros::stability_scope!(BETA {
     pub use error::Error;
     pub use extensions::*;
     pub use mode::{InvalidMode, Mode, Modes};
+
+    // Re-export bytes for derive-generated code
+    #[doc(hidden)]
+    pub use bytes;
+
+    /// Derives [Write](trait@Write) by writing each field in declaration order; enum variants
+    /// write their mandatory `#[codec(tag = N)]` byte first, and `write_bufs` forwards to each
+    /// field's `write_bufs`.
+    ///
+    /// All four codec derives accept `#[codec(bound = "...")]` to replace the auto-generated
+    /// per-field bounds (an empty string keeps only the type's inherited bounds).
+    ///
+    /// ```
+    /// use commonware_codec::{DecodeExt, Encode, EncodeSize, Read, Write};
+    ///
+    /// #[derive(Debug, PartialEq, Write, EncodeSize, Read)]
+    /// struct Item {
+    ///     id: u32,
+    ///     label: Option<u8>,
+    /// }
+    ///
+    /// #[derive(Debug, PartialEq, Write, EncodeSize, Read)]
+    /// enum Message {
+    ///     #[codec(tag = 0)]
+    ///     Ping,
+    ///     #[codec(tag = 7)]
+    ///     Item(Item),
+    /// }
+    ///
+    /// let message = Message::Item(Item { id: 1, label: None });
+    /// let encoded = message.encode();
+    /// assert_eq!(encoded[0], 7);
+    /// assert_eq!(Message::decode(encoded).unwrap(), message);
+    /// ```
+    ///
+    /// Duplicate tags are rejected at compile time:
+    /// ```compile_fail
+    /// #[derive(commonware_codec::Write)]
+    /// enum Bad {
+    ///     #[codec(tag = 0)]
+    ///     A,
+    ///     #[codec(tag = 0)]
+    ///     B,
+    /// }
+    /// ```
+    pub use commonware_codec_macros::Write;
+
+    /// Derives [EncodeSize](trait@EncodeSize) as the sum of field sizes, plus one tag byte for
+    /// enums; `encode_inline_size` forwards to each field's `encode_inline_size`.
+    ///
+    /// Never derive this alongside [FixedSize](trait@FixedSize), which provides
+    /// [EncodeSize](trait@EncodeSize) automatically.
+    pub use commonware_codec_macros::EncodeSize;
+
+    /// Derives [FixedSize](trait@FixedSize) with `SIZE` the sum of field sizes.
+    ///
+    /// ```
+    /// use commonware_codec::{FixedSize, Read, Write};
+    ///
+    /// #[derive(Write, Read, FixedSize)]
+    /// struct Pair {
+    ///     a: u32,
+    ///     b: [u8; 8],
+    /// }
+    ///
+    /// assert_eq!(Pair::SIZE, 12);
+    /// ```
+    ///
+    /// Enums are rejected (variants differ in size):
+    /// ```compile_fail
+    /// #[derive(commonware_codec::FixedSize)]
+    /// enum Bad {
+    ///     #[codec(tag = 0)]
+    ///     A,
+    /// }
+    /// ```
+    pub use commonware_codec_macros::FixedSize;
+
+    /// Derives [Read](trait@Read) by reading each field in declaration order.
+    ///
+    /// `Cfg` is `()` unless exactly one field (or at most one per enum variant) is marked
+    /// `#[codec(cfg)]`, in which case that field's [Read::Cfg](trait@Read) becomes the
+    /// container's and receives the caller's config; every other field must have a unit-like
+    /// ([IsUnit]) config. Unknown enum tags yield [Error::InvalidEnum].
+    ///
+    /// ```
+    /// use bytes::Bytes;
+    /// use commonware_codec::{Decode, Encode, EncodeSize, RangeCfg, Read, Write};
+    ///
+    /// #[derive(Debug, PartialEq, Write, EncodeSize, Read)]
+    /// struct Blob {
+    ///     seq: u64,
+    ///     #[codec(cfg)]
+    ///     data: Bytes,
+    /// }
+    ///
+    /// let blob = Blob { seq: 9, data: Bytes::from_static(b"abc") };
+    /// let cfg: RangeCfg<usize> = (0..=16).into();
+    /// assert_eq!(Blob::decode_cfg(blob.encode(), &cfg).unwrap(), blob);
+    /// ```
+    ///
+    /// A field with a non-unit config must be marked `#[codec(cfg)]`:
+    /// ```compile_fail
+    /// #[derive(commonware_codec::Read)]
+    /// struct Bad {
+    ///     data: bytes::Bytes,
+    /// }
+    /// ```
+    ///
+    /// At most one field may be marked:
+    /// ```compile_fail
+    /// #[derive(commonware_codec::Read)]
+    /// struct Bad {
+    ///     #[codec(cfg)]
+    ///     a: bytes::Bytes,
+    ///     #[codec(cfg)]
+    ///     b: bytes::Bytes,
+    /// }
+    /// ```
+    pub use commonware_codec_macros::Read;
 });
 
 commonware_macros::stability_scope!(ALPHA {

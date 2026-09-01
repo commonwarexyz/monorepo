@@ -5,6 +5,9 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
+mod expand;
+mod input;
+
 use proc_macro::TokenStream;
 use proc_macro_crate::{FoundCrate, crate_name};
 use proc_macro2::Span;
@@ -15,15 +18,15 @@ use syn::{
 };
 
 /// Resolves the path to the `commonware-codec` crate, accounting for renames and use within
-/// `commonware-codec` itself.
+/// `commonware-codec` itself (which aliases itself via `extern crate self`, so its doctests
+/// resolve the same path).
 fn codec_path() -> proc_macro2::TokenStream {
     match crate_name("commonware-codec") {
-        Ok(FoundCrate::Itself) => quote!(crate),
+        Ok(FoundCrate::Itself) | Err(_) => quote!(::commonware_codec),
         Ok(FoundCrate::Name(name)) => {
             let ident = Ident::new(&name, Span::call_site());
             quote!(::#ident)
         }
-        Err(_) => quote!(::commonware_codec),
     }
 }
 
@@ -34,6 +37,53 @@ fn where_clause_with(generics: &Generics, predicate: WherePredicate) -> WhereCla
     generics
         .where_clause
         .expect("make_where_clause should create a where clause")
+}
+
+/// Derives `Write` by writing each field in declaration order.
+///
+/// Enum variants write their mandatory `#[codec(tag = N)]` byte before their fields, and
+/// `write_bufs` forwards to each field's `write_bufs`. All four codec derives accept
+/// `#[codec(bound = "...")]` to replace the auto-generated per-field bounds.
+#[proc_macro_derive(Write, attributes(codec))]
+pub fn derive_write(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    expand::write(&input)
+        .unwrap_or_else(Error::into_compile_error)
+        .into()
+}
+
+/// Derives `EncodeSize` as the sum of field sizes, plus one tag byte for enums.
+///
+/// Never derive this alongside `FixedSize`, which provides `EncodeSize` automatically.
+#[proc_macro_derive(EncodeSize, attributes(codec))]
+pub fn derive_encode_size(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    expand::encode_size(&input)
+        .unwrap_or_else(Error::into_compile_error)
+        .into()
+}
+
+/// Derives `FixedSize` with `SIZE` the sum of field sizes. Structs only.
+#[proc_macro_derive(FixedSize, attributes(codec))]
+pub fn derive_fixed_size(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    expand::fixed_size(&input)
+        .unwrap_or_else(Error::into_compile_error)
+        .into()
+}
+
+/// Derives `Read` by reading each field in declaration order.
+///
+/// `Cfg` is `()` unless exactly one field (or at most one per enum variant) is marked
+/// `#[codec(cfg)]`, in which case that field's `Read::Cfg` becomes the container's and receives
+/// the caller's config; every other field must have a unit-like config. Unknown enum tags yield
+/// `Error::InvalidEnum`.
+#[proc_macro_derive(Read, attributes(codec))]
+pub fn derive_read(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    expand::read(&input)
+        .unwrap_or_else(Error::into_compile_error)
+        .into()
 }
 
 /// Derives byte-array conversion impls for a fixed-size type.

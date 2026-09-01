@@ -49,6 +49,14 @@ impl_is_unit_for_tuple!(A, B, C, D, E, F, G, H, I, J);
 impl_is_unit_for_tuple!(A, B, C, D, E, F, G, H, I, J, K);
 impl_is_unit_for_tuple!(A, B, C, D, E, F, G, H, I, J, K, L);
 
+/// Returns the config for a type whose `Cfg` is [IsUnit].
+///
+/// Used by derive-generated [Read] implementations for fields that require no configuration.
+#[doc(hidden)]
+pub fn unit_cfg<C: IsUnit>() -> C {
+    C::default()
+}
+
 /// Extension trait providing ergonomic decode method for types requiring no specific configuration.
 /// This is typically types with only one possible value, such as the unit type `()` or tuples of
 /// such types.

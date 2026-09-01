@@ -26,7 +26,10 @@ use crate::{
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use bytes::{Buf, BufMut};
-use core::num::{NonZeroU16, NonZeroU32, NonZeroU64};
+use core::{
+    marker::PhantomData,
+    num::{NonZeroU16, NonZeroU32, NonZeroU64},
+};
 #[cfg(feature = "std")]
 use std::vec::Vec;
 
@@ -293,6 +296,25 @@ impl<T: Read> Read for Option<T> {
         } else {
             Ok(None)
         }
+    }
+}
+
+// PhantomData implementation (zero bytes)
+impl<T: ?Sized> Write for PhantomData<T> {
+    #[inline]
+    fn write(&self, _: &mut impl BufMut) {}
+}
+
+impl<T: ?Sized> FixedSize for PhantomData<T> {
+    const SIZE: usize = 0;
+}
+
+impl<T: ?Sized> Read for PhantomData<T> {
+    type Cfg = ();
+
+    #[inline]
+    fn read_cfg(_: &mut impl Buf, _: &Self::Cfg) -> Result<Self, Error> {
+        Ok(Self)
     }
 }
 
