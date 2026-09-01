@@ -66,7 +66,7 @@ impl<P: PublicKey> Directory<P> for Unit {
 }
 
 /// Address directory for transports that dial by [`Address`].
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, EncodeSize, Write)]
 pub struct Addresses<P: PublicKey>(Map<P, Address>);
 
 impl<P: PublicKey> Addresses<P> {
@@ -90,18 +90,6 @@ impl<P: PublicKey> From<Map<P, Address>> for Addresses<P> {
 impl<P: PublicKey> FromIterator<(P, Address)> for Addresses<P> {
     fn from_iter<I: IntoIterator<Item = (P, Address)>>(iter: I) -> Self {
         Self(Map::from_iter_dedup(iter))
-    }
-}
-
-impl<P: PublicKey> Write for Addresses<P> {
-    fn write(&self, writer: &mut impl bytes::BufMut) {
-        self.0.write(writer);
-    }
-}
-
-impl<P: PublicKey> EncodeSize for Addresses<P> {
-    fn encode_size(&self) -> usize {
-        self.0.encode_size()
     }
 }
 

@@ -19,8 +19,7 @@
 //! distributes).
 
 use crate::dkg::{SecretStore, network::Directory, types::EpochInfo};
-use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
+use commonware_codec::{EncodeSize, Read, Write};
 use commonware_consensus::types::Epoch;
 use commonware_cryptography::{
     BatchVerifier, PublicKey, Signer,
@@ -57,61 +56,14 @@ const PAGE_CACHE_CAPACITY: NonZeroUsize = NZUsize!(1 << 13); // 8 KiB
 const WRITE_BUFFER: NonZeroUsize = NZUsize!(1 << 12); // 4 KiB
 const READ_BUFFER: NonZeroUsize = NZUsize!(1 << 20); // 1 MiB
 
+#[derive(EncodeSize, Read, Write)]
 enum Event<V: Variant, P: PublicKey> {
-    Dealing(P, DealerPubMsg<V>),
+    #[codec(tag = 0)]
+    Dealing(P, #[codec(cfg)] DealerPubMsg<V>),
+    #[codec(tag = 1)]
     Ack(P, PlayerAck<P>),
-    Log(P, DealerLog<V, P>),
-}
-
-impl<V: Variant, P: PublicKey> EncodeSize for Event<V, P> {
-    fn encode_size(&self) -> usize {
-        1 + match self {
-            Self::Dealing(dealer, public) => dealer.encode_size() + public.encode_size(),
-            Self::Ack(player, ack) => player.encode_size() + ack.encode_size(),
-            Self::Log(dealer, log) => dealer.encode_size() + log.encode_size(),
-        }
-    }
-}
-
-impl<V: Variant, P: PublicKey> Write for Event<V, P> {
-    fn write(&self, writer: &mut impl BufMut) {
-        match self {
-            Self::Dealing(dealer, public) => {
-                0u8.write(writer);
-                dealer.write(writer);
-                public.write(writer);
-            }
-            Self::Ack(player, ack) => {
-                1u8.write(writer);
-                player.write(writer);
-                ack.write(writer);
-            }
-            Self::Log(dealer, log) => {
-                2u8.write(writer);
-                dealer.write(writer);
-                log.write(writer);
-            }
-        }
-    }
-}
-
-impl<V: Variant, P: PublicKey> Read for Event<V, P> {
-    type Cfg = NonZeroU32;
-
-    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        match u8::read(reader)? {
-            0 => Ok(Self::Dealing(
-                ReadExt::read(reader)?,
-                Read::read_cfg(reader, cfg)?,
-            )),
-            1 => Ok(Self::Ack(ReadExt::read(reader)?, ReadExt::read(reader)?)),
-            2 => Ok(Self::Log(
-                ReadExt::read(reader)?,
-                Read::read_cfg(reader, cfg)?,
-            )),
-            tag => Err(CodecError::InvalidEnum(tag)),
-        }
-    }
+    #[codec(tag = 2)]
+    Log(P, #[codec(cfg)] DealerLog<V, P>),
 }
 
 #[cfg(feature = "arbitrary")]
@@ -707,7 +659,7 @@ mod tests {
         tests::mocks::MemorySecretStore,
         types::{EpochInfo, EpochOutcome},
     };
-    use commonware_codec::FixedSize;
+    use commonware_codec::{FixedSize, ReadExt};
     use commonware_consensus::types::Epoch;
     use commonware_cryptography::{
         Signer,

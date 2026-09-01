@@ -7,7 +7,7 @@
 //! beyond the synced epoch.
 
 use crate::dkg::{network::Directory, types::EpochInfo};
-use bytes::{Buf, BufMut};
+use bytes::Buf;
 use commonware_codec::{Decode as _, Encode as _, EncodeSize, Error as CodecError, Read, Write};
 use commonware_consensus::{
     Epochable as _,
@@ -57,6 +57,7 @@ pub struct Config {
 ///
 /// The probe fixes the floor and the epoch info atomically, so the info
 /// always describes the epoch containing the floor.
+#[derive(EncodeSize, Write)]
 pub struct StateSync<S, D, V, Dir = Unit>
 where
     S: Scheme<D>,
@@ -124,31 +125,6 @@ where
     V: Variant,
     Dir: Directory<S::PublicKey>,
 {
-}
-
-impl<S, D, V, Dir> Write for StateSync<S, D, V, Dir>
-where
-    S: Scheme<D>,
-    D: Digest,
-    V: Variant,
-    Dir: Directory<S::PublicKey>,
-{
-    fn write(&self, writer: &mut impl BufMut) {
-        self.info.write(writer);
-        self.floor.write(writer);
-    }
-}
-
-impl<S, D, V, Dir> EncodeSize for StateSync<S, D, V, Dir>
-where
-    S: Scheme<D>,
-    D: Digest,
-    V: Variant,
-    Dir: Directory<S::PublicKey>,
-{
-    fn encode_size(&self) -> usize {
-        self.info.encode_size() + self.floor.encode_size()
-    }
 }
 
 impl<S, D, V, Dir> Read for StateSync<S, D, V, Dir>

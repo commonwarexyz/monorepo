@@ -2,7 +2,7 @@ use crate::stateful::{
     Application,
     db::{Anchor, DatabaseSet},
 };
-use commonware_codec::{EncodeSize, Error, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{EncodeSize, Read, Write};
 use commonware_consensus::{
     CertifiableBlock, Heightable, Roundable,
     marshal::{
@@ -13,7 +13,7 @@ use commonware_consensus::{
     types::Height,
 };
 use commonware_cryptography::{Digest, Digestible, certificate::Scheme};
-use commonware_runtime::{Buf, BufMut, Clock, Metrics, Spawner};
+use commonware_runtime::{Clock, Metrics, Spawner};
 use commonware_storage::{
     Context,
     metadata::{self, Metadata},
@@ -36,13 +36,15 @@ const SYNC_STATE_KEY: FixedBytes<1> = fixed_bytes!("C0");
 type BlockDigest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
 
 /// Durable sync progress.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, EncodeSize, Read, Write)]
 pub(crate) enum SyncState<S, C>
 where
     S: Scheme,
     C: Digest,
 {
-    InProgress(Finalization<S, C>),
+    #[codec(tag = 0)]
+    InProgress(#[codec(cfg)] Finalization<S, C>),
+    #[codec(tag = 1)]
     Complete(Height),
 }
 
@@ -56,55 +58,6 @@ where
         match self {
             Self::InProgress(_) => None,
             Self::Complete(height) => Some(*height),
-        }
-    }
-}
-
-impl<S, C> Write for SyncState<S, C>
-where
-    S: Scheme,
-    C: Digest,
-{
-    fn write(&self, writer: &mut impl BufMut) {
-        match self {
-            Self::InProgress(floor) => {
-                0u8.write(writer);
-                floor.write(writer);
-            }
-            Self::Complete(height) => {
-                1u8.write(writer);
-                height.write(writer);
-            }
-        }
-    }
-}
-
-impl<S, C> EncodeSize for SyncState<S, C>
-where
-    S: Scheme,
-    C: Digest,
-{
-    fn encode_size(&self) -> usize {
-        u8::SIZE
-            + match self {
-                Self::InProgress(floor) => floor.encode_size(),
-                Self::Complete(height) => height.encode_size(),
-            }
-    }
-}
-
-impl<S, C> Read for SyncState<S, C>
-where
-    S: Scheme,
-    C: Digest,
-{
-    type Cfg = <S::Certificate as Read>::Cfg;
-
-    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
-        match u8::read(reader)? {
-            0 => Ok(Self::InProgress(Finalization::read_cfg(reader, cfg)?)),
-            1 => Ok(Self::Complete(Height::read(reader)?)),
-            n => Err(Error::InvalidEnum(n)),
         }
     }
 }

@@ -1,4 +1,4 @@
-use bytes::{Buf, BufMut};
+use bytes::Buf;
 use commonware_codec::{Decode, DecodeExt, EncodeSize, Error, FixedSize, Read, ReadExt, Write};
 use commonware_consensus::{
     marshal::core::Variant,
@@ -7,54 +7,31 @@ use commonware_consensus::{
 };
 
 /// First byte of a DKG probe message.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Read, Write)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub(crate) enum Tag {
     /// Request the boundary finalization for an epoch.
+    #[codec(tag = 0)]
     BoundaryRequest,
     /// Response carrying a boundary finalization.
+    #[codec(tag = 1)]
     BoundaryResponse,
     /// Request the boundary block for an epoch.
+    #[codec(tag = 2)]
     BlockRequest,
     /// Response carrying a finalized block.
+    #[codec(tag = 3)]
     BlockResponse,
     /// Request the receiver's latest finalization.
+    #[codec(tag = 4)]
     LatestRequest,
     /// Response carrying the receiver's latest finalization.
+    #[codec(tag = 5)]
     LatestResponse,
 }
 
 impl FixedSize for Tag {
     const SIZE: usize = u8::SIZE;
-}
-
-impl Write for Tag {
-    fn write(&self, writer: &mut impl BufMut) {
-        match self {
-            Self::BoundaryRequest => 0u8.write(writer),
-            Self::BoundaryResponse => 1u8.write(writer),
-            Self::BlockRequest => 2u8.write(writer),
-            Self::BlockResponse => 3u8.write(writer),
-            Self::LatestRequest => 4u8.write(writer),
-            Self::LatestResponse => 5u8.write(writer),
-        }
-    }
-}
-
-impl Read for Tag {
-    type Cfg = ();
-
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        match u8::read(reader)? {
-            0 => Ok(Self::BoundaryRequest),
-            1 => Ok(Self::BoundaryResponse),
-            2 => Ok(Self::BlockRequest),
-            3 => Ok(Self::BlockResponse),
-            4 => Ok(Self::LatestRequest),
-            5 => Ok(Self::LatestResponse),
-            n => Err(Error::InvalidEnum(n)),
-        }
-    }
 }
 
 /// Request decoded from a peer.
@@ -88,18 +65,23 @@ where
 }
 
 /// DKG probe protocol message.
+#[derive(EncodeSize, Write)]
 pub(crate) enum Message<S, V>
 where
     S: Scheme<V::Commitment>,
     V: Variant,
 {
     /// Request the boundary finalization for `epoch`.
+    #[codec(tag = 0)]
     BoundaryRequest(Epoch),
     /// Respond with a boundary finalization.
+    #[codec(tag = 1)]
     BoundaryResponse(Finalization<S, V::Commitment>),
     /// Request the boundary block for `epoch`.
+    #[codec(tag = 2)]
     BlockRequest(Epoch),
     /// Respond with a finalized block.
+    #[codec(tag = 3)]
     BlockResponse {
         /// Epoch echoed from the request.
         epoch: Epoch,
@@ -107,62 +89,11 @@ where
         block: V::Block,
     },
     /// Request the receiver's latest finalization.
+    #[codec(tag = 4)]
     LatestRequest,
     /// Respond with the receiver's latest finalization.
+    #[codec(tag = 5)]
     LatestResponse(Finalization<S, V::Commitment>),
-}
-
-impl<S, V> Write for Message<S, V>
-where
-    S: Scheme<V::Commitment>,
-    V: Variant,
-{
-    fn write(&self, writer: &mut impl BufMut) {
-        match self {
-            Self::BoundaryRequest(epoch) => {
-                Tag::BoundaryRequest.write(writer);
-                epoch.write(writer);
-            }
-            Self::BoundaryResponse(finalization) => {
-                Tag::BoundaryResponse.write(writer);
-                finalization.write(writer);
-            }
-            Self::BlockRequest(epoch) => {
-                Tag::BlockRequest.write(writer);
-                epoch.write(writer);
-            }
-            Self::BlockResponse { epoch, block } => {
-                Tag::BlockResponse.write(writer);
-                epoch.write(writer);
-                block.write(writer);
-            }
-            Self::LatestRequest => {
-                Tag::LatestRequest.write(writer);
-            }
-            Self::LatestResponse(finalization) => {
-                Tag::LatestResponse.write(writer);
-                finalization.write(writer);
-            }
-        }
-    }
-}
-
-impl<S, V> EncodeSize for Message<S, V>
-where
-    S: Scheme<V::Commitment>,
-    V: Variant,
-{
-    fn encode_size(&self) -> usize {
-        Tag::SIZE
-            + match self {
-                Self::BoundaryRequest(epoch) => epoch.encode_size(),
-                Self::BoundaryResponse(finalization) => finalization.encode_size(),
-                Self::BlockRequest(epoch) => epoch.encode_size(),
-                Self::BlockResponse { epoch, block } => epoch.encode_size() + block.encode_size(),
-                Self::LatestRequest => 0,
-                Self::LatestResponse(finalization) => finalization.encode_size(),
-            }
-    }
 }
 
 #[cfg(feature = "arbitrary")]
