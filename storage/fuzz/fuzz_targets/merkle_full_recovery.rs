@@ -1,7 +1,13 @@
 #![no_main]
 
-//! Fuzz test for persisted Merkle crash recovery with fault injection.
-//! Tests both MMR and MMB families.
+//! Persisted Merkle (MMR and MMB) crash recovery under injected sync, write, and remove faults.
+//!
+//! The op phase interleaves appends with sync, flush, and abandoned start_sync barriers, plus
+//! prune drives with remove faults armed so a prune can fail after removing only some blobs.
+//! The oracle checks the recovered size, leaf count, and prune boundary against tracked
+//! durable floors and attempted ceilings, then compares every readable node against an
+//! independently rebuilt reference tree so a same-size corruption cannot pass. A sentinel
+//! append, sync, and reopen prove the recovered instance still writes durably.
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::{Sha256, sha256::Digest};
@@ -102,17 +108,29 @@ fn merkle_config(
     }
 }
 
-/// Expected bounds for state after recovery.
+/// Conservative bounds on what a recovery may produce after an unclean shutdown:
+/// - the recovered size is in `[min_size, max_size]`,
+/// - the recovered leaf count is in `[min_leaves, max_leaves]`,
+/// - the recovered prune boundary is in `[min_pruned, max_pruned]`.
 struct ExpectedBounds {
+    /// Guaranteed-durable size floor, raised only by completed barriers.
     min_size: u64,
+    /// Ceiling on the recovered size, raised by every append.
     max_size: u64,
+    /// Guaranteed-durable leaf floor, raised only by completed barriers.
     min_leaves: u64,
+    /// Ceiling on the recovered leaf count, raised by every append.
     max_leaves: u64,
+    /// Guaranteed prune floor, raised only by completed prunes.
     min_pruned: u64,
+    /// Ceiling on the recovered prune boundary, including failed prune attempts.
     max_pruned: u64,
+    /// Every leaf in append order, for rebuilding the reference tree.
     leaves: Vec<[u8; DATA_SIZE]>,
 }
 
+/// Drive the operation sequence under armed faults until one fails, tracking the durable
+/// floors and attempted ceilings the recovery oracle asserts against.
 async fn run_operations<F: MerkleFamily>(
     mut merkle: Merkle<F>,
     hasher: &StandardHasher<Sha256>,
@@ -266,6 +284,7 @@ async fn run_operations<F: MerkleFamily>(
     }
 }
 
+/// Rebuild an in-memory tree from the first `count` intended leaves.
 fn build_reference<F: MerkleFamily>(
     hasher: &StandardHasher<Sha256>,
     leaves: &[[u8; DATA_SIZE]],
@@ -281,6 +300,8 @@ fn build_reference<F: MerkleFamily>(
     reference
 }
 
+/// Run one family through the faulted op phase, the faulted recovery chain, and a clean
+/// recovery that verifies the oracle and post-recovery usability.
 fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
     let page_size = NonZeroU16::new(input.page_size).unwrap();
     let page_cache_size = NonZeroUsize::new(input.page_cache_size).unwrap();
@@ -316,7 +337,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                 ),
             )
             .await
-            .unwrap();
+            .expect("initial merkle init failed");
 
             let storage_fault_cfg = ctx.storage_fault_config();
             let op_faults = deterministic::FaultConfig {
@@ -342,6 +363,8 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
         }
     });
 
+    // A failed recovery instance is abandoned. Its crash checkpoint must remain recoverable by
+    // the same ordinary initialization path with faults disabled.
     let recovery_partition_suffix = partition_suffix.clone();
     let checkpoint = faulted_recovery(checkpoint, move |ctx| {
         let recovery_partition_suffix = recovery_partition_suffix.clone();
@@ -384,7 +407,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
             ),
         )
         .await
-        .expect("recovery should succeed");
+        .expect("merkle recovery failed");
 
         // Verify recovered state is within expected bounds
         let size = merkle.size().as_u64();
@@ -393,38 +416,32 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
 
         assert!(
             size <= bounds.max_size,
-            "size {} > max_size {}",
-            size,
+            "recovered size {size} exceeds the ceiling {} raised by appends",
             bounds.max_size
         );
         assert!(
             size >= bounds.min_size,
-            "size {} < min_size {}",
-            size,
+            "recovered size {size} lost nodes below the durable floor {}",
             bounds.min_size
         );
         assert!(
             leaves <= bounds.max_leaves,
-            "leaves {} > max_leaves {}",
-            leaves,
+            "recovered leaf count {leaves} exceeds the ceiling {} raised by appends",
             bounds.max_leaves
         );
         assert!(
             leaves >= bounds.min_leaves,
-            "leaves {} < min_leaves {}",
-            leaves,
+            "recovered leaf count {leaves} lost leaves below the durable floor {}",
             bounds.min_leaves
         );
         assert!(
             pruned <= bounds.max_pruned,
-            "pruned {} > max_pruned {}",
-            pruned,
+            "recovered prune boundary {pruned} exceeds the highest attempted prune {}",
             bounds.max_pruned
         );
         assert!(
             pruned >= bounds.min_pruned,
-            "pruned {} < min_pruned {}",
-            pruned,
+            "recovered prune boundary {pruned} resurrected nodes below the durable prune floor {}",
             bounds.min_pruned
         );
 
@@ -433,12 +450,8 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
         let reference = build_reference::<F>(&hasher, &bounds.leaves, leaves);
         if leaves > 0 {
             assert_eq!(
-                merkle
-                    .root(&hasher, 0)
-                    .expect("recovered root should exist"),
-                reference
-                    .root(&hasher, 0)
-                    .expect("reference root should exist"),
+                merkle.root(&hasher, 0).expect("recovered root missing"),
+                reference.root(&hasher, 0).expect("reference root missing"),
                 "recovered root does not match the intended leaf prefix",
             );
         }
@@ -453,24 +466,49 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
             .map(|&position| {
                 reference
                     .get_node(position)
-                    .expect("reference node should exist")
+                    .expect("reference node missing")
             })
             .collect::<Vec<_>>();
         assert_eq!(
             merkle
                 .get_nodes(&positions)
                 .await
-                .expect("recovered nodes should remain readable"),
+                .expect("recovered node read failed"),
             expected_nodes,
             "recovered nodes do not match the intended leaf prefix",
         );
 
-        // Verify we can add new data after recovery
+        // Prove the recovered instance still writes durably: append a sentinel leaf, sync it,
+        // and reopen to the same root.
         let test_data = [0xABu8; DATA_SIZE];
         let batch = merkle.new_batch().add(&hasher, &test_data);
         let batch = merkle.with_mem(|mem| batch.merkleize(mem, &hasher));
         let merkle = merkle.apply_batch(&batch).unwrap();
-        merkle.destroy().await.expect("should be able to destroy");
+        let merkle = merkle.sync().await.expect("post-recovery sync failed");
+        let root = merkle.root(&hasher, 0).expect("post-recovery root missing");
+        drop(merkle);
+
+        let reopened = Merkle::<F>::init(
+            ctx.child("reopened"),
+            &hasher,
+            merkle_config(
+                &partition_suffix,
+                &ctx,
+                page_size,
+                page_cache_size,
+                items_per_blob,
+                write_buffer,
+                replay_buffer,
+            ),
+        )
+        .await
+        .expect("reopen after sentinel sync failed");
+        assert_eq!(
+            reopened.root(&hasher, 0).expect("reopened root missing"),
+            root,
+            "sentinel leaf did not survive the reopen",
+        );
+        reopened.destroy().await.expect("destroy failed");
     });
 }
 

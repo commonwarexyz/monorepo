@@ -1,8 +1,8 @@
 #![no_main]
 
-//! Fuzz target contiguous journal crash recovery.
+//! Contiguous journal crash recovery across repeated crash/recover cycles.
 //!
-//! A journal is an append-only log of items. Appends are buffered; `sync` and `commit` establish
+//! A journal is an append-only log of items. Appends are buffered. `sync` and `commit` establish
 //! durability, while the configured crash policy may retain unsynchronized storage mutations. On
 //! the next `init()` the journal must rebuild a consistent state from whatever survived. This
 //! target tests recovering after storage faults.
@@ -35,7 +35,7 @@
 //! above the durable prefix are still content-checked: every readable frame is CRC-gated and
 //! composed of old or new bytes only, so a recovered item must be one of the values recorded at
 //! that position (see `candidates`). `assert_matches_expected` checks recovery falls within
-//! them; `to_expected` then snapshots it as the next cycle's start.
+//! them. `to_expected` then snapshots it as the next cycle's start.
 //!
 //! # Faults
 //!
@@ -99,7 +99,7 @@ fn bounded_rate(u: &mut Unstructured<'_>) -> arbitrary::Result<Probability> {
     Ok(probability!(u64::from(percent), 100))
 }
 
-/// Op sequence capped at `MAX_OPERATIONS`; a derived `Vec` would instead grow with input length.
+/// Op sequence capped at `MAX_OPERATIONS`. A derived `Vec` would instead grow with input length.
 fn bounded_operations(u: &mut Unstructured<'_>) -> arbitrary::Result<Vec<JournalOperation>> {
     let num_ops = u.int_in_range(0..=MAX_OPERATIONS)?;
     (0..num_ops)
@@ -236,11 +236,11 @@ impl Params {
 /// - the recovered pruning boundary is in `[durable_prune, max_prune]`.
 #[derive(Clone, Default)]
 struct Expected {
-    /// Guaranteed-durable prefix length; also the minimum recovered size.
+    /// Guaranteed-durable prefix length. It is also the minimum recovered size.
     durable_len: u64,
     /// Upper bound on the recovered size.
     max_size: u64,
-    /// Guaranteed pruning floor; positions below are guaranteed pruned.
+    /// Guaranteed pruning floor. Positions below are guaranteed pruned.
     durable_prune: u64,
     /// Upper bound on the recovered pruning boundary.
     max_prune: u64,
@@ -325,7 +325,7 @@ impl Expected {
     }
 
     /// Successful prune durably deletes whole sections, so recovery can never reopen below
-    /// `boundary`; pin it exactly. (The boundary only moves forward.)
+    /// `boundary`. Pin it exactly. (The boundary only moves forward.)
     fn pruned(&mut self, boundary: u64) {
         self.durable_prune = boundary;
         self.max_prune = boundary;
@@ -807,7 +807,7 @@ async fn run_ops<J: FuzzJournal>(
                 if bounds.is_empty() {
                     journal
                 } else {
-                    // Usually clamp to a valid retained target; occasionally pass the raw value to
+                    // Usually clamp to a valid retained target. Occasionally pass the raw value to
                     // exercise the validation paths.
                     let use_raw_target = *size % 8 == 0;
                     let target = if use_raw_target {
@@ -821,7 +821,7 @@ async fn run_ops<J: FuzzJournal>(
                             journal
                         }
                         // Any error ends the cycle. Validation errors reject before
-                        // mutating and are only possible for a raw target; seeing one for
+                        // mutating and are only possible for a raw target, so seeing one for
                         // a clamped target is a bug. Any other error
                         // may have interrupted the truncation and lost data above `target`,
                         // so lower durable_len conservatively.
@@ -1018,7 +1018,7 @@ where
 
         let mut expected = to_expected(&journal).await;
 
-        // Faults on for the operation phase; returning drops the journal (the crash).
+        // Faults on for the operation phase. Returning drops the journal (the crash).
         *ctx.storage_fault_config().write() = params.fault_config();
         run_ops(&ctx, journal, &mut expected, &cycle.ops, params).await;
         expected

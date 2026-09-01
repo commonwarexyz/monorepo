@@ -19,7 +19,6 @@
 //! exactly the images whose surviving covered sections form a nonempty suffix.
 
 use arbitrary::Arbitrary;
-use commonware_cryptography::Crc32;
 use commonware_runtime::{
     Blob as _, BufferPooler, ReadOptions, Runner, Storage as _, Supervisor as _,
     buffer::paged::CacheRef,
@@ -27,7 +26,9 @@ use commonware_runtime::{
     mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs},
 };
 use commonware_storage::journal::{Error, segmented::variable};
-use commonware_storage_fuzz::{bounded_entropy, faulted_recovery, release_oldest_pending_sync};
+use commonware_storage_fuzz::{
+    bounded_entropy, faulted_recovery, poll_interrupted, valid_page_len,
+};
 use commonware_utils::{FuzzRng, NZUsize, Probability};
 use libfuzzer_sys::fuzz_target;
 use std::{
@@ -44,9 +45,15 @@ const SECTIONS: u64 = 4;
 
 #[derive(Arbitrary, Clone, Debug)]
 struct FuzzInput {
+    /// Length selector for the scripted append stream.
     count: u8,
+    /// Append offset at which a fault-free sync_all establishes the durable baseline.
     baseline: u8,
+    /// Byte retention rate (percent) for the partial writes the interrupted final
+    /// sync leaves behind.
     retention: u8,
+    /// Whether the torn section retains a byte subset or a byte prefix of each
+    /// partial write.
     subset: bool,
     /// Per-item target section selector.
     routes: [u8; 32],
@@ -93,32 +100,6 @@ fn items(input: &FuzzInput) -> Vec<(u64, Vec<u8>)> {
             (section, vec![id as u8; len])
         })
         .collect()
-}
-
-/// Select a page's authoritative checksum slot, falling back to the other slot if a write tore.
-fn valid_page_len(page: &[u8]) -> Option<usize> {
-    let footer = page.get(PAGE_SIZE..)?;
-    if footer.len() != PAGE_CHECKSUM_RECORD_SIZE {
-        return None;
-    }
-    let slots = [
-        (
-            u16::from_be_bytes(footer[0..2].try_into().unwrap()) as usize,
-            u32::from_be_bytes(footer[2..6].try_into().unwrap()),
-        ),
-        (
-            u16::from_be_bytes(footer[6..8].try_into().unwrap()) as usize,
-            u32::from_be_bytes(footer[8..12].try_into().unwrap()),
-        ),
-    ];
-    let authoritative = usize::from(slots[1].0 > slots[0].0);
-    for slot in [authoritative, authoritative ^ 1] {
-        let (len, checksum) = slots[slot];
-        if len > 0 && len <= PAGE_SIZE && Crc32::checksum(&page[..len]) == checksum {
-            return Some(len);
-        }
-    }
-    None
 }
 
 /// Decode a LEB128 varint u32 frame header, returning `(header len, data len)`.
@@ -179,7 +160,7 @@ async fn recover_expected(
                 .await
                 .expect("oracle read failed")
                 .coalesce();
-            match valid_page_len(physical.as_ref()) {
+            match valid_page_len(physical.as_ref(), PAGE_SIZE) {
                 Some(len) => {
                     any_valid = true;
                     if prefix_open {
@@ -269,7 +250,7 @@ async fn recover_once(context: deterministic::Context) -> Result<(), Error> {
         inner: context,
         pending,
     };
-    let journal = Journal::init(context.child("journal"), config(&context)).await?;
+    let journal = Journal::init(context.child("faulted_recovery"), config(&context)).await?;
     let mut replay = journal
         .replay(0, 0, NZUsize!(1024), ReadOptions::default())
         .await?;
@@ -403,21 +384,16 @@ fn fuzz(input: FuzzInput) {
                 ..Default::default()
             };
             pending.arm();
-            let mut sync = Box::pin(journal.sync_all());
-            for _ in 0..usize::from(phase_input.final_polls) % 2 + 1 {
-                if let Some(result) = futures::future::poll_immediate(sync.as_mut()).await {
-                    // A sync that ran to completion is an observed barrier: it must
-                    // succeed and every routed item in a live section becomes durable.
-                    drop(result.expect("interrupted sync failed"));
-                    durable = live
-                        .iter()
-                        .map(|&section| (section, effective[&section].len()))
-                        .collect();
-                    break;
-                }
-                release_oldest_pending_sync(&pending);
+            let polls = usize::from(phase_input.final_polls) % 2 + 1;
+            if let Some(result) = poll_interrupted(&pending, journal.sync_all(), polls).await {
+                // A sync that ran to completion is an observed barrier: it must
+                // succeed and every routed item in a live section becomes durable.
+                drop(result.expect("interrupted sync failed"));
+                durable = live
+                    .iter()
+                    .map(|&section| (section, effective[&section].len()))
+                    .collect();
             }
-            drop(sync);
             (durable, effective, live, doomed)
         });
 

@@ -1,6 +1,19 @@
 #![no_main]
 
 //! Freezer recovery across supported partial-write crash cuts.
+//!
+//! The crash cuts either the put path (candidate writes past a checkpointed baseline) or
+//! the resize path (a sync that writes both table regions while a bounded resize is in
+//! progress), through failed writes that retain selected submitted bytes or successful
+//! writes left volatile by a failed durability barrier. The deepen arm first completes a
+//! table resize and rolls past one value section, so recovery trims a multi-section value
+//! journal against a doubled table.
+//!
+//! The oracle treats the supplied checkpoint as the Freezer authority: recovery must trim
+//! the oversized journal, table epochs, and any interrupted resize back to exactly the
+//! checkpointed logical state, and every cursor from the discarded candidate suffix must
+//! be unreadable. A sentinel put, sync, and reopen then prove the recovered instance can
+//! publish a new checkpoint.
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Crc32;
@@ -32,8 +45,12 @@ enum CrashKind {
 
 #[derive(Arbitrary, Clone, Debug)]
 struct FuzzInput {
+    /// Write path the crash cuts: candidate puts or an in-progress table resize sync.
     path: WritePath,
+    /// Cut through failed writes (bytes retained immediately) or successful writes
+    /// left volatile by a failed durability barrier.
     crash: CrashKind,
+    /// Byte retention rate (percent) for the partial writes the crash leaves behind.
     retention: u8,
     /// Let the first candidate write succeed (volatile) and fail the second,
     /// so the failed-write cut can land past a pending update.
@@ -250,6 +267,8 @@ fn run(input: &FuzzInput, mode: PartialWriteMode) {
             (freezer_checkpoint, baseline, candidate_cursors)
         });
 
+    // Chain faulted recovery attempts, each restoring the checkpoint under fresh faults
+    // and crashing into the next.
     let runtime_checkpoint = faulted_recovery(runtime_checkpoint, move |context| async move {
         Freezer::<_, Key, i32>::init(
             context.child("faulted_recovery"),

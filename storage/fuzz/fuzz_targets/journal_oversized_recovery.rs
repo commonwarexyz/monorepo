@@ -2,6 +2,12 @@
 
 //! Oversized journal crash recovery under supported partial-write crash cuts, in inferred and
 //! marker-tracked recovery modes.
+//!
+//! The oracle derives each section's retained prefix from the raw crash image (see
+//! `recover_expected` for the per-mode rules and marker-floor invariants). It asserts that
+//! entries covered by a completed sync survive, that recovery removes orphan value sections
+//! and truncates each value glob to the last retained entry, that a second recovery mutates
+//! nothing, and that sentinel appends land at the repaired tail and reopen intact.
 
 use arbitrary::Arbitrary;
 use commonware_codec::{DecodeExt as _, FixedSize, Read, ReadExt as _, Write};
@@ -21,7 +27,9 @@ use commonware_storage::{
     },
     metadata::{Config as MetadataConfig, Metadata},
 };
-use commonware_storage_fuzz::{bounded_entropy, faulted_recovery, release_oldest_pending_sync};
+use commonware_storage_fuzz::{
+    bounded_entropy, faulted_recovery, poll_interrupted, valid_page_len,
+};
 use commonware_utils::{FuzzRng, NZU16, NZUsize, Probability, sequence::U64};
 use libfuzzer_sys::fuzz_target;
 use std::{
@@ -102,8 +110,11 @@ type TestValue = [u8; 16];
 
 #[derive(Arbitrary, Clone, Debug)]
 struct FuzzInput {
+    /// Number of entries to append (1..=24).
     count: u8,
+    /// Crash retention rate (percent) for unsynced bytes.
     retention: u8,
+    /// Partial-write mode: Subset when set, Prefix otherwise.
     subset: bool,
     /// Drive the whole execution through marker-tracked recovery: the op-phase instance and
     /// every recovery attempt (interrupted or clean) open the sidecar, replay, and finish
@@ -119,8 +130,10 @@ struct FuzzInput {
     /// inside rewind is not falsifiable here. Prune's ordering is made falsifiable by the
     /// interrupted-prune final op and by the remove faults armed around every prune.
     ops: [u8; 24],
-    /// Shape of the faulted crash: flush everything then abandon the requests, interrupt a
-    /// blocking sync mid-flight, or abandon a tracked prune mid-flight.
+    /// Shape of the faulted crash: flush everything then abandon the requests (also the
+    /// fallback for the prune arm when untracked), interrupt a blocking sync of every
+    /// section, interrupt a blocking sync of one section, or abandon a tracked prune
+    /// mid-flight.
     final_op: u8,
     /// Remove failure rate (percent) armed around every prune, sampled per section-blob
     /// removal so a prune can fail after removing an index section but before its value
@@ -178,33 +191,6 @@ fn items(input: &FuzzInput) -> Vec<(u64, u64)> {
             (section, id)
         })
         .collect()
-}
-
-/// Select a page's authoritative checksum slot, falling back to the other slot if a write tore.
-fn valid_page_len(page: &[u8]) -> Option<usize> {
-    let page_size = usize::from(PAGE_SIZE.get());
-    let footer = page.get(page_size..)?;
-    if footer.len() != PAGE_CHECKSUM_RECORD_SIZE {
-        return None;
-    }
-    let slots = [
-        (
-            u16::from_be_bytes(footer[0..2].try_into().unwrap()) as usize,
-            u32::from_be_bytes(footer[2..6].try_into().unwrap()),
-        ),
-        (
-            u16::from_be_bytes(footer[6..8].try_into().unwrap()) as usize,
-            u32::from_be_bytes(footer[8..12].try_into().unwrap()),
-        ),
-    ];
-    let authoritative = usize::from(slots[1].0 > slots[0].0);
-    for slot in [authoritative, authoritative ^ 1] {
-        let (len, checksum) = slots[slot];
-        if len > 0 && len <= page_size && Crc32::checksum(&page[..len]) == checksum {
-            return Some(len);
-        }
-    }
-    None
 }
 
 /// Return whether `entry` references an in-bounds value frame whose checksum verifies against
@@ -291,7 +277,7 @@ async fn recover_expected(
                 .await
                 .expect("oracle index read failed")
                 .coalesce();
-            let Some(len) = valid_page_len(physical.as_ref()) else {
+            let Some(len) = valid_page_len(physical.as_ref(), page_size) else {
                 break;
             };
             logical.extend_from_slice(&physical.as_ref()[..len]);
@@ -651,18 +637,15 @@ fn fuzz(input: FuzzInput) {
                     // volatile while every other blob syncs durably. Releasing the gate and
                     // polling again instead completes the sync before the crash.
                     pending.arm();
-                    let mut sync = Box::pin(oversized.sync_all());
-                    for _ in 0..usize::from(first_phase_input.final_op >> 2) % 2 + 1 {
-                        if let Some(result) = futures::future::poll_immediate(sync.as_mut()).await {
-                            // A sync that ran to completion is an observed barrier: it must
-                            // succeed and every appended entry becomes durable.
-                            drop(result.expect("interrupted sync_all failed"));
-                            durable = counts.clone();
-                            break;
-                        }
-                        release_oldest_pending_sync(&pending);
+                    let polls = usize::from(first_phase_input.final_op >> 2) % 2 + 1;
+                    if let Some(result) =
+                        poll_interrupted(&pending, oversized.sync_all(), polls).await
+                    {
+                        // A sync that ran to completion is an observed barrier: it must
+                        // succeed and every appended entry becomes durable.
+                        drop(result.expect("interrupted sync_all failed"));
+                        durable = counts.clone();
                     }
-                    drop(sync);
                 }
                 2 => {
                     // Interrupt a blocking sync of one section behind the armed gate, with
@@ -673,20 +656,17 @@ fn fuzz(input: FuzzInput) {
                     if section < prune_floor {
                         section = prune_floor + section % (SECTIONS - prune_floor);
                     }
-                    let mut sync = Box::pin(oversized.sync(section));
-                    for _ in 0..usize::from(first_phase_input.final_op >> 5) % 2 + 1 {
-                        if let Some(result) = futures::future::poll_immediate(sync.as_mut()).await {
-                            // A completed section sync must succeed and makes that section's
-                            // appended entries durable.
-                            drop(result.expect("interrupted section sync failed"));
-                            if let Some(&count) = counts.get(&section) {
-                                durable.insert(section, count);
-                            }
-                            break;
+                    let polls = usize::from(first_phase_input.final_op >> 5) % 2 + 1;
+                    if let Some(result) =
+                        poll_interrupted(&pending, oversized.sync(section), polls).await
+                    {
+                        // A completed section sync must succeed and makes that section's
+                        // appended entries durable.
+                        drop(result.expect("interrupted section sync failed"));
+                        if let Some(&count) = counts.get(&section) {
+                            durable.insert(section, count);
                         }
-                        release_oldest_pending_sync(&pending);
                     }
-                    drop(sync);
                 }
                 3 if tracked => {
                     // Interrupt a prune behind the armed gate and abandon it mid-flight. This arm
@@ -699,28 +679,21 @@ fn fuzz(input: FuzzInput) {
                     pending.arm();
                     let min = u64::from(first_phase_input.final_op >> 2) % SECTIONS;
                     let polls = usize::from(first_phase_input.final_op >> 4) % 3;
-                    let mut prune = Box::pin(oversized.prune(min));
                     let mut completed = false;
-                    for _ in 0..polls {
-                        if let Some(result) = futures::future::poll_immediate(prune.as_mut()).await
-                        {
-                            // A prune that ran to completion durably removed the markers and
-                            // section blobs below the floor before returning. One that failed on a
-                            // section removal consumed the journal with those removals partially
-                            // applied, which the post-loop durability drop below covers.
-                            if let Ok((journal, did_prune)) = result {
-                                drop(journal);
-                                if did_prune {
-                                    durable.retain(|&section, _| section >= min);
-                                    model.retain(|&section, _| section >= min);
-                                }
-                                completed = true;
-                            }
-                            break;
+                    // A prune that ran to completion durably removed the markers and
+                    // section blobs below the floor before returning. One that failed on a
+                    // section removal consumed the journal with those removals partially
+                    // applied, which the durability drop below covers.
+                    if let Some(Ok((journal, did_prune))) =
+                        poll_interrupted(&pending, oversized.prune(min), polls).await
+                    {
+                        drop(journal);
+                        if did_prune {
+                            durable.retain(|&section, _| section >= min);
+                            model.retain(|&section, _| section >= min);
                         }
-                        release_oldest_pending_sync(&pending);
+                        completed = true;
                     }
-                    drop(prune);
 
                     // The oracle must not depend on where the abandoned or failed future stopped,
                     // so durability claims below the floor are dropped rather than assuming the
@@ -748,6 +721,8 @@ fn fuzz(input: FuzzInput) {
             (durable, model, flushed_all)
         });
 
+    // A failed recovery instance is abandoned. Its crash checkpoint must remain recoverable by
+    // the same recovery path, tracked or inferred, with faults disabled.
     let checkpoint = if tracked {
         faulted_recovery(checkpoint, |context| async move {
             init_tracked(context.child("faulted_recovery"), config(&context)).await

@@ -2,9 +2,13 @@
 
 //! Fuzz test for Current QMDB crash recovery with fault injection.
 //!
-//! Phase 1 runs state-changing operations (update, delete, commit, prune) with
-//! injected write/sync failures, then "crashes". Phase 2 attempts recovery under
-//! storage faults, crashes again, then recovers cleanly and verifies the DB is usable.
+//! Phase 1 runs state-changing operations (update, delete, commit, prune) under injected
+//! write/sync failures, with remove faults armed only around each prune drive, then
+//! "crashes". A chain of one to four faulted recovery attempts follows, each restoring the
+//! crash image under fresh input-driven faults and crashing into the next. Phase 2 recovers
+//! cleanly and checks the oracle: the recovered (state, root) pair must be atomic at a
+//! recorded batch boundary, key-value and range proofs must verify against that root, and
+//! a fresh batch proves the recovered DB is usable.
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::{Sha256, sha256::Digest};
@@ -50,20 +54,28 @@ enum CurrentOperation {
 /// Fuzz input containing fault injection parameters and operations.
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {
+    /// Page size for buffer pool.
     #[arbitrary(with = bounded_page_size)]
     page_size: u16,
+    /// Number of pages in the buffer pool cache.
     #[arbitrary(with = bounded_page_cache_size)]
     page_cache_size: usize,
+    /// Items per blob for the Merkle journal.
     #[arbitrary(with = bounded_items)]
     merkle_items_per_blob: u64,
+    /// Items per section for the operations log.
     #[arbitrary(with = bounded_items)]
     log_items_per_blob: u64,
+    /// Write buffer size.
     #[arbitrary(with = bounded_buffer)]
     write_buffer: usize,
+    /// Replay buffer size.
     #[arbitrary(with = bounded_buffer)]
     replay_buffer: usize,
+    /// Failure rate for sync operations (0, 1].
     #[arbitrary(with = bounded_nonzero_rate)]
     sync_failure_rate: Probability,
+    /// Failure and byte-retention configuration for write operations.
     write_config: deterministic::WriteConfig,
     /// Remove failure rate (percent) armed only around each prune drive, sampled per blob
     /// removal so the ops-log prune inside can fail after removing only some blobs, leaving
@@ -71,6 +83,7 @@ struct FuzzInput {
     /// is bitmap-chunk aligned, so the log removes nothing below 256 committed operations,
     /// beyond reachable input sizes.
     remove_failure: u8,
+    /// Sequence of operations to execute.
     operations: Vec<CurrentOperation>,
     /// Byte stream driving the runtime rng: all in-run randomness, fault sampling, and the
     /// faulted recovery chain's depth and shapes.
@@ -252,7 +265,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
         async move {
             let mut db: Db<F> = Db::init(ctx.child("db"), make_config(&ctx, &suffix, params))
                 .await
-                .unwrap();
+                .expect("initial init failed");
 
             // Root recorded at the last successful commit boundary (initially empty).
             let mut committed_root = db.root();
@@ -377,7 +390,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
 
             let db: Db<F> = Db::init(ctx.child("recovered"), make_config(&ctx, &suffix, params))
                 .await
-                .expect("recovery must succeed");
+                .expect("recovery failed");
 
             // Read every observed key in one batch so the result must match one atomic
             // snapshot, and require the recovered root to match the root recorded at
@@ -389,7 +402,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
             let recovered = db
                 .get_many(&key_refs)
                 .await
-                .expect("whole-snapshot read should not fail");
+                .expect("whole-snapshot read failed on recovered data");
             let matches_allowed = allowed_states.iter().any(|(state, expected_root)| {
                 *expected_root == root
                     && known_keys
@@ -411,7 +424,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
                 let proof = db
                     .key_value_proof(key.clone())
                     .await
-                    .expect("proof generation should not fail for recovered key");
+                    .expect("proof generation failed for a recovered key");
                 assert!(
                     Db::<F>::verify_key_value_proof(key, value, &proof, &root),
                     "key value proof failed to verify after crash recovery"
@@ -426,7 +439,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
                 let (proof, ops, chunks) = db
                     .range_proof(loc, NZU64!(4))
                     .await
-                    .expect("range proof should not fail after recovery");
+                    .expect("range proof generation failed after recovery");
                 assert!(
                     Db::<F>::verify_range_proof(&proof, loc, &ops, &chunks, &root),
                     "range proof failed to verify after crash recovery at loc {loc}"
@@ -441,19 +454,14 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
                 .write(test_key, Some(test_value))
                 .merkleize(&db, None)
                 .await
-                .unwrap();
+                .expect("post-recovery merkleize failed");
             let (db, _) = db
                 .apply_batch(batch)
                 .await
-                .expect("apply_batch after recovery should succeed");
-            let db = db
-                .commit()
-                .await
-                .expect("commit after recovery should succeed");
+                .expect("post-recovery apply_batch failed");
+            let db = db.commit().await.expect("post-recovery commit failed");
 
-            db.destroy()
-                .await
-                .expect("destroy after recovery should succeed");
+            db.destroy().await.expect("destroy failed");
         }
     });
 }

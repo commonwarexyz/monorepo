@@ -1,6 +1,12 @@
 #![no_main]
 
 //! Metadata recovery across supported partial-write crash cuts.
+//!
+//! Rewrite, overwrite, and remove write paths are crossed with three crash kinds: a failed
+//! write, an unsynced write parked at the delayed durability barrier, and an acked sync that
+//! completes the barrier first. The oracle pins that recovery yields the baseline or the
+//! complete candidate, never a mixture, and that a crash after an acknowledged sync
+//! preserves the acked state exactly.
 
 use arbitrary::Arbitrary;
 use commonware_codec::Read;
@@ -27,16 +33,23 @@ enum WritePath {
 
 #[derive(Arbitrary, Clone, Copy, Debug)]
 enum CrashKind {
+    /// The mutating sync's write fails, possibly retaining submitted bytes immediately.
     FailedWrite,
+    /// The write succeeds but its durability barrier parks for the crash to cut.
     UnsyncedWrite,
+    /// The parked barrier completes before the crash, so the cut finds nothing volatile.
     AckedSync,
 }
 
 #[derive(Arbitrary, Clone, Debug)]
 struct FuzzInput {
+    /// Mutation applied on top of the committed baseline.
     path: WritePath,
+    /// Where the crash lands relative to the mutating sync's durability barrier.
     crash: CrashKind,
+    /// Crash retention rate (percent) for faulted bytes.
     retention: u8,
+    /// Base value bytes, tagged per write path.
     payload: [u8; 32],
     /// Byte stream driving the runtime rng: all in-run randomness, fault sampling, and the
     /// faulted recovery chain's depth and shapes.
@@ -245,7 +258,11 @@ fn run(input: &FuzzInput, mode: PartialWriteMode) {
         let metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("reopened"), config())
             .await
             .expect("post-recovery reopen failed");
-        assert_eq!(snapshot(&metadata), expected);
+        assert_eq!(
+            snapshot(&metadata),
+            expected,
+            "reopen lost the post-recovery synced state"
+        );
         metadata.destroy().await.expect("metadata destroy failed");
     });
 }

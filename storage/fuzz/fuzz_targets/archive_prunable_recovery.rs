@@ -1,6 +1,16 @@
 #![no_main]
 
 //! Prunable archive recovery under supported partial-write crash cuts.
+//!
+//! The op phase pipelines start_sync requests whose completions stay parked until an op
+//! releases them, drives prunes with remove faults armed so a prune can fail between the
+//! index and value section removals, and optionally appends through put_multi with repeated
+//! indices. The faulted crash takes one of three shapes: an abandoned sync request, an
+//! interrupted blocking sync, or an interrupted prune. The oracle reconstructs the retained
+//! entries and repaired section sizes from the raw crash image (recover_expected), asserts
+//! every entry covered by a completed sync survived, checks the recovered index and value
+//! blob sizes exactly, then repairs the archive and proves the full view survives a sync
+//! and reopen.
 
 use arbitrary::Arbitrary;
 use commonware_codec::{DecodeExt as _, FixedSize, Read, ReadExt as _};
@@ -16,7 +26,9 @@ use commonware_storage::{
     rmap::RMap,
     translator::EightCap,
 };
-use commonware_storage_fuzz::{bounded_entropy, faulted_recovery, release_oldest_pending_sync};
+use commonware_storage_fuzz::{
+    bounded_entropy, faulted_recovery, poll_interrupted, valid_page_len,
+};
 use commonware_utils::{FuzzRng, NZUsize, Probability, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 use std::{
@@ -34,10 +46,15 @@ const VALUE_CHECKSUM_SIZE: usize = 4;
 
 #[derive(Arbitrary, Clone, Debug)]
 struct FuzzInput {
+    /// Number of entries to append (1..=24).
     count: u8,
+    /// Entries per section (1..=8).
     items_per_section: u8,
+    /// Crash retention rate (percent) for unsynced bytes.
     retention: u8,
+    /// Partial-write mode: Subset when set, Prefix otherwise.
     subset: bool,
+    /// Use put_multi with repeated indices instead of put.
     multi: bool,
     /// Per-entry action applied after its put: pipeline a sync, release one held completion,
     /// settle everything held, or prune.
@@ -176,32 +193,6 @@ async fn read_value(
     Value::decode(&frame.as_ref()[..data_len]).ok()
 }
 
-/// Select a page's authoritative checksum slot, falling back to the other slot if a write tore.
-fn valid_page_len(page: &[u8]) -> Option<usize> {
-    let footer = page.get(INDEX_PAGE_SIZE..)?;
-    if footer.len() != PAGE_CHECKSUM_RECORD_SIZE {
-        return None;
-    }
-    let slots = [
-        (
-            u16::from_be_bytes(footer[0..2].try_into().unwrap()) as usize,
-            u32::from_be_bytes(footer[2..6].try_into().unwrap()),
-        ),
-        (
-            u16::from_be_bytes(footer[6..8].try_into().unwrap()) as usize,
-            u32::from_be_bytes(footer[8..12].try_into().unwrap()),
-        ),
-    ];
-    let authoritative = usize::from(slots[1].0 > slots[0].0);
-    for slot in [authoritative, authoritative ^ 1] {
-        let (len, checksum) = slots[slot];
-        if len > 0 && len <= INDEX_PAGE_SIZE && Crc32::checksum(&page[..len]) == checksum {
-            return Some(len);
-        }
-    }
-    None
-}
-
 /// Decode the contiguous, whole-record prefix of each raw index section without repairing it.
 async fn read_index_sections(
     context: &deterministic::Context,
@@ -231,7 +222,7 @@ async fn read_index_sections(
                 .await
                 .expect("oracle index read failed")
                 .coalesce();
-            let Some(len) = valid_page_len(physical.as_ref()) else {
+            let Some(len) = valid_page_len(physical.as_ref(), INDEX_PAGE_SIZE) else {
                 break;
             };
             logical.extend_from_slice(&physical.as_ref()[..len]);
@@ -329,21 +320,32 @@ fn assert_range_helpers(
     let ranges: Vec<_> = archive.ranges().collect();
     let mut actual = BTreeSet::new();
     for &(start, end) in &ranges {
-        assert!(start <= end);
+        assert!(start <= end, "archive exposed an inverted index range");
         assert!(
             end < 64,
             "archive exposed an unmodeled index range {start}..={end}"
         );
         actual.extend(start..=end);
     }
-    assert_eq!(ranges, expected_ranges);
+    assert_eq!(
+        ranges, expected_ranges,
+        "range iteration disagrees with the expected index set"
+    );
     assert_eq!(
         &actual, expected,
         "range metadata disagrees with retained values"
     );
 
-    assert_eq!(archive.first_index(), model.first_index());
-    assert_eq!(archive.last_index(), model.last_index());
+    assert_eq!(
+        archive.first_index(),
+        model.first_index(),
+        "first_index disagrees with the expected index set"
+    );
+    assert_eq!(
+        archive.last_index(),
+        model.last_index(),
+        "last_index disagrees with the expected index set"
+    );
     let mut starts = BTreeSet::from([0]);
     for &index in candidates {
         starts.insert(index);
@@ -358,12 +360,18 @@ fn assert_range_helpers(
             .collect();
         assert_eq!(
             archive.ranges_from(start).collect::<Vec<_>>(),
-            expected_from
+            expected_from,
+            "ranges_from disagrees with the expected index set"
         );
-        assert_eq!(archive.next_gap(start), model.next_gap(start));
+        assert_eq!(
+            archive.next_gap(start),
+            model.next_gap(start),
+            "next_gap disagrees with the expected index set"
+        );
         assert_eq!(
             archive.missing_items(start, 8),
-            model.missing_items(start, 8)
+            model.missing_items(start, 8),
+            "missing_items disagrees with the expected index set"
         );
     }
 }
@@ -380,14 +388,17 @@ async fn assert_view(archive: &TestArchive, intended: &[Entry], expected: &[Entr
         assert_eq!(
             archive.get_all(index).await.unwrap(),
             (!values.is_empty()).then_some(values.clone()),
+            "get_all disagrees with the retained entries"
         );
         assert_eq!(
             archive.get(Identifier::Index(index)).await.unwrap(),
             values.first().cloned(),
+            "get by index disagrees with the retained entries"
         );
         assert_eq!(
             archive.has(Identifier::Index(index)).await.unwrap(),
             !values.is_empty(),
+            "has by index disagrees with the retained entries"
         );
 
         let mut checked_keys = Vec::new();
@@ -399,7 +410,11 @@ async fn assert_view(archive: &TestArchive, intended: &[Entry], expected: &[Entr
             let present = expected
                 .iter()
                 .any(|candidate| candidate.index == index && candidate.key == entry.key);
-            assert_eq!(archive.has_at(index, &entry.key).await.unwrap(), present);
+            assert_eq!(
+                archive.has_at(index, &entry.key).await.unwrap(),
+                present,
+                "has_at disagrees with the retained entries"
+            );
         }
     }
 
@@ -419,10 +434,17 @@ async fn assert_view(archive: &TestArchive, intended: &[Entry], expected: &[Entr
         assert_eq!(
             archive.has(Identifier::Key(&entry.key)).await.unwrap(),
             !values.is_empty(),
+            "has by key disagrees with the retained entries"
         );
         match actual {
-            Some(value) => assert!(values.contains(&value)),
-            None => assert!(values.is_empty()),
+            Some(value) => assert!(
+                values.contains(&value),
+                "get by key returned a value not among the retained entries"
+            ),
+            None => assert!(
+                values.is_empty(),
+                "get by key returned nothing while entries are retained"
+            ),
         }
     }
 }
@@ -593,16 +615,11 @@ fn fuzz(input: FuzzInput) {
                     // the instance) so the crash lands between its internal barriers. A
                     // sync that runs to completion is an observed barrier: it must succeed
                     // and every accepted write becomes durable.
-                    let mut sync = Box::pin(archive.sync());
-                    for _ in 0..usize::from(first_phase_input.final_op >> 2) % 8 + 1 {
-                        if let Some(result) = futures::future::poll_immediate(sync.as_mut()).await {
-                            drop(result.expect("interrupted sync failed"));
-                            durable = durable.max(total);
-                            break;
-                        }
-                        release_oldest_pending_sync(&pending);
+                    let polls = usize::from(first_phase_input.final_op >> 2) % 8 + 1;
+                    if let Some(result) = poll_interrupted(&pending, archive.sync(), polls).await {
+                        drop(result.expect("interrupted sync failed"));
+                        durable = durable.max(total);
                     }
-                    drop(sync);
                 }
                 2 => {
                     // Interrupt a prune mid-flight: the armed gate parks it at the
@@ -619,16 +636,8 @@ fn fuzz(input: FuzzInput) {
                     pruned |= floor > 0;
                     exempt_below = exempt_below.max(floor);
                     pending.arm();
-                    let mut prune = Box::pin(archive.prune(min));
-                    for _ in 0..usize::from(first_phase_input.final_op >> 5) % 2 + 1 {
-                        if let Some(result) = futures::future::poll_immediate(prune.as_mut()).await
-                        {
-                            drop(result);
-                            break;
-                        }
-                        release_oldest_pending_sync(&pending);
-                    }
-                    drop(prune);
+                    let polls = usize::from(first_phase_input.final_op >> 5) % 2 + 1;
+                    drop(poll_interrupted(&pending, archive.prune(min), polls).await);
                 }
                 _ => {
                     let (archive, handle) = archive.start_sync().await.expect("start_sync failed");
@@ -639,6 +648,8 @@ fn fuzz(input: FuzzInput) {
             (durable, exempt_below, pruned)
         });
 
+    // A failed recovery instance is abandoned. Its crash checkpoint must remain recoverable by
+    // the same ordinary initialization path with faults disabled.
     let checkpoint = faulted_recovery(checkpoint, move |context| async move {
         TestArchive::init(
             context.child("faulted_recovery"),
@@ -647,6 +658,8 @@ fn fuzz(input: FuzzInput) {
         .await
     });
 
+    // Clean recovery: derive the expected view from the raw crash image, then verify the
+    // recovered archive against it with faults disabled.
     let recovery_intended = intended.clone();
     let ((expected, expected_index_sizes, expected_value_sizes), checkpoint) =
         deterministic::Runner::from(checkpoint).start_and_recover(move |context| async move {
@@ -695,6 +708,8 @@ fn fuzz(input: FuzzInput) {
             (expected, expected_index_sizes, expected_value_sizes)
         });
 
+    // Usability: recover once more, re-put every lost entry, and prove the repaired archive
+    // serves the full intended view across a sync and reopen.
     deterministic::Runner::from(checkpoint).start(move |context| async move {
         *context.storage_fault_config().write() = deterministic::FaultConfig::default();
         let cfg = config(&context, items_per_section);

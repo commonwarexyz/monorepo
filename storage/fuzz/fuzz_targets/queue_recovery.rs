@@ -7,6 +7,11 @@
 //! - Unacknowledged items are re-delivered after recovery
 //! - Acknowledged items (once committed) may or may not be re-delivered after crash
 //! - Queue state is consistent after recovery
+//!
+//! The operation phase runs under write and sync fault injection. Remove faults are armed only
+//! around each Sync drive, so its internal prune can fail after removing whole sections and
+//! strand a partially pruned image. Between the crash and the clean verification, a chain of
+//! faulted recovery attempts reopens the queue under fresh faults, each crashing into the next.
 
 use arbitrary::Arbitrary;
 use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
@@ -142,12 +147,12 @@ impl RecoveryState {
 
     fn enqueue_failed(&mut self, pos: u64, value: u8) {
         // Enqueue may have partially succeeded (append but not commit).
-        // Track as pending - it may or may not be persisted.
+        // Track the item as pending because it may or may not be persisted.
         self.pending.insert(pos, value);
     }
 
     fn append_succeeded(&mut self, pos: u64, value: u8) {
-        // Append only - not durable until committed.
+        // Append establishes no durability, so the item stays uncommitted until a commit.
         self.uncommitted.insert(pos, value);
     }
 
@@ -164,8 +169,8 @@ impl RecoveryState {
     }
 
     fn commit_failed(&mut self) {
-        // Uncommitted items remain uncommitted; they may or may not be durable.
-        // Move them to pending since we can't be sure.
+        // Uncommitted items remain uncommitted. They may or may not be durable,
+        // so move them to pending.
         let uncommitted = std::mem::take(&mut self.uncommitted);
         for (pos, value) in uncommitted {
             self.pending.insert(pos, value);
@@ -285,7 +290,7 @@ async fn run_operations(
             }
 
             QueueOperation::DequeueNoAck => {
-                // Dequeue without acking - item should be re-delivered on recovery
+                // Dequeue without acking. The unacked item must be re-delivered on recovery.
                 queue
                     .dequeue()
                     .await
@@ -360,6 +365,8 @@ async fn run_operations(
     state
 }
 
+/// Dequeue every unacked item from the recovered queue, checking each recovered position holds
+/// tracked content and that exactly `size - ack_floor` items are delivered.
 async fn verify_recovered_items(
     queue: &mut Queue<deterministic::Context, Vec<u8>>,
     state: &RecoveryState,
@@ -445,21 +452,21 @@ async fn verify_recovery_after_mutable_error(
     );
     verify_recovered_items(&mut queue, state, size_before, ack_floor).await;
 
-    // Queue should remain writable after recovery.
+    // Usability phase: the recovered instance must accept new writes.
     let (queue, new_pos) = queue
         .enqueue(make_item(0xFF))
         .await
-        .expect("enqueue should succeed after recovery");
+        .expect("recovered queue rejected a new enqueue");
     assert_eq!(
         new_pos, size_before,
-        "new item should be appended at current queue size"
+        "new item landed away from the recovered queue size"
     );
 
-    // Persist path should also remain usable.
-    queue
-        .sync()
-        .await
-        .expect("sync should succeed after recovery");
+    // The persist path must also remain usable.
+    let queue = queue.sync().await.expect("recovered queue failed to sync");
+
+    // Destroy exercises the removal path on a post-crash image.
+    queue.destroy().await.expect("destroy");
 }
 
 /// Verify the queue state after recovery.
@@ -472,7 +479,7 @@ async fn verify_recovery(mut queue: Queue<deterministic::Context, Vec<u8>>, stat
     let size = queue.size();
     let ack_floor = queue.ack_floor();
 
-    // Size should be within expected bounds
+    // The recovered size is bounded below by committed items and above by every tracked append.
     assert!(
         size >= state.min_recovered_size(),
         "recovered size {} is less than minimum expected {}",
@@ -496,9 +503,18 @@ async fn verify_recovery(mut queue: Queue<deterministic::Context, Vec<u8>>, stat
 
     verify_recovered_items(&mut queue, state, size, ack_floor).await;
 
-    // Verify we can enqueue new items after recovery
-    let (_queue, new_pos) = queue.enqueue(make_item(0xFF)).await.unwrap();
-    assert_eq!(new_pos, size, "new item should be at position {}", size);
+    // Usability phase: the recovered instance must accept new writes.
+    let (queue, new_pos) = queue
+        .enqueue(make_item(0xFF))
+        .await
+        .expect("recovered queue rejected a new enqueue");
+    assert_eq!(
+        new_pos, size,
+        "new item landed away from the recovered queue size"
+    );
+
+    // Destroy exercises the removal path on a post-crash image.
+    queue.destroy().await.expect("destroy");
 }
 
 fn fuzz(input: FuzzInput) {
@@ -533,7 +549,7 @@ fn fuzz(input: FuzzInput) {
 
             let queue = Queue::<_, Vec<u8>>::init(ctx.child("storage"), queue_cfg)
                 .await
-                .unwrap();
+                .expect("init on a fresh partition with no faults armed");
 
             // Enable fault injection
             let op_faults = deterministic::FaultConfig {
@@ -577,7 +593,7 @@ fn fuzz(input: FuzzInput) {
         }
     });
 
-    // Recovery phase - re-initialize queue from checkpoint
+    // Recovery phase: re-initialize the queue from the crash checkpoint.
     let runner = deterministic::Runner::from(checkpoint);
     runner.start(|ctx| async move {
         // Disable fault injection for recovery verification
@@ -595,7 +611,7 @@ fn fuzz(input: FuzzInput) {
 
         let queue = Queue::<_, Vec<u8>>::init(ctx.child("storage"), queue_cfg)
             .await
-            .expect("Queue recovery should succeed");
+            .expect("clean recovery must succeed on a post-crash image");
 
         verify_recovery(queue, &state).await;
     });

@@ -1,11 +1,15 @@
-//! Shared input generators and crash-recovery flows for storage fuzz targets.
+//! Shared input generators, crash-recovery flows, and raw-image oracles for storage fuzz
+//! targets.
 
 use arbitrary::Unstructured;
+use commonware_cryptography::Crc32;
 use commonware_runtime::{
+    buffer::paged::CHECKSUM_SIZE,
     deterministic::{self, PartialWriteMode},
     mocks::PendingSyncs,
 };
 use commonware_utils::{Probability, probability};
+use futures::future::poll_immediate;
 use rand::{Rng, RngExt as _};
 use std::future::Future;
 
@@ -26,6 +30,27 @@ pub fn release_oldest_pending_sync(pending: &PendingSyncs) {
     if let Some(sync) = released {
         let _ = sync.release.send(Ok(()));
     }
+}
+
+/// Poll `fut` up to `polls` times, completing the oldest parked durability barrier between
+/// unfinished polls.
+///
+/// Returns the output when the future completes within the budget. Otherwise returns `None`
+/// and drops the abandoned future, so the crash lands between its internal barriers. Arming
+/// the pending gate and crediting durability from a completed output stay with the caller.
+pub async fn poll_interrupted<F: Future>(
+    pending: &PendingSyncs,
+    fut: F,
+    polls: usize,
+) -> Option<F::Output> {
+    let mut fut = std::pin::pin!(fut);
+    for _ in 0..polls {
+        if let Some(output) = poll_immediate(fut.as_mut()).await {
+            return Some(output);
+        }
+        release_oldest_pending_sync(pending);
+    }
+    None
 }
 
 /// Draw one faulted recovery attempt's fault config from `rng`.
@@ -120,6 +145,36 @@ where
         remaining = Some(left);
     }
     checkpoint
+}
+
+/// Select a page's authoritative checksum slot, falling back to the other slot if a write tore.
+///
+/// `page` is one raw physical page: `page_size` logical bytes followed by the dual-slot
+/// checksum footer. Returns the CRC-validated logical length, or `None` when neither slot
+/// verifies.
+pub fn valid_page_len(page: &[u8], page_size: usize) -> Option<usize> {
+    let footer = page.get(page_size..)?;
+    if footer.len() != CHECKSUM_SIZE as usize {
+        return None;
+    }
+    let slots = [
+        (
+            u16::from_be_bytes(footer[0..2].try_into().unwrap()) as usize,
+            u32::from_be_bytes(footer[2..6].try_into().unwrap()),
+        ),
+        (
+            u16::from_be_bytes(footer[6..8].try_into().unwrap()) as usize,
+            u32::from_be_bytes(footer[8..12].try_into().unwrap()),
+        ),
+    ];
+    let authoritative = usize::from(slots[1].0 > slots[0].0);
+    for slot in [authoritative, authoritative ^ 1] {
+        let (len, checksum) = slots[slot];
+        if len > 0 && len <= page_size && Crc32::checksum(&page[..len]) == checksum {
+            return Some(len);
+        }
+    }
+    None
 }
 
 /// Cap on the entropy stream a recovery target draws its randomness from.

@@ -3,7 +3,10 @@
 //! Immutable archive recovery across supported partial-write crash cuts.
 //!
 //! Runs start either from a committed sparse baseline or from virgin storage where the
-//! first-ever publish itself runs under the crash policy.
+//! first-ever publish itself runs under the crash policy. The oracle pins that recovery
+//! exposes the committed floor or the complete candidate, never a mixed public view, and
+//! that the stored ordinal sections exactly match the recovered state, with stranded blobs
+//! removed.
 
 use arbitrary::Arbitrary;
 use commonware_runtime::{
@@ -40,12 +43,16 @@ enum FaultKind {
 
 #[derive(Arbitrary, Clone, Debug)]
 struct FuzzInput {
+    /// Fault family (write or sync failures) armed for the candidate phase.
     fault: FaultKind,
+    /// Write or sync failure rate (percent), floored to 1.
     rate: u8,
+    /// Crash retention rate (percent) for faulted bytes.
     retention: u8,
     /// Skip the fault-free baseline commit so init and the first-ever metadata publish run
     /// under faults and recovery can land on the empty commit record.
     virgin: bool,
+    /// Base value bytes, tagged per entry.
     payload: [u8; 32],
     /// Byte stream driving the runtime rng: all in-run randomness, fault sampling, and the
     /// faulted recovery chain's depth and shapes.
@@ -142,11 +149,15 @@ async fn snapshot(archive: &TestArchive, intended: &[Entry]) -> Vec<Entry> {
         );
         assert_eq!(
             archive.has(Identifier::Index(entry.index)).await.unwrap(),
-            by_index.is_some()
+            by_index.is_some(),
+            "has and get by index must agree at {}",
+            entry.index
         );
         assert_eq!(
             archive.has(Identifier::Key(&entry.key)).await.unwrap(),
-            by_key.is_some()
+            by_key.is_some(),
+            "has and get by key must agree at {}",
+            entry.index
         );
         if let Some(value) = by_index {
             assert_eq!(value, entry.value, "wrong value at index {}", entry.index);
@@ -341,7 +352,11 @@ fn run(input: &FuzzInput, mode: PartialWriteMode) {
         let archive = Archive::<_, Key, Value>::init(context.child("reopened"), config(&context))
             .await
             .expect("post-recovery reopen failed");
-        assert_eq!(snapshot(&archive, &expected).await, expected);
+        assert_eq!(
+            snapshot(&archive, &expected).await,
+            expected,
+            "reopen lost the post-recovery synced state"
+        );
         assert_ranges(&archive, &expected);
         assert_sections(&context, &expected).await;
         archive.destroy().await.expect("archive destroy failed");
