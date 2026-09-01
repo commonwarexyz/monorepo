@@ -10,6 +10,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /commonware
 COPY . .
+# Frame pointers let `perf record -g` unwind the deployed binary from a stripped copy, so a
+# node can be profiled in place with call chains at a cost of about one percent.
+ENV RUSTFLAGS="-C force-frame-pointers=yes"
 RUN cargo build --locked --profile release-with-debug --package commonware-log-multimmit \
     && cp target/release-with-debug/commonware-log-multimmit /commonware-log-multimmit-debug \
     && strip -o /commonware-log-multimmit /commonware-log-multimmit-debug
