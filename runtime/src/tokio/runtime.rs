@@ -263,6 +263,10 @@ impl Config {
         self
     }
     /// See [Config]
+    ///
+    /// # Panics
+    ///
+    /// Panics if `layout` is empty.
     pub fn with_storage_blob_layout(mut self, layout: RangeInclusive<BlobLayout>) -> Self {
         assert!(!layout.is_empty(), "storage blob layout must be non-empty");
         self.storage_blob_layout = layout;
@@ -1059,7 +1063,7 @@ mod tests {
         let runner = std::thread::spawn(move || {
             let strategy = Runner::new(cfg).start(move |context| async move {
                 let strategy = context.strategy(NZUsize!(2));
-                strategy.spawn(|_| ()).await;
+                strategy.spawn(1, |_| ()).await;
                 retain.then_some(strategy)
             });
             strategy_tx.send(strategy).unwrap();
@@ -1116,21 +1120,43 @@ mod tests {
 
         assert_eq!(std::fs::read(&v0_path).unwrap(), v0_bytes);
         let v1_path = partition_directory.join(commonware_formatting::hex(b"v1"));
-        let v1 = std::fs::read(v1_path).unwrap();
+        let v1 = std::fs::read(&v1_path).unwrap();
         assert_eq!(&v1[..4], &BlobLayout::V1.magic());
 
-        // A V0-only policy keeps newly created blobs readable by the rollback target.
+        // A V0-only policy rejects the intact header-only V1 blob without healing it and
+        // creates new blobs the rollback target can read and write.
         let cfg = Config::new()
             .with_storage_directory(storage_directory.clone())
             .with_storage_blob_layout(BlobLayout::V0..=BlobLayout::V0);
         Runner::new(cfg).start(|context| async move {
-            context.open(partition, b"rollback").await.unwrap();
+            let result = context.open(partition, b"v1").await;
+            assert!(matches!(
+                result,
+                Err(Error::BlobLayoutMismatch { expected, found })
+                    if expected == (BlobLayout::V0..=BlobLayout::V0)
+                        && found == BlobLayout::V1
+            ));
+
+            let (blob, size) = context.open(partition, b"rollback").await.unwrap();
+            assert_eq!(size, 0);
+            blob.write_at(0, b"rollback!".as_slice(), crate::WriteOptions::SYNC)
+                .await
+                .unwrap();
+            drop(blob);
+            let (blob, size) = context.open(partition, b"rollback").await.unwrap();
+            assert_eq!(size, 9);
+            let payload = blob
+                .read_at(0, 9, crate::ReadOptions::default())
+                .await
+                .unwrap();
+            assert_eq!(payload.coalesce(), b"rollback!".as_slice());
         });
 
+        assert_eq!(std::fs::read(&v1_path).unwrap(), v1);
         let rollback_path = partition_directory.join(commonware_formatting::hex(b"rollback"));
         let rollback = std::fs::read(rollback_path).unwrap();
-        assert_eq!(rollback.len(), 8);
         assert_eq!(&rollback[..4], &BlobLayout::V0.magic());
+        assert_eq!(&rollback[8..], b"rollback!");
         let _ = std::fs::remove_dir_all(storage_directory);
     }
 
@@ -1245,7 +1271,7 @@ mod tests {
         assert!(run_with_returned_strategy(false).is_none());
 
         let strategy = run_with_returned_strategy(true).unwrap();
-        assert_eq!(futures::executor::block_on(strategy.spawn(|_| 42)), 42);
+        assert_eq!(futures::executor::block_on(strategy.spawn(1, |_| 42)), 42);
     }
 
     #[test]
@@ -1258,7 +1284,7 @@ mod tests {
                 std::panic::catch_unwind(AssertUnwindSafe(|| {
                     Runner::new(cfg).start(move |context| async move {
                         let strategy = context.strategy(NZUsize!(2));
-                        strategy.spawn(|_| ()).await;
+                        strategy.spawn(1, |_| ()).await;
                         std::panic::panic_any(strategy);
                     });
                 }));
@@ -1274,7 +1300,7 @@ mod tests {
             .expect("Runner::start did not resume the strategy panic payload");
         runner.join().unwrap();
         let _ = std::fs::remove_dir_all(storage_directory);
-        assert_eq!(futures::executor::block_on(strategy.spawn(|_| 42)), 42);
+        assert_eq!(futures::executor::block_on(strategy.spawn(1, |_| 42)), 42);
     }
 
     #[test]

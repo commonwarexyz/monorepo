@@ -85,13 +85,19 @@ stability_scope!(BETA {
     #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
     pub enum BlobLayout {
         /// An 8-byte header, with data beginning immediately after it.
+        ///
+        /// A V0 header has no checksum, so an interrupted creation is not reliably
+        /// recognized: an image whose magic and layout version are durable parses as a
+        /// complete header and reopens as blob version 0 or fails as a version mismatch
+        /// until the blob is removed.
         #[deprecated(note = "unaligned pages can degrade performance")]
         V0 = 0,
         /// A header padded to one 4096-byte page, so data begins on an aligned boundary.
         V1 = 1,
     }
 
-    /// Default runtime layout used when creating a [`Blob`].
+    /// Latest supported [`BlobLayout`], used to create new [`Blob`]s unless the runtime
+    /// restricts layouts to an older range.
     pub const DEFAULT_BLOB_LAYOUT: BlobLayout = BlobLayout::V1;
 
     impl BlobLayout {
@@ -103,7 +109,7 @@ stability_scope!(BETA {
     /// Application-owned version of a [`Blob`]'s contents.
     ///
     /// This is independent of the runtime-owned [`BlobLayout`].
-    #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+    #[derive(Clone, Copy, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
     #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
     pub struct BlobVersion(u16);
 
@@ -120,6 +126,12 @@ stability_scope!(BETA {
     }
 
     impl std::fmt::Display for BlobVersion {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "{}", self.0)
+        }
+    }
+
+    impl std::fmt::Debug for BlobVersion {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             write!(f, "{}", self.0)
         }
@@ -694,7 +706,9 @@ stability_scope!(BETA {
         /// # Layout
         ///
         /// New blobs are created with the latest layout allowed by the runtime. Reopening an
-        /// existing blob honors the layout recorded in its header.
+        /// existing blob honors the layout recorded in its header when the runtime's
+        /// configured layout range allows it, and returns [Error::BlobLayoutMismatch]
+        /// otherwise.
         ///
         /// # Returns
         ///
@@ -838,6 +852,12 @@ stability_scope!(BETA {
     /// When a blob is dropped, any unsynced changes may be discarded. Implementations
     /// may attempt to sync during drop but errors will go unhandled. Call `sync`
     /// before dropping to ensure all changes are durably persisted.
+    ///
+    /// # Durability
+    ///
+    /// After a crash, a write not covered by a completed [Blob::sync] may be torn: any
+    /// subset of its bytes may be durable. Bytes outside the written range remain
+    /// unchanged.
     #[allow(clippy::len_without_is_empty)]
     pub trait Blob: Clone + Send + Sync + 'static {
         /// Read exactly `len` bytes at `offset` into caller-provided buffers.
@@ -992,6 +1012,7 @@ mod tests {
         let version = BlobVersion::new(7);
         assert_eq!(version.get(), 7);
         assert_eq!(version.to_string(), "7");
+        assert_eq!(format!("{version:?}"), "7");
         assert_eq!(BlobVersion::default(), DEFAULT_BLOB_VERSION);
         assert!((BlobVersion::new(3)..=BlobVersion::new(7)).contains(&version));
     }
@@ -3384,7 +3405,7 @@ mod tests {
             let strategy = context.child("pool").strategy(NZUsize!(1)).manual();
 
             let output = strategy
-                .spawn(|strategy| strategy.map_collect_vec(0..2, |i| i + 1))
+                .spawn(2, |strategy| strategy.map_collect_vec(0..2, |i| i + 1))
                 .await;
 
             assert_eq!(output, vec![1, 2]);

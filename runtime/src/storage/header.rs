@@ -42,9 +42,10 @@ stability_scope!(BETA {
         /// before the header became durable, making the blob a candidate for
         /// [Layout::interrupted_creation] classification.
         ///
-        /// [HeaderError::VersionMismatch] is excluded: for V1 it fires only once the CRC has
+        /// [HeaderError::LayoutMismatch], [HeaderError::VersionMismatch], and
+        /// [HeaderError::InvalidPadding] are excluded: for V1 they fire only once the CRC has
         /// validated and the full header region is present, so the header was completely
-        /// written and the failure is a genuine version disagreement. (A V0 version mismatch
+        /// written and the failure is a genuine disagreement or foreign bytes. (A V0 mismatch
         /// has no checksum and cannot be safely classified as a torn creation.)
         pub(crate) const fn may_be_torn_creation(&self) -> bool {
             matches!(
@@ -183,7 +184,7 @@ stability_scope!(BETA {
         /// blob with this layout that was interrupted before its header became durable.
         ///
         /// A V0 header has no integrity metadata. A creation shorter than the prelude is handled
-        /// as missing before parsing; once the full prelude exists, malformed bytes cannot be
+        /// as missing before parsing. Once the full prelude exists, malformed bytes cannot be
         /// distinguished safely from pre-existing corruption and do not qualify for healing.
         ///
         /// [Layout::V1] creation writes the region with set_len(0) -> write -> sync, and
@@ -245,7 +246,7 @@ stability_scope!(BETA {
 
     /// Fixed-size header prelude at the start of each [crate::Blob].
     ///
-    /// Runtime layout (big-endian). The prelude is 8 bytes and a V1 header extends it:
+    /// On-disk layout (big-endian). The prelude is 8 bytes and a V1 header extends it:
     ///
     /// | bytes    | field                        | owner       | question it answers                              |
     /// |----------|------------------------------|-------------|--------------------------------------------------|
@@ -512,23 +513,16 @@ pub(crate) mod tests {
     /// Raw bytes of a legacy V0 blob: an 8-byte header followed immediately by `payload`, as a
     /// pre-V1 writer laid them out.
     pub(crate) fn v0_blob_bytes(blob_version: u16, payload: &[u8]) -> Vec<u8> {
-        let mut raw = v0_header(blob_version).encode().to_vec();
+        let layouts = Layout::V0..=Layout::V0;
+        let (mut raw, _) = Header::create(&layouts, &versions(blob_version, blob_version));
         raw.extend_from_slice(payload);
         raw
     }
 
     /// Raw bytes of a V1 blob with the given version, followed by `payload`.
     pub(crate) fn v1_blob_bytes(blob_version: u16, payload: &[u8]) -> Vec<u8> {
-        let header = Header {
-            magic: Layout::V1.magic(),
-            layout_version: Layout::V1.layout_version(),
-            blob_version: version(blob_version),
-        };
-        let mut raw = Vec::with_capacity(Layout::V1.data_offset() as usize + payload.len());
-        raw.extend_from_slice(&header.encode());
-        let crc = commonware_cryptography::Crc32::checksum(&raw);
-        raw.extend_from_slice(&crc.to_be_bytes());
-        raw.resize(Layout::V1.data_offset() as usize, 0);
+        let layouts = Layout::V1..=Layout::V1;
+        let (mut raw, _) = Header::create(&layouts, &versions(blob_version, blob_version));
         raw.extend_from_slice(payload);
         raw
     }

@@ -9,7 +9,7 @@ use commonware_runtime::{
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     merkle::{Graftable, full::Config as MerkleConfig, mmb, mmr},
-    qmdb::current::{FixedConfig as Config, unordered::fixed::Db as CurrentDb},
+    qmdb::current::{FixedConfig as Config, ordered::fixed::Db as CurrentDb},
     translator::OneCap,
 };
 use commonware_utils::{NZU16, NZU64, NZUsize, sequence::FixedBytes};
@@ -21,6 +21,9 @@ type Value = FixedBytes<32>;
 type Db<F> = CurrentDb<F, deterministic::Context, Key, Value, Sha256, OneCap, 32, Sequential>;
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(137);
+
+// A small key space with few translated-key buckets forces frequent collisions between distinct
+// full keys, so a parent-deleted key and a colliding sibling routinely land in one bucket.
 const COLLISION_GROUPS: u8 = 4;
 const KEY_SPACE: u64 = 32;
 const MAX_INITIAL_WRITES: usize = 16;
@@ -84,6 +87,7 @@ fn test_config(name: &str, pooler: &impl BufferPooler) -> Config<OneCap, Sequent
             metadata_partition: format!("{name}-meta"),
             items_per_blob: NZU64!(17),
             write_buffer: NZUsize!(1024),
+            replay_buffer: NZUsize!(1024),
             strategy: Sequential,
             page_cache: page_cache.clone(),
         },
@@ -91,6 +95,7 @@ fn test_config(name: &str, pooler: &impl BufferPooler) -> Config<OneCap, Sequent
             partition: format!("{name}-log"),
             items_per_blob: NZU64!(13),
             write_buffer: NZUsize!(1024),
+            replay_buffer: NZUsize!(1024),
             page_cache,
         },
         grafted_metadata_partition: format!("{name}-grafted"),
@@ -103,6 +108,8 @@ fn test_config(name: &str, pooler: &impl BufferPooler) -> Config<OneCap, Sequent
 
 fn key_from_seed(seed: KeySeed) -> Key {
     let mut bytes = [0u8; 32];
+    // The first byte selects the translated-key bucket (OneCap keys on it), the suffix keeps the
+    // full keys distinct within a bucket so ordered next-key bookkeeping stays exercised.
     bytes[0] = seed.prefix % COLLISION_GROUPS;
     let suffix = seed.suffix % KEY_SPACE;
     bytes[24..].copy_from_slice(&suffix.to_be_bytes());
@@ -121,10 +128,10 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
         let cfg = test_config(&test_name, &context);
         let db: Db<F> = Db::init(context.child("storage"), cfg)
             .await
-            .expect("init current unordered db");
+            .expect("init current ordered db");
 
-        // Seed the committed base state so the wrapper sees collision-heavy
-        // inner batching before parent/child comparisons.
+        // Seed committed base state so parent/child batching sees translated-key collisions
+        // against the committed snapshot.
         let mut batch = db.new_batch();
         for write in &input.initial {
             batch = batch.write(
@@ -136,7 +143,10 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
         let (db, _) = db.apply_batch(initial).await.unwrap();
         let db = db.commit().await.unwrap();
 
-        // Build the child while the parent is still pending.
+        // Build the child while the parent is still pending, so the child resolves through the
+        // parent's diff plus the committed snapshot. A parent-deleted key with a colliding
+        // committed sibling is the advisory's trigger: the ordered classifier must not consume
+        // the deleted key's stale committed location via the sibling's snapshot-bucket scan.
         let mut batch = db.new_batch();
         for mutation in &input.parent {
             batch = match mutation {
@@ -158,8 +168,8 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
         }
         let pending_child = batch.merkleize(&db, None).await.unwrap();
 
-        // Commit the parent, then rebuild the same logical child from the
-        // committed wrapper state. Both canonical and ops roots must match.
+        // Commit the parent, then rebuild the same logical child from committed state. Both the
+        // canonical root and the ops root must be independent of the parent's pending state.
         let (db, _) = db.apply_batch(parent).await.unwrap();
         let db = db.commit().await.unwrap();
 
@@ -203,6 +213,6 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
 }
 
 fuzz_target!(|input: FuzzInput| {
-    fuzz_family::<mmr::Family>(&input, "fuzz-mmr-current-unordered-batch-root");
-    fuzz_family::<mmb::Family>(&input, "fuzz-mmb-current-unordered-batch-root");
+    fuzz_family::<mmr::Family>(&input, "fuzz-mmr-current-ordered-batch-root");
+    fuzz_family::<mmb::Family>(&input, "fuzz-mmb-current-ordered-batch-root");
 });

@@ -283,7 +283,8 @@ impl Config {
     // Setters
     /// See [Config]
     pub fn with_seed(self, seed: u64) -> Self {
-        self.with_rng(Box::new(StdRng::seed_from_u64(seed)))
+        let rng: BoxDynRng = Box::new(StdRng::seed_from_u64(seed));
+        self.with_rng(rng)
     }
 
     /// Provide the config with a dynamic RNG directly.
@@ -291,8 +292,8 @@ impl Config {
     /// This can be useful for, e.g. fuzzing, where beyond just having randomness,
     /// you might want to control specific bytes of the RNG. By taking in a dynamic
     /// RNG object, any behavior is possible.
-    pub fn with_rng(mut self, rng: BoxDynRng) -> Self {
-        self.rng = rng;
+    pub fn with_rng(mut self, rng: impl Into<BoxDynRng>) -> Self {
+        self.rng = rng.into();
         self
     }
 
@@ -1938,7 +1939,7 @@ mod tests {
     fn test_recover_retained_successful_resize() {
         let retained_resize = [u64::MAX, 0];
         let cfg = deterministic::Config::default()
-            .with_rng(Box::new(ScriptedRng::new(retained_resize)))
+            .with_rng(ScriptedRng::new(retained_resize))
             .with_storage_fault_config(FaultConfig::default().resize(ResizeConfig {
                 failure_rate: probability!(0.5),
                 partial_rate: probability!(0.0),
@@ -2567,7 +2568,7 @@ mod tests {
             assert_eq!(strategy.parallelism(), 2);
 
             let output = strategy
-                .spawn(|strategy| strategy.map_collect_vec(0..2, |i| i + 1))
+                .spawn(2, |strategy| strategy.map_collect_vec(0..2, |i| i + 1))
                 .await;
 
             assert_eq!(output, vec![1, 2]);
@@ -2585,7 +2586,7 @@ mod tests {
             assert_eq!(first.parallelism(), 1);
             assert_eq!(first.run(2, || "serial", || "parallel"), "serial");
             let output = first
-                .spawn(|strategy| strategy.map_collect_vec(0..2, |i| i + 1))
+                .spawn(2, |strategy| strategy.map_collect_vec(0..2, |i| i + 1))
                 .now_or_never()
                 .expect("single-threaded pool should run spawned work inline");
             assert_eq!(output, vec![1, 2]);
@@ -2594,7 +2595,7 @@ mod tests {
             assert_eq!(second.parallelism(), 3);
             assert_eq!(second.run(2, || "serial", || "parallel"), "parallel");
             let output = second
-                .spawn(|strategy| strategy.map_collect_vec(0..3, |i| i + 1))
+                .spawn(3, |strategy| strategy.map_collect_vec(0..3, |i| i + 1))
                 .now_or_never()
                 .expect("single-threaded pool should run spawned work inline");
             assert_eq!(output, vec![1, 2, 3]);
@@ -2606,7 +2607,7 @@ mod tests {
             assert_eq!(third.parallelism(), 4);
             assert_eq!(third.run(2, || "serial", || "parallel"), "parallel");
             let output = third
-                .spawn(|strategy| strategy.map_collect_vec(0..4, |i| i + 1))
+                .spawn(4, |strategy| strategy.map_collect_vec(0..4, |i| i + 1))
                 .now_or_never()
                 .expect("single-threaded pool should run spawned work inline");
             assert_eq!(output, vec![1, 2, 3, 4]);
@@ -2624,7 +2625,7 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
 
             let output = strategy
-                .spawn(|strategy| strategy.map_collect_vec(0..2, |i| i + 1))
+                .spawn(2, |strategy| strategy.map_collect_vec(0..2, |i| i + 1))
                 .await;
             assert_eq!(output, vec![1, 2]);
 

@@ -12,20 +12,26 @@ use commonware_storage::{
     qmdb::any::{
         FixedConfig as Config,
         batch::UnmerkleizedBatch,
-        unordered::fixed::{Db as AnyDb, Update},
+        ordered::{Update, fixed::Db as AnyDb},
     },
     translator::OneCap,
 };
 use commonware_utils::{NZU16, NZU64, NZUsize, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
-use std::num::NonZeroU16;
+use std::{collections::BTreeMap, num::NonZeroU16};
 
 type Key = FixedBytes<32>;
 type Value = FixedBytes<32>;
 type Db<F> = AnyDb<F, deterministic::Context, Key, Value, Sha256, OneCap, Sequential>;
-type Batch<F> = UnmerkleizedBatch<F, Sha256, Update<Key, Value>, Sequential>;
+type Batch<F> = UnmerkleizedBatch<F, Sha256, Update<Key, FixedEncoding>, Sequential>;
+
+use commonware_storage::qmdb::any::value::FixedEncoding as FixedEncodingGeneric;
+type FixedEncoding = FixedEncodingGeneric<Value>;
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(131);
+
+// A small key space with few translated-key buckets forces frequent collisions between distinct
+// full keys, so a parent-deleted key and a colliding sibling routinely land in one bucket.
 const COLLISION_GROUPS: u8 = 4;
 const KEY_SPACE: u64 = 32;
 const MAX_INITIAL_WRITES: usize = 16;
@@ -105,6 +111,7 @@ fn test_config(name: &str, pooler: &impl BufferPooler) -> Config<OneCap, Sequent
             metadata_partition: format!("{name}-meta"),
             items_per_blob: NZU64!(17),
             write_buffer: NZUsize!(1024),
+            replay_buffer: NZUsize!(1024),
             strategy: Sequential,
             page_cache: page_cache.clone(),
         },
@@ -112,6 +119,7 @@ fn test_config(name: &str, pooler: &impl BufferPooler) -> Config<OneCap, Sequent
             partition: format!("{name}-log"),
             items_per_blob: NZU64!(13),
             write_buffer: NZUsize!(1024),
+            replay_buffer: NZUsize!(1024),
             page_cache,
         },
         translator: OneCap,
@@ -123,6 +131,8 @@ fn test_config(name: &str, pooler: &impl BufferPooler) -> Config<OneCap, Sequent
 
 fn key_from_seed(seed: KeySeed) -> Key {
     let mut bytes = [0u8; 32];
+    // The first byte selects the translated-key bucket (OneCap keys on it), the suffix keeps the
+    // full keys distinct within a bucket so ordered next-key bookkeeping stays exercised.
     bytes[0] = seed.prefix % COLLISION_GROUPS;
     let suffix = seed.suffix % KEY_SPACE;
     bytes[24..].copy_from_slice(&suffix.to_be_bytes());
@@ -145,6 +155,44 @@ fn apply_mutations<F: MerkleFamily>(mut batch: Batch<F>, mutations: &[Mutation])
     batch
 }
 
+// A minimal model of committed key-value state, used only to confirm that whichever operation
+// stream a schedule produced, the applied database ends up holding the expected keys.
+fn apply_to_model(model: &mut BTreeMap<Key, Value>, mutations: &[Mutation]) {
+    for mutation in mutations {
+        let key = key_from_seed(match mutation {
+            Mutation::Write { key, .. } | Mutation::Delete { key } => *key,
+        });
+        match mutation {
+            Mutation::Write { value, .. } => {
+                model.insert(key, value_from_bytes(*value));
+            }
+            Mutation::Delete { .. } => {
+                model.remove(&key);
+            }
+        }
+    }
+}
+
+async fn assert_matches_model<F: MerkleFamily>(db: &Db<F>, model: &BTreeMap<Key, Value>) {
+    assert_eq!(
+        db.is_empty(),
+        model.is_empty(),
+        "empty-db state diverged from model (active-key accounting)"
+    );
+    for (key, value) in model {
+        let got = db
+            .get(key)
+            .await
+            .expect("get should not fail")
+            .expect("model key missing from db");
+        assert_eq!(
+            got.as_ref(),
+            value.as_ref(),
+            "value mismatch for a live key"
+        );
+    }
+}
+
 fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
     let runner = deterministic::Runner::default();
 
@@ -152,16 +200,18 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
         let cfg = test_config(suffix, &context);
         let db: Db<F> = Db::init(context.child("storage"), cfg)
             .await
-            .expect("init unordered any db");
+            .expect("init ordered any db");
 
-        // Seed the committed base state so parent/child batching sees both
-        // translated-key collisions and ordinary committed lookups.
+        // Seed committed base state so parent/child batching sees both translated-key
+        // collisions against the committed snapshot and ordinary committed lookups.
+        let mut model: BTreeMap<Key, Value> = BTreeMap::new();
         let mut batch = db.new_batch();
         for write in &input.initial {
             batch = batch.write(
                 key_from_seed(write.key),
                 Some(value_from_bytes(write.value)),
             );
+            model.insert(key_from_seed(write.key), value_from_bytes(write.value));
         }
         let initial = batch.merkleize(&db, None).await.unwrap();
         let (db, _) = db.apply_batch(initial).await.unwrap();
@@ -169,16 +219,18 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
 
         let db = match input.schedule {
             Schedule::PendingParent => {
-                // Build a parent batch, then build the child while the parent is still
-                // pending so the child must resolve through base_diff plus the stale
-                // committed snapshot.
+                // Build a parent batch, then build the child while the parent is still pending so
+                // the child must resolve through the parent's diff plus the committed snapshot.
+                // A parent-deleted key with a colliding committed sibling is the advisory's
+                // trigger: the ordered classifier must not consume the deleted key's stale
+                // committed location via the sibling's snapshot-bucket scan.
                 let batch = apply_mutations(db.new_batch(), &input.parent);
                 let parent = batch.merkleize(&db, None).await.unwrap();
                 let batch = apply_mutations(parent.new_batch::<Sha256>(), &input.child);
                 let pending_child = batch.merkleize(&db, None).await.unwrap();
 
-                // Commit the parent, then rebuild the same logical child from the
-                // committed DB state. Both speculative roots must match.
+                // Commit the parent, then rebuild the same logical child from committed state.
+                // Both speculative roots must match regardless of the parent's pending state.
                 let (db, _) = db.apply_batch(parent).await.unwrap();
                 let db = db.commit().await.unwrap();
 
@@ -191,18 +243,22 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                     "child root depended on pending-vs-committed parent path"
                 );
 
-                // Apply the pending child and verify the DB state matches.
                 let (db, _) = db.apply_batch(pending_child).await.unwrap();
                 assert_eq!(
                     db.root(),
                     committed_child.root(),
                     "pending child root diverged"
                 );
+                let db = db.commit().await.unwrap();
+
+                apply_to_model(&mut model, &input.parent);
+                apply_to_model(&mut model, &input.child);
+                assert_matches_model(&db, &model).await;
                 db
             }
             Schedule::DroppedCommittedPrefix => {
-                // Build A -> B, then commit and drop A before merkleizing C. C must retain
-                // only B and position that suffix relative to the now-committed A.
+                // Build A -> B, then commit and drop A before merkleizing C. C must retain only B
+                // and position that suffix relative to the now-committed A.
                 let batch = apply_mutations(db.new_batch(), &input.parent);
                 let a = batch.merkleize(&db, None).await.unwrap();
                 let batch = apply_mutations(a.new_batch::<Sha256>(), &input.child);
@@ -233,6 +289,14 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                     rebuilt_child.root(),
                     "retained-suffix child root diverged"
                 );
+                let db = db.commit().await.unwrap();
+
+                // The parent (A) was committed at apply_batch above, and the retained child
+                // applied B (child) then C (grandchild) on top, so the database holds all three.
+                apply_to_model(&mut model, &input.parent);
+                apply_to_model(&mut model, &input.child);
+                apply_to_model(&mut model, &input.grandchild);
+                assert_matches_model(&db, &model).await;
                 db
             }
         };
@@ -244,11 +308,11 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
 fuzz_target!(|input: FuzzInput| {
     match input.schedule {
         Schedule::PendingParent => {
-            fuzz_family::<mmr::Family>(&input, "fuzz-mmr-qmdb-unordered-batch-root");
-            fuzz_family::<mmb::Family>(&input, "fuzz-mmb-qmdb-unordered-batch-root");
+            fuzz_family::<mmr::Family>(&input, "fuzz-mmr-qmdb-ordered-batch-root");
+            fuzz_family::<mmb::Family>(&input, "fuzz-mmb-qmdb-ordered-batch-root");
         }
         Schedule::DroppedCommittedPrefix => {
-            fuzz_family::<mmb::Family>(&input, "fuzz-mmb-qmdb-unordered-dropped-prefix");
+            fuzz_family::<mmb::Family>(&input, "fuzz-mmb-qmdb-ordered-dropped-prefix");
         }
     }
 });

@@ -470,7 +470,7 @@ impl Arbitrary<'_> for Batch {
 
 impl Batch {
     fn run(self) {
-        let expected = self.items.iter().all(Item::verify);
+        let expected = !self.items.is_empty() && self.items.iter().all(Item::verify);
         let mut batch = BatchVerifier::new(self.items.len());
         for item in &self.items {
             batch.add(

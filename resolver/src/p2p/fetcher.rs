@@ -10,10 +10,11 @@ use commonware_runtime::{
         status::{self, Status},
     },
 };
-use commonware_utils::{PrioritySet, Span, SystemTimeExt};
+use commonware_utils::{PrioritySet, Span, SystemTimeExt, time::NANOS_PER_SEC};
 use rand::seq::SliceRandom;
 use rand_core::Rng;
 use std::{
+    cmp::Reverse,
     collections::{HashMap, HashSet},
     marker::PhantomData,
     mem,
@@ -41,13 +42,22 @@ struct ActiveRequest<P, Key> {
     start: SystemTime,
 }
 
+/// Throughput of a response in bytes per second (higher is better).
+///
+/// A response that delivers no bytes contributes a zero-throughput sample.
+/// Timeouts, missing data, and failed sends contribute the same sample because
+/// they too deliver no data. Elapsed time is floored at one nanosecond to avoid
+/// dividing by zero for an instantaneous response.
+fn throughput(elapsed: Duration, bytes: usize) -> u128 {
+    (bytes as u128)
+        .saturating_mul(NANOS_PER_SEC)
+        .saturating_div(elapsed.as_nanos().max(1))
+}
+
 /// Configuration for the fetcher.
 pub struct Config<P: PublicKey> {
     /// Local identity of the participant (if any).
     pub me: Option<P>,
-
-    /// Initial expected performance for new participants.
-    pub initial: Duration,
 
     /// Timeout for requests.
     pub timeout: Duration,
@@ -93,8 +103,9 @@ where
     me: Option<P>,
     /// Participants to exclude from requests (blocked peers)
     excluded: HashSet<P>,
-    /// Participants and their performance (lower is better, in milliseconds)
-    participants: PrioritySet<P, u128>,
+    /// Participants and their performance (throughput in bytes per second, higher is
+    /// better). Stored as `Reverse` so the set orders the best-performing peer first.
+    participants: PrioritySet<P, Reverse<u128>>,
 
     // Request tracking
     /// Next ID to use for a request
@@ -107,8 +118,6 @@ where
     key_to_id: HashMap<Key, ID>,
 
     // Config
-    /// Initial expected performance for new participants
-    initial: Duration,
     /// Timeout for requests
     timeout: Duration,
 
@@ -136,7 +145,7 @@ where
     /// only removed when blocked (invalid data) or cleared on successful fetch.
     targets: HashMap<Key, HashSet<P>>,
 
-    /// Per-peer performance metric (exponential moving average of response time in ms)
+    /// Per-peer performance metric (exponential moving average of throughput in bytes per second)
     performance: GaugeFamily<Peer<P>>,
 
     /// Status of request creation attempts (Success when eligible peers exist, Dropped otherwise)
@@ -163,7 +172,7 @@ where
     pub fn new(context: E, config: Config<P>) -> Self {
         let performance = context.family(
             "peer_performance",
-            "Per-peer performance (exponential moving average of response time in ms)",
+            "Per-peer performance (exponential moving average of throughput in bytes per second)",
         );
         let requests_created =
             context.family("requests_created", "Status of request creation attempts");
@@ -185,7 +194,6 @@ where
             active: PrioritySet::new(),
             requests: HashMap::new(),
             key_to_id: HashMap::new(),
-            initial: config.initial,
             timeout: config.timeout,
             pending: PrioritySet::new(),
             waiter: None,
@@ -207,23 +215,25 @@ where
         id
     }
 
-    /// Calculate a participant's new priority using exponential moving average.
-    fn update_performance(&mut self, participant: &P, elapsed: Duration) {
-        let Some(past) = self.participants.get(participant) else {
+    /// Update a participant's throughput estimate (higher is better) using an
+    /// exponential moving average.
+    fn update_performance(&mut self, participant: &P, throughput: u128) {
+        let Some(Reverse(past)) = self.participants.get(participant) else {
             return;
         };
-        let next = past.saturating_add(elapsed.as_millis()) / 2;
-        self.participants.put(participant.clone(), next);
+        let next = past.saturating_add(throughput) / 2;
+        self.participants.put(participant.clone(), Reverse(next));
         let _ = self.performance.get_or_create_by(participant).try_set(next);
     }
 
-    /// Get eligible peers for a key in priority order.
+    /// Get eligible peers for a key, best-performing first.
     ///
     /// If `shuffle` is true, the peers are shuffled (used for retries to try different peers).
     fn get_eligible_peers(&mut self, key: &Key, shuffle: bool) -> Vec<P> {
         let targets = self.targets.get(key);
 
-        // Prepare participant iterator
+        // Prepare participant iterator. The set stores throughput as `Reverse`,
+        // so it iterates best-performing peer first.
         let participant_iter = self.participants.iter();
 
         // Collect eligible peers
@@ -304,7 +314,9 @@ where
                         // Send was not handled, try next peer
                         self.requests_sent.inc(Status::Dropped);
                         debug!(?peer, ?feedback, "send failed");
-                        self.update_performance(&peer, self.timeout);
+
+                        // Nothing was delivered, so score zero throughput.
+                        self.update_performance(&peer, 0);
                     }
                 }
             }
@@ -410,10 +422,10 @@ where
         // Pop the next deadline
         let (id, _) = self.active.pop()?;
 
-        // Remove the request and update performance with timeout penalty
+        // Remove the request and score zero throughput (nothing was delivered).
         let req = self.requests.remove(&id)?;
         self.key_to_id.remove(&req.key);
-        self.update_performance(&req.peer, self.timeout);
+        self.update_performance(&req.peer, 0);
 
         Some(req.key)
     }
@@ -455,24 +467,28 @@ where
 
     /// Attribute a received data response to its serving peer.
     ///
-    /// Ignored responses must not be recorded because the consumer declined to attribute them.
-    pub fn record_response(&mut self, peer: &P, elapsed: Duration) {
-        self.update_performance(peer, elapsed);
+    /// Performance is scored as response size divided by wall-clock time (bytes per
+    /// second) so peers that deliver more bytes in the same time rank better. Ignored
+    /// responses must not be recorded because the consumer declined to attribute them.
+    pub fn record_response(&mut self, peer: &P, elapsed: Duration, bytes: usize) {
+        self.update_performance(peer, throughput(elapsed, bytes));
         self.resolves.observe(elapsed.as_secs_f64());
     }
 
     /// Processes a response indicating that the peer does not have the requested data.
     ///
-    /// Missing data is scored like a timeout because it did not resolve the request.
+    /// Missing data is scored as zero throughput because the peer delivered nothing.
     pub fn pop_missing(&mut self, id: ID, peer: &P) -> Option<Key> {
         let req = self.pop_request(id, peer)?;
-        self.update_performance(&req.peer, self.timeout);
+        self.update_performance(&req.peer, 0);
         Some(req.key)
     }
 
     /// Reconciles the list of peers that can be used to fetch future requests.
     pub fn reconcile(&mut self, keep: &[P]) {
-        self.participants.reconcile(keep, self.initial.as_millis());
+        // New peers start with zero throughput, having delivered nothing yet. They
+        // are tried via shuffled retries and earn a real score once they respond.
+        self.participants.reconcile(keep, Reverse(0));
 
         // Clear waiter (may no longer apply)
         self.waiter = None;
@@ -721,7 +737,6 @@ mod tests {
         let public_key = PrivateKey::from_seed(0).public_key();
         let config = Config {
             me: Some(public_key),
-            initial: Duration::from_millis(100),
             timeout: Duration::from_secs(5),
             retry_timeout: Duration::from_millis(100),
             priority_requests: false,
@@ -741,7 +756,6 @@ mod tests {
         let missing_peer = PrivateKey::from_seed(2).public_key();
         let config = Config {
             me: Some(public_key.clone()),
-            initial: Duration::from_millis(100),
             timeout: Duration::from_secs(5),
             retry_timeout: Duration::from_millis(100),
             priority_requests: false,
@@ -1083,9 +1097,107 @@ mod tests {
 
             // Receiving bytes is not enough to score the peer: the consumer may
             // decide the key became obsolete before inspecting the response.
-            assert_eq!(fetcher.participants.get(&peer), Some(100));
-            fetcher.record_response(&peer, elapsed);
-            assert_eq!(fetcher.participants.get(&peer), Some(60));
+            // New peers start at zero throughput.
+            assert_eq!(fetcher.participants.get(&peer), Some(Reverse(0)));
+            fetcher.record_response(&peer, elapsed, 1);
+            let observed = throughput(Duration::from_millis(20), 1);
+            assert_eq!(fetcher.participants.get(&peer), Some(Reverse(observed / 2)));
+        });
+    }
+
+    #[test]
+    fn test_record_response_scores_by_size() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
+            let local_peer = PrivateKey::from_seed(0).public_key();
+            let small = PrivateKey::from_seed(1).public_key();
+            let large = PrivateKey::from_seed(2).public_key();
+            fetcher.reconcile(&[local_peer, small.clone(), large.clone()]);
+
+            let elapsed = Duration::from_millis(20);
+            fetcher.record_response(&small, elapsed, 1);
+            fetcher.record_response(&large, elapsed, 1_000);
+
+            // Same latency, larger payload -> higher (better) throughput.
+            let small_score = fetcher.participants.get(&small).unwrap().0;
+            let large_score = fetcher.participants.get(&large).unwrap().0;
+            assert!(
+                large_score > small_score,
+                "larger payload should score better: large={large_score} small={small_score}"
+            );
+
+            let peers = fetcher.get_eligible_peers(&MockKey(1), false);
+            assert_eq!(peers[0], large);
+            assert_eq!(peers[1], small);
+        });
+    }
+
+    #[test]
+    fn test_empty_fast_reply_cannot_outrank_real_payload() {
+        // An empty response contributes zero throughput, the same as a timeout.
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            // An empty response has zero throughput regardless of latency.
+            assert_eq!(throughput(Duration::from_millis(1), 0), 0);
+
+            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
+            let local_peer = PrivateKey::from_seed(0).public_key();
+            let empty = PrivateKey::from_seed(1).public_key();
+            let real = PrivateKey::from_seed(2).public_key();
+            fetcher.reconcile(&[local_peer, empty.clone(), real.clone()]);
+
+            // Empty-and-instant repeatedly, versus a real 1 KiB payload served slowly.
+            for _ in 0..3 {
+                fetcher.record_response(&empty, Duration::from_millis(1), 0);
+                fetcher.record_response(&real, Duration::from_millis(50), 1024);
+            }
+
+            let empty_score = fetcher.participants.get(&empty).unwrap().0;
+            let real_score = fetcher.participants.get(&real).unwrap().0;
+            assert!(
+                real_score > empty_score,
+                "real payload must outrank empty reply: real={real_score} empty={empty_score}"
+            );
+
+            let peers = fetcher.get_eligible_peers(&MockKey(1), false);
+            assert_eq!(peers[0], real);
+            assert_eq!(peers[1], empty);
+        });
+    }
+
+    #[test]
+    fn test_throughput_orders_fast_large_payloads() {
+        // 10 MiB in 10ms is about 1 GB/s. Throughput stays non-zero and ranks a
+        // faster peer ahead of a slower one delivering the same payload.
+        let bytes = 10 * 1024 * 1024;
+        let slow = throughput(Duration::from_millis(10), bytes);
+        let fast = throughput(Duration::from_millis(5), bytes);
+        assert_ne!(slow, 0);
+        assert_ne!(fast, 0);
+        assert!(fast > slow);
+    }
+
+    #[test]
+    fn test_throughput_ema_rewards_faster_history() {
+        // Two peers deliver the same total bytes with different histories. The EMA
+        // is applied to per-response throughput, so the bursty peer's fast first
+        // response outweighs its slower second response.
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
+            let local_peer = PrivateKey::from_seed(0).public_key();
+            let bursty = PrivateKey::from_seed(1).public_key();
+            let steady = PrivateKey::from_seed(2).public_key();
+            fetcher.reconcile(&[local_peer, bursty.clone(), steady.clone()]);
+
+            fetcher.record_response(&bursty, Duration::from_millis(1), 1);
+            fetcher.record_response(&bursty, Duration::from_millis(100), 1);
+            fetcher.record_response(&steady, Duration::from_millis(40), 1);
+            fetcher.record_response(&steady, Duration::from_millis(40), 1);
+
+            let peers = fetcher.get_eligible_peers(&MockKey(1), false);
+            assert_eq!(peers, vec![bursty, steady]);
         });
     }
 
@@ -1279,7 +1391,6 @@ mod tests {
             let other_public_key = PrivateKey::from_seed(1).public_key();
             let config = Config {
                 me: Some(public_key.clone()),
-                initial: Duration::from_millis(100),
                 timeout: Duration::from_secs(5),
                 retry_timeout: Duration::from_millis(100),
                 priority_requests: false,
@@ -1328,7 +1439,6 @@ mod tests {
             let blocked_peer = PrivateKey::from_seed(99).public_key();
             let config = Config {
                 me: Some(public_key.clone()),
-                initial: Duration::from_millis(100),
                 timeout: Duration::from_secs(5),
                 retry_timeout: Duration::from_millis(100),
                 priority_requests: false,
@@ -1383,7 +1493,6 @@ mod tests {
             let missing_peer = PrivateKey::from_seed(2).public_key();
             let config = Config {
                 me: Some(public_key.clone()),
-                initial: Duration::from_millis(100),
                 timeout: Duration::from_secs(5),
                 retry_timeout: Duration::from_millis(100),
                 priority_requests: false,
@@ -1420,7 +1529,6 @@ mod tests {
             let missing_peer = PrivateKey::from_seed(2).public_key();
             let config = Config {
                 me: Some(public_key.clone()),
-                initial: Duration::from_millis(100),
                 timeout: Duration::from_secs(5),
                 retry_timeout: Duration::from_millis(100),
                 priority_requests: false,
@@ -1542,7 +1650,6 @@ mod tests {
             let retry_timeout = Duration::from_millis(100);
             let config = Config {
                 me: Some(public_key.clone()),
-                initial: Duration::from_millis(100),
                 timeout: Duration::from_secs(5),
                 retry_timeout,
                 priority_requests: false,
@@ -1888,7 +1995,6 @@ mod tests {
             let peer2 = PrivateKey::from_seed(2).public_key();
             let config = Config {
                 me: Some(public_key.clone()),
-                initial: Duration::from_millis(100),
                 timeout: Duration::from_secs(5),
                 retry_timeout: Duration::from_millis(100),
                 priority_requests: false,
@@ -1954,31 +2060,31 @@ mod tests {
             let peer2 = PrivateKey::from_seed(2).public_key();
             let peer3 = PrivateKey::from_seed(3).public_key();
 
-            // Add peers with initial performance (100ms)
+            // Add peers with zero initial throughput
             fetcher.reconcile(&[public_key, peer1.clone(), peer2.clone(), peer3.clone()]);
 
             // Simulate different response times by updating performance:
             // - peer1: very fast (10ms)
             // - peer2: slow (500ms)
             // - peer3: medium (200ms)
-            // After update_performance with EMA: new = (past + elapsed) / 2
+            // After update_performance with EMA: new = (past + throughput) / 2
 
-            // peer1: simulate multiple fast responses to drive down its priority
+            // peer1: simulate multiple fast responses to raise its throughput
             for _ in 0..5 {
-                fetcher.update_performance(&peer1, Duration::from_millis(10));
+                fetcher.update_performance(&peer1, throughput(Duration::from_millis(10), 1));
             }
 
-            // peer2: simulate slow responses to increase its priority
+            // peer2: simulate slow responses to keep its throughput low
             for _ in 0..5 {
-                fetcher.update_performance(&peer2, Duration::from_millis(500));
+                fetcher.update_performance(&peer2, throughput(Duration::from_millis(500), 1));
             }
 
             // peer3: simulate medium responses
             for _ in 0..5 {
-                fetcher.update_performance(&peer3, Duration::from_millis(200));
+                fetcher.update_performance(&peer3, throughput(Duration::from_millis(200), 1));
             }
 
-            // Get eligible peers - should be ordered by priority (fastest first)
+            // Get eligible peers - should be ordered best first (highest throughput)
             let peers = fetcher.get_eligible_peers(&MockKey(1), false);
 
             // Verify we have 3 peers (excluding self)

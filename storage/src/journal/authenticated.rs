@@ -183,21 +183,23 @@ impl<F: Family, D: Digest, Item: Send + Sync, S: Strategy> MerkleizedBatch<F, D,
     /// Inclusion proof for the element at `loc`.
     pub fn proof(
         &self,
+        base: &Mem<F, D>,
         hasher: &impl merkle::hasher::Hasher<F, Digest = D>,
         loc: Location<F>,
         inactive_peaks: usize,
     ) -> Result<Proof<F, D>, merkle::Error<F>> {
-        self.inner.proof(hasher, loc, inactive_peaks)
+        self.inner.proof(base, hasher, loc, inactive_peaks)
     }
 
     /// Inclusion proof for all elements in `range`.
     pub fn range_proof(
         &self,
+        base: &Mem<F, D>,
         hasher: &impl merkle::hasher::Hasher<F, Digest = D>,
         range: core::ops::Range<Location<F>>,
         inactive_peaks: usize,
     ) -> Result<Proof<F, D>, merkle::Error<F>> {
-        self.inner.range_proof(hasher, range, inactive_peaks)
+        self.inner.range_proof(base, hasher, range, inactive_peaks)
     }
 
     /// The items added in this batch.
@@ -323,14 +325,13 @@ where
         }
     }
 
-    /// Add `items` to `batch`, merkleize, and compute the post-apply root, all as one CPU-bound
-    /// job submitted through [`Strategy::spawn`].
+    /// Add `items` to `batch`, merkleize, and compute the post-apply root, all as one CPU-bound job
+    /// submitted through [`Strategy::spawn`].
     ///
-    /// The job hashes against an immutable snapshot of the committed Merkle state, so a
-    /// parallel strategy hosts the batch's dominant CPU phase on its own pool instead of
-    /// occupying the calling task. If the caller is cancelled mid-job, the job still runs to
-    /// completion against its snapshot and the result is discarded (a panic inside the job is
-    /// caught by [`Strategy::spawn`] and only propagates to a caller that awaits it).
+    /// The job hashes against an immutable snapshot of the committed Merkle state, so a parallel
+    /// strategy can host the batch's dominant CPU phase on its own pool instead of occupying the
+    /// calling task. If the job's caller is cancelled, the job still runs to completion
+    /// against its snapshot and the result is discarded.
     pub(crate) async fn merkleize(
         &self,
         batch: UnmerkleizedBatch<F, H, C::Item, S>,
@@ -345,7 +346,7 @@ where
         let hasher = self.hasher.clone();
         let strategy = self.strategy().clone();
         strategy
-            .spawn(move |_| {
+            .spawn(items.len(), move |_| {
                 let merkleized = batch.add_many(items).merkleize(&mem);
                 let root = merkleized.root(&mem, &hasher, inactive_peaks)?;
                 drop(ancestors);
@@ -665,6 +666,25 @@ where
     ) -> Result<(Proof<F, H::Digest>, Vec<C::Item>), Error<F>> {
         self.historical_proof(self.size(), start_loc, max_ops, inactive_peaks)
             .await
+    }
+
+    /// Inclusion proof for the items `batch` appends, anchored at the batch's speculative tip.
+    ///
+    /// Nodes below the batch chain are read from this journal's
+    /// [Merkle store][crate::merkle::mem::Mem], which retains them at least until
+    /// the batch's changes are flushed.
+    pub fn speculative_proof(
+        &self,
+        batch: &MerkleizedBatch<F, H::Digest, C::Item, S>,
+        inactive_peaks: usize,
+    ) -> Result<Proof<F, H::Digest>, Error<F>> {
+        let end = batch.size();
+        let start = Location::new(end - batch.items().len() as u64);
+        self.merkle
+            .with_mem(|mem| {
+                batch.range_proof(mem, &self.hasher, start..Location::new(end), inactive_peaks)
+            })
+            .map_err(Error::Merkle)
     }
 
     /// Generate a historical proof with respect to the state of the Merkle structure when it had
@@ -1133,6 +1153,7 @@ mod tests {
             metadata_partition: format!("mmr-metadata-{suffix}"),
             items_per_blob: NZU64!(11),
             write_buffer: NZUsize!(1024),
+            replay_buffer: NZUsize!(1024),
             strategy,
             page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         }
@@ -1149,6 +1170,7 @@ mod tests {
             partition: format!("journal-{suffix}"),
             items_per_blob: NZU64!(7),
             write_buffer: NZUsize!(1024),
+            replay_buffer: NZUsize!(1024),
             page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }

@@ -108,6 +108,7 @@ mod tests {
                 metadata_partition: format!("metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
@@ -116,6 +117,7 @@ mod tests {
                 partition: format!("log-{suffix}"),
                 page_cache,
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
             },
             translator: TwoCap,
             init_cache_size: Some(NZUsize!(1024)),
@@ -142,6 +144,7 @@ mod tests {
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
             },
             commit_codec_config: (),
         };
@@ -525,6 +528,7 @@ mod tests {
         test_fixed_proof_verify => run_proof_verify, open;
         test_fixed_prune => run_prune, open;
         test_fixed_batch_chain => run_batch_chain, open;
+        test_fixed_operations_match_applied_log => run_operations_match_applied_log, open;
         test_fixed_build_and_authenticate => run_build_and_authenticate, open;
         test_fixed_recovery_from_failed_merkle_sync => run_recovery_from_failed_merkle_sync, open;
         test_fixed_recovery_from_failed_log_sync => run_recovery_from_failed_log_sync, open;

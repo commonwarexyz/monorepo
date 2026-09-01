@@ -52,7 +52,7 @@ use commonware_consensus::{
 use commonware_cryptography::{
     Digest as _, Digestible, Hasher, Sha256, Signer as _,
     bls12381::{
-        dkg::feldman_desmedt::deal,
+        dkg::feldman_desmedt::{Reveal, deal},
         primitives::{group::Share, sharing::Mode, variant::MinPk},
     },
     certificate::{ConstantProvider, Provider as CertificateProvider, Scoped},
@@ -833,7 +833,6 @@ impl EngineDefinition for ReshareEngine {
                 peer_provider: oracle.manager(),
                 blocker: oracle.control(public_key.clone()),
                 mailbox_size: NZUsize!(100),
-                initial: Duration::from_secs(1),
                 timeout: Duration::from_secs(2),
                 fetch_retry_timeout: Duration::from_millis(100),
                 priority_requests: false,
@@ -1003,6 +1002,7 @@ impl EngineDefinition for ReshareEngine {
                 metadata_partition: format!("{partition_prefix}-qmdb-mmr-metadata"),
                 items_per_blob: NZU64!(11),
                 write_buffer: IO_BUFFER_SIZE,
+                replay_buffer: IO_BUFFER_SIZE,
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
@@ -1011,6 +1011,7 @@ impl EngineDefinition for ReshareEngine {
                 items_per_blob: NZU64!(7),
                 page_cache: page_cache.clone(),
                 write_buffer: IO_BUFFER_SIZE,
+                replay_buffer: IO_BUFFER_SIZE,
             },
             translator: TwoCap,
             init_cache_size: Some(NZUsize!(1024)),
@@ -1026,7 +1027,6 @@ impl EngineDefinition for ReshareEngine {
                 database: None,
                 mailbox_size: NZUsize!(100),
                 me: Some(public_key.clone()),
-                initial: Duration::from_secs(1),
                 timeout: Duration::from_secs(2),
                 fetch_retry_timeout: Duration::from_millis(100),
                 max_serve_ops: NZU64!(16),
@@ -1087,6 +1087,7 @@ impl EngineDefinition for ReshareEngine {
                 fence,
                 namespace: NAMESPACE,
                 sharing_mode: self.sharing_mode,
+                reveal: Reveal::V1,
                 mailbox_size: NZUsize!(100),
                 partition_prefix: format!("{partition_prefix}-reshare"),
                 max_participants: MAX_PARTICIPANTS,
@@ -1325,6 +1326,7 @@ fn archive_config<C>(
 ) -> prunable::Config<TwoCap, C> {
     prunable::Config {
         translator: TwoCap,
+        metadata_partition: format!("{prefix}-{name}-metadata"),
         key_partition: format!("{prefix}-{name}-key"),
         key_page_cache: page_cache,
         value_partition: format!("{prefix}-{name}-value"),

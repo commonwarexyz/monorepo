@@ -661,7 +661,7 @@ mod tests {
             test_pool(),
         );
 
-        // Fabricate a legacy V0 blob on disk (creation is always V1): an 8-byte header
+        // Fabricate a legacy V0 blob on disk (the default config creates V1): an 8-byte header
         // followed immediately by the payload.
         let payload = b"hello world";
         let partition_dir = storage_directory.join("partition");

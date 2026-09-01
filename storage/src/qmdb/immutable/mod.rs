@@ -1185,6 +1185,104 @@ pub(super) mod tests {
         db.destroy().await.unwrap();
     }
 
+    /// `operations()` must cover exactly the batch's own applied range and match the
+    /// operations a post-apply `historical_proof` recovers from the log, for a db-based
+    /// batch and for a chained batch applied after its ancestor.
+    #[boxed]
+    pub(crate) async fn run_operations_match_applied_log<F: Family, V, C>(
+        context: deterministic::Context,
+        open_db: impl Fn(
+            deterministic::Context,
+        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+    ) where
+        V: ValueEncoding<Value = Digest>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
+        C::Item: EncodeShared + PartialEq + core::fmt::Debug,
+    {
+        let db = open_db(context.child("db")).await;
+
+        let seed = db
+            .new_batch()
+            .set(Sha256::fill(1u8), Sha256::fill(11u8))
+            .set(Sha256::fill(2u8), Sha256::fill(12u8))
+            .merkleize(&db, None, db.inactivity_floor_loc())
+            .await;
+        let (seed_start, seed_ops) = seed.operations();
+        let seed_root = seed.root();
+        let seed_proof = seed.proof(&db).unwrap();
+        let (db, seed_range) = db.apply_batch(seed).await.unwrap();
+        assert_eq!(seed_start, seed_range.start);
+        assert_eq!(*seed_start + seed_ops.len() as u64, *seed_range.end);
+
+        // A chained batch's operations are its own suffix only.
+        let parent = db
+            .new_batch()
+            .set(Sha256::fill(3u8), Sha256::fill(13u8))
+            .merkleize(&db, None, db.inactivity_floor_loc())
+            .await;
+        let child = parent
+            .new_batch::<Sha256>()
+            .set(Sha256::fill(4u8), Sha256::fill(14u8))
+            .merkleize(&db, None, db.inactivity_floor_loc())
+            .await;
+        let (parent_start, parent_ops) = parent.operations();
+        let (child_start, child_ops) = child.operations();
+        let (parent_root, child_root) = (parent.root(), child.root());
+        let (parent_proof, child_proof) = (parent.proof(&db).unwrap(), child.proof(&db).unwrap());
+        let (db, parent_range) = db.apply_batch(parent).await.unwrap();
+        let (db, child_range) = db.apply_batch(child).await.unwrap();
+        assert_eq!(parent_start, parent_range.start);
+        assert_eq!(*parent_start + parent_ops.len() as u64, *parent_range.end);
+        assert_eq!(child_start, child_range.start);
+        assert_eq!(*child_start + child_ops.len() as u64, *child_range.end);
+
+        // A write-free batch still captures its commit-only suffix.
+        let empty = db
+            .new_batch()
+            .merkleize(&db, None, db.inactivity_floor_loc())
+            .await;
+        let (empty_start, empty_ops) = empty.operations();
+        let (empty_root, empty_proof) = (empty.root(), empty.proof(&db).unwrap());
+        let (db, empty_range) = db.apply_batch(empty).await.unwrap();
+        assert_eq!(empty_start, empty_range.start);
+        assert_eq!(*empty_start + empty_ops.len() as u64, *empty_range.end);
+
+        // Every captured delta and proof must match what the log recovers for its
+        // range, and verify against the batch's own root.
+        for (start, ops, proof, root) in [
+            (seed_start, seed_ops, seed_proof, seed_root),
+            (parent_start, parent_ops, parent_proof, parent_root),
+            (child_start, child_ops, child_proof, child_root),
+            (empty_start, empty_ops, empty_proof, empty_root),
+        ] {
+            let len = core::num::NonZeroU64::new(ops.len() as u64).unwrap();
+            let end = Location::new(*start + ops.len() as u64);
+            let (log_proof, log_ops) = db.historical_proof(end, start, len).await.unwrap();
+            assert_eq!(log_ops, *ops);
+            assert_eq!(log_proof, proof);
+            assert!(verify_proof::<Sha256, _, _>(&proof, start, &ops, &root));
+        }
+
+        // After the batch's changes are flushed, proof is a verifying proof or an
+        // error, never a wrong proof.
+        let late = db
+            .new_batch()
+            .set(Sha256::fill(5u8), Sha256::fill(15u8))
+            .merkleize(&db, None, db.inactivity_floor_loc())
+            .await;
+        let (late_start, late_ops) = late.operations();
+        let late_root = late.root();
+        let (db, _) = db.apply_batch(Arc::clone(&late)).await.unwrap();
+        let db = db.commit().await.unwrap();
+        if let Ok(proof) = late.proof(&db) {
+            assert!(verify_proof::<Sha256, _, _>(
+                &proof, late_start, &late_ops, &late_root
+            ));
+        }
+
+        db.destroy().await.unwrap();
+    }
+
     #[boxed]
     pub(crate) async fn run_batch_chain<F: Family, V, C>(
         context: deterministic::Context,

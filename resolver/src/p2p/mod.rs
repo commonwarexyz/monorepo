@@ -146,7 +146,6 @@ mod tests {
 
     const MAILBOX_SIZE: NonZeroUsize = NZUsize!(1024);
     const RATE_LIMIT: NonZeroU32 = NZU32!(10);
-    const INITIAL_DURATION: Duration = Duration::from_millis(100);
     const TIMEOUT: Duration = Duration::from_millis(400);
     const FETCH_RETRY_TIMEOUT: Duration = Duration::from_millis(100);
     const LINK: Link = Link {
@@ -333,7 +332,6 @@ mod tests {
                 producer,
                 mailbox_size: MAILBOX_SIZE,
                 me: Some(public_key),
-                initial: INITIAL_DURATION,
                 timeout: TIMEOUT,
                 fetch_retry_timeout: FETCH_RETRY_TIMEOUT,
                 priority_requests: false,
@@ -2846,7 +2844,6 @@ mod tests {
                     producer: Producer::<Key, Bytes>::default(),
                     mailbox_size: MAILBOX_SIZE,
                     me: Some(requester_key),
-                    initial: INITIAL_DURATION,
                     timeout: TIMEOUT,
                     fetch_retry_timeout: Duration::ZERO,
                     priority_requests: false,
@@ -3902,7 +3899,6 @@ mod tests {
                     producer: Producer::<Key, Bytes>::default(),
                     mailbox_size: MAILBOX_SIZE,
                     me: Some(public_key),
-                    initial: INITIAL_DURATION,
                     timeout: TIMEOUT,
                     fetch_retry_timeout: FETCH_RETRY_TIMEOUT,
                     priority_requests: false,
@@ -3922,7 +3918,6 @@ mod tests {
                     producer: prod2,
                     mailbox_size: MAILBOX_SIZE,
                     me: Some(public_key),
-                    initial: INITIAL_DURATION,
                     timeout: TIMEOUT,
                     fetch_retry_timeout: FETCH_RETRY_TIMEOUT,
                     priority_requests: false,
@@ -3998,7 +3993,6 @@ mod tests {
                     producer,
                     mailbox_size: MAILBOX_SIZE,
                     me: Some(public_key),
-                    initial: INITIAL_DURATION,
                     timeout: TIMEOUT,
                     fetch_retry_timeout: FETCH_RETRY_TIMEOUT,
                     priority_requests: false,
