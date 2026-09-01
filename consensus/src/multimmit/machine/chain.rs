@@ -1032,7 +1032,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
                     );
                 }
                 if !locally_custodied {
-                    self.schedule_ready_validations::<H>(generation)?;
+                    self.schedule_ready_validations(generation)?;
                 }
             }
             Artifact::DaVote(vote) => self.observe_da_vote::<H>(vote)?,
@@ -1431,23 +1431,23 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             return Err(ChainError::Context);
         };
         let Some(records) = blocks.get_mut(&job.height) else {
-            self.schedule_ready_validations::<H>(generation)?;
+            self.schedule_ready_validations(generation)?;
             return Ok(BlockValidationOutcome::Stale);
         };
         let Some(index) = records
             .iter()
             .position(|record| record.artifact == job.artifact)
         else {
-            self.schedule_ready_validations::<H>(generation)?;
+            self.schedule_ready_validations(generation)?;
             return Ok(BlockValidationOutcome::Stale);
         };
         if records[index].state != ValidationState::Pending(completion.id) {
-            self.schedule_ready_validations::<H>(generation)?;
+            self.schedule_ready_validations(generation)?;
             return Ok(BlockValidationOutcome::Stale);
         }
         let header = records[index].block.header().clone();
         if completion.validity == BlockValidity::Invalid || !self.record_header::<H>(&header)? {
-            self.discard_validation::<H>(job, generation)?;
+            self.discard_validation(job, generation)?;
             return Ok(BlockValidationOutcome::Invalid(job.artifact));
         }
         let record = self
@@ -1464,15 +1464,11 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             return Err(ChainError::Context);
         }
         record.state = ValidationState::Valid;
-        self.schedule_ready_validations::<H>(generation)?;
+        self.schedule_ready_validations(generation)?;
         Ok(BlockValidationOutcome::Retained)
     }
 
-    fn discard_validation<H: Hasher<Digest = D>>(
-        &mut self,
-        job: ValidationRecord<D>,
-        generation: u64,
-    ) -> Result<(), ChainError> {
+    fn discard_validation(&mut self, job: ValidationRecord<D>, generation: u64) -> Result<(), ChainError> {
         let blocks = self
             .blocks
             .get_mut(job.chain.get() as usize)
@@ -1487,7 +1483,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             blocks.remove(&job.height);
         }
         self.processed.remove(&job.artifact);
-        self.schedule_ready_validations::<H>(generation)?;
+        self.schedule_ready_validations(generation)?;
         Ok(())
     }
 
@@ -1500,10 +1496,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
     /// Saturated producers retain their authenticated block in the existing artifact-cache slot.
     /// The rotating cursor continues across other chains, so one producer cannot turn local
     /// application pressure into a fatal error or global validation head-of-line blocking.
-    fn schedule_ready_validations<H: Hasher<Digest = D>>(
-        &mut self,
-        generation: u64,
-    ) -> Result<(), ChainError> {
+    fn schedule_ready_validations(&mut self, generation: u64) -> Result<(), ChainError> {
         loop {
             if self.validation_reservations.items >= self.validation_limits.items {
                 return Ok(());
@@ -1527,7 +1520,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
                             .enumerate()
                             .find(|(_, record)| {
                                 record.state == ValidationState::Ready
-                                    && self.validation_parent_available::<H>(
+                                    && self.validation_parent_available(
                                         chain_index,
                                         record.block.header(),
                                     )
@@ -1588,11 +1581,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         }
     }
 
-    fn validation_parent_available<H: Hasher<Digest = D>>(
-        &self,
-        chain: usize,
-        header: &TransactionBlockHeader<D>,
-    ) -> bool {
+    fn validation_parent_available(&self, chain: usize, header: &TransactionBlockHeader<D>) -> bool {
         let Some(parent_height) = header.height().get().checked_sub(1).map(Height::new) else {
             return false;
         };
@@ -1602,6 +1591,8 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         {
             return true;
         }
+        // Every record stores the digest it was registered with, so no header is rehashed on
+        // the per-poll scheduling pass.
         self.blocks[chain]
             .get(&parent_height)
             .is_some_and(|records| {
@@ -1609,7 +1600,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
                     matches!(
                         parent.state,
                         ValidationState::Pending(_) | ValidationState::Valid
-                    ) && parent.block.header().digest::<H>() == header.parent()
+                    ) && parent.block_ref.digest() == header.parent()
                 })
             })
     }
@@ -2516,7 +2507,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         production_credit: bool,
     ) -> Result<(), ChainError> {
         self.production_credit = production_credit;
-        self.schedule_ready_validations::<H>(generation)?;
+        self.schedule_ready_validations(generation)?;
         let recoveries_before = self.recovery_jobs.len();
         self.drive_recoveries::<H>(profile, generation, recovery_slots)?;
         if self.recovery_jobs.len() > recoveries_before {
