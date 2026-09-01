@@ -1717,18 +1717,33 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
                 complete: slots == 0,
             });
         }
-        if self
-            .certificate_scan
-            .as_ref()
-            .is_some_and(|scan| scan.view != view)
-        {
-            self.certificate_scan = None;
+        let mut processed = 0;
+        // A scan already in progress for another view finishes first. Discarding it would let
+        // the current view and a deferred ready view reset each other's partial scans on
+        // alternating drives, which never terminates once one pass exceeds a service budget.
+        if let Some(mut other) = self.certificate_scan.take_if(|scan| scan.view != view) {
+            while processed < budget && !matches!(other.phase, CertificateScanPhase::Complete) {
+                processed += usize::from(self.advance_certificate_scan(&mut other));
+            }
+            if !matches!(other.phase, CertificateScanPhase::Complete) {
+                self.certificate_scan = Some(other);
+                return Ok(CertificateDrive {
+                    processed,
+                    complete: false,
+                });
+            }
+            self.finish_certificate_scan::<H>(profile, generation, other)?;
+            if processed >= budget {
+                return Ok(CertificateDrive {
+                    processed,
+                    complete: false,
+                });
+            }
         }
         let mut scan = self
             .certificate_scan
             .take()
             .unwrap_or_else(|| self.start_certificate_scan(view));
-        let mut processed = 0;
         while processed < budget && !matches!(scan.phase, CertificateScanPhase::Complete) {
             processed += usize::from(self.advance_certificate_scan(&mut scan));
         }

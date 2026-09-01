@@ -1,5 +1,8 @@
 use self::test_utils::{Runner, SymbolicPersistence, SymbolicVerifier, cohort};
-use super::{contracts::Lane, *};
+use super::{
+    contracts::{CORE_BUDGET, Lane},
+    *,
+};
 use crate::{
     Epochable, Viewable as _,
     multimmit::{
@@ -6414,6 +6417,70 @@ fn aggregate_publication_defers_to_the_signature_exposure_floor() {
         matches!(durable_effect(effect), Some(DurableEffect::Broadcast(artifact))
             if artifact.as_ref() == &aggregate)
     }));
+}
+
+#[test]
+fn deferred_view_certificate_scan_survives_current_view_drives() {
+    // The current view's certificate drive and the drive for another ready view share one scan
+    // slot. Once a single pass over a ready view's messages costs more than one core budget, a
+    // current-view drive that discarded the other view's partial scan would leave the machine
+    // reporting progress on every poll without ever assembling that certificate. The committee
+    // is sized so one pass exceeds the budget on its own.
+    const PARTICIPANTS: usize = 111;
+    const MAX_POLLS: usize = 64;
+    let resources = ResourceLimits::new(
+        NonZeroUsize::new(16 * 1024).unwrap(),
+        NonZeroUsize::new(1_024).unwrap(),
+        NonZeroUsize::new(8).unwrap(),
+        NonZeroUsize::new(3).unwrap(),
+        2,
+        NonZeroUsize::new(512).unwrap(),
+        NonZeroUsize::new(8).unwrap(),
+        NonZeroUsize::new(32).unwrap(),
+        NonZeroUsize::new(64).unwrap(),
+    );
+    let profile = profile_with_resources(Role::Observer, PARTICIPANTS, 2, resources);
+    let quorum = profile.protocol().codec_config().view_quorum();
+    assert!(
+        quorum * 3 > CORE_BUDGET as usize,
+        "one certificate scan must exceed one core budget"
+    );
+    let (mut machine, _) = start_profile(profile);
+    assert_eq!(machine.durable.view, View::new(1));
+
+    // The machine holds view 1 while a view quorum votes in view 2.
+    let proposed = leader(&machine, 2);
+    let proposal = observe(
+        &mut machine,
+        Artifact::LeaderBlock(SignedLeaderBlock::new(proposed.clone(), attestation(0))),
+    );
+    complete_raw(&mut machine, &proposal, true);
+    for signer in 0..quorum {
+        let vote = Artifact::Vote(view_vote(&machine, &proposed, signer as u32));
+        let vote = observe(&mut machine, vote);
+        complete_raw(&mut machine, &vote, true);
+    }
+
+    // Machine-owned work must assemble the ready view's V-QC within a bounded number of polls.
+    let mut aggregate = None;
+    let mut polls = 0;
+    while aggregate.is_none() && polls < MAX_POLLS {
+        let result = machine.poll(NonZeroUsize::MIN).unwrap();
+        polls += 1;
+        let work_remaining = result.work_remaining();
+        let (effects, _) = result.into_parts();
+        aggregate = effects.into_iter().find_map(|effect| match effect {
+            Capability::Leader(LeaderCapability::AggregateVqc(job)) => Some(job),
+            _ => None,
+        });
+        if aggregate.is_none() && !work_remaining {
+            break;
+        }
+    }
+    let aggregate = aggregate
+        .unwrap_or_else(|| panic!("no V-QC assembly for the ready view after {polls} polls"));
+    assert_eq!(aggregate.leader().view(), View::new(2));
+    assert_eq!(aggregate.messages().len(), quorum);
 }
 
 #[test]
