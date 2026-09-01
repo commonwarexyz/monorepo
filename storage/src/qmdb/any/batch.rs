@@ -2198,6 +2198,7 @@ where
                 Operation::Update(data) => data,
                 _ => unreachable!("snapshot should only reference Update operations"),
             };
+
             // A key resolved via the ancestor diff must only match at its ancestor-diff
             // location. A stale snapshot collision (the pre-parent DB snapshot still
             // containing the key's old location) must contribute nothing: consuming its
@@ -2205,7 +2206,7 @@ where
             // (or its redundant delete as a live delete) before extract_parent_deleted_creates
             // runs, and feeding its next_key or (key, old_loc) into the candidate sets would
             // steer the predecessor rewrites only on the pending-ancestor path (the
-            // committed-ancestor path never reads the superseded op).
+            // applied-ancestor path never reads the superseded op).
             if let Some(entry) = resolve_in_ancestors(&m.ancestors, &key)
                 && entry.loc() != Some(old_loc)
             {
@@ -2295,7 +2296,7 @@ where
             };
 
             // Same stale-location guard as the mutation classifier above: the snapshot scan
-            // sees only committed state, so a key the ancestor diff supersedes at another
+            // sees only applied state, so a key the ancestor diff supersedes at another
             // location (or deletes) is stale here and must not steer the predecessor search.
             // The ancestor-diff walk below contributes the live version of such keys.
             if let Some(entry) = resolve_in_ancestors(&m.ancestors, &data.key)
@@ -5102,7 +5103,7 @@ mod tests {
     }
 
     /// Ordered mirror of [`recreate_deleted_key_with_collision_sibling_root_matches`]:
-    /// re-creating a key deleted by a pending parent must match the committed-parent
+    /// re-creating a key deleted by a pending parent must match the applied-parent
     /// path even though a colliding sibling's bucket scan exposes the deleted key's
     /// stale committed location to the classifier.
     #[test]
@@ -5182,7 +5183,7 @@ mod tests {
     }
 
     /// Deleting a key already deleted by a pending parent must be a no-op: same root
-    /// as the committed-parent path and no double decrement of the active-key count,
+    /// as the applied-parent path and no double decrement of the active-key count,
     /// even though the sibling update's bucket scan exposes the key's stale committed
     /// location.
     #[test]
@@ -5253,7 +5254,7 @@ mod tests {
 
     /// Reduced from a fuzzer counterexample: a parent deletes keys whose buckets the child
     /// later touches, and building the child on the pending parent must produce the same
-    /// root as building it on the committed parent. The final key-value state is identical
+    /// root as building it on the applied parent. The final key-value state is identical
     /// either way; a divergence means the emitted operation streams (next-key pointers or
     /// floor moves) depended on whether the parent was pending.
     #[test]
@@ -5319,7 +5320,7 @@ mod tests {
             assert_eq!(
                 pending_child.root(),
                 committed_child.root(),
-                "child root depended on pending-vs-committed parent path"
+                "child root depended on pending-vs-applied parent path"
             );
 
             let (db, _) = db.apply_batch(pending_child).await.unwrap();
@@ -5334,9 +5335,9 @@ mod tests {
     }
 
     /// While the parent's delete is pending, the deleted key's op remains in the
-    /// committed snapshot, so a child write to the same bucket reads it during the
+    /// pre-parent snapshot, so a child write to the same bucket reads it during the
     /// bucket scan. That stale op must contribute no candidates: they reorder the
-    /// predecessor rewrites, so the root differs from the committed-parent path.
+    /// predecessor rewrites, so the root differs from the applied-parent path.
     #[test]
     fn ordered_stale_sibling_scan_candidates_root_matches() {
         let runner = deterministic::Runner::default();
@@ -5400,7 +5401,7 @@ mod tests {
             assert_eq!(
                 pending_child.root(),
                 committed_child.root(),
-                "child root depended on pending-vs-committed parent path"
+                "child root depended on pending-vs-applied parent path"
             );
             let (db, _) = db.apply_batch(pending_child).await.unwrap();
             assert_eq!(db.root(), committed_child.root());
