@@ -109,6 +109,15 @@ impl<S: Scheme, C: Digest> State<S, C> {
         self.pending.take()
     }
 
+    /// Takes the pending anchor if the processed round floor now covers its round.
+    ///
+    /// Finalized rounds and heights increase together along the finalized chain, so
+    /// an anchor at or below the round floor sits at or below the processed height.
+    #[must_use]
+    pub(super) fn take_superseded_anchor(&mut self, round: Round) -> Option<Finalization<S, C>> {
+        self.pending.take_if(|pending| pending.round() <= round)
+    }
+
     /// Returns true when the resolver request is above all processed floors.
     fn permits(&self, fetch: &Request<C>) -> bool {
         if let Some(height) = self.height
