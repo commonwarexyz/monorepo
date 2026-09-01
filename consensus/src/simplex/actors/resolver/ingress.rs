@@ -43,7 +43,7 @@ pub enum MailboxMessage<S: Scheme, D: Digest> {
         view: View,
         /// The certificate that is needed.
         kind: Kind,
-        /// Preferred peer, or `None` to use ordinary resolver peer selection.
+        /// When set, the resolver queries only this peer.
         target: Option<S::PublicKey>,
     },
 }

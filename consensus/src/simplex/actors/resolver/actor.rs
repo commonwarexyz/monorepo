@@ -1372,8 +1372,8 @@ mod tests {
         });
     }
 
-    /// A resolve without a target (no tracked round in the term knows the
-    /// leader) must fall back to an untargeted fetch, not be dropped.
+    /// A resolve without a target must open an untargeted fetch, not be
+    /// dropped.
     #[test_async]
     async fn resolve_without_target_falls_back_to_untargeted_fetch() {
         let runtime = deterministic::Runner::default();
