@@ -42,10 +42,12 @@ use commonware_p2p::{Blocker, Receiver, Sender};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage, Supervisor,
-    buffer::paged::CacheRef, spawn_cell, telemetry::traces::TracedExt as _,
+    buffer::paged::{self, CacheRef},
+    spawn_cell,
+    telemetry::traces::TracedExt as _,
 };
 use commonware_storage::Context as StorageContext;
-use commonware_utils::{N5f1, NZU16, NZU64, NZUsize, channel::oneshot};
+use commonware_utils::{N5f1, NZU64, NZUsize, channel::oneshot};
 use futures::{StreamExt as _, stream::FuturesUnordered};
 use rand::{SeedableRng as _, rngs::StdRng};
 use rand_core::CryptoRng;
@@ -361,7 +363,7 @@ where
         event_codec: DomainEventCodecConfig::from_profile(&profile),
         max_events_per_record: tuning.max_events_per_record,
         max_record_bytes: tuning.max_record_bytes,
-        page_cache: CacheRef::from_pooler(context, NZU16!(1024), NZUsize!(8)),
+        page_cache: CacheRef::from_pooler(context, paged::page_size(4_096), NZUsize!(8)),
         write_buffer: WRITE_BUFFER,
     };
     let mut journal = SafetyJournal::open(context.child("journal"), journal_config, covered)
