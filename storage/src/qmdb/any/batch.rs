@@ -5333,6 +5333,82 @@ mod tests {
         });
     }
 
+    /// While the parent's delete is pending, the deleted key's op remains in the
+    /// committed snapshot, so a child write to the same bucket reads it during the
+    /// bucket scan. That stale op must contribute no candidates: they reorder the
+    /// predecessor rewrites, so the root differs from the committed-parent path.
+    #[test]
+    fn ordered_stale_sibling_scan_candidates_root_matches() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            type TestDb = OrderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+            let config = fixed_db_config::<OneCap>("ordered-stale-sibling-scan", &context);
+            let db = TestDb::init(context, config).await.unwrap();
+            let v = |n| colliding_digest(0xB0, n);
+            let initial = db
+                .new_batch()
+                .write(colliding_digest(3, 1), Some(v(1)))
+                .write(colliding_digest(3, 23), Some(v(2)))
+                .write(colliding_digest(3, 31), Some(v(4)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(initial).await.unwrap();
+            let db = db.commit().await.unwrap();
+
+            // Parent: delete the bucket's largest key.
+            let parent = db
+                .new_batch()
+                .write(colliding_digest(3, 31), None)
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            // Child: write a colliding sibling (its bucket scan reads the deleted
+            // key's stale committed op), re-create the deleted key, and create a
+            // new smallest key so the wraparound predecessor search consults the
+            // candidate set.
+            let pending_child = parent
+                .new_batch::<Sha256>()
+                .write(colliding_digest(3, 7), Some(v(5)))
+                .write(colliding_digest(3, 31), Some(v(6)))
+                .write(colliding_digest(0, 0), Some(v(7)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            let (db, _) = db.apply_batch(parent).await.unwrap();
+            let db = db.commit().await.unwrap();
+
+            let committed_child = db
+                .new_batch()
+                .write(colliding_digest(3, 7), Some(v(5)))
+                .write(colliding_digest(3, 31), Some(v(6)))
+                .write(colliding_digest(0, 0), Some(v(7)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            assert_eq!(
+                pending_child.root(),
+                committed_child.root(),
+                "child root depended on pending-vs-committed parent path"
+            );
+            let (db, _) = db.apply_batch(pending_child).await.unwrap();
+            assert_eq!(db.root(), committed_child.root());
+
+            db.destroy().await.unwrap();
+        });
+    }
+
     /// Redundant deletes of two parent-deleted keys must not drive the active-key
     /// count negative while a colliding create pulls their stale committed locations
     /// into the classifier's read set.
