@@ -359,37 +359,12 @@ where
 }
 
 /// Combined vote/seed signature pair emitted by the BLS12-381 threshold VRF scheme.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, FixedSize, Read, Write)]
 pub struct Signature<V: Variant> {
     /// Signature over the consensus vote message (partial or recovered aggregate).
     pub vote_signature: V::Signature,
     /// Signature over the per-round seed (partial or recovered aggregate).
     pub seed_signature: V::Signature,
-}
-
-impl<V: Variant> Write for Signature<V> {
-    fn write(&self, writer: &mut impl BufMut) {
-        self.vote_signature.write(writer);
-        self.seed_signature.write(writer);
-    }
-}
-
-impl<V: Variant> Read for Signature<V> {
-    type Cfg = ();
-
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let vote_signature = V::Signature::read(reader)?;
-        let seed_signature = V::Signature::read(reader)?;
-
-        Ok(Self {
-            vote_signature,
-            seed_signature,
-        })
-    }
-}
-
-impl<V: Variant> FixedSize for Signature<V> {
-    const SIZE: usize = V::Signature::SIZE * 2;
 }
 
 #[cfg(feature = "arbitrary")]
@@ -461,7 +436,7 @@ where
 }
 
 /// Seed represents a threshold signature over the current view.
-#[derive(Clone, Debug, PartialEq, Hash, Eq)]
+#[derive(Clone, Debug, PartialEq, Hash, Eq, EncodeSize, Read, Write)]
 pub struct Seed<V: Variant> {
     /// The round for which this seed is generated
     pub round: Round,
@@ -521,30 +496,6 @@ impl<V: Variant> Epochable for Seed<V> {
 impl<V: Variant> Viewable for Seed<V> {
     fn view(&self) -> View {
         self.round.view()
-    }
-}
-
-impl<V: Variant> Write for Seed<V> {
-    fn write(&self, writer: &mut impl BufMut) {
-        self.round.write(writer);
-        self.signature.write(writer);
-    }
-}
-
-impl<V: Variant> Read for Seed<V> {
-    type Cfg = ();
-
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let round = Round::read(reader)?;
-        let signature = V::Signature::read(reader)?;
-
-        Ok(Self { round, signature })
-    }
-}
-
-impl<V: Variant> EncodeSize for Seed<V> {
-    fn encode_size(&self) -> usize {
-        self.round.encode_size() + self.signature.encode_size()
     }
 }
 

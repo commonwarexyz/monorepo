@@ -608,7 +608,9 @@ impl Display for TermLength {
 ///
 /// Round provides a total ordering across epoch boundaries, where rounds are
 /// ordered first by epoch, then by view within that epoch.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, EncodeSize, Read, Write,
+)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct Round {
     epoch: Epoch,
@@ -807,30 +809,6 @@ impl Epocher for FixedEpocher {
     }
 }
 
-impl Read for Round {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, Error> {
-        Ok(Self {
-            epoch: Epoch::read(buf)?,
-            view: View::read(buf)?,
-        })
-    }
-}
-
-impl Write for Round {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.epoch.write(buf);
-        self.view.write(buf);
-    }
-}
-
-impl EncodeSize for Round {
-    fn encode_size(&self) -> usize {
-        self.epoch.encode_size() + self.view.encode_size()
-    }
-}
-
 impl Display for Round {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "({}, {})", self.epoch, self.view)
@@ -943,8 +921,9 @@ commonware_macros::stability_scope!(ALPHA {
         ///
         /// Each field is parsed as its declared type on deserialization, so the accessors on a
         /// successfully decoded [`Commitment`] never fail.
-        #[derive(FixedArray)]
+        #[derive(FixedArray, FixedSize, Write)]
         #[fixed_array(bytes([u8; COMMITMENT_SIZE]))]
+        #[codec(bound = "B: Digestible, C: Scheme, H: Hasher")]
         pub struct Commitment<B, C, H>([u8; COMMITMENT_SIZE], PhantomData<(B, C, H)>);
 
         impl<B, C, H> Clone for Commitment<B, C, H> {
@@ -1072,16 +1051,6 @@ commonware_macros::stability_scope!(ALPHA {
                 Self::assert_layout();
                 Self([0u8; COMMITMENT_SIZE], PhantomData)
             };
-        }
-
-        impl<B: Digestible, C: Scheme, H: Hasher> Write for Commitment<B, C, H> {
-            fn write(&self, buf: &mut impl bytes::BufMut) {
-                buf.put_slice(self.as_ref());
-            }
-        }
-
-        impl<B: Digestible, C: Scheme, H: Hasher> FixedSize for Commitment<B, C, H> {
-            const SIZE: usize = COMMITMENT_SIZE;
         }
 
         impl<B: Digestible, C: Scheme, H: Hasher> Read for Commitment<B, C, H> {

@@ -4,7 +4,7 @@ use crate::{
     Block, CertifiableBlock, Heightable,
     types::{Height, coding::Commitment},
 };
-use commonware_codec::{BufsMut, EncodeSize, Read, ReadExt, Write};
+use commonware_codec::{EncodeSize, Read, ReadExt, Write};
 use commonware_coding::{Config as CodingConfig, Scheme};
 use commonware_cryptography::{Committable, Digestible, Hasher};
 use commonware_parallel::{Sequential, Strategy};
@@ -16,12 +16,14 @@ use std::{
 
 /// A broadcastable shard of erasure coded data, including the coding commitment and
 /// the configuration used to code the data.
+#[derive(EncodeSize, Read, Write)]
 pub struct Shard<B: Digestible, C: Scheme, H: Hasher> {
     /// The coding commitment
     pub(crate) commitment: Commitment<B, C, H>,
     /// The index of this shard within the commitment.
     pub(crate) index: u16,
     /// An individual shard within the commitment.
+    #[codec(cfg)]
     pub(crate) inner: C::Shard,
 }
 
@@ -65,49 +67,6 @@ impl<B: Digestible, C: Scheme, H: Hasher> Committable for Shard<B, C, H> {
 
     fn commitment(&self) -> Self::Commitment {
         self.commitment
-    }
-}
-
-impl<B: Digestible, C: Scheme, H: Hasher> Write for Shard<B, C, H> {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.commitment.write(buf);
-        self.index.write(buf);
-        self.inner.write(buf);
-    }
-
-    fn write_bufs(&self, buf: &mut impl BufsMut) {
-        self.commitment.write(buf);
-        self.index.write(buf);
-        self.inner.write_bufs(buf);
-    }
-}
-
-impl<B: Digestible, C: Scheme, H: Hasher> EncodeSize for Shard<B, C, H> {
-    fn encode_size(&self) -> usize {
-        self.commitment.encode_size() + self.index.encode_size() + self.inner.encode_size()
-    }
-
-    fn encode_inline_size(&self) -> usize {
-        self.commitment.encode_size() + self.index.encode_size() + self.inner.encode_inline_size()
-    }
-}
-
-impl<B: Digestible, C: Scheme, H: Hasher> Read for Shard<B, C, H> {
-    type Cfg = commonware_coding::CodecConfig;
-
-    fn read_cfg(
-        buf: &mut impl bytes::Buf,
-        cfg: &Self::Cfg,
-    ) -> Result<Self, commonware_codec::Error> {
-        let commitment = Commitment::<B, C, H>::read(buf)?;
-        let index = u16::read(buf)?;
-        let inner = C::Shard::read_cfg(buf, cfg)?;
-
-        Ok(Self {
-            commitment,
-            index,
-            inner,
-        })
     }
 }
 
@@ -427,6 +386,7 @@ impl<B: Block + Eq, C: Scheme, H: Hasher> Eq for CodedBlock<B, C, H> {}
 ///
 /// The [`Read`] implementation performs a light verification (block digest check)
 /// to detect storage corruption, but does not re-encode the block.
+#[derive(EncodeSize, Write)]
 pub struct StoredCodedBlock<B: Block, C: Scheme, H: Hasher> {
     inner: Arc<B>,
     commitment: Commitment<B, C, H>,
@@ -486,19 +446,6 @@ impl<B: Block, C: Scheme, H: Hasher> Digestible for StoredCodedBlock<B, C, H> {
 
     fn digest(&self) -> Self::Digest {
         self.inner.digest()
-    }
-}
-
-impl<B: Block, C: Scheme, H: Hasher> Write for StoredCodedBlock<B, C, H> {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.inner.write(buf);
-        self.commitment.write(buf);
-    }
-}
-
-impl<B: Block, C: Scheme, H: Hasher> EncodeSize for StoredCodedBlock<B, C, H> {
-    fn encode_size(&self) -> usize {
-        self.inner.encode_size() + self.commitment.encode_size()
     }
 }
 

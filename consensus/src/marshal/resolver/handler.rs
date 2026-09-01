@@ -1,7 +1,7 @@
 use crate::types::{Height, Round};
-use bytes::{Buf, BufMut, Bytes};
+use bytes::Bytes;
 use commonware_actor::mailbox::{self, Overflow, Policy, Sender};
-use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
+use commonware_codec::{EncodeSize, Read, Write};
 use commonware_cryptography::Digest;
 use commonware_resolver::{Consumer, Delivery, Fetch as ResolverFetch, p2p::Producer};
 use commonware_runtime::Metrics;
@@ -210,20 +210,19 @@ pub enum Finalized {
 }
 
 /// A raw resolver key for backfilling data.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, EncodeSize, Read, Write)]
 pub enum Key<D: Digest> {
     /// Fetch a block by consensus commitment.
+    #[codec(tag = 0)]
     Block(D),
-    Finalized {
-        height: Height,
-    },
-    Notarized {
-        round: Round,
-    },
+    #[codec(tag = 1)]
+    Finalized { height: Height },
+    #[codec(tag = 2)]
+    Notarized { round: Round },
 }
 
 impl<D: Digest> Key<D> {
-    /// The subject of the request.
+    /// The subject of the request, used to order and hash requests.
     const fn subject(&self) -> u8 {
         match self {
             Self::Block(_) => BLOCK_REQUEST,
@@ -380,45 +379,6 @@ pub(crate) fn above_round_floor<D: Digest>(
     }
 }
 
-impl<D: Digest> Write for Key<D> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.subject().write(buf);
-        match self {
-            Self::Block(commitment) => commitment.write(buf),
-            Self::Finalized { height } => height.write(buf),
-            Self::Notarized { round } => round.write(buf),
-        }
-    }
-}
-
-impl<D: Digest> Read for Key<D> {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let request = match u8::read(buf)? {
-            BLOCK_REQUEST => Self::Block(D::read(buf)?),
-            FINALIZED_REQUEST => Self::Finalized {
-                height: Height::read(buf)?,
-            },
-            NOTARIZED_REQUEST => Self::Notarized {
-                round: Round::read(buf)?,
-            },
-            i => return Err(CodecError::InvalidEnum(i)),
-        };
-        Ok(request)
-    }
-}
-
-impl<D: Digest> EncodeSize for Key<D> {
-    fn encode_size(&self) -> usize {
-        1 + match self {
-            Self::Block(commitment) => commitment.encode_size(),
-            Self::Finalized { height } => height.encode_size(),
-            Self::Notarized { round } => round.encode_size(),
-        }
-    }
-}
-
 impl<D: Digest> Span for Key<D> {}
 
 impl<D: Digest> PartialEq for Key<D> {
@@ -506,7 +466,7 @@ where
 mod tests {
     use super::*;
     use crate::types::{Epoch, View};
-    use commonware_codec::{Encode, ReadExt};
+    use commonware_codec::{Encode, Error as CodecError, ReadExt};
     use commonware_cryptography::{
         Hasher as _,
         sha256::{Digest as Sha256Digest, Sha256},
