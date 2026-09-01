@@ -93,32 +93,20 @@ use std::{
 
 /// The role-specific data for a BLS12-381 threshold scheme participant.
 #[derive(Clone, Debug)]
-enum Role<P: PublicKey, V: Variant> {
+enum Role<V: Variant> {
     Signer {
-        /// Participants in the committee.
-        participants: Committee<P>,
         /// The public polynomial, used for the group identity, and partial signatures.
         polynomial: Sharing<V>,
         /// Local share used to generate partial signatures.
         share: Share,
-        /// Pre-computed namespaces for domain separation.
-        namespace: Namespace,
     },
     Verifier {
-        /// Participants in the committee.
-        participants: Committee<P>,
         /// The public polynomial, used for the group identity, and partial signatures.
         polynomial: Sharing<V>,
-        /// Pre-computed namespaces for domain separation.
-        namespace: Namespace,
     },
     CertificateVerifier {
-        /// Participants in the committee.
-        participants: Committee<P>,
         /// Public identity of the committee (constant across reshares).
         identity: V::Public,
-        /// Pre-computed namespaces for domain separation.
-        namespace: Namespace,
     },
 }
 
@@ -127,12 +115,12 @@ enum Role<P: PublicKey, V: Variant> {
 /// This scheme produces both vote signatures and per-round seed signatures.
 /// The seed can be extracted from certificates using the [`Seedable`] trait.
 ///
-/// It is possible for a node to play one of the following roles: a signer (with its share),
-/// a verifier (with evaluated public polynomial), or an external verifier that
-/// only checks recovered certificates.
+/// Instances can sign, verify partial signatures, or verify recovered certificates.
 #[derive(Clone, Debug)]
 pub struct Scheme<P: PublicKey, V: Variant> {
-    role: Role<P, V>,
+    participants: Committee<P>,
+    namespace: Namespace,
+    role: Role<V>,
 }
 
 impl<P: PublicKey, V: Variant> Scheme<P, V> {
@@ -187,12 +175,9 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
             .expect("share index must match participant indices");
         if partial_public == share.public::<V>() {
             Some(Self {
-                role: Role::Signer {
-                    participants,
-                    polynomial,
-                    share,
-                    namespace: Namespace::new(namespace),
-                },
+                participants,
+                namespace: Namespace::new(namespace),
+                role: Role::Signer { polynomial, share },
             })
         } else {
             None
@@ -236,11 +221,9 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         polynomial.precompute_partial_publics();
 
         Some(Self {
-            role: Role::Verifier {
-                participants,
-                polynomial,
-                namespace: Namespace::new(namespace),
-            },
+            participants,
+            namespace: Namespace::new(namespace),
+            role: Role::Verifier { polynomial },
         })
     }
 
@@ -263,21 +246,15 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
             return None;
         }
         Some(Self {
-            role: Role::CertificateVerifier {
-                participants,
-                identity,
-                namespace: Namespace::new(namespace),
-            },
+            participants,
+            namespace: Namespace::new(namespace),
+            role: Role::CertificateVerifier { identity },
         })
     }
 
     /// Returns the ordered committee of participant public identity keys and weights.
     pub const fn participants(&self) -> &Committee<P> {
-        match &self.role {
-            Role::Signer { participants, .. } => participants,
-            Role::Verifier { participants, .. } => participants,
-            Role::CertificateVerifier { participants, .. } => participants,
-        }
+        &self.participants
     }
 
     /// Returns the public identity of the committee (constant across reshares).
@@ -310,11 +287,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
 
     /// Returns the pre-computed namespaces.
     const fn namespace(&self) -> &Namespace {
-        match &self.role {
-            Role::Signer { namespace, .. } => namespace,
-            Role::Verifier { namespace, .. } => namespace,
-            Role::CertificateVerifier { namespace, .. } => namespace,
-        }
+        &self.namespace
     }
 
     /// Encrypts a message for a target round using Timelock Encryption ([TLE](tle)).

@@ -78,22 +78,16 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         signing_keys: BiMap<P, V::Public>,
         private_key: Private,
     ) -> Option<Self> {
-        if !committee.iter().eq(signing_keys.keys().iter()) {
-            return None;
-        }
         let public_key = ops::compute_public::<V>(&private_key);
-        let signer = signing_keys
+        let mut scheme = Self::verifier(namespace, committee, signing_keys)?;
+        let signer = scheme
+            .signing_keys
             .values()
             .iter()
             .position(|p| p == &public_key)
             .map(|index| (Participant::from_usize(index), private_key))?;
-
-        Some(Self {
-            committee,
-            signing_keys,
-            signer: Some(signer),
-            namespace: N::derive(namespace),
-        })
+        scheme.signer = Some(signer);
+        Some(scheme)
     }
 
     /// Builds a verifier that can authenticate signatures and certificates.

@@ -39,47 +39,32 @@ use std::collections::BTreeSet;
 
 /// Role-specific data for a BLS12-381 threshold scheme.
 #[derive(Clone, Debug)]
-enum Role<P: PublicKey, V: Variant, N: Namespace> {
+enum Role<V: Variant> {
     Signer {
-        /// Participants in the committee.
-        participants: Committee<P>,
         /// The public polynomial, used for the group identity, and partial signatures.
         polynomial: Sharing<V>,
         /// Local share used to generate partial signatures.
         share: Share,
-        /// Pre-computed namespace(s) for this subject type.
-        namespace: N,
     },
     Verifier {
-        /// Participants in the committee.
-        participants: Committee<P>,
         /// The public polynomial, used for the group identity, and partial signatures.
         polynomial: Sharing<V>,
-        /// Pre-computed namespace(s) for this subject type.
-        namespace: N,
     },
     CertificateVerifier {
-        /// Participants in the committee.
-        participants: Committee<P>,
         /// Public identity of the committee (constant across reshares).
         identity: V::Public,
-        /// Pre-computed namespace(s) for this subject type.
-        namespace: N,
     },
 }
 
 /// Generic BLS12-381 threshold signature implementation.
 ///
-/// This type contains the core cryptographic operations without protocol-specific
-/// context types. It can be reused across different protocols (simplex, aggregation, etc.)
-/// by wrapping it with protocol-specific trait implementations via the macro.
-///
-/// A node can play one of the following roles: a signer (with its share),
-/// a verifier (with evaluated public polynomial), or an external verifier that
-/// only checks recovered certificates.
+/// Protocol-specific wrappers use this type for signing, partial-signature verification, or
+/// recovered-certificate verification.
 #[derive(Clone, Debug)]
 pub struct Generic<P: PublicKey, V: Variant, N: Namespace> {
-    role: Role<P, V, N>,
+    participants: Committee<P>,
+    namespace: N,
+    role: Role<V>,
 }
 
 impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
@@ -97,7 +82,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     /// The polynomial can be evaluated to obtain public verification keys for partial
     /// signatures produced by committee members.
     ///
-    /// Returns `None` if the share's public key does not match any participant.
+    /// Returns `None` if the committee is non-uniform or the share does not match a participant.
     ///
     /// # Panics
     ///
@@ -135,12 +120,9 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
             .expect("share index must match participant indices");
         if partial_public == share.public::<V>() {
             Some(Self {
-                role: Role::Signer {
-                    participants,
-                    polynomial,
-                    share,
-                    namespace: N::derive(namespace),
-                },
+                participants,
+                namespace: N::derive(namespace),
+                role: Role::Signer { polynomial, share },
             })
         } else {
             None
@@ -153,6 +135,8 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     /// The participant identity keys are used for committee ordering and indexing.
     /// The polynomial can be evaluated to obtain public verification keys for partial
     /// signatures produced by committee members.
+    ///
+    /// Returns `None` if the committee is non-uniform.
     ///
     /// # Panics
     ///
@@ -184,11 +168,9 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         polynomial.precompute_partial_publics();
 
         Some(Self {
-            role: Role::Verifier {
-                participants,
-                polynomial,
-                namespace: N::derive(namespace),
-            },
+            participants,
+            namespace: N::derive(namespace),
+            role: Role::Verifier { polynomial },
         })
     }
 
@@ -196,6 +178,8 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     ///
     /// This lightweight verifier can authenticate recovered threshold certificates but cannot
     /// verify individual signatures or partial signatures.
+    ///
+    /// Returns `None` if the committee is non-uniform.
     ///
     /// * `namespace` - base namespace for domain separation
     /// * `identity` - public identity of the committee (constant across reshares)
@@ -208,21 +192,15 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
             return None;
         }
         Some(Self {
-            role: Role::CertificateVerifier {
-                participants,
-                identity,
-                namespace: N::derive(namespace),
-            },
+            participants,
+            namespace: N::derive(namespace),
+            role: Role::CertificateVerifier { identity },
         })
     }
 
-    /// Returns the ordered set of participant public identity keys in the committee.
+    /// Returns the ordered committee.
     pub const fn participants(&self) -> &Committee<P> {
-        match &self.role {
-            Role::Signer { participants, .. } => participants,
-            Role::Verifier { participants, .. } => participants,
-            Role::CertificateVerifier { participants, .. } => participants,
-        }
+        &self.participants
     }
 
     /// Returns the public identity of the committee (constant across reshares).
@@ -253,11 +231,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
 
     /// Returns the pre-computed namespace.
     const fn namespace(&self) -> &N {
-        match &self.role {
-            Role::Signer { namespace, .. } => namespace,
-            Role::Verifier { namespace, .. } => namespace,
-            Role::CertificateVerifier { namespace, .. } => namespace,
-        }
+        &self.namespace
     }
 
     /// Returns the index of "self" in the participant set, if available.
@@ -395,11 +369,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
 
         // Enforce signer bounds, uniqueness, and quorum before recovering the certificate.
         let quorum = self.polynomial();
-        Signers::new(
-            quorum.total().get(),
-            partials.iter().map(|partial| partial.index),
-        )?
-        .require_count(quorum.required())?;
+        Signers::try_from((quorum, partials.iter().map(|partial| partial.index)))?;
 
         // Recover the certificate only after these structural preconditions hold.
         let signature = threshold::recover(quorum, partials.iter(), strategy)

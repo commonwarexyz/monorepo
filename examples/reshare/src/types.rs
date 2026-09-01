@@ -42,7 +42,7 @@ use commonware_storage::{
     translator::TwoCap,
 };
 use commonware_utils::{
-    Acknowledgement, NZU32, NZU64, NZUsize,
+    Acknowledgement, NZU32, NZU64, NZUsize, TryCollect,
     ordered::{Committee, Set},
     range::NonEmptyRange,
     sequence::{U64, Unit},
@@ -60,14 +60,12 @@ use tracing::info;
 
 /// Builds the uniform threshold committee used by this example.
 pub fn committee(participants: &Set<ed25519::PublicKey>) -> Committee<ed25519::PublicKey> {
-    Committee::try_from(
-        participants
-            .iter()
-            .cloned()
-            .map(|participant| (participant, 1))
-            .collect::<Vec<_>>(),
-    )
-    .expect("participants form a committee")
+    participants
+        .iter()
+        .cloned()
+        .map(|participant| (participant, 1))
+        .try_collect()
+        .expect("participants form a committee")
 }
 
 /// Threshold certificate scheme used for consensus votes and certificates.

@@ -4,7 +4,7 @@
 
 ### Weighted Certificate Committees
 
-Certificate schemes now expose weighted committees. Ed25519, secp256r1, and
+Certificate schemes expose weighted committees. Ed25519, secp256r1, and
 BLS multisig certificates form and verify quorum by weight. BLS threshold
 schemes remain count-based and reject non-uniform committees. Certificate
 encoding is unchanged ([#4635]).

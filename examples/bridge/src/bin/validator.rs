@@ -102,14 +102,12 @@ fn main() {
         .try_collect()
         .expect("public keys are unique");
     let max_peers_per_set = authenticated::peer_set_limit(&validators, &signer.public_key());
-    let committee = Committee::try_from(
-        validators
-            .iter()
-            .cloned()
-            .map(|participant| (participant, 1))
-            .collect::<Vec<_>>(),
-    )
-    .expect("validators form a committee");
+    let committee: Committee<_> = validators
+        .iter()
+        .cloned()
+        .map(|participant| (participant, 1))
+        .try_collect()
+        .expect("validators form a committee");
 
     // Configure bootstrappers (if provided)
     let bootstrappers = matches.get_many::<String>("bootstrappers");

@@ -189,14 +189,12 @@ fn main() {
 
         // Initialize application
         let namespace = union(APPLICATION_NAMESPACE, b"_CONSENSUS");
-        let committee = Committee::try_from(
-            validators
-                .iter()
-                .cloned()
-                .map(|participant| (participant, 1))
-                .collect::<Vec<_>>(),
-        )
-        .expect("validators form a committee");
+        let committee: Committee<_> = validators
+            .iter()
+            .cloned()
+            .map(|participant| (participant, 1))
+            .try_collect()
+            .expect("validators form a committee");
         let scheme = application::Scheme::signer(&namespace, committee, signer.clone())
             .expect("private key must be in participants");
         let (application, scheme, reporter, mailbox) = application::Application::<_, Sha256>::new(

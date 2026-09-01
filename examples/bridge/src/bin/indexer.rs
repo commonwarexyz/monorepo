@@ -123,14 +123,12 @@ fn main() {
         })
         .try_collect()
         .expect("public keys are unique");
-    let committee = Committee::try_from(
-        validators
-            .iter()
-            .cloned()
-            .map(|participant| (participant, 1))
-            .collect::<Vec<_>>(),
-    )
-    .expect("validators form a committee");
+    let committee: Committee<_> = validators
+        .iter()
+        .cloned()
+        .map(|participant| (participant, 1))
+        .try_collect()
+        .expect("validators form a committee");
 
     // Configure networks
     let mut verifiers: HashMap<G2, Scheme> = HashMap::new();

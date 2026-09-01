@@ -570,6 +570,7 @@ impl Signers {
     }
 
     /// Requires at least `required` signers in an already validated set.
+    #[cfg(feature = "bls12381")]
     pub(crate) fn require_count(self, required: u32) -> Result<Self, AssemblyError> {
         let found = u32::try_from(self.count()).expect("signer count exceeds u32::MAX");
         if found < required {

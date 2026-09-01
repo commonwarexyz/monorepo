@@ -48,30 +48,24 @@ impl<P: crate::PublicKey, N: Namespace> Generic<P, N> {
     /// is used for participant set ordering and indexing, while the signing key is used for
     /// signing and verification.
     ///
-    /// Returns `None` if the provided private key does not match any signing key
-    /// in the participant set.
+    /// Returns `None` if the committee and signing-key identities differ or the private key does
+    /// not match a signing key.
     pub fn signer(
         namespace: &[u8],
         committee: Committee<P>,
         signing_keys: BiMap<P, PublicKey>,
         private_key: PrivateKey,
     ) -> Option<Self> {
-        if !committee.iter().eq(signing_keys.keys().iter()) {
-            return None;
-        }
         let public_key = private_key.public_key();
-        let signer = signing_keys
+        let mut scheme = Self::verifier(namespace, committee, signing_keys)?;
+        let signer = scheme
+            .signing_keys
             .values()
             .iter()
             .position(|p| p == &public_key)
             .map(|index| (Participant::from_usize(index), private_key))?;
-
-        Some(Self {
-            committee,
-            signing_keys,
-            signer: Some(signer),
-            namespace: N::derive(namespace),
-        })
+        scheme.signer = Some(signer);
+        Some(scheme)
     }
 
     /// Builds a verifier that can authenticate signatures and certificates.
@@ -79,6 +73,8 @@ impl<P: crate::PublicKey, N: Namespace> Generic<P, N> {
     /// Participants have both an identity key and a signing key. The identity key
     /// is used for participant set ordering and indexing, while the signing key is used for
     /// verification.
+    ///
+    /// Returns `None` if the committee and signing-key identities differ.
     pub fn verifier(
         namespace: &[u8],
         committee: Committee<P>,
