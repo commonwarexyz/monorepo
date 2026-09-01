@@ -30,27 +30,19 @@ use commonware_utils::{
     Faults, Participant,
     iter::NonEmpty,
     non_empty,
-    ordered::{Quorum, Set},
+    ordered::{Committee, Quorum},
 };
 use core::fmt::Debug;
 use rand_core::CryptoRng;
 #[cfg(feature = "std")]
 use std::collections::BTreeSet;
 
-/// Generic BLS12-381 threshold signature implementation.
-///
-/// This enum contains the core cryptographic operations without protocol-specific
-/// context types. It can be reused across different protocols (simplex, aggregation, etc.)
-/// by wrapping it with protocol-specific trait implementations via the macro.
-///
-/// A node can play one of the following roles: a signer (with its share),
-/// a verifier (with evaluated public polynomial), or an external verifier that
-/// only checks recovered certificates.
+/// Role-specific data for a BLS12-381 threshold scheme.
 #[derive(Clone, Debug)]
-pub enum Generic<P: PublicKey, V: Variant, N: Namespace> {
+enum Role<P: PublicKey, V: Variant, N: Namespace> {
     Signer {
         /// Participants in the committee.
-        participants: Set<P>,
+        participants: Committee<P>,
         /// The public polynomial, used for the group identity, and partial signatures.
         polynomial: Sharing<V>,
         /// Local share used to generate partial signatures.
@@ -60,13 +52,15 @@ pub enum Generic<P: PublicKey, V: Variant, N: Namespace> {
     },
     Verifier {
         /// Participants in the committee.
-        participants: Set<P>,
+        participants: Committee<P>,
         /// The public polynomial, used for the group identity, and partial signatures.
         polynomial: Sharing<V>,
         /// Pre-computed namespace(s) for this subject type.
         namespace: N,
     },
     CertificateVerifier {
+        /// Participants in the committee.
+        participants: Committee<P>,
         /// Public identity of the committee (constant across reshares).
         identity: V::Public,
         /// Pre-computed namespace(s) for this subject type.
@@ -74,7 +68,28 @@ pub enum Generic<P: PublicKey, V: Variant, N: Namespace> {
     },
 }
 
+/// Generic BLS12-381 threshold signature implementation.
+///
+/// This type contains the core cryptographic operations without protocol-specific
+/// context types. It can be reused across different protocols (simplex, aggregation, etc.)
+/// by wrapping it with protocol-specific trait implementations via the macro.
+///
+/// A node can play one of the following roles: a signer (with its share),
+/// a verifier (with evaluated public polynomial), or an external verifier that
+/// only checks recovered certificates.
+#[derive(Clone, Debug)]
+pub struct Generic<P: PublicKey, V: Variant, N: Namespace> {
+    role: Role<P, V, N>,
+}
+
 impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
+    fn has_uniform_weights(participants: &Committee<P>) -> bool {
+        participants
+            .weights()
+            .windows(2)
+            .all(|weights| weights[0] == weights[1])
+    }
+
     /// Constructs a signer instance with a private share and evaluated public polynomial
     /// compatible with the specified fault model.
     ///
@@ -96,10 +111,13 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     /// * `share` - local threshold share for signing
     pub fn signer<M: Faults>(
         namespace: &[u8],
-        participants: Set<P>,
+        participants: Committee<P>,
         polynomial: Sharing<V>,
         share: Share,
     ) -> Option<Self> {
+        if !Self::has_uniform_weights(&participants) {
+            return None;
+        }
         assert_eq!(
             polynomial.total().get() as usize,
             participants.len(),
@@ -116,11 +134,13 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
             .partial_public(share.index)
             .expect("share index must match participant indices");
         if partial_public == share.public::<V>() {
-            Some(Self::Signer {
-                participants,
-                polynomial,
-                share,
-                namespace: N::derive(namespace),
+            Some(Self {
+                role: Role::Signer {
+                    participants,
+                    polynomial,
+                    share,
+                    namespace: N::derive(namespace),
+                },
             })
         } else {
             None
@@ -144,9 +164,12 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     /// * `polynomial` - public polynomial for threshold verification
     pub fn verifier<M: Faults>(
         namespace: &[u8],
-        participants: Set<P>,
+        participants: Committee<P>,
         polynomial: Sharing<V>,
-    ) -> Self {
+    ) -> Option<Self> {
+        if !Self::has_uniform_weights(&participants) {
+            return None;
+        }
         assert_eq!(
             polynomial.total().get() as usize,
             participants.len(),
@@ -160,11 +183,13 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         #[cfg(feature = "std")]
         polynomial.precompute_partial_publics();
 
-        Self::Verifier {
-            participants,
-            polynomial,
-            namespace: N::derive(namespace),
-        }
+        Some(Self {
+            role: Role::Verifier {
+                participants,
+                polynomial,
+                namespace: N::derive(namespace),
+            },
+        })
     }
 
     /// Creates a verifier that only checks recovered certificates.
@@ -174,61 +199,71 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     ///
     /// * `namespace` - base namespace for domain separation
     /// * `identity` - public identity of the committee (constant across reshares)
-    pub fn certificate_verifier(namespace: &[u8], identity: V::Public) -> Self {
-        Self::CertificateVerifier {
-            identity,
-            namespace: N::derive(namespace),
+    pub fn certificate_verifier(
+        namespace: &[u8],
+        participants: Committee<P>,
+        identity: V::Public,
+    ) -> Option<Self> {
+        if !Self::has_uniform_weights(&participants) {
+            return None;
         }
+        Some(Self {
+            role: Role::CertificateVerifier {
+                participants,
+                identity,
+                namespace: N::derive(namespace),
+            },
+        })
     }
 
     /// Returns the ordered set of participant public identity keys in the committee.
-    pub fn participants(&self) -> &Set<P> {
-        match self {
-            Self::Signer { participants, .. } => participants,
-            Self::Verifier { participants, .. } => participants,
-            _ => panic!("can only be called for signer and verifier"),
+    pub const fn participants(&self) -> &Committee<P> {
+        match &self.role {
+            Role::Signer { participants, .. } => participants,
+            Role::Verifier { participants, .. } => participants,
+            Role::CertificateVerifier { participants, .. } => participants,
         }
     }
 
     /// Returns the public identity of the committee (constant across reshares).
     pub fn identity(&self) -> &V::Public {
-        match self {
-            Self::Signer { polynomial, .. } => polynomial.public(),
-            Self::Verifier { polynomial, .. } => polynomial.public(),
-            Self::CertificateVerifier { identity, .. } => identity,
+        match &self.role {
+            Role::Signer { polynomial, .. } => polynomial.public(),
+            Role::Verifier { polynomial, .. } => polynomial.public(),
+            Role::CertificateVerifier { identity, .. } => identity,
         }
     }
 
     /// Returns the local share if this instance can generate partial signatures.
     pub const fn share(&self) -> Option<&Share> {
-        match self {
-            Self::Signer { share, .. } => Some(share),
+        match &self.role {
+            Role::Signer { share, .. } => Some(share),
             _ => None,
         }
     }
 
     /// Returns the evaluated public polynomial for validating partial signatures produced by committee members.
     fn polynomial(&self) -> &Sharing<V> {
-        match self {
-            Self::Signer { polynomial, .. } => polynomial,
-            Self::Verifier { polynomial, .. } => polynomial,
+        match &self.role {
+            Role::Signer { polynomial, .. } => polynomial,
+            Role::Verifier { polynomial, .. } => polynomial,
             _ => panic!("can only be called for signer and verifier"),
         }
     }
 
     /// Returns the pre-computed namespace.
     const fn namespace(&self) -> &N {
-        match self {
-            Self::Signer { namespace, .. } => namespace,
-            Self::Verifier { namespace, .. } => namespace,
-            Self::CertificateVerifier { namespace, .. } => namespace,
+        match &self.role {
+            Role::Signer { namespace, .. } => namespace,
+            Role::Verifier { namespace, .. } => namespace,
+            Role::CertificateVerifier { namespace, .. } => namespace,
         }
     }
 
     /// Returns the index of "self" in the participant set, if available.
     pub const fn me(&self) -> Option<Participant> {
-        match self {
-            Self::Signer { share, .. } => Some(share.index),
+        match &self.role {
+            Role::Signer { share, .. } => Some(share.index),
             _ => None,
         }
     }
@@ -360,7 +395,11 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
 
         // Enforce signer bounds, uniqueness, and quorum before recovering the certificate.
         let quorum = self.polynomial();
-        Signers::try_from((quorum, partials.iter().map(|partial| partial.index)))?;
+        Signers::new(
+            quorum.total().get(),
+            partials.iter().map(|partial| partial.index),
+        )?
+        .require_count(quorum.required())?;
 
         // Recover the certificate only after these structural preconditions hold.
         let signature = threshold::recover(quorum, partials.iter(), strategy)
@@ -575,7 +614,7 @@ macro_rules! impl_certificate_bls12381_threshold {
             /// compatible with the configured fault model.
             pub fn signer(
                 namespace: &[u8],
-                participants: commonware_utils::ordered::Set<P>,
+                participants: commonware_utils::ordered::Committee<P>,
                 polynomial: $crate::bls12381::primitives::sharing::Sharing<V>,
                 share: $crate::bls12381::primitives::group::Share,
             ) -> Option<Self> {
@@ -593,26 +632,31 @@ macro_rules! impl_certificate_bls12381_threshold {
             /// signatures.
             pub fn verifier(
                 namespace: &[u8],
-                participants: commonware_utils::ordered::Set<P>,
+                participants: commonware_utils::ordered::Committee<P>,
                 polynomial: $crate::bls12381::primitives::sharing::Sharing<V>,
-            ) -> Self {
-                Self {
+            ) -> Option<Self> {
+                Some(Self {
                     generic: $crate::bls12381::certificate::threshold::Generic::verifier::<$faults>(
                         namespace,
                         participants,
                         polynomial,
-                    ),
-                }
+                    )?,
+                })
             }
 
             /// Creates a lightweight verifier that only checks recovered certificates.
-            pub fn certificate_verifier(namespace: &[u8], identity: V::Public) -> Self {
-                Self {
+            pub fn certificate_verifier(
+                namespace: &[u8],
+                participants: commonware_utils::ordered::Committee<P>,
+                identity: V::Public,
+            ) -> Option<Self> {
+                Some(Self {
                     generic: $crate::bls12381::certificate::threshold::Generic::certificate_verifier(
                         namespace,
+                        participants,
                         identity,
-                    ),
-                }
+                    )?,
+                })
             }
 
             /// Returns the public identity of the committee (constant across reshares).
@@ -691,7 +735,7 @@ macro_rules! impl_certificate_bls12381_threshold {
                 self.generic.me()
             }
 
-            fn participants(&self) -> &commonware_utils::ordered::Set<Self::PublicKey> {
+            fn participants(&self) -> &commonware_utils::ordered::Committee<Self::PublicKey> {
                 self.generic.participants()
             }
 
@@ -773,7 +817,11 @@ mod tests {
     use commonware_codec::{DecodeExt, Encode, types::lazy::Lazy};
     use commonware_math::algebra::{Additive, Random};
     use commonware_parallel::Sequential;
-    use commonware_utils::{N3f1, N5f1, NZU32, Participant, TryCollect, ordered::Set, test_rng};
+    use commonware_utils::{
+        N3f1, N5f1, NZU32, Participant, TryCollect,
+        ordered::{Committee, Set},
+        test_rng,
+    };
 
     const NAMESPACE: &[u8] = b"test-bls12381-threshold";
     const MESSAGE: &[u8] = b"test message";
@@ -812,11 +860,12 @@ mod tests {
         let identity_keys: Vec<_> = (0..n)
             .map(|_| Ed25519PrivateKey::random(&mut *rng))
             .collect();
-        let participants: Set<ed25519::PublicKey> = identity_keys
+        let participant_set: Set<ed25519::PublicKey> = identity_keys
             .iter()
             .map(|sk| sk.public_key())
             .try_collect()
             .unwrap();
+        let participants = committee_from_set(participant_set);
 
         // Generate threshold polynomial and shares using DKG
         let (polynomial, shares) =
@@ -829,7 +878,7 @@ mod tests {
             })
             .collect();
 
-        let verifier = Scheme::verifier(NAMESPACE, participants, polynomial.clone());
+        let verifier = Scheme::verifier(NAMESPACE, participants, polynomial.clone()).unwrap();
 
         (signers, verifier, polynomial)
     }
@@ -1350,8 +1399,12 @@ mod tests {
 
         // Create a certificate-only verifier using the identity from the polynomial
         let identity = polynomial.public();
-        let cert_verifier =
-            Scheme::<ed25519::PublicKey, V>::certificate_verifier(NAMESPACE, *identity);
+        let cert_verifier = Scheme::<ed25519::PublicKey, V>::certificate_verifier(
+            NAMESPACE,
+            schemes[0].participants().clone(),
+            *identity,
+        )
+        .unwrap();
 
         // Should be able to verify certificates
         assert!(cert_verifier.verify_certificate::<_, Sha256Digest>(
@@ -1457,8 +1510,10 @@ mod tests {
         let (schemes, _, _) = setup_signers::<V>(&mut rng, 4);
         let certificate_verifier = Scheme::<ed25519::PublicKey, V>::certificate_verifier(
             NAMESPACE,
+            schemes[0].participants().clone(),
             *schemes[0].identity(),
-        );
+        )
+        .unwrap();
 
         let vote = schemes[1]
             .sign::<Sha256Digest>(TestSubject {
@@ -1496,11 +1551,12 @@ mod tests {
         let identity_keys: Vec<_> = (0..4)
             .map(|_| Ed25519PrivateKey::random(&mut rng))
             .collect();
-        let participants: Set<ed25519::PublicKey> = identity_keys
+        let participant_set: Set<ed25519::PublicKey> = identity_keys
             .iter()
             .map(|sk| sk.public_key())
             .try_collect()
             .unwrap();
+        let participants = committee_from_set(participant_set);
 
         let (polynomial, mut shares) =
             dkg::deal_anonymous::<V, N3f1>(&mut rng, Mode::NonZeroCounter, NZU32!(4));
@@ -1525,11 +1581,124 @@ mod tests {
         signer_shares_must_match_participant_indices::<MinSig>();
     }
 
-    fn make_participants<R: rand_core::CryptoRng>(rng: &mut R, n: u32) -> Set<ed25519::PublicKey> {
-        (0..n)
+    fn committee_from_set(participants: Set<ed25519::PublicKey>) -> Committee<ed25519::PublicKey> {
+        let participants: Vec<_> = participants.into();
+        Committee::try_from(
+            participants
+                .into_iter()
+                .map(|participant| (participant, 1))
+                .collect::<Vec<_>>(),
+        )
+        .expect("participants are unique and non-empty")
+    }
+
+    fn make_participants<R: rand_core::CryptoRng>(
+        rng: &mut R,
+        n: u32,
+    ) -> Committee<ed25519::PublicKey> {
+        let participants = (0..n)
             .map(|_| Ed25519PrivateKey::random(&mut *rng).public_key())
             .try_collect()
-            .expect("participants are unique")
+            .expect("participants are unique");
+        committee_from_set(participants)
+    }
+
+    fn weighted_committee(
+        participants: &Committee<ed25519::PublicKey>,
+        weights: impl IntoIterator<Item = u64>,
+    ) -> Committee<ed25519::PublicKey> {
+        Committee::try_from(
+            participants
+                .iter()
+                .cloned()
+                .zip(weights)
+                .collect::<Vec<_>>(),
+        )
+        .expect("weights must define a valid committee")
+    }
+
+    fn constructors_reject_nonuniform_weights<V: Variant>() {
+        let mut rng = test_rng();
+        let participants = make_participants(&mut rng, 4);
+        let nonuniform = weighted_committee(&participants, [1, 2, 1, 1]);
+        let (polynomial, shares) =
+            dkg::deal_anonymous::<V, N3f1>(&mut rng, Mode::NonZeroCounter, NZU32!(4));
+
+        assert!(
+            Scheme::<ed25519::PublicKey, V>::signer(
+                NAMESPACE,
+                nonuniform.clone(),
+                polynomial.clone(),
+                shares[0].clone(),
+            )
+            .is_none()
+        );
+        assert!(
+            Scheme::<ed25519::PublicKey, V>::verifier(
+                NAMESPACE,
+                nonuniform.clone(),
+                polynomial.clone(),
+            )
+            .is_none()
+        );
+        assert!(
+            Scheme::<ed25519::PublicKey, V>::certificate_verifier(
+                NAMESPACE,
+                nonuniform,
+                *polynomial.public(),
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn test_constructors_reject_nonuniform_weights_variants() {
+        constructors_reject_nonuniform_weights::<MinPk>();
+        constructors_reject_nonuniform_weights::<MinSig>();
+    }
+
+    fn uniform_nonunit_weights_preserve_count_thresholds<V: Variant>() {
+        let mut rng = test_rng();
+        let participants = weighted_committee(&make_participants(&mut rng, 4), [7; 4]);
+        let (polynomial, shares) =
+            dkg::deal_anonymous::<V, N3f1>(&mut rng, Mode::NonZeroCounter, NZU32!(4));
+
+        assert_eq!(polynomial.total().get() as usize, participants.len());
+        assert_eq!(polynomial.required(), participants.quorum_count::<N3f1>());
+        assert_ne!(
+            u64::from(polynomial.required()),
+            participants.quorum_weight::<N3f1>()
+        );
+
+        let signer = Scheme::<ed25519::PublicKey, V>::signer(
+            NAMESPACE,
+            participants.clone(),
+            polynomial.clone(),
+            shares[0].clone(),
+        )
+        .expect("uniform non-unit weights must be accepted");
+        let verifier = Scheme::<ed25519::PublicKey, V>::verifier(
+            NAMESPACE,
+            participants.clone(),
+            polynomial.clone(),
+        )
+        .expect("uniform non-unit weights must be accepted");
+        let certificate_verifier = Scheme::<ed25519::PublicKey, V>::certificate_verifier(
+            NAMESPACE,
+            participants.clone(),
+            *polynomial.public(),
+        )
+        .expect("uniform non-unit weights must be accepted");
+
+        assert_eq!(signer.participants(), &participants);
+        assert_eq!(verifier.participants(), &participants);
+        assert_eq!(certificate_verifier.participants(), &participants);
+    }
+
+    #[test]
+    fn test_uniform_nonunit_weights_preserve_count_thresholds_variants() {
+        uniform_nonunit_weights_preserve_count_thresholds::<MinPk>();
+        uniform_nonunit_weights_preserve_count_thresholds::<MinSig>();
     }
 
     fn signer_validates_polynomial_degree<V: Variant>() {

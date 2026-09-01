@@ -43,7 +43,7 @@ use commonware_storage::{
 };
 use commonware_utils::{
     Acknowledgement, NZU32, NZU64, NZUsize,
-    ordered::Set,
+    ordered::{Committee, Set},
     range::NonEmptyRange,
     sequence::{U64, Unit},
     sync::Mutex,
@@ -57,6 +57,18 @@ use std::{
     sync::Arc,
 };
 use tracing::info;
+
+/// Builds the uniform threshold committee used by this example.
+pub fn committee(participants: &Set<ed25519::PublicKey>) -> Committee<ed25519::PublicKey> {
+    Committee::try_from(
+        participants
+            .iter()
+            .cloned()
+            .map(|participant| (participant, 1))
+            .collect::<Vec<_>>(),
+    )
+    .expect("participants form a committee")
+}
 
 /// Threshold certificate scheme used for consensus votes and certificates.
 pub type Scheme = simplex::scheme::bls12381_threshold::vrf::Scheme<ed25519::PublicKey, MinSig>;
@@ -268,12 +280,13 @@ impl RegistrarTrait for Registrar {
             dkg::types::SchemeInfo::Verifier {
                 participants,
                 sharing,
-            } => Scheme::verifier(NAMESPACE, participants, sharing),
+            } => Scheme::verifier(NAMESPACE, committee(&participants), sharing)
+                .expect("threshold committees must be uniform"),
             dkg::types::SchemeInfo::Signer {
                 participants,
                 sharing,
                 share,
-            } => Scheme::signer(NAMESPACE, participants, sharing, share)
+            } => Scheme::signer(NAMESPACE, committee(&participants), sharing, share)
                 .expect("registered share must match participant set"),
         };
         self.provider.register(epoch, scheme);

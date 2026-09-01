@@ -25,7 +25,11 @@ use commonware_runtime::{
     Network, Quota, Runner, Strategizer, Supervisor as _, buffer::paged::CacheRef, tokio,
 };
 use commonware_stream::encrypted::{Config as StreamConfig, dial};
-use commonware_utils::{NZU16, NZU32, NZUsize, TryCollect, ordered::Set, union};
+use commonware_utils::{
+    NZU16, NZU32, NZUsize, TryCollect,
+    ordered::{Committee, Set},
+    union,
+};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     str::FromStr,
@@ -98,6 +102,14 @@ fn main() {
         .try_collect()
         .expect("public keys are unique");
     let max_peers_per_set = authenticated::peer_set_limit(&validators, &signer.public_key());
+    let committee = Committee::try_from(
+        validators
+            .iter()
+            .cloned()
+            .map(|participant| (participant, 1))
+            .collect::<Vec<_>>(),
+    )
+    .expect("validators form a committee");
 
     // Configure bootstrappers (if provided)
     let bootstrappers = matches.get_many::<String>("bootstrappers");
@@ -212,10 +224,11 @@ fn main() {
         // Initialize application
         let strategy = context.strategy(NZUsize!(2));
         let consensus_namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
-        let this_network =
-            Scheme::signer(&consensus_namespace, validators.clone(), identity, share)
-                .expect("share must be in participants");
-        let other_network = Scheme::certificate_verifier(&consensus_namespace, other_public);
+        let this_network = Scheme::signer(&consensus_namespace, committee.clone(), identity, share)
+            .expect("share and uniform committee must be compatible");
+        let other_network =
+            Scheme::certificate_verifier(&consensus_namespace, committee, other_public)
+                .expect("uniform committee supports threshold verification");
         let (application, scheme, mailbox) = application::Application::<_, Sha256, _, _>::new(
             context.child("application"),
             application::Config {

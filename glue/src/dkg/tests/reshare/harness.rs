@@ -79,7 +79,7 @@ use commonware_storage::{
 };
 use commonware_utils::{
     N3f1, NZDuration, NZU16, NZU32, NZU64, NZUsize, TestRng, non_empty_range,
-    ordered::{Map, Set},
+    ordered::{Committee, Map, Set},
     range::NonEmptyRange,
     sequence::Unit,
     sync::Mutex,
@@ -98,6 +98,17 @@ use std::{
 type Qmdb<E> =
     fixed::Db<mmr::Family, E, sha256::Digest, sha256::Digest, Sha256, TwoCap, Sequential>;
 type Database<E> = Shared<Qmdb<E>>;
+
+fn committee(participants: &Set<ed25519::PublicKey>) -> Committee<ed25519::PublicKey> {
+    Committee::try_from(
+        participants
+            .iter()
+            .cloned()
+            .map(|participant| (participant, 1))
+            .collect::<Vec<_>>(),
+    )
+    .expect("participants form a committee")
+}
 type Scheme = simplex::scheme::bls12381_threshold::vrf::Scheme<ed25519::PublicKey, MinPk>;
 type MarshalVariant = Standard<Block>;
 type Marshal = MarshalMailbox<Scheme, MarshalVariant>;
@@ -510,7 +521,8 @@ impl Registrar for TestRegistrar {
                 participants,
                 sharing,
             } => (
-                Scheme::verifier(NAMESPACE, participants, sharing),
+                Scheme::verifier(NAMESPACE, committee(&participants), sharing)
+                    .expect("threshold committees must be uniform"),
                 RegistrationRole::Verifier,
             ),
             SchemeInfo::Signer {
@@ -518,7 +530,7 @@ impl Registrar for TestRegistrar {
                 sharing,
                 share,
             } => (
-                Scheme::signer(NAMESPACE, participants, sharing, share)
+                Scheme::signer(NAMESPACE, committee(&participants), sharing, share)
                     .expect("share must match participant set"),
                 RegistrationRole::Signer,
             ),
@@ -614,14 +626,15 @@ impl InitialState {
             || {
                 provider.register(
                     Epoch::zero(),
-                    Scheme::verifier(NAMESPACE, participants.clone(), sharing.clone()),
+                    Scheme::verifier(NAMESPACE, committee(participants), sharing.clone())
+                        .expect("threshold committees must be uniform"),
                 );
                 RegistrationRole::Verifier
             },
             |share| {
                 provider.register(
                     Epoch::zero(),
-                    Scheme::signer(NAMESPACE, participants.clone(), sharing.clone(), share)
+                    Scheme::signer(NAMESPACE, committee(participants), sharing.clone(), share)
                         .expect("initial signer share"),
                 );
                 RegistrationRole::Signer
@@ -877,8 +890,10 @@ impl EngineDefinition for ReshareEngine {
             },
             verifier: Scheme::certificate_verifier(
                 NAMESPACE,
+                committee(self.initial.info.output.players()),
                 *self.initial.info.output.public().public(),
-            ),
+            )
+            .expect("initial threshold committee must be uniform"),
             genesis: self.initial.info.clone(),
             strategy: Sequential,
             blocker: oracle.control(public_key.clone()),
@@ -905,9 +920,10 @@ impl EngineDefinition for ReshareEngine {
                 artifact.info.epoch,
                 Scheme::verifier(
                     NAMESPACE,
-                    artifact.info.output.players().clone(),
+                    committee(artifact.info.output.players()),
                     artifact.info.output.public().clone(),
-                ),
+                )
+                .expect("reshared threshold committee must be uniform"),
             );
             Some(artifact)
         } else {
@@ -971,10 +987,14 @@ impl EngineDefinition for ReshareEngine {
             finalizations_by_height,
             finalized_blocks,
             marshal::Config {
-                provider: ConstantProvider::<_, Epoch>::new(Scheme::certificate_verifier(
-                    NAMESPACE,
-                    *self.initial.info.output.public().public(),
-                )),
+                provider: ConstantProvider::<_, Epoch>::new(
+                    Scheme::certificate_verifier(
+                        NAMESPACE,
+                        committee(self.initial.info.output.players()),
+                        *self.initial.info.output.public().public(),
+                    )
+                    .expect("initial threshold committee must be uniform"),
+                ),
                 epocher: FixedEpocher::new(EPOCH_LENGTH),
                 start: plan.marshal_start(genesis.clone()),
                 partition_prefix: partition_prefix.clone(),

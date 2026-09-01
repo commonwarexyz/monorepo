@@ -14,7 +14,6 @@ use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{Hasher, certificate};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, ContextCell, Handle, Spawner, spawn_cell};
-use commonware_utils::ordered::Quorum;
 use rand::{Rng, RngExt as _, seq::IteratorRandom};
 use std::{collections::HashSet, sync::Arc};
 

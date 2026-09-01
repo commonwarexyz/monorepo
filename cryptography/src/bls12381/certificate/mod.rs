@@ -23,6 +23,6 @@ where
     type Error = AssemblyError;
 
     fn try_from((quorum, signers): (&'a Sharing<V>, I)) -> Result<Self, Self::Error> {
-        Self::new(quorum.total().get(), signers)?.require(quorum.required())
+        Self::new(quorum.total().get(), signers)?.require_count(quorum.required())
     }
 }

@@ -310,16 +310,15 @@ mod test {
         }
     }
 
-    /// Wraps the mock scheme so it can verify certificates without exposing participants.
+    /// Wraps the mock scheme for provider-role tests.
     #[derive(Clone, Debug)]
-    struct MaybeEnumerableScheme {
+    struct ProviderScheme {
         inner: Scheme,
-        enumerable: bool,
     }
 
-    impl MaybeEnumerableScheme {
-        const fn new(inner: Scheme, enumerable: bool) -> Self {
-            Self { inner, enumerable }
+    impl ProviderScheme {
+        const fn new(inner: Scheme) -> Self {
+            Self { inner }
         }
 
         fn wrap_attestation(attestation: Attestation<Scheme>) -> Attestation<Self> {
@@ -337,7 +336,7 @@ mod test {
         }
     }
 
-    impl Verifier for MaybeEnumerableScheme {
+    impl Verifier for ProviderScheme {
         type Subject<'a, D: commonware_cryptography::Digest> =
             commonware_consensus::simplex::types::Subject<'a, D>;
         type Faults = <Scheme as Verifier>::Faults;
@@ -387,18 +386,14 @@ mod test {
         }
     }
 
-    impl certificate::Scheme for MaybeEnumerableScheme {
+    impl certificate::Scheme for ProviderScheme {
         type Signature = <Scheme as certificate::Scheme>::Signature;
 
         fn me(&self) -> Option<commonware_utils::Participant> {
             self.inner.me()
         }
 
-        fn participants(&self) -> &commonware_utils::ordered::Set<Self::PublicKey> {
-            assert!(
-                self.enumerable,
-                "verify-only scheme has no participant metadata"
-            );
+        fn participants(&self) -> &commonware_utils::ordered::Committee<Self::PublicKey> {
             self.inner.participants()
         }
 
@@ -479,19 +474,19 @@ mod test {
     /// Serves a participant-less verifier from `scoped` and the full signing scheme from `scheme`.
     #[derive(Clone)]
     struct ParticipantlessAllProvider {
-        verifier: Arc<MaybeEnumerableScheme>,
-        scheme: Arc<MaybeEnumerableScheme>,
+        verifier: Arc<ProviderScheme>,
+        scheme: Arc<ProviderScheme>,
     }
 
     impl Provider for ParticipantlessAllProvider {
         type Scope = Epoch;
-        type Scheme = MaybeEnumerableScheme;
+        type Scheme = ProviderScheme;
 
-        fn scoped(&self, _: Epoch) -> Option<Scoped<MaybeEnumerableScheme>> {
+        fn scoped(&self, _: Epoch) -> Option<Scoped<ProviderScheme>> {
             Some(Scoped::verifier(self.verifier.clone()))
         }
 
-        fn scheme(&self, _: Epoch) -> Option<Arc<MaybeEnumerableScheme>> {
+        fn scheme(&self, _: Epoch) -> Option<Arc<ProviderScheme>> {
             Some(self.scheme.clone())
         }
     }
@@ -1510,13 +1505,10 @@ mod test {
                 verifier,
                 ..
             } = scheme_mocks::fixture(&mut rng, b"_COMMONWARE_GLUE_FD_ALL_VERIFIER", 4);
-            let schemes: Vec<_> = schemes
-                .into_iter()
-                .map(|scheme| MaybeEnumerableScheme::new(scheme, true))
-                .collect();
+            let schemes: Vec<_> = schemes.into_iter().map(ProviderScheme::new).collect();
             let provider = ParticipantlessAllProvider {
-                verifier: Arc::new(MaybeEnumerableScheme::new(verifier.clone(), false)),
-                scheme: Arc::new(MaybeEnumerableScheme::new(verifier, true)),
+                verifier: Arc::new(ProviderScheme::new(verifier.clone())),
+                scheme: Arc::new(ProviderScheme::new(verifier)),
             };
 
             let (network, oracle) = Network::new_with_peers(
@@ -1549,7 +1541,7 @@ mod test {
                 .expect("failed to register probe channel");
             let (probe, probe_mailbox) = Probe::<
                 _,
-                MaybeEnumerableScheme,
+                ProviderScheme,
                 ParticipantlessAllProvider,
                 Variant,
                 _,

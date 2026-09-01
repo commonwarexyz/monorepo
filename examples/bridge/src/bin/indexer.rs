@@ -29,7 +29,7 @@ use commonware_stream::encrypted::{Config as StreamConfig, listen};
 use commonware_utils::{
     TryCollect,
     channel::{mpsc, oneshot},
-    ordered::Set,
+    ordered::{Committee, Set},
     union,
 };
 use std::{
@@ -123,6 +123,14 @@ fn main() {
         })
         .try_collect()
         .expect("public keys are unique");
+    let committee = Committee::try_from(
+        validators
+            .iter()
+            .cloned()
+            .map(|participant| (participant, 1))
+            .collect::<Vec<_>>(),
+    )
+    .expect("validators form a committee");
 
     // Configure networks
     let mut verifiers: HashMap<G2, Scheme> = HashMap::new();
@@ -146,7 +154,12 @@ fn main() {
             let namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
             verifiers.insert(
                 public,
-                bls12381_threshold::Scheme::certificate_verifier(&namespace, public),
+                bls12381_threshold::Scheme::certificate_verifier(
+                    &namespace,
+                    committee.clone(),
+                    public,
+                )
+                .expect("uniform committee supports threshold verification"),
             );
             blocks.insert(public, HashMap::new());
             finalizations.insert(public, BTreeMap::new());

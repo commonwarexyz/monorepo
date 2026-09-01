@@ -6,7 +6,10 @@ use crate::{
     ed25519,
 };
 use commonware_math::algebra::Random;
-use commonware_utils::{TryCollect as _, ordered::BiMap};
+use commonware_utils::{
+    TryCollect as _,
+    ordered::{BiMap, Committee},
+};
 use rand_core::CryptoRng;
 
 /// Builds ed25519 identities and matching BLS12-381 multisig schemes.
@@ -14,8 +17,17 @@ pub fn fixture<S, V, R>(
     rng: &mut R,
     namespace: &[u8],
     n: u32,
-    signer: impl Fn(&[u8], BiMap<ed25519::PublicKey, V::Public>, Private) -> Option<S>,
-    verifier: impl Fn(&[u8], BiMap<ed25519::PublicKey, V::Public>) -> S,
+    signer: impl Fn(
+        &[u8],
+        Committee<ed25519::PublicKey>,
+        BiMap<ed25519::PublicKey, V::Public>,
+        Private,
+    ) -> Option<S>,
+    verifier: impl Fn(
+        &[u8],
+        Committee<ed25519::PublicKey>,
+        BiMap<ed25519::PublicKey, V::Public>,
+    ) -> Option<S>,
 ) -> Fixture<S>
 where
     V: Variant,
@@ -26,6 +38,12 @@ where
 
     let associated = crate::ed25519::certificate::mocks::participants(rng, n);
     let participants = associated.keys().clone();
+    let committee: Committee<ed25519::PublicKey> = participants
+        .iter()
+        .cloned()
+        .map(|participant| (participant, 1))
+        .try_collect()
+        .expect("fixture committee is valid");
     let participants_vec: Vec<_> = participants.clone().into();
     let private_keys: Vec<_> = participants_vec
         .iter()
@@ -52,10 +70,12 @@ where
     let schemes = bls_privates
         .into_iter()
         .map(|sk| {
-            signer(namespace, signers.clone(), sk).expect("scheme signer must be a participant")
+            signer(namespace, committee.clone(), signers.clone(), sk)
+                .expect("scheme signer must be a participant")
         })
         .collect();
-    let verifier = verifier(namespace, signers);
+    let verifier = verifier(namespace, committee, signers)
+        .expect("scheme verifier participants must match the committee");
 
     Fixture {
         participants: participants_vec,
