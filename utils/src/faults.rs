@@ -22,13 +22,11 @@
 //! assert_eq!(N5f1::max_faults(n), 1);  // f = (n-1)/5 = 1
 //! assert_eq!(N5f1::quorum(n), 9);       // q = n - f = 9
 //!
-//! // Works with any integer type
-//! let n_i32: i32 = 10;
-//! assert_eq!(N3f1::max_faults(n_i32), 3);
-//! assert_eq!(N3f1::quorum(n_i32), 7);
+//! // Arithmetic uses u64 so weighted committees are not limited to u32 totals.
+//! let weight = 10u64;
+//! assert_eq!(N3f1::max_faults(weight), 3);
+//! assert_eq!(N3f1::quorum(weight), 7);
 //! ```
-
-use num_traits::ToPrimitive;
 
 /// A Byzantine fault tolerance model that defines quorum calculations.
 ///
@@ -36,32 +34,28 @@ use num_traits::ToPrimitive;
 /// This trait abstracts over those requirements, allowing protocols to be
 /// parameterized by their fault model.
 ///
-/// All methods accept any integer type that implements [`ToPrimitive`], allowing
-/// callers to use `u32`, `u64`, `i32`, `usize`, etc. without explicit conversion.
-/// Output is always `u32`.
+/// All methods accept and return `u64`. Callers pass either a participant count
+/// or a total committee weight, depending on the collection being evaluated.
 pub trait Faults {
-    /// Compute the maximum number of faults that can be tolerated for `n` participants.
+    /// Compute the maximum number of faulty units tolerated for `n` total units.
     ///
     /// This is the maximum integer `f` such that the protocol's safety and liveness
-    /// properties hold when up to `f` participants are Byzantine.
+    /// properties hold when up to `f` units are Byzantine.
     ///
     /// # Panics
     ///
-    /// Panics if `n` is zero, negative, or exceeds `u32::MAX`.
-    fn max_faults(n: impl ToPrimitive) -> u32;
+    /// Panics if `n` is zero.
+    fn max_faults(n: u64) -> u64;
 
-    /// Compute the quorum size for `n` participants.
+    /// Compute the quorum for `n` total units.
     ///
-    /// This is the minimum number of participants that must agree for the protocol
-    /// to make progress. It equals `n - max_faults(n)`.
+    /// This is the minimum number of units that must agree for the protocol to make
+    /// progress. It equals `n - max_faults(n)`.
     ///
     /// # Panics
     ///
-    /// Panics if `n` is zero, negative, or exceeds `u32::MAX`.
-    fn quorum(n: impl ToPrimitive) -> u32 {
-        let n = n
-            .to_u32()
-            .expect("n must be a non-negative integer that fits in u32");
+    /// Panics if `n` is zero.
+    fn quorum(n: u64) -> u64 {
         assert!(n > 0, "n must not be zero");
         n - Self::max_faults(n)
     }
@@ -86,10 +80,7 @@ pub trait Faults {
 pub struct N3f1;
 
 impl Faults for N3f1 {
-    fn max_faults(n: impl ToPrimitive) -> u32 {
-        let n = n
-            .to_u32()
-            .expect("n must be a non-negative integer that fits in u32");
+    fn max_faults(n: u64) -> u64 {
         assert!(n > 0, "n must not be zero");
         (n - 1) / 3
     }
@@ -114,10 +105,7 @@ impl Faults for N3f1 {
 pub struct N5f1;
 
 impl Faults for N5f1 {
-    fn max_faults(n: impl ToPrimitive) -> u32 {
-        let n = n
-            .to_u32()
-            .expect("n must be a non-negative integer that fits in u32");
+    fn max_faults(n: u64) -> u64 {
         assert!(n > 0, "n must not be zero");
         (n - 1) / 5
     }
@@ -128,11 +116,8 @@ impl N5f1 {
     ///
     /// # Panics
     ///
-    /// Panics if `n` is zero, negative, or exceeds `u32::MAX`.
-    pub fn m_quorum(n: impl ToPrimitive) -> u32 {
-        let n = n
-            .to_u32()
-            .expect("n must be a non-negative integer that fits in u32");
+    /// Panics if `n` is zero.
+    pub fn m_quorum(n: u64) -> u64 {
         assert!(n > 0, "n must not be zero");
         2 * Self::max_faults(n) + 1
     }
@@ -143,8 +128,8 @@ impl N5f1 {
     ///
     /// # Panics
     ///
-    /// Panics if `n` is zero, negative, or exceeds `u32::MAX`.
-    pub fn l_quorum(n: impl ToPrimitive) -> u32 {
+    /// Panics if `n` is zero.
+    pub fn l_quorum(n: u64) -> u64 {
         Self::quorum(n)
     }
 }
@@ -190,9 +175,9 @@ mod tests {
     #[case(20, 6, 14)]
     #[case(21, 6, 15)]
     fn test_bft3f1_quorum_and_max_faults(
-        #[case] n: u32,
-        #[case] expected_f: u32,
-        #[case] expected_q: u32,
+        #[case] n: u64,
+        #[case] expected_f: u64,
+        #[case] expected_q: u64,
     ) {
         assert_eq!(N3f1::max_faults(n), expected_f);
         assert_eq!(N3f1::quorum(n), expected_q);
@@ -252,10 +237,10 @@ mod tests {
     // n=21: f=4
     #[case(21, 4, 17, 9)]
     fn test_bft5f1_quorums(
-        #[case] n: u32,
-        #[case] expected_f: u32,
-        #[case] expected_l_quorum: u32,
-        #[case] expected_m_quorum: u32,
+        #[case] n: u64,
+        #[case] expected_f: u64,
+        #[case] expected_l_quorum: u64,
+        #[case] expected_m_quorum: u64,
     ) {
         assert_eq!(N5f1::max_faults(n), expected_f);
         assert_eq!(N5f1::quorum(n), expected_l_quorum);
@@ -268,51 +253,13 @@ mod tests {
     }
 
     #[test]
-    fn test_generic_integer_types() {
-        // Test with various integer types
-        assert_eq!(N3f1::max_faults(10u8), 3);
-        assert_eq!(N3f1::max_faults(10u16), 3);
-        assert_eq!(N3f1::max_faults(10u32), 3);
-        assert_eq!(N3f1::max_faults(10u64), 3);
-        assert_eq!(N3f1::max_faults(10usize), 3);
-        assert_eq!(N3f1::max_faults(10i32), 3);
-        assert_eq!(N3f1::max_faults(10i64), 3);
-
-        assert_eq!(N3f1::quorum(10u8), 7);
-        assert_eq!(N3f1::quorum(10u16), 7);
-        assert_eq!(N3f1::quorum(10u64), 7);
-        assert_eq!(N3f1::quorum(10usize), 7);
-        assert_eq!(N3f1::quorum(10i32), 7);
-        assert_eq!(N3f1::quorum(10i64), 7);
-
-        assert_eq!(N5f1::max_faults(10u64), 1);
-        assert_eq!(N5f1::quorum(10usize), 9);
-        assert_eq!(N5f1::m_quorum(10i32), 3);
-        assert_eq!(N5f1::l_quorum(10i64), 9);
-    }
-
-    #[test]
-    #[should_panic(expected = "n must be a non-negative integer that fits in u32")]
-    fn test_max_faults_negative_panics() {
-        N3f1::max_faults(-1i32);
-    }
-
-    #[test]
-    #[should_panic(expected = "n must be a non-negative integer that fits in u32")]
-    fn test_max_faults_overflow_panics() {
-        N3f1::max_faults(u64::MAX);
-    }
-
-    #[test]
-    #[should_panic(expected = "n must be a non-negative integer that fits in u32")]
-    fn test_quorum_negative_panics() {
-        N3f1::quorum(-1i32);
-    }
-
-    #[test]
-    #[should_panic(expected = "n must be a non-negative integer that fits in u32")]
-    fn test_quorum_overflow_panics() {
-        N3f1::quorum(u64::MAX);
+    fn test_values_above_u32_max() {
+        let n = u64::from(u32::MAX) + 2;
+        assert_eq!(N3f1::max_faults(n), (n - 1) / 3);
+        assert_eq!(N3f1::quorum(n), n - (n - 1) / 3);
+        assert_eq!(N5f1::max_faults(n), (n - 1) / 5);
+        assert_eq!(N5f1::m_quorum(n), 2 * ((n - 1) / 5) + 1);
+        assert_eq!(N5f1::l_quorum(n), n - (n - 1) / 5);
     }
 
     proptest! {
@@ -322,7 +269,7 @@ mod tests {
         /// - M-quorum (2f+1) < L-quorum (n-f)
         /// - Both quorums must be achievable (<= n)
         #[test]
-        fn test_n5f1_quorum_relationships(n in 6u32..10_000) {
+        fn test_n5f1_quorum_relationships(n in 6u64..10_000) {
             let m = N5f1::m_quorum(n);
             let l = N5f1::l_quorum(n);
 
@@ -345,7 +292,7 @@ mod tests {
         /// This ensures that any two quorums share at least one honest participant,
         /// which is fundamental for BFT consensus safety.
         #[test]
-        fn test_bft_model_safety_property(n in 1u32..10_000) {
+        fn test_bft_model_safety_property(n in 1u64..10_000) {
             // N3f1 safety
             let f_3f1 = N3f1::max_faults(n);
             let q_3f1 = N3f1::quorum(n);

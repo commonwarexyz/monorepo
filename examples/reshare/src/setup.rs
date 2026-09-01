@@ -158,7 +158,9 @@ fn validate(args: &Setup) -> anyhow::Result<()> {
     if args.committee_size > args.peers {
         anyhow::bail!("committee size exceeds peer count");
     }
-    if u64::from(N3f1::quorum(args.committee_size)) > dealer_log_slots() {
+    if N3f1::quorum(u64::try_from(args.committee_size).expect("committee size exceeds u64::MAX"))
+        > dealer_log_slots()
+    {
         anyhow::bail!("committee quorum exceeds available dealer log slots");
     }
     port(args, args.peers - 1)?;

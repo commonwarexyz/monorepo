@@ -104,6 +104,7 @@ fn fuzz(input: FuzzInput) {
             if n == 0 {
                 return;
             }
+            let n = u64::from(n);
             let faults = N3f1::max_faults(n);
             assert_eq!(faults, (n.saturating_sub(1)) / 3);
 
@@ -115,6 +116,7 @@ fn fuzz(input: FuzzInput) {
             if n == 0 {
                 return;
             }
+            let n = u64::from(n);
             let q = N3f1::quorum(n);
             let faults = N3f1::max_faults(n);
 

@@ -599,7 +599,9 @@ mod fuzz {
             let total: u32 = u.int_in_range(1..=100)?;
             let mode: Mode = u.arbitrary()?;
             let seed: u64 = u.arbitrary()?;
-            let poly = Poly::new(TestRng::new(seed), N3f1::quorum(total) - 1);
+            let degree = u32::try_from(N3f1::quorum(u64::from(total)) - 1)
+                .expect("quorum degree must fit in u32");
+            let poly = Poly::new(TestRng::new(seed), degree);
             Ok(Self::new(
                 mode,
                 NZU32!(total),

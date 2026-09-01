@@ -164,7 +164,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         );
         assert_eq!(
             polynomial.required(),
-            participants.quorum::<N3f1>(),
+            participants.quorum_count::<N3f1>(),
             "polynomial threshold must equal quorum"
         );
         polynomial.precompute_partial_publics();
@@ -207,7 +207,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         );
         assert_eq!(
             polynomial.required(),
-            participants.quorum::<N3f1>(),
+            participants.quorum_count::<N3f1>(),
             "polynomial threshold must equal quorum"
         );
         polynomial.precompute_partial_publics();
@@ -961,7 +961,7 @@ mod tests {
     };
     use commonware_math::algebra::{Additive, CryptoGroup, Random};
     use commonware_parallel::Sequential;
-    use commonware_utils::{Faults, N3f1, N5f1, NZU32, test_rng};
+    use commonware_utils::{N3f1, N5f1, NZU32, test_rng};
     use rand::{SeedableRng, rngs::StdRng};
 
     const NAMESPACE: &[u8] = b"bls-threshold-signing-scheme";
@@ -1223,7 +1223,8 @@ mod tests {
     fn verify_votes_filters_bad_signers<V: Variant>() {
         let mut rng = test_rng();
         let (schemes, _) = setup_signers::<V>(5, 13);
-        let quorum = N3f1::quorum(schemes.len()) as usize;
+        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+            .expect("quorum exceeds usize::MAX");
         let proposal = sample_proposal(Epoch::new(0), View::new(5), 3);
 
         let mut votes: Vec<_> = schemes
@@ -1270,7 +1271,7 @@ mod tests {
 
     fn assemble_certificate_requires_quorum<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(4, 17);
-        let quorum = N3f1::quorum(schemes.len());
+        let quorum = u64::from(schemes[0].participants().quorum_count::<N3f1>());
         let subquorum = usize::try_from(quorum - 1).expect("quorum exceeds usize::MAX");
         let proposal = sample_proposal(Epoch::new(0), View::new(7), 4);
 
@@ -1300,8 +1301,8 @@ mod tests {
 
     fn assemble_certificate_rejects_duplicate_signers<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(4, 18);
-        let quorum =
-            usize::try_from(N3f1::quorum(schemes.len())).expect("quorum exceeds usize::MAX");
+        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+            .expect("quorum exceeds usize::MAX");
         let proposal = sample_proposal(Epoch::new(0), View::new(8), 4);
         let mut votes: Vec<_> = schemes
             .iter()
@@ -1331,8 +1332,8 @@ mod tests {
 
     fn assemble_certificate_rejects_unknown_signer<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(4, 19);
-        let quorum =
-            usize::try_from(N3f1::quorum(schemes.len())).expect("quorum exceeds usize::MAX");
+        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+            .expect("quorum exceeds usize::MAX");
         let proposal = sample_proposal(Epoch::new(0), View::new(9), 4);
         let mut votes: Vec<_> = schemes
             .iter()
@@ -1364,8 +1365,8 @@ mod tests {
 
     fn assemble_certificate_rejects_malformed_signature<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(4, 20);
-        let quorum =
-            usize::try_from(N3f1::quorum(schemes.len())).expect("quorum exceeds usize::MAX");
+        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+            .expect("quorum exceeds usize::MAX");
         let proposal = sample_proposal(Epoch::new(0), View::new(10), 4);
         let mut votes: Vec<_> = schemes
             .iter()
@@ -1396,7 +1397,8 @@ mod tests {
 
     fn verify_certificate<V: Variant>() {
         let (schemes, verifier) = setup_signers::<V>(4, 19);
-        let quorum = N3f1::quorum(schemes.len()) as usize;
+        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+            .expect("quorum exceeds usize::MAX");
         let proposal = sample_proposal(Epoch::new(0), View::new(9), 5);
 
         let votes: Vec<_> = schemes
@@ -1434,7 +1436,8 @@ mod tests {
     fn verify_certificate_detects_corruption<V: Variant>() {
         let mut rng = test_rng();
         let (schemes, verifier) = setup_signers::<V>(4, 23);
-        let quorum = N3f1::quorum(schemes.len()) as usize;
+        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+            .expect("quorum exceeds usize::MAX");
         let proposal = sample_proposal(Epoch::new(0), View::new(11), 6);
 
         let votes: Vec<_> = schemes
@@ -1487,8 +1490,8 @@ mod tests {
     fn verify_certificate_rejects_identity_components<V: Variant>() {
         let mut rng = test_rng();
         let (schemes, verifier) = setup_signers::<V>(4, 27);
-        let quorum =
-            usize::try_from(N3f1::quorum(schemes.len())).expect("quorum exceeds usize::MAX");
+        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+            .expect("quorum exceeds usize::MAX");
         let proposal = sample_proposal(Epoch::new(0), View::new(12), 7);
         let votes: Vec<_> = schemes
             .iter()
@@ -1538,7 +1541,8 @@ mod tests {
 
     fn certificate_codec_roundtrip<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(5, 29);
-        let quorum = N3f1::quorum(schemes.len()) as usize;
+        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+            .expect("quorum exceeds usize::MAX");
         let proposal = sample_proposal(Epoch::new(0), View::new(13), 7);
 
         let votes: Vec<_> = schemes
@@ -1570,7 +1574,8 @@ mod tests {
 
     fn seed_codec_roundtrip<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(4, 5);
-        let quorum = N3f1::quorum(schemes.len()) as usize;
+        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+            .expect("quorum exceeds usize::MAX");
         let proposal = sample_proposal(Epoch::new(0), View::new(1), 0);
 
         let votes: Vec<_> = schemes
@@ -1605,7 +1610,8 @@ mod tests {
 
     fn seed_verify<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(4, 5);
-        let quorum = N3f1::quorum(schemes.len()) as usize;
+        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+            .expect("quorum exceeds usize::MAX");
         let proposal = sample_proposal(Epoch::new(0), View::new(1), 0);
 
         let votes: Vec<_> = schemes
@@ -1646,7 +1652,8 @@ mod tests {
 
     fn seedable<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(4, 5);
-        let quorum = N3f1::quorum(schemes.len()) as usize;
+        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+            .expect("quorum exceeds usize::MAX");
         let proposal = sample_proposal(Epoch::new(0), View::new(1), 0);
 
         let notarizes: Vec<_> = schemes
@@ -1711,7 +1718,8 @@ mod tests {
 
     fn certificate_verifier_accepts_certificates<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(4, 37);
-        let quorum = N3f1::quorum(schemes.len()) as usize;
+        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+            .expect("quorum exceeds usize::MAX");
         let proposal = sample_proposal(Epoch::new(0), View::new(15), 8);
 
         let votes: Vec<_> = schemes
@@ -1791,7 +1799,8 @@ mod tests {
 
     fn verify_certificate_returns_seed_randomness<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(4, 43);
-        let quorum = N3f1::quorum(schemes.len()) as usize;
+        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+            .expect("quorum exceeds usize::MAX");
         let proposal = sample_proposal(Epoch::new(0), View::new(19), 10);
 
         let votes: Vec<_> = schemes
@@ -1823,7 +1832,8 @@ mod tests {
 
     fn certificate_decode_rejects_length_mismatch<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(4, 47);
-        let quorum = N3f1::quorum(schemes.len()) as usize;
+        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+            .expect("quorum exceeds usize::MAX");
         let proposal = sample_proposal(Epoch::new(0), View::new(21), 11);
 
         let votes: Vec<_> = schemes
@@ -1895,7 +1905,8 @@ mod tests {
     fn verify_certificate_detects_seed_corruption<V: Variant>() {
         let mut rng = test_rng();
         let (schemes, verifier) = setup_signers::<V>(4, 59);
-        let quorum = N3f1::quorum(schemes.len()) as usize;
+        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+            .expect("quorum exceeds usize::MAX");
         let proposal = sample_proposal(Epoch::new(0), View::new(25), 13);
 
         let votes: Vec<_> = schemes
@@ -1948,7 +1959,8 @@ mod tests {
     fn encrypt_decrypt<V: Variant>() {
         let mut rng = test_rng();
         let (schemes, verifier) = setup_signers::<V>(4, 61);
-        let quorum = N3f1::quorum(schemes.len()) as usize;
+        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+            .expect("quorum exceeds usize::MAX");
 
         // Prepare a message to encrypt
         let message = b"Secret message for future view10";
@@ -2146,7 +2158,8 @@ mod tests {
     fn verify_certificate_rejects_malleability<V: Variant>() {
         let mut rng = test_rng();
         let (schemes, verifier) = setup_signers::<V>(4, 73);
-        let quorum = N3f1::quorum(schemes.len()) as usize;
+        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+            .expect("quorum exceeds usize::MAX");
         let proposal = sample_proposal(Epoch::new(0), View::new(31), 16);
 
         let votes: Vec<_> = schemes
@@ -2210,7 +2223,8 @@ mod tests {
     fn verify_certificates_rejects_malleability<V: Variant>() {
         let mut rng = test_rng();
         let (schemes, verifier) = setup_signers::<V>(4, 79);
-        let quorum = N3f1::quorum(schemes.len()) as usize;
+        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+            .expect("quorum exceeds usize::MAX");
         let proposal1 = sample_proposal(Epoch::new(0), View::new(33), 17);
         let proposal2 = sample_proposal(Epoch::new(0), View::new(34), 18);
 
@@ -2320,7 +2334,8 @@ mod tests {
         schemes: &[Scheme<V>],
         proposal: &Proposal<Sha256Digest>,
     ) -> Certificate<V> {
-        let quorum = N3f1::quorum(schemes.len()) as usize;
+        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+            .expect("quorum exceeds usize::MAX");
         let votes: Vec<_> = schemes
             .iter()
             .take(quorum)
@@ -2336,7 +2351,8 @@ mod tests {
         schemes: &[Scheme<V>],
         proposal: &Proposal<Sha256Digest>,
     ) -> Certificate<V> {
-        let quorum = N3f1::quorum(schemes.len()) as usize;
+        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+            .expect("quorum exceeds usize::MAX");
         let votes: Vec<_> = schemes
             .iter()
             .skip(schemes.len() - quorum)

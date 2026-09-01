@@ -367,10 +367,10 @@ impl Info {
                 return Err(Error::NumDealers(dealers.len()));
             }
         }
-        let player_quorum =
-            NonZeroU32::new(players.quorum::<M>()).expect("non-empty players have non-zero quorum");
-        let dealer_quorum =
-            NonZeroU32::new(dealers.quorum::<M>()).expect("non-empty dealers have non-zero quorum");
+        let player_quorum = NonZeroU32::new(players.quorum_count::<M>())
+            .expect("a non-empty player set must have a non-zero quorum");
+        let dealer_quorum = NonZeroU32::new(dealers.quorum_count::<M>())
+            .expect("a non-empty dealer set must have a non-zero quorum");
         let required_commitments = previous
             .as_ref()
             .map(|previous| dealer_quorum.max(previous.quorum()))
@@ -1184,8 +1184,12 @@ mod test_plan {
             let Some(&shift) = self.shift_degrees.get(&dealer) else {
                 return false;
             };
-            let degree = N3f1::quorum(self.num_players).saturating_sub(1);
-            let new_degree = (degree as i32 + shift).max(0) as u32;
+            let degree = u32::try_from(N3f1::quorum(u64::from(self.num_players)).saturating_sub(1))
+                .expect("player quorum must fit in u32");
+            let new_degree = u32::try_from(
+                (i32::try_from(degree).expect("polynomial degree exceeds i32::MAX") + shift).max(0),
+            )
+            .expect("shifted polynomial degree must be non-negative");
             new_degree != degree
         }
 
@@ -1201,15 +1205,15 @@ mod test_plan {
         }
 
         fn expect_failure(&self) -> bool {
-            let required = N3f1::quorum(self.num_dealers);
+            let required = N3f1::quorum(u64::from(self.num_dealers));
             let previous_quorum = if self.reshare {
                 // In reshare, dealers == players from previous round.
-                N3f1::quorum(self.num_dealers)
+                N3f1::quorum(u64::from(self.num_dealers))
             } else {
                 0
             };
             let required = required.max(previous_quorum);
-            self.honest_dealer_count() < required
+            u64::from(self.honest_dealer_count()) < required
         }
 
         fn make_info(
