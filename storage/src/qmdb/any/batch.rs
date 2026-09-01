@@ -5254,7 +5254,7 @@ mod tests {
 
     /// Reduced from a fuzzer counterexample: a parent deletes keys whose buckets the child
     /// later touches, and building the child on the pending parent must produce the same
-    /// root as building it on the applied parent. The final key-value state is identical
+    /// root as building it on the committed parent. The final key-value state is identical
     /// either way; a divergence means the emitted operation streams (next-key pointers or
     /// floor moves) depended on whether the parent was pending.
     #[test]
@@ -5319,7 +5319,7 @@ mod tests {
             assert_eq!(
                 pending_child.root(),
                 committed_child.root(),
-                "child root depended on pending-vs-applied parent path"
+                "child root depended on pending-vs-committed parent path"
             );
             assert_eq!(
                 pending_child.total_active_keys,
@@ -5501,7 +5501,7 @@ mod tests {
             assert_eq!(
                 pending_child.root(),
                 committed_child.root(),
-                "child root depended on pending-vs-applied parent path"
+                "child root depended on pending-vs-committed parent path"
             );
             let (db, _) = db.apply_batch(pending_child).await.unwrap();
             assert_eq!(db.root(), committed_child.root());
