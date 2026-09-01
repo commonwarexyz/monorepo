@@ -5,17 +5,17 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use commonware_clearing::bajillion::{
     admission::{Committee, SealedDealing, Vote, assigned_slice_indices, bls12381, seal},
     boundary::{DepositBatch, DepositRecord, WithdrawalAction, WithdrawalBatch},
-    challenge::HigherShardTipLookup,
-    commitment::VectorRoot,
-    credit::ShardSet,
-    payment::{MAX_ENTRIES, PaymentContext, SignedReceipt, SignedSend, verify_acceptance},
+    challenge::{HigherEntryLookup, higher_entry_lookup},
+    commitment::{Opening, VectorRoot},
+    payment::{EntryReceipt, PaymentContext, VectorAck, VectorSendBody},
     settlement::{EpochDeadlinePolicy, FinalizedBatch, SettlementChain, SettlementConfig},
     state::{AccountRow, AccountState, Prefix, SettlementOutput, StateLeaf},
     transition::{
         Assignment, ChallengeIndex, CloseContext, CloseLimits, EpochContext, ExternalPayoutClaim,
-        Header, PreparedClose, ProofSlice, RootBundle, StateCache, WithdrawalClaim,
-        prepare_close_with_strategy,
+        Header, OperatorKey, OperatorSignature, OperatorVariant, PreparedClose, ProofSlice,
+        RootBundle, StateCache, WithdrawalClaim, prepare_close_with_strategy,
     },
+    vector::{OutEntry, OutTipLookup, OutVector, TransposeEntry},
 };
 use commonware_codec::{
     Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
@@ -24,7 +24,7 @@ use commonware_cryptography::{
     Hasher, Sha256, Signer as _,
     bls12381::primitives::{
         group::{Private, Scalar},
-        ops::compute_public,
+        ops::{compute_public, sign_message},
         variant::MinSig,
     },
     sha256::Digest,
@@ -41,8 +41,12 @@ use std::{
 };
 
 pub(crate) type Key = StrictVerifyingKey;
-pub(crate) type Payment = commonware_clearing::bajillion::payment::Payment<Key, Digest>;
+pub(crate) type Ack = VectorAck<Key, Digest>;
+pub(crate) type Receipt = EntryReceipt<Key, Digest>;
 pub(crate) type AccountCache = StateCache<Key, Digest>;
+
+/// Maximum entries in one batched send, bounding adversarial acceptance decoding.
+pub(crate) const MAX_ENTRIES: usize = 256;
 
 const DEPLOYMENT_NAMESPACE: &[u8] = b"_COMMONWARE_EXAMPLES_TERMINAL_DEPLOYMENT";
 
@@ -62,8 +66,9 @@ pub(crate) fn deployment_of(operator: &Key) -> Digest {
 const CHAIN_REGISTRATION_SIGNATURE_NAMESPACE: &[u8] =
     b"_COMMONWARE_EXAMPLES_TERMINAL_CHAIN_REGISTRATION";
 const VALIDATOR_SEED_START: u64 = 10_000;
+const OPERATOR_ACK_SEED_START: u64 = 20_000;
 const VALIDATORS: usize = 4;
-const SLICE_BITS: u8 = 2;
+pub(crate) const SLICE_BITS: u8 = 2;
 
 /// Maximum proof slices one close partitions into, and so the most slices one
 /// validator dealing can carry.
@@ -71,8 +76,6 @@ pub(crate) const MAX_SLICES: usize = 1 << SLICE_BITS;
 pub(crate) const MAX_ACCOUNTS: usize = 1_024;
 /// Maximum accepted payments in one epoch, counting one per batched-send entry.
 pub(crate) const MAX_ACCEPTED_PAYMENTS: usize = 1_024;
-/// Bounds one encoded linked payment: a batch send at the protocol entry limit plus one receipt.
-pub(crate) const MAX_PAYMENT_BYTES: usize = 12 * 1024;
 /// Bounds one encoded [`Acceptance`]: a batch send at the protocol entry limit plus one receipt
 /// per entry.
 pub(crate) const MAX_ACCEPTANCE_BYTES: usize = 64 * 1024;
@@ -227,55 +230,132 @@ pub(crate) fn external_identity() -> AccountIdentity {
     }
 }
 
-/// One accepted send: the signed batch and one operator receipt per entry, in entry order.
+/// One credited recipient and positive amount inside a batched send.
 ///
-/// This is the shape the wire and both SQLite stores share. The send is carried once. Per-entry
-/// [`Payment`] pairs are reassembled where linked evidence is needed.
+/// The wire carries per-batch deltas so both sides can maintain the payer's cumulative
+/// out vector independently. Entries must be strictly recipient-sorted and unique.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Entry {
+    pub(crate) recipient: Key,
+    pub(crate) amount: u64,
+}
+
+impl Write for Entry {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.recipient.write(buf);
+        self.amount.write(buf);
+    }
+}
+
+impl EncodeSize for Entry {
+    fn encode_size(&self) -> usize {
+        self.recipient.encode_size() + self.amount.encode_size()
+    }
+}
+
+impl Read for Entry {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+        Ok(Self {
+            recipient: Key::read(buf)?,
+            amount: u64::read(buf)?,
+        })
+    }
+}
+
+/// One accepted entry: the credited recipient's cumulative endpoint and its membership
+/// opening under the acknowledged vector root.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct AcceptedEntry {
+    pub(crate) recipient: Key,
+    pub(crate) cumulative: u64,
+    pub(crate) count: u64,
+    pub(crate) opening: Opening<Digest>,
+}
+
+impl Write for AcceptedEntry {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.recipient.write(buf);
+        self.cumulative.write(buf);
+        self.count.write(buf);
+        self.opening.write(buf);
+    }
+}
+
+impl EncodeSize for AcceptedEntry {
+    fn encode_size(&self) -> usize {
+        self.recipient.encode_size()
+            + self.cumulative.encode_size()
+            + self.count.encode_size()
+            + self.opening.encode_size()
+    }
+}
+
+impl Read for AcceptedEntry {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+        Ok(Self {
+            recipient: Key::read(buf)?,
+            cumulative: u64::read(buf)?,
+            count: u64::read(buf)?,
+            opening: Opening::read(buf)?,
+        })
+    }
+}
+
+/// One accepted send: the dual-signed vector endpoint and one opened entry per credited
+/// recipient, in entry order.
+///
+/// This is the shape the wire and both SQLite stores share. The acknowledgment is carried
+/// once. Per-entry [`Receipt`]s are reassembled where transferable evidence is needed.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Acceptance {
-    pub(crate) send: SignedSend<Key, Digest>,
-    pub(crate) receipts: Vec<SignedReceipt<Key, Digest>>,
+    pub(crate) ack: Ack,
+    pub(crate) entries: Vec<AcceptedEntry>,
 }
 
 impl Acceptance {
-    /// Verifies every linked entry pair and that the receipts cover the entries in entry order.
+    /// Verifies the acknowledgment and every entry's membership under its committed root.
     pub(crate) fn verify(&self, context: &PaymentContext<Key, Digest>) -> Result<()> {
+        ensure!(!self.entries.is_empty(), "acceptance opens no entries");
         ensure!(
-            self.receipts.len() == self.send.body().entries().len(),
-            "acceptance does not cover every send entry"
+            self.entries
+                .windows(2)
+                .all(|pair| pair[0].recipient < pair[1].recipient),
+            "acceptance entries are not strictly recipient-sorted"
         );
-
-        // Entries are strictly recipient-sorted and unique, so positional recipient equality
-        // proves the receipts cover every entry exactly once.
-        for (receipt, entry) in self.receipts.iter().zip(self.send.body().entries()) {
-            ensure!(
-                receipt.body().recipient() == entry.recipient(),
-                "acceptance receipts are not in entry order"
-            );
+        for receipt in self.receipts() {
+            receipt
+                .verify::<Sha256>(context)
+                .context("verify acceptance entry receipt")?;
         }
-        verify_acceptance::<Sha256, _, _>(context, &self.send, &self.receipts)
-            .context("verify acceptance receipt")
+        Ok(())
     }
 
-    /// Reassembles one transferable linked pair per entry.
-    #[cfg(test)]
-    pub(crate) fn payments(&self) -> impl Iterator<Item = Payment> + '_ {
-        self.receipts
-            .iter()
-            .map(|receipt| Payment::from_parts_unchecked(self.send.clone(), receipt.clone()))
+    /// Reassembles one transferable entry receipt per credited recipient.
+    pub(crate) fn receipts(&self) -> impl Iterator<Item = Receipt> + '_ {
+        self.entries.iter().map(|entry| EntryReceipt {
+            ack: self.ack.clone(),
+            recipient: entry.recipient.clone(),
+            cumulative: entry.cumulative,
+            count: entry.count,
+            opening: entry.opening.clone(),
+        })
     }
 }
 
 impl Write for Acceptance {
     fn write(&self, buf: &mut impl BufMut) {
-        self.send.write(buf);
-        self.receipts.write(buf);
+        self.ack.write(buf);
+        self.entries.write(buf);
     }
 }
 
 impl EncodeSize for Acceptance {
     fn encode_size(&self) -> usize {
-        self.send.encode_size() + self.receipts.encode_size()
+        self.ack.encode_size() + self.entries.encode_size()
     }
 }
 
@@ -284,11 +364,8 @@ impl Read for Acceptance {
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self {
-            send: SignedSend::read(buf)?,
-            receipts: Vec::<SignedReceipt<Key, Digest>>::read_cfg(
-                buf,
-                &(RangeCfg::new(1..=MAX_ENTRIES), ()),
-            )?,
+            ack: Ack::read(buf)?,
+            entries: Vec::<AcceptedEntry>::read_cfg(buf, &(RangeCfg::new(1..=MAX_ENTRIES), ()))?,
         })
     }
 }
@@ -476,6 +553,24 @@ pub(crate) fn operator_key() -> Key {
     operator_signer(0).public_key()
 }
 
+/// The aggregable-acknowledgment BLS signing key of demo operator `index`.
+///
+/// Deployment-fixed and dedicated like the operator clearing key: the close carries one
+/// combined countersignature per proof slice under this key, and validators verify the
+/// aggregates against the public half committed in the genesis deployment list.
+pub(crate) fn operator_ack_signer(index: u64) -> Private {
+    Private::new(Scalar::from(
+        OPERATOR_ACK_SEED_START
+            .checked_add(index)
+            .and_then(|seed| seed.checked_add(1))
+            .expect("the demo operator index fits the seed space"),
+    ))
+}
+
+pub(crate) fn operator_ack_key(index: u64) -> OperatorKey {
+    compute_public::<OperatorVariant>(&operator_ack_signer(index))
+}
+
 /// One configured account of a deployment's genesis machine.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Account {
@@ -490,14 +585,16 @@ pub(crate) struct Account {
 pub(crate) struct Deployment {
     digest: Digest,
     pub(crate) operator: Key,
+    pub(crate) operator_ack: OperatorKey,
     pub(crate) accounts: Vec<Account>,
 }
 
 impl Deployment {
-    pub(crate) fn new(operator: Key, accounts: Vec<Account>) -> Self {
+    pub(crate) fn new(operator: Key, operator_ack: OperatorKey, accounts: Vec<Account>) -> Self {
         Self {
             digest: deployment_of(&operator),
             operator,
+            operator_ack,
             accounts,
         }
     }
@@ -523,7 +620,11 @@ pub(crate) fn accounts() -> Vec<Account> {
 /// The compiled default deployment set: the seed-1 operator alone, the
 /// configuration the fixture and harness paths run under.
 pub(crate) fn deployments() -> Vec<Deployment> {
-    vec![Deployment::new(operator_key(), accounts())]
+    vec![Deployment::new(
+        operator_key(),
+        operator_ack_key(0),
+        accounts(),
+    )]
 }
 
 /// Digest committing to the whole configured deployment set in genesis
@@ -727,6 +828,8 @@ pub(crate) fn epoch_context_at(
 pub(crate) struct Protocol {
     deployment: Digest,
     operator: SigningKey,
+    operator_ack: Private,
+    operator_ack_key: OperatorKey,
     validators: Validators,
     strategy: Rayon,
 }
@@ -735,18 +838,41 @@ impl Protocol {
     /// Protocol machinery for the compiled default deployment (the seed-1
     /// demo operator): the fixture and harness path.
     pub(crate) fn new(workers: NonZeroUsize) -> Result<Self> {
-        Self::with_signer(workers, operator_signer(0))
+        Self::with_signer(workers, operator_signer(0), operator_ack_signer(0))
     }
 
     /// Protocol machinery for the deployment `operator` runs: the deployment
     /// digest derives from the signing identity.
-    pub(crate) fn with_signer(workers: NonZeroUsize, operator: SigningKey) -> Result<Self> {
+    pub(crate) fn with_signer(
+        workers: NonZeroUsize,
+        operator: SigningKey,
+        operator_ack: Private,
+    ) -> Result<Self> {
         Ok(Self {
             deployment: deployment_of(&operator.public_key()),
             operator,
+            operator_ack_key: compute_public::<OperatorVariant>(&operator_ack),
+            operator_ack,
             validators: Validators::new()?,
             strategy: Rayon::new(workers).context("create clearing worker pool")?,
         })
+    }
+
+    /// The operator's aggregable-acknowledgment public key.
+    pub(crate) const fn operator_ack_key(&self) -> &OperatorKey {
+        &self.operator_ack_key
+    }
+
+    /// Countersigns one accepted endpoint body for the close's slice aggregates.
+    pub(crate) fn sign_ack_aggregate(
+        &self,
+        body: &VectorSendBody<Key, Digest>,
+    ) -> OperatorSignature {
+        sign_message::<OperatorVariant>(
+            &self.operator_ack,
+            commonware_clearing::bajillion::payment::VECTOR_ACK_AGGREGATE_NAMESPACE,
+            body.encode().as_ref(),
+        )
     }
 
     pub(crate) const fn strategy(&self) -> &Rayon {
@@ -864,13 +990,16 @@ impl Protocol {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn prepare(
         &self,
         registration: EpochRegistration,
         deposit_events: Vec<DepositEvent>,
         predecessor: Vec<StateLeaf<Key>>,
         rows: Vec<AccountRow<Key, Digest>>,
-        shard_sets: Vec<ShardSet<Key, Digest>>,
+        out_vectors: Vec<OutVector<Key>>,
+        operator_signatures: Vec<Option<OperatorSignature>>,
+        transpose: Vec<TransposeEntry<Key>>,
         successor: Vec<StateLeaf<Key>>,
     ) -> Result<PreparedEpoch> {
         ensure!(!rows.is_empty(), "there is nothing to settle");
@@ -888,19 +1017,27 @@ impl Protocol {
         let successor = StateCache::new_with_strategy::<Sha256>(successor, &self.strategy)
             .context("commit projected successor state")?;
         let successor_root = successor.root();
+        let partials = out_vectors
+            .iter()
+            .map(OutVector::accumulator)
+            .collect::<Vec<_>>();
         let prepared = prepare_close_with_strategy::<Sha256, _, _>(
             &predecessor,
             &context,
             &registration.deposits,
             &registration.withdrawals,
             rows,
-            shard_sets,
+            out_vectors,
+            &partials,
+            &operator_signatures,
+            transpose,
             &self.strategy,
         )
         .context("prepare close")?;
         prepared
             .validate::<Sha256, PaymentBatchVerifier, _>(
                 &context,
+                &self.operator_ack_key,
                 &registration.deposits,
                 &registration.withdrawals,
                 &mut rand::rng(),
@@ -1003,6 +1140,7 @@ impl Protocol {
             let (vote, sealed) = seal::<Sha256, _, _, PaymentBatchVerifier, _>(
                 &scheme,
                 &epoch.context,
+                &self.operator_ack_key,
                 &epoch.deposits,
                 &epoch.withdrawals,
                 &epoch.prepared.close().header,
@@ -1083,7 +1221,7 @@ impl Protocol {
             .enumerate()
             .map(|(position, request)| {
                 let claim = prepared
-                    .withdrawal_claim::<Sha256>(&withdrawals, request.account())
+                    .withdrawal_claim(&withdrawals, request.account())
                     .context("assemble withdrawal claim")?;
                 ensure!(
                     u32::try_from(position).ok() == Some(claim.position()),
@@ -1300,16 +1438,16 @@ pub(crate) fn short_digest(digest: &Digest) -> String {
 /// A committed close that omits one receiver's credit, plus that receiver's held receipt.
 ///
 /// This is the demo's fraud construction, kept out of the honest operator binary. The close
-/// credits a deposit to a bystander account, so the omitted receiver is absent from its change
-/// vector, mirroring how the challenge tests build an inconsistent close. The held pair is a
-/// valid operator-signed receipt crediting the receiver under the same epoch context, so it
-/// convicts the close with a `HigherShardTip` challenge.
+/// credits a deposit to a bystander account, so the paying sender is absent from its change
+/// vector, mirroring how the challenge tests build an inconsistent close. The held receipt is
+/// a valid operator-acknowledged entry crediting the receiver under the same epoch context,
+/// so it convicts the close with a `HigherAckEntry` challenge.
 pub(crate) struct OmittingClose {
     pub(crate) result: SettlementResult,
     pub(crate) receiver: Key,
     pub(crate) held_credit: u64,
-    pub(crate) held_pair: Payment,
-    pub(crate) held_lookup: HigherShardTipLookup<Key, Digest>,
+    pub(crate) held_receipt: Receipt,
+    pub(crate) held_lookup: HigherEntryLookup<Key, Digest>,
 }
 
 /// The omitting close's boundary: the bystander deposit event and its
@@ -1396,37 +1534,62 @@ pub(crate) fn omitting_close<R: CryptoRng>(
         vec![deposit],
         state.leaves().to_vec(),
         vec![row],
-        vec![ShardSet::empty(0, bystander)],
+        vec![OutVector::empty(0, bystander)],
+        vec![None],
+        Vec::new(),
         successor,
     )?;
 
-    // The omitting close excludes the receiver, so its composed lookup is an ordered absence.
+    // The omitting close excludes the paying sender entirely, so its composed lookup is an
+    // ordered change-vector absence and the public terminal entry resolves to zero.
     let index = ChallengeIndex::new::<Sha256>(prepared.close_context(), prepared.close())
         .context("index the omitting close")?;
-    let held_lookup = index
-        .higher_shard_tip_lookup::<Sha256>(&receiver, None, 0)
-        .context("compose the omitted receiver lookup")?;
+    let held_lookup =
+        higher_entry_lookup::<Sha256, _, _>(&index, &payer.public_key(), None, &receiver)
+            .context("compose the omitted sender lookup")?;
     let result = protocol.complete(prepared, rng)?;
     let context = result.payment_context.clone();
 
-    // The receiver holds an operator-signed receipt crediting it under the same epoch context.
-    let send = SignedSend::sign_next(&context, payer.signer(), receiver.clone(), held_credit, 0)
-        .context("sign the omitted receiver's send")?;
-    let receipt = SignedReceipt::issue_next::<Sha256, _>(
-        &context,
-        &send,
-        &receiver,
-        0,
-        0,
-        0,
-        protocol.operator(),
+    // The receiver holds an operator-acknowledged entry crediting it under the same epoch
+    // context, opened under the acknowledged vector root.
+    let out_vector = OutVector::new(
+        context.epoch(),
+        payer.public_key(),
+        vec![OutEntry {
+            recipient: receiver.clone(),
+            cumulative: held_credit,
+            count: 1,
+        }],
     )
-    .context("issue the omitted receiver's receipt")?;
+    .context("build the omitted receiver's out vector")?;
+    let body = VectorSendBody::new(
+        &context,
+        payer.public_key(),
+        1,
+        held_credit,
+        out_vector
+            .root::<Sha256, Digest>()
+            .context("commit the omitted receiver's out vector")?,
+    );
+    let ack = Ack::sign_by_authorities(body, payer.signer(), protocol.operator());
+    let opening = match out_vector
+        .lookup::<Sha256, Digest>(&receiver)
+        .context("open the omitted receiver's entry")?
+    {
+        OutTipLookup::Present { opening, .. } => opening,
+        OutTipLookup::Absent { .. } => anyhow::bail!("the held entry is present by construction"),
+    };
     Ok(OmittingClose {
         result,
         receiver,
         held_credit,
-        held_pair: Payment::from_parts_unchecked(send, receipt),
+        held_receipt: EntryReceipt {
+            ack,
+            recipient: wallets[1].public_key(),
+            cumulative: held_credit,
+            count: 1,
+            opening,
+        },
         held_lookup,
     })
 }

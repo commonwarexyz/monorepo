@@ -77,17 +77,16 @@ const MAX_STATE_OPENINGS: usize = 5;
 /// Certificate participant-bitmap length for the fixed clearing committee.
 const CERTIFICATE_PARTICIPANTS: usize = 4;
 
-/// Bounds one encoded challenge. The largest canonical challenge is an inconsistent receipt
-/// range whose upper endpoint is a full payment witness over a send at the protocol entry
-/// limit (10,466 bytes) and whose lower endpoint is a scoped payment witness over another
-/// such send (10,426 bytes), 20,894 bytes with both enum tags. 32 KiB covers that maximum
-/// with headroom and stays far below the 4 MiB frame budget.
+/// Bounds one encoded challenge. The largest canonical challenge is a higher acknowledged
+/// entry: one fixed-size acknowledgment witness with its retained entry opening, plus a
+/// composed sender lookup carrying two more openings (the change-vector membership proof
+/// and the entry lookup under the reconstructed vector root). 32 KiB covers that maximum
+/// with generous headroom and stays far below the 4 MiB frame budget.
 ///
-/// No challenge size depends on the operator's account count. The receipt-range and fork
-/// families carry no openings at all, and the opening-carrying families are depth-bounded
-/// structurally: every opening decodes at most `bmt::MAX_LEVELS` sibling hashes per position,
-/// their lookup leaves are fixed size, and one entry-limit payment witness plus those bounded
-/// openings stays below the receipt-range maximum.
+/// No challenge size depends on the operator's account count. The fork family carries two
+/// fixed-size acknowledgment witnesses and no openings at all, and the opening-carrying
+/// families are depth-bounded structurally: every opening decodes at most `bmt::MAX_LEVELS`
+/// sibling hashes per position, and their lookup leaves are fixed size.
 pub(crate) const MAX_CHALLENGE_BYTES: usize = 32 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -644,15 +643,17 @@ impl Read for SettlementTx {
 mod tests {
     use super::*;
     use crate::{
-        protocol::{Payment, Protocol, Wallet, operator_key, wallets},
+        protocol::{MAX_ENTRIES, Protocol, Wallet, omitting_close, wallets},
         rpc,
     };
     use bytes::BytesMut;
     use commonware_clearing::bajillion::{
-        challenge::{Challenge, RangeLower, ReceiptForkWitness},
-        payment::{Entry, MAX_ENTRIES, PaymentContext, PaymentWitness, SignedReceipt, SignedSend},
+        challenge::{AckWitness, Challenge, EntryWitness},
+        payment::{VectorAck, VectorSendBody},
+        vector::{OutEntry, OutTipLookup, OutVector},
     };
     use commonware_codec::DecodeExt as _;
+    use commonware_utils::TestRng;
     use std::num::NonZeroUsize;
 
     #[test]
@@ -686,63 +687,88 @@ mod tests {
 
     #[test]
     fn challenge_bound_admits_the_maximal_canonical_proof() {
+        // A genuine higher-entry challenge over a committed close: the
+        // retained acknowledgment witness with its entry opening plus the
+        // composed sender lookup, the family the bound is sized for.
+        let fraud = omitting_close(&mut TestRng::new(41), 11, 12).unwrap();
+        let context = fraud.result.payment_context.clone();
+        let held = &fraud.held_receipt;
+        let genuine: Challenge<Key, Digest> = Challenge::HigherAckEntry {
+            entry: Box::new(EntryWitness {
+                ack: AckWitness::from_ack(&held.ack),
+                recipient: held.recipient.clone(),
+                cumulative: held.cumulative,
+                count: held.count,
+                opening: held.opening.clone(),
+            }),
+            sender: Box::new(fraud.held_lookup.clone()),
+        };
+        let evidence = genuine.encode();
+        assert!(evidence.len() <= MAX_CHALLENGE_BYTES);
+        assert_eq!(
+            Challenge::<Key, Digest>::decode(evidence.clone()).unwrap(),
+            genuine
+        );
+
+        // The deepest canonical entry witness: an acknowledged vector at the
+        // protocol entry limit opens one entry at full depth, and the
+        // composed challenge still clears the bound.
         let protocol = Protocol::new(NonZeroUsize::MIN).unwrap();
         let payer = wallets().remove(0);
-        let context = PaymentContext::new(
-            Sha256::hash(&[b"maximal-challenge-context"]),
-            0,
-            operator_key(),
-        );
-        let entries = (0..MAX_ENTRIES)
+        let mut entries = (0..MAX_ENTRIES)
             .map(|index| {
                 let seed = 20_000 + u64::try_from(index).unwrap();
-                Entry::new(Wallet::from_seed("receiver", seed).public_key(), 1).unwrap()
+                OutEntry {
+                    recipient: Wallet::from_seed("receiver", seed).public_key(),
+                    cumulative: 1,
+                    count: 1,
+                }
             })
             .collect::<Vec<_>>();
-        let payment = |previous_debit: u64| {
-            let send = SignedSend::sign_next_batch(
+        entries.sort_unstable_by(|left, right| left.recipient.cmp(&right.recipient));
+        let recipient = entries[0].recipient.clone();
+        let vector = OutVector::new(context.epoch(), payer.public_key(), entries).unwrap();
+        let ack = VectorAck::sign_by_authorities(
+            VectorSendBody::new(
                 &context,
-                payer.signer(),
-                entries.clone(),
-                previous_debit,
-            )
-            .unwrap();
-            let receiver = send.body().entries()[0].recipient().clone();
-            let receipt = SignedReceipt::issue_next::<Sha256, _>(
-                &context,
-                &send,
-                &receiver,
+                payer.public_key(),
                 0,
-                0,
-                0,
-                protocol.operator(),
-            )
-            .unwrap();
-            Payment::new::<Sha256>(&context, send, receipt).unwrap()
+                MAX_ENTRIES as u64,
+                vector.root::<Sha256, Digest>().unwrap(),
+            ),
+            payer.signer(),
+            protocol.operator(),
+        );
+        let OutTipLookup::Present {
+            cumulative,
+            count,
+            opening,
+        } = vector.lookup::<Sha256, Digest>(&recipient).unwrap()
+        else {
+            panic!("the entry-limit vector holds its first entry");
         };
-        let upper = payment(0);
-        let lower = payment(256);
-
-        // The largest canonical proof: an inconsistent receipt range over two endpoints at
-        // the protocol entry limit, one complete payment witness and one scoped witness.
-        let range: Challenge<Key, Digest> = Challenge::InconsistentReceiptRange {
-            upper: Box::new(PaymentWitness::from_payment(&upper)),
-            lower: RangeLower::from_payment(&lower),
+        let widest: Challenge<Key, Digest> = Challenge::HigherAckEntry {
+            entry: Box::new(EntryWitness {
+                ack: AckWitness::from_ack(&ack),
+                recipient,
+                cumulative,
+                count,
+                opening,
+            }),
+            sender: Box::new(fraud.held_lookup.clone()),
         };
-        let evidence = range.encode();
-        assert_eq!(evidence.len(), 20_894);
-        assert!(evidence.len() <= MAX_CHALLENGE_BYTES);
+        let widest = widest.encode();
+        assert!(widest.len() <= MAX_CHALLENGE_BYTES);
 
-        // The densest receipt fork projects to its same-index relation and stays smaller.
-        let fork = Challenge::receipt_fork(&upper, &lower);
-        assert!(matches!(
-            &fork,
-            Challenge::ReceiptFork { fork }
-                if matches!(fork.as_ref(), ReceiptForkWitness::SameIndex { .. })
-        ));
-        assert!(fork.encode().len() <= evidence.len());
+        // The fork family carries two fixed-size witnesses and no openings,
+        // so it stays under the deepest entry challenge.
+        let fork: Challenge<Key, Digest> = Challenge::AckFork {
+            left: Box::new(AckWitness::from_ack(&held.ack)),
+            right: Box::new(AckWitness::from_ack(&ack)),
+        };
+        assert!(fork.encode().len() <= widest.len());
 
-        // The maximal proof clears the request decode bound and the frame budget.
+        // The genuine proof clears the request decode bound and the frame budget.
         let request = ChallengeRequest {
             batch_id: BatchId::new(Sha256::hash(&[b"maximal-challenge-batch"])),
             evidence,

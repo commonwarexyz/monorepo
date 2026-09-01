@@ -4,11 +4,11 @@ Run `commonware-clearing` through three independently owned roles:
 
 - `terminal-agent` runs the wallet agents: p2p-less light clients speaking codec RPC to the
   validators' query servers. Every read they rely on is certified, and every mutation is
-  submit-then-prove. Each agent owns one wallet key, verifies returned receipts, holds as a
-  receiver the pairs crediting it, reconciles them against certified admitted closes, and
-  provides the Ratatui UI.
-- `terminal-operator` owns one SQLite ledger, accepts signed sends, issues receipts, and
-  constructs closes. It runs the validator stack without a consensus engine, as a registered
+  submit-then-prove. Each agent owns one wallet key, verifies returned entry receipts, holds
+  as a receiver the receipts crediting it, reconciles them against certified admitted closes,
+  and provides the Ratatui UI.
+- `terminal-operator` owns one SQLite ledger, accepts signed sends, issues acknowledgments
+  and entry receipts, and constructs closes. It runs the validator stack without a consensus engine, as a registered
   p2p secondary of the committee: settlement reads come from its own verified finalized state,
   transaction submission goes out on the settlement transaction channel, and its close pipeline
   disseminates dealings, collects votes, and assembles the admission certificate over the
@@ -96,12 +96,13 @@ PAYMENT
    | sign from local SQL alone: the cached (epoch, anchor), the wallet's own
    | durable cumulative debit as the endpoint, affordability prechecked against
    | the cached Merkle-verified floor (a lower bound on spendable balance)
-   | persist (root, SignedSend S)                                 |
+   | persist (root, SendAuthorization S)                          |
    |-------------------------->|                                 |
    |                           | first payment for epoch:        |
    |                           | registration tx, certified ---->|
    |                           |<-- registration record (effect) |
-   |                           | sign one linked receipt per entry|
+   |                           | countersign the endpoint, open  |
+   |                           | one entry per credited recipient|
    |<--------------------------|                                 |
    | verify S and every receipt                                   |
    |-- certified anchor read for the epoch ---------------------->|
@@ -129,10 +130,11 @@ PAYMENT
        over-debited: public validity certifies every committed debit against a payer-signed
        send, so enforcing an omitted credit belongs to the harmed receiver, not the payer
 
- A send names one or more strictly recipient-sorted entries under one signature and one
- cumulative debit endpoint. The operator accepts or rejects the batch as a whole and
- returns one receipt per entry, all committed in one SQLite transaction. A single payment
- is a batch of one.
+ A send merges one or more strictly recipient-sorted delta entries into the payer's
+ cumulative per-recipient vector and signs its root, sequence number, and cumulative debit
+ endpoint under one signature. The operator accepts or rejects the batch as a whole and
+ returns one dual-signed acknowledgment plus one entry opening per credited recipient, all
+ committed in one SQLite transaction. A single payment is a batch of one.
 
 DEPOSIT OR WITHDRAWAL AUTHORIZATION
 
@@ -179,7 +181,7 @@ operator prepare -> deal -> validators seal every assigned proof slice
 
 OPERATOR FAULT
 
- missed registered admission | expired deposit/withdrawal | proven receipt challenge
+ missed registered admission | expired deposit/withdrawal | proven challenge
                                   |
                                   v
                          PERMANENT HARD FAULT
@@ -217,31 +219,30 @@ verbatim, and only an operator that stalls entirely lets the obligation expire i
 recovery. This covers roots the agent observed while online, not an unobserved root reached while
 it was offline. An account reactivated by a current-epoch deposit cannot pay until it appears in a
 later epoch-predecessor state, because the current frozen root has no live payer leaf to retain.
-Receipt challenges still require the exact linked send/receipt pair. The example supplies no
+Challenges still require the exact retained acknowledgment evidence. The example supplies no
 third-party opening retrieval.
 
 Receiver enforcement flow. A wallet that provides a service is the party an omitted credit harms,
-so it enforces its own preconfirmations. It fetches the pairs crediting it from the operator by a
-durable cursor, verifies each fully (payer send signature once per transaction, operator receipt
-signature, exact linkage, and its own recipient), and anchors the pair's `(epoch, anchor)` to the
-context settlement registered for that epoch. A receipt over an operator-chosen anchor with no
-settlement obligation is never reliance-grade. Only then does it durably hold the pair and gate
-service on it, so a balance read from the operator's head is an observation, not reliance. In the
-background it reconciles held credits against the admitted close: settlement serves the batch
-identity and change root it admitted for the epoch, and operator-served committed-side evidence is
-trusted only when it matches that anchor exactly, so the operator can withhold a lookup but can
-never fabricate coverage. Withholding has no settlement-clock backstop once a close is admitted,
-so an epoch that finalizes while its lookup is still withheld is surfaced as an alarm and kept
-retrying. When a held receipt exceeds the anchored committed tip inside the admission-to-
-finalization window, the wallet convicts the close with one `HigherShardTip` challenge and stops,
-because one proven challenge invalidates the whole close. The operator is the pair-delivery
-channel, and withholding a pair only degrades to the acceptance gate: an unheld credit is never
-relied upon and so harms no one. Wallets file `HigherShardTip` only, and the
-authenticated-absence form covers even a receiver the close omits entirely.
-`LatestAcknowledgedSend` exists for a holder whose held pair no committed shard tip contradicts,
-proving the omission through the payer-row angle instead, and the receipt-range and receipt-fork
-families require operator equivocation the honest demo never produces. Settlement adjudicates
-all four.
+so it enforces its own preconfirmations. It fetches the entry receipts crediting it from the
+operator by a durable cursor, verifies each fully (both signatures over the acknowledged endpoint
+and the entry's membership opening under the acknowledged vector root), and anchors the receipt's
+`(epoch, anchor)` to the context settlement registered for that epoch. A receipt over an
+operator-chosen anchor with no settlement obligation is never reliance-grade. Only then does it
+durably hold the receipt and gate service on it, so a balance read from the operator's head is an
+observation, not reliance. In the background it reconciles held credits against the admitted
+close: settlement serves the batch identity and change root it admitted for the epoch, and
+operator-served committed-side evidence is trusted only when it matches that anchor exactly, so
+the operator can withhold a lookup but can never fabricate coverage. Withholding has no
+settlement-clock backstop once a close is admitted, so an epoch that finalizes while its lookup
+is still withheld is surfaced as an alarm and kept retrying. When a held per-edge entry exceeds
+the anchored committed terminal entry inside the admission-to-finalization window, the wallet
+convicts the close with one `HigherAckEntry` challenge and stops, because one proven challenge
+invalidates the whole close. The operator is the receipt-delivery channel, and withholding a
+receipt only degrades to the acceptance gate: an unheld credit is never relied upon and so harms
+no one. Wallets file `HigherAckEntry` only, and the authenticated-absence form covers even a
+sender the close omits entirely. `HigherAckDebit` exists for a payer whose acknowledged endpoint
+the committed terminal understates, and the acknowledgment fork requires operator equivocation
+the honest demo never produces. Settlement adjudicates all three.
 
 Registration confirmation is a certified anchor read. The anchor commits the entire epoch
 context, the boundary, the predecessor liability, and the chain-assigned absolute deadlines,
@@ -252,7 +253,15 @@ context the chain never registered has no close to adjudicate against and is nev
 ## Close certification and data availability
 
 Distributed certification runs over the settlement DA channel. An operator sends each
-validator exactly its assigned proof slices, and the validator routes the dealing by the
+validator exactly its assigned proof slices, stripped of their unchanged state: every slice
+travels as a `DealtSlice`, and the validator hydrates it against the key interval it retains
+for the registered close's predecessor root. Genesis seeds each deployment's intervals from
+its configured accounts, every sealed close advances them under the successor root, and the
+advanced intervals are made durable together with the sealed dealing before the vote leaves
+the validator, so dealing bytes scale with the movers rather than the account set. Retention
+is a protocol assumption: a validator that missed a close no longer holds the interval the
+next dealing hydrates against and must sync it externally before sealing again, which the
+demo surfaces as a warning. The validator routes each dealing by the
 sending operator's network identity to the deployment that operator runs and seals it with
 clearing `seal` against THAT deployment's chain-registered close from its own applied state,
 never against operator-supplied context material. The sealed dealing lands in that
@@ -440,7 +449,7 @@ closes that epoch inside its admission runway, and proves with a certified read 
 obligation outlasts the run, so the deployment idles safely afterward. It ends with a
 self-contained fraud arc on a throwaway in-process single-validator chain with locally
 simulated certification: the assembled omitting close is registered and admitted as real
-transactions, the omitted receiver's held receipt convicts it with a real `HigherShardTip`
+transactions, the omitted receiver's held receipt convicts it with a real `HigherAckEntry`
 challenge transaction, and the proven verdict, the fault record, and the hard-faulted status are
 read back certified through the light client. The operator binary stays honest, and the fraud is
 assembled only in the scripted walkthrough.

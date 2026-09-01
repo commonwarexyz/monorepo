@@ -17,9 +17,10 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use commonware_clearing::bajillion::{
     boundary::{WithdrawalAction, WithdrawalBatch},
-    challenge::ChallengeKind,
+    challenge::{AckWitness, Challenge, ChallengeKind, EntryWitness},
 };
-use commonware_cryptography::Sha256;
+use commonware_codec::Encode as _;
+use commonware_cryptography::{Hasher as _, Sha256};
 use commonware_macros::select;
 use commonware_runtime::{Clock as _, Runner as _, Supervisor as _, deterministic};
 use crossterm::{
@@ -226,7 +227,7 @@ pub(crate) async fn run<E: Env>(
                                 payment.epoch,
                                 payment.sequence,
                                 payment.total,
-                                payment.acceptance.receipts.len()
+                                payment.acceptance.entries.len()
                             ));
                             state.staged.clear();
                         }
@@ -441,7 +442,7 @@ async fn refresh<E: Env>(
     if let Ok(summary) = agent.reconcile(network, chain, operator).await {
         for epoch in summary.convicted {
             state.log(format!(
-                "epoch {epoch} omission convicted via HigherShardTip; the close is invalidated"
+                "epoch {epoch} omission convicted via HigherAckEntry; the close is invalidated"
             ));
         }
         for epoch in summary.reconciled {
@@ -761,9 +762,9 @@ pub(crate) async fn scripted<E: Env>(
         payment.epoch, payment.sequence
     );
 
-    // The payer chooses the transaction id by signing its send, so it is the invoice reference a
-    // receiver answers its service-accounting query against below.
-    let invoice = payment.acceptance.send.tx_id::<Sha256>().into_digest();
+    // The payer-signed acknowledgment body digest is the invoice reference a receiver
+    // answers its service-accounting query against below.
+    let invoice = Sha256::hash(&[payment.acceptance.ack.body().encode().as_ref()]);
     let payer_account = agent.account();
     let batch = accepted(
         agent
@@ -775,7 +776,7 @@ pub(crate) async fn scripted<E: Env>(
         batch.epoch,
         batch.sequence,
         batch.total,
-        batch.acceptance.receipts.len()
+        batch.acceptance.entries.len()
     );
     let external_payment = accepted(
         agent
@@ -890,7 +891,7 @@ pub(crate) async fn scripted<E: Env>(
 /// The honest operator binary can never produce an inconsistent close, so the fraud is
 /// assembled with the shared omitting-close machinery and adjudicated by a throwaway
 /// in-process single-validator chain: the fraudulent close is registered and admitted as
-/// real transactions, the receiver files one real `HigherShardTip` challenge transaction,
+/// real transactions, the receiver files one real `HigherAckEntry` challenge transaction,
 /// and the proven verdict, the fault record, and the hard-faulted status are all read back
 /// certified through the light client. This mirrors what a receiver's reconciliation does
 /// on the wire against the live deployment.
@@ -978,11 +979,14 @@ fn fraud_arc() -> Result<()> {
             *fraud.result.payment_context.anchor() == record.anchor,
             "the fraudulent close does not bind the assigned anchor"
         );
-        let committed = fraud
+        let (committed, _) = fraud
             .held_lookup
-            .resolve::<Sha256>(&fraud.result.roots.change, &fraud.receiver, 0)
-            .context("resolve the omitted committed tip")?
-            .map_or(0, |tip| tip.cumulative_credit);
+            .resolve::<Sha256>(
+                &fraud.result.roots.change,
+                fraud.held_receipt.ack.body().payer(),
+                &fraud.receiver,
+            )
+            .context("resolve the omitted committed entry")?;
         println!(
             "fraud: the operator's admitted close commits cumulative credit {committed} for the omitted receiver, which holds an operator-signed receipt for {}",
             fraud.held_credit
@@ -1002,19 +1006,22 @@ fn fraud_arc() -> Result<()> {
         }
         ensure!(admitted, "the fraud admission earned no admitted record");
 
-        // The receiver files exactly the challenge its reconciliation would: its held pair
-        // against the committed lookup that omits it.
-        let challenge = commonware_clearing::bajillion::challenge::Challenge::HigherShardTip {
-            payment: Box::new(
-                commonware_clearing::bajillion::payment::PaymentWitness::from_payment(
-                    &fraud.held_pair,
-                ),
-            ),
-            recipient: Box::new(fraud.held_lookup),
+        // The receiver files exactly the challenge its reconciliation would: its held
+        // receipt against the committed lookup that omits it.
+        let held = &fraud.held_receipt;
+        let challenge = Challenge::HigherAckEntry {
+            entry: Box::new(EntryWitness {
+                ack: AckWitness::from_ack(&held.ack),
+                recipient: held.recipient.clone(),
+                cumulative: held.cumulative,
+                count: held.count,
+                opening: held.opening.clone(),
+            }),
+            sender: Box::new(fraud.held_lookup),
         };
         let tx = SettlementTx::Challenge(ChallengeRequest {
             batch_id,
-            evidence: commonware_codec::Encode::encode(&challenge),
+            evidence: challenge.encode(),
         });
         chain.deliver(&context, &tx).await?;
 
@@ -1038,11 +1045,11 @@ fn fraud_arc() -> Result<()> {
             matches!(
                 reason,
                 HardFaultReasonResponse::ProvenChallenge { batch_id: proven, kind }
-                    if proven == batch_id && kind == ChallengeKind::HigherShardTip
+                    if proven == batch_id && kind == ChallengeKind::HigherAckEntry
             ),
             "the certified fault record does not name the proven challenge"
         );
-        println!("fraud: HigherShardTip proven; the omitting close is invalidated");
+        println!("fraud: HigherAckEntry proven; the omitting close is invalidated");
         let status = chain.status(&context).await?;
         ensure!(
             status.hard_faulted,
@@ -1103,8 +1110,9 @@ mod tests {
                 .bind(SocketAddr::from(([127, 0, 0, 1], 2)))
                 .await
                 .unwrap();
+            let mut identity_rng = context.child("identity_rng");
             let mut chain = Client::new(
-                &harness::identity(&mut context.child("identity_rng")),
+                &harness::identity(&mut identity_rng),
                 crate::protocol::deployment(),
                 vec![chain_listener.local_addr().unwrap()],
                 context.child("client_rng"),

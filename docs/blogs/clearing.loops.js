@@ -492,14 +492,14 @@ function buildPaymentMinimal(mount) {
     weight: 700,
     fill: GREEN,
   });
-  s.revealText(stepX, OP_Y + 56, 'sign R', {
+  s.revealText(stepX, OP_Y + 56, 'countersign R', {
     at: 2.15,
     anchor: 'end',
     size: 12.5,
     weight: 700,
     fill: GOLD,
   });
-  s.revealText(stepX, OP_Y + 76, 'a: 100→80 • b/κ₀: (0,0)→(20,1)', {
+  s.revealText(stepX, OP_Y + 76, 'a: 100→80 • a→b: (0,0)→(20,1)', {
     at: 2.35,
     anchor: 'end',
     size: 12,

@@ -14,10 +14,7 @@ use crate::{
     },
     protocol::deployment,
 };
-use commonware_clearing::bajillion::{
-    challenge::StateOpening, payment::Entry, transition::WithdrawalClaim,
-};
-use commonware_codec::Encode as _;
+use commonware_clearing::bajillion::{challenge::StateOpening, transition::WithdrawalClaim};
 use commonware_runtime::{Runner as _, deterministic};
 use commonware_utils::TestRng;
 use std::{
@@ -296,64 +293,52 @@ fn payment_is_atomic_and_rejects_overspend() {
 #[test]
 fn accepted_batch_reads_across_the_operating_fence() {
     let mut operator = operator();
-    let payer = operator.wallets[0].public_key();
-    let head = operator.payment_head(&payer).unwrap();
-    let send = SignedSend::sign_next(
-        &head.context,
-        operator.wallets[0].signer(),
-        operator.wallets[1].public_key(),
-        25,
-        head.state.cumulative_debit,
-    )
-    .unwrap();
-    let committed = operator.accept_send(send.clone()).unwrap().into_accepted();
+    let (send, entries) = operator
+        .sign_send(0, &[(operator.wallets[1].public_key(), 25)])
+        .unwrap();
+    let committed = operator
+        .accept_send(send.clone(), entries.clone())
+        .unwrap()
+        .into_accepted();
 
     // Sign a second send that is never accepted, before any fence blocks quoting.
-    let head = operator
-        .payment_head(&operator.wallets[3].public_key())
+    let (uncommitted, uncommitted_entries) = operator
+        .sign_send(3, &[(operator.wallets[2].public_key(), 1)])
         .unwrap();
-    let uncommitted = SignedSend::sign_next(
-        &head.context,
-        operator.wallets[3].signer(),
-        operator.wallets[2].public_key(),
-        1,
-        head.state.cumulative_debit,
-    )
-    .unwrap();
 
     // A close fence blocks admitting new state but leaves the committed rows readable.
     operator.close_fault = Some("fenced after a failed predecessor close".to_string());
-    assert!(operator.accept_send(send.clone()).is_err());
+    assert!(operator.accept_send(send.clone(), entries.clone()).is_err());
     let resolved = operator
-        .accepted_batch(&send)
+        .accepted_batch(&send, &entries)
         .unwrap()
         .expect("a fenced operator failed to read a committed batch");
     assert_eq!(resolved.acceptance, committed.acceptance);
-    assert!(operator.accepted_batch(&uncommitted).unwrap().is_none());
+    assert!(
+        operator
+            .accepted_batch(&uncommitted, &uncommitted_entries)
+            .unwrap()
+            .is_none()
+    );
 
     // A storage fault is fatal to the instance until it restarts, so the read refuses
     // to answer instead of reporting a false absence.
     operator.store_fault = Some("the SQLite connection is unusable".to_string());
-    assert!(operator.accepted_batch(&send).is_err());
-    assert!(operator.accepted_batch(&uncommitted).is_err());
+    assert!(operator.accepted_batch(&send, &entries).is_err());
+    assert!(
+        operator
+            .accepted_batch(&uncommitted, &uncommitted_entries)
+            .is_err()
+    );
 }
 
 #[test]
 fn arbitrary_unregistered_receiver_is_rejected_without_a_debit() {
     let mut operator = operator();
-    let payer = operator.wallets[0].public_key();
-    let head = operator.payment_head(&payer).unwrap();
     let receiver = Wallet::from_seed("Mallory", 9_999).public_key();
-    let send = SignedSend::sign_next(
-        &head.context,
-        operator.wallets[0].signer(),
-        receiver,
-        25,
-        head.state.cumulative_debit,
-    )
-    .unwrap();
+    let (send, entries) = operator.sign_send(0, &[(receiver, 25)]).unwrap();
 
-    assert!(operator.accept_send(send).is_err());
+    assert!(operator.accept_send(send, entries).is_err());
     let snapshot = operator.snapshot().unwrap();
     assert!(snapshot.payments.is_empty());
     assert_eq!(
@@ -374,7 +359,7 @@ fn compact_status_does_not_materialize_epoch_artifacts() {
     operator.pay(0, 1, 1).unwrap();
     let connection = rusqlite::Connection::open(database.path()).unwrap();
     connection
-        .execute("UPDATE payments SET encoded = zeroblob(256)", [])
+        .execute("UPDATE accepted_entries SET opening = zeroblob(256)", [])
         .unwrap();
 
     let status = operator.status().unwrap();
@@ -404,21 +389,17 @@ fn payment_head_serves_the_retained_predecessor_cache() {
         before.state.cumulative_debit + 12
     );
 
-    // Head reads serve the retained cache and never replay the payment log: tampering
-    // with a stored row is invisible here. Startup replays and verifies every row,
-    // so the reopened operator must reject the same database loudly.
+    // Head reads serve the retained cache and never replay the acknowledgment log:
+    // tampering with a stored row is invisible here. Startup replays and verifies every
+    // row, so the reopened operator must reject the same database loudly.
     let connection = rusqlite::Connection::open(database.path()).unwrap();
     let mut tampered: Vec<u8> = connection
-        .query_row(
-            "SELECT encoded FROM payments WHERE sequence = 1",
-            [],
-            |row| row.get(0),
-        )
+        .query_row("SELECT ack FROM acks WHERE seq = 1", [], |row| row.get(0))
         .unwrap();
     *tampered.last_mut().unwrap() ^= 1;
     connection
         .execute(
-            "UPDATE payments SET encoded = ?1 WHERE sequence = 1",
+            "UPDATE acks SET ack = ?1 WHERE seq = 1",
             [tampered.as_slice()],
         )
         .unwrap();
@@ -430,29 +411,23 @@ fn payment_head_serves_the_retained_predecessor_cache() {
     drop(connection);
 
     let error = match Operator::open(database.path(), NonZeroUsize::new(2).unwrap()) {
-        Ok(_) => panic!("tampered payment log reopened cleanly"),
+        Ok(_) => panic!("tampered acknowledgment log reopened cleanly"),
         Err(error) => error,
     };
-    assert!(format!("{error:#}").contains("verify stored payment"));
+    assert!(format!("{error:#}").contains("verify stored acknowledgment"));
 }
 
 #[test]
 fn payment_retry_returns_the_original_receipt_without_a_second_debit() {
     let mut operator = operator();
-    let payer = operator.wallets[0].public_key();
     let receiver = operator.wallets[1].public_key();
-    let head = operator.payment_head(&payer).unwrap();
-    let send = SignedSend::sign_next(
-        &head.context,
-        operator.wallets[0].signer(),
-        receiver,
-        25,
-        head.state.cumulative_debit,
-    )
-    .unwrap();
+    let (send, entries) = operator.sign_send(0, &[(receiver, 25)]).unwrap();
 
-    let first = operator.accept_send(send.clone()).unwrap().into_accepted();
-    let retry = operator.accept_send(send).unwrap().into_accepted();
+    let first = operator
+        .accept_send(send.clone(), entries.clone())
+        .unwrap()
+        .into_accepted();
+    let retry = operator.accept_send(send, entries).unwrap().into_accepted();
     assert_eq!(retry.sequence, first.sequence);
     assert_eq!(retry.acceptance, first.acceptance);
 
@@ -472,22 +447,20 @@ fn payment_retry_returns_the_original_receipt_without_a_second_debit() {
 #[test]
 fn payment_retry_survives_epoch_cutover() {
     let mut operator = operator();
-    let payer = operator.wallets[0].public_key();
     let receiver = operator.wallets[1].public_key();
-    let head = operator.payment_head(&payer).unwrap();
-    let send = SignedSend::sign_next(
-        &head.context,
-        operator.wallets[0].signer(),
-        receiver,
-        25,
-        head.state.cumulative_debit,
-    )
-    .unwrap();
+    let (send, entries) = operator.sign_send(0, &[(receiver, 25)]).unwrap();
 
-    let first = operator.accept_send(send.clone()).unwrap().into_accepted();
+    let first = operator
+        .accept_send(send.clone(), entries.clone())
+        .unwrap()
+        .into_accepted();
     rotate_epoch(&mut operator, 0);
-    assert!(!operator.send_requires_epoch_registration(&send).unwrap());
-    let retry = operator.accept_send(send).unwrap().into_accepted();
+    assert!(
+        !operator
+            .send_requires_epoch_registration(&send, &entries)
+            .unwrap()
+    );
+    let retry = operator.accept_send(send, entries).unwrap().into_accepted();
 
     assert_eq!(retry.epoch, first.epoch);
     assert_eq!(retry.sequence, first.sequence);
@@ -507,31 +480,37 @@ fn corrective_retry_and_kept_send_commit_at_most_once() {
     let mut byzantine = operator();
     let payer = byzantine.wallets[0].public_key();
     let receiver = byzantine.wallets[1].public_key();
-    let head = byzantine.payment_head(&payer).unwrap();
-    let kept = SignedSend::sign_next(
-        &head.context,
-        byzantine.wallets[0].signer(),
-        receiver.clone(),
-        7,
-        head.state.cumulative_debit,
-    )
-    .unwrap();
-    byzantine.accept_send(kept).unwrap().into_accepted();
+    let (kept, kept_entries) = byzantine.sign_send(0, &[(receiver.clone(), 7)]).unwrap();
+    byzantine
+        .accept_send(kept, kept_entries)
+        .unwrap()
+        .into_accepted();
     rotate_epoch(&mut byzantine, 0);
     let successor = byzantine.registration.context.payment().clone();
-    let retry = SignedSend::sign_next(
+    let (retry, retry_entries) = sign_send_at(
         &successor,
-        byzantine.wallets[0].signer(),
-        receiver.clone(),
-        7,
-        0,
+        &byzantine.wallets[0],
+        &Endpoint {
+            cumulative_debit: 0,
+            seq: 0,
+            entries: Vec::new(),
+        },
+        &[(receiver.clone(), 7)],
     )
     .unwrap();
-    let error = match byzantine.accept_send(retry) {
-        Ok(_) => panic!("a zero-delta corrective retry was accepted"),
-        Err(error) => error,
-    };
-    assert!(format!("{error:#}").contains("verify payer authorization"));
+    match byzantine.accept_send(retry, retry_entries).unwrap() {
+        SendOutcome::Stale {
+            cumulative_debit,
+            seq,
+            entries,
+            ..
+        } => {
+            assert_eq!(cumulative_debit, 7);
+            assert_eq!(seq, 0);
+            assert!(entries.is_empty());
+        }
+        SendOutcome::Accepted(_) => panic!("a zero-delta corrective retry was accepted"),
+    }
     assert_eq!(
         byzantine
             .payment_head(&payer)
@@ -545,38 +524,151 @@ fn corrective_retry_and_kept_send_commit_at_most_once() {
     // so only the retry commits. The dead bytes afterward earn the typed corrective
     // rejection carrying the live context and the committed endpoint, never a debit.
     let mut honest = operator();
-    let head = honest.payment_head(&payer).unwrap();
-    let dead = SignedSend::sign_next(
-        &head.context,
-        honest.wallets[0].signer(),
-        receiver.clone(),
-        7,
-        head.state.cumulative_debit,
-    )
-    .unwrap();
+    let (dead, dead_entries) = honest.sign_send(0, &[(receiver.clone(), 7)]).unwrap();
 
     // An unrelated payment gives the epoch content to close. The payer's send was
     // never accepted, so the cut commits nothing of it.
     honest.pay(2, 3, 5).unwrap();
     rotate_epoch(&mut honest, 0);
-    let successor = honest.registration.context.payment().clone();
-    let retry =
-        SignedSend::sign_next(&successor, honest.wallets[0].signer(), receiver, 7, 0).unwrap();
-    let committed = honest.accept_send(retry).unwrap().into_accepted();
+    let (retry, retry_entries) = honest.sign_send(0, &[(receiver.clone(), 7)]).unwrap();
+    let committed = honest
+        .accept_send(retry, retry_entries)
+        .unwrap()
+        .into_accepted();
     assert_eq!(committed.total, 7);
-    match honest.accept_send(dead).unwrap() {
+    match honest.accept_send(dead, dead_entries).unwrap() {
         SendOutcome::Stale {
             context,
             cumulative_debit,
+            seq,
+            entries,
         } => {
             assert_eq!(&context, honest.registration.context.payment());
             assert_eq!(cumulative_debit, 7);
+            assert_eq!(seq, 1);
+            assert_eq!(
+                entries,
+                vec![OutEntry {
+                    recipient: receiver,
+                    cumulative: 7,
+                    count: 1,
+                }]
+            );
         }
         SendOutcome::Accepted(_) => panic!("a dead-context send was accepted"),
     }
     assert_eq!(
         honest.payment_head(&payer).unwrap().state.cumulative_debit,
         7
+    );
+}
+
+/// A re-signed different body at an already accepted sequence is wallet equivocation
+/// against its own endpoint chain, so acceptance fails closed instead of correcting.
+#[test]
+fn conflicting_body_at_an_accepted_sequence_is_refused() {
+    let mut operator = operator();
+    let payer = operator.wallets[0].public_key();
+    let receiver = operator.wallets[2].public_key();
+    operator.pay(0, 1, 7).unwrap();
+
+    // Sequence one is committed crediting wallet one. Re-sign it crediting wallet two
+    // with the same endpoint arithmetic.
+    let context = operator.registration.context.payment().clone();
+    let (conflict, conflict_entries) = sign_send_at(
+        &context,
+        &operator.wallets[0],
+        &Endpoint {
+            cumulative_debit: 0,
+            seq: 0,
+            entries: Vec::new(),
+        },
+        &[(receiver, 7)],
+    )
+    .unwrap();
+    let error = match operator.accept_send(conflict, conflict_entries) {
+        Ok(_) => panic!("a conflicting body at an accepted sequence was admitted"),
+        Err(error) => error,
+    };
+    assert!(format!("{error:#}").contains("bound to another accepted endpoint"));
+    assert_eq!(
+        operator
+            .payment_head(&payer)
+            .unwrap()
+            .state
+            .cumulative_debit,
+        7
+    );
+    assert_eq!(operator.snapshot().unwrap().payments.len(), 1);
+}
+
+#[test]
+fn incoming_entries_serve_verifiable_receipts_in_cursor_order() {
+    let mut operator = operator();
+    let receiver = operator.wallets[1].public_key();
+    operator.pay(0, 1, 2).unwrap();
+    operator.pay(2, 1, 3).unwrap();
+    let context = operator.registration.context.payment().clone();
+
+    let first = operator.incoming_payments(&receiver, 0, 10).unwrap();
+    assert_eq!(first.len(), 2);
+    for incoming in &first {
+        assert_eq!(incoming.receipt.recipient, receiver);
+        incoming.receipt.verify::<Sha256>(&context).unwrap();
+    }
+    let after = operator
+        .incoming_payments(&receiver, first[0].sequence, 10)
+        .unwrap();
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0].sequence, first[1].sequence);
+
+    // A second batch from the same payer advances the same edge cumulatively.
+    operator.pay(0, 1, 5).unwrap();
+    let all = operator.incoming_payments(&receiver, 0, 10).unwrap();
+    assert_eq!(all.len(), 3);
+    assert_eq!(all[2].receipt.cumulative, 7);
+    assert_eq!(all[2].receipt.count, 2);
+    all[2].receipt.verify::<Sha256>(&context).unwrap();
+}
+
+#[test]
+fn committed_entry_serves_the_retained_close() {
+    let mut operator = operator();
+    let payer = operator.wallets[0].public_key();
+    let receiver = operator.wallets[1].public_key();
+    operator.pay(0, 1, 7).unwrap();
+    let epoch = start_current_close(&mut operator).unwrap().epoch;
+    operator.wait_for_closes().unwrap();
+
+    // The credited edge resolves to its committed terminal entry.
+    let evidence = operator.committed_entry(&payer, &receiver, epoch).unwrap();
+    assert_eq!(
+        evidence
+            .lookup
+            .resolve::<Sha256>(&evidence.change_root, &payer, &receiver)
+            .unwrap(),
+        (7, 1)
+    );
+
+    // A changed credit-only row resolves the reverse edge through its empty vector, and
+    // a payer outside the close resolves through ordered change-vector absence: both
+    // land on the canonical zero entry.
+    let evidence = operator.committed_entry(&receiver, &payer, epoch).unwrap();
+    assert_eq!(
+        evidence
+            .lookup
+            .resolve::<Sha256>(&evidence.change_root, &receiver, &payer)
+            .unwrap(),
+        (0, 0)
+    );
+    let idle = operator.wallets[3].public_key();
+    let evidence = operator.committed_entry(&idle, &receiver, epoch).unwrap();
+    assert_eq!(
+        evidence
+            .lookup
+            .resolve::<Sha256>(&evidence.change_root, &idle, &receiver)
+            .unwrap(),
+        (0, 0)
     );
 }
 
@@ -600,33 +692,32 @@ fn completed_close_event_is_replayable() {
 #[test]
 fn batched_send_survives_retry_and_closes() {
     let mut operator = operator();
-    let head = operator
-        .payment_head(&operator.wallets[0].public_key())
+    let context = operator.registration.context.payment().clone();
+    let (send, entries) = operator
+        .sign_send(
+            0,
+            &[
+                (operator.wallets[1].public_key(), 2),
+                (operator.wallets[2].public_key(), 3),
+                (operator.external.key.clone(), 1),
+            ],
+        )
         .unwrap();
-    let send = SignedSend::sign_next_batch(
-        &head.context,
-        operator.wallets[0].signer(),
-        vec![
-            Entry::new(operator.wallets[1].public_key(), 2).unwrap(),
-            Entry::new(operator.wallets[2].public_key(), 3).unwrap(),
-            Entry::new(operator.external.key.clone(), 1).unwrap(),
-        ],
-        head.state.cumulative_debit,
-    )
-    .unwrap();
 
-    let first = operator.accept_send(send.clone()).unwrap().into_accepted();
+    let first = operator
+        .accept_send(send.clone(), entries.clone())
+        .unwrap()
+        .into_accepted();
     assert_eq!(first.total, 6);
-    assert_eq!(first.acceptance.receipts.len(), 3);
-    let tx_id = send.tx_id::<Sha256>();
+    assert_eq!(first.acceptance.entries.len(), 3);
+    first.acceptance.verify(&context).unwrap();
     assert!(
         first
             .acceptance
-            .receipts
-            .iter()
-            .all(|receipt| receipt.body().tx_id() == &tx_id)
+            .receipts()
+            .all(|receipt| receipt.ack == first.acceptance.ack)
     );
-    let retry = operator.accept_send(send).unwrap().into_accepted();
+    let retry = operator.accept_send(send, entries).unwrap().into_accepted();
     assert_eq!(retry.sequence, first.sequence);
     assert_eq!(retry.acceptance, first.acceptance);
 
@@ -644,7 +735,7 @@ fn batched_send_survives_retry_and_closes() {
     assert_eq!(balance("Bob"), INITIAL_BALANCE + 2);
     assert_eq!(balance("Carol"), INITIAL_BALANCE + 3);
 
-    // The close replay walks the payer's endpoint once per batch and each entry's shard step.
+    // The close replay walks the payer's endpoint once per batch and each entry's edge step.
     let epoch = start_current_close(&mut operator).unwrap().epoch;
     let event = loop {
         if let Some(event) = operator.poll_close(epoch).unwrap() {
@@ -988,34 +1079,25 @@ fn staged_close_keeps_incoming_and_outgoing_activity_live_until_cutover() {
         100
     );
 
-    let payer = operator.wallets[0].public_key();
     let receiver = operator.wallets[1].public_key();
-    let head = operator.payment_head(&payer).unwrap();
-    let incoming = SignedSend::sign_next(
-        &head.context,
-        operator.wallets[0].signer(),
-        receiver.clone(),
-        7,
-        head.state.cumulative_debit,
-    )
-    .unwrap();
+    let (incoming, incoming_entries) = operator.sign_send(0, &[(receiver.clone(), 7)]).unwrap();
     assert!(
         operator
-            .send_requires_epoch_registration(&incoming)
+            .send_requires_epoch_registration(&incoming, &incoming_entries)
             .unwrap()
     );
-    operator.accept_send(incoming).unwrap().into_accepted();
+    operator
+        .accept_send(incoming, incoming_entries)
+        .unwrap()
+        .into_accepted();
 
-    let head = operator.payment_head(&receiver).unwrap();
-    let outgoing = SignedSend::sign_next(
-        &head.context,
-        operator.wallets[1].signer(),
-        operator.wallets[2].public_key(),
-        12,
-        head.state.cumulative_debit,
-    )
-    .unwrap();
-    operator.accept_send(outgoing).unwrap().into_accepted();
+    let (outgoing, outgoing_entries) = operator
+        .sign_send(1, &[(operator.wallets[2].public_key(), 12)])
+        .unwrap();
+    operator
+        .accept_send(outgoing, outgoing_entries)
+        .unwrap()
+        .into_accepted();
 
     let data = operator.store.load_current().unwrap();
     let bob = data
@@ -1104,7 +1186,7 @@ fn payment_to_a_closed_configured_identity_becomes_an_external_claim() {
 
     let accepted = operator.pay(0, 1, 7).unwrap();
     assert_eq!(accepted.epoch, 1);
-    assert!(operator.store.load_current().unwrap().payments[0].external);
+    assert!(operator.store.load_current().unwrap().entries[0].external);
     operator.pay(2, operator.wallet_count(), 5).unwrap();
     assert_eq!(operator.store.current_liability().unwrap(), 288);
 
@@ -1126,18 +1208,15 @@ fn payment_to_a_closed_configured_identity_becomes_an_external_claim() {
 #[test]
 fn invalid_requests_are_rejected_before_epoch_registration() {
     let operator = operator();
-    let payer = operator.wallets[0].public_key();
-    let head = operator.payment_head(&payer).unwrap();
-    let invalid = SignedSend::sign_next(
-        &head.context,
-        operator.wallets[0].signer(),
-        operator.wallets[1].public_key(),
-        101,
-        head.state.cumulative_debit,
-    )
-    .unwrap();
+    let (invalid, invalid_entries) = operator
+        .sign_send(0, &[(operator.wallets[1].public_key(), 101)])
+        .unwrap();
 
-    assert!(operator.send_requires_epoch_registration(&invalid).is_err());
+    assert!(
+        operator
+            .send_requires_epoch_registration(&invalid, &invalid_entries)
+            .is_err()
+    );
     assert!(operator.validate_close_start(0).is_err());
 }
 
@@ -1485,13 +1564,22 @@ fn stale_same_epoch_anchor_is_rejected_without_mutation() {
     let mut operator = operator();
     let stale = operator.registration.context.payment().clone();
     operator.deposit(0, 10).unwrap();
-    let payer = &operator.wallets[1];
-    let receiver = &operator.wallets[2];
-    let send = SignedSend::sign_next(&stale, payer.signer(), receiver.public_key(), 1, 0).unwrap();
+    let receiver = operator.wallets[2].public_key();
+    let (send, entries) = sign_send_at(
+        &stale,
+        &operator.wallets[1],
+        &Endpoint {
+            cumulative_debit: 0,
+            seq: 0,
+            entries: Vec::new(),
+        },
+        &[(receiver, 1)],
+    )
+    .unwrap();
 
     let error = match operator
         .store
-        .accept_send(&stale, operator.protocol.operator(), send, 0)
+        .accept_send(&stale, &operator.protocol, send, &entries)
     {
         Ok(_) => panic!("stale payment anchor was accepted"),
         Err(error) => error,
@@ -1503,7 +1591,7 @@ fn stale_same_epoch_anchor_is_rejected_without_mutation() {
         snapshot
             .accounts
             .iter()
-            .find(|account| account.name == payer.name)
+            .find(|account| account.name == operator.wallets[1].name)
             .unwrap()
             .balance,
         100
@@ -1931,7 +2019,7 @@ fn recovery_bounds_close_error_before_materializing_text() {
 }
 
 #[test]
-fn recovery_bounds_payment_blobs_before_decoding() {
+fn recovery_bounds_entry_blobs_before_decoding() {
     let database = TempDatabase::new();
     {
         let mut operator = Operator::open(database.path(), NonZeroUsize::new(2).unwrap()).unwrap();
@@ -1942,15 +2030,18 @@ fn recovery_bounds_payment_blobs_before_decoding() {
         .execute_batch("PRAGMA ignore_check_constraints = ON")
         .unwrap();
     connection
-        .execute("UPDATE payments SET encoded = zeroblob(1048576)", [])
+        .execute(
+            "UPDATE accepted_entries SET opening = zeroblob(1048576)",
+            [],
+        )
         .unwrap();
     drop(connection);
 
     let error = match Operator::open(database.path(), NonZeroUsize::new(2).unwrap()) {
-        Ok(_) => panic!("oversized payment blob was accepted"),
+        Ok(_) => panic!("oversized entry opening was accepted"),
         Err(error) => error,
     };
-    assert!(format!("{error:#}").contains("invalid encoded payment length"));
+    assert!(format!("{error:#}").contains("invalid entry opening length"));
 }
 
 #[test]

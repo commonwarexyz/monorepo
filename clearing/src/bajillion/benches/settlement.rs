@@ -4,13 +4,13 @@ use commonware_clearing::bajillion::{
     admission::{Committee, bls12381},
     boundary::{DepositBatch, SignedWithdrawal, WithdrawalAction, WithdrawalBatch},
     challenge::StateOpening,
-    credit::ShardSet,
     settlement::{EpochDeadlinePolicy, SettlementChain, SettlementConfig},
     state::{AccountRow, AccountState, Prefix, SettlementOutput, StateLeaf},
     transition::{
-        Assignment, Close, CloseContext, CloseLimits, EpochContext, Header, RootBundle, StateCache,
-        TerminalProof, prepare_close_with_strategy,
+        Assignment, Close, CloseContext, CloseLimits, EpochContext, Header, OperatorKey,
+        OperatorSignature, RootBundle, StateCache, TerminalProof, prepare_close_with_strategy,
     },
+    vector::OutVector,
 };
 use commonware_cryptography::{
     Hasher, Sha256, Signer as _,
@@ -40,6 +40,7 @@ const WITHDRAWAL_DEADLINE: u64 = 100;
 const MAXIMUM_WITHDRAWAL_NOTICE: u64 = 1_000;
 const FAULT_DEADLINE: u64 = 2;
 const OPERATOR_SEED: u64 = 1;
+const OPERATOR_BLS_SEED: u64 = 777;
 const ACCOUNT_SEED_START: u64 = 10_000;
 const VALIDATOR_SEED_START: u64 = 1_000_000;
 const ADMISSION_VALIDATORS: usize = 100;
@@ -189,6 +190,12 @@ fn deployment() -> Digest {
     Sha256::hash(&[b"clearing-settlement-benchmark"])
 }
 
+// The benchmark closes carry no payments, so this key countersigns nothing and only threads
+// through close validation.
+fn operator_bls() -> OperatorKey {
+    compute_public::<MinSig>(&Private::new(Scalar::from(OPERATOR_BLS_SEED)))
+}
+
 fn state_fixture(live_accounts: usize) -> (TestCache, Vec<Account>) {
     let mut accounts = (0..live_accounts)
         .map(|index| {
@@ -282,7 +289,7 @@ fn withdrawal_close(
 ) -> (TestClose, TestTerminalProof) {
     let mut prefix = Prefix::default();
     let mut rows = Vec::with_capacity(withdrawals.len());
-    let mut shard_sets = Vec::with_capacity(withdrawals.len());
+    let mut out_vectors = Vec::with_capacity(withdrawals.len());
     for request in withdrawals.requests() {
         let account = request.account().clone();
         let predecessor = cache
@@ -301,7 +308,6 @@ fn withdrawal_close(
             .checked_sub(applied)
             .expect("benchmark withdrawal is affordable");
         successor.active = predecessor.active && !closes_account;
-        let shards = ShardSet::empty(context.payment().epoch(), account.clone());
         prefix = prefix
             .checked_extend(Prefix {
                 withdrawal: applied,
@@ -310,28 +316,37 @@ fn withdrawal_close(
             })
             .expect("benchmark totals are representable");
         rows.push(AccountRow {
-            account,
+            account: account.clone(),
             predecessor,
             successor,
             outgoing: None,
             output: SettlementOutput::Withdrawal(applied),
             prefix,
         });
-        shard_sets.push(shards);
+        out_vectors.push(OutVector::empty(context.payment().epoch(), account));
     }
+    let out_partials = out_vectors
+        .iter()
+        .map(OutVector::accumulator)
+        .collect::<Vec<_>>();
+    let operator_signatures: Vec<Option<OperatorSignature>> = vec![None; rows.len()];
     let prepared = prepare_close_with_strategy::<Sha256, _, _>(
         cache,
         context,
         deposits,
         withdrawals,
         rows,
-        shard_sets,
+        out_vectors,
+        &out_partials,
+        &operator_signatures,
+        Vec::new(),
         strategy(),
     )
     .expect("benchmark close is valid");
     prepared
         .validate::<Sha256, PaymentBatchVerifier, _>(
             context,
+            &operator_bls(),
             deposits,
             withdrawals,
             &mut TestRng::new(0),

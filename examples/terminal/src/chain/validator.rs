@@ -310,12 +310,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
     let dealers = operators
         .iter()
         .cloned()
-        .zip(
-            genesis_output
-                .deployments
-                .iter()
-                .map(|deployment| *deployment.digest()),
-        )
+        .zip(genesis_output.deployments.iter().cloned())
         .collect::<Vec<_>>();
     let mut bootstrappers = network.bootstrappers(&local);
     for operator in &network.operators {
@@ -429,7 +424,8 @@ pub async fn run(context: tokio::Context, args: Validator) {
         initial_sync_target::<tokio::Context>(),
     );
 
-    let plan = SyncPlan::init(&context.child("stateful_startup"), partition_prefix).await;
+    let startup = context.child("stateful_startup");
+    let plan = SyncPlan::init(&startup, partition_prefix).await;
     let _ = plan.should_state_sync(false);
 
     // Marshal actor.

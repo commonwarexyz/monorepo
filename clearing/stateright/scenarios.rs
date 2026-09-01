@@ -2,7 +2,7 @@ use super::{
     certification, challenge as challenge_model,
     settlement::{
         Account, AccountState, Batch, BatchStatus, ChallengeKind, Deployment, DepositId,
-        Destination, Fault, ForkRelation, RegistrationId, Root, SettlementAction, SettlementEdge,
+        Destination, Fault, RegistrationId, Root, SettlementAction, SettlementEdge,
         SettlementModel, SettlementState, Terminal, WithdrawalAction, WithdrawalId,
     },
 };
@@ -369,10 +369,7 @@ fn admission_and_challenge_boundaries_are_inclusive() {
     step(
         model,
         &mut admitted,
-        proven_challenge(
-            Batch::B0,
-            ChallengeKind::ReceiptFork(ForkRelation::SameIndex),
-        ),
+        proven_challenge(Batch::B0, ChallengeKind::Fork),
     );
 
     let (late, admitted_late) = model.call_at(&registered, 3, admission(Batch::B0));
@@ -587,7 +584,7 @@ fn simultaneous_faults_use_registration_then_withdrawal_then_deposit_priority() 
 }
 
 #[test]
-fn every_receipt_contradiction_releases_the_frozen_sender() {
+fn every_contradiction_kind_releases_the_frozen_sender() {
     let model = SettlementModel::default();
     for kind in ChallengeKind::ALL {
         let mut state = SettlementState::default();
@@ -619,7 +616,7 @@ fn front_fault_restores_the_sender_and_refunds_the_admitted_deposit() {
     step(
         model,
         &mut state,
-        proven_challenge(Batch::B0, ChallengeKind::LatestAcknowledgedSend),
+        proven_challenge(Batch::B0, ChallengeKind::HigherDebit),
     );
     assert_eq!(state.clean_prefix_len, 0);
     assert_eq!(
@@ -672,7 +669,7 @@ fn wrong_batch_and_expired_challenge_do_not_change_status() {
     rejected(
         model,
         &state,
-        proven_challenge(Batch::B1, ChallengeKind::LatestAcknowledgedSend),
+        proven_challenge(Batch::B1, ChallengeKind::HigherDebit),
     );
     assert_eq!(state, snapshot);
 
@@ -681,7 +678,7 @@ fn wrong_batch_and_expired_challenge_do_not_change_status() {
     rejected(
         model,
         &state,
-        proven_challenge(Batch::B0, ChallengeKind::LatestAcknowledgedSend),
+        proven_challenge(Batch::B0, ChallengeKind::HigherDebit),
     );
     assert_eq!(state, snapshot);
 }
@@ -694,10 +691,7 @@ fn middle_fault_preserves_only_the_clean_fifo_prefix() {
     step(
         model,
         &mut state,
-        proven_challenge(
-            Batch::B1,
-            ChallengeKind::ReceiptFork(ForkRelation::SameSend),
-        ),
+        proven_challenge(Batch::B1, ChallengeKind::Fork),
     );
     assert_eq!(state.status[Batch::B0.index()], BatchStatus::Pending);
     assert!(matches!(
@@ -727,7 +721,7 @@ fn tail_fault_precedes_and_drains_its_two_batch_clean_prefix() {
     step(
         model,
         &mut state,
-        proven_challenge(Batch::B2, ChallengeKind::HigherShardTip),
+        proven_challenge(Batch::B2, ChallengeKind::HigherEntry),
     );
     assert_eq!(state.clean_prefix_len, 2);
     assert_eq!(state.status[Batch::B0.index()], BatchStatus::Pending);
@@ -794,7 +788,7 @@ fn finalized_reserve_survives_descendant_fault_and_claims_independently() {
     step(
         model,
         &mut state,
-        proven_challenge(Batch::B2, ChallengeKind::HigherShardTip),
+        proven_challenge(Batch::B2, ChallengeKind::HigherEntry),
     );
     drain_terminal(model, &mut state);
     assert_eq!(state.claimable, 1);
@@ -818,10 +812,7 @@ fn finalized_withdrawal_reserve_survives_a_later_malicious_close() {
     step(
         model,
         &mut state,
-        proven_challenge(
-            Batch::B3,
-            ChallengeKind::ReceiptFork(ForkRelation::SameIndex),
-        ),
+        proven_challenge(Batch::B3, ChallengeKind::Fork),
     );
     drain_terminal(model, &mut state);
     assert_eq!(state.withdrawal_reserve[Batch::B2.index()], 2);
@@ -924,7 +915,7 @@ fn admitted_withdrawal_expiry_supports_challenge_and_clean_finalization() {
     step(
         model,
         &mut challenged,
-        proven_challenge(Batch::Offset, ChallengeKind::InconsistentReceiptRange),
+        proven_challenge(Batch::Offset, ChallengeKind::HigherDebit),
     );
     drain_terminal(model, &mut challenged);
     assert_eq!(challenged.released, challenged.total_in);
@@ -1159,7 +1150,7 @@ fn uncovered_carried_amount_degrades_at_the_frozen_root() {
     step(
         model,
         &mut state,
-        proven_challenge(Batch::B1C, ChallengeKind::ReceiptFork(ForkRelation::Full)),
+        proven_challenge(Batch::B1C, ChallengeKind::Fork),
     );
     assert!(!state.fault.healthy());
     drain_terminal(model, &mut state);

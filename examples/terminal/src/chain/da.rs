@@ -19,6 +19,16 @@
 //! deadline slot. Within one archive the record key is the batch id, which
 //! is already deployment-unique by construction: the close header commits
 //! the payment anchor, which folds the deployment digest.
+//!
+//! Dealings travel without their unchanged state: every slice arrives as a
+//! [`DealtSlice`] and the validator hydrates it against the key interval it
+//! retains for the registered close's predecessor root, seeded from the
+//! deployment's genesis accounts and advanced with every sealed close. The
+//! advanced intervals are made durable together with the sealed dealing
+//! before the vote leaves the validator. Retention is a protocol assumption:
+//! a validator that missed a close no longer holds the interval the next
+//! dealing hydrates against and must sync it externally before sealing
+//! again, which the demo surfaces as a warning rather than implementing.
 
 use crate::{
     chain::{
@@ -26,18 +36,21 @@ use crate::{
         types::Database,
         validator::{IO_BUFFER_SIZE, PAGE_CACHE_SIZE, PAGE_SIZE},
     },
-    protocol::{Key, MAX_SLICES, limits, short_digest},
+    protocol::{Deployment, Key, MAX_ACCOUNTS, MAX_SLICES, limits, short_digest},
 };
 use bytes::{Buf, BufMut};
 use commonware_clearing::bajillion::{
     admission::{Vote, bls12381, seal},
-    transition::{Header, ProofSlice, RootBundle, SliceCodecConfig},
+    commitment::VectorRoot,
+    retained::{DealtSlice, Interval},
+    state::StateLeaf,
+    transition::{Header, ProofSlice, RootBundle, SliceCodecConfig, StateCache, account_slice},
 };
 use commonware_codec::{
     DecodeExt as _, Encode as _, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _,
     Write,
 };
-use commonware_cryptography::{Sha256, ed25519, sha256::Digest};
+use commonware_cryptography::{Hasher as _, Sha256, ed25519, sha256::Digest};
 use commonware_cryptography_curve25519::signing::BatchVerifier as PaymentBatchVerifier;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_parallel::Sequential;
@@ -63,13 +76,14 @@ const fn slice_codec() -> SliceCodecConfig {
 }
 
 /// One validator's dealing for the registered close: the close header and
-/// roots with exactly that validator's assigned proof slices.
+/// roots with exactly that validator's assigned proof slices, each stripped
+/// of the unchanged state its retained interval supplies.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Dealing {
     pub(crate) epoch: u64,
     pub(crate) header: Header<Digest>,
     pub(crate) roots: RootBundle<Digest>,
-    pub(crate) slices: Vec<ProofSlice<Key, Digest>>,
+    pub(crate) slices: Vec<DealtSlice<Key, Digest>>,
 }
 
 impl Write for Dealing {
@@ -98,7 +112,7 @@ impl Read for Dealing {
             epoch: u64::read(buf)?,
             header: Header::read(buf)?,
             roots: RootBundle::read(buf)?,
-            slices: Vec::<ProofSlice<Key, Digest>>::read_cfg(
+            slices: Vec::<DealtSlice<Key, Digest>>::read_cfg(
                 buf,
                 &(RangeCfg::new(1..=MAX_SLICES), slice_codec()),
             )?,
@@ -285,6 +299,143 @@ pub(crate) async fn store<E: StorageContext>(
     .expect("failed to initialize the sealed dealing store")
 }
 
+/// One slice interval's retained live leaves at one certified state root.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RetainedInterval {
+    pub(crate) root: VectorRoot<Digest>,
+    pub(crate) slice: u16,
+    pub(crate) leaves: Vec<StateLeaf<Key>>,
+}
+
+impl Write for RetainedInterval {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.root.write(buf);
+        self.slice.write(buf);
+        self.leaves.write(buf);
+    }
+}
+
+impl EncodeSize for RetainedInterval {
+    fn encode_size(&self) -> usize {
+        self.root.encode_size() + self.slice.encode_size() + self.leaves.encode_size()
+    }
+}
+
+impl Read for RetainedInterval {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+        Ok(Self {
+            root: VectorRoot::read(buf)?,
+            slice: u16::read(buf)?,
+            leaves: Vec::<StateLeaf<Key>>::read_cfg(buf, &(RangeCfg::new(..=MAX_ACCOUNTS), ()))?,
+        })
+    }
+}
+
+/// Durable store of retained slice intervals: a prunable archive sectioned
+/// by the epoch whose dealing the interval hydrates and keyed by the digest
+/// of the state root and slice index.
+///
+/// Sealing epoch `e` consumes the intervals at section `e` (the registered
+/// close's predecessor root) and writes the advanced intervals at section
+/// `e + 1` (its successor root), synced together with the sealed dealing
+/// before the vote leaves this validator. Pruning keeps the consumed and
+/// produced sections, so a retried close re-votes from the dealing store
+/// while the next registration always finds its predecessor interval.
+pub(crate) type IntervalStore<E> = prunable::Archive<TwoCap, E, Digest, RetainedInterval>;
+
+/// The interval record key: one state root and slice interval.
+fn interval_key(root: &VectorRoot<Digest>, slice: u16) -> Digest {
+    Sha256::hash(&[root.digest.as_ref(), &slice.to_be_bytes()])
+}
+
+/// The interval record index: one section per epoch, one record per slice.
+fn interval_index(epoch: u64, slice: u16) -> u64 {
+    epoch
+        .checked_mul(MAX_SLICES as u64)
+        .and_then(|base| base.checked_add(u64::from(slice)))
+        .expect("the interval index fits the epoch clock")
+}
+
+/// Opens one deployment's durable interval store under the `partition`
+/// family and seeds the genesis intervals when the store is empty.
+async fn intervals<E: StorageContext>(
+    context: E,
+    partition: &str,
+    deployment: &Deployment,
+) -> IntervalStore<E> {
+    let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+    let scoped = format!("{partition}-{}", short_digest(deployment.digest()));
+    let mut store = IntervalStore::init(
+        context,
+        prunable::Config {
+            translator: TwoCap,
+            key_partition: format!("{scoped}-key"),
+            key_page_cache: page_cache,
+            value_partition: format!("{scoped}-value"),
+            compression: None,
+            codec_config: (),
+            items_per_section: NZU64!(MAX_SLICES as u64),
+            key_write_buffer: IO_BUFFER_SIZE,
+            value_write_buffer: IO_BUFFER_SIZE,
+            replay_buffer: IO_BUFFER_SIZE,
+        },
+    )
+    .await
+    .expect("failed to initialize the retained interval store");
+
+    // A fresh store holds the deployment's genesis intervals: every slice of
+    // the genesis account state, checked against the same root the genesis
+    // machine committed.
+    let mut leaves = deployment
+        .accounts
+        .iter()
+        .map(|account| StateLeaf {
+            account: account.key.clone(),
+            state: commonware_clearing::bajillion::state::AccountState {
+                balance: account.balance,
+                active: true,
+                ..Default::default()
+            },
+        })
+        .collect::<Vec<_>>();
+    leaves.sort_unstable_by(|left, right| left.account.cmp(&right.account));
+    let root = StateCache::new::<Sha256>(leaves.clone())
+        .expect("the genesis deployment state is canonical")
+        .root();
+    for slice in 0..MAX_SLICES as u16 {
+        let key = interval_key(&root, slice);
+        match store.get(Identifier::Key(&key)).await {
+            Ok(Some(_)) => continue,
+            Ok(None) => {}
+            Err(error) => panic!("failed to read the retained interval store: {error:?}"),
+        }
+        let members = leaves
+            .iter()
+            .filter(|leaf| {
+                account_slice(&leaf.account, crate::protocol::SLICE_BITS)
+                    .expect("demo accounts partition")
+                    == slice
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        store = store
+            .put_sync(
+                interval_index(0, slice),
+                key,
+                RetainedInterval {
+                    root,
+                    slice,
+                    leaves: members,
+                },
+            )
+            .await
+            .expect("failed to seed the genesis interval");
+    }
+    store
+}
+
 /// Sealer configuration.
 pub(crate) struct Config<E>
 where
@@ -293,8 +444,8 @@ where
     /// The validator's dealt clearing committee signing scheme.
     pub(crate) scheme: bls12381::Scheme,
     /// The accepted dealers: each configured operator's network identity
-    /// paired with the digest of the deployment it runs, in genesis order.
-    pub(crate) operators: Vec<(ed25519::PublicKey, Digest)>,
+    /// paired with the deployment it runs, in genesis order.
+    pub(crate) operators: Vec<(ed25519::PublicKey, Deployment)>,
     /// The applied settlement database holding the registered closes.
     pub(crate) db: Database<E>,
     /// Storage partition family retaining sealed dealings.
@@ -312,6 +463,9 @@ where
     /// Taken while one dealing is processed and always restored: archive
     /// operations consume and return the store.
     store: Option<Store<E>>,
+    /// The retained slice intervals dealings hydrate against, taken and
+    /// restored like the dealing store.
+    intervals: Option<IntervalStore<E>>,
 }
 
 /// The validator's sealing actor on the settlement DA channel.
@@ -321,7 +475,7 @@ where
 {
     context: ContextCell<E>,
     scheme: bls12381::Scheme,
-    operators: Vec<(ed25519::PublicKey, Digest)>,
+    operators: Vec<(ed25519::PublicKey, Deployment)>,
     db: Database<E>,
     partition: String,
 }
@@ -367,10 +521,26 @@ where
             // Context labels are 'static: one bounded allocation per
             // configured operator at actor start.
             let label: &'static str = format!("dealings_{index}").leak();
+            let interval_label: &'static str = format!("intervals_{index}").leak();
             lanes.push(Lane {
                 peer: peer.clone(),
-                deployment: *deployment,
-                store: Some(store(self.context.child(label), &self.partition, deployment).await),
+                deployment: *deployment.digest(),
+                store: Some(
+                    store(
+                        self.context.child(label),
+                        &self.partition,
+                        deployment.digest(),
+                    )
+                    .await,
+                ),
+                intervals: Some(
+                    intervals(
+                        self.context.child(interval_label),
+                        &format!("{}-intervals", self.partition),
+                        deployment,
+                    )
+                    .await,
+                ),
             });
         }
         while let Ok((peer, bytes)) = receiver.recv().await {
@@ -387,9 +557,14 @@ where
                 .store
                 .take()
                 .expect("the lane store is always restored");
-            let Ok(Message::Dealing(dealing)) = Message::decode(bytes) else {
+            let mut intervals = lane
+                .intervals
+                .take()
+                .expect("the lane interval store is always restored");
+            let Ok(Message::Dealing(mut dealing)) = Message::decode(bytes) else {
                 debug!("dropping undecodable or unexpected DA message");
                 lane.store = Some(store);
+                lane.intervals = Some(intervals);
                 continue;
             };
 
@@ -402,6 +577,7 @@ where
                 Ok(Some(sealed)) => {
                     self.vote(&mut sender, &peer, sealed.epoch, sealed.header);
                     lane.store = Some(store);
+                    lane.intervals = Some(intervals);
                     continue;
                 }
                 Ok(None) => {}
@@ -423,6 +599,7 @@ where
                     Ok(_) => {
                         debug!("no settlement machine is applied yet");
                         lane.store = Some(store);
+                        lane.intervals = Some(intervals);
                         continue;
                     }
                     Err(error) => {
@@ -446,6 +623,7 @@ where
                     "no registered close to seal against yet"
                 );
                 lane.store = Some(store);
+                lane.intervals = Some(intervals);
                 continue;
             };
             if registered.context.payment().epoch() != dealing.epoch {
@@ -455,6 +633,7 @@ where
                     "dealing is not for the registered epoch"
                 );
                 lane.store = Some(store);
+                lane.intervals = Some(intervals);
                 continue;
             }
 
@@ -469,6 +648,7 @@ where
                     deadline, height, "dealing challenge window already closed"
                 );
                 lane.store = Some(store);
+                lane.intervals = Some(intervals);
                 continue;
             }
 
@@ -483,6 +663,7 @@ where
                         deadline, "refusing a second close for a sealed challenge deadline"
                     );
                     lane.store = Some(store);
+                    lane.intervals = Some(intervals);
                     continue;
                 }
                 Ok(None) => {}
@@ -492,17 +673,56 @@ where
                 }
             }
 
+            // Hydrate each dealt slice against the retained interval for the
+            // registered close's predecessor root. A missing interval means
+            // this validator never advanced past the predecessor close and
+            // must sync the interval externally before it can seal again.
+            let predecessor_root = *registered.context.predecessor_root();
+            let mut hydrated = Vec::with_capacity(dealing.slices.len());
+            let mut retained = Vec::with_capacity(dealing.slices.len());
+            let mut missing = None;
+            for slice in std::mem::take(&mut dealing.slices) {
+                let key = interval_key(&predecessor_root, slice.index);
+                let record = match intervals.get(Identifier::Key(&key)).await {
+                    Ok(record) => record,
+                    Err(error) => {
+                        error!(?error, "sealer failed to read the interval store");
+                        return;
+                    }
+                };
+                let Some(record) = record else {
+                    missing = Some(slice.index);
+                    break;
+                };
+                let interval =
+                    Interval::new(record.leaves).expect("a durably retained interval is canonical");
+                hydrated.push(slice.hydrate(&interval));
+                retained.push(interval);
+            }
+            if let Some(slice) = missing {
+                warn!(
+                    epoch = dealing.epoch,
+                    slice, "retained interval is missing; sync it externally before sealing"
+                );
+                lane.store = Some(store);
+                lane.intervals = Some(intervals);
+                continue;
+            }
+
             // Clearing seal re-derives and enforces this validator's exact
-            // assignment, validates every slice against the registered
-            // context, and batch-verifies the payment signatures.
+            // assignment, validates every hydrated slice against the
+            // registered context, verifies each slice's combined operator
+            // countersignature against the deployment's genesis-fixed
+            // acknowledgment key, and batch-verifies the payer signatures.
             let sealed = match seal::<Sha256, _, _, PaymentBatchVerifier, _>(
                 &self.scheme,
                 registered.context,
+                machine.operator_ack(),
                 registered.deposits,
                 registered.withdrawals,
                 &dealing.header,
                 &dealing.roots,
-                dealing.slices,
+                hydrated,
                 self.context.as_mut(),
                 &Sequential,
             ) {
@@ -510,7 +730,48 @@ where
                 Err(error) => {
                     warn!(?error, epoch = dealing.epoch, "dealing failed to seal");
                     lane.store = Some(store);
+                    lane.intervals = Some(intervals);
                     continue;
+                }
+            };
+
+            // Advance and persist the retained intervals under the sealed
+            // close's successor root before anything else becomes durable: a
+            // crash after this point re-seals or re-votes from the stores,
+            // and an identical advanced record is idempotently ignored.
+            // Pruning keeps the consumed and produced epochs only.
+            let successor_root = dealing.roots.successor;
+            for (interval, slice) in retained.iter_mut().zip(sealed.slices()) {
+                interval.advance(slice);
+                let key = interval_key(&successor_root, slice.index);
+                let next = dealing
+                    .epoch
+                    .checked_add(1)
+                    .expect("the epoch clock is bounded");
+                intervals = match intervals
+                    .put_sync(
+                        interval_index(next, slice.index),
+                        key,
+                        RetainedInterval {
+                            root: successor_root,
+                            slice: slice.index,
+                            leaves: interval.leaves().to_vec(),
+                        },
+                    )
+                    .await
+                {
+                    Ok(intervals) => intervals,
+                    Err(error) => {
+                        error!(?error, "advanced interval could not be made durable");
+                        return;
+                    }
+                };
+            }
+            intervals = match intervals.prune(interval_index(dealing.epoch, 0)).await {
+                Ok(intervals) => intervals,
+                Err(error) => {
+                    error!(?error, "retained interval store could not prune");
+                    return;
                 }
             };
 
@@ -551,6 +812,7 @@ where
             };
             info!(epoch = dealing.epoch, "sealed dealing");
             lane.store = Some(store);
+            lane.intervals = Some(intervals);
             self.vote(&mut sender, &peer, dealing.epoch, dealing.header);
         }
     }
@@ -598,11 +860,11 @@ mod tests {
     };
     use commonware_clearing::bajillion::{
         boundary::{DepositBatch, DepositRecord, WithdrawalBatch},
-        credit::ShardSet,
         state::{AccountRow, AccountState, Prefix, SettlementOutput, StateLeaf},
+        vector::OutVector,
     };
     use commonware_consensus::types::Height;
-    use commonware_cryptography::{Hasher as _, Signer as _, ed25519::PrivateKey};
+    use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
     use commonware_glue::stateful::db::DatabaseSet;
     use commonware_p2p::simulated::{Config as NetConfig, Link, Network};
     use commonware_runtime::{
@@ -761,7 +1023,9 @@ mod tests {
                 vec![deposit.clone()],
                 predecessor,
                 vec![row],
-                vec![ShardSet::empty(0, account)],
+                vec![OutVector::empty(0, account)],
+                vec![None],
+                Vec::new(),
                 successor,
             )
             .unwrap();
@@ -841,7 +1105,7 @@ mod tests {
     fn sealer(
         context: &deterministic::Context,
         index: usize,
-        operators: Vec<(ed25519::PublicKey, Digest)>,
+        operators: Vec<(ed25519::PublicKey, Deployment)>,
         db: Database<deterministic::Context>,
         partition: &str,
     ) -> Sealer<deterministic::Context> {
@@ -875,7 +1139,7 @@ mod tests {
             sealer(
                 &context,
                 0,
-                vec![(operator_key.clone(), deployment())],
+                vec![(operator_key.clone(), deployments().remove(0))],
                 db.clone(),
                 "sealer-happy",
             )
@@ -891,7 +1155,11 @@ mod tests {
                 epoch: 0,
                 header,
                 roots,
-                slices: dealings[usize::from(participant)].clone(),
+                slices: dealings[usize::from(participant)]
+                    .iter()
+                    .cloned()
+                    .map(DealtSlice::strip)
+                    .collect(),
             });
             let sent = operator_chan.0.send(
                 Recipients::One(validator_key.clone()),
@@ -957,7 +1225,7 @@ mod tests {
             sealer(
                 &context,
                 0,
-                vec![(operator_key.clone(), deployment())],
+                vec![(operator_key.clone(), deployments().remove(0))],
                 db.clone(),
                 "sealer-tampered",
             )
@@ -978,7 +1246,11 @@ mod tests {
                 epoch: 0,
                 header,
                 roots,
-                slices: dealings[foreign].clone(),
+                slices: dealings[foreign]
+                    .iter()
+                    .cloned()
+                    .map(DealtSlice::strip)
+                    .collect(),
             });
             let mut corrupt_slices = mine.clone();
             corrupt_slices[0].coverage.end.predecessor =
@@ -987,13 +1259,13 @@ mod tests {
                 epoch: 0,
                 header,
                 roots,
-                slices: corrupt_slices,
+                slices: corrupt_slices.into_iter().map(DealtSlice::strip).collect(),
             });
             let good = Message::Dealing(Dealing {
                 epoch: 0,
                 header,
                 roots,
-                slices: mine,
+                slices: mine.into_iter().map(DealtSlice::strip).collect(),
             });
             for message in [&wrong, &corrupt, &good] {
                 let sent = operator_chan.0.send(
@@ -1048,7 +1320,7 @@ mod tests {
             let running = sealer(
                 &context,
                 0,
-                vec![(operator_key.clone(), deployment())],
+                vec![(operator_key.clone(), deployments().remove(0))],
                 db.clone(),
                 "sealer-durable",
             )
@@ -1062,7 +1334,11 @@ mod tests {
                 epoch: 0,
                 header,
                 roots: prepared.close().roots,
-                slices: dealings[usize::from(participant)].clone(),
+                slices: dealings[usize::from(participant)]
+                    .iter()
+                    .cloned()
+                    .map(DealtSlice::strip)
+                    .collect(),
             });
             operator_chan.0.send(
                 Recipients::One(validator_key.clone()),
@@ -1087,10 +1363,11 @@ mod tests {
             let relinked = context.child("relinked");
             let (mut operator_chan, validator_chan) =
                 network(&relinked, &operator_key, &validator_key, true, true).await;
+            let restarted = context.child("restarted");
             sealer(
-                &context.child("restarted"),
+                &restarted,
                 0,
-                vec![(operator_key.clone(), deployment())],
+                vec![(operator_key.clone(), deployments().remove(0))],
                 db.clone(),
                 "sealer-durable",
             )
@@ -1116,18 +1393,23 @@ mod tests {
     fn dealing_stores_do_not_cross_talk() {
         deterministic::Runner::default().start(|context| async move {
             let alpha_protocol = Protocol::new(NonZeroUsize::MIN).unwrap();
-            let beta_protocol =
-                Protocol::with_signer(NonZeroUsize::MIN, crate::protocol::operator_signer(1))
-                    .unwrap();
+            let beta_protocol = Protocol::with_signer(
+                NonZeroUsize::MIN,
+                crate::protocol::operator_signer(1),
+                crate::protocol::operator_ack_signer(1),
+            )
+            .unwrap();
             let alpha = alpha_protocol.deployment();
             let beta = beta_protocol.deployment();
             let configured = vec![
                 crate::protocol::Deployment::new(
                     crate::protocol::operator_key(),
+                    crate::protocol::operator_ack_key(0),
                     crate::protocol::accounts(),
                 ),
                 crate::protocol::Deployment::new(
                     crate::protocol::operator_signer(1).public_key(),
+                    crate::protocol::operator_ack_key(1),
                     crate::protocol::accounts(),
                 ),
             ];
@@ -1196,7 +1478,10 @@ mod tests {
             sealer(
                 &context,
                 0,
-                vec![(alpha_key.clone(), alpha), (beta_key.clone(), beta)],
+                vec![
+                    (alpha_key.clone(), configured[0].clone()),
+                    (beta_key.clone(), configured[1].clone()),
+                ],
                 db.clone(),
                 "cross-talk",
             )
@@ -1217,7 +1502,11 @@ mod tests {
                     epoch: 0,
                     header,
                     roots: prepared.close().roots,
-                    slices: dealings[usize::from(participant)].clone(),
+                    slices: dealings[usize::from(participant)]
+                        .iter()
+                        .cloned()
+                        .map(DealtSlice::strip)
+                        .collect(),
                 });
                 let sent = chan.0.send(
                     Recipients::One(validator_key.clone()),

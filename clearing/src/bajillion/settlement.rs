@@ -43,7 +43,6 @@ use commonware_codec::{
     Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt as _, Write,
 };
 use commonware_cryptography::{Digest, Hasher, PublicKey};
-use commonware_parallel::{Sequential, Strategy};
 use core::{
     marker::PhantomData,
     num::{NonZeroU64, NonZeroUsize},
@@ -1300,29 +1299,18 @@ where
         Ok(batch_id)
     }
 
-    /// Adjudicates a typed receipt challenge through the target's inclusive deadline.
+    /// Adjudicates a typed challenge through the target's inclusive deadline.
     pub fn challenge(
         &mut self,
         now: u64,
         batch_id: BatchId<H::Digest>,
         submitted: &Challenge<P, H::Digest>,
     ) -> Result<Verdict, SettlementError> {
-        self.challenge_with_strategy(now, batch_id, submitted, &Sequential)
-    }
-
-    /// Adjudicates a typed receipt challenge using the supplied execution strategy.
-    pub fn challenge_with_strategy(
-        &mut self,
-        now: u64,
-        batch_id: BatchId<H::Digest>,
-        submitted: &Challenge<P, H::Digest>,
-        strategy: &impl Strategy,
-    ) -> Result<Verdict, SettlementError> {
         self.observe_time(now);
-        self.challenge_after_observation(now, batch_id, submitted, strategy)
+        self.challenge_after_observation(now, batch_id, submitted)
     }
 
-    /// Bounded-decodes and adjudicates one receipt challenge.
+    /// Bounded-decodes and adjudicates one challenge.
     pub fn challenge_encoded(
         &mut self,
         now: u64,
@@ -1330,24 +1318,12 @@ where
         encoded: &[u8],
         maximum_bytes: usize,
     ) -> Result<Verdict, SettlementError> {
-        self.challenge_encoded_with_strategy(now, batch_id, encoded, maximum_bytes, &Sequential)
-    }
-
-    /// Bounded-decodes and adjudicates one receipt challenge using the supplied strategy.
-    pub fn challenge_encoded_with_strategy(
-        &mut self,
-        now: u64,
-        batch_id: BatchId<H::Digest>,
-        encoded: &[u8],
-        maximum_bytes: usize,
-        strategy: &impl Strategy,
-    ) -> Result<Verdict, SettlementError> {
         self.observe_time(now);
         if self.fault_settled {
             return Err(SettlementError::HardFaultAlreadySettled);
         }
         let submitted = challenge::decode_bounded(encoded, maximum_bytes)?;
-        self.challenge_after_observation(now, batch_id, &submitted, strategy)
+        self.challenge_after_observation(now, batch_id, &submitted)
     }
 
     fn challenge_after_observation(
@@ -1355,7 +1331,6 @@ where
         now: u64,
         batch_id: BatchId<H::Digest>,
         submitted: &Challenge<P, H::Digest>,
-        strategy: &impl Strategy,
     ) -> Result<Verdict, SettlementError> {
         if self.fault_settled {
             return Err(SettlementError::HardFaultAlreadySettled);
@@ -1371,13 +1346,14 @@ where
             BatchStatus::Invalidated(_) => return Err(SettlementError::BatchInvalidated),
         }
 
-        let verdict = challenge::adjudicate_with_strategy::<H, P>(
+        if now > self.pipeline[index].admitted.context.challenge_deadline() {
+            return Err(SettlementError::Challenge(ChallengeError::Expired));
+        }
+        let verdict = challenge::adjudicate::<H, P, H::Digest>(
             &self.pipeline[index].admitted.context,
             &self.pipeline[index].batch.header,
             &self.pipeline[index].batch.roots,
-            now,
             submitted,
-            strategy,
         )?;
         if let Verdict::Proven(kind) = verdict {
             let batch_id = self.pipeline[index].batch.header.batch_id::<H>();
@@ -2174,19 +2150,17 @@ where
 
     const fn challenge_kind_tag(kind: ChallengeKind) -> u8 {
         match kind {
-            ChallengeKind::LatestAcknowledgedSend => 0,
-            ChallengeKind::HigherShardTip => 1,
-            ChallengeKind::InconsistentReceiptRange => 2,
-            ChallengeKind::ReceiptFork => 3,
+            ChallengeKind::HigherAckDebit => 0,
+            ChallengeKind::HigherAckEntry => 1,
+            ChallengeKind::AckFork => 2,
         }
     }
 
     const fn challenge_kind_from_tag(tag: u8) -> Result<ChallengeKind, CodecError> {
         Ok(match tag {
-            0 => ChallengeKind::LatestAcknowledgedSend,
-            1 => ChallengeKind::HigherShardTip,
-            2 => ChallengeKind::InconsistentReceiptRange,
-            3 => ChallengeKind::ReceiptFork,
+            0 => ChallengeKind::HigherAckDebit,
+            1 => ChallengeKind::HigherAckEntry,
+            2 => ChallengeKind::AckFork,
             tag => return Err(CodecError::InvalidEnum(tag)),
         })
     }
@@ -2717,10 +2691,9 @@ where
         }
         fn kind(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<ChallengeKind> {
             u.choose(&[
-                ChallengeKind::LatestAcknowledgedSend,
-                ChallengeKind::HigherShardTip,
-                ChallengeKind::InconsistentReceiptRange,
-                ChallengeKind::ReceiptFork,
+                ChallengeKind::HigherAckDebit,
+                ChallengeKind::HigherAckEntry,
+                ChallengeKind::AckFork,
             ])
             .copied()
         }
@@ -2752,9 +2725,11 @@ where
                 },
             })
         }
-        fn packed<H, P>(
-            u: &mut arbitrary::Unstructured<'_>,
-        ) -> arbitrary::Result<(PackedWithdrawals<P, H::Digest>, Option<(u64, P)>)>
+        type Packed<H, P> = (
+            PackedWithdrawals<P, <H as Hasher>::Digest>,
+            Option<(u64, P)>,
+        );
+        fn packed<H, P>(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Packed<H, P>>
         where
             H: Hasher,
             H::Digest: for<'a> arbitrary::Arbitrary<'a>,
@@ -3128,15 +3103,15 @@ mod tests {
     use crate::bajillion::{
         admission::{Committee, bls12381},
         boundary::{SignedWithdrawal, WithdrawalAction, WithdrawalBody},
-        challenge::RangeLower,
+        challenge::{AckWitness, EntryWitness, account_lookup, higher_entry_lookup},
         commitment::VectorKind,
-        credit::{ShardHead, ShardSet},
-        payment::{Payment, PaymentError, PaymentWitness, ReceiptBody, SignedReceipt, SignedSend},
+        payment::{SendAuthorization, VECTOR_ACK_AGGREGATE_NAMESPACE, VectorAck, VectorSendBody},
         state::{AccountChange, AccountRow, AccountState, Prefix, SettlementOutput, StateLeaf},
         transition::{
-            Assignment, ChallengeIndex, Close, CloseLimits, assemble_external_payout_claim,
-            assemble_terminal_proof, assemble_withdrawal_claim, build_close, validate_close,
+            Assignment, ChallengeIndex, Close, CloseLimits, OperatorKey, OperatorVariant,
+            PreparedClose, prepare_close_with_strategy,
         },
+        vector::{OutEntry, OutVector, TransposeEntry},
     };
     use alloc::collections::BTreeSet;
     use bytes::BufMut;
@@ -3145,7 +3120,7 @@ mod tests {
         Sha256, Signer as _,
         bls12381::primitives::{
             group::{Private as BlsPrivate, Scalar},
-            ops::compute_public,
+            ops::{compute_public, sign_message},
             variant::MinSig,
         },
         sha256::Digest as ShaDigest,
@@ -3154,7 +3129,7 @@ mod tests {
         BatchVerifier as PaymentBatchVerifier, Signature, SigningKey,
         StrictVerifyingKey as VerifyingKey,
     };
-    use commonware_parallel::{Rayon, Sequential};
+    use commonware_parallel::Sequential;
     use commonware_utils::{Array, Span, test_rng};
     use core::{fmt, ops::Deref};
     use rand_core::Rng;
@@ -3176,6 +3151,8 @@ mod tests {
         cache: TestCache,
         deployment: ShaDigest,
         operator: SigningKey,
+        operator_ack: BlsPrivate,
+        operator_bls: OperatorKey,
         signer: bls12381::Scheme,
         committee: ShaDigest,
         accounts: Vec<SigningKey>,
@@ -3282,6 +3259,7 @@ mod tests {
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
+            &fixture.operator_bls,
             0,
             first_context,
             deposits.clone(),
@@ -3441,6 +3419,7 @@ mod tests {
         let batch_id = register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
+            &fixture.operator_bls,
             1,
             close_context.clone(),
             deposits,
@@ -3448,26 +3427,26 @@ mod tests {
             &[],
             &close,
         );
-        let left = fork_payment(
+        let left = fork_ack(
             &close_context,
             &fixture.operator,
             &fixture.accounts[0],
-            &fixture.accounts[2],
+            1,
             2,
         );
-        let right = fork_payment(
+        let right = fork_ack(
             &close_context,
             &fixture.operator,
-            &fixture.accounts[1],
-            &fixture.accounts[2],
+            &fixture.accounts[0],
+            1,
             3,
         );
         assert_eq!(
             fixture
                 .chain
-                .challenge(5, batch_id, &Challenge::receipt_fork(&left, &right))
+                .challenge(5, batch_id, &ack_fork(&left, &right))
                 .unwrap(),
-            Verdict::Proven(ChallengeKind::ReceiptFork)
+            Verdict::Proven(ChallengeKind::AckFork)
         );
 
         fixture.chain.begin_hard_fault_settlement().unwrap();
@@ -3523,6 +3502,7 @@ mod tests {
         let batch_id = register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
+            &fixture.operator_bls,
             1,
             close_context.clone(),
             deposits,
@@ -3530,26 +3510,26 @@ mod tests {
             &[fixture.cache.opening(&withdrawing.public_key()).unwrap()],
             &close,
         );
-        let left = fork_payment(
+        let left = fork_ack(
             &close_context,
             &fixture.operator,
             &fixture.accounts[0],
-            &fixture.accounts[2],
+            1,
             2,
         );
-        let right = fork_payment(
+        let right = fork_ack(
             &close_context,
             &fixture.operator,
-            &fixture.accounts[1],
-            &fixture.accounts[2],
+            &fixture.accounts[0],
+            1,
             3,
         );
         assert_eq!(
             fixture
                 .chain
-                .challenge(5, batch_id, &Challenge::receipt_fork(&left, &right))
+                .challenge(5, batch_id, &ack_fork(&left, &right))
                 .unwrap(),
-            Verdict::Proven(ChallengeKind::ReceiptFork)
+            Verdict::Proven(ChallengeKind::AckFork)
         );
 
         fixture.chain.begin_hard_fault_settlement().unwrap();
@@ -3603,6 +3583,7 @@ mod tests {
         let batch_id = register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
+            &fixture.operator_bls,
             1,
             close_context.clone(),
             deposits,
@@ -3613,26 +3594,26 @@ mod tests {
         assert_eq!(fixture.chain.pending_epoch_count(), 1);
         assert_eq!(fixture.chain.current_state_root(), fixture.cache.root());
 
-        let left = fork_payment(
+        let left = fork_ack(
             &close_context,
             &fixture.operator,
             &fixture.accounts[0],
-            &fixture.accounts[2],
+            1,
             2,
         );
-        let right = fork_payment(
+        let right = fork_ack(
             &close_context,
             &fixture.operator,
-            &fixture.accounts[1],
-            &fixture.accounts[2],
+            &fixture.accounts[0],
+            1,
             3,
         );
         assert_eq!(
             fixture
                 .chain
-                .challenge(5, batch_id, &Challenge::receipt_fork(&left, &right))
+                .challenge(5, batch_id, &ack_fork(&left, &right))
                 .unwrap(),
-            Verdict::Proven(ChallengeKind::ReceiptFork)
+            Verdict::Proven(ChallengeKind::AckFork)
         );
 
         let settlement = fixture.chain.begin_hard_fault_settlement().unwrap();
@@ -3729,14 +3710,8 @@ mod tests {
             2,
         );
         let anchor = *registered.payment().anchor();
-        let accepted_payment = fork_payment(
-            &registered,
-            &fixture.operator,
-            &fixture.accounts[0],
-            &fixture.accounts[1],
-            3,
-        );
-        assert_eq!(accepted_payment.amount(), 3);
+        let accepted_payment = fork_ack(&registered, &fixture.operator, &fixture.accounts[0], 1, 3);
+        assert_eq!(accepted_payment.body().cumulative_debit(), 3);
         fixture
             .chain
             .register_close(0, registered, withdrawals, &[], |_| true)
@@ -3823,6 +3798,8 @@ mod tests {
             Committee::new(vec![compute_public::<MinSig>(&validator_bls)]).unwrap();
         let committee = committee_keys.commitment::<Sha256>();
         let signer = bls12381::Scheme::signer(committee_keys.clone(), validator_bls).unwrap();
+        let operator_ack = BlsPrivate::new(Scalar::from(777_u64));
+        let operator_bls = compute_public::<OperatorVariant>(&operator_ack);
         let chain = SettlementChain::new(
             deployment,
             operator.public_key(),
@@ -3837,6 +3814,8 @@ mod tests {
             cache,
             deployment,
             operator,
+            operator_ack,
+            operator_bls,
             signer,
             committee,
             accounts,
@@ -3910,93 +3889,73 @@ mod tests {
         .unwrap()
     }
 
-    fn empty_close(cache: &TestCache, context: &TestContext) -> TestClose {
-        build_close::<Sha256, _, _, PaymentBatchVerifier, _>(
+    /// A prepared close and its retained Merkle material, transparently readable as the close.
+    struct Built {
+        prepared: PreparedClose<VerifyingKey, ShaDigest>,
+    }
+
+    impl Deref for Built {
+        type Target = TestClose;
+
+        fn deref(&self) -> &TestClose {
+            self.prepared.close()
+        }
+    }
+
+    type BuiltRow = (
+        AccountRow<VerifyingKey, ShaDigest>,
+        OutVector<VerifyingKey>,
+        Option<crate::bajillion::transition::OperatorSignature>,
+    );
+
+    fn build_prepared(
+        cache: &TestCache,
+        context: &TestContext,
+        deposits: &TestDeposits,
+        withdrawals: &TestWithdrawals,
+        rows: Vec<BuiltRow>,
+        transpose: Vec<TransposeEntry<VerifyingKey>>,
+    ) -> Built {
+        let mut split_rows = Vec::with_capacity(rows.len());
+        let mut vectors = Vec::with_capacity(rows.len());
+        let mut signatures = Vec::with_capacity(rows.len());
+        for (row, vector, signature) in rows {
+            split_rows.push(row);
+            vectors.push(vector);
+            signatures.push(signature);
+        }
+        let partials = vectors
+            .iter()
+            .map(OutVector::accumulator)
+            .collect::<Vec<_>>();
+        let prepared = prepare_close_with_strategy::<Sha256, _, _>(
+            cache,
+            context,
+            deposits,
+            withdrawals,
+            split_rows,
+            vectors,
+            &partials,
+            &signatures,
+            transpose,
+            &Sequential,
+        )
+        .unwrap();
+        Built { prepared }
+    }
+
+    fn empty_close(cache: &TestCache, context: &TestContext) -> Built {
+        build_prepared(
             cache,
             context,
             &DepositBatch::empty(),
             &WithdrawalBatch::empty(),
             Vec::new(),
             Vec::new(),
-            &mut test_rng(),
         )
-        .unwrap()
     }
 
-    fn boundary_close(
-        cache: &TestCache,
-        context: &TestContext,
-        deposits: &TestDeposits,
-        withdrawals: &TestWithdrawals,
-    ) -> (TestClose, TestCache) {
-        let mut changed = BTreeSet::new();
-        changed.extend(
-            deposits
-                .records()
-                .iter()
-                .map(|record| record.account().clone()),
-        );
-        changed.extend(
-            withdrawals
-                .requests()
-                .iter()
-                .map(|request| request.account().clone()),
-        );
-
-        let mut prefix = Prefix::default();
-        let mut rows = Vec::with_capacity(changed.len());
-        let mut shard_sets = Vec::with_capacity(changed.len());
-        for account in changed {
-            let predecessor = cache
-                .leaves()
-                .iter()
-                .find(|leaf| leaf.account == account)
-                .map_or_else(AccountState::default, |leaf| leaf.state);
-            let deposit = deposits.amount_for(&account);
-            let withdrawal = withdrawals.request_for(&account);
-            let applied = withdrawal.map_or(0, |request| match request.body().action() {
-                WithdrawalAction::Amount(amount) => amount.get(),
-                WithdrawalAction::Close => predecessor.balance.checked_add(deposit).unwrap(),
-            });
-            let mut successor = predecessor;
-            successor.balance = predecessor
-                .balance
-                .checked_add(deposit)
-                .and_then(|balance| balance.checked_sub(applied))
-                .unwrap();
-            successor.active = successor.balance > 0;
-            let shards = ShardSet::empty(context.payment().epoch(), account.clone());
-            let output = withdrawal.map_or(SettlementOutput::None, |_| {
-                SettlementOutput::Withdrawal(applied)
-            });
-            prefix = prefix
-                .checked_extend(Prefix {
-                    deposit,
-                    withdrawal: applied,
-                    withdrawal_count: u64::from(withdrawal.is_some()),
-                    ..Prefix::default()
-                })
-                .unwrap();
-            rows.push(AccountRow {
-                account,
-                predecessor,
-                successor,
-                outgoing: None,
-                output,
-                prefix,
-            });
-            shard_sets.push(shards);
-        }
-        let close = build_close::<Sha256, _, _, PaymentBatchVerifier, _>(
-            cache,
-            context,
-            deposits,
-            withdrawals,
-            rows,
-            shard_sets,
-            &mut test_rng(),
-        )
-        .unwrap();
+    fn successor_cache(cache: &TestCache, close: &TestClose) -> TestCache {
         let changed = close
             .rows
             .iter()
@@ -4021,24 +3980,99 @@ mod tests {
         successor_leaves.sort_unstable_by(|left, right| left.account.cmp(&right.account));
         let successor = StateCache::new::<Sha256>(successor_leaves).unwrap();
         assert_eq!(successor.root(), close.roots.successor);
-        (close, successor)
+        successor
+    }
+
+    fn boundary_close(
+        cache: &TestCache,
+        context: &TestContext,
+        deposits: &TestDeposits,
+        withdrawals: &TestWithdrawals,
+    ) -> (Built, TestCache) {
+        let mut changed = BTreeSet::new();
+        changed.extend(
+            deposits
+                .records()
+                .iter()
+                .map(|record| record.account().clone()),
+        );
+        changed.extend(
+            withdrawals
+                .requests()
+                .iter()
+                .map(|request| request.account().clone()),
+        );
+
+        let mut prefix = Prefix::default();
+        let mut rows = Vec::with_capacity(changed.len());
+        for account in changed {
+            let predecessor = cache
+                .leaves()
+                .iter()
+                .find(|leaf| leaf.account == account)
+                .map_or_else(AccountState::default, |leaf| leaf.state);
+            let deposit = deposits.amount_for(&account);
+            let withdrawal = withdrawals.request_for(&account);
+            let applied = withdrawal.map_or(0, |request| match request.body().action() {
+                WithdrawalAction::Amount(amount) => amount.get(),
+                WithdrawalAction::Close => predecessor.balance.checked_add(deposit).unwrap(),
+            });
+            let mut successor = predecessor;
+            successor.balance = predecessor
+                .balance
+                .checked_add(deposit)
+                .and_then(|balance| balance.checked_sub(applied))
+                .unwrap();
+            successor.active = successor.balance > 0;
+            let output = withdrawal.map_or(SettlementOutput::None, |_| {
+                SettlementOutput::Withdrawal(applied)
+            });
+            prefix = prefix
+                .checked_extend(Prefix {
+                    deposit,
+                    withdrawal: applied,
+                    withdrawal_count: u64::from(withdrawal.is_some()),
+                    ..Prefix::default()
+                })
+                .unwrap();
+            let vector = OutVector::empty(context.payment().epoch(), account.clone());
+            rows.push((
+                AccountRow {
+                    account,
+                    predecessor,
+                    successor,
+                    outgoing: None,
+                    output,
+                    prefix,
+                },
+                vector,
+                None,
+            ));
+        }
+        let built = build_prepared(cache, context, deposits, withdrawals, rows, Vec::new());
+        let successor = successor_cache(cache, &built);
+        (built, successor)
     }
 
     fn certificate(
         signer: &bls12381::Scheme,
+        operator_bls: &OperatorKey,
         context: &TestContext,
         deposits: &TestDeposits,
         withdrawals: &TestWithdrawals,
-        close: &TestClose,
+        close: &Built,
     ) -> bls12381::Certificate {
-        validate_close::<Sha256, _, _, PaymentBatchVerifier, _>(
-            context,
-            deposits,
-            withdrawals,
-            close,
-            &mut test_rng(),
-        )
-        .unwrap();
+        close
+            .prepared
+            .validate::<Sha256, PaymentBatchVerifier, _>(
+                context,
+                operator_bls,
+                deposits,
+                withdrawals,
+                &mut test_rng(),
+                &Sequential,
+            )
+            .unwrap();
         let vote = signer.sign(&close.header).unwrap();
         signer.assemble_exact([vote]).unwrap()
     }
@@ -4047,22 +4081,23 @@ mod tests {
     fn register_and_admit(
         chain: &mut TestChain,
         signer: &bls12381::Scheme,
+        operator_bls: &OperatorKey,
         now: u64,
         context: TestContext,
         deposits: TestDeposits,
         withdrawals: TestWithdrawals,
         extra_openings: &[StateOpening<VerifyingKey, ShaDigest>],
-        close: &TestClose,
+        close: &Built,
     ) -> BatchId<ShaDigest> {
-        let certificate = certificate(signer, &context, &deposits, &withdrawals, close);
-        let terminal_proof = assemble_terminal_proof::<Sha256, _, _>(
+        let certificate = certificate(
+            signer,
+            operator_bls,
             &context,
             &deposits,
             &withdrawals,
             close,
-            &Sequential,
-        )
-        .unwrap();
+        );
+        let terminal_proof = close.prepared.terminal_proof().unwrap();
         chain
             .register_close(now, context, withdrawals, extra_openings, |_| true)
             .unwrap();
@@ -4095,6 +4130,7 @@ mod tests {
         let batch_id = register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
+            &fixture.operator_bls,
             now,
             close_context.clone(),
             deposits,
@@ -4252,270 +4288,248 @@ mod tests {
         );
     }
 
-    fn fork_payment(
+    /// Countersigns one endpoint body for `payer` at `seq` whose fields derive from `amount`.
+    fn fork_ack(
         context: &TestContext,
         operator: &SigningKey,
         payer: &SigningKey,
-        recipient: &SigningKey,
+        seq: u64,
         amount: u64,
-    ) -> Payment<VerifyingKey, ShaDigest> {
-        let send =
-            SignedSend::sign_next(context.payment(), payer, recipient.public_key(), amount, 0)
-                .unwrap();
-        let receipt = SignedReceipt::issue_next::<Sha256, _>(
-            context.payment(),
-            &send,
-            &recipient.public_key(),
-            0,
-            0,
-            0,
-            operator,
+    ) -> VectorAck<VerifyingKey, ShaDigest> {
+        let vector = OutVector::new(
+            context.payment().epoch(),
+            payer.public_key(),
+            vec![OutEntry {
+                recipient: SigningKey::from_seed(9_999).public_key(),
+                cumulative: amount,
+                count: 1,
+            }],
         )
         .unwrap();
-        Payment::new::<Sha256>(context.payment(), send, receipt).unwrap()
+        let body = VectorSendBody::new(
+            context.payment(),
+            payer.public_key(),
+            seq,
+            amount,
+            vector.root::<Sha256, ShaDigest>().unwrap(),
+        );
+        VectorAck::sign_by_authorities(body, payer, operator)
     }
 
-    fn external_payout_close(
+    fn ack_fork(
+        left: &VectorAck<VerifyingKey, ShaDigest>,
+        right: &VectorAck<VerifyingKey, ShaDigest>,
+    ) -> TestChallenge {
+        Challenge::AckFork {
+            left: Box::new(AckWitness::from_ack(left)),
+            right: Box::new(AckWitness::from_ack(right)),
+        }
+    }
+
+    /// Builds one acknowledged payment row pair: `payer` sends `amount` to `recipient`.
+    ///
+    /// The recipient may be absent from the predecessor state, in which case its credit
+    /// classifies as an external payout.
+    fn payment_close(
         cache: &TestCache,
         context: &TestContext,
-        operator: &SigningKey,
+        operator_ack: &BlsPrivate,
         payer: &SigningKey,
         recipient: &SigningKey,
+        withdrawals: &TestWithdrawals,
         amount: u64,
-    ) -> (TestClose, TestCache) {
-        let payment = fork_payment(context, operator, payer, recipient, amount);
-        let predecessor = cache
+    ) -> (Built, TestCache) {
+        let epoch = context.payment().epoch();
+        let payer_predecessor = cache
             .leaves()
             .iter()
             .find(|leaf| leaf.account == payer.public_key())
             .expect("test payer is live")
             .state;
-        let payer_shards = ShardSet::empty(context.payment().epoch(), payer.public_key());
-        let recipient_shards = ShardSet::new(
-            context.payment().epoch(),
-            recipient.public_key(),
-            vec![ShardHead::new(0, payment.clone())],
+        let recipient_predecessor = cache
+            .leaves()
+            .iter()
+            .find(|leaf| leaf.account == recipient.public_key())
+            .map_or_else(AccountState::default, |leaf| leaf.state);
+        let out_vector = OutVector::new(
+            epoch,
+            payer.public_key(),
+            vec![OutEntry {
+                recipient: recipient.public_key(),
+                cumulative: amount,
+                count: 1,
+            }],
         )
         .unwrap();
-        let mut pairs = vec![
+        let body = VectorSendBody::new(
+            context.payment(),
+            payer.public_key(),
+            1,
+            payer_predecessor
+                .cumulative_debit
+                .checked_add(amount)
+                .unwrap(),
+            out_vector.root::<Sha256, ShaDigest>().unwrap(),
+        );
+        let operator_signature = sign_message::<OperatorVariant>(
+            operator_ack,
+            VECTOR_ACK_AGGREGATE_NAMESPACE,
+            body.encode().as_ref(),
+        );
+        let outgoing = SendAuthorization::sign(body, payer);
+        let transpose = vec![TransposeEntry {
+            recipient: recipient.public_key(),
+            payer: payer.public_key(),
+            cumulative: amount,
+            count: 1,
+        }];
+
+        let payer_withdrawal = withdrawals.request_for(&payer.public_key());
+        let payer_balance = payer_predecessor.balance.checked_sub(amount).unwrap();
+        let payer_applied = payer_withdrawal.map_or(0, |request| match request.body().action() {
+            WithdrawalAction::Amount(requested) => requested.get().min(payer_balance),
+            WithdrawalAction::Close => payer_balance,
+        });
+        let payer_balance = payer_balance.checked_sub(payer_applied).unwrap();
+        let mut rows = vec![
             (
                 AccountRow {
                     account: payer.public_key(),
-                    predecessor,
+                    predecessor: payer_predecessor,
                     successor: AccountState {
-                        balance: predecessor.balance.checked_sub(amount).unwrap(),
-                        cumulative_debit: predecessor.cumulative_debit.checked_add(amount).unwrap(),
-                        ..predecessor
+                        balance: payer_balance,
+                        cumulative_debit: payer_predecessor
+                            .cumulative_debit
+                            .checked_add(amount)
+                            .unwrap(),
+                        active: payer_balance > 0,
+                        ..payer_predecessor
                     },
-                    outgoing: Some(payment),
-                    output: SettlementOutput::None,
+                    outgoing: Some(outgoing),
+                    output: payer_withdrawal.map_or(SettlementOutput::None, |_| {
+                        SettlementOutput::Withdrawal(payer_applied)
+                    }),
                     prefix: Prefix::default(),
                 },
-                payer_shards,
+                out_vector,
+                Some(operator_signature),
             ),
             (
                 AccountRow {
                     account: recipient.public_key(),
-                    predecessor: AccountState::default(),
-                    successor: AccountState {
-                        cumulative_credit: amount,
-                        receipt_count: 1,
-                        ..AccountState::default()
+                    predecessor: recipient_predecessor,
+                    successor: if recipient_predecessor.active {
+                        AccountState {
+                            balance: recipient_predecessor.balance.checked_add(amount).unwrap(),
+                            cumulative_credit: recipient_predecessor
+                                .cumulative_credit
+                                .checked_add(amount)
+                                .unwrap(),
+                            receipt_count: recipient_predecessor
+                                .receipt_count
+                                .checked_add(1)
+                                .unwrap(),
+                            ..recipient_predecessor
+                        }
+                    } else {
+                        AccountState {
+                            cumulative_credit: amount,
+                            receipt_count: 1,
+                            ..AccountState::default()
+                        }
                     },
                     outgoing: None,
                     output: SettlementOutput::None,
                     prefix: Prefix::default(),
                 },
-                recipient_shards,
+                OutVector::empty(epoch, recipient.public_key()),
+                None,
             ),
         ];
-        pairs.sort_unstable_by(|left, right| left.0.account.cmp(&right.0.account));
+        rows.sort_unstable_by(|left, right| left.0.account.cmp(&right.0.account));
         let mut prefix = Prefix::default();
-        for (row, shards) in &mut pairs {
-            let (debit, credit, _) = row.checked_deltas().unwrap();
+        for (row, vector, _) in &mut rows {
+            let (debit, credit, receipts) = row.checked_deltas().unwrap();
             let payout = if row.predecessor.active { 0 } else { credit };
-            row.output = if payout == 0 {
-                SettlementOutput::None
-            } else {
-                SettlementOutput::ExternalPayout(payout)
+            if payout != 0 {
+                row.output = SettlementOutput::ExternalPayout(payout);
+            }
+            let withdrawal = match row.output {
+                SettlementOutput::Withdrawal(applied) => applied,
+                _ => 0,
             };
             prefix = prefix
                 .checked_extend(Prefix {
                     debit,
                     credit,
                     payout,
-                    shard_count: shards.heads().len() as u64,
-                    ..Prefix::default()
-                })
-                .unwrap();
-            row.prefix = prefix;
-        }
-        let (rows, shard_sets): (Vec<_>, Vec<_>) = pairs.into_iter().unzip();
-        let close = build_close::<Sha256, _, _, PaymentBatchVerifier, _>(
-            cache,
-            context,
-            &DepositBatch::empty(),
-            &WithdrawalBatch::empty(),
-            rows,
-            shard_sets,
-            &mut test_rng(),
-        )
-        .unwrap();
-        let changed = close
-            .rows
-            .iter()
-            .map(|row| row.account.clone())
-            .collect::<BTreeSet<_>>();
-        let mut successor = cache
-            .leaves()
-            .iter()
-            .filter(|leaf| !changed.contains(&leaf.account))
-            .cloned()
-            .collect::<Vec<_>>();
-        successor.extend(
-            close
-                .rows
-                .iter()
-                .filter(|row| row.successor.active)
-                .map(|row| StateLeaf {
-                    account: row.account.clone(),
-                    state: row.successor,
-                }),
-        );
-        successor.sort_unstable_by(|left, right| left.account.cmp(&right.account));
-        let successor = StateCache::new::<Sha256>(successor).unwrap();
-        assert_eq!(successor.root(), close.roots.successor);
-        (close, successor)
-    }
-
-    fn internal_payment_and_close(
-        cache: &TestCache,
-        context: &TestContext,
-        operator: &SigningKey,
-        payer: &SigningKey,
-        recipient: &SigningKey,
-        withdrawals: &TestWithdrawals,
-        amount: u64,
-    ) -> (TestClose, TestCache) {
-        let payment = fork_payment(context, operator, payer, recipient, amount);
-        let payer_predecessor = cache.opening(&payer.public_key()).unwrap().leaf.state;
-        let recipient_predecessor = cache.opening(&recipient.public_key()).unwrap().leaf.state;
-        let payer_shards = ShardSet::empty(context.payment().epoch(), payer.public_key());
-        let recipient_shards = ShardSet::new(
-            context.payment().epoch(),
-            recipient.public_key(),
-            vec![ShardHead::new(0, payment.clone())],
-        )
-        .unwrap();
-        let mut pairs = vec![
-            (
-                AccountRow {
-                    account: payer.public_key(),
-                    predecessor: payer_predecessor,
-                    successor: AccountState {
-                        balance: 0,
-                        cumulative_debit: payer_predecessor
-                            .cumulative_debit
-                            .checked_add(amount)
-                            .unwrap(),
-                        active: false,
-                        ..payer_predecessor
-                    },
-                    outgoing: Some(payment),
-                    output: SettlementOutput::None,
-                    prefix: Prefix::default(),
-                },
-                payer_shards,
-            ),
-            (
-                AccountRow {
-                    account: recipient.public_key(),
-                    predecessor: recipient_predecessor,
-                    successor: AccountState {
-                        balance: recipient_predecessor.balance.checked_add(amount).unwrap(),
-                        cumulative_credit: recipient_predecessor
-                            .cumulative_credit
-                            .checked_add(amount)
-                            .unwrap(),
-                        receipt_count: recipient_predecessor.receipt_count.checked_add(1).unwrap(),
-                        ..recipient_predecessor
-                    },
-                    outgoing: None,
-                    output: SettlementOutput::None,
-                    prefix: Prefix::default(),
-                },
-                recipient_shards,
-            ),
-        ];
-        pairs.sort_unstable_by(|left, right| left.0.account.cmp(&right.0.account));
-        let mut prefix = Prefix::default();
-        for (row, shards) in &mut pairs {
-            let (debit, credit, _) = row.checked_deltas().unwrap();
-            let closes_account = row.account == payer.public_key();
-            let withdrawal = 0;
-            row.output = if closes_account {
-                SettlementOutput::Withdrawal(withdrawal)
-            } else {
-                SettlementOutput::None
-            };
-            prefix = prefix
-                .checked_extend(Prefix {
-                    debit,
-                    credit,
                     withdrawal,
-                    withdrawal_count: u64::from(closes_account),
-                    shard_count: shards.heads().len() as u64,
+                    withdrawal_count: u64::from(matches!(
+                        row.output,
+                        SettlementOutput::Withdrawal(_)
+                    )),
+                    out_count: u64::try_from(vector.entries().len()).unwrap(),
+                    in_count: receipts,
                     ..Prefix::default()
                 })
                 .unwrap();
             row.prefix = prefix;
         }
-        let (rows, shard_sets): (Vec<_>, Vec<_>) = pairs.into_iter().unzip();
-        let close = build_close::<Sha256, _, _, PaymentBatchVerifier, _>(
+        let built = build_prepared(
             cache,
             context,
             &DepositBatch::empty(),
             withdrawals,
             rows,
-            shard_sets,
-            &mut test_rng(),
-        )
-        .unwrap();
-        let changed = close
-            .rows
-            .iter()
-            .map(|row| row.account.clone())
-            .collect::<BTreeSet<_>>();
-        let mut successor = cache
-            .leaves()
-            .iter()
-            .filter(|leaf| !changed.contains(&leaf.account))
-            .cloned()
-            .collect::<Vec<_>>();
-        successor.extend(
-            close
-                .rows
-                .iter()
-                .filter(|row| row.successor.active)
-                .map(|row| StateLeaf {
-                    account: row.account.clone(),
-                    state: row.successor,
-                }),
+            transpose,
         );
-        successor.sort_unstable_by(|left, right| left.account.cmp(&right.account));
-        let successor = StateCache::new::<Sha256>(successor).unwrap();
-        assert_eq!(successor.root(), close.roots.successor);
-        (close, successor)
+        let successor = successor_cache(cache, &built);
+        (built, successor)
+    }
+
+    fn external_payout_close(
+        cache: &TestCache,
+        context: &TestContext,
+        operator_ack: &BlsPrivate,
+        payer: &SigningKey,
+        recipient: &SigningKey,
+        amount: u64,
+    ) -> (Built, TestCache) {
+        payment_close(
+            cache,
+            context,
+            operator_ack,
+            payer,
+            recipient,
+            &WithdrawalBatch::empty(),
+            amount,
+        )
+    }
+
+    fn internal_payment_and_close(
+        cache: &TestCache,
+        context: &TestContext,
+        operator_ack: &BlsPrivate,
+        payer: &SigningKey,
+        recipient: &SigningKey,
+        withdrawals: &TestWithdrawals,
+        amount: u64,
+    ) -> (Built, TestCache) {
+        payment_close(
+            cache,
+            context,
+            operator_ack,
+            payer,
+            recipient,
+            withdrawals,
+            amount,
+        )
     }
 
     #[derive(Clone, Copy)]
     enum ChallengeApi {
-        TypedWrapper,
-        TypedSequential,
-        TypedRayon,
-        EncodedWrapper,
-        EncodedSequential,
-        EncodedRayon,
+        Typed,
+        Encoded,
     }
 
     #[derive(Debug, Eq, PartialEq)]
@@ -4530,36 +4544,28 @@ mod tests {
         let mut fixture = harness(&[10, 10, 10]);
         let (first_context, first_id) = admit_empty_epoch(&mut fixture, 0, 1, 2, 10);
         admit_empty_epoch(&mut fixture, 1, 1, 3, 10);
-        let left = fork_payment(
+        let left = fork_ack(
             &first_context,
             &fixture.operator,
             &fixture.accounts[0],
-            &fixture.accounts[2],
+            1,
             2,
         );
-        let right = fork_payment(
-            &first_context,
-            &fixture.operator,
-            &fixture.accounts[1],
-            &fixture.accounts[2],
-            3,
-        );
-        let (left, right) = if malformed {
+        let right = if malformed {
+            // A countersignature from a key other than the operator's makes the evidence
+            // unauthenticated rather than a contradiction.
             let wrong = SigningKey::from_seed(999);
-            (
-                Payment::from_parts_unchecked(
-                    left.send().clone(),
-                    SignedReceipt::sign_body_by_authority(left.receipt().body().clone(), &wrong),
-                ),
-                Payment::from_parts_unchecked(
-                    SignedSend::sign_body_by_authority(right.send().body().clone(), &wrong),
-                    right.receipt().clone(),
-                ),
-            )
+            fork_ack(&first_context, &wrong, &fixture.accounts[0], 1, 3)
         } else {
-            (left, right)
+            fork_ack(
+                &first_context,
+                &fixture.operator,
+                &fixture.accounts[0],
+                1,
+                3,
+            )
         };
-        let challenge = Challenge::receipt_fork(&left, &right);
+        let challenge = ack_fork(&left, &right);
         (fixture, challenge, first_id)
     }
 
@@ -4578,7 +4584,6 @@ mod tests {
     fn run_challenge_api(
         api: ChallengeApi,
         malformed: bool,
-        rayon: &Rayon,
     ) -> (
         Result<Verdict, SettlementError>,
         ChallengeState,
@@ -4587,97 +4592,47 @@ mod tests {
         let (mut fixture, challenge, batch) = challenge_pipeline(malformed);
         let encoded = challenge.encode();
         let result = match api {
-            ChallengeApi::TypedWrapper => fixture.chain.challenge(10, batch, &challenge),
-            ChallengeApi::TypedSequential => {
-                fixture
-                    .chain
-                    .challenge_with_strategy(10, batch, &challenge, &Sequential)
-            }
-            ChallengeApi::TypedRayon => fixture
-                .chain
-                .challenge_with_strategy(10, batch, &challenge, rayon),
-            ChallengeApi::EncodedWrapper => {
+            ChallengeApi::Typed => fixture.chain.challenge(10, batch, &challenge),
+            ChallengeApi::Encoded => {
                 fixture
                     .chain
                     .challenge_encoded(10, batch, encoded.as_ref(), encoded.len())
             }
-            ChallengeApi::EncodedSequential => fixture.chain.challenge_encoded_with_strategy(
-                10,
-                batch,
-                encoded.as_ref(),
-                encoded.len(),
-                &Sequential,
-            ),
-            ChallengeApi::EncodedRayon => fixture.chain.challenge_encoded_with_strategy(
-                10,
-                batch,
-                encoded.as_ref(),
-                encoded.len(),
-                rayon,
-            ),
         };
         let state = challenge_state(&fixture.chain);
         (result, state, batch)
     }
 
     #[test]
-    fn challenge_strategy_entry_points_have_identical_state_transitions() {
-        let rayon = Rayon::new(NonZeroUsize::new(8).unwrap()).unwrap();
-        let apis = [
-            ChallengeApi::TypedWrapper,
-            ChallengeApi::TypedSequential,
-            ChallengeApi::TypedRayon,
-            ChallengeApi::EncodedWrapper,
-            ChallengeApi::EncodedSequential,
-            ChallengeApi::EncodedRayon,
-        ];
+    fn challenge_entry_points_have_identical_state_transitions() {
+        let apis = [ChallengeApi::Typed, ChallengeApi::Encoded];
 
-        let mut proven_state = None;
-        for api in apis {
-            let (result, state, batch) = run_challenge_api(api, false, &rayon);
-            assert_eq!(result.unwrap(), Verdict::Proven(ChallengeKind::ReceiptFork));
-            assert_eq!(
-                state.statuses,
-                vec![
-                    BatchStatus::Challenged(ChallengeKind::ReceiptFork),
-                    BatchStatus::Invalidated(batch),
-                ]
-            );
-            if let Some(expected) = &proven_state {
-                assert_eq!(&state, expected);
-            } else {
-                proven_state = Some(state);
+        for malformed in [false, true] {
+            let (reference_result, reference_state, _) = run_challenge_api(apis[0], malformed);
+            for api in &apis[1..] {
+                let (result, state, _) = run_challenge_api(*api, malformed);
+                match (&reference_result, &result) {
+                    (Ok(left), Ok(right)) => assert_eq!(left, right),
+                    (Err(_), Err(_)) => {}
+                    (left, right) => {
+                        panic!("challenge APIs disagree: {left:?} vs {right:?}")
+                    }
+                }
+                assert_eq!(state, reference_state);
             }
-        }
-
-        let mut malformed_state = None;
-        let mut malformed_result = None;
-        for api in apis {
-            let (result, state, _) = run_challenge_api(api, true, &rayon);
-            assert!(matches!(
-                &result,
-                Err(SettlementError::Challenge(ChallengeError::Payment(
-                    PaymentError::InvalidOperatorSignature
-                )))
-            ));
-            assert!(
-                state
-                    .statuses
-                    .iter()
-                    .all(|status| matches!(status, BatchStatus::Pending))
-            );
-            assert_eq!(state.invalid_from, None);
-            assert_eq!(state.hard_fault, None);
-            let rendered = format!("{result:?}");
-            if let Some(expected) = &malformed_result {
-                assert_eq!(&rendered, expected);
+            if malformed {
+                assert!(reference_result.is_err());
+                assert!(
+                    reference_state
+                        .statuses
+                        .iter()
+                        .all(|status| matches!(status, BatchStatus::Pending))
+                );
             } else {
-                malformed_result = Some(rendered);
-            }
-            if let Some(expected) = &malformed_state {
-                assert_eq!(&state, expected);
-            } else {
-                malformed_state = Some(state);
+                assert_eq!(
+                    reference_result.as_ref().unwrap(),
+                    &Verdict::Proven(ChallengeKind::AckFork)
+                );
             }
         }
     }
@@ -4687,25 +4642,25 @@ mod tests {
         let mut fixture = harness(&[10, 10, 10]);
         admit_empty_epoch(&mut fixture, 0, 1, 2, 10);
         let (second_context, second_id) = admit_empty_epoch(&mut fixture, 1, 1, 3, 10);
-        let left = fork_payment(
+        let left = fork_ack(
             &second_context,
             &fixture.operator,
             &fixture.accounts[0],
-            &fixture.accounts[2],
+            1,
             2,
         );
-        let right = fork_payment(
+        let right = fork_ack(
             &second_context,
             &fixture.operator,
-            &fixture.accounts[1],
-            &fixture.accounts[2],
+            &fixture.accounts[0],
+            1,
             3,
         );
-        let challenge = Challenge::receipt_fork(&left, &right);
+        let challenge = ack_fork(&left, &right);
 
         assert_eq!(
             fixture.chain.challenge(10, second_id, &challenge).unwrap(),
-            Verdict::Proven(ChallengeKind::ReceiptFork)
+            Verdict::Proven(ChallengeKind::AckFork)
         );
         assert_eq!(
             fixture
@@ -4715,14 +4670,14 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 BatchStatus::Pending,
-                BatchStatus::Challenged(ChallengeKind::ReceiptFork),
+                BatchStatus::Challenged(ChallengeKind::AckFork),
             ]
         );
         assert_eq!(fixture.chain.invalid_from(), Some(second_id));
     }
 
     #[test]
-    fn higher_shard_tip_fault_releases_sender() {
+    fn higher_ack_entry_fault_releases_sender() {
         let mut fixture = harness(&[10]);
         let recipient = SigningKey::from_seed(1_006);
         let deposits = DepositBatch::empty();
@@ -4741,7 +4696,7 @@ mod tests {
         let (close, _) = external_payout_close(
             &fixture.cache,
             &close_context,
-            &fixture.operator,
+            &fixture.operator_ack,
             &fixture.accounts[0],
             &recipient,
             2,
@@ -4749,6 +4704,7 @@ mod tests {
         let batch_id = register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
+            &fixture.operator_bls,
             1,
             close_context.clone(),
             deposits,
@@ -4757,46 +4713,64 @@ mod tests {
             &close,
         );
 
-        let payment = close
-            .rows
-            .iter()
-            .find_map(|row| row.outgoing.clone())
-            .expect("the close has one outgoing payment");
-        let receipt = SignedReceipt::issue_next::<Sha256, _>(
-            close_context.payment(),
-            payment.send(),
-            payment.recipient(),
-            payment.receipt().body().shard(),
-            payment.receipt().body().cumulative_shard_credit(),
-            payment.receipt().body().index(),
-            &fixture.operator,
+        // The operator acknowledged a later batch crediting the recipient above the committed
+        // terminal entry, and the recipient retained the entry receipt.
+        let payer = &fixture.accounts[0];
+        let retained_vector = OutVector::new(
+            close_context.payment().epoch(),
+            payer.public_key(),
+            vec![OutEntry {
+                recipient: recipient.public_key(),
+                cumulative: 3,
+                count: 2,
+            }],
         )
         .unwrap();
-        let payment =
-            Payment::new::<Sha256>(close_context.payment(), payment.send().clone(), receipt)
-                .unwrap();
+        let retained_body = VectorSendBody::new(
+            close_context.payment(),
+            payer.public_key(),
+            2,
+            3,
+            retained_vector.root::<Sha256, ShaDigest>().unwrap(),
+        );
+        let retained_ack = VectorAck::sign_by_authorities(retained_body, payer, &fixture.operator);
+        let opening = match retained_vector
+            .lookup::<Sha256, ShaDigest>(&recipient.public_key())
+            .unwrap()
+        {
+            crate::bajillion::vector::OutTipLookup::Present { opening, .. } => opening,
+            crate::bajillion::vector::OutTipLookup::Absent { .. } => {
+                panic!("retained entry is present")
+            }
+        };
+        let entry = EntryWitness {
+            ack: AckWitness::from_ack(&retained_ack),
+            recipient: recipient.public_key(),
+            cumulative: 3,
+            count: 2,
+            opening,
+        };
 
         let index = ChallengeIndex::new::<Sha256>(&close_context, &close).unwrap();
-        let recipient = payment.recipient().clone();
-        let recipient_position = close
+        let payer_position = close
             .rows
-            .binary_search_by(|row| row.account.cmp(&recipient))
+            .binary_search_by(|row| row.account.cmp(&payer.public_key()))
             .unwrap();
-        let recipient_lookup = index
-            .higher_shard_tip_lookup::<Sha256>(
-                &recipient,
-                Some(&close.shard_sets[recipient_position]),
-                payment.receipt().body().shard(),
-            )
-            .unwrap();
-        let challenge = Challenge::HigherShardTip {
-            payment: alloc::boxed::Box::new(PaymentWitness::from_payment(&payment)),
-            recipient: alloc::boxed::Box::new(recipient_lookup),
+        let sender_lookup = higher_entry_lookup::<Sha256, _, _>(
+            &index,
+            &payer.public_key(),
+            Some(&close.out_vectors[payer_position]),
+            &recipient.public_key(),
+        )
+        .unwrap();
+        let challenge = Challenge::HigherAckEntry {
+            entry: Box::new(entry),
+            sender: Box::new(sender_lookup),
         };
 
         assert_eq!(
             fixture.chain.challenge(10, batch_id, &challenge).unwrap(),
-            Verdict::Proven(ChallengeKind::HigherShardTip)
+            Verdict::Proven(ChallengeKind::HigherAckEntry)
         );
         assert_eq!(
             fixture
@@ -4804,7 +4778,7 @@ mod tests {
                 .pending_batches()
                 .map(|batch| batch.status.clone())
                 .collect::<Vec<_>>(),
-            vec![BatchStatus::Challenged(ChallengeKind::HigherShardTip)]
+            vec![BatchStatus::Challenged(ChallengeKind::HigherAckEntry)]
         );
         assert_eq!(fixture.chain.invalid_from(), Some(batch_id));
 
@@ -4844,6 +4818,7 @@ mod tests {
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
+            &fixture.operator_bls,
             2,
             first_context,
             deposits.clone(),
@@ -4866,6 +4841,7 @@ mod tests {
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
+            &fixture.operator_bls,
             3,
             second_context,
             deposits.clone(),
@@ -4965,6 +4941,7 @@ mod tests {
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
+            &fixture.operator_bls,
             1,
             first_context,
             deposits.clone(),
@@ -5148,16 +5125,10 @@ mod tests {
         );
         let anchor = *registered.payment().anchor();
         let (close, _) = boundary_close(&fixture.cache, &registered, &deposits, &withdrawals);
-        let terminal_proof = assemble_terminal_proof::<Sha256, _, _>(
-            &registered,
-            &deposits,
-            &withdrawals,
-            &close,
-            &Sequential,
-        )
-        .unwrap();
+        let terminal_proof = close.prepared.terminal_proof().unwrap();
         let certificate = certificate(
             &fixture.signer,
+            &fixture.operator_bls,
             &registered,
             &deposits,
             &withdrawals,
@@ -5383,6 +5354,7 @@ mod tests {
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
+            &fixture.operator_bls,
             1,
             close_context,
             deposits,
@@ -5540,16 +5512,14 @@ mod tests {
         );
         let (close, successor) =
             boundary_close(&fixture.cache, &close_context, &deposits, &withdrawals);
-        let claim = assemble_withdrawal_claim::<Sha256, _, _>(
-            &close,
-            &withdrawals,
-            &account.public_key(),
-            &Sequential,
-        )
-        .unwrap();
+        let claim = close
+            .prepared
+            .withdrawal_claim(&withdrawals, &account.public_key())
+            .unwrap();
         let batch_id = register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
+            &fixture.operator_bls,
             5,
             close_context,
             deposits.clone(),
@@ -5770,6 +5740,7 @@ mod tests {
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
+            &fixture.operator_bls,
             5,
             close_context,
             deposits.clone(),
@@ -5997,16 +5968,14 @@ mod tests {
             7,
         );
         let (close, successor) = boundary_close(&fixture.cache, &close_context, &deferred, &offset);
-        let claim = assemble_withdrawal_claim::<Sha256, _, _>(
-            &close,
-            &offset,
-            &signer.public_key(),
-            &Sequential,
-        )
-        .unwrap();
+        let claim = close
+            .prepared
+            .withdrawal_claim(&offset, &signer.public_key())
+            .unwrap();
         let batch_id = register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
+            &fixture.operator_bls,
             5,
             close_context,
             deferred,
@@ -6049,6 +6018,7 @@ mod tests {
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
+            &fixture.operator_bls,
             9,
             successor_context,
             deposits,
@@ -6205,16 +6175,14 @@ mod tests {
         );
         let (close, successor) =
             boundary_close(&fixture.cache, &close_context, &deposits, &withdrawals);
-        let claim = assemble_withdrawal_claim::<Sha256, _, _>(
-            &close,
-            &withdrawals,
-            &account.public_key(),
-            &Sequential,
-        )
-        .unwrap();
+        let claim = close
+            .prepared
+            .withdrawal_claim(&withdrawals, &account.public_key())
+            .unwrap();
         let batch_id = register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
+            &fixture.operator_bls,
             6,
             close_context,
             deposits,
@@ -6298,6 +6266,7 @@ mod tests {
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
+            &fixture.operator_bls,
             10,
             close_context,
             deposits,
@@ -6458,6 +6427,7 @@ mod tests {
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
+            &fixture.operator_bls,
             2,
             close_context,
             deposits,
@@ -6544,6 +6514,7 @@ mod tests {
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
+            &fixture.operator_bls,
             1,
             create_context,
             deposits,
@@ -6587,13 +6558,10 @@ mod tests {
         let (destroy, destroyed) =
             boundary_close(&created, &destroy_context, &deposits, &withdrawals);
         assert!(destroyed.leaves().is_empty());
-        let claim = assemble_withdrawal_claim::<Sha256, _, _>(
-            &destroy,
-            &withdrawals,
-            &public_key,
-            &Sequential,
-        )
-        .unwrap();
+        let claim = destroy
+            .prepared
+            .withdrawal_claim(&withdrawals, &public_key)
+            .unwrap();
         let output = claim
             .verify::<Sha256>(&destroy.roots.withdrawal_outputs)
             .unwrap();
@@ -6601,6 +6569,7 @@ mod tests {
         let batch_id = register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
+            &fixture.operator_bls,
             4,
             destroy_context,
             deposits,
@@ -6643,7 +6612,7 @@ mod tests {
         let (close, successor) = external_payout_close(
             &fixture.cache,
             &close_context,
-            &fixture.operator,
+            &fixture.operator_ack,
             payer,
             &recipient,
             20,
@@ -6651,6 +6620,7 @@ mod tests {
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
+            &fixture.operator_bls,
             1,
             close_context,
             deposits,
@@ -6695,20 +6665,19 @@ mod tests {
         let (close, _) = external_payout_close(
             &fixture.cache,
             &close_context,
-            &fixture.operator,
+            &fixture.operator_ack,
             payer,
             &recipient,
             20,
         );
-        let claim = assemble_external_payout_claim::<Sha256, _, _>(
-            &close,
-            &recipient.public_key(),
-            &Sequential,
-        )
-        .unwrap();
+        let claim = close
+            .prepared
+            .external_payout_claim(&recipient.public_key())
+            .unwrap();
         let batch_id = register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
+            &fixture.operator_bls,
             1,
             close_context,
             deposits,
@@ -6757,14 +6726,15 @@ mod tests {
             1,
             2,
         );
-        let (mut close, _) = external_payout_close(
+        let (built, _) = external_payout_close(
             &fixture.cache,
             &close_context,
-            &fixture.operator,
+            &fixture.operator_ack,
             payer,
             &recipient,
             7,
         );
+        let mut close = (*built).clone();
         let position = close
             .rows
             .binary_search_by(|row| row.account.cmp(&recipient.public_key()))
@@ -6777,8 +6747,10 @@ mod tests {
         let leaves = close
             .rows
             .iter()
-            .zip(&close.shard_sets)
-            .map(|(row, shards)| AccountChange::from_row::<Sha256>(row, shards).unwrap())
+            .zip(&close.out_vectors)
+            .map(|(row, vector)| {
+                AccountChange::from_row::<Sha256>(row, vector.root::<Sha256, ShaDigest>().unwrap())
+            })
             .collect::<Vec<_>>();
         let guards = leaves
             .iter()
@@ -6844,7 +6816,7 @@ mod tests {
             let (close, successor) = external_payout_close(
                 &fixture.cache,
                 &close_context,
-                &fixture.operator,
+                &fixture.operator_ack,
                 &fixture.accounts[usize::try_from(epoch).unwrap()],
                 &recipient,
                 1,
@@ -6852,6 +6824,7 @@ mod tests {
             register_and_admit(
                 &mut fixture.chain,
                 &fixture.signer,
+                &fixture.operator_bls,
                 now,
                 close_context,
                 deposits,
@@ -6914,18 +6887,16 @@ mod tests {
         let claims = queued
             .iter()
             .map(|(account, _, _, _)| {
-                assemble_withdrawal_claim::<Sha256, _, _>(
-                    &close,
-                    &withdrawals,
-                    account,
-                    &Sequential,
-                )
-                .unwrap()
+                close
+                    .prepared
+                    .withdrawal_claim(&withdrawals, account)
+                    .unwrap()
             })
             .collect::<Vec<_>>();
         let batch_id = register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
+            &fixture.operator_bls,
             1,
             close_context,
             deposits,
@@ -7023,16 +6994,14 @@ mod tests {
             &deposits,
             &first_withdrawals,
         );
-        let first_claim = assemble_withdrawal_claim::<Sha256, _, _>(
-            &first_close,
-            &first_withdrawals,
-            &account,
-            &Sequential,
-        )
-        .unwrap();
+        let first_claim = first_close
+            .prepared
+            .withdrawal_claim(&first_withdrawals, &account)
+            .unwrap();
         let first_batch = register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
+            &fixture.operator_bls,
             1,
             first_context,
             deposits.clone(),
@@ -7078,16 +7047,14 @@ mod tests {
             &deposits,
             &second_withdrawals,
         );
-        let second_claim = assemble_withdrawal_claim::<Sha256, _, _>(
-            &second_close,
-            &second_withdrawals,
-            &account,
-            &Sequential,
-        )
-        .unwrap();
+        let second_claim = second_close
+            .prepared
+            .withdrawal_claim(&second_withdrawals, &account)
+            .unwrap();
         let second_batch = register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
+            &fixture.operator_bls,
             4,
             second_context,
             deposits,
@@ -7177,6 +7144,7 @@ mod tests {
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
+            &fixture.operator_bls,
             1,
             close_context,
             deposits,
@@ -7210,20 +7178,19 @@ mod tests {
         let (first, first_successor) = external_payout_close(
             &fixture.cache,
             &first_context,
-            &fixture.operator,
+            &fixture.operator_ack,
             &fixture.accounts[0],
             &first_recipient,
             20,
         );
-        let first_claim = assemble_external_payout_claim::<Sha256, _, _>(
-            &first,
-            &first_recipient.public_key(),
-            &Sequential,
-        )
-        .unwrap();
+        let first_claim = first
+            .prepared
+            .external_payout_claim(&first_recipient.public_key())
+            .unwrap();
         let first_id = register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
+            &fixture.operator_bls,
             1,
             first_context,
             empty.clone(),
@@ -7251,6 +7218,7 @@ mod tests {
         let second_id = register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
+            &fixture.operator_bls,
             4,
             second_context.clone(),
             empty,
@@ -7258,26 +7226,26 @@ mod tests {
             &[],
             &second,
         );
-        let left = fork_payment(
+        let left = fork_ack(
             &second_context,
             &fixture.operator,
             &fixture.accounts[1],
-            &fixture.accounts[0],
+            1,
             2,
         );
-        let right = fork_payment(
+        let right = fork_ack(
             &second_context,
             &fixture.operator,
-            &fixture.accounts[2],
-            &fixture.accounts[0],
+            &fixture.accounts[1],
+            1,
             3,
         );
         assert_eq!(
             fixture
                 .chain
-                .challenge(8, second_id, &Challenge::receipt_fork(&left, &right))
+                .challenge(8, second_id, &ack_fork(&left, &right))
                 .unwrap(),
-            Verdict::Proven(ChallengeKind::ReceiptFork)
+            Verdict::Proven(ChallengeKind::AckFork)
         );
 
         let settlement = fixture.chain.begin_hard_fault_settlement().unwrap();
@@ -7340,12 +7308,14 @@ mod tests {
         );
         let (first, first_successor) =
             boundary_close(&fixture.cache, &first_context, &deposits, &withdrawals);
-        let claim =
-            assemble_withdrawal_claim::<Sha256, _, _>(&first, &withdrawals, &account, &Sequential)
-                .unwrap();
+        let claim = first
+            .prepared
+            .withdrawal_claim(&withdrawals, &account)
+            .unwrap();
         let first_id = register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
+            &fixture.operator_bls,
             1,
             first_context,
             deposits.clone(),
@@ -7374,6 +7344,7 @@ mod tests {
         let second_id = register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
+            &fixture.operator_bls,
             4,
             second_context.clone(),
             deposits,
@@ -7381,26 +7352,26 @@ mod tests {
             &[],
             &second,
         );
-        let left = fork_payment(
+        let left = fork_ack(
             &second_context,
             &fixture.operator,
             &fixture.accounts[1],
-            &fixture.accounts[0],
+            1,
             2,
         );
-        let right = fork_payment(
+        let right = fork_ack(
             &second_context,
             &fixture.operator,
-            &fixture.accounts[2],
-            &fixture.accounts[0],
+            &fixture.accounts[1],
+            1,
             3,
         );
         assert_eq!(
             fixture
                 .chain
-                .challenge(8, second_id, &Challenge::receipt_fork(&left, &right))
+                .challenge(8, second_id, &ack_fork(&left, &right))
                 .unwrap(),
-            Verdict::Proven(ChallengeKind::ReceiptFork)
+            Verdict::Proven(ChallengeKind::AckFork)
         );
         let settlement = fixture.chain.begin_hard_fault_settlement().unwrap();
         assert_eq!(settlement.custody_balance, 26);
@@ -7450,6 +7421,7 @@ mod tests {
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
+            &fixture.operator_bls,
             1,
             first_context,
             empty.clone(),
@@ -7473,7 +7445,7 @@ mod tests {
         let (second, _) = external_payout_close(
             &fixture.cache,
             &second_context,
-            &fixture.operator,
+            &fixture.operator_ack,
             &fixture.accounts[0],
             &recipient,
             20,
@@ -7481,6 +7453,7 @@ mod tests {
         let second_id = register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
+            &fixture.operator_bls,
             2,
             second_context.clone(),
             empty,
@@ -7488,26 +7461,26 @@ mod tests {
             &[],
             &second,
         );
-        let left = fork_payment(
+        let left = fork_ack(
             &second_context,
             &fixture.operator,
             &fixture.accounts[1],
-            &fixture.accounts[0],
+            1,
             2,
         );
-        let right = fork_payment(
+        let right = fork_ack(
             &second_context,
             &fixture.operator,
-            &fixture.accounts[2],
-            &fixture.accounts[0],
+            &fixture.accounts[1],
+            1,
             3,
         );
         assert_eq!(
             fixture
                 .chain
-                .challenge(8, second_id, &Challenge::receipt_fork(&left, &right))
+                .challenge(8, second_id, &ack_fork(&left, &right))
                 .unwrap(),
-            Verdict::Proven(ChallengeKind::ReceiptFork)
+            Verdict::Proven(ChallengeKind::AckFork)
         );
 
         let finalized = fixture.chain.finalize(8).unwrap();
@@ -7550,6 +7523,7 @@ mod tests {
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
+            &fixture.operator_bls,
             1,
             first_context,
             deposits.clone(),
@@ -7573,6 +7547,7 @@ mod tests {
         let second_id = register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
+            &fixture.operator_bls,
             2,
             second_context.clone(),
             deposits.clone(),
@@ -7596,7 +7571,7 @@ mod tests {
         let (third, _) = external_payout_close(
             &fixture.cache,
             &third_context,
-            &fixture.operator,
+            &fixture.operator_ack,
             &fixture.accounts[0],
             &external,
             20,
@@ -7604,6 +7579,7 @@ mod tests {
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
+            &fixture.operator_bls,
             3,
             third_context,
             deposits,
@@ -7612,26 +7588,26 @@ mod tests {
             &third,
         );
 
-        let left = fork_payment(
+        let left = fork_ack(
             &second_context,
             &fixture.operator,
             &fixture.accounts[1],
-            &fixture.accounts[0],
+            1,
             2,
         );
-        let right = fork_payment(
+        let right = fork_ack(
             &second_context,
             &fixture.operator,
-            &fixture.accounts[2],
-            &fixture.accounts[0],
+            &fixture.accounts[1],
+            1,
             3,
         );
         assert_eq!(
             fixture
                 .chain
-                .challenge(8, second_id, &Challenge::receipt_fork(&left, &right))
+                .challenge(8, second_id, &ack_fork(&left, &right))
                 .unwrap(),
-            Verdict::Proven(ChallengeKind::ReceiptFork)
+            Verdict::Proven(ChallengeKind::AckFork)
         );
         assert_eq!(fixture.chain.finalize(8).unwrap().epoch, 0);
 
@@ -7674,15 +7650,15 @@ mod tests {
             1,
             4,
         );
-        let acknowledged = fork_payment(&close_context, &fixture.operator, payer, recipient, 3);
+        let acknowledged = fork_ack(&close_context, &fixture.operator, payer, 1, 3);
         let close = empty_close(&fixture.cache, &close_context);
         let index = ChallengeIndex::new::<Sha256>(&close_context, &close).unwrap();
-        let payer_lookup = index
-            .account_lookup(&fixture.cache, &payer.public_key())
-            .unwrap();
+        let payer_lookup =
+            account_lookup::<Sha256, _, _>(&index, &fixture.cache, &payer.public_key()).unwrap();
         let batch_id = register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
+            &fixture.operator_bls,
             1,
             close_context,
             deposits,
@@ -7697,13 +7673,13 @@ mod tests {
                 .challenge(
                     4,
                     batch_id,
-                    &Challenge::LatestAcknowledgedSend {
-                        payment: Box::new(PaymentWitness::from_payment(&acknowledged)),
+                    &Challenge::HigherAckDebit {
+                        ack: Box::new(AckWitness::from_ack(&acknowledged)),
                         payer: Box::new(payer_lookup),
                     },
                 )
                 .unwrap(),
-            Verdict::Proven(ChallengeKind::LatestAcknowledgedSend)
+            Verdict::Proven(ChallengeKind::HigherAckDebit)
         );
         let settlement = fixture.chain.begin_hard_fault_settlement().unwrap();
         assert_eq!(settlement.frozen_state_root, fixture.cache.root());
@@ -7729,7 +7705,7 @@ mod tests {
     }
 
     #[test]
-    fn inconsistent_receipt_range_fault_releases_the_frozen_sender() {
+    fn ack_fork_fault_releases_the_frozen_sender() {
         let mut fixture = harness(&[10, 20]);
         let payer = &fixture.accounts[0];
         let recipient = &fixture.accounts[1];
@@ -7750,6 +7726,7 @@ mod tests {
         let batch_id = register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
+            &fixture.operator_bls,
             1,
             close_context.clone(),
             deposits,
@@ -7757,43 +7734,21 @@ mod tests {
             &[],
             &close,
         );
-        let send =
-            SignedSend::sign_next(close_context.payment(), payer, recipient.public_key(), 5, 0)
-                .unwrap();
-        let receipt = SignedReceipt::sign_body_by_authority(
-            ReceiptBody::from_raw_unchecked(
-                *close_context.payment().anchor(),
-                close_context.payment().epoch(),
-                recipient.public_key(),
-                0,
-                5,
-                send.tx_id::<Sha256>(),
-                4,
-                1,
-            ),
-            &fixture.operator,
-        );
-        let impossible = Payment::new::<Sha256>(close_context.payment(), send, receipt).unwrap();
+        let left = fork_ack(&close_context, &fixture.operator, payer, 1, 4);
+        let right = fork_ack(&close_context, &fixture.operator, payer, 1, 5);
 
         assert_eq!(
             fixture
                 .chain
-                .challenge(
-                    4,
-                    batch_id,
-                    &Challenge::InconsistentReceiptRange {
-                        upper: Box::new(PaymentWitness::from_payment(&impossible)),
-                        lower: RangeLower::ShardStart,
-                    },
-                )
+                .challenge(4, batch_id, &ack_fork(&left, &right))
                 .unwrap(),
-            Verdict::Proven(ChallengeKind::InconsistentReceiptRange)
+            Verdict::Proven(ChallengeKind::AckFork)
         );
         assert_eq!(
             fixture.chain.hard_fault(),
             Some(&HardFaultReason::ProvenChallenge {
                 batch_id,
-                kind: ChallengeKind::InconsistentReceiptRange,
+                kind: ChallengeKind::AckFork,
             })
         );
 
@@ -7846,6 +7801,7 @@ mod tests {
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
+            &fixture.operator_bls,
             1,
             first_context,
             deposits,
@@ -7917,6 +7873,7 @@ mod tests {
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
+            &fixture.operator_bls,
             4,
             second_context,
             DepositBatch::empty(),
@@ -7947,6 +7904,7 @@ mod tests {
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
+            &fixture.operator_bls,
             1,
             first_context,
             deposits.clone(),
@@ -7969,6 +7927,7 @@ mod tests {
         let second_id = register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
+            &fixture.operator_bls,
             1,
             second_context.clone(),
             deposits,
@@ -7976,24 +7935,24 @@ mod tests {
             &[],
             &second,
         );
-        let left = fork_payment(
+        let left = fork_ack(
             &second_context,
             &fixture.operator,
             &fixture.accounts[0],
-            &fixture.accounts[2],
+            1,
             2,
         );
-        let right = fork_payment(
+        let right = fork_ack(
             &second_context,
             &fixture.operator,
-            &fixture.accounts[1],
-            &fixture.accounts[2],
+            &fixture.accounts[0],
+            1,
             3,
         );
-        let challenge = Challenge::receipt_fork(&left, &right);
+        let challenge = ack_fork(&left, &right);
         assert_eq!(
             fixture.chain.challenge(8, second_id, &challenge).unwrap(),
-            Verdict::Proven(ChallengeKind::ReceiptFork)
+            Verdict::Proven(ChallengeKind::AckFork)
         );
         let statuses = fixture
             .chain
@@ -8003,7 +7962,7 @@ mod tests {
         assert!(matches!(statuses[0], BatchStatus::Pending));
         assert!(matches!(
             statuses[1],
-            BatchStatus::Challenged(ChallengeKind::ReceiptFork)
+            BatchStatus::Challenged(ChallengeKind::AckFork)
         ));
         assert_eq!(fixture.chain.invalid_from(), Some(second_id));
         assert_eq!(fixture.chain.finalize(8).unwrap().epoch, 0);
@@ -8033,6 +7992,7 @@ mod tests {
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
+            &fixture.operator_bls,
             1,
             first_context,
             empty_deposits,
@@ -8072,6 +8032,7 @@ mod tests {
         let middle_id = register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
+            &fixture.operator_bls,
             2,
             middle_context.clone(),
             middle_deposits,
@@ -8111,6 +8072,7 @@ mod tests {
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
+            &fixture.operator_bls,
             3,
             descendant_context,
             descendant_deposits,
@@ -8119,26 +8081,26 @@ mod tests {
             &descendant,
         );
 
-        let left = fork_payment(
+        let left = fork_ack(
             &middle_context,
             &fixture.operator,
             &fixture.accounts[0],
-            &fixture.accounts[2],
+            1,
             2,
         );
-        let right = fork_payment(
+        let right = fork_ack(
             &middle_context,
             &fixture.operator,
-            &fixture.accounts[1],
-            &fixture.accounts[2],
+            &fixture.accounts[0],
+            1,
             3,
         );
         assert_eq!(
             fixture
                 .chain
-                .challenge(8, middle_id, &Challenge::receipt_fork(&left, &right))
+                .challenge(8, middle_id, &ack_fork(&left, &right))
                 .unwrap(),
-            Verdict::Proven(ChallengeKind::ReceiptFork)
+            Verdict::Proven(ChallengeKind::AckFork)
         );
         assert_eq!(
             fixture
@@ -8148,7 +8110,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 BatchStatus::Pending,
-                BatchStatus::Challenged(ChallengeKind::ReceiptFork),
+                BatchStatus::Challenged(ChallengeKind::AckFork),
                 BatchStatus::Invalidated(middle_id),
             ]
         );
@@ -8200,7 +8162,7 @@ mod tests {
             settlement.reason,
             HardFaultReason::ProvenChallenge {
                 batch_id,
-                kind: ChallengeKind::ReceiptFork,
+                kind: ChallengeKind::AckFork,
             } if batch_id == middle_id
         ));
         assert_eq!(fixture.chain.custody_balance(), 0);
@@ -8249,26 +8211,26 @@ mod tests {
         assert_eq!(fixture.chain.admission_fence_epoch(), Some(3));
         assert_eq!(fixture.chain.invalid_from(), None);
 
-        let left = fork_payment(
+        let left = fork_ack(
             &third_context,
             &fixture.operator,
             &fixture.accounts[0],
-            &fixture.accounts[2],
+            1,
             2,
         );
-        let right = fork_payment(
+        let right = fork_ack(
             &third_context,
             &fixture.operator,
-            &fixture.accounts[1],
-            &fixture.accounts[2],
+            &fixture.accounts[0],
+            1,
             3,
         );
         assert_eq!(
             fixture
                 .chain
-                .challenge(8, third_id, &Challenge::receipt_fork(&left, &right))
+                .challenge(8, third_id, &ack_fork(&left, &right))
                 .unwrap(),
-            Verdict::Proven(ChallengeKind::ReceiptFork)
+            Verdict::Proven(ChallengeKind::AckFork)
         );
         assert_eq!(fixture.chain.hard_fault(), Some(&first_reason));
         assert_eq!(fixture.chain.admission_fence_epoch(), Some(3));
@@ -8282,7 +8244,7 @@ mod tests {
             vec![
                 BatchStatus::Pending,
                 BatchStatus::Pending,
-                BatchStatus::Challenged(ChallengeKind::ReceiptFork),
+                BatchStatus::Challenged(ChallengeKind::AckFork),
             ]
         );
         assert!(matches!(
@@ -8341,6 +8303,7 @@ mod tests {
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
+            &fixture.operator_bls,
             1,
             close_context,
             deposits,
@@ -8390,19 +8353,13 @@ mod tests {
         assert_eq!(successor.leaves().len(), 2);
         let certificate = certificate(
             &fixture.signer,
+            &fixture.operator_bls,
             &close_context,
             &deposits,
             &withdrawals,
             &close,
         );
-        let terminal_proof = assemble_terminal_proof::<Sha256, _, _>(
-            &close_context,
-            &deposits,
-            &withdrawals,
-            &close,
-            &Sequential,
-        )
-        .unwrap();
+        let terminal_proof = close.prepared.terminal_proof().unwrap();
         fixture
             .chain
             .register_close(1, close_context, withdrawals, &[], |_| true)
@@ -8461,6 +8418,7 @@ mod tests {
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
+            &fixture.operator_bls,
             1,
             close_context,
             deposits,
@@ -8515,19 +8473,16 @@ mod tests {
         let (close, successor) = internal_payment_and_close(
             &fixture.cache,
             &close_context,
-            &fixture.operator,
+            &fixture.operator_ack,
             payer,
             recipient,
             &withdrawals,
             10,
         );
-        let claim = assemble_withdrawal_claim::<Sha256, _, _>(
-            &close,
-            &withdrawals,
-            &payer.public_key(),
-            &Sequential,
-        )
-        .unwrap();
+        let claim = close
+            .prepared
+            .withdrawal_claim(&withdrawals, &payer.public_key())
+            .unwrap();
         let output = claim
             .verify::<Sha256>(&close.roots.withdrawal_outputs)
             .unwrap();
@@ -8539,6 +8494,7 @@ mod tests {
         let batch_id = register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
+            &fixture.operator_bls,
             1,
             close_context,
             deposits,
@@ -8671,6 +8627,7 @@ mod tests {
             register_and_admit(
                 &mut fixture.chain,
                 &fixture.signer,
+                &fixture.operator_bls,
                 1,
                 close_context,
                 deposits,
@@ -8746,6 +8703,7 @@ mod tests {
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
+            &fixture.operator_bls,
             1,
             first_context,
             first_deposits,
@@ -8782,6 +8740,7 @@ mod tests {
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
+            &fixture.operator_bls,
             4,
             second_context,
             second_deposits,
@@ -8850,6 +8809,7 @@ mod tests {
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
+            &fixture.operator_bls,
             1,
             close_context,
             deposits,
@@ -9291,6 +9251,7 @@ mod tests {
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
+            &fixture.operator_bls,
             1,
             partial_context,
             deposits,
@@ -9336,6 +9297,7 @@ mod tests {
         register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
+            &fixture.operator_bls,
             4,
             close_context,
             deposits,
@@ -9387,16 +9349,14 @@ mod tests {
             2,
         );
         let (close, _) = boundary_close(&fixture.cache, &close_context, &deposits, &withdrawals);
-        let claim = assemble_withdrawal_claim::<Sha256, _, _>(
-            &close,
-            &withdrawals,
-            &public_key,
-            &Sequential,
-        )
-        .unwrap();
+        let claim = close
+            .prepared
+            .withdrawal_claim(&withdrawals, &public_key)
+            .unwrap();
         let batch_id = register_and_admit(
             &mut fixture.chain,
             &fixture.signer,
+            &fixture.operator_bls,
             1,
             close_context,
             deposits,
@@ -9573,28 +9533,19 @@ mod tests {
             7,
         );
         let (close, _) = boundary_close(&fixture.cache, &close_context, &deposits, &withdrawals);
-        let claim = assemble_withdrawal_claim::<Sha256, _, _>(
-            &close,
-            &withdrawals,
-            &signer.public_key(),
-            &Sequential,
-        )
-        .unwrap();
+        let claim = close
+            .prepared
+            .withdrawal_claim(&withdrawals, &signer.public_key())
+            .unwrap();
         let certificate = certificate(
             &fixture.signer,
+            &fixture.operator_bls,
             &close_context,
             &deposits,
             &withdrawals,
             &close,
         );
-        let terminal_proof = assemble_terminal_proof::<Sha256, _, _>(
-            &close_context,
-            &deposits,
-            &withdrawals,
-            &close,
-            &Sequential,
-        )
-        .unwrap();
+        let terminal_proof = close.prepared.terminal_proof().unwrap();
         fixture
             .chain
             .register_close(2, close_context, withdrawals, &[], |_| true)

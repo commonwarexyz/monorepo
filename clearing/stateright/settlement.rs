@@ -686,29 +686,14 @@ impl Candidate {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) enum ForkRelation {
-    SameSend,
-    SameIndex,
-    Full,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum ChallengeKind {
-    LatestAcknowledgedSend,
-    HigherShardTip,
-    InconsistentReceiptRange,
-    ReceiptFork(ForkRelation),
+    HigherDebit,
+    HigherEntry,
+    Fork,
 }
 
 impl ChallengeKind {
-    pub(crate) const ALL: [Self; 6] = [
-        Self::LatestAcknowledgedSend,
-        Self::HigherShardTip,
-        Self::InconsistentReceiptRange,
-        Self::ReceiptFork(ForkRelation::SameSend),
-        Self::ReceiptFork(ForkRelation::SameIndex),
-        Self::ReceiptFork(ForkRelation::Full),
-    ];
+    pub(crate) const ALL: [Self; 3] = [Self::HigherDebit, Self::HigherEntry, Self::Fork];
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -2079,45 +2064,24 @@ const fn deposit_fault(_: &SettlementModel, state: &SettlementState) -> bool {
     matches!(state.fault, Fault::ExpiredDeposit { .. })
 }
 
-const fn latest_fault(_: &SettlementModel, state: &SettlementState) -> bool {
+const fn higher_debit_fault(_: &SettlementModel, state: &SettlementState) -> bool {
     matches!(
         state.last,
-        SettlementEdge::Challenge(_, ChallengeKind::LatestAcknowledgedSend)
+        SettlementEdge::Challenge(_, ChallengeKind::HigherDebit)
     )
 }
 
-const fn higher_tip_fault(_: &SettlementModel, state: &SettlementState) -> bool {
+const fn higher_entry_fault(_: &SettlementModel, state: &SettlementState) -> bool {
     matches!(
         state.last,
-        SettlementEdge::Challenge(_, ChallengeKind::HigherShardTip)
+        SettlementEdge::Challenge(_, ChallengeKind::HigherEntry)
     )
 }
 
-const fn range_fault(_: &SettlementModel, state: &SettlementState) -> bool {
+const fn fork_fault(_: &SettlementModel, state: &SettlementState) -> bool {
     matches!(
         state.last,
-        SettlementEdge::Challenge(_, ChallengeKind::InconsistentReceiptRange)
-    )
-}
-
-const fn same_send_fork(_: &SettlementModel, state: &SettlementState) -> bool {
-    matches!(
-        state.last,
-        SettlementEdge::Challenge(_, ChallengeKind::ReceiptFork(ForkRelation::SameSend))
-    )
-}
-
-const fn same_index_fork(_: &SettlementModel, state: &SettlementState) -> bool {
-    matches!(
-        state.last,
-        SettlementEdge::Challenge(_, ChallengeKind::ReceiptFork(ForkRelation::SameIndex))
-    )
-}
-
-const fn full_fork(_: &SettlementModel, state: &SettlementState) -> bool {
-    matches!(
-        state.last,
-        SettlementEdge::Challenge(_, ChallengeKind::ReceiptFork(ForkRelation::Full))
+        SettlementEdge::Challenge(_, ChallengeKind::Fork)
     )
 }
 
@@ -2437,8 +2401,8 @@ impl Model for SettlementModel {
             Property::sometimes("registration expiry is reachable", registration_fault),
             Property::sometimes("withdrawal expiry is reachable", withdrawal_fault),
             Property::sometimes("deposit expiry is reachable", deposit_fault),
-            Property::sometimes("latest-send challenge is reachable", latest_fault),
-            Property::sometimes("higher-tip challenge is reachable", higher_tip_fault),
+            Property::sometimes("higher-debit challenge is reachable", higher_debit_fault),
+            Property::sometimes("higher-entry challenge is reachable", higher_entry_fault),
             Property::sometimes("a carried withdrawal clears at full value", carried_claimed),
             Property::sometimes(
                 "a degraded amount finalizes with a zero reserve",
@@ -2452,10 +2416,7 @@ impl Model for SettlementModel {
                 "a carried offset defers its staged deposit",
                 carried_offset_deferred,
             ),
-            Property::sometimes("receipt-range challenge is reachable", range_fault),
-            Property::sometimes("same-send fork challenge is reachable", same_send_fork),
-            Property::sometimes("same-index fork challenge is reachable", same_index_fork),
-            Property::sometimes("a full fork challenge is reachable", full_fork),
+            Property::sometimes("an acknowledgment-fork challenge is reachable", fork_fault),
             Property::sometimes(
                 "a middle challenge invalidates its suffix",
                 middle_suffix_invalidated,
@@ -2547,7 +2508,7 @@ fn settlement_checker_explores_the_complete_finite_graph() {
         .spawn_bfs()
         .join();
     assert!(checker.is_done());
-    assert_eq!(checker.unique_state_count(), 6_034_482);
+    assert_eq!(checker.unique_state_count(), 3_000_804);
     checker.assert_properties();
 }
 

@@ -25,7 +25,7 @@ more to replicate, settle onchain, and index than they’re worth. Yet
 your agent will need to make millions of them over the coming years." />
     <meta property="article:author" content="Patrick O’Grady" />
     <meta property="article:published_time" content="2026-08-19T00:00:00Z" />
-    <meta property="article:modified_time" content="2026-08-28T00:00:00Z" />
+    <meta property="article:modified_time" content="2026-09-01T00:00:00Z" />
 
     <link rel="canonical" href="https://commonware.xyz/blogs/clearing" />
 
@@ -108,6 +108,17 @@ O’Grady</a></div>
         uncensored exit costs one onchain transaction: the claim.
         Admission and close coverage are stronger, and finalized claims
         and paired challenge evidence are more compact.</em></p>
+        <p><em>Update (9/1/26): Bajillion’s close is now a sender
+        vector. Each sending row carries one payer-signed cumulative
+        vector endpoint instead of per-edge receipts, the operator’s
+        acceptance is aggregated into one countersignature per proof
+        slice, and three acknowledgment challenges replace the four
+        receipt challenges. The posted close ships movers and edges only
+        against reader-held state, and validators retain their key
+        intervals so dealings travel without unchanged leaves. The
+        walkthrough below describes this design, and the benchmarks are
+        re-measured on it, including a new matrix that varies the active
+        accounts under a fixed account set.</em></p>
         <p><em>Update (8/20/26): Bajillion now uses a 32-byte commitment
         and BLS12-381 multisignatures for the commitment
         certificate.</em></p>
@@ -128,7 +139,7 @@ O’Grady</a></div>
         <p><strong>Bajillion</strong> is a new optimistic clearing
         protocol for many-to-many payments at massive scale. At each
         settlement, all of that activity is bound by a 101-byte header
-        plus certificate; admission also carries a 128-byte root bundle
+        plus certificate; admission also carries a 164-byte root bundle
         and one compact terminal proof. Preconfirmations arrive as fast
         as browsing the web and double as the evidence that holds the
         system honest. Payments flow through a non-custodial operator
@@ -146,71 +157,87 @@ O’Grady</a></div>
         can be prepared while its predecessor remains challengeable, but
         registration must succeed onchain against the exact predecessor
         <span class="math inline">\mathsf{StateRoot}</span> before the
-        operator releases any receipt. An accepted registration creates
-        one immutable admission obligation: construction, certification,
-        and admission may retry against it through the inclusive
-        deadline, but the first later observation permanently faults the
-        deployment. The <span class="math inline">\mathsf{OPEN}</span>
-        registration slot has no heartbeat. The deployment fixes the
-        maximum admission-delay increment and the minimum and maximum
-        challenge duration before it accepts funds, while deposits and
-        user-signed withdrawals carry their own deadlines. Let’s suppose
-        account <span class="math inline">a</span> opens with 100 and
-        wants to pay account <span class="math inline">b</span> 20.</p>
+        operator acknowledges any payment. An accepted registration
+        creates one immutable admission obligation: construction,
+        certification, and admission may retry against it through the
+        inclusive deadline, but the first later observation permanently
+        faults the deployment. The <span
+        class="math inline">\mathsf{OPEN}</span> registration slot has
+        no heartbeat. The deployment fixes the maximum admission-delay
+        increment and the minimum and maximum challenge duration before
+        it accepts funds, while deposits and user-signed withdrawals
+        carry their own deadlines. Let’s suppose account <span
+        class="math inline">a</span> opens with 100 and wants to pay
+        account <span class="math inline">b</span> 20.</p>
         <p><span class="math inline">a</span>’s persistent state <span
         class="math inline">X_a</span> is a balance <span
         class="math inline">B_a</span>, cumulative debit <span
         class="math inline">D_a</span>, operator-promised credit <span
         class="math inline">C_a</span>, a receipt count, and an activity
-        flag. To send <span class="math inline">x&gt;0</span> from <span
+        flag. <span class="math inline">a</span>’s epoch activity is one
+        strictly recipient-sorted vector <span
+        class="math inline">V_a</span> of cumulative entries, one per
+        recipient it paid this epoch, where the entry <span
+        class="math inline">(G,J)</span> for recipient <span
+        class="math inline">b</span> carries <span
+        class="math inline">a</span>’s epoch-cumulative credit to <span
+        class="math inline">b</span> and the number of payments behind
+        it. To send <span class="math inline">x&gt;0</span> from <span
         class="math inline">a</span> to <span
-        class="math inline">b</span>, the payer signs the exact next
-        debit, and the operator accepts by advancing the recipient’s
-        receive shard <span class="math inline">\kappa</span> from its
-        current tip <span class="math inline">(G,J)</span> (which may or
-        may not have been registered with the operator at the start of
-        the epoch):</p>
+        class="math inline">b</span> (who may or may not have been
+        registered with the operator at the start of the epoch), the
+        payer advances <span class="math inline">b</span>’s entry inside
+        its own vector and signs the exact resulting endpoint: an
+        epoch-local sequence number <span
+        class="math inline">n_a</span>, the lifetime cumulative debit,
+        and the vector’s Merkle root. The operator accepts by
+        countersigning the identical body:</p>
         <p><span class="math display">
         S=\mathsf{Sign}_a\bigl(\mathcal
-        A_e,\;a\xrightarrow{\,x\,}b,\;D_a+x\bigr),
+        A_e,\;n_a,\;D_a+x,\;\mathsf{root}(V_a\text{ with
+        }b:(G+x,\,J+1))\bigr),
         \qquad
-        R=\mathsf{Sign}_{\mathsf{op}}\bigl(\mathcal
-        A_e,\;\kappa,\;x,\;\mathsf{TxId}(S),\;(G+x,\,J+1)\bigr).
+        R=\mathsf{CounterSign}_{\mathsf{op}}(S).
         </span></p>
         <p>After authenticating <span class="math inline">S</span> and
         checking spendability, the operator atomically commits the
-        debit, shard advance, close reservation, replay record, and
-        receipt body. It then signs and returns <span
-        class="math inline">R</span>.</p>
-        <p>A send may also batch entries. One signature names strictly
-        recipient-sorted, unique <span
-        class="math inline">(b_i,x_i)</span> pairs under a single
-        cumulative endpoint:</p>
+        debit, entry advance, close reservation, replay record, and
+        acknowledgment body. It then countersigns and returns <span
+        class="math inline">R</span> with one Merkle opening per
+        advanced entry. It actually countersigns the body twice: an
+        ordinary signature for the acknowledgment the payer holds, and
+        an aggregable one so the close can later carry one combined
+        countersignature per proof slice instead of one per row.</p>
+        <p>A send may also batch entries. One signature advances
+        strictly recipient-sorted, unique entries <span
+        class="math inline">(b_i,x_i)</span> under a single cumulative
+        endpoint:</p>
         <p><span class="math display">
-        S=\mathsf{Sign}_a\bigl(\mathcal
-        A_e,\;(a\xrightarrow{\,x_i\,}b_i)_{i=1}^{m},\;D_a+\textstyle\sum_i
-        x_i\bigr).
+        S=\mathsf{Sign}_a\bigl(\mathcal A_e,\;n_a,\;D_a+\textstyle\sum_i
+        x_i,\;\mathsf{root}(V_a\text{ with every }b_i\text{
+        advanced})\bigr).
         </span></p>
-        <p>The operator accepts or rejects the batch as a whole: it
-        atomically commits the debit and every entry’s shard advance,
-        then signs and returns one receipt per entry. Each receipt links
-        the batch’s transaction identifier and its own unique entry
-        recipient. A single payment is a batch of one.</p>
-        <p>The matching pair <span class="math inline">(S,R)</span> is
-        the accepted payment and the preconfirmation, one pair per
-        entry. The payer verifies and durably retains every pair,
-        advances its local <span class="math inline">D_a</span> in that
-        atomic local receipt commit, then forwards each pair to any
-        recipient that will rely on it. The wallet keeps at most one
-        unacknowledged send for this payer: it does not sign the next
-        cumulative endpoint until the prior send’s pairs are all
-        verified and committed. An operator-reported counter is never
-        the payer’s authority. A rejection before the operator’s commit
-        changes no balance; the wallet retains the exact staged request
-        for retry. If the response is lost, retrying that request
-        returns the same pairs without a second debit. This ordering
-        serializes one payer account, not independent payers or a
-        recipient’s receive shards.</p>
+        <p>The operator accepts or rejects the batch as a whole and
+        returns one acknowledgment covering every entry. A single
+        payment is a batch of one.</p>
+        <p>The countersigned endpoint <span class="math inline">R</span>
+        is the accepted payment, and the preconfirmation for one
+        recipient is an entry receipt: <span
+        class="math inline">R</span> plus the Merkle opening of that
+        recipient’s cumulative entry under the acknowledged vector root.
+        The payer verifies and durably retains the acknowledgment and
+        every opening, advances its local <span
+        class="math inline">D_a</span> in that atomic local commit, then
+        forwards each entry receipt to any recipient that will rely on
+        it. The wallet keeps at most one unacknowledged send for this
+        payer: it does not sign the next cumulative endpoint until the
+        prior send’s acknowledgment is verified and committed. An
+        operator-reported counter is never the payer’s authority. A
+        rejection before the operator’s commit changes no balance; the
+        wallet retains the exact staged request for retry. If the
+        response is lost, retrying that request returns the same
+        acknowledgment without a second debit. This ordering serializes
+        one payer account, not independent payers or recipients.</p>
         <p>Figure 1 begins with <span class="math inline">a</span> at
         100, <span class="math inline">b</span> at 40, and the payment
         <span class="math inline">a\xrightarrow{20}b</span>.</p>
@@ -242,47 +269,45 @@ O’Grady</a></div>
             }
           </style>
         </noscript>
-        <div id="clearing-fig-payment" class="clearing-loop" role="img" aria-label="Animated message-sequence timeline of one accepted payment, with rows for payer a, the operator, and recipient b, and time measured in message delays. Payer a signs request S paying b 20 and sends it to the operator. At one instant, with no network hop, the operator verifies S, commits atomically, moving a from 100 to 80 and receive shard kappa zero from (0,0) to (20,1), and then signs receipt R. The response returns to a, which retains the matching pair of S and R and forwards the same pair directly to recipient b with no operator hop.">
-          <noscript>Account a sends one request to one operator and receives one signed response. Verification, atomic storage, and receipt signing are local operator steps, and the payment is accepted at the operator's commit while the response is still in flight. Afterward, a gives the same matching pair directly to b without another operator hop.</noscript>
+        <div id="clearing-fig-payment" class="clearing-loop" role="img" aria-label="Animated message-sequence timeline of one accepted payment, with rows for payer a, the operator, and recipient b, and time measured in message delays. Payer a signs endpoint S paying b 20 and sends it to the operator. At one instant, with no network hop, the operator verifies S, commits atomically, moving a from 100 to 80 and the a-to-b vector entry from (0,0) to (20,1), and then countersigns acknowledgment R. The response returns to a, which retains R with the entry opening and forwards that entry receipt directly to recipient b with no operator hop.">
+          <noscript>Account a sends one signed vector endpoint to one operator and receives one countersigned response. Verification, atomic storage, and countersigning are local operator steps, and the payment is accepted at the operator's commit while the response is still in flight. Afterward, a gives the acknowledgment and its entry opening directly to b without another operator hop.</noscript>
         </div>
         <script type="module" src="clearing.loops.js"></script>
         <div class="image-caption">
-        <p>Figure 1: The payer sends one request and receives one signed
-        response. The operator verifies, commits, and signs locally,
-        adding no network round trip. The commit moves <span
-        class="math inline">a</span> from 100 to 80 and advances <span
-        class="math inline">b</span>’s receive shard <span
-        class="math inline">\kappa_0</span> from <span
+        <p>Figure 1: The payer sends one request and receives one
+        countersigned response. The operator verifies, commits, and
+        signs locally, adding no network round trip. The commit moves
+        <span class="math inline">a</span> from 100 to 80 and advances
+        the <span class="math inline">a\rightarrow b</span> entry in
+        <span class="math inline">a</span>’s own vector from <span
         class="math inline">(0,0)</span> to <span
         class="math inline">(20,1)</span> before <span
         class="math inline">R</span> exists. Once <span
         class="math inline">R</span> returns, <span
-        class="math inline">a</span> sends the same matching <span
-        class="math inline">(S,R)</span> directly to <span
+        class="math inline">a</span> sends the entry receipt, <span
+        class="math inline">R</span> plus <span
+        class="math inline">b</span>’s entry opening, directly to <span
         class="math inline">b</span> as transferable evidence.</p>
         </div>
         <h2 id="optimizing-for-hot-accounts">Optimizing for Hot
         Accounts</h2>
         <p>A single incoming counter would serialize every payment to a
-        popular recipient. Instead, the operator shards each recipient’s
-        incoming payments across a configurable number of receive
-        shards, identified by <span class="math inline">(\mathcal
-        A_e,b,\kappa)</span>. A payment of <span
-        class="math inline">x</span> assigned to shard <span
-        class="math inline">\kappa</span> advances only that shard’s
-        running credit and receipt count:</p>
+        popular recipient. Bajillion has no incoming counter at all:
+        acceptance touches only the payer’s side. A payment of <span
+        class="math inline">x</span> on the edge <span
+        class="math inline">a\rightarrow b</span> advances only that
+        edge’s entry inside <span class="math inline">a</span>’s own
+        vector:</p>
         <p><span class="math display">
-        (G_\kappa,J_\kappa)\longrightarrow(G_\kappa+x,J_\kappa+1),
+        (G_{ab},J_{ab})\longrightarrow(G_{ab}+x,J_{ab}+1),
         \qquad
-        (G_{\kappa&#39;},J_{\kappa&#39;})\text{ unchanged for every
-        }\kappa&#39;\ne\kappa.
+        \text{every other entry of every other vector unchanged.}
         </span></p>
-        <p>Payments assigned to different shards never contend on
-        recipient state, so a hot account’s incoming path scales
-        approximately linearly across parallel workers. When the epoch
-        ends, one terminal signed pair represents each shard, no matter
-        how many payments advanced it (and the sum of all shards is the
-        recipient’s credit).</p>
+        <p>Payments to one hot account from different payers live in
+        disjoint payer vectors and never contend on shared state, so the
+        incoming path scales with the payers, not the recipient. However
+        many payments an edge carries, the epoch ends with one
+        cumulative entry for it.</p>
         <p>Consider accounts <span class="math inline">(a,b,c,d)</span>
         that open with balances <span
         class="math inline">(100,40,25,35)</span> and the epoch
@@ -292,20 +317,25 @@ O’Grady</a></div>
         c\xrightarrow{7}d,\quad d\xrightarrow{5}a,\quad
         c\xrightarrow{4}b,\quad d\xrightarrow{6}b.
         </span></p>
-        <p>Suppose the operator assigns each of <span
-        class="math inline">b</span>’s three incoming payments to its
-        own shard. Their tips end at <span
-        class="math inline">(20,1)</span>, <span
-        class="math inline">(4,1)</span>, and <span
-        class="math inline">(6,1)</span>.</p>
-        <p>A hot recipient can end an epoch with many shards, but
-        proving one tip does not require shipping the rest. Sort the
-        terminal records by shard identifier and commit them as a Merkle
-        tree under <span
-        class="math inline">\mathsf{CreditTipRoot}_e(b)</span>. The root
-        binds the exact shard count, ordered records, total credit, and
-        total receipt count: here <span
-        class="math inline">(h_b,G_b,J_b)=(3,30,3)</span>.</p>
+        <p><span class="math inline">b</span>’s three incoming payments
+        end as the entries <span class="math inline">(20,1)</span> in
+        <span class="math inline">a</span>’s vector, <span
+        class="math inline">(4,1)</span> in <span
+        class="math inline">c</span>’s, and <span
+        class="math inline">(6,1)</span> in <span
+        class="math inline">d</span>’s.</p>
+        <p>Credit is collated lazily, at the close instead of per
+        payment. The operator re-sorts the union of every terminal
+        vector’s entries by recipient and then payer into the transpose,
+        committed under <span
+        class="math inline">\mathsf{TransposeRoot}_e</span>, where each
+        recipient’s entries are one contiguous range. <span
+        class="math inline">b</span>’s range holds those three entries,
+        and its sum is <span class="math inline">b</span>’s credit
+        delta: <span class="math inline">20+4+6=30</span> over 3
+        payments. Proving one edge never requires shipping the rest: the
+        payer-side entry opens under its payer’s signed vector root, and
+        the recipient-side image opens under the transpose root.</p>
         <h2 id="one-row-per-changed-account">One Row per Changed
         Account</h2>
         <p>Netting each account’s debits and credits gives exact
@@ -354,21 +384,28 @@ O’Grady</a></div>
         \mathsf{none}, &amp; \text{otherwise.}
         \end{cases}
         </span></p>
-        <p>The row binds both account states, the terminal outgoing pair
-        <span class="math inline">\mathsf{Out}_a</span> when the account
-        sent, its <span
-        class="math inline">\mathsf{CreditTipRoot}</span>, and a running
-        total <span class="math inline">\mathsf{prefix}_a</span> over
-        the sorted rows so far, where <span
-        class="math inline">\chi</span> flags a withdrawal record and
-        <span class="math inline">h</span> counts shard heads:</p>
+        <p>The row binds both account states, the terminal payer-signed
+        vector endpoint <span class="math inline">\mathsf{Out}_a</span>
+        exactly when the account sent, and a running total <span
+        class="math inline">\mathsf{prefix}_a</span> over the sorted
+        rows so far, where <span class="math inline">\chi</span> flags a
+        withdrawal record, <span class="math inline">\varepsilon</span>
+        counts the row’s vector entries, and <span
+        class="math inline">\iota</span> counts its transpose
+        entries:</p>
         <p><span class="math display">
         \begin{aligned}
         \mathsf{prefix}_a&amp;=\sum_{a&#39;\le
-        a}\bigl(d_{a&#39;},\;c_{a&#39;},\;p_{a&#39;},\;f_{a&#39;},\;w_{a&#39;},\;\chi_{a&#39;},\;h_{a&#39;}\bigr),\\[0.3em]
-        \mathsf{Row}_a&amp;=\bigl(a,\;X_a^0,\;X_a^1,\;\mathsf{Out}_a,\;\mathsf{CreditTipRoot}_e(a),\;o_a,\;\mathsf{prefix}_a\bigr).
+        a}\bigl(d_{a&#39;},\;c_{a&#39;},\;p_{a&#39;},\;f_{a&#39;},\;w_{a&#39;},\;\chi_{a&#39;},\;\varepsilon_{a&#39;},\;\iota_{a&#39;}\bigr),\\[0.3em]
+        \mathsf{Row}_a&amp;=\bigl(a,\;X_a^0,\;X_a^1,\;\mathsf{Out}_a,\;o_a,\;\mathsf{prefix}_a\bigr).
         \end{aligned}
         </span></p>
+        <p>The signed vector root rides inside <span
+        class="math inline">\mathsf{Out}_a</span>’s endpoint body, so a
+        sending row carries its whole epoch fan-out through one
+        signature. The operator’s matching acceptance is not stored per
+        row: each proof slice carries one combined aggregable
+        countersignature over its rows’ endpoint bodies.</p>
         <p>Each prefix must extend the preceding prefix exactly, so the
         terminal row alone carries the epoch’s totals. The rows are
         strictly sorted by account, with exactly one for every account
@@ -384,7 +421,7 @@ O’Grady</a></div>
         <p><span class="math display">
         \begin{aligned}
         \mathsf{ChangeValue}_a
-        &amp;=\bigl(o_a,\;D_a^1,\;\mathsf{OutDigest}_a,\;\mathsf{CreditTipRoot}_e(a)\bigr),\\
+        &amp;=\bigl(o_a,\;D_a^1,\;n_a,\;\mathsf{OutDigest}_a,\;\mathsf{root}(V_a)\bigr),\\
         \mathsf{ChangeGuard}_a
         &amp;=\bigl(a,\;H(\textsf{change-value}\parallel\mathsf{encode}(\mathsf{ChangeValue}_a))\bigr),\\
         \mathbf C_e
@@ -396,16 +433,19 @@ O’Grady</a></div>
         \end{aligned}
         </span></p>
         <p>The <span class="math inline">\mathsf{ChangeValue}</span>
-        exposes only the settlement output, terminal debit,
-        outgoing-body digest, and credit-tip root. <span
+        exposes only the settlement output, terminal debit, terminal
+        sequence number <span class="math inline">n_a</span>,
+        endpoint-body digest, and terminal vector root. <span
         class="math inline">\mathsf{OutDigest}_a</span> binds the
-        unsigned terminal send body (or a distinguished absence). It
-        deliberately does not pin one acknowledging receipt: a batched
-        send is acknowledged by one receipt per entry, and any of them
-        may accompany the committed row. Validators still check the
-        complete row in the proof-slice corpus, but the change tree
-        commits only this public projection. Membership and challenge
-        proofs expose the <span
+        unsigned terminal endpoint body (or a distinguished absence).
+        Together they pin the exact acknowledged terminal a challenger
+        contradicts: a retained acknowledgment above it in debit, at its
+        sequence with a different body, or equal-valued at a later
+        sequence is fraud evidence, and any of the batch’s entry
+        receipts opens against the committed root. Validators still
+        check the complete row in the proof-slice corpus, but the change
+        tree commits only this public projection. Membership and
+        challenge proofs expose the <span
         class="math inline">\mathsf{ChangeValue}</span> rather than the
         full row, while its digested guard keeps ordered range
         boundaries compact.</p>
@@ -451,50 +491,77 @@ O’Grady</a></div>
         shared boundaries. For <span class="math inline">S</span>
         slices, exactly <span class="math inline">S+1</span> boundaries
         authenticate the predecessor-state, change, and successor-state
-        positions plus the cumulative prefix at each cut:</p>
+        positions plus the cumulative prefix at each cut, alongside two
+        running accumulator checksums <span
+        class="math inline">u_j</span> and <span
+        class="math inline">v_j</span>:</p>
         <p><span class="math display">
-        \mathsf{Coverage}_e=\bigl((o_j,r_j,c_j,\mathsf{prefix}_j)\bigr)_{j=0}^{S}
+        \mathsf{Coverage}_e=\bigl((o_j,r_j,c_j,\mathsf{prefix}_j,u_j,v_j)\bigr)_{j=0}^{S}
         \xrightarrow{\ \mathsf{BMT}\ }
         \mathsf{CoverageRoot}_e.
         </span></p>
-        <p>Each slice opens two adjacent boundaries, making the three
+        <p>The checksums are what let a committee verify the
+        recipient-major transpose piecewise. Every edge terminal folds
+        one canonical key, the payer, recipient, cumulative credit, and
+        count, into an order-independent lattice-hash multiset
+        accumulator: <span class="math inline">u</span> over the vector
+        entries in payer-major row order and <span
+        class="math inline">v</span> over the transpose entries in
+        recipient-major order. Each slice resumes both accumulators from
+        its opening boundary, folds its own interval, and must land
+        exactly on its closing boundary. Terminal equality <span
+        class="math inline">u_S=v_S</span> then proves the transpose is
+        a permutation of the union of the payer vectors, so every
+        promised credit is backed by exactly one payer-signed debit
+        entry: double-entry bookkeeping as a multiset equation, verified
+        without any validator seeing both sides of an edge.</p>
+        <p>Each slice opens two adjacent boundaries, making its
         intervals gap-free across neighboring dealings. The
-        withdrawal-count positions in the same prefixes select that
-        slice’s exact contiguous interval under <span
-        class="math inline">\mathsf{WithdrawalOutputRoot}_e</span>. A
+        withdrawal-count, vector-entry, and transpose-entry positions in
+        the same prefixes select that slice’s exact contiguous intervals
+        under <span
+        class="math inline">\mathsf{WithdrawalOutputRoot}_e</span> and
+        <span class="math inline">\mathsf{TransposeRoot}_e</span>. A
         terminal coverage proof authenticates the final vector counts
         and aggregate totals.</p>
         <div class="image-caption">
         <p>Figure 2: Opening and successor state are rebuilt from sorted
         live accounts. The coverage root binds each slice’s exact
-        positions in both state vectors and the change vector, so
-        account insertion and deletion cannot create a gap or overlap
-        between validator dealings.</p>
+        positions in both state vectors, the change vector, and the
+        transpose, so account insertion and deletion cannot create a gap
+        or overlap between validator dealings.</p>
         </div>
         <p>The predecessor state root belongs to <span
-        class="math inline">\mathsf{CloseContext}_e</span>. The four
-        other roots form the admission witness, and the 32-byte header
-        binds every root in its contextual role:</p>
+        class="math inline">\mathsf{CloseContext}_e</span>. The five
+        other roots and the exact transpose length form the admission
+        witness, and the 32-byte header binds every root in its
+        contextual role:</p>
         <p><span class="math display">
         \begin{aligned}
         \mathsf{RootBundle}_e
-        &amp;=\bigl(\mathsf{ChangeRoot}_e,\;\mathsf{WithdrawalOutputRoot}_e,\;\mathsf{StateRoot}_{e+1},\;\mathsf{CoverageRoot}_e\bigr),\\
+        &amp;=\bigl(\mathsf{ChangeRoot}_e,\;\mathsf{WithdrawalOutputRoot}_e,\;\mathsf{StateRoot}_{e+1},\;\mathsf{CoverageRoot}_e,\;\mathsf{TransposeRoot}_e,\;\ell_e\bigr),\\
         \mathsf{Commitment}_e=\mathsf{Header}_e
-        &amp;=H\!\left(\mathsf{CloseContext}_e\parallel\textsf{change}:\mathsf{ChangeRoot}_e\parallel\textsf{withdrawal-output}:\mathsf{WithdrawalOutputRoot}_e\parallel\textsf{successor}:\mathsf{StateRoot}_{e+1}\parallel\textsf{coverage}:\mathsf{CoverageRoot}_e\right).
+        &amp;=H\!\left(\mathsf{CloseContext}_e\parallel\mathsf{ChangeRoot}_e\parallel\mathsf{WithdrawalOutputRoot}_e\parallel\mathsf{StateRoot}_{e+1}\parallel\mathsf{CoverageRoot}_e\parallel\mathsf{TransposeRoot}_e\parallel\ell_e\right).
         \end{aligned}
         </span></p>
-        <p>The terminal prefix carries gross debit <span
+        <p>The committed transpose length <span
+        class="math inline">\ell_e</span> closes a wedge: slice openings
+        prove membership but cannot see past their own interval, so
+        without it a certified transpose could carry trailing leaves no
+        slice opens. The terminal boundary requires <span
+        class="math inline">\ell_e</span> to equal its transpose-entry
+        count. The terminal prefix carries gross debit <span
         class="math inline">D_e</span>, credit <span
         class="math inline">C_e</span>, external payouts <span
         class="math inline">P_e</span>, deposits <span
         class="math inline">F_e</span>, and withdrawals <span
-        class="math inline">W_e</span>, with the row, record, and shard
-        counts alongside. One terminal coverage proof authenticates
-        those totals without listing their recipients. Admission also
-        consumes the 128-byte <span
+        class="math inline">W_e</span>, with the row, withdrawal-record,
+        and entry counts alongside. One terminal coverage proof
+        authenticates those totals without listing their recipients.
+        Admission also consumes the 164-byte <span
         class="math inline">\mathsf{RootBundle}</span> and terminal
         proof as witness data; neither is included in the 32-byte
-        commitment figure. The live leaves, shard vectors, changed rows,
+        commitment figure. The live leaves, edge vectors, changed rows,
         withdrawal outputs, and remaining Merkle openings stay offchain
         as an authenticated corpus <span class="math inline">\mathcal
         D_e</span> that must remain retrievable through the challenge
@@ -503,12 +570,13 @@ O’Grady</a></div>
         Front</h2>
         <p>Before the chain queues a close for finalization, the
         operator disseminates each validator’s dealing. A validator
-        authenticates every assigned slice, checks every local row and
-        prefix transition, verifies every distinct send and receipt
-        signature across the dealing in one randomized batch, retains
-        the evidence through the challenge deadline, and only then seals
-        the shared commitment. No validator needs the complete corpus,
-        but the assignments cover it exactly.</p>
+        authenticates every assigned slice, checks every local row,
+        prefix transition, and accumulator transition, verifies each
+        slice’s combined operator countersignature and every distinct
+        payer authorization across the dealing in one randomized batch,
+        retains the evidence through the challenge deadline, and only
+        then seals the shared commitment. No validator needs the
+        complete corpus, but the assignments cover it exactly.</p>
         <p>Prefix continuity ties the epoch totals to the rows beneath
         them. The deposit total and withdrawal record count must
         reproduce the chain-sealed boundary. Every ordinary withdrawal
@@ -558,40 +626,44 @@ O’Grady</a></div>
         <p>Sealing is not a totals-only check. Each validator
         authenticates the exact coverage and state ranges in its slices,
         every changed-account equation and settlement output, terminal
-        outgoing pair, terminal receive-shard head, boundary
-        contribution, prefix transition, state update, and distinct
-        payment signature in its dealing. The terminal prefix then binds
-        the exact vector lengths, deposits, withdrawals, external
-        payouts, payment conservation, and successor liability. What
-        certification cannot establish is that the operator never signed
-        an additional receipt outside the selected public corpus.</p>
-        <p>Each payer account is one linear cumulative-debit sequence,
-        and a batch advances it by exactly its total. A wallet using the
-        base safety guarantee stages one exact send, retries those same
-        bytes after response loss, verifies and durably commits every
-        matching pair, advances its locally owned debit, and only then
-        signs the next endpoint. A later endpoint authorizes the whole
-        debit delta up to that value, while the public row carries only
-        the terminal outgoing pair. If a wallet deliberately signs
-        several cumulative endpoints before obtaining the earlier
-        receipts, an intermediate receipt may be neither held privately
-        nor selected as that terminal pair; that exposure is outside the
-        base guarantee, and it covers the entries of a batch whose
-        receipts the wallet never obtained. This per-payer ordering does
-        not limit parallel sends from independent accounts or parallel
-        incoming receive shards.</p>
-        <p>The linked pair is private, transferable evidence. Any holder
-        may submit a challenge; the chain does not require the caller to
-        be the payer or recipient. Neither role must remain continuously
-        online, but the availability assumption is per receipt: at least
-        one honest holder must obtain and retain the required pair or
-        pairs and get the bounded challenge included by <span
+        payer-signed endpoint, outgoing vector, transpose interval,
+        accumulator transition, boundary contribution, prefix
+        transition, state update, combined operator countersignature,
+        and distinct payer signature in its dealing. The terminal
+        boundary then binds the exact vector lengths, deposits,
+        withdrawals, external payouts, payment conservation, the
+        multiset equality between the two edge orderings, and successor
+        liability. What certification cannot establish is that the
+        operator never countersigned an additional endpoint outside the
+        selected public corpus.</p>
+        <p>Each payer account is one linear cumulative-debit sequence
+        over one epoch-cumulative outgoing vector, and a batch advances
+        both by exactly its total. A wallet using the base safety
+        guarantee stages one exact send, retries those same bytes after
+        response loss, verifies and durably commits the acknowledgment
+        and every entry opening, advances its locally owned debit, and
+        only then signs the next endpoint. A later endpoint authorizes
+        the whole debit delta up to that value, while the public row
+        carries only the terminal endpoint. If a wallet deliberately
+        signs several cumulative endpoints before obtaining the earlier
+        acknowledgments, an intermediate acknowledgment may be neither
+        held privately nor selected as that terminal; that exposure is
+        outside the base guarantee. This per-payer ordering does not
+        limit parallel sends from independent accounts, and recipients
+        have no acceptance-path state to serialize at all.</p>
+        <p>The entry receipt is private, transferable evidence. Any
+        holder may submit a challenge; the chain does not require the
+        caller to be the payer or recipient. Neither role must remain
+        continuously online, but the availability assumption is per
+        acknowledgment: at least one honest holder must obtain and
+        retain the required acknowledgment or entry receipt and get the
+        bounded challenge included by <span
         class="math inline">\Delta_e</span>. A recipient that wants an
-        independently enforceable preconfirmation obtains the pair
-        before relying on it. Honest validators retain public proof
-        slices, but they cannot reconstruct a private receipt that no
-        independent holder received or retained. This is not a single
-        global observer assumption: different receipts may depend on
+        independently enforceable preconfirmation obtains its entry
+        receipt before relying on it. Honest validators retain public
+        proof slices, but they cannot reconstruct private evidence that
+        no independent holder received or retained. This is not a single
+        global observer assumption: different edges may depend on
         different holders.</p>
         <p>The configured challenge duration therefore trades
         clean-settlement latency for evidence-holder offline tolerance.
@@ -610,17 +682,17 @@ O’Grady</a></div>
         Challenge</h2>
         <p>Validation establishes that the bound corpus satisfies the
         public relation. However, it cannot establish that the corpus
-        contains every receipt the operator signed and delivered
-        privately.</p>
+        contains every acknowledgment the operator countersigned and
+        delivered privately.</p>
         <p>Fix a public corpus <span class="math inline">\mathcal
         D_e</span> and accepting certificate, proof, or attestation
         <span class="math inline">\zeta</span>. Compare two executions:
-        in <span class="math inline">\Xi_0</span> the operator signs
-        exactly the receipts represented by <span
+        in <span class="math inline">\Xi_0</span> the operator
+        countersigns exactly the acknowledgments represented by <span
         class="math inline">\mathcal D_e</span>, while in <span
         class="math inline">\Xi_1</span> it produces the same <span
         class="math inline">(\mathcal D_e,\zeta)</span> and privately
-        delivers one more valid receipt <span
+        delivers one more valid acknowledgment <span
         class="math inline">R^+</span>. The close verifier has the same
         view in both:</p>
         <p><span class="math display">
@@ -630,53 +702,48 @@ O’Grady</a></div>
         accept <span class="math inline">\Xi_1</span>. A validation
         committee (or TEE or SNARK/STARK) can certify the exact
         public-validity relation over selected inputs. None proves the
-        nonexistence of an additional private signature. Every
-        represented payment in challenge evidence retains both its payer
-        and operator signatures; paired forms share repeated relation
-        fields without discarding either signature. Through the
+        nonexistence of an additional private signature. Every retained
+        acknowledgment in challenge evidence carries both its payer and
+        operator signatures over one endpoint body. Through the
         inclusive deadline <span
         class="math inline">t\le\Delta_e</span>, any holder may submit
-        one of four bounded contradictions:</p>
+        one of three bounded contradictions:</p>
         <ol type="1">
-        <li><p><strong>Payer debit contradiction.</strong> A matching
-        acknowledged pair carries a debit above the public debit marker,
-        or the same debit with a different send body. A bare payer
-        request is insufficient. The receipt proves operator
-        acknowledgement. Equal endpoints compare only the signed
-        authorization, since any entry receipt may accompany a committed
-        batched send.</p></li>
-        <li><p><strong>Higher receive-shard tip.</strong> Authenticate
-        the public tip <span
-        class="math inline">(G^\star,J^\star)</span> for one shard,
-        using <span class="math inline">(0,0)</span> for authenticated
-        absence, and present a matching retained receipt at <span
-        class="math inline">(G^+,J^+)</span>. Either strict increase,
-        <span class="math inline">G^+&gt;G^\star</span> or <span
+        <li><p><strong>Higher acknowledged debit.</strong> A retained
+        dual-signed endpoint carries a cumulative debit above the public
+        terminal debit, a countersigned different body at the committed
+        terminal sequence number, or an equal endpoint at a strictly
+        later sequence. A bare payer authorization is insufficient. The
+        countersignature proves operator acknowledgment.</p></li>
+        <li><p><strong>Higher acknowledged entry.</strong> Authenticate
+        the public terminal entry <span
+        class="math inline">(G^\star,J^\star)</span> for one
+        payer-recipient edge under the sender row’s committed vector
+        root, using <span class="math inline">(0,0)</span> for
+        authenticated absence, and present a retained entry at <span
+        class="math inline">(G^+,J^+)</span> opened under its own
+        acknowledged root. Either strict increase, <span
+        class="math inline">G^+&gt;G^\star</span> or <span
         class="math inline">J^+&gt;J^\star</span>, is a
         contradiction.</p></li>
-        <li><p><strong>Inconsistent receipt range.</strong> For lower
-        and upper pairs in one anchor, recipient, and shard, where each
-        receipt is linked to its own valid send, adjacent receipts must
-        increase credit by exactly the upper payment, and an index gap
-        must leave at least one base unit for each omitted positive
-        payment. The lower endpoint may also be the canonical shard
-        start, in which case the challenge carries a single retained
-        pair. A violation is a contradiction.</p></li>
-        <li><p><strong>Receipt fork.</strong> Two distinct linked
-        receipt bodies either reuse one receipt index within a shard or
-        acknowledge the same payer transaction entry differently.
-        Entries of one batched send share the transaction identifier
-        without forking it. Different signature bytes over one identical
-        receipt body are not a fork.</p></li>
+        <li><p><strong>Acknowledgment fork.</strong> Two distinct
+        operator-countersigned endpoint bodies at one payer sequence
+        number. Only the operator countersignatures need to verify,
+        since a fork is the operator’s fault whatever produced the payer
+        halves. Different signature bytes over one identical body are
+        not a fork.</p></li>
         </ol>
+        <p>There is no interior receipt range to reason about: every
+        counted value is a terminal opening under a payer-signed vector
+        root.</p>
         <p>Each challenge is one-shot. There is no interactive dispute
         game and no execution trace to bisect: the holder submits the
         signed pair or pairs and the bounded openings that expose the
         contradiction, and the chain checks fixed signature, arithmetic,
         and Merkle predicates in one call.</p>
-        <p>A successful receipt challenge blocks the challenged slot and
-        every pending descendant from finalizing. Earlier pending slots
-        keep their ordinary challenge windows and may still finalize in
+        <p>A successful challenge blocks the challenged slot and every
+        pending descendant from finalizing. Earlier pending slots keep
+        their ordinary challenge windows and may still finalize in
         order.</p>
         <h2 id="a-deadline-to-exit">A Deadline to Exit</h2>
         <p>A successful challenge stops a contested close from
@@ -854,8 +921,8 @@ O’Grady</a></div>
         <p><span class="math display">
         80-20+5-15=50=(85)-20-15.
         </span></p>
-        <div id="clearing-fig-rollover" class="clearing-loop" role="img" aria-label="Animated owner-preserved rollover for account a. An accepted epoch-e pair leaves one preserved head of 80 and rotates that head into epoch e plus 1. Two connected rails branch from the same 80. The exact predecessor close reaches 85. The live successor rail spends 20 to reach 60, reconciles to 65, and spends 15 to reach 50. One vertical marker identifies the same missing predecessor credit of 5 in both calculations. The 85 close terminates on its own rail and never overwrites the live head.">
-          <noscript>An accepted epoch-e pair leaves one preserved head of 80. The exact-close rail computes 80 plus 5 as 85. The live rail computes 80 minus 20 plus the same 5 minus 15 as 50. Reconciliation adds the shared missing credit without installing 85 over the live head.</noscript>
+        <div id="clearing-fig-rollover" class="clearing-loop" role="img" aria-label="Animated owner-preserved rollover for account a. An accepted epoch-e send leaves one preserved head of 80 and rotates that head into epoch e plus 1. Two connected rails branch from the same 80. The exact predecessor close reaches 85. The live successor rail spends 20 to reach 60, reconciles to 65, and spends 15 to reach 50. One vertical marker identifies the same missing predecessor credit of 5 in both calculations. The 85 close terminates on its own rail and never overwrites the live head.">
+          <noscript>An accepted epoch-e send leaves one preserved head of 80. The exact-close rail computes 80 plus 5 as 85. The live rail computes 80 minus 20 plus the same 5 minus 15 as 50. Reconciliation adds the shared missing credit without installing 85 over the live head.</noscript>
         </div>
         <div class="image-caption">
         <p>Figure 3: Both rails branch from the same preserved 80. The
@@ -874,8 +941,8 @@ O’Grady</a></div>
         <p>The live balance is not monotone, since successor payments
         spend it down. The one-sidedness is all on the predecessor’s
         side: completion can add missing credit but can never discover
-        another accepted debit. Boundary operations and shard moves obey
-        the same rule: the live head is only ever adjusted, never
+        another accepted debit. Boundary operations and credit imports
+        obey the same rule: the live head is only ever adjusted, never
         overwritten.</p>
         <p>Rollover changes only live serving state, without changing
         the evidence required for finalization. The close still produces
@@ -888,33 +955,39 @@ O’Grady</a></div>
         divides the evidence into 256 slices. Strategy-enabled prepare,
         deal, seal, and challenge checks share one adaptive eight-worker
         pool (AWS c8a.4xlarge). Certificate and withdrawal-claim checks
-        are scalar calling-thread measurements. The matrix varies <span
-        class="math inline">N</span>, the number of live accounts. Every
-        account sends, the same 512 accounts receive, and each recipient
-        uses one receive shard. The fixture therefore holds <span
-        class="math inline">A=N</span>, <span
-        class="math inline">B=512</span>, and <span
-        class="math inline">h=1</span> while <span
-        class="math inline">N</span> grows from 1,024 to one
-        million.</p>
+        are scalar calling-thread measurements. The first matrix varies
+        <span class="math inline">N</span>, the number of live accounts.
+        Every account sends one entry, and the same 512 accounts
+        receive. The fixture therefore holds <span
+        class="math inline">A=N</span> and <span
+        class="math inline">B=512</span> while <span
+        class="math inline">N</span> grows from 1,024 to one million; a
+        second matrix afterward holds <span class="math inline">N</span>
+        at one million while the active accounts shrink.</p>
         <p>No payment count appears because none is needed: rows and
-        shard tips carry fixed-width cumulative totals, so every size in
-        the table is the same for any <span
+        vector entries carry fixed-width cumulative totals, so every
+        size in the table is the same for any <span
         class="math inline">T</span>. Every fixture send is a batch of
-        one entry. A terminal batch with more entries adds 40 bytes per
-        extra entry to its row and to each shard head that carries it,
-        still independent of <span class="math inline">T</span>. Each
-        stage is measured independently. The fixture constructs the
-        predecessor-state proof cache before measurement. Prepare builds
-        the compact change, withdrawal-output, successor-state, and
-        coverage roots from the owned close inputs while reusing that
+        one entry. A terminal batch with more entries adds one 48-byte
+        entry to its committed vector (and that entry’s transpose image
+        to the dealt slices), still independent of <span
+        class="math inline">T</span>. Each stage is measured
+        independently. The fixture constructs the predecessor-state
+        proof cache before measurement. Prepare builds the compact
+        change, withdrawal-output, successor-state, coverage, and
+        transpose roots from the owned close inputs while reusing that
         cache; deal derives all proof slices from the prepared close;
         seal checks and retains the busiest validator’s dealing,
-        verifies every distinct send and receipt signature in one
-        randomized batch, and signs the commitment. Withdrawal claims
-        are measured from separately constructed fixtures, and the
-        claims table after the matrix scales their own variable, the
-        close’s withdrawal count, on its own axis.</p>
+        verifies each slice’s combined operator countersignature and
+        every distinct payer authorization in one randomized batch, and
+        signs the commitment. The posted close is the corpus a reader
+        holding the previous certified state needs: live accounts ride
+        as one-or-two-byte rank gaps and the transpose, predecessor
+        states, successor states, and prefixes are all derived rather
+        than shipped. Withdrawal claims are measured from separately
+        constructed fixtures, and the claims table after the matrix
+        scales their own variable, the close’s withdrawal count, on its
+        own axis.</p>
         <div class="clearing-benchmark-table">
         <table>
           <thead>
@@ -932,40 +1005,47 @@ O’Grady</a></div>
           <tbody>
             <tr><th colspan="5" style="text-align:left;">Construction</th></tr>
             <tr>
+              <td style="padding-left:20px;">posted close</td>
+              <td style="text-align:right;">107 KB</td>
+              <td style="text-align:right;">0.94 MB</td>
+              <td style="text-align:right;">9.29 MB</td>
+              <td style="text-align:right;">92.8 MB</td>
+            </tr>
+            <tr>
               <td style="padding-left:20px;">proof-slice corpus</td>
-              <td style="text-align:right;">1.26 MB</td>
-              <td style="text-align:right;">6.57 MB</td>
-              <td style="text-align:right;">59.0 MB</td>
-              <td style="text-align:right;">583 MB</td>
+              <td style="text-align:right;">2.11 MB</td>
+              <td style="text-align:right;">6.52 MB</td>
+              <td style="text-align:right;">50.3 MB</td>
+              <td style="text-align:right;">487 MB</td>
             </tr>
             <tr>
               <td style="padding-left:20px;">prepare</td>
-              <td style="text-align:right;">0.855 ms</td>
-              <td style="text-align:right;">3.58 ms</td>
-              <td style="text-align:right;">29.3 ms</td>
-              <td style="text-align:right;">317 ms</td>
+              <td style="text-align:right;">2.61 ms</td>
+              <td style="text-align:right;">20.5 ms</td>
+              <td style="text-align:right;">189 ms</td>
+              <td style="text-align:right;">1.85 s</td>
             </tr>
             <tr>
               <td style="padding-left:20px;">deal</td>
-              <td style="text-align:right;">0.198 ms</td>
-              <td style="text-align:right;">0.313 ms</td>
-              <td style="text-align:right;">3.08 ms</td>
-              <td style="text-align:right;">32.6 ms</td>
+              <td style="text-align:right;">0.219 ms</td>
+              <td style="text-align:right;">0.373 ms</td>
+              <td style="text-align:right;">4.12 ms</td>
+              <td style="text-align:right;">93.6 ms</td>
             </tr>
             <tr><th colspan="5" style="text-align:left;">Certification</th></tr>
             <tr>
               <td style="padding-left:20px;">largest dealing</td>
-              <td style="text-align:right;">0.866 MB <span style="color:#666;">(-31.3%)</span></td>
-              <td style="text-align:right;">4.46 MB <span style="color:#666;">(-32.2%)</span></td>
-              <td style="text-align:right;">39.8 MB <span style="color:#666;">(-32.6%)</span></td>
-              <td style="text-align:right;">392 MB <span style="color:#666;">(-32.8%)</span></td>
+              <td style="text-align:right;">1.43 MB <span style="color:#666;">(-32.2%)</span></td>
+              <td style="text-align:right;">4.43 MB <span style="color:#666;">(-32.0%)</span></td>
+              <td style="text-align:right;">35.4 MB <span style="color:#666;">(-29.5%)</span></td>
+              <td style="text-align:right;">343 MB <span style="color:#666;">(-29.5%)</span></td>
             </tr>
             <tr>
               <td style="padding-left:20px;">seal</td>
-              <td style="text-align:right;">2.49 ms</td>
-              <td style="text-align:right;">12.5 ms</td>
-              <td style="text-align:right;">98.7 ms</td>
-              <td style="text-align:right;">1.12 s</td>
+              <td style="text-align:right;">17.5 ms</td>
+              <td style="text-align:right;">57.2 ms</td>
+              <td style="text-align:right;">447 ms</td>
+              <td style="text-align:right;">4.34 s</td>
             </tr>
             <tr><th colspan="5" style="text-align:left;">Settlement</th></tr>
             <tr>
@@ -984,67 +1064,53 @@ O’Grady</a></div>
             </tr>
             <tr>
               <td style="padding-left:20px;">check certified commitment</td>
-              <td style="text-align:right;"><strong>0.670 ms</strong></td>
-              <td style="text-align:right;"><strong>0.669 ms</strong></td>
-              <td style="text-align:right;"><strong>0.669 ms</strong></td>
-              <td style="text-align:right;"><strong>0.669 ms</strong></td>
+              <td style="text-align:right;"><strong>0.672 ms</strong></td>
+              <td style="text-align:right;"><strong>0.672 ms</strong></td>
+              <td style="text-align:right;"><strong>0.672 ms</strong></td>
+              <td style="text-align:right;"><strong>0.674 ms</strong></td>
             </tr>
             <tr><th colspan="5" style="text-align:left;">Dispute</th></tr>
             <tr>
-              <td style="padding-left:20px;">LatestAcknowledgedSend challenge</td>
-              <td style="text-align:right;"><strong>669 B</strong></td>
-              <td style="text-align:right;"><strong>797 B</strong></td>
-              <td style="text-align:right;"><strong>893 B</strong></td>
-              <td style="text-align:right;"><strong>989 B</strong></td>
+              <td style="padding-left:20px;">HigherAckDebit challenge</td>
+              <td style="text-align:right;"><strong>620 B</strong></td>
+              <td style="text-align:right;"><strong>748 B</strong></td>
+              <td style="text-align:right;"><strong>844 B</strong></td>
+              <td style="text-align:right;"><strong>940 B</strong></td>
             </tr>
             <tr>
-              <td style="padding-left:20px;">HigherShardTip challenge</td>
-              <td style="text-align:right;"><strong>663 B</strong></td>
-              <td style="text-align:right;"><strong>791 B</strong></td>
-              <td style="text-align:right;"><strong>887 B</strong></td>
-              <td style="text-align:right;"><strong>983 B</strong></td>
+              <td style="padding-left:20px;">HigherAckEntry challenge</td>
+              <td style="text-align:right;"><strong>671 B</strong></td>
+              <td style="text-align:right;"><strong>799 B</strong></td>
+              <td style="text-align:right;"><strong>895 B</strong></td>
+              <td style="text-align:right;"><strong>991 B</strong></td>
             </tr>
             <tr>
-              <td style="padding-left:20px;">InconsistentReceiptRange challenge</td>
-              <td style="text-align:right;"><strong>492 B</strong></td>
-              <td style="text-align:right;"><strong>492 B</strong></td>
-              <td style="text-align:right;"><strong>492 B</strong></td>
-              <td style="text-align:right;"><strong>492 B</strong></td>
+              <td style="padding-left:20px;">AckFork challenge</td>
+              <td style="text-align:right;"><strong>417 B</strong></td>
+              <td style="text-align:right;"><strong>417 B</strong></td>
+              <td style="text-align:right;"><strong>417 B</strong></td>
+              <td style="text-align:right;"><strong>417 B</strong></td>
             </tr>
             <tr>
-              <td style="padding-left:20px;">ReceiptFork challenge</td>
-              <td style="text-align:right;"><strong>484 B</strong></td>
-              <td style="text-align:right;"><strong>484 B</strong></td>
-              <td style="text-align:right;"><strong>484 B</strong></td>
-              <td style="text-align:right;"><strong>484 B</strong></td>
+              <td style="padding-left:20px;">check HigherAckDebit</td>
+              <td style="text-align:right;"><strong>0.280 ms</strong></td>
+              <td style="text-align:right;"><strong>0.275 ms</strong></td>
+              <td style="text-align:right;"><strong>0.270 ms</strong></td>
+              <td style="text-align:right;"><strong>0.271 ms</strong></td>
             </tr>
             <tr>
-              <td style="padding-left:20px;">check LatestAcknowledgedSend</td>
-              <td style="text-align:right;"><strong>0.301 ms</strong></td>
-              <td style="text-align:right;"><strong>0.306 ms</strong></td>
-              <td style="text-align:right;"><strong>0.299 ms</strong></td>
-              <td style="text-align:right;"><strong>0.314 ms</strong></td>
+              <td style="padding-left:20px;">check HigherAckEntry</td>
+              <td style="text-align:right;"><strong>0.334 ms</strong></td>
+              <td style="text-align:right;"><strong>0.329 ms</strong></td>
+              <td style="text-align:right;"><strong>0.323 ms</strong></td>
+              <td style="text-align:right;"><strong>0.324 ms</strong></td>
             </tr>
             <tr>
-              <td style="padding-left:20px;">check HigherShardTip</td>
-              <td style="text-align:right;"><strong>0.297 ms</strong></td>
-              <td style="text-align:right;"><strong>0.303 ms</strong></td>
-              <td style="text-align:right;"><strong>0.306 ms</strong></td>
-              <td style="text-align:right;"><strong>0.305 ms</strong></td>
-            </tr>
-            <tr>
-              <td style="padding-left:20px;">check InconsistentReceiptRange</td>
-              <td style="text-align:right;"><strong>0.418 ms</strong></td>
-              <td style="text-align:right;"><strong>0.424 ms</strong></td>
-              <td style="text-align:right;"><strong>0.429 ms</strong></td>
-              <td style="text-align:right;"><strong>0.429 ms</strong></td>
-            </tr>
-            <tr>
-              <td style="padding-left:20px;">check ReceiptFork</td>
-              <td style="text-align:right;"><strong>0.422 ms</strong></td>
-              <td style="text-align:right;"><strong>0.419 ms</strong></td>
-              <td style="text-align:right;"><strong>0.428 ms</strong></td>
-              <td style="text-align:right;"><strong>0.425 ms</strong></td>
+              <td style="padding-left:20px;">check AckFork</td>
+              <td style="text-align:right;"><strong>0.327 ms</strong></td>
+              <td style="text-align:right;"><strong>0.326 ms</strong></td>
+              <td style="text-align:right;"><strong>0.323 ms</strong></td>
+              <td style="text-align:right;"><strong>0.318 ms</strong></td>
             </tr>
           </tbody>
         </table>
@@ -1058,7 +1124,7 @@ O’Grady</a></div>
         class="math inline">W</span>, and both the <span
         class="math inline">\mathsf{Amount}</span> and <span
         class="math inline">\mathsf{Close}</span> claims share the
-        shape. Verification recomputes that one path, 0.313 µs at a
+        shape. Verification recomputes that one path, 0.30 µs at a
         single output on the same c8a.4xlarge, adding one hash per
         doubling of <span class="math inline">W</span>.</p>
         <div class="clearing-benchmark-table">
@@ -1092,8 +1158,8 @@ O’Grady</a></div>
         <p>Figure 4: The operator prepares the roots, then deals the
         evidence into slices. Each validator seals its dealing by
         checking and retaining its assigned slices before signing the
-        commitment. A receipt holder with evidence of fraud can dispute
-        the certified commitment with a challenge that the chain
+        commitment. An acknowledgment holder with evidence of fraud can
+        dispute the certified commitment with a challenge that the chain
         checks.</p>
         </div>
         <img class="clearing-benchmark-plot" src="/imgs/clearing-benchmark-matrix.svg" alt="Three log-scale plots show measured latency for preparing roots, dealing all evidence slices, and sealing the busiest validator dealing as live accounts increase from 1,024 to one million.">
@@ -1104,26 +1170,87 @@ O’Grady</a></div>
         scale approximately linearly once the fixed costs are
         amortized.</p>
         </div>
-        <p>Even the largest validator dealing is 31.3–32.8% smaller than
+        <p>Even the largest validator dealing is 29.5–32.2% smaller than
         the complete proof-slice corpus because it contains only that
         validator’s assigned slices. At one million live accounts it
-        checks 392 MB rather than the complete 583 MB corpus. This is
-        the explicit cost of the simpler fresh-BMT design: evidence
-        distribution grows with live state, while settlement and
-        disputes remain bounded.</p>
+        checks 343 MB rather than the complete 487 MB corpus. That is
+        the every-account-sends worst case, and it hides the design’s
+        real lever: dealings travel without unchanged state, because
+        every slice assignee retains its key interval across closes and
+        hydrates each dealing against it. When every account changes
+        there is nothing to strip. When the movers are a fraction of the
+        account set, the posted close and the dealt wire follow the
+        movers:</p>
+        <div class="clearing-benchmark-table">
+        <table>
+          <thead>
+            <tr>
+              <th rowspan="2" style="text-align:left; vertical-align:bottom;">Stage</th>
+              <th colspan="4" style="text-align:center;">Active accounts (<em>A</em>) at <em>N</em> = 1,000,000</th>
+            </tr>
+            <tr>
+              <th style="text-align:right;">1,024</th>
+              <th style="text-align:right;">10,000</th>
+              <th style="text-align:right;">100,000</th>
+              <th style="text-align:right;">1,000,000</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td style="padding-left:20px;">posted close</td>
+              <td style="text-align:right;"><strong>95.5 KB</strong></td>
+              <td style="text-align:right;"><strong>0.93 MB</strong></td>
+              <td style="text-align:right;"><strong>9.28 MB</strong></td>
+              <td style="text-align:right;">92.8 MB</td>
+            </tr>
+            <tr>
+              <td style="padding-left:20px;">largest dealing</td>
+              <td style="text-align:right;"><strong>1.65 MB</strong></td>
+              <td style="text-align:right;"><strong>6.00 MB</strong></td>
+              <td style="text-align:right;"><strong>36.1 MB</strong></td>
+              <td style="text-align:right;">343 MB</td>
+            </tr>
+            <tr>
+              <td style="padding-left:20px;">prepare</td>
+              <td style="text-align:right;">167 ms</td>
+              <td style="text-align:right;">182 ms</td>
+              <td style="text-align:right;">305 ms</td>
+              <td style="text-align:right;">1.85 s</td>
+            </tr>
+            <tr>
+              <td style="padding-left:20px;">seal</td>
+              <td style="text-align:right;">65.6 ms</td>
+              <td style="text-align:right;">458 ms</td>
+              <td style="text-align:right;">1.84 s</td>
+              <td style="text-align:right;">4.34 s</td>
+            </tr>
+          </tbody>
+        </table>
+        </div>
+        <p>The posted close is about 93 bytes per active account plus
+        its edges, whatever the account set holds: at 1,024 movers among
+        one million accounts it is 95.5 KB, a thousandth of the
+        every-account column. The dealt wire keeps the slice openings
+        and its interval’s row evidence but none of the unchanged
+        leaves, so it falls from 343 MB to 1.65 MB across the same
+        sweep. Prepare and deal retain a fixed cost in <span
+        class="math inline">N</span> (the fresh state BMTs are rebuilt
+        over all live leaves), while seal follows the movers because
+        signature and countersignature verification dominate it.</p>
         <p>The proof-slice corpus is constant for a profile, so accepted
         payments only divide it. Ten million payments spread the
-        one-million-account profile’s 582,907,548 bytes to 58.3 offchain
-        bytes per payment; a billion spread it to 0.583 offchain bytes
-        per payment. The certificate is one 48-byte aggregate signature
-        plus a <span class="math inline">\lceil n/8\rceil</span>-byte
-        signer bitmap; proofs of possession were checked when the
-        committee registered. With the 32-byte commitment and this
-        encoding’s eight-byte bitmap-length prefix, the external
-        100-validator certified package is 101 bytes total. If the
-        Bajillion validators are also the settlement chain’s validators,
-        inclusion itself supplies the attestation and only the 32-byte
-        commitment need be retained. The 128-byte <span
+        one-million-account profile’s 486,822,246 bytes to 48.7 offchain
+        bytes per payment, and its 92,762,697-byte posted close to 9.3;
+        a billion payments spread them to 0.487 and 0.093. The
+        certificate is one 48-byte aggregate signature plus a <span
+        class="math inline">\lceil n/8\rceil</span>-byte signer bitmap;
+        proofs of possession were checked when the committee registered.
+        With the 32-byte commitment and this encoding’s eight-byte
+        bitmap-length prefix, the external 100-validator certified
+        package is 101 bytes total. If the Bajillion validators are also
+        the settlement chain’s validators, inclusion itself supplies the
+        attestation and only the 32-byte commitment need be retained.
+        The 164-byte <span
         class="math inline">\mathsf{RootBundle}</span> admission witness
         and terminal proof are not included in either commitment figure.
         Each figure likewise shrinks as <span
@@ -1138,31 +1265,25 @@ O’Grady</a></div>
         carry only the validator-derived destination and amount plus one
         <span class="math inline">\mathsf{WithdrawalOutputRoot}</span>
         opening. At <span class="math inline">W=1</span> either claim is
-        39 bytes and verifies in 0.313 µs. The surge claim grows one
+        39 bytes and verifies in 0.30 µs. The surge claim grows one
         32-byte sibling per doubling of the withdrawal count, reaching
         359 bytes when 1,024 accounts exit together and 679 bytes when
         one million do, and its verification grows only by the path
         hashes. The <span
-        class="math inline">\mathsf{LatestAcknowledgedSend}</span> and
-        <span class="math inline">\mathsf{HigherShardTip}</span>
-        challenges carry one acknowledged pair plus one changed-row
-        opening, so they grow with lookup depth: 669–989 and 663–983
-        bytes across the matrix, checking in 0.297–0.314 ms. The <span
-        class="math inline">\mathsf{InconsistentReceiptRange}</span> and
-        <span class="math inline">\mathsf{ReceiptFork}</span>
-        contradictions carry two acknowledged pairs and no state
-        opening, so they hold at 492 and 484 bytes for every <span
-        class="math inline">N</span> and check in 0.418–0.429 ms. Every
-        represented payment retains both its signatures, and
-        adjudication is signature-dominated: the pair contradictions
-        verify four retained signatures where the lookup challenges
-        verify two plus their Merkle openings. Challenge evidence embeds
-        the whole signed send, so representing an entry of a larger
-        batch adds 40 bytes per sibling entry, its signatures checked
-        once regardless of batch size while only the hashed send bytes
-        grow. Adjudicating the same contradiction measures within noise
-        of a single entry at 16 entries and about 10% slower at the
-        256-entry protocol bound. Clean closes submit no fraud challenge
+        class="math inline">\mathsf{HigherAckDebit}</span> and <span
+        class="math inline">\mathsf{HigherAckEntry}</span> challenges
+        carry one retained acknowledgment plus one changed-row lookup,
+        so they grow with opening depth: 620–940 and 671–991 bytes
+        across the matrix, checking in 0.270–0.334 ms. The <span
+        class="math inline">\mathsf{AckFork}</span> contradiction
+        carries two countersigned endpoints and no state opening, so it
+        holds at 417 bytes for every <span class="math inline">N</span>
+        and checks in about 0.32 ms. Adjudication is
+        signature-dominated, and challenge evidence is one fixed-size
+        acknowledgment plus at most one entry opening: an acknowledged
+        endpoint commits its whole batch through the vector root, so
+        representing an entry of a larger batch changes nothing about
+        the witness or its check. Clean closes submit no fraud challenge
         at all, so average challenge traffic is smaller still. A
         challenge targets a commitment whose certificate was already
         checked at admission, so adjudication does not verify that
@@ -1183,30 +1304,34 @@ O’Grady</a></div>
         class="math inline">T</span> payments it accepts. The close has
         no per-payment term. Writing <span class="math inline">U</span>
         for unchanged live leaves, <span class="math inline">A</span>
-        for changed rows, <span class="math inline">H</span> for total
-        shard tips, <span class="math inline">W</span> for withdrawal
+        for changed rows, <span class="math inline">E</span> for edge
+        entries, <span class="math inline">W</span> for withdrawal
         outputs, <span class="math inline">S</span> for proof slices,
         and <span class="math inline">M</span> for the largest committed
         vector length, its authenticated corpus is</p>
         <p><span class="math display">
         \text{payments }T
         \quad\longrightarrow\quad
-        U\text{ state leaves}+A\text{ rows}+H\text{ shard tips}+W\text{
-        withdrawal outputs}
-        +(S+1)\text{ coverage boundaries}+O(S\log M)\text{ openings}.
+        U\text{ state leaves}+A\text{ rows}+E\text{ vector
+        entries}+E\text{ transpose entries}
+        +W\text{ withdrawal outputs}+(S+1)\text{ coverage
+        boundaries}+O(S\log M)\text{ openings},
         </span></p>
-        <p>For the benchmark’s fixed live set, <span
+        <p>and the posted close omits <span
+        class="math inline">U</span>, the transpose, and every derivable
+        column outright. For the benchmark’s fixed live set, <span
         class="math inline">U=N-A</span>; account creation, deletion,
         and external-payout rows need not preserve that identity in
         general. For repeated activity over a fixed set of accounts and
-        shards, this fixed corpus divided by <span
+        edges, this fixed corpus divided by <span
         class="math inline">T</span> tends to zero. Account-level
         clearing compresses repetition, not state: every unchanged live
-        account contributes a leaf, every changed account contributes a
-        row, and every shard contributes its terminal pair, but
+        account contributes a leaf to the dealt evidence and nothing to
+        the posted close, every changed account contributes a row, and
+        every edge contributes one cumulative entry on each side, but
         additional payments between them add nothing. No traffic pattern
         adds a per-payment term to the close either, because acceptance
-        reserves room per account and per shard, never per payment.</p>
+        reserves room per account and per edge, never per payment.</p>
         <p>The fresh tree is intentionally conventional. Root-only
         construction can stream an existing ordered account database
         through bounded subtree builders; proof-producing close assembly
@@ -1216,8 +1341,9 @@ O’Grady</a></div>
         complete live state rather than only a sparse update. A
         preconfirmation still cannot arrive in less than one round trip
         to the operator that serializes spending, and a close cannot
-        quietly drop a payment: it must agree with every receipt a
-        holder retains, or a single retained pair proves the fault.</p>
+        quietly drop a payment: it must agree with every acknowledgment
+        a holder retains, or a single retained entry receipt proves the
+        fault.</p>
         <p>When the close is clean, those involved keep the receipts.
         The settlement chain only keeps the change.</p>
         <div id="footer-placeholder"></div>

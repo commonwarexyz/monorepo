@@ -6,10 +6,10 @@ mod certificate;
 use crate::bajillion::transition::EpochContext;
 use crate::bajillion::{
     boundary::{DepositBatch, WithdrawalBatch},
-    payment::verify_payment_signatures,
+    payment::verify_ack_signatures,
     transition::{
-        Assignment, CloseContext, Header, ProofSlice, RootBundle, validate_slice_header,
-        validate_slice_structure_after_header,
+        Assignment, CloseContext, Header, OperatorKey, ProofSlice, RootBundle,
+        validate_boundary_roots, validate_slice_after_header,
     },
 };
 use alloc::vec::Vec;
@@ -151,12 +151,14 @@ impl<P: PublicKey, D: Digest> SealedDealing<P, D> {
 /// Authenticates and takes ownership of one validator's dealing, then signs the header.
 ///
 /// A dealing is the complete, canonically ordered set of proof slices assigned to one validator.
-/// `seal` verifies every distinct signed send and receipt in one randomized aggregate batch.
-/// Applications must make the returned dealing durable before publishing the accompanying vote.
+/// `seal` verifies every distinct payer authorization in one randomized aggregate batch and each
+/// slice's combined operator countersignature. Applications must make the returned dealing
+/// durable before publishing the accompanying vote.
 #[allow(clippy::too_many_arguments)]
 pub fn seal<H, P, D, B, R>(
     scheme: &bls12381::Scheme,
     context: &CloseContext<P, D>,
+    operator: &OperatorKey,
     deposits: &DepositBatch<P>,
     withdrawals: &WithdrawalBatch<P, D>,
     header: &Header<D>,
@@ -185,12 +187,16 @@ where
     {
         return Err(AdmissionError::IncompleteAssignment);
     }
-    validate_slice_header::<H, P, D>(context, deposits, withdrawals, header, roots)
+    if !header.verify::<H, P>(context, roots) {
+        return Err(AdmissionError::InvalidSlice);
+    }
+    validate_boundary_roots::<H, P, D>(context, deposits, withdrawals)
         .map_err(|_| AdmissionError::InvalidSlice)?;
     strategy
         .try_map_collect_vec(&dealing, |slice| {
-            validate_slice_structure_after_header::<H, P, D>(
+            validate_slice_after_header::<H, P, D>(
                 context,
+                operator,
                 deposits,
                 withdrawals,
                 roots,
@@ -199,41 +205,30 @@ where
         })
         .map_err(|_| AdmissionError::InvalidSlice)?;
 
-    // Structural validation makes every payment reference safe to collect. The complete dealing
-    // then contributes all of its distinct signatures to one randomized aggregate batch.
-    let payment_count = dealing
+    // Structural validation makes every authorization reference safe to collect. The complete
+    // dealing contributes its distinct payer signatures to one randomized aggregate batch; the
+    // operator's acceptance was verified per slice through its combined countersignature.
+    let ack_count = dealing
         .iter()
-        .try_fold(0_usize, |total, slice| {
-            let outgoing = slice
+        .map(|slice| {
+            slice
                 .changes
                 .rows
                 .iter()
                 .filter(|row| row.outgoing.is_some())
-                .count();
-            let incoming = slice
-                .shard_sets
-                .iter()
-                .map(|shards| shards.heads().len())
-                .try_fold(0_usize, usize::checked_add)?;
-            total.checked_add(outgoing)?.checked_add(incoming)
+                .count()
         })
+        .try_fold(0_usize, |total, count| total.checked_add(count))
         .ok_or(AdmissionError::InvalidSlice)?;
-    if !verify_payment_signatures::<P, D, B, R, _>(
-        context.payment(),
+    if !verify_ack_signatures::<P, D, B, R, _>(
         dealing.iter().flat_map(|slice| {
             slice
                 .changes
                 .rows
                 .iter()
                 .filter_map(|row| row.outgoing.as_ref())
-                .chain(
-                    slice
-                        .shard_sets
-                        .iter()
-                        .flat_map(|shards| shards.heads().iter().map(|head| &head.payment)),
-                )
         }),
-        payment_count,
+        ack_count,
         rng,
         strategy,
     ) {
@@ -257,18 +252,20 @@ mod tests {
     use super::*;
     use crate::bajillion::{
         boundary::{DepositBatch, WithdrawalBatch},
-        credit::{ShardHead, ShardSet},
-        payment::{Payment, SignedReceipt, SignedSend},
+        payment::{SendAuthorization, VECTOR_ACK_AGGREGATE_NAMESPACE, VectorSendBody},
         state::{AccountRow, AccountState, Prefix, SettlementOutput, StateLeaf},
         transition::{
-            Assignment, CloseLimits, StateCache, assemble_slices, build_close, validate_close,
+            Assignment, CloseLimits, OperatorVariant, PreparedClose, StateCache,
+            prepare_close_with_strategy,
         },
+        vector::{OutEntry, OutVector, TransposeEntry},
     };
+    use commonware_codec::Encode;
     use commonware_cryptography::{
         Hasher, Sha256, Signer as _, Verifier,
         bls12381::primitives::{
             group::{Private as ValidatorSigningKey, Scalar},
-            ops::compute_public,
+            ops::{compute_public, sign_message},
             variant::MinSig,
         },
         sha256::Digest as ShaDigest,
@@ -285,9 +282,9 @@ mod tests {
     };
 
     static HASH_CALLS: AtomicUsize = AtomicUsize::new(0);
-    static PAYMENT_BATCH_CREATIONS: AtomicUsize = AtomicUsize::new(0);
-    static PAYMENT_BATCH_VERIFICATIONS: AtomicUsize = AtomicUsize::new(0);
-    static PAYMENT_BATCH_ADDS: AtomicUsize = AtomicUsize::new(0);
+    static ACK_BATCH_CREATIONS: AtomicUsize = AtomicUsize::new(0);
+    static ACK_BATCH_VERIFICATIONS: AtomicUsize = AtomicUsize::new(0);
+    static ACK_BATCH_ADDS: AtomicUsize = AtomicUsize::new(0);
 
     #[derive(Default)]
     struct CountingSha256(Sha256);
@@ -446,229 +443,21 @@ mod tests {
         assert_eq!(counts.iter().sum::<usize>(), 256 * 67);
     }
 
-    #[test]
-    fn validator_seals_only_its_exact_dealing() {
-        let validators = validator_keys(4);
-        let committee = committee(&validators);
+    struct SealFixture {
+        cache: StateCache<AccountVerifyingKey, ShaDigest>,
+        context: CloseContext<AccountVerifyingKey, ShaDigest>,
+        deposits: DepositBatch<AccountVerifyingKey>,
+        withdrawals: WithdrawalBatch<AccountVerifyingKey, ShaDigest>,
+        operator_bls: OperatorKey,
+        prepared: PreparedClose<AccountVerifyingKey, ShaDigest>,
+    }
+
+    /// Builds a close over two accounts where the payer sends twenty units to the recipient,
+    /// bound to `committee` with `slice_bits` deterministic slices.
+    fn seal_fixture(committee: &Committee, slice_bits: u8, payments: bool) -> SealFixture {
         let operator = SigningKey::from_seed(100);
-        let account = SigningKey::from_seed(101).public_key();
-        let cache = StateCache::new::<Sha256>(vec![StateLeaf {
-            account,
-            state: AccountState {
-                balance: 3,
-                active: true,
-                ..AccountState::default()
-            },
-        }])
-        .unwrap();
-        let deposits = DepositBatch::empty();
-        let withdrawals = WithdrawalBatch::empty();
-        let assignment = Assignment::new(committee.commitment::<Sha256>(), 3).unwrap();
-        let context = EpochContext::new::<Sha256>(
-            Sha256::hash(&[b"deployment"]),
-            7,
-            operator.public_key(),
-            &deposits,
-            &withdrawals,
-            cache.liability(),
-            49,
-            50,
-            CloseLimits::protocol_maximum(),
-            assignment,
-        )
-        .and_then(|epoch| epoch.bind::<Sha256>(&cache, &deposits, &withdrawals))
-        .unwrap();
-        let close = build_close::<Sha256, _, _, PaymentBatchVerifier, _>(
-            &cache,
-            &context,
-            &deposits,
-            &withdrawals,
-            Vec::new(),
-            Vec::new(),
-            &mut test_rng(),
-        )
-        .unwrap();
-        validate_close::<Sha256, _, _, PaymentBatchVerifier, _>(
-            &context,
-            &deposits,
-            &withdrawals,
-            &close,
-            &mut test_rng(),
-        )
-        .unwrap();
-        let all = assemble_slices::<Sha256, _, _>(
-            &cache,
-            &context,
-            &deposits,
-            &withdrawals,
-            &close,
-            &Sequential,
-        )
-        .unwrap();
-        let scheme =
-            bls12381::Scheme::signer(committee.clone(), validators[0].signing.clone()).unwrap();
-        let expected = assigned_slice_indices::<Sha256, _>(
-            &committee,
-            context.assignment(),
-            scheme.me().unwrap(),
-        )
-        .unwrap();
-        let slices = expected
-            .iter()
-            .map(|slice| all[usize::from(*slice)].clone())
-            .collect::<Vec<_>>();
-        let mut rng = test_rng();
-        let (vote, sealed) = seal::<Sha256, _, _, PaymentBatchVerifier, _>(
-            &scheme,
-            &context,
-            &deposits,
-            &withdrawals,
-            &close.header,
-            &close.roots,
-            slices.clone(),
-            &mut rng,
-            &Sequential,
-        )
-        .unwrap();
-        assert_eq!(sealed.slices(), slices);
-        for slice in expected {
-            assert_eq!(sealed.serve(slice).map(|slice| slice.index), Some(slice));
-        }
-
-        let (parallel_vote, parallel_sealed) = seal::<Sha256, _, _, PaymentBatchVerifier, _>(
-            &scheme,
-            &context,
-            &deposits,
-            &withdrawals,
-            &close.header,
-            &close.roots,
-            slices.clone(),
-            &mut test_rng(),
-            &Rayon::new(NonZeroUsize::new(4).unwrap()).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(parallel_vote, vote);
-        assert_eq!(parallel_sealed.slices(), sealed.slices());
-
-        assert_eq!(
-            seal::<Sha256, _, _, PaymentBatchVerifier, _>(
-                &scheme,
-                &context,
-                &deposits,
-                &withdrawals,
-                &close.header,
-                &close.roots,
-                slices[..slices.len() - 1].to_vec(),
-                &mut rng,
-                &Sequential,
-            )
-            .map(|_| ()),
-            Err(AdmissionError::IncompleteAssignment)
-        );
-
-        let mut duplicate = slices.clone();
-        let last = duplicate.len() - 1;
-        duplicate[last] = duplicate[0].clone();
-        assert_eq!(
-            seal::<Sha256, _, _, PaymentBatchVerifier, _>(
-                &scheme,
-                &context,
-                &deposits,
-                &withdrawals,
-                &close.header,
-                &close.roots,
-                duplicate,
-                &mut rng,
-                &Sequential,
-            )
-            .map(|_| ()),
-            Err(AdmissionError::IncompleteAssignment)
-        );
-
-        let mut malformed = slices;
-        malformed[0].coverage.end.predecessor =
-            malformed[0].coverage.end.predecessor.saturating_add(1);
-        assert_eq!(
-            seal::<Sha256, _, _, PaymentBatchVerifier, _>(
-                &scheme,
-                &context,
-                &deposits,
-                &withdrawals,
-                &close.header,
-                &close.roots,
-                malformed,
-                &mut rng,
-                &Sequential,
-            )
-            .map(|_| ()),
-            Err(AdmissionError::InvalidSlice)
-        );
-    }
-
-    struct ExactPaymentBatch {
-        items: usize,
-    }
-
-    impl BatchVerifier for ExactPaymentBatch {
-        type PublicKey = AccountVerifyingKey;
-
-        fn new(capacity: usize) -> Self {
-            assert_eq!(capacity, 2);
-            PAYMENT_BATCH_CREATIONS.fetch_add(1, Ordering::Relaxed);
-            Self { items: 0 }
-        }
-
-        fn add(
-            &mut self,
-            _namespace: &[u8],
-            _message: &[u8],
-            _public_key: &Self::PublicKey,
-            _signature: &<Self::PublicKey as Verifier>::Signature,
-        ) -> bool {
-            PAYMENT_BATCH_ADDS.fetch_add(1, Ordering::Relaxed);
-            self.items += 1;
-            true
-        }
-
-        fn verify<R: CryptoRng>(self, _rng: &mut R, _strategy: &impl Strategy) -> bool {
-            PAYMENT_BATCH_VERIFICATIONS.fetch_add(1, Ordering::Relaxed);
-            self.items == 2
-        }
-    }
-
-    struct ThreeItemBatch {
-        items: usize,
-    }
-
-    impl BatchVerifier for ThreeItemBatch {
-        type PublicKey = AccountVerifyingKey;
-
-        fn new(capacity: usize) -> Self {
-            assert_eq!(capacity, 3);
-            Self { items: 0 }
-        }
-
-        fn add(
-            &mut self,
-            _namespace: &[u8],
-            _message: &[u8],
-            _public_key: &Self::PublicKey,
-            _signature: &<Self::PublicKey as Verifier>::Signature,
-        ) -> bool {
-            self.items += 1;
-            true
-        }
-
-        fn verify<R: CryptoRng>(self, _rng: &mut R, _strategy: &impl Strategy) -> bool {
-            self.items == 3
-        }
-    }
-
-    #[test]
-    fn seal_authenticates_exact_payment_envelopes() {
-        let validators = validator_keys(4);
-        let committee = committee(&validators);
-        let operator = SigningKey::from_seed(100);
+        let operator_bls_private = ValidatorSigningKey::new(Scalar::from(999));
+        let operator_bls = compute_public::<OperatorVariant>(&operator_bls_private);
         let payer = SigningKey::from_seed(101);
         let recipient = SigningKey::from_seed(102);
         let opening = AccountState {
@@ -690,9 +479,9 @@ mod tests {
         let cache = StateCache::new::<Sha256>(leaves).unwrap();
         let deposits = DepositBatch::empty();
         let withdrawals = WithdrawalBatch::empty();
-        let assignment = Assignment::new(committee.commitment::<Sha256>(), 0).unwrap();
+        let assignment = Assignment::new(committee.commitment::<Sha256>(), slice_bits).unwrap();
         let context = EpochContext::new::<Sha256>(
-            Sha256::hash(&[b"batch-deployment"]),
+            Sha256::hash(&[b"deployment"]),
             7,
             operator.public_key(),
             &deposits,
@@ -705,125 +494,296 @@ mod tests {
         )
         .and_then(|epoch| epoch.bind::<Sha256>(&cache, &deposits, &withdrawals))
         .unwrap();
-        let send = SignedSend::sign_next(context.payment(), &payer, recipient.public_key(), 20, 0)
-            .unwrap();
-        let receipt = SignedReceipt::issue_next::<Sha256, _>(
-            context.payment(),
-            &send,
-            &recipient.public_key(),
-            0,
-            0,
-            0,
-            &operator,
-        )
-        .unwrap();
-        let payment = Payment::new::<Sha256>(context.payment(), send, receipt).unwrap();
-        let invalid_send = SignedSend::sign_body_by_authority(
-            payment.send().body().clone(),
-            &SigningKey::from_seed(999),
-        );
-        let signature_variant =
-            Payment::from_parts_unchecked(invalid_send, payment.receipt().clone());
-        assert!(verify_payment_signatures::<_, _, ThreeItemBatch, _, _>(
-            context.payment(),
-            [&payment, &signature_variant],
-            2,
-            &mut test_rng(),
-            &Sequential,
-        ));
-        assert!(
-            !verify_payment_signatures::<_, _, PaymentBatchVerifier, _, _>(
-                context.payment(),
-                [&payment, &signature_variant],
-                2,
-                &mut test_rng(),
-                &Sequential,
+
+        let (rows, out_vectors, transpose, signatures) = if payments {
+            let epoch = context.payment().epoch();
+            let out_vector = OutVector::new(
+                epoch,
+                payer.public_key(),
+                vec![OutEntry {
+                    recipient: recipient.public_key(),
+                    cumulative: 20,
+                    count: 1,
+                }],
             )
-        );
-        let payer_shards = ShardSet::empty(context.payment().epoch(), payer.public_key());
-        let recipient_shards = ShardSet::new(
-            context.payment().epoch(),
-            recipient.public_key(),
-            vec![ShardHead::new(0, payment.clone())],
-        )
-        .unwrap();
-        let mut rows = vec![
-            (
-                AccountRow {
-                    account: payer.public_key(),
-                    predecessor: opening,
-                    successor: AccountState {
-                        balance: 80,
-                        cumulative_debit: 20,
-                        ..opening
+            .unwrap();
+            let body = VectorSendBody::new(
+                context.payment(),
+                payer.public_key(),
+                1,
+                20,
+                out_vector.root::<Sha256, ShaDigest>().unwrap(),
+            );
+            let operator_signature = sign_message::<OperatorVariant>(
+                &operator_bls_private,
+                VECTOR_ACK_AGGREGATE_NAMESPACE,
+                body.encode().as_ref(),
+            );
+            let outgoing = SendAuthorization::sign(body, &payer);
+            let transpose = vec![TransposeEntry {
+                recipient: recipient.public_key(),
+                payer: payer.public_key(),
+                cumulative: 20,
+                count: 1,
+            }];
+            let mut rows = vec![
+                (
+                    AccountRow {
+                        account: payer.public_key(),
+                        predecessor: opening,
+                        successor: AccountState {
+                            balance: 80,
+                            cumulative_debit: 20,
+                            ..opening
+                        },
+                        outgoing: Some(outgoing),
+                        output: SettlementOutput::None,
+                        prefix: Prefix::default(),
                     },
-                    outgoing: Some(payment),
-                    output: SettlementOutput::None,
-                    prefix: Prefix::default(),
-                },
-                payer_shards,
-            ),
-            (
-                AccountRow {
-                    account: recipient.public_key(),
-                    predecessor: opening,
-                    successor: AccountState {
-                        balance: 120,
-                        cumulative_credit: 20,
-                        receipt_count: 1,
-                        ..opening
+                    out_vector,
+                    Some(operator_signature),
+                ),
+                (
+                    AccountRow {
+                        account: recipient.public_key(),
+                        predecessor: opening,
+                        successor: AccountState {
+                            balance: 120,
+                            cumulative_credit: 20,
+                            receipt_count: 1,
+                            ..opening
+                        },
+                        outgoing: None,
+                        output: SettlementOutput::None,
+                        prefix: Prefix::default(),
                     },
-                    outgoing: None,
-                    output: SettlementOutput::None,
-                    prefix: Prefix::default(),
-                },
-                recipient_shards,
-            ),
-        ];
-        rows.sort_unstable_by(|left, right| left.0.account.cmp(&right.0.account));
-        let mut prefix = Prefix::default();
-        for (row, shards) in &mut rows {
-            let (debit, credit, _) = row.checked_deltas().unwrap();
-            prefix = prefix
-                .checked_extend(Prefix {
-                    debit,
-                    credit,
-                    shard_count: u64::try_from(shards.heads().len()).unwrap(),
-                    ..Prefix::default()
-                })
-                .unwrap();
-            row.prefix = prefix;
-        }
-        let (rows, shards): (Vec<_>, Vec<_>) = rows.into_iter().unzip();
-        let close = build_close::<Sha256, _, _, PaymentBatchVerifier, _>(
+                    OutVector::empty(epoch, recipient.public_key()),
+                    None,
+                ),
+            ];
+            rows.sort_unstable_by(|left, right| left.0.account.cmp(&right.0.account));
+            let mut prefix = Prefix::default();
+            for (row, out_vector, _) in &mut rows {
+                let (debit, credit, receipts) = row.checked_deltas().unwrap();
+                prefix = prefix
+                    .checked_extend(Prefix {
+                        debit,
+                        credit,
+                        out_count: u64::try_from(out_vector.entries().len()).unwrap(),
+                        in_count: receipts,
+                        ..Prefix::default()
+                    })
+                    .unwrap();
+                row.prefix = prefix;
+            }
+            let mut split_rows = Vec::new();
+            let mut split_vectors = Vec::new();
+            let mut split_signatures = Vec::new();
+            for (row, out_vector, signature) in rows {
+                split_rows.push(row);
+                split_vectors.push(out_vector);
+                split_signatures.push(signature);
+            }
+            (split_rows, split_vectors, transpose, split_signatures)
+        } else {
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new())
+        };
+        let partials = out_vectors
+            .iter()
+            .map(OutVector::accumulator)
+            .collect::<Vec<_>>();
+        let prepared = prepare_close_with_strategy::<Sha256, _, _>(
             &cache,
             &context,
             &deposits,
             &withdrawals,
             rows,
-            shards,
-            &mut test_rng(),
-        )
-        .unwrap();
-        validate_close::<Sha256, _, _, PaymentBatchVerifier, _>(
-            &context,
-            &deposits,
-            &withdrawals,
-            &close,
-            &mut test_rng(),
-        )
-        .unwrap();
-        let all = assemble_slices::<Sha256, _, _>(
-            &cache,
-            &context,
-            &deposits,
-            &withdrawals,
-            &close,
+            out_vectors,
+            &partials,
+            &signatures,
+            transpose,
             &Sequential,
         )
         .unwrap();
+        prepared
+            .validate::<Sha256, PaymentBatchVerifier, _>(
+                &context,
+                &operator_bls,
+                &deposits,
+                &withdrawals,
+                &mut test_rng(),
+                &Sequential,
+            )
+            .unwrap();
+        SealFixture {
+            cache,
+            context,
+            deposits,
+            withdrawals,
+            operator_bls,
+            prepared,
+        }
+    }
+
+    #[test]
+    fn validator_seals_only_its_exact_dealing() {
+        let validators = validator_keys(4);
+        let committee = committee(&validators);
+        let fixture = seal_fixture(&committee, 3, false);
+        let close = fixture.prepared.close();
+        let all = fixture
+            .prepared
+            .assemble_slices(&fixture.cache, &Sequential)
+            .unwrap();
+        let scheme =
+            bls12381::Scheme::signer(committee.clone(), validators[0].signing.clone()).unwrap();
+        let expected = assigned_slice_indices::<Sha256, _>(
+            &committee,
+            fixture.context.assignment(),
+            scheme.me().unwrap(),
+        )
+        .unwrap();
+        let slices = expected
+            .iter()
+            .map(|slice| all[usize::from(*slice)].clone())
+            .collect::<Vec<_>>();
+        let mut rng = test_rng();
+        let (vote, sealed) = seal::<Sha256, _, _, PaymentBatchVerifier, _>(
+            &scheme,
+            &fixture.context,
+            &fixture.operator_bls,
+            &fixture.deposits,
+            &fixture.withdrawals,
+            &close.header,
+            &close.roots,
+            slices.clone(),
+            &mut rng,
+            &Sequential,
+        )
+        .unwrap();
+        assert_eq!(sealed.slices(), slices);
+        for slice in expected {
+            assert_eq!(sealed.serve(slice).map(|slice| slice.index), Some(slice));
+        }
+
+        let (parallel_vote, parallel_sealed) = seal::<Sha256, _, _, PaymentBatchVerifier, _>(
+            &scheme,
+            &fixture.context,
+            &fixture.operator_bls,
+            &fixture.deposits,
+            &fixture.withdrawals,
+            &close.header,
+            &close.roots,
+            slices.clone(),
+            &mut test_rng(),
+            &Rayon::new(NonZeroUsize::new(4).unwrap()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(parallel_vote, vote);
+        assert_eq!(parallel_sealed.slices(), sealed.slices());
+
+        assert_eq!(
+            seal::<Sha256, _, _, PaymentBatchVerifier, _>(
+                &scheme,
+                &fixture.context,
+                &fixture.operator_bls,
+                &fixture.deposits,
+                &fixture.withdrawals,
+                &close.header,
+                &close.roots,
+                slices[..slices.len() - 1].to_vec(),
+                &mut rng,
+                &Sequential,
+            )
+            .map(|_| ()),
+            Err(AdmissionError::IncompleteAssignment)
+        );
+
+        let mut duplicate = slices.clone();
+        let last = duplicate.len() - 1;
+        duplicate[last] = duplicate[0].clone();
+        assert_eq!(
+            seal::<Sha256, _, _, PaymentBatchVerifier, _>(
+                &scheme,
+                &fixture.context,
+                &fixture.operator_bls,
+                &fixture.deposits,
+                &fixture.withdrawals,
+                &close.header,
+                &close.roots,
+                duplicate,
+                &mut rng,
+                &Sequential,
+            )
+            .map(|_| ()),
+            Err(AdmissionError::IncompleteAssignment)
+        );
+
+        let mut malformed = slices;
+        malformed[0].coverage.end.predecessor =
+            malformed[0].coverage.end.predecessor.saturating_add(1);
+        assert_eq!(
+            seal::<Sha256, _, _, PaymentBatchVerifier, _>(
+                &scheme,
+                &fixture.context,
+                &fixture.operator_bls,
+                &fixture.deposits,
+                &fixture.withdrawals,
+                &close.header,
+                &close.roots,
+                malformed,
+                &mut rng,
+                &Sequential,
+            )
+            .map(|_| ()),
+            Err(AdmissionError::InvalidSlice)
+        );
+    }
+
+    struct ExactAckBatch {
+        items: usize,
+    }
+
+    impl BatchVerifier for ExactAckBatch {
+        type PublicKey = AccountVerifyingKey;
+
+        fn new(capacity: usize) -> Self {
+            assert_eq!(capacity, 1);
+            ACK_BATCH_CREATIONS.fetch_add(1, Ordering::Relaxed);
+            Self { items: 0 }
+        }
+
+        fn add(
+            &mut self,
+            _namespace: &[u8],
+            _message: &[u8],
+            _public_key: &Self::PublicKey,
+            _signature: &<Self::PublicKey as Verifier>::Signature,
+        ) -> bool {
+            ACK_BATCH_ADDS.fetch_add(1, Ordering::Relaxed);
+            self.items += 1;
+            true
+        }
+
+        fn verify<R: CryptoRng>(self, _rng: &mut R, _strategy: &impl Strategy) -> bool {
+            ACK_BATCH_VERIFICATIONS.fetch_add(1, Ordering::Relaxed);
+            self.items == 1
+        }
+    }
+
+    #[test]
+    fn seal_authenticates_exact_ack_envelopes() {
+        let validators = validator_keys(4);
+        let committee = committee(&validators);
+        let fixture = seal_fixture(&committee, 0, true);
+        let close = fixture.prepared.close();
+        let all = fixture
+            .prepared
+            .assemble_slices(&fixture.cache, &Sequential)
+            .unwrap();
         let validator =
-            slice_holders::<Sha256, ShaDigest>(&committee, context.assignment(), 0).unwrap()[0];
+            slice_holders::<Sha256, ShaDigest>(&committee, fixture.context.assignment(), 0)
+                .unwrap()[0];
         let validator_key = validators
             .iter()
             .find(|key| {
@@ -835,6 +795,8 @@ mod tests {
             bls12381::Scheme::signer(committee.clone(), validator_key.signing.clone()).unwrap();
         let strategy = Rayon::new(NonZeroUsize::new(4).unwrap()).unwrap();
 
+        // A payer signature swap leaves the committed body untouched, so only the randomized
+        // aggregate batch can catch it.
         let mut mutated_outgoing = all.clone();
         let row = mutated_outgoing[0]
             .changes
@@ -843,20 +805,17 @@ mod tests {
             .find(|row| row.outgoing.is_some())
             .unwrap();
         let original = row.outgoing.as_ref().unwrap();
-        let invalid_send = SignedSend::sign_body_by_authority(
-            original.send().body().clone(),
+        row.outgoing = Some(SendAuthorization::sign(
+            original.body().clone(),
             &SigningKey::from_seed(999),
-        );
-        row.outgoing = Some(Payment::from_parts_unchecked(
-            invalid_send,
-            original.receipt().clone(),
         ));
         assert_eq!(
             seal::<Sha256, _, _, PaymentBatchVerifier, _>(
                 &scheme,
-                &context,
-                &deposits,
-                &withdrawals,
+                &fixture.context,
+                &fixture.operator_bls,
+                &fixture.deposits,
+                &fixture.withdrawals,
                 &close.header,
                 &close.roots,
                 mutated_outgoing,
@@ -867,49 +826,15 @@ mod tests {
             Err(AdmissionError::InvalidSlice)
         );
 
-        let mut mutated_incoming = all.clone();
-        let shards = mutated_incoming[0]
-            .shard_sets
-            .iter_mut()
-            .find(|shards| !shards.heads().is_empty())
-            .unwrap();
-        let head = &shards.heads()[0];
-        let invalid_send = SignedSend::sign_body_by_authority(
-            head.payment.send().body().clone(),
-            &SigningKey::from_seed(999),
-        );
-        let invalid_payment =
-            Payment::from_parts_unchecked(invalid_send, head.payment.receipt().clone());
-        *shards = ShardSet::new(
-            shards.epoch(),
-            shards.recipient().clone(),
-            vec![ShardHead::new(head.shard, invalid_payment)],
-        )
-        .unwrap();
-        assert_eq!(
-            seal::<Sha256, _, _, PaymentBatchVerifier, _>(
-                &scheme,
-                &context,
-                &deposits,
-                &withdrawals,
-                &close.header,
-                &close.roots,
-                mutated_incoming,
-                &mut test_rng(),
-                &strategy,
-            )
-            .map(|_| ()),
-            Err(AdmissionError::InvalidSlice)
-        );
-
-        PAYMENT_BATCH_CREATIONS.store(0, Ordering::Relaxed);
-        PAYMENT_BATCH_VERIFICATIONS.store(0, Ordering::Relaxed);
-        PAYMENT_BATCH_ADDS.store(0, Ordering::Relaxed);
-        let (_, sealed) = seal::<Sha256, _, _, ExactPaymentBatch, _>(
+        ACK_BATCH_CREATIONS.store(0, Ordering::Relaxed);
+        ACK_BATCH_VERIFICATIONS.store(0, Ordering::Relaxed);
+        ACK_BATCH_ADDS.store(0, Ordering::Relaxed);
+        let (_, sealed) = seal::<Sha256, _, _, ExactAckBatch, _>(
             &scheme,
-            &context,
-            &deposits,
-            &withdrawals,
+            &fixture.context,
+            &fixture.operator_bls,
+            &fixture.deposits,
+            &fixture.withdrawals,
             &close.header,
             &close.roots,
             all,
@@ -918,8 +843,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(sealed.slices().len(), 1);
-        assert_eq!(PAYMENT_BATCH_CREATIONS.load(Ordering::Relaxed), 1);
-        assert_eq!(PAYMENT_BATCH_VERIFICATIONS.load(Ordering::Relaxed), 1);
-        assert_eq!(PAYMENT_BATCH_ADDS.load(Ordering::Relaxed), 2);
+        assert_eq!(ACK_BATCH_CREATIONS.load(Ordering::Relaxed), 1);
+        assert_eq!(ACK_BATCH_VERIFICATIONS.load(Ordering::Relaxed), 1);
+        assert_eq!(ACK_BATCH_ADDS.load(Ordering::Relaxed), 1);
     }
 }

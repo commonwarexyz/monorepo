@@ -7,22 +7,23 @@ use commonware_clearing::bajillion::{
     },
     boundary::{DepositBatch, SignedWithdrawal, WithdrawalAction, WithdrawalBatch, WithdrawalBody},
     challenge::{
-        AccountLookup, ChallengeError, ChangeAbsence, ChangeLookup, ChangeOpening,
-        HigherShardTipLookup, RangeLower, ReceiptForkWitness, ReceiptWitness,
-        SameIndexPaymentWitness, ScopedPaymentWitness, StateLookup, StateOpening, adjudicate,
-        decode_bounded,
+        AccountLookup, AckWitness, ChallengeError, ChangeAbsence, ChangeOpening, EntryWitness,
+        HigherEntryLookup, StateLookup, StateOpening, adjudicate, decode_bounded,
     },
     commitment::{MultiOpening, Opening, RangeOpening, VectorKind, VectorRoot, empty_root},
-    credit::{CreditTip, CreditTipLookup, CreditTipValue, ShardHead, ShardSet},
-    payment::{Payment, PaymentContext, PaymentWitness},
+    payment::{EntryReceipt, PaymentContext, SendAuthorization, VectorAck, VectorSendBody},
     state::{
-        AccountChange, AccountRow, AccountState, ChangeValueCore, Prefix, SettlementOutput,
-        StateLeaf,
+        AccountChange, AccountRow, AccountState, ChangeGuard, ChangeValue, ChangeValueCore, Prefix,
+        SettlementOutput, StateLeaf,
     },
     transition::{
-        Assignment, ChangeRange, Close, CloseContext, CloseLimits, CoverageRange, EpochContext,
-        ExternalPayoutClaim, Header, ProofSlice, RootBundle, SliceBoundary, SliceCodecConfig,
-        StateCache, StateRange, TerminalProof, WithdrawalClaim, WithdrawalOutput,
+        Assignment, BatchId, CloseContext, CloseLimits, CoverageRange, EpochContext,
+        ExternalPayoutClaim, Header, RootBundle, SliceBoundary, StateCache, TerminalProof,
+        WithdrawalClaim, WithdrawalOutput, decode_slice_bounded,
+    },
+    vector::{
+        OutEntry, OutTipLookup, OutVector, TransposeEntry, read_transpose, transpose_encode_size,
+        write_transpose,
     },
 };
 use commonware_codec::{Decode, Encode, EncodeSize, RangeCfg, Read};
@@ -36,8 +37,8 @@ const MAX_ITEMS: usize = 16;
 const MAX_DESTINATION_BYTES: usize = 256;
 const MAX_STATES: usize = 16;
 const MAX_ROWS: usize = 8;
-const MAX_SHARDS_PER_ACCOUNT: usize = 8;
-const MAX_TOTAL_SHARDS: usize = 32;
+const MAX_ACCOUNT_ENTRIES: usize = 8;
+const MAX_TOTAL_ENTRIES: usize = 32;
 
 fn roundtrip<T>(bytes: &[u8], cfg: &<T as Read>::Cfg)
 where
@@ -84,6 +85,8 @@ fn semantic_header(
         withdrawal_outputs: empty_root::<Sha256>(VectorKind::WithdrawalOutput),
         successor: cache.root(),
         coverage: empty_root::<Sha256>(VectorKind::Coverage),
+        transpose: empty_root::<Sha256>(VectorKind::Transpose),
+        transpose_len: 0,
     };
     let header = Header::new::<Sha256, _>(&context, &roots);
     (context, header, roots)
@@ -101,13 +104,39 @@ fn challenge_roundtrip(bytes: &[u8], seed: u8) {
     assert_eq!(decoded, challenge);
 
     let (context, header, roots) = semantic_header(seed);
-    let _ = adjudicate::<Sha256, _>(
-        &context,
-        &header,
-        &roots,
-        context.challenge_deadline(),
-        &decoded,
-    );
+    let _ = adjudicate::<Sha256, _, _>(&context, &header, &roots, &decoded);
+}
+
+fn slice_roundtrip(bytes: &[u8], limits: CloseLimits) {
+    let Ok(slice) = decode_slice_bounded::<VerifyingKey, Digest>(bytes, limits, MAX_INPUT_BYTES)
+    else {
+        return;
+    };
+
+    let encoded = slice.encode();
+    assert_eq!(encoded.len(), slice.encoded_size());
+    let decoded = decode_slice_bounded::<VerifyingKey, Digest>(
+        &encoded,
+        limits,
+        MAX_INPUT_BYTES.max(encoded.len()),
+    )
+    .expect("encoded slice must remain bounded and decodable");
+    assert_eq!(decoded, slice);
+}
+
+fn transpose_roundtrip(bytes: &[u8], max: usize) {
+    let Ok(entries) = read_transpose::<VerifyingKey>(&mut &bytes[..], max) else {
+        return;
+    };
+
+    // The decoder accepts adjacent runs sharing one recipient that the encoder would merge,
+    // so parity is asserted on the canonical re-encoding rather than the input bytes.
+    let mut encoded = Vec::new();
+    write_transpose(&entries, &mut encoded);
+    assert_eq!(encoded.len(), transpose_encode_size(&entries));
+    let decoded = read_transpose::<VerifyingKey>(&mut &encoded[..], entries.len())
+        .expect("encoded transpose interval must remain decodable");
+    assert_eq!(decoded, entries);
 }
 
 fuzz_target!(|data: &[u8]| {
@@ -127,15 +156,15 @@ fuzz_target!(|data: &[u8]| {
         u64::from(limit_selector) % (u64::try_from(MAX_ROWS).expect("row bound fits in u64") + 1),
         u64::try_from(item_limit).expect("withdrawal bound fits in u64"),
         u64::from(limit_selector)
-            % (u64::try_from(MAX_SHARDS_PER_ACCOUNT).expect("per-account shard bound fits in u64")
+            % (u64::try_from(MAX_ACCOUNT_ENTRIES).expect("per-account entry bound fits in u64")
                 + 1),
         u64::from(limit_selector)
-            % (u64::try_from(MAX_TOTAL_SHARDS).expect("total shard bound fits in u64") + 1),
+            % (u64::try_from(MAX_TOTAL_ENTRIES).expect("total entry bound fits in u64") + 1),
         u64::MAX,
         u64::MAX,
         u64::MAX,
     );
-    match selector % 54 {
+    match selector % 52 {
         0 => roundtrip::<DepositBatch<VerifyingKey>>(bytes, &RangeCfg::new(..=item_limit)),
         1 => roundtrip::<WithdrawalBody<Digest>>(bytes, &RangeCfg::new(..=destination_limit)),
         2 => roundtrip::<SignedWithdrawal<VerifyingKey, Digest>>(
@@ -151,57 +180,52 @@ fuzz_target!(|data: &[u8]| {
         ),
         4 => roundtrip::<Committee>(bytes, &item_limit),
         5 => roundtrip::<Certificate>(bytes, &item_limit),
-        6 => roundtrip::<AccountState>(bytes, &()),
-        7 => roundtrip::<StateLeaf<VerifyingKey>>(bytes, &()),
-        8 => roundtrip::<Prefix>(bytes, &()),
-        9 => roundtrip::<AccountRow<VerifyingKey, Digest>>(bytes, &()),
-        10 => roundtrip::<Opening<Digest>>(bytes, &()),
-        11 => roundtrip::<MultiOpening<Digest>>(bytes, &()),
-        12 => roundtrip::<ShardSet<VerifyingKey, Digest>>(bytes, &()),
-        13 => roundtrip::<CreditTip>(bytes, &()),
-        14 => roundtrip::<CreditTipLookup<Digest>>(bytes, &()),
-        15 => roundtrip::<ChangeOpening<Digest>>(bytes, &()),
-        16 => roundtrip::<StateOpening<VerifyingKey, Digest>>(bytes, &()),
-        17 => roundtrip::<StateLookup<VerifyingKey, Digest>>(bytes, &()),
-        18 => roundtrip::<AccountLookup<VerifyingKey, Digest>>(bytes, &()),
-        19 => roundtrip::<RangeLower<VerifyingKey>>(bytes, &()),
-        20 => challenge_roundtrip(bytes, limit_selector),
-        21 => roundtrip::<Close<VerifyingKey, Digest>>(bytes, &close_limits),
-        22 => roundtrip::<PaymentContext<VerifyingKey, Digest>>(bytes, &()),
-        23 => roundtrip::<Payment<VerifyingKey, Digest>>(bytes, &()),
-        24 => roundtrip::<Header<Digest>>(bytes, &()),
-        25 => roundtrip::<CreditTipValue>(bytes, &()),
-        26 => roundtrip::<VectorRoot<Digest>>(bytes, &()),
-        27 => roundtrip::<ShardHead<VerifyingKey, Digest>>(bytes, &()),
-        28 => roundtrip::<CloseLimits>(bytes, &()),
-        29 => roundtrip::<Assignment<Digest>>(bytes, &()),
-        30 => roundtrip::<RangeOpening<Digest>>(bytes, &item_limit),
-        31 => roundtrip::<SliceBoundary>(bytes, &()),
-        32 => roundtrip::<CoverageRange<Digest>>(bytes, &()),
-        33 => roundtrip::<ChangeRange<VerifyingKey, Digest>>(bytes, &item_limit),
-        34 => roundtrip::<StateRange<VerifyingKey, Digest>>(bytes, &item_limit),
-        35 => roundtrip::<ProofSlice<VerifyingKey, Digest>>(
-            bytes,
-            &SliceCodecConfig::new(close_limits, item_limit),
-        ),
-        36 => roundtrip::<TerminalProof<Digest>>(bytes, &()),
-        37 => roundtrip::<ExternalPayoutClaim<VerifyingKey, Digest>>(bytes, &()),
-        38 => roundtrip::<WithdrawalClaim<Digest>>(bytes, &RangeCfg::new(..=destination_limit)),
-        39 => roundtrip::<RootBundle<Digest>>(bytes, &()),
-        40 => roundtrip::<Vote>(bytes, &()),
-        41 => roundtrip::<WithdrawalAction>(bytes, &()),
-        42 => roundtrip::<SettlementOutput>(bytes, &()),
-        43 => roundtrip::<AccountChange<VerifyingKey, Digest>>(bytes, &()),
-        44 => roundtrip::<ChangeAbsence<VerifyingKey, Digest>>(bytes, &()),
-        45 => roundtrip::<ChangeLookup<VerifyingKey, Digest>>(bytes, &()),
-        46 => roundtrip::<PaymentWitness<VerifyingKey>>(bytes, &()),
-        47 => roundtrip::<WithdrawalOutput>(bytes, &RangeCfg::new(..=destination_limit)),
-        48 => roundtrip::<HigherShardTipLookup<VerifyingKey, Digest>>(bytes, &()),
-        49 => roundtrip::<ScopedPaymentWitness<VerifyingKey>>(bytes, &()),
-        50 => roundtrip::<ReceiptWitness<VerifyingKey>>(bytes, &()),
-        51 => roundtrip::<SameIndexPaymentWitness<VerifyingKey>>(bytes, &()),
-        52 => roundtrip::<ReceiptForkWitness<VerifyingKey>>(bytes, &()),
-        53 => roundtrip::<ChangeValueCore<Digest>>(bytes, &()),
+        6 => roundtrip::<Vote>(bytes, &()),
+        7 => roundtrip::<WithdrawalAction>(bytes, &()),
+        8 => roundtrip::<AccountState>(bytes, &()),
+        9 => roundtrip::<StateLeaf<VerifyingKey>>(bytes, &()),
+        10 => roundtrip::<Prefix>(bytes, &()),
+        11 => roundtrip::<AccountRow<VerifyingKey, Digest>>(bytes, &()),
+        12 => roundtrip::<SettlementOutput>(bytes, &()),
+        13 => roundtrip::<AccountChange<VerifyingKey, Digest>>(bytes, &()),
+        14 => roundtrip::<ChangeValue<Digest>>(bytes, &()),
+        15 => roundtrip::<ChangeValueCore<Digest>>(bytes, &()),
+        16 => roundtrip::<ChangeGuard<VerifyingKey, Digest>>(bytes, &()),
+        17 => roundtrip::<Opening<Digest>>(bytes, &()),
+        18 => roundtrip::<MultiOpening<Digest>>(bytes, &()),
+        19 => roundtrip::<RangeOpening<Digest>>(bytes, &item_limit),
+        20 => roundtrip::<VectorRoot<Digest>>(bytes, &()),
+        21 => roundtrip::<PaymentContext<VerifyingKey, Digest>>(bytes, &()),
+        22 => roundtrip::<VectorSendBody<VerifyingKey, Digest>>(bytes, &()),
+        23 => roundtrip::<SendAuthorization<VerifyingKey, Digest>>(bytes, &()),
+        24 => roundtrip::<VectorAck<VerifyingKey, Digest>>(bytes, &()),
+        25 => roundtrip::<EntryReceipt<VerifyingKey, Digest>>(bytes, &()),
+        26 => roundtrip::<OutEntry<VerifyingKey>>(bytes, &()),
+        27 => roundtrip::<OutVector<VerifyingKey>>(bytes, &()),
+        28 => roundtrip::<OutTipLookup<VerifyingKey, Digest>>(bytes, &()),
+        29 => roundtrip::<TransposeEntry<VerifyingKey>>(bytes, &()),
+        30 => transpose_roundtrip(bytes, item_limit),
+        31 => roundtrip::<StateOpening<VerifyingKey, Digest>>(bytes, &()),
+        32 => roundtrip::<StateLookup<VerifyingKey, Digest>>(bytes, &()),
+        33 => roundtrip::<AccountLookup<VerifyingKey, Digest>>(bytes, &()),
+        34 => roundtrip::<ChangeOpening<Digest>>(bytes, &()),
+        35 => roundtrip::<ChangeAbsence<VerifyingKey, Digest>>(bytes, &()),
+        36 => roundtrip::<AckWitness<VerifyingKey, Digest>>(bytes, &()),
+        37 => roundtrip::<EntryWitness<VerifyingKey, Digest>>(bytes, &()),
+        38 => roundtrip::<HigherEntryLookup<VerifyingKey, Digest>>(bytes, &()),
+        39 => challenge_roundtrip(bytes, limit_selector),
+        40 => roundtrip::<Header<Digest>>(bytes, &()),
+        41 => roundtrip::<RootBundle<Digest>>(bytes, &()),
+        42 => roundtrip::<BatchId<Digest>>(bytes, &()),
+        43 => roundtrip::<CloseLimits>(bytes, &()),
+        44 => roundtrip::<Assignment<Digest>>(bytes, &()),
+        45 => roundtrip::<SliceBoundary>(bytes, &()),
+        46 => roundtrip::<CoverageRange<Digest>>(bytes, &()),
+        47 => roundtrip::<TerminalProof<Digest>>(bytes, &()),
+        48 => roundtrip::<WithdrawalOutput>(bytes, &RangeCfg::new(..=destination_limit)),
+        49 => roundtrip::<WithdrawalClaim<Digest>>(bytes, &RangeCfg::new(..=destination_limit)),
+        50 => roundtrip::<ExternalPayoutClaim<VerifyingKey, Digest>>(bytes, &()),
+        51 => slice_roundtrip(bytes, close_limits),
         _ => unreachable!(),
     }
 

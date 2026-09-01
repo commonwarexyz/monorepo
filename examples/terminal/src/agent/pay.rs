@@ -2,12 +2,14 @@
 //! resolution, and receipt commitment.
 //!
 //! Ordinary payments touch nothing but local SQL before the wire: the wallet's durable
-//! cumulative debit is the authoritative signing endpoint, the cached operator-served
-//! context is the claimed `(epoch, anchor)` binding, and the cached verified floor
-//! lower-bounds affordability. When the operator has moved to a new context, the wallet
-//! is taught by the typed corrective rejection its send earns, adopts the corrected
-//! context, and re-signs the same intent. Head reads survive only as the fallback
-//! for a wallet with no cache or a floor that cannot prove affordability.
+//! cumulative debit is the authoritative signing endpoint, the durable per-context vector
+//! state supplies the batch sequence and cumulative entries the signed root commits, the
+//! cached operator-served context is the claimed `(epoch, anchor)` binding, and the cached
+//! verified floor lower-bounds affordability. When the operator has moved to a new context
+//! or endpoint view, the wallet is taught by the typed corrective rejection its send earns,
+//! adopts the corrected context and endpoint, and re-signs the same intent. Head reads
+//! survive only as the fallback for a wallet with no cache or a floor that cannot prove
+//! affordability.
 //!
 //! Signing under a cached, possibly stale context is safe because a send authorizes a
 //! cumulative debit endpoint. Two sends at one endpoint under different contexts can
@@ -24,12 +26,13 @@ use super::{
 use crate::{
     chain::client::{Chain, Client, Env},
     operator::rpc as operator_rpc,
-    protocol::Key,
+    protocol::{Entry, Key},
 };
 use anyhow::{Context, Result, ensure};
 use commonware_clearing::bajillion::{
     commitment::{VectorKind, VectorRoot},
-    payment::{Entry, PaymentContext, SignedSend},
+    payment::{PaymentContext, SendAuthorization, VectorSendBody},
+    vector::{OutEntry, OutVector},
 };
 use commonware_codec::Encode as _;
 use commonware_cryptography::{Sha256, sha256::Digest};
@@ -41,8 +44,9 @@ use std::{net::SocketAddr, time::Duration};
 /// (rotation to the successor context), and the chain's registration-time
 /// deadline assignment, which re-anchors the successor context at the
 /// absolute deadlines execution derived from the registration's inclusion
-/// height. Beyond that, a corrective loop is an operator fault and the
-/// payment fails.
+/// height. Each corrective carries the operator's full endpoint view, so one
+/// adoption also synchronizes the batch sequence and vector state. Beyond
+/// that, a corrective loop is an operator fault and the payment fails.
 const MAX_CORRECTIONS: usize = 2;
 
 /// Certified anchor polls before an acceptance is reported unconfirmed. The
@@ -56,7 +60,8 @@ const CONFIRM_POLL: Duration = Duration::from_millis(200);
 /// One send resolved and ready for the shared accept, verify, and commit tail.
 struct StagedSend {
     context: PaymentContext<Key, Digest>,
-    send: SignedSend<Key, Digest>,
+    authorization: SendAuthorization<Key, Digest>,
+    entries: Vec<Entry>,
     predecessor_state_root: VectorRoot<Digest>,
 }
 
@@ -95,9 +100,10 @@ impl Agent {
     /// that rule on the optimistic path: the cached floor view is a lower bound on
     /// spendable balance, so a send it admits is affordable at an honest operator, and
     /// a shortfall falls back to one verified head read whose live-balance precheck
-    /// refuses before staging. A stale context is not a staging hazard at all: the
-    /// operator answers it with a typed corrective rejection and the wallet re-signs the
-    /// same intent at its own endpoint, boundedly per rejection reason.
+    /// refuses before staging. A stale context or endpoint view is not a staging hazard
+    /// at all: the operator answers it with a typed corrective rejection carrying its
+    /// live context and the payer's accepted endpoint, and the wallet re-signs the same
+    /// intent at its own endpoint, boundedly per rejection reason.
     ///
     /// A corrective rejection claiming an endpoint other than the wallet's own is never
     /// adopted. It is the lost-acceptance signal, so the wallet routes through the
@@ -134,11 +140,8 @@ impl Agent {
         let Some(pending) = &self.pending_payment else {
             return Ok(None);
         };
-        let requested = pending.send.body().entries().to_vec();
-        let total = requested.iter().try_fold(0_u64, |sum, entry| {
-            sum.checked_add(entry.amount())
-                .context("pending payment total overflow")
-        })?;
+        let requested = pending.entries.clone();
+        let total = entry_total(&requested)?;
         self.pay_requested(ctx, chain, operator, requested, total)
             .await
             .map(Some)
@@ -149,29 +152,26 @@ impl Agent {
         ctx: &E,
         chain: &mut Client,
         operator: SocketAddr,
-        requested: Vec<Entry<Key>>,
+        requested: Vec<Entry>,
         total: u64,
     ) -> Result<PaymentOutcome> {
-        let mut staged = match self
-            .pending_payment
-            .as_ref()
-            .map(|pending| (pending.send.clone(), pending.recovery_root))
-        {
-            Some((pending_send, recovery_root)) => {
+        let mut staged = match self.pending_payment.clone() {
+            Some(pending) => {
                 // Resubmit the exact staged bytes without any read: the operator's
                 // typed reply adjudicates whether they are replayed, accepted, or
                 // rejected with a corrective context.
                 ensure!(
-                    pending_send.body().entries() == requested,
+                    pending.entries == requested,
                     "another payment retry is pending"
                 );
                 self.store
-                    .recovery_opening(&recovery_root)?
+                    .recovery_opening(&pending.recovery_root)?
                     .context("pending payment recovery opening is missing")?;
                 StagedSend {
-                    context: send_context(&pending_send, &self.operator),
-                    send: pending_send,
-                    predecessor_state_root: recovery_root,
+                    context: authorization_context(&pending.authorization, &self.operator),
+                    authorization: pending.authorization,
+                    entries: pending.entries,
+                    predecessor_state_root: pending.recovery_root,
                 }
             }
             None => self.stage(ctx, chain, operator, &requested, total).await?,
@@ -188,29 +188,32 @@ impl Agent {
             // submitted before the wire attempt, so its row never claims less than what
             // may have reached the operator.
             self.store
-                .mark_payment_submitted(&staged.send)
+                .mark_payment_submitted(&staged.authorization)
                 .context("mark payment submitted")?;
             let response = operator_rpc::accept_send(
                 ctx,
                 operator,
                 operator_rpc::AcceptSendRequest {
-                    send: staged.send.clone(),
+                    authorization: staged.authorization.clone(),
+                    entries: staged.entries.clone(),
                 },
             )
             .await
             .context("submit payment")?;
-            let (context, cumulative_debit) = match response {
+            let (context, cumulative_debit, seq, entries) = match response {
                 operator_rpc::AcceptSendResponse::Accepted(accepted) => {
-                    Self::verify_accepted(&accepted, &staged.send, &staged.context)?;
+                    Self::verify_accepted(&accepted, &staged, total)?;
                     let accepted = self
-                        .confirm_and_record(ctx, chain, &staged.context, accepted, &staged.send)
+                        .confirm_and_record(ctx, chain, &staged, accepted)
                         .await?;
                     return Ok(PaymentOutcome::Accepted(Box::new(accepted)));
                 }
                 operator_rpc::AcceptSendResponse::Stale {
                     context,
                     cumulative_debit,
-                } => (context, cumulative_debit),
+                    seq,
+                    entries,
+                } => (context, cumulative_debit, seq, entries),
             };
             ensure!(
                 context.operator() == &self.operator,
@@ -223,7 +226,7 @@ impl Agent {
                     corrections + 1
                 );
                 corrections += 1;
-                staged = self.correct(context, &staged)?;
+                staged = self.correct(context, seq, entries, &staged)?;
             } else {
                 // The operator claims this payer stands at an endpoint the wallet does
                 // not recognize. That claim is never adopted: it is the lost-acceptance
@@ -233,19 +236,7 @@ impl Agent {
                     "the operator repeated an unrecognized endpoint after resolution"
                 );
                 recovered = true;
-                let (pending_send, recovery_root) =
-                    (staged.send.clone(), staged.predecessor_state_root);
-                staged = match self
-                    .resolve_pending(
-                        ctx,
-                        chain,
-                        operator,
-                        &pending_send,
-                        recovery_root,
-                        &requested,
-                    )
-                    .await?
-                {
+                staged = match self.resolve_pending(ctx, chain, operator, staged).await? {
                     PendingOutcome::Live(staged) => *staged,
                     PendingOutcome::Resolved(outcome) => return Ok(outcome),
                     PendingOutcome::Abandoned => {
@@ -264,7 +255,7 @@ impl Agent {
         ctx: &E,
         chain: &mut Client,
         operator: SocketAddr,
-        requested: &[Entry<Key>],
+        requested: &[Entry],
         total: u64,
     ) -> Result<StagedSend> {
         if let Some(cache) = self.cache.clone() {
@@ -274,7 +265,7 @@ impl Agent {
             // live-balance precheck refuses a truly unaffordable send before staging
             // and whose verified opening re-anchors the floor.
             if self.spendable(&cache)? >= total {
-                return self.stage_local(&cache, requested);
+                return self.stage_local(&cache, requested, total);
             }
         }
         self.stage_against_head(ctx, chain, operator, requested, total)
@@ -312,37 +303,76 @@ impl Agent {
         Ok(funds.saturating_sub(debited))
     }
 
+    /// Signs the requested deltas against the wallet's durable prior vector state under
+    /// `context`: the merged cumulative vector's root at the next batch sequence and the
+    /// wallet's own successor debit endpoint.
+    fn sign_batch(
+        &self,
+        context: &PaymentContext<Key, Digest>,
+        requested: &[Entry],
+        total: u64,
+    ) -> Result<SendAuthorization<Key, Digest>> {
+        let prior = self.store.vector_state(context)?;
+        let (seq, prior_entries) = match prior {
+            Some(state) => {
+                ensure!(
+                    state.cumulative_debit == self.cumulative_debit,
+                    "the durable vector state is not at the wallet endpoint"
+                );
+                (state.seq, state.entries)
+            }
+            None => (0, Vec::new()),
+        };
+        let merged = merge_entries(prior_entries, requested)?;
+        let vector = OutVector::new(context.epoch(), self.account(), merged)
+            .context("assemble signed out vector")?;
+        let body = VectorSendBody::new(
+            context,
+            self.account(),
+            seq.checked_add(1).context("batch sequence overflow")?,
+            self.cumulative_debit
+                .checked_add(total)
+                .context("payment endpoint overflow")?,
+            vector
+                .root::<Sha256, Digest>()
+                .context("commit signed out vector")?,
+        );
+        Ok(SendAuthorization::sign(body, self.wallet.signer()))
+    }
+
     /// Signs and durably stages a send from local state alone: the cached context, the
-    /// wallet's own authoritative endpoint, and the cached floor's retained opening as
-    /// the staged recovery evidence.
+    /// wallet's own authoritative endpoint and vector state, and the cached floor's
+    /// retained opening as the staged recovery evidence.
     fn stage_local(
         &mut self,
         cache: &ContextCache,
-        requested: &[Entry<Key>],
+        requested: &[Entry],
+        total: u64,
     ) -> Result<StagedSend> {
-        let send = SignedSend::sign_next_batch(
-            &cache.context,
-            self.wallet.signer(),
-            requested.to_vec(),
-            self.cumulative_debit,
-        )
-        .context("sign payment")?;
+        let authorization = self.sign_batch(&cache.context, requested, total)?;
         self.store
-            .stage_payment(&send, &cache.root, self.cumulative_debit)
+            .stage_payment(
+                &authorization,
+                requested,
+                &cache.root,
+                self.cumulative_debit,
+            )
             .context("durably stage payment")?;
         self.pending_payment = Some(PendingPayment {
-            send: send.clone(),
+            authorization: authorization.clone(),
+            entries: requested.to_vec(),
             recovery_root: cache.root,
         });
         Ok(StagedSend {
             context: cache.context.clone(),
-            send,
+            authorization,
+            entries: requested.to_vec(),
             predecessor_state_root: cache.root,
         })
     }
 
-    /// Adopts a corrective context and re-signs the exact staged intent at the wallet's
-    /// own endpoint.
+    /// Adopts a corrective context and endpoint view, and re-signs the exact staged
+    /// intent at the wallet's own endpoint.
     ///
     /// Endpoint exclusivity makes the adoption safe even against a Byzantine operator
     /// that claims rejection while keeping the replaced bytes: both sends authorize the
@@ -350,29 +380,40 @@ impl Agent {
     /// replaced send, the corrected one has a zero delta against that committed
     /// endpoint and is infeasible, and if it does not, the replaced send is dead the
     /// moment its context is unregistrable. At most one of the two ever commits, and
-    /// either way the ledger's endpoint arithmetic stays exact.
+    /// either way the ledger's endpoint arithmetic stays exact. The adopted batch
+    /// sequence and vector entries are equally harmless: a false claim only produces a
+    /// send whose root the operator rejects again.
     fn correct(
         &mut self,
         context: PaymentContext<Key, Digest>,
+        seq: u64,
+        entries: Vec<OutEntry<Key>>,
         staged: &StagedSend,
     ) -> Result<StagedSend> {
-        ensure!(
-            context.epoch() != staged.send.body().epoch()
-                || context.anchor() != staged.send.body().anchor(),
-            "corrective rejection repeated the rejected context"
-        );
-        let send = SignedSend::sign_next_batch(
-            &context,
-            self.wallet.signer(),
-            staged.send.body().entries().to_vec(),
-            self.cumulative_debit,
-        )
-        .context("re-sign corrected payment")?;
         self.store
-            .restage_payment(&staged.send, &send, self.cumulative_debit)
+            .adopt_vector(&context, seq, self.cumulative_debit, &entries)
+            .context("durably adopt corrective endpoint")?;
+        let total = staged
+            .authorization
+            .body()
+            .cumulative_debit()
+            .checked_sub(self.cumulative_debit)
+            .context("staged payment total is checked")?;
+        let authorization = self.sign_batch(&context, &staged.entries, total)?;
+        ensure!(
+            authorization.body() != staged.authorization.body(),
+            "corrective rejection repeated the rejected endpoint"
+        );
+        self.store
+            .restage_payment(
+                &staged.authorization,
+                &authorization,
+                &staged.entries,
+                self.cumulative_debit,
+            )
             .context("durably restage corrected payment")?;
         if let Some(pending) = self.pending_payment.as_mut() {
-            pending.send = send.clone();
+            pending.authorization = authorization.clone();
         }
 
         // The corrected context is operator-claimed data adopted only for signing: the
@@ -389,27 +430,35 @@ impl Agent {
         }
         Ok(StagedSend {
             context,
-            send,
+            authorization,
+            entries: staged.entries.clone(),
             predecessor_state_root: staged.predecessor_state_root,
         })
     }
 
     /// Validates and canonically orders the requested batch entries with their checked total.
-    fn payment_entries(&self, entries: &[(usize, u64)]) -> Result<(Vec<Entry<Key>>, u64)> {
+    fn payment_entries(&self, entries: &[(usize, u64)]) -> Result<(Vec<Entry>, u64)> {
         let mut requested = Vec::with_capacity(entries.len());
-        let mut total = 0_u64;
         for (receiver, amount) in entries {
             let receiver = self.receivers[receiver % self.receivers.len()].key.clone();
             ensure!(
                 receiver != self.account(),
                 "self-payments are omitted from this operator"
             );
-            total = total
-                .checked_add(*amount)
-                .context("payment total overflow")?;
-            requested.push(Entry::new(receiver, *amount).context("stage payment entry")?);
+            ensure!(*amount > 0, "payment amount must be positive");
+            requested.push(Entry {
+                recipient: receiver,
+                amount: *amount,
+            });
         }
-        requested.sort_unstable_by(|left, right| left.recipient().cmp(right.recipient()));
+        requested.sort_unstable_by(|left, right| left.recipient.cmp(&right.recipient));
+        ensure!(
+            requested
+                .windows(2)
+                .all(|pair| pair[0].recipient < pair[1].recipient),
+            "batch entries name unique receivers"
+        );
+        let total = entry_total(&requested)?;
         Ok((requested, total))
     }
 
@@ -428,15 +477,8 @@ impl Agent {
         ctx: &E,
         chain: &mut Client,
         operator: SocketAddr,
-        pending_send: &SignedSend<Key, Digest>,
-        recovery_root: VectorRoot<Digest>,
-        requested: &[Entry<Key>],
+        staged: StagedSend,
     ) -> Result<PendingOutcome> {
-        ensure!(
-            pending_send.body().entries() == requested,
-            "another payment retry is pending"
-        );
-
         // Re-read the head to learn whether the staged epoch is still the operator's live context.
         let head = operator_rpc::payment_head(
             ctx,
@@ -451,17 +493,13 @@ impl Agent {
             head.context.operator() == &self.operator,
             "payment context has an unexpected operator"
         );
-        let context = send_context(pending_send, &self.operator);
+        let context = &staged.context;
         if head.context.epoch() == context.epoch() && head.context.anchor() == context.anchor() {
             // The staged context is still live: resubmit the exact bytes unchanged.
             self.store
-                .recovery_opening(&recovery_root)?
+                .recovery_opening(&staged.predecessor_state_root)?
                 .context("pending payment recovery opening is missing")?;
-            return Ok(PendingOutcome::Live(Box::new(StagedSend {
-                context,
-                send: pending_send.clone(),
-                predecessor_state_root: recovery_root,
-            })));
+            return Ok(PendingOutcome::Live(Box::new(staged)));
         }
 
         // The staged epoch was cut, so the exact bytes can never be accepted again. The
@@ -487,33 +525,37 @@ impl Agent {
 
         self.verify_head(&head, &status)?;
         let endpoint = head.opening.leaf.state.cumulative_debit;
-        let staged_endpoint = pending_send.body().cumulative_debit();
+        let staged_endpoint = staged.authorization.body().cumulative_debit();
         let outcome = if endpoint == staged_endpoint {
             // The send committed. The operator is only an optional source of receipts,
             // never a verdict: an unanswered or unverifiable fetch still commits, with the
             // batch's receipts durably recorded as unheld.
+            let total = staged_endpoint
+                .checked_sub(self.cumulative_debit)
+                .context("staged payment total is checked")?;
             let fetched = operator_rpc::accepted_batch(
                 ctx,
                 operator,
                 operator_rpc::AcceptSendRequest {
-                    send: pending_send.clone(),
+                    authorization: staged.authorization.clone(),
+                    entries: staged.entries.clone(),
                 },
             )
             .await
             .ok()
             .flatten()
-            .filter(|accepted| Self::verify_accepted(accepted, pending_send, &context).is_ok());
+            .filter(|accepted| Self::verify_accepted(accepted, &staged, total).is_ok());
             match fetched {
                 Some(accepted) => PendingOutcome::Resolved(PaymentOutcome::Accepted(Box::new(
-                    self.record_payment(accepted, pending_send)?,
+                    self.record_payment(accepted, &staged)?,
                 ))),
                 None => {
-                    let total = pending_send
-                        .body()
-                        .total()
-                        .context("staged payment total is checked")?;
                     self.store
-                        .finalize_payment_unheld(pending_send, self.cumulative_debit)
+                        .finalize_payment_unheld(
+                            &staged.authorization,
+                            &staged.entries,
+                            self.cumulative_debit,
+                        )
                         .context("record finalized payment without receipts")?;
                     self.cumulative_debit = staged_endpoint;
                     self.pending_payment = None;
@@ -528,7 +570,7 @@ impl Agent {
             // send, so abandoning cannot drop or double count a real transfer. The ledger
             // keeps the abandoned row and the slot frees for a fresh send.
             self.store
-                .abandon_payment(pending_send)
+                .abandon_payment(&staged.authorization)
                 .context("abandon stale staged payment")?;
             self.pending_payment = None;
             PendingOutcome::Abandoned
@@ -628,7 +670,7 @@ impl Agent {
         ctx: &E,
         chain: &mut Client,
         operator: SocketAddr,
-        requested: &[Entry<Key>],
+        requested: &[Entry],
         total: u64,
     ) -> Result<StagedSend> {
         let head = operator_rpc::payment_head(
@@ -668,23 +710,19 @@ impl Agent {
             "payer has insufficient available balance"
         );
         self.verify_head(&head, &status)?;
-        let send = SignedSend::sign_next_batch(
-            &head.context,
-            self.wallet.signer(),
-            requested.to_vec(),
-            self.cumulative_debit,
-        )
-        .context("sign payment")?;
+        let authorization = self.sign_batch(&head.context, requested, total)?;
         self.store
-            .stage_payment(&send, &head.root, self.cumulative_debit)
+            .stage_payment(&authorization, requested, &head.root, self.cumulative_debit)
             .context("durably stage payment")?;
         self.pending_payment = Some(PendingPayment {
-            send: send.clone(),
+            authorization: authorization.clone(),
+            entries: requested.to_vec(),
             recovery_root: head.root,
         });
         Ok(StagedSend {
             context: head.context,
-            send,
+            authorization,
+            entries: requested.to_vec(),
             predecessor_state_root: head.root,
         })
     }
@@ -706,10 +744,10 @@ impl Agent {
         &mut self,
         ctx: &E,
         chain: &mut Client,
-        context: &PaymentContext<Key, Digest>,
+        staged: &StagedSend,
         accepted: operator_rpc::AcceptedBatchResponse,
-        send: &SignedSend<Key, Digest>,
     ) -> Result<operator_rpc::AcceptedBatchResponse> {
+        let context = &staged.context;
         for attempt in 0..CONFIRM_ATTEMPTS {
             match chain.anchor(ctx, context.epoch()).await {
                 Ok(Some(anchor)) => {
@@ -717,7 +755,7 @@ impl Agent {
                         anchor == *context.anchor(),
                         "confirm payment registration: another anchor is registered for the epoch"
                     );
-                    return self.record_payment(accepted, send);
+                    return self.record_payment(accepted, staged);
                 }
                 Ok(None) if attempt + 1 < CONFIRM_ATTEMPTS => {}
                 Ok(None) => anyhow::bail!(
@@ -733,25 +771,33 @@ impl Agent {
         unreachable!("the confirmation loop returns on its final attempt")
     }
 
-    /// Confirms an operator acceptance is the exact staged send with valid receipts.
+    /// Confirms an operator acceptance is the exact staged send with valid receipts:
+    /// the acknowledged body must be the staged body byte for byte, and the opened
+    /// entries must credit the staged recipients positionally.
     fn verify_accepted(
         accepted: &operator_rpc::AcceptedBatchResponse,
-        send: &SignedSend<Key, Digest>,
-        context: &PaymentContext<Key, Digest>,
+        staged: &StagedSend,
+        total: u64,
     ) -> Result<()> {
-        let total = send
-            .body()
-            .total()
-            .context("staged payment total is checked")?;
         ensure!(
-            accepted.epoch == context.epoch()
+            accepted.epoch == staged.context.epoch()
                 && accepted.total == total
-                && accepted.acceptance.send == *send,
+                && accepted.acceptance.ack.body() == staged.authorization.body(),
             "operator returned another payment"
+        );
+        ensure!(
+            accepted.acceptance.entries.len() == staged.entries.len()
+                && accepted
+                    .acceptance
+                    .entries
+                    .iter()
+                    .zip(&staged.entries)
+                    .all(|(opened, delta)| opened.recipient == delta.recipient),
+            "operator receipts do not credit the staged recipients"
         );
         accepted
             .acceptance
-            .verify(context)
+            .verify(&staged.context)
             .context("verify operator receipts")
     }
 
@@ -759,25 +805,69 @@ impl Agent {
     fn record_payment(
         &mut self,
         accepted: operator_rpc::AcceptedBatchResponse,
-        send: &SignedSend<Key, Digest>,
+        staged: &StagedSend,
     ) -> Result<operator_rpc::AcceptedBatchResponse> {
         let receipt_count = self
             .store
             .commit_payment(
                 &accepted.acceptance,
+                &staged.authorization,
+                &staged.entries,
                 self.cumulative_debit,
                 self.receipt_count,
             )
             .context("commit accepted receipts")?;
-        self.cumulative_debit = send.body().cumulative_debit();
+        self.cumulative_debit = staged.authorization.body().cumulative_debit();
         self.pending_payment = None;
         self.receipt_count = receipt_count;
         Ok(accepted)
     }
 }
 
-/// Rebuilds the payment context a signed send binds, under the bound
+/// Rebuilds the payment context a signed authorization binds, under the bound
 /// deployment's operator.
-fn send_context(send: &SignedSend<Key, Digest>, operator: &Key) -> PaymentContext<Key, Digest> {
-    PaymentContext::new(*send.body().anchor(), send.body().epoch(), operator.clone())
+fn authorization_context(
+    authorization: &SendAuthorization<Key, Digest>,
+    operator: &Key,
+) -> PaymentContext<Key, Digest> {
+    PaymentContext::new(
+        *authorization.body().anchor(),
+        authorization.body().epoch(),
+        operator.clone(),
+    )
+}
+
+/// The checked total of strictly recipient-sorted positive delta entries.
+fn entry_total(entries: &[Entry]) -> Result<u64> {
+    entries.iter().try_fold(0_u64, |sum, entry| {
+        sum.checked_add(entry.amount)
+            .context("payment total overflow")
+    })
+}
+
+/// Merges positive deltas into a strictly recipient-sorted cumulative vector.
+fn merge_entries(mut merged: Vec<OutEntry<Key>>, deltas: &[Entry]) -> Result<Vec<OutEntry<Key>>> {
+    for delta in deltas {
+        match merged.binary_search_by(|edge| edge.recipient.cmp(&delta.recipient)) {
+            Ok(position) => {
+                merged[position].cumulative = merged[position]
+                    .cumulative
+                    .checked_add(delta.amount)
+                    .context("edge cumulative overflow")?;
+                merged[position].count = merged[position]
+                    .count
+                    .checked_add(1)
+                    .context("edge count overflow")?;
+            }
+            Err(position) => merged.insert(
+                position,
+                OutEntry {
+                    recipient: delta.recipient.clone(),
+                    cumulative: delta.amount,
+                    count: 1,
+                },
+            ),
+        }
+    }
+    Ok(merged)
 }

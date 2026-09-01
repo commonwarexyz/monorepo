@@ -50,6 +50,7 @@ use commonware_broadcast::buffered;
 use commonware_clearing::bajillion::{
     admission::{Vote, bls12381},
     commitment::VectorRoot,
+    retained::DealtSlice,
     settlement::FinalizedBatch,
     transition::{Header, ProofSlice, RootBundle},
 };
@@ -246,7 +247,9 @@ where
 pub(crate) struct Deal {
     pub(crate) participant: Participant,
     pub(crate) peer: ed25519::PublicKey,
-    pub(crate) slices: Vec<ProofSlice<Key, Digest>>,
+    /// The dealt wire form: slices travel without their unchanged state, and
+    /// the validator hydrates each one against its retained key interval.
+    pub(crate) slices: Vec<DealtSlice<Key, Digest>>,
 }
 
 /// A message sent to the close pipeline [`Certifier`].
@@ -375,7 +378,7 @@ impl Pipeline {
             .map(|(index, slices)| Deal {
                 participant: Participant::from_usize(index),
                 peer: self.peers[index].clone(),
-                slices,
+                slices: slices.into_iter().map(DealtSlice::strip).collect(),
             })
             .collect();
         futures::executor::block_on(self.mailbox.certify(epoch, header, roots, dealings))
@@ -864,7 +867,8 @@ pub(crate) async fn start(
         genesis.timestamp,
         initial_sync_target::<tokio::Context>(),
     );
-    let plan = SyncPlan::init(&context.child("stateful_startup"), partition_prefix).await;
+    let startup = context.child("stateful_startup");
+    let plan = SyncPlan::init(&startup, partition_prefix).await;
     let _ = plan.should_state_sync(false);
 
     // Marshal actor.
@@ -1110,6 +1114,10 @@ mod tests {
                 coverage: VectorRoot {
                     digest: Sha256::hash(&[b"coverage"]),
                 },
+                transpose: VectorRoot {
+                    digest: Sha256::hash(&[b"transpose"]),
+                },
+                transpose_len: 0,
             };
             let deals = validator_keys
                 .iter()

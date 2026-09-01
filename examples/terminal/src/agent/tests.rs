@@ -15,17 +15,19 @@ use crate::{
     },
     operator::{Operator, rpc as operator_rpc},
     protocol::{
-        Acceptance, AccountCache, DepositEvent, INITIAL_BALANCE, Key, Protocol, SettlementResult,
-        Wallet, deployment, external_identity, identities, operator_key, wallets,
+        Acceptance, AcceptedEntry, AccountCache, Ack, DepositEvent, Entry, INITIAL_BALANCE, Key,
+        Protocol, Receipt, SettlementResult, Wallet, deployment, external_identity, identities,
+        operator_key, wallets,
     },
     rpc,
 };
 use bytes::Bytes;
 use commonware_clearing::bajillion::{
     boundary::{DepositBatch, WithdrawalAction, WithdrawalBatch},
-    payment::{Payment, PaymentContext, SignedReceipt, SignedSend},
+    payment::{PaymentContext, SendAuthorization, VECTOR_ACK_SIGNATURE_NAMESPACE, VectorSendBody},
     state::{AccountState, StateLeaf},
     transition::BatchId,
+    vector::{OutEntry, OutTipLookup, OutVector},
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{Hasher, Sha256, sha256::Digest};
@@ -242,10 +244,121 @@ async fn accept_and_drop<L: commonware_runtime::Listener>(
         panic!("expected the staged send");
     };
     operator
-        .accept_send(request.send)
+        .accept_send(request.authorization, request.entries)
         .unwrap()
         .into_accepted()
         .into()
+}
+
+/// Countersigns one payer authorization as the scripted operator, producing the
+/// dual-signed acknowledgment the wire carries.
+fn countersign(authorization: &SendAuthorization<Key, Digest>, operator: &Wallet) -> Ack {
+    let encoded = authorization.body().encode();
+    Ack::from_raw_unchecked(
+        authorization.body().clone(),
+        authorization.payer_signature().clone(),
+        operator
+            .signer()
+            .sign(VECTOR_ACK_SIGNATURE_NAMESPACE, &encoded),
+    )
+}
+
+/// Issues the acceptance a scripted operator returns for one submitted batch: the deltas
+/// merge into `prior` (the payer's cumulative vector before the batch), the merged root
+/// must be the acknowledged root, and each credited entry opens under it.
+fn issue_acceptance(
+    operator: &Wallet,
+    prior: &[OutEntry<Key>],
+    authorization: &SendAuthorization<Key, Digest>,
+    entries: &[Entry],
+) -> Acceptance {
+    let mut merged = prior.to_vec();
+    for entry in entries {
+        match merged.binary_search_by(|edge| edge.recipient.cmp(&entry.recipient)) {
+            Ok(position) => {
+                merged[position].cumulative += entry.amount;
+                merged[position].count += 1;
+            }
+            Err(position) => merged.insert(
+                position,
+                OutEntry {
+                    recipient: entry.recipient.clone(),
+                    cumulative: entry.amount,
+                    count: 1,
+                },
+            ),
+        }
+    }
+    let body = authorization.body();
+    let vector = OutVector::new(body.epoch(), body.payer().clone(), merged).unwrap();
+    assert_eq!(
+        vector.root::<Sha256, Digest>().unwrap(),
+        body.send_root(),
+        "the scripted operator merged another vector view"
+    );
+    let opened = entries
+        .iter()
+        .map(|entry| {
+            let OutTipLookup::Present {
+                cumulative,
+                count,
+                opening,
+            } = vector.lookup::<Sha256, Digest>(&entry.recipient).unwrap()
+            else {
+                panic!("every credited recipient is in the merged vector");
+            };
+            AcceptedEntry {
+                recipient: entry.recipient.clone(),
+                cumulative,
+                count,
+                opening,
+            }
+        })
+        .collect();
+    Acceptance {
+        ack: countersign(authorization, operator),
+        entries: opened,
+    }
+}
+
+/// A dual-signed receipt crediting `recipient` with one payment of `amount` from `payer`
+/// at sequence one under `context`, signed by the compiled default operator authority.
+fn issued_receipt(
+    context: &PaymentContext<Key, Digest>,
+    payer: &Wallet,
+    recipient: &Key,
+    amount: u64,
+) -> Receipt {
+    let vector = OutVector::new(
+        context.epoch(),
+        payer.public_key(),
+        vec![OutEntry {
+            recipient: recipient.clone(),
+            cumulative: amount,
+            count: 1,
+        }],
+    )
+    .unwrap();
+    let body = VectorSendBody::new(
+        context,
+        payer.public_key(),
+        1,
+        amount,
+        vector.root::<Sha256, Digest>().unwrap(),
+    );
+    let protocol = Protocol::new(NonZeroUsize::MIN).unwrap();
+    let ack = Ack::sign_by_authorities(body, payer.signer(), protocol.operator());
+    let OutTipLookup::Present { opening, .. } = vector.lookup::<Sha256, Digest>(recipient).unwrap()
+    else {
+        panic!("the issued entry is present by construction");
+    };
+    Receipt {
+        ack,
+        recipient: recipient.clone(),
+        cumulative: amount,
+        count: 1,
+        opening,
+    }
 }
 
 fn accepted(outcome: PaymentOutcome) -> operator_rpc::AcceptedBatchResponse {
@@ -261,10 +374,14 @@ fn accept_response(accepted: operator_rpc::AcceptedBatchResponse) -> Bytes {
     operator_rpc::AcceptSendResponse::Accepted(accepted).encode()
 }
 
+/// A scripted corrective rejection claiming `cumulative_debit`. Every scripted use claims
+/// an endpoint the wallet refuses to adopt, so the served sequence and vector are empty.
 fn stale_response(context: &PaymentContext<Key, Digest>, cumulative_debit: u64) -> Bytes {
     operator_rpc::AcceptSendResponse::Stale {
         context: context.clone(),
         cumulative_debit,
+        seq: 0,
+        entries: Vec::new(),
     }
     .encode()
 }
@@ -351,44 +468,29 @@ fn payment_debit_is_local_and_advances_only_after_a_verified_receipt() {
                 let operator_rpc::OperatorRequest::AcceptSend(request) = request else {
                     panic!("payment retry unexpectedly requested another head");
                 };
-                assert_eq!(request.send.body().cumulative_debit(), 7);
-                let receiver = request.send.body().entries()[0].recipient().clone();
-                let receipt = SignedReceipt::issue_next::<Sha256, _>(
-                    &payment_context,
-                    &request.send,
-                    &receiver,
-                    0,
-                    0,
-                    0,
-                    operator.signer(),
-                )
-                .unwrap();
-                let linked =
-                    Payment::new::<Sha256>(&payment_context, request.send.clone(), receipt)
-                        .unwrap();
-                let (send, receipt) = linked.into_parts();
-                first_payment = Some(Acceptance {
-                    send,
-                    receipts: vec![receipt],
-                });
-                let forged = SignedReceipt::sign_body_by_authority(
-                    first_payment.as_ref().unwrap().receipts[0].body().clone(),
-                    impostor.signer(),
-                );
+                assert_eq!(request.authorization.body().cumulative_debit(), 7);
+                let genuine =
+                    issue_acceptance(&operator, &[], &request.authorization, &request.entries);
+
+                // The forged acceptance countersigns the exact acknowledged body with an
+                // impostor key, so only signature verification stands between the wallet
+                // and recording it.
+                let forged = Acceptance {
+                    ack: countersign(&request.authorization, &impostor),
+                    entries: genuine.entries.clone(),
+                };
+                first_payment = Some((request.authorization, request.entries, genuine));
                 rpc::Response::Success {
                     body: accept_response(operator_rpc::AcceptedBatchResponse {
                         epoch: payment_context.epoch(),
-                        sequence: 0,
+                        sequence: 1,
                         total: 7,
-                        acceptance: Acceptance {
-                            send: request.send,
-                            receipts: vec![forged],
-                        },
+                        acceptance: forged,
                     }),
                 }
             })
             .await;
-            let first_payment = first_payment.unwrap();
+            let (first_authorization, first_entries, first_payment) = first_payment.unwrap();
 
             // The retry resubmits the exact staged bytes directly, with no head read:
             // the operator's typed reply adjudicates the resubmission.
@@ -396,11 +498,12 @@ fn payment_debit_is_local_and_advances_only_after_a_verified_receipt() {
                 let operator_rpc::OperatorRequest::AcceptSend(request) = request else {
                     panic!("live retry unexpectedly skipped its resubmission");
                 };
-                assert_eq!(request.send, first_payment.send);
+                assert_eq!(request.authorization, first_authorization);
+                assert_eq!(request.entries, first_entries);
                 rpc::Response::Success {
                     body: accept_response(operator_rpc::AcceptedBatchResponse {
                         epoch: payment_context.epoch(),
-                        sequence: 0,
+                        sequence: 1,
                         total: 7,
                         acceptance: first_payment.clone(),
                     }),
@@ -409,37 +512,30 @@ fn payment_debit_is_local_and_advances_only_after_a_verified_receipt() {
             .await;
 
             // The second payment signs from local state alone: the cached context and
-            // the wallet's own endpoint suffice, so no head read precedes the send.
+            // the wallet's own endpoint and vector state suffice, so no head read
+            // precedes the send.
             respond(&mut listener, |request| {
                 let operator_rpc::OperatorRequest::AcceptSend(request) = request else {
                     panic!("expected the second signed send");
                 };
-                assert_eq!(request.send.body().cumulative_debit(), 10);
-                let receiver = request.send.body().entries()[0].recipient().clone();
-                let receipt = SignedReceipt::issue_next::<Sha256, _>(
-                    &payment_context,
-                    &request.send,
-                    &receiver,
-                    0,
-                    7,
-                    1,
-                    operator.signer(),
-                )
-                .unwrap();
-                let (send, receipt) =
-                    Payment::new::<Sha256>(&payment_context, request.send, receipt)
-                        .unwrap()
-                        .into_parts();
-                let payment = Acceptance {
-                    send,
-                    receipts: vec![receipt],
-                };
+                assert_eq!(request.authorization.body().cumulative_debit(), 10);
+                let prior = first_payment
+                    .entries
+                    .iter()
+                    .map(|entry| OutEntry {
+                        recipient: entry.recipient.clone(),
+                        cumulative: entry.cumulative,
+                        count: entry.count,
+                    })
+                    .collect::<Vec<_>>();
+                let acceptance =
+                    issue_acceptance(&operator, &prior, &request.authorization, &request.entries);
                 rpc::Response::Success {
                     body: accept_response(operator_rpc::AcceptedBatchResponse {
                         epoch: payment_context.epoch(),
-                        sequence: 1,
+                        sequence: 2,
                         total: 3,
-                        acceptance: payment,
+                        acceptance,
                     }),
                 }
             })
@@ -462,10 +558,10 @@ fn payment_debit_is_local_and_advances_only_after_a_verified_receipt() {
                 .await
                 .unwrap(),
         );
-        assert_eq!(payment.acceptance.receipts[0].body().amount(), 7);
+        assert_eq!(payment.acceptance.entries[0].cumulative, 7);
         assert_eq!(agent.receipt_count(), 1);
         assert_eq!(
-            payment.acceptance.send.body().anchor(),
+            payment.acceptance.ack.body().anchor(),
             payment_context.anchor()
         );
 
@@ -475,7 +571,8 @@ fn payment_debit_is_local_and_advances_only_after_a_verified_receipt() {
                 .await
                 .unwrap(),
         );
-        assert_eq!(payment.acceptance.receipts[0].body().amount(), 3);
+        assert_eq!(payment.total, 3);
+        assert_eq!(payment.acceptance.entries[0].cumulative, 10);
         assert_eq!(agent.receipt_count(), 2);
         operator_server.await.unwrap();
     });
@@ -512,7 +609,7 @@ fn stale_uncommitted_payment_is_abandoned_on_the_finalized_endpoint_proof() {
             .unwrap_err();
         assert!(format!("{error:#}").contains("submit payment"));
         let pending = agent.pending_payment.as_ref().unwrap();
-        assert_eq!(pending.send.body().epoch(), cut.epoch());
+        assert_eq!(pending.authorization.body().epoch(), cut.epoch());
         assert_eq!(agent.cumulative_debit, 0);
         let (mut listener, mut operator) = staging.await.unwrap();
 
@@ -555,8 +652,8 @@ fn stale_uncommitted_payment_is_abandoned_on_the_finalized_endpoint_proof() {
                 .unwrap(),
         );
         assert_eq!(payment.epoch, live.epoch());
-        assert_eq!(payment.acceptance.receipts[0].body().amount(), 7);
-        assert_eq!(payment.acceptance.send.body().cumulative_debit(), 7);
+        assert_eq!(payment.acceptance.entries[0].cumulative, 7);
+        assert_eq!(payment.acceptance.ack.body().cumulative_debit(), 7);
         assert_eq!(agent.cumulative_debit, 7);
         assert_eq!(agent.receipt_count(), 1);
         assert!(agent.pending_payment.is_none());
@@ -591,7 +688,13 @@ fn committed_payment_resolves_from_the_finalized_endpoint_without_a_verdict() {
             .unwrap_err();
         assert!(format!("{error:#}").contains("submit payment"));
         assert_eq!(
-            agent.pending_payment.as_ref().unwrap().send.body().epoch(),
+            agent
+                .pending_payment
+                .as_ref()
+                .unwrap()
+                .authorization
+                .body()
+                .epoch(),
             0
         );
         let (mut listener, mut operator, recorded) = staging.await.unwrap();
@@ -611,13 +714,13 @@ fn committed_payment_resolves_from_the_finalized_endpoint_without_a_verdict() {
             .payment_head(&wallets()[0].public_key())
             .unwrap()
             .context;
-        let expected_send = recorded.acceptance.send.clone();
+        let expected_ack = recorded.acceptance.ack.clone();
         let resolution = context.child("resolution").spawn(move |_| async move {
             respond(&mut listener, |request| {
                 let operator_rpc::OperatorRequest::AcceptSend(request) = request else {
                     panic!("the retry did not resubmit the staged bytes");
                 };
-                assert_eq!(request.send, expected_send);
+                assert_eq!(request.authorization.body(), expected_ack.body());
                 rpc::Response::Success {
                     body: stale_response(&live, 7),
                 }
@@ -628,7 +731,7 @@ fn committed_payment_resolves_from_the_finalized_endpoint_without_a_verdict() {
                 let operator_rpc::OperatorRequest::AcceptedBatch(request) = request else {
                     panic!("the receipts fetch did not name the exact staged bytes");
                 };
-                assert_eq!(request.send, expected_send);
+                assert_eq!(request.authorization.body(), expected_ack.body());
                 operator_rpc::handle_decoded(
                     &mut operator,
                     operator_rpc::OperatorRequest::AcceptedBatch(request),
@@ -644,7 +747,7 @@ fn committed_payment_resolves_from_the_finalized_endpoint_without_a_verdict() {
                 .unwrap(),
         );
         assert_eq!(payment.epoch, committed.epoch());
-        assert_eq!(payment.acceptance.receipts[0].body().amount(), 7);
+        assert_eq!(payment.acceptance.entries[0].cumulative, 7);
         assert_eq!(agent.cumulative_debit, 7);
         assert_eq!(agent.receipt_count(), 1);
         assert!(agent.pending_payment.is_none());
@@ -681,7 +784,12 @@ fn unfinalized_staged_epoch_keeps_resolution_undecidable() {
             .await
             .unwrap_err();
         assert!(format!("{error:#}").contains("submit payment"));
-        let staged = agent.pending_payment.as_ref().unwrap().send.clone();
+        let staged = agent
+            .pending_payment
+            .as_ref()
+            .unwrap()
+            .authorization
+            .clone();
         assert_eq!(staged.body().epoch(), cut.epoch());
         let (mut listener, mut operator) = staging.await.unwrap();
 
@@ -721,7 +829,12 @@ fn unfinalized_staged_epoch_keeps_resolution_undecidable() {
             .unwrap_err();
         assert!(format!("{error:#}").contains("not yet decidable"));
         assert_eq!(
-            agent.pending_payment.as_ref().unwrap().send.encode(),
+            agent
+                .pending_payment
+                .as_ref()
+                .unwrap()
+                .authorization
+                .encode(),
             staged.encode()
         );
         assert_eq!(agent.cumulative_debit, 0);
@@ -817,7 +930,7 @@ fn finalized_endpoint_commits_without_receipts_when_the_fetch_fails() {
                 let operator_rpc::OperatorRequest::AcceptSend(request) = request else {
                     panic!("expected the successor send");
                 };
-                assert_eq!(request.send.body().cumulative_debit(), 10);
+                assert_eq!(request.authorization.body().cumulative_debit(), 10);
                 operator_rpc::handle_decoded(
                     &mut operator,
                     operator_rpc::OperatorRequest::AcceptSend(request),
@@ -835,7 +948,8 @@ fn finalized_endpoint_commits_without_receipts_when_the_fetch_fails() {
                 .await
                 .unwrap(),
         );
-        assert_eq!(payment.acceptance.receipts[0].body().amount(), 3);
+        assert_eq!(payment.total, 3);
+        assert_eq!(payment.acceptance.entries[0].cumulative, 3);
         assert_eq!(payment.epoch, live.epoch());
         assert_eq!(recovered.cumulative_debit, 10);
         successor.await.unwrap();
@@ -865,7 +979,12 @@ fn forged_resolution_opening_fails_verification_and_retries() {
             .await
             .unwrap_err();
         assert!(format!("{error:#}").contains("submit payment"));
-        let staged = agent.pending_payment.as_ref().unwrap().send.clone();
+        let staged = agent
+            .pending_payment
+            .as_ref()
+            .unwrap()
+            .authorization
+            .clone();
         let (mut listener, mut operator, _recorded) = staging.await.unwrap();
 
         let result = operator.complete_close(6).unwrap();
@@ -920,7 +1039,12 @@ fn forged_resolution_opening_fails_verification_and_retries() {
             .unwrap_err();
         assert!(format!("{error:#}").contains("verify payer state opening"));
         assert_eq!(
-            agent.pending_payment.as_ref().unwrap().send.encode(),
+            agent
+                .pending_payment
+                .as_ref()
+                .unwrap()
+                .authorization
+                .encode(),
             staged.encode()
         );
         assert_eq!(agent.cumulative_debit, 0);
@@ -964,7 +1088,7 @@ fn finalized_endpoint_below_the_committed_endpoint_is_reported_not_healed() {
                 .await
                 .unwrap(),
         );
-        assert_eq!(payment.acceptance.receipts[0].body().amount(), 7);
+        assert_eq!(payment.acceptance.entries[0].cumulative, 7);
         assert_eq!(agent.cumulative_debit, 7);
         let error = agent
             .pay(&context, &mut chain, operator_address, &[(1, 3)])
@@ -1014,7 +1138,12 @@ fn finalized_endpoint_below_the_committed_endpoint_is_reported_not_healed() {
             assert_eq!(agent.cumulative_debit, 7);
             assert_eq!(agent.receipt_count(), 1);
             assert!(agent.pending_payment.is_some());
-            let staged = agent.pending_payment.as_ref().unwrap().send.encode();
+            let staged = agent
+                .pending_payment
+                .as_ref()
+                .unwrap()
+                .authorization
+                .encode();
             (listener, byzantine) = resolution.await.unwrap();
 
             // The restarted wallet reports the same contradiction from its
@@ -1024,7 +1153,12 @@ fn finalized_endpoint_below_the_committed_endpoint_is_reported_not_healed() {
             assert_eq!(agent.cumulative_debit, 7);
             assert_eq!(agent.receipt_count(), 1);
             assert_eq!(
-                agent.pending_payment.as_ref().unwrap().send.encode(),
+                agent
+                    .pending_payment
+                    .as_ref()
+                    .unwrap()
+                    .authorization
+                    .encode(),
                 staged
             );
         }
@@ -1084,48 +1218,48 @@ fn deterministically_rejected_sends_are_never_staged() {
     });
 }
 
+/// Serves one scripted acceptance at the expected endpoint, merging the request's deltas
+/// into `prior` (the payer's cumulative vector before the batch).
 async fn respond_acceptance<L: commonware_runtime::Listener>(
     listener: &mut L,
     operator: &Wallet,
     context: &PaymentContext<Key, Digest>,
     endpoint: u64,
-    previous_credit: u64,
-    previous_index: u64,
+    prior: Vec<OutEntry<Key>>,
 ) {
     respond(listener, |request| {
         let operator_rpc::OperatorRequest::AcceptSend(request) = request else {
             panic!("expected a signed send");
         };
-        assert_eq!(request.send.body().epoch(), context.epoch());
-        assert_eq!(request.send.body().cumulative_debit(), endpoint);
-        let receiver = request.send.body().entries()[0].recipient().clone();
-        let total = request.send.body().total().unwrap();
-        let receipt = SignedReceipt::issue_next::<Sha256, _>(
-            context,
-            &request.send,
-            &receiver,
-            0,
-            previous_credit,
-            previous_index,
-            operator.signer(),
-        )
-        .unwrap();
-        let (send, receipt) = Payment::new::<Sha256>(context, request.send, receipt)
-            .unwrap()
-            .into_parts();
+        assert_eq!(request.authorization.body().epoch(), context.epoch());
+        assert_eq!(request.authorization.body().cumulative_debit(), endpoint);
+        let total = request
+            .entries
+            .iter()
+            .map(|entry| entry.amount)
+            .sum::<u64>();
+        let acceptance =
+            issue_acceptance(operator, &prior, &request.authorization, &request.entries);
         rpc::Response::Success {
             body: accept_response(operator_rpc::AcceptedBatchResponse {
                 epoch: context.epoch(),
-                sequence: previous_index,
+                sequence: request.authorization.body().seq(),
                 total,
-                acceptance: Acceptance {
-                    send,
-                    receipts: vec![receipt],
-                },
+                acceptance,
             }),
         }
     })
     .await;
+}
+
+/// The single Alice-to-Bob cumulative edge at `(cumulative, count)`, the prior vector the
+/// scripted payment sequences advance through.
+fn bob_edge(cumulative: u64, count: u64) -> Vec<OutEntry<Key>> {
+    vec![OutEntry {
+        recipient: wallets()[1].public_key(),
+        cumulative,
+        count,
+    }]
 }
 
 #[test]
@@ -1163,9 +1297,23 @@ fn steady_state_payments_sign_from_local_state_without_head_reads() {
                 }
             })
             .await;
-            respond_acceptance(&mut listener, &operator, &server_context, 7, 0, 0).await;
-            respond_acceptance(&mut listener, &operator, &server_context, 10, 7, 1).await;
-            respond_acceptance(&mut listener, &operator, &server_context, 12, 10, 2).await;
+            respond_acceptance(&mut listener, &operator, &server_context, 7, Vec::new()).await;
+            respond_acceptance(
+                &mut listener,
+                &operator,
+                &server_context,
+                10,
+                bob_edge(7, 1),
+            )
+            .await;
+            respond_acceptance(
+                &mut listener,
+                &operator,
+                &server_context,
+                12,
+                bob_edge(10, 2),
+            )
+            .await;
         });
 
         let mut agent = Agent::open(database.path(), 0).unwrap();
@@ -1235,7 +1383,7 @@ fn fresh_wallet_falls_back_to_one_head_read_and_caches_the_context() {
                 }
             })
             .await;
-            respond_acceptance(&mut listener, &operator, &server_context, 7, 0, 0).await;
+            respond_acceptance(&mut listener, &operator, &server_context, 7, Vec::new()).await;
         });
 
         let mut agent = Agent::new(0).unwrap();
@@ -1359,7 +1507,7 @@ fn unaffordable_by_local_view_is_refused_before_staging() {
                 }
             })
             .await;
-            respond_acceptance(&mut listener, &operator, &server_context, 7, 0, 0).await;
+            respond_acceptance(&mut listener, &operator, &server_context, 7, Vec::new()).await;
 
             // The local floor cannot prove affordability for the oversized send, so
             // the wallet confirms against one live head read, which refuses it before
@@ -1384,7 +1532,14 @@ fn unaffordable_by_local_view_is_refused_before_staging() {
 
             // Nothing was staged, so the wallet is not wedged: an affordable payment
             // still signs from local state.
-            respond_acceptance(&mut listener, &operator, &server_context, 10, 7, 1).await;
+            respond_acceptance(
+                &mut listener,
+                &operator,
+                &server_context,
+                10,
+                bob_edge(7, 1),
+            )
+            .await;
         });
 
         let mut agent = Agent::new(0).unwrap();
@@ -1409,7 +1564,8 @@ fn unaffordable_by_local_view_is_refused_before_staging() {
                 .await
                 .unwrap(),
         );
-        assert_eq!(payment.acceptance.receipts[0].body().amount(), 3);
+        assert_eq!(payment.total, 3);
+        assert_eq!(payment.acceptance.entries[0].cumulative, 10);
         assert_eq!(agent.cumulative_debit, 10);
         operator_server.await.unwrap();
     });
@@ -1427,8 +1583,9 @@ fn withdrawal_deadline_caps_at_the_clock_horizon() {
 /// A client whose one validator address answers nothing, for flows that must
 /// fail before any chain interaction.
 fn dead_client(context: &deterministic::Context) -> Client {
+    let mut identity_rng = context.child("identity_rng");
     Client::new(
-        &harness::identity(&mut context.child("identity_rng")),
+        &harness::identity(&mut identity_rng),
         deployment(),
         vec![SocketAddr::from(([127, 0, 0, 1], 9_601))],
         context.child("client_rng"),
@@ -1967,9 +2124,9 @@ fn unregistered_valid_payment_context_does_not_commit() {
                     let request = operator_rpc::decode_request(request).unwrap();
                     if let operator_rpc::OperatorRequest::AcceptSend(request) = &request {
                         if let Some(first) = &first_send {
-                            assert_eq!(&request.send, first);
+                            assert_eq!(&request.authorization, first);
                         } else {
-                            first_send = Some(request.send.clone());
+                            first_send = Some(request.authorization.clone());
                         }
                     }
                     operator_rpc::handle_decoded(&mut operator, request)
@@ -2049,7 +2206,7 @@ fn response_loss_restart_retries_byte_identical_pending_send() {
             .await;
 
             let accepted;
-            let first_send;
+            let first_authorization;
             {
                 let (_, _sink, mut stream) = listener.accept().await.unwrap();
                 let request = rpc::recv_request(&mut stream).await.unwrap();
@@ -2058,27 +2215,10 @@ fn response_loss_restart_retries_byte_identical_pending_send() {
                 else {
                     panic!("expected the initially staged send");
                 };
-                assert_eq!(request.send.body().cumulative_debit(), 7);
-                first_send = request.send;
-                let receiver = first_send.body().entries()[0].recipient().clone();
-                let receipt = SignedReceipt::issue_next::<Sha256, _>(
-                    &payment_context,
-                    &first_send,
-                    &receiver,
-                    0,
-                    0,
-                    0,
-                    operator.signer(),
-                )
-                .unwrap();
-                let (send, receipt) =
-                    Payment::new::<Sha256>(&payment_context, first_send.clone(), receipt)
-                        .unwrap()
-                        .into_parts();
-                accepted = Acceptance {
-                    send,
-                    receipts: vec![receipt],
-                };
+                assert_eq!(request.authorization.body().cumulative_debit(), 7);
+                accepted =
+                    issue_acceptance(&operator, &[], &request.authorization, &request.entries);
+                first_authorization = request.authorization;
             }
 
             // The restarted retry resubmits the exact staged bytes with no head read.
@@ -2086,11 +2226,11 @@ fn response_loss_restart_retries_byte_identical_pending_send() {
                 let operator_rpc::OperatorRequest::AcceptSend(request) = request else {
                     panic!("restart retry unexpectedly skipped its resubmission");
                 };
-                assert_eq!(request.send.encode(), first_send.encode());
+                assert_eq!(request.authorization.encode(), first_authorization.encode());
                 rpc::Response::Success {
                     body: accept_response(operator_rpc::AcceptedBatchResponse {
                         epoch: payment_context.epoch(),
-                        sequence: 0,
+                        sequence: 1,
                         total: 7,
                         acceptance: accepted,
                     }),
@@ -2116,7 +2256,7 @@ fn response_loss_restart_retries_byte_identical_pending_send() {
                 .await
                 .unwrap(),
         );
-        assert_eq!(payment.acceptance.receipts[0].body().amount(), 7);
+        assert_eq!(payment.acceptance.entries[0].cumulative, 7);
         assert_eq!(recovered.cumulative_debit, 7);
         assert_eq!(recovered.receipt_count(), 1);
         assert!(recovered.pending_payment.is_none());
@@ -2162,11 +2302,18 @@ fn successful_receipt_commit_survives_restart_and_advances_next_debit() {
                 }
             })
             .await;
-            respond_acceptance(&mut listener, &operator, &payment_context, 7, 0, 0).await;
+            respond_acceptance(&mut listener, &operator, &payment_context, 7, Vec::new()).await;
 
             // The cached signing state is durable, so the restarted wallet signs its
             // next send from local SQL alone: no head read precedes it.
-            respond_acceptance(&mut listener, &operator, &payment_context, 10, 7, 1).await;
+            respond_acceptance(
+                &mut listener,
+                &operator,
+                &payment_context,
+                10,
+                bob_edge(7, 1),
+            )
+            .await;
         });
 
         let mut agent = Agent::open(database.path(), 0).unwrap();
@@ -3616,43 +3763,37 @@ fn admitted_batch(fixture: &crate::protocol::OmittingClose) -> BatchId<Digest> {
     fixture.result.header.batch_id::<Sha256>()
 }
 
-fn incoming_response(
-    pairs: &[(Payment<Key, Digest>, u64)],
-) -> operator_rpc::IncomingPaymentsResponse {
+fn incoming_response(pairs: &[(Receipt, u64)]) -> operator_rpc::IncomingPaymentsResponse {
     operator_rpc::IncomingPaymentsResponse {
         next_cursor: pairs.last().map_or(0, |(_, cursor)| *cursor),
         pairs: pairs
             .iter()
-            .map(|(pair, cursor)| operator_rpc::IncomingPair {
-                epoch: pair.send().body().epoch(),
-                cursor: *cursor,
-                payment: pair.clone(),
+            .map(|(receipt, cursor)| operator_rpc::IncomingPair {
+                sequence: *cursor,
+                receipt: receipt.clone(),
             })
             .collect(),
     }
 }
 
-/// A held receipt in `shard` credited by Alice under the omitting close's epoch context.
-fn held_in_shard(fixture: &crate::protocol::OmittingClose, shard: u64) -> Payment<Key, Digest> {
-    let context = fixture.result.payment_context.clone();
-    let alice = &wallets()[0];
-    let bob = wallets()[1].public_key();
-    let previous_debit = shard * 5;
-    let send =
-        SignedSend::sign_next(&context, alice.signer(), bob.clone(), 5, previous_debit).unwrap();
-    let receipt = SignedReceipt::issue_next::<Sha256, _>(
-        &context,
-        &send,
-        &bob,
-        shard,
-        0,
-        0,
-        crate::protocol::Protocol::new(NonZeroUsize::MIN)
-            .unwrap()
-            .operator(),
+/// A held receipt crediting Bob from `payer` under the omitting close's epoch context.
+fn held_from(fixture: &crate::protocol::OmittingClose, payer: &Wallet) -> Receipt {
+    issued_receipt(
+        &fixture.result.payment_context,
+        payer,
+        &wallets()[1].public_key(),
+        5,
     )
-    .unwrap();
-    Payment::from_parts_unchecked(send, receipt)
+}
+
+/// A second paying edge whose payer key sorts after Alice's, so reconciliation assesses
+/// the fixture's Alice edge first.
+fn later_payer() -> Wallet {
+    let alice = wallets()[0].public_key();
+    (2_000..2_100)
+        .map(|seed| Wallet::from_seed("later-payer", seed))
+        .find(|wallet| wallet.public_key() > alice)
+        .expect("a seeded key sorts after Alice")
 }
 
 /// (c) THE POINT: a receiver holding a verified receipt convicts a close that omits its
@@ -3663,7 +3804,7 @@ fn omitted_credit_is_convicted_by_the_held_receipt() {
     deterministic::Runner::default().start(|context| async move {
         let (control, mut chain) = chain(&context).await;
         let fixture = admit_omitting(&control).await;
-        let bob_pair = fixture.held_pair.clone();
+        let bob_receipt = fixture.held_receipt.clone();
         let batch_id = admitted_batch(&fixture);
         let change_root = fixture.result.roots.change;
         let bob_lookup = fixture.held_lookup.clone();
@@ -3681,18 +3822,19 @@ fn omitted_credit_is_convicted_by_the_held_receipt() {
                     operator_rpc::OperatorRequest::IncomingPayments(_)
                 ));
                 rpc::Response::Success {
-                    body: incoming_response(&[(bob_pair, 1)]).encode(),
+                    body: incoming_response(&[(bob_receipt, 1)]).encode(),
                 }
             })
             .await;
             respond(&mut operator_listener, move |request| {
-                let operator_rpc::OperatorRequest::CommittedShardTip(request) = request else {
-                    panic!("expected a committed shard-tip request");
+                let operator_rpc::OperatorRequest::CommittedEntry(request) = request else {
+                    panic!("expected a committed entry request");
                 };
-                assert_eq!(request.shard, 0);
+                assert_eq!(request.payer, wallets()[0].public_key());
+                assert_eq!(request.recipient, wallets()[1].public_key());
                 assert_eq!(request.epoch, 0);
                 rpc::Response::Success {
-                    body: operator_rpc::CommittedShardTipResponse {
+                    body: operator_rpc::CommittedEntryResponse {
                         batch_id,
                         change_root,
                         lookup: bob_lookup,
@@ -3735,15 +3877,16 @@ fn omitted_credit_is_convicted_by_the_held_receipt() {
     });
 }
 
-/// Item 1: a pair whose context anchor is not the one the chain certifiably registered has
-/// no close to adjudicate against, so intake refuses it. It never becomes reliance-grade,
-/// and the durable cursor still advances past it so a poisoned pair cannot wedge intake.
+/// Item 1: a receipt whose context anchor is not the one the chain certifiably registered
+/// has no close to adjudicate against, so intake refuses it. It never becomes
+/// reliance-grade, and the durable cursor still advances past it so a poisoned receipt
+/// cannot wedge intake.
 #[test]
 fn fabricated_anchor_pair_is_refused_at_intake() {
     deterministic::Runner::default().start(|context| async move {
         let (control, mut chain) = chain(&context).await;
 
-        // A sig-valid pair over an operator-chosen anchor with no settlement obligation.
+        // A sig-valid receipt over an operator-chosen anchor with no settlement obligation.
         let bogus = PaymentContext::new(
             Sha256::hash(&[b"fabricated-unregistered-anchor"]),
             0,
@@ -3752,20 +3895,8 @@ fn fabricated_anchor_pair_is_refused_at_intake() {
         let alice = &wallets()[0];
         let bob = wallets()[1].public_key();
         let payer = alice.public_key();
-        let send = SignedSend::sign_next(&bogus, alice.signer(), bob.clone(), 5, 0).unwrap();
-        let invoice = send.tx_id::<Sha256>().into_digest();
-        let protocol = crate::protocol::Protocol::new(NonZeroUsize::MIN).unwrap();
-        let receipt = SignedReceipt::issue_next::<Sha256, _>(
-            &bogus,
-            &send,
-            &bob,
-            0,
-            0,
-            0,
-            protocol.operator(),
-        )
-        .unwrap();
-        let pair = Payment::from_parts_unchecked(send, receipt);
+        let receipt = issued_receipt(&bogus, alice, &bob, 5);
+        let invoice = Sha256::hash(&[receipt.ack.body().encode().as_ref()]);
 
         // The chain registered a different anchor for epoch 0 than the operator's forgery.
         let registered = registered_context(&control).await;
@@ -3783,7 +3914,7 @@ fn fabricated_anchor_pair_is_refused_at_intake() {
                     operator_rpc::OperatorRequest::IncomingPayments(_)
                 ));
                 rpc::Response::Success {
-                    body: incoming_response(&[(pair, 1)]).encode(),
+                    body: incoming_response(&[(receipt, 1)]).encode(),
                 }
             })
             .await;
@@ -3794,8 +3925,8 @@ fn fabricated_anchor_pair_is_refused_at_intake() {
             .await
             .unwrap();
 
-        // The forged pair is not stored, so it never reaches the service-accounting query, and
-        // the cursor advanced past it.
+        // The forged receipt is not stored, so it never reaches the service-accounting
+        // query, and the cursor advanced past it.
         assert_eq!(
             bob.incoming(),
             IncomingSummary {
@@ -3810,18 +3941,18 @@ fn fabricated_anchor_pair_is_refused_at_intake() {
 }
 
 /// Item 2A: one proven challenge invalidates the whole close, so a wallet holding understated
-/// receipts in several shards convicts once and stops rather than resubmitting distinct
+/// receipts on several payer edges convicts once and stops rather than resubmitting distinct
 /// evidence under the same batch and tripping the chain's evidence-replay guard.
 #[test]
-fn multi_shard_understatement_convicts_once() {
+fn multi_edge_understatement_convicts_once() {
     deterministic::Runner::default().start(|context| async move {
         let (control, mut chain) = chain(&context).await;
         let fixture = admit_omitting(&control).await;
         let batch_id = admitted_batch(&fixture);
         let change_root = fixture.result.roots.change;
         let lookup = fixture.held_lookup.clone();
-        let shard_zero = fixture.held_pair.clone();
-        let shard_one = held_in_shard(&fixture, 1);
+        let alice_edge = fixture.held_receipt.clone();
+        let later_edge = held_from(&fixture, &later_payer());
 
         let mut operator_listener = context
             .bind(SocketAddr::from(([127, 0, 0, 1], 2)))
@@ -3835,20 +3966,20 @@ fn multi_shard_understatement_convicts_once() {
                     operator_rpc::OperatorRequest::IncomingPayments(_)
                 ));
                 rpc::Response::Success {
-                    body: incoming_response(&[(shard_zero, 1), (shard_one, 2)]).encode(),
+                    body: incoming_response(&[(alice_edge, 1), (later_edge, 2)]).encode(),
                 }
             })
             .await;
 
-            // Only the first shard is ever fetched: a second committed-shard-tip request would
+            // Only the first edge is ever fetched: a second committed-entry request would
             // block here forever, so completing proves the loop stopped after one conviction.
             respond(&mut operator_listener, move |request| {
-                let operator_rpc::OperatorRequest::CommittedShardTip(request) = request else {
-                    panic!("expected a committed shard-tip request");
+                let operator_rpc::OperatorRequest::CommittedEntry(request) = request else {
+                    panic!("expected a committed entry request");
                 };
-                assert_eq!(request.shard, 0);
+                assert_eq!(request.payer, wallets()[0].public_key());
                 rpc::Response::Success {
-                    body: operator_rpc::CommittedShardTipResponse {
+                    body: operator_rpc::CommittedEntryResponse {
                         batch_id,
                         change_root,
                         lookup,
@@ -3886,7 +4017,7 @@ fn unresolvable_lookup_is_a_soft_refusal_not_an_abort() {
         let fixture = admit_omitting(&control).await;
         let batch_id = admitted_batch(&fixture);
         let change_root = fixture.result.roots.change;
-        let bob_pair = fixture.held_pair.clone();
+        let bob_receipt = fixture.held_receipt.clone();
 
         // A lookup built against another close's root: it decodes and is served under the
         // anchored batch and root, but it cannot resolve against this close's change root.
@@ -3894,15 +4025,19 @@ fn unresolvable_lookup_is_a_soft_refusal_not_an_abort() {
         foreign.pay(0, 1, 5).unwrap();
         foreign.complete_close(41).unwrap();
         let foreign_lookup = foreign
-            .committed_shard_tip(&wallets()[1].public_key(), 0, 0)
+            .committed_entry(&wallets()[0].public_key(), &wallets()[1].public_key(), 0)
             .unwrap()
             .lookup;
         assert!(
             foreign_lookup
-                .resolve::<Sha256>(&change_root, &wallets()[1].public_key(), 0)
+                .resolve::<Sha256>(
+                    &change_root,
+                    &wallets()[0].public_key(),
+                    &wallets()[1].public_key(),
+                )
                 .is_err()
         );
-        let poison_body = operator_rpc::CommittedShardTipResponse {
+        let poison_body = operator_rpc::CommittedEntryResponse {
             batch_id,
             change_root,
             lookup: foreign_lookup,
@@ -3920,14 +4055,14 @@ fn unresolvable_lookup_is_a_soft_refusal_not_an_abort() {
                     operator_rpc::OperatorRequest::IncomingPayments(_)
                 ));
                 rpc::Response::Success {
-                    body: incoming_response(&[(bob_pair, 1)]).encode(),
+                    body: incoming_response(&[(bob_receipt, 1)]).encode(),
                 }
             })
             .await;
             respond(&mut operator_listener, move |request| {
                 assert!(matches!(
                     request,
-                    operator_rpc::OperatorRequest::CommittedShardTip(_)
+                    operator_rpc::OperatorRequest::CommittedEntry(_)
                 ));
                 rpc::Response::Success { body: poison_body }
             })
@@ -3963,7 +4098,7 @@ fn finalized_understatement_alarms() {
         let batch_id = admitted_batch(&fixture);
         let change_root = fixture.result.roots.change;
         let lookup = fixture.held_lookup.clone();
-        let bob_pair = fixture.held_pair.clone();
+        let bob_receipt = fixture.held_receipt.clone();
 
         // The omitting close finalizes for real: its challenge window passes
         // unchallenged.
@@ -3981,17 +4116,17 @@ fn finalized_understatement_alarms() {
                     operator_rpc::OperatorRequest::IncomingPayments(_)
                 ));
                 rpc::Response::Success {
-                    body: incoming_response(&[(bob_pair, 1)]).encode(),
+                    body: incoming_response(&[(bob_receipt, 1)]).encode(),
                 }
             })
             .await;
             respond(&mut operator_listener, move |request| {
                 assert!(matches!(
                     request,
-                    operator_rpc::OperatorRequest::CommittedShardTip(_)
+                    operator_rpc::OperatorRequest::CommittedEntry(_)
                 ));
                 rpc::Response::Success {
-                    body: operator_rpc::CommittedShardTipResponse {
+                    body: operator_rpc::CommittedEntryResponse {
                         batch_id,
                         change_root,
                         lookup,
@@ -4032,7 +4167,7 @@ fn withheld_evidence_past_finalization_alarms_once() {
         let batch_id = admitted_batch(&fixture);
         let change_root = fixture.result.roots.change;
         let lookup = fixture.held_lookup.clone();
-        let bob_pair = fixture.held_pair.clone();
+        let bob_receipt = fixture.held_receipt.clone();
         finalize_omitting(&control, &fixture).await;
 
         let mut operator_listener = context
@@ -4047,7 +4182,7 @@ fn withheld_evidence_past_finalization_alarms_once() {
                     operator_rpc::OperatorRequest::IncomingPayments(_)
                 ));
                 rpc::Response::Success {
-                    body: incoming_response(&[(bob_pair, 1)]).encode(),
+                    body: incoming_response(&[(bob_receipt, 1)]).encode(),
                 }
             })
             .await;
@@ -4057,7 +4192,7 @@ fn withheld_evidence_past_finalization_alarms_once() {
                 respond(&mut operator_listener, |request| {
                     assert!(matches!(
                         request,
-                        operator_rpc::OperatorRequest::CommittedShardTip(_)
+                        operator_rpc::OperatorRequest::CommittedEntry(_)
                     ));
                     rpc::Response::Error {
                         error: Bytes::from_static(b"withheld"),
@@ -4068,10 +4203,10 @@ fn withheld_evidence_past_finalization_alarms_once() {
             respond(&mut operator_listener, move |request| {
                 assert!(matches!(
                     request,
-                    operator_rpc::OperatorRequest::CommittedShardTip(_)
+                    operator_rpc::OperatorRequest::CommittedEntry(_)
                 ));
                 rpc::Response::Success {
-                    body: operator_rpc::CommittedShardTipResponse {
+                    body: operator_rpc::CommittedEntryResponse {
                         batch_id,
                         change_root,
                         lookup,
@@ -4134,7 +4269,7 @@ fn verified_incoming_reconciles_and_survives_restart() {
         // The reconstructed committed-side evidence matches the finalized roots, so the
         // certified anchor below names the exact close the operator serves lookups for.
         let evidence = operator
-            .committed_shard_tip(&wallets()[1].public_key(), 0, 0)
+            .committed_entry(&wallets()[0].public_key(), &wallets()[1].public_key(), 0)
             .unwrap();
         assert_eq!(evidence.change_root, result.roots.change);
 
@@ -4198,32 +4333,20 @@ fn incoming_intake_is_durable_and_refetch_is_idempotent() {
         let database = TempDatabase::new();
         let (control, mut chain) = chain(&context).await;
 
-        // The pair binds the certifiably registered epoch-0 context, so intake
+        // The receipt binds the certifiably registered epoch-0 context, so intake
         // anchors it against the chain's own registration record.
         let registered = registered_context(&control).await;
         let alice = &wallets()[0];
         let bob = wallets()[1].public_key();
-        let send = SignedSend::sign_next(&registered, alice.signer(), bob.clone(), 5, 0).unwrap();
-        let receipt = SignedReceipt::issue_next::<Sha256, _>(
-            &registered,
-            &send,
-            &bob,
-            0,
-            0,
-            0,
-            crate::protocol::Protocol::new(NonZeroUsize::MIN)
-                .unwrap()
-                .operator(),
-        )
-        .unwrap();
-        let pair = Payment::from_parts_unchecked(send, receipt);
+        let receipt = issued_receipt(&registered, alice, &bob, 5);
+        let invoice = Sha256::hash(&[receipt.ack.body().encode().as_ref()]);
 
         let mut operator_listener = context
             .bind(SocketAddr::from(([127, 0, 0, 1], 2)))
             .await
             .unwrap();
         let operator_address = operator_listener.local_addr().unwrap();
-        let served = pair.clone();
+        let served = receipt.clone();
         let operator_server = context.child("operator").spawn(move |_| async move {
             // Both intakes see the same page, standing in for a lost commit that refetches.
             for _ in 0..2 {
@@ -4249,16 +4372,14 @@ fn incoming_intake_is_durable_and_refetch_is_idempotent() {
         assert_eq!(bob.incoming().total, 5);
         drop(bob);
 
-        // The pair and cursor are durable before any reliance, so the reopened wallet holds
-        // them, and the receiver service-accounting query answers from that held evidence.
+        // The receipt and cursor are durable before any reliance, so the reopened wallet
+        // holds them, and the receiver service-accounting query answers from that held
+        // evidence.
         let mut recovered = Agent::open(database.path(), 1).unwrap();
         assert_eq!(recovered.incoming().count, 1);
         assert_eq!(recovered.incoming().cursor, 1);
         let credit = recovered
-            .paid(
-                &alice.public_key(),
-                &pair.send().tx_id::<Sha256>().into_digest(),
-            )
+            .paid(&alice.public_key(), &invoice)
             .unwrap()
             .unwrap();
         assert_eq!(credit.amount, 5);

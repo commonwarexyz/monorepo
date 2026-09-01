@@ -26,11 +26,11 @@ use std::{collections::BTreeSet, net::SocketAddr, path::Path};
 /// Durable state follows one discipline. It holds only what this wallet alone can
 /// produce: its signed sends, its signed withdrawal requests, and its deposit identities.
 /// The exceptions are proofs that must survive counterparty death, namely the frozen-root
-/// recovery openings, cached claim evidence, and the receiver's held incoming pairs. A held
-/// incoming pair is a self-verified (send, receipt) crediting this wallet: like the recovery
-/// openings it is irreplaceable once the operator is gone, so it is retained, never an
-/// overwritable cache. Everything the counterparty can reproduce is a cache and never gates
-/// progress.
+/// recovery openings, cached claim evidence, and the receiver's held incoming receipts. A
+/// held incoming receipt is a self-verified dual-signed entry crediting this wallet: like
+/// the recovery openings it is irreplaceable once the operator is gone, so it is retained,
+/// never an overwritable cache. Everything the counterparty can reproduce is a cache and
+/// never gates progress.
 ///
 /// The cached signing context follows the cache rule and exists precisely so that
 /// ordinary payments need nothing beyond local SQL. The wallet's own durable cumulative
@@ -46,7 +46,7 @@ use std::{collections::BTreeSet, net::SocketAddr, path::Path};
 /// every head read or balance poll, so only a wallet passive across the final finalization
 /// holds none, and it then depends on the operator's survival to serve one.
 ///
-/// As a receiver, this wallet may rely on a payment exactly when its verified pair is
+/// As a receiver, this wallet may rely on a payment exactly when its verified receipt is
 /// durably held. A balance that moved in the operator's head is an observation, not
 /// reliance-grade: the enforceable preconfirmation is the held operator receipt, and
 /// reconciliation later proves every finalized credit was backed by one.
@@ -224,11 +224,12 @@ impl Agent {
     }
 
     /// Answers the receiver's service-accounting question: has `payer` paid this wallet under
-    /// transaction `tx_id`, and for how much? The payer chooses the transaction id by signing
-    /// its send, so it is the natural invoice reference. A hit means the credit's verified pair
-    /// is durably held, which is exactly the condition under which a receiver may rely on it.
-    pub(crate) fn paid(&self, payer: &Key, tx_id: &Digest) -> Result<Option<IncomingCredit>> {
-        self.store.paid(payer, tx_id)
+    /// the batch identified by `id`, and for how much? The id is the digest of the
+    /// payer-signed acknowledgment body, so it is the natural invoice reference. A hit means
+    /// the credit's verified receipt is durably held, which is exactly the condition under
+    /// which a receiver may rely on it.
+    pub(crate) fn paid(&self, payer: &Key, id: &Digest) -> Result<Option<IncomingCredit>> {
+        self.store.paid(payer, id)
     }
 
     pub(crate) async fn operator_status<E: Network>(

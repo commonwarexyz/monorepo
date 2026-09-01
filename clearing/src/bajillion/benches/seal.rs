@@ -1,6 +1,6 @@
 use super::{
     admission_fixtures::{QUORUM, SLICES, VALIDATORS, validator_fixture},
-    fixtures::{WORKERS, selected_active_profiles, strategy},
+    fixtures::{WORKERS, profile_key, selected_active_profiles, strategy},
 };
 use commonware_clearing::bajillion::admission::seal;
 use commonware_cryptography::Sha256;
@@ -17,23 +17,22 @@ fn bench_seal(c: &mut Criterion) {
         let fixture = validator_fixture(profile);
         let assigned_slices = fixture.slices.len();
         let scheme = fixture.validators.signer(fixture.validator);
-        let live_accounts = profile.live_accounts;
-        let changed = profile.changed_accounts;
-        let credited = profile.credited_accounts;
-        let shards = profile.receive_shards_per_credited;
         eprintln!(
-            "clearing benchmark corpus: N={live_accounts} A={changed} B={credited} h={shards} close_bytes={} slice_corpus_bytes={} validator={} assignment_bytes={} assigned_slices={} workers={WORKERS}",
+            "clearing benchmark corpus: {} E={} close_bytes={} slice_corpus_bytes={} validator={} assignment_bytes={} assigned_slices={assigned_slices} workers={WORKERS}",
+            profile_key(profile),
+            profile.edges(),
             fixture.public_corpus_bytes,
             fixture.slice_corpus_bytes,
             usize::from(fixture.validator),
             fixture.assignment_bytes,
-            assigned_slices,
         );
 
         c.bench_function(
             &format!(
-                "{}/N={live_accounts} A={changed} B={credited} h={shards} n={VALIDATORS} q={QUORUM} slices={SLICES} assigned={assigned_slices} workers={WORKERS}",
-                module_path!()
+                "{}/{} E={} n={VALIDATORS} q={QUORUM} slices={SLICES} assigned={assigned_slices} workers={WORKERS}",
+                module_path!(),
+                profile_key(profile),
+                profile.edges(),
             ),
             |b| {
                 let mut slices = Some(fixture.slices.clone());
@@ -43,19 +42,19 @@ fn bench_seal(c: &mut Criterion) {
                     for _ in 0..iterations {
                         let input = slices.take().expect("benchmark assignment is available");
                         let start = Instant::now();
-                        let (vote, sealed) =
-                            seal::<Sha256, _, _, PaymentBatchVerifier, _>(
-                                black_box(&scheme),
-                                black_box(&fixture.close.context),
-                                black_box(&fixture.close.deposits),
-                                black_box(&fixture.close.withdrawals),
-                                black_box(&fixture.close.prepared.close().header),
-                                black_box(&fixture.close.prepared.close().roots),
-                                input,
-                                &mut rng,
-                                strategy(),
-                            )
-                            .expect("benchmark assignment is valid");
+                        let (vote, sealed) = seal::<Sha256, _, _, PaymentBatchVerifier, _>(
+                            black_box(&scheme),
+                            black_box(&fixture.close.context),
+                            black_box(&fixture.close.operator_bls),
+                            black_box(&fixture.close.deposits),
+                            black_box(&fixture.close.withdrawals),
+                            black_box(&fixture.close.prepared.close().header),
+                            black_box(&fixture.close.prepared.close().roots),
+                            input,
+                            &mut rng,
+                            strategy(),
+                        )
+                        .expect("benchmark assignment is valid");
                         elapsed += start.elapsed();
                         black_box(vote);
                         slices = Some(sealed.into_slices());

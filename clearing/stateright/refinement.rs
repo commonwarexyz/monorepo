@@ -1,7 +1,5 @@
 use super::*;
-use crate::bajillion::{
-    admission::seal, model::settlement as spec, payment::Entry, transition::assemble_slices,
-};
+use crate::bajillion::{admission::seal, model::settlement as spec, vector::OutTipLookup};
 use commonware_cryptography_curve25519::signing::BatchVerifier as PaymentBatchVerifier;
 
 const ACCOUNTS: [spec::Account; 3] = [
@@ -51,293 +49,93 @@ fn spec_batch(registration: spec::RegistrationId) -> spec::Batch {
     }
 }
 
-fn successor_cache(cache: &TestCache, close: &TestClose) -> TestCache {
-    let changed = close
-        .rows
-        .iter()
-        .map(|row| row.account.clone())
-        .collect::<BTreeSet<_>>();
-    let mut leaves = cache
-        .leaves()
-        .iter()
-        .filter(|leaf| !changed.contains(&leaf.account))
-        .cloned()
-        .collect::<Vec<_>>();
-    leaves.extend(
-        close
-            .rows
-            .iter()
-            .filter(|row| row.successor.active)
-            .map(|row| StateLeaf {
-                account: row.account.clone(),
-                state: row.successor,
-            }),
-    );
-    leaves.sort_unstable_by(|left, right| left.account.cmp(&right.account));
-    StateCache::new::<Sha256>(leaves).unwrap()
-}
-
-fn transfer_with_deposit_close(
+// One acknowledged payment from `payer` to `recipient` under the registered deposits and
+// withdrawals. A queued amount releases with the production coverage rule: the requested
+// amount releases exactly when the payer's row tail covers it and nothing otherwise. An
+// absent recipient without a staged deposit classifies as an external payout.
+#[allow(clippy::too_many_arguments)]
+fn refined_payment_close(
     cache: &TestCache,
     context: &TestContext,
-    operator: &SigningKey,
+    operator_ack: &BlsPrivate,
     payer: &SigningKey,
     recipient: &SigningKey,
-    amount: u64,
     deposits: &TestDeposits,
-) -> (TestClose, TestCache) {
-    let payment = fork_payment(context, operator, payer, recipient, amount);
-    let payer_key = payer.public_key();
-    let recipient_key = recipient.public_key();
-    let payer_predecessor = cache.opening(&payer_key).unwrap().leaf.state;
-    let recipient_predecessor = cache.opening(&recipient_key).unwrap().leaf.state;
-    let payer_shards = ShardSet::empty(context.payment().epoch(), payer_key.clone());
-    let recipient_shards = ShardSet::new(
-        context.payment().epoch(),
-        recipient_key.clone(),
-        vec![ShardHead::new(0, payment.clone())],
-    )
-    .unwrap();
-    let mut rows = vec![
-        (
-            AccountRow {
-                account: payer_key,
-                predecessor: payer_predecessor,
-                successor: AccountState {
-                    balance: payer_predecessor.balance.checked_sub(amount).unwrap(),
-                    cumulative_debit: payer_predecessor
-                        .cumulative_debit
-                        .checked_add(amount)
-                        .unwrap(),
-                    ..payer_predecessor
-                },
-                outgoing: Some(payment),
-                output: SettlementOutput::None,
-                prefix: Prefix::default(),
-            },
-            payer_shards,
-        ),
-        (
-            AccountRow {
-                account: recipient_key,
-                predecessor: recipient_predecessor,
-                successor: AccountState {
-                    balance: recipient_predecessor
-                        .balance
-                        .checked_add(deposits.amount_for(&recipient.public_key()))
-                        .and_then(|balance| balance.checked_add(amount))
-                        .unwrap(),
-                    cumulative_credit: recipient_predecessor
-                        .cumulative_credit
-                        .checked_add(amount)
-                        .unwrap(),
-                    receipt_count: recipient_predecessor.receipt_count.checked_add(1).unwrap(),
-                    ..recipient_predecessor
-                },
-                outgoing: None,
-                output: SettlementOutput::None,
-                prefix: Prefix::default(),
-            },
-            recipient_shards,
-        ),
-    ];
-    rows.sort_unstable_by(|left, right| left.0.account.cmp(&right.0.account));
-    let mut prefix = Prefix::default();
-    for (row, shards) in &mut rows {
-        let (debit, credit, _) = row.checked_deltas().unwrap();
-        prefix = prefix
-            .checked_extend(Prefix {
-                deposit: deposits.amount_for(&row.account),
-                debit,
-                credit,
-                shard_count: shards.heads().len() as u64,
-                ..Prefix::default()
-            })
-            .unwrap();
-        row.prefix = prefix;
-    }
-    let (rows, shards): (Vec<_>, Vec<_>) = rows.into_iter().unzip();
-    let close = build_close::<Sha256, _, _, PaymentBatchVerifier, _>(
-        cache,
-        context,
-        deposits,
-        &WithdrawalBatch::empty(),
-        rows,
-        shards,
-        &mut test_rng(),
-    )
-    .unwrap();
-    let successor = successor_cache(cache, &close);
-    assert_eq!(successor.root(), close.roots.successor);
-    (close, successor)
-}
-
-fn external_payout_refinement_close(
-    cache: &TestCache,
-    context: &TestContext,
-    operator: &SigningKey,
-    payer: &SigningKey,
-    recipient: &SigningKey,
-    amount: u64,
-) -> (TestClose, TestCache) {
-    let payer_key = payer.public_key();
-    let recipient_key = recipient.public_key();
-    let payer_predecessor = cache.opening(&payer_key).unwrap().leaf.state;
-    let send = SignedSend::sign_next(
-        context.payment(),
-        payer,
-        recipient_key.clone(),
-        amount,
-        payer_predecessor.cumulative_debit,
-    )
-    .unwrap();
-    let receipt = SignedReceipt::issue_next::<Sha256, _>(
-        context.payment(),
-        &send,
-        &recipient_key,
-        0,
-        0,
-        0,
-        operator,
-    )
-    .unwrap();
-    let payment = Payment::new::<Sha256>(context.payment(), send, receipt).unwrap();
-    let payer_shards = ShardSet::empty(context.payment().epoch(), payer_key.clone());
-    let recipient_shards = ShardSet::new(
-        context.payment().epoch(),
-        recipient_key.clone(),
-        vec![ShardHead::new(0, payment.clone())],
-    )
-    .unwrap();
-    let recipient_successor = AccountState {
-        cumulative_credit: amount,
-        receipt_count: 1,
-        ..AccountState::default()
-    };
-    let mut rows = vec![
-        (
-            AccountRow {
-                account: payer_key,
-                predecessor: payer_predecessor,
-                successor: AccountState {
-                    balance: payer_predecessor.balance.checked_sub(amount).unwrap(),
-                    cumulative_debit: payer_predecessor
-                        .cumulative_debit
-                        .checked_add(amount)
-                        .unwrap(),
-                    ..payer_predecessor
-                },
-                outgoing: Some(payment),
-                output: SettlementOutput::None,
-                prefix: Prefix::default(),
-            },
-            payer_shards,
-        ),
-        (
-            AccountRow {
-                account: recipient_key,
-                predecessor: AccountState::default(),
-                successor: recipient_successor,
-                outgoing: None,
-                output: SettlementOutput::ExternalPayout(amount),
-                prefix: Prefix::default(),
-            },
-            recipient_shards,
-        ),
-    ];
-    rows.sort_unstable_by(|left, right| left.0.account.cmp(&right.0.account));
-    let mut prefix = Prefix::default();
-    for (row, shards) in &mut rows {
-        let (debit, credit, _) = row.checked_deltas().unwrap();
-        let payout = if row.predecessor.active { 0 } else { credit };
-        prefix = prefix
-            .checked_extend(Prefix {
-                debit,
-                credit,
-                payout,
-                shard_count: shards.heads().len() as u64,
-                ..Prefix::default()
-            })
-            .unwrap();
-        row.prefix = prefix;
-    }
-    let (rows, shards): (Vec<_>, Vec<_>) = rows.into_iter().unzip();
-    let close = build_close::<Sha256, _, _, PaymentBatchVerifier, _>(
-        cache,
-        context,
-        &DepositBatch::empty(),
-        &WithdrawalBatch::empty(),
-        rows,
-        shards,
-        &mut test_rng(),
-    )
-    .unwrap();
-    let successor = successor_cache(cache, &close);
-    assert_eq!(successor.root(), close.roots.successor);
-    (close, successor)
-}
-
-// One payment from `payer` to `recipient` plus the payer's withdrawal from the
-// sealed batch, applied with the production coverage rule: the requested amount
-// releases exactly when the row tail covers it and nothing otherwise.
-fn payment_withdrawal_close(
-    cache: &TestCache,
-    context: &TestContext,
-    operator: &SigningKey,
-    payer: &SigningKey,
-    recipient: &SigningKey,
-    amount: u64,
     withdrawals: &TestWithdrawals,
-) -> (TestClose, TestCache) {
+    amount: u64,
+) -> (Built, TestCache) {
+    let epoch = context.payment().epoch();
     let payer_key = payer.public_key();
     let recipient_key = recipient.public_key();
     let payer_predecessor = cache.opening(&payer_key).unwrap().leaf.state;
     let recipient_predecessor = cache
         .opening(&recipient_key)
         .map_or_else(|_| AccountState::default(), |opening| opening.leaf.state);
-    assert_eq!(recipient_predecessor.cumulative_credit, 0);
-    assert_eq!(recipient_predecessor.receipt_count, 0);
-    let send = SignedSend::sign_next(
+    let out_vector = OutVector::new(
+        epoch,
+        payer_key.clone(),
+        vec![OutEntry {
+            recipient: recipient_key.clone(),
+            cumulative: amount,
+            count: 1,
+        }],
+    )
+    .unwrap();
+    let body = VectorSendBody::new(
         context.payment(),
-        payer,
-        recipient_key.clone(),
-        amount,
-        payer_predecessor.cumulative_debit,
-    )
-    .unwrap();
-    let receipt = SignedReceipt::issue_next::<Sha256, _>(
-        context.payment(),
-        &send,
-        &recipient_key,
-        0,
-        0,
-        0,
-        operator,
-    )
-    .unwrap();
-    let payment = Payment::new::<Sha256>(context.payment(), send, receipt).unwrap();
-    let payer_shards = ShardSet::empty(context.payment().epoch(), payer_key.clone());
-    let recipient_shards = ShardSet::new(
-        context.payment().epoch(),
-        recipient_key.clone(),
-        vec![ShardHead::new(0, payment.clone())],
-    )
-    .unwrap();
+        payer_key.clone(),
+        1,
+        payer_predecessor
+            .cumulative_debit
+            .checked_add(amount)
+            .unwrap(),
+        out_vector.root::<Sha256, ShaDigest>().unwrap(),
+    );
+    let operator_signature = sign_message::<OperatorVariant>(
+        operator_ack,
+        VECTOR_ACK_AGGREGATE_NAMESPACE,
+        body.encode().as_ref(),
+    );
+    let outgoing = SendAuthorization::sign(body, payer);
+    let transpose = vec![TransposeEntry {
+        recipient: recipient_key.clone(),
+        payer: payer_key.clone(),
+        cumulative: amount,
+        count: 1,
+    }];
 
-    let request = withdrawals
-        .request_for(&payer_key)
-        .expect("the sealed batch carries the payer's withdrawal");
-    let tail = payer_predecessor.balance.checked_sub(amount).unwrap();
-    let applied = match request.body().action() {
-        WithdrawalAction::Amount(requested) if requested.get() <= tail => requested.get(),
+    let payer_request = withdrawals.request_for(&payer_key);
+    let payer_tail = payer_predecessor
+        .balance
+        .checked_add(deposits.amount_for(&payer_key))
+        .and_then(|balance| balance.checked_sub(amount))
+        .unwrap();
+    let payer_applied = payer_request.map_or(0, |request| match request.body().action() {
+        WithdrawalAction::Amount(requested) if requested.get() <= payer_tail => requested.get(),
         WithdrawalAction::Amount(_) => 0,
-        WithdrawalAction::Close => tail,
-    };
-    let payer_balance = tail - applied;
-    let recipient_output = if recipient_predecessor.active {
-        SettlementOutput::None
+        WithdrawalAction::Close => payer_tail,
+    });
+    let payer_balance = payer_tail - payer_applied;
+    let recipient_successor = if recipient_predecessor.active {
+        AccountState {
+            balance: recipient_predecessor
+                .balance
+                .checked_add(deposits.amount_for(&recipient_key))
+                .and_then(|balance| balance.checked_add(amount))
+                .unwrap(),
+            cumulative_credit: recipient_predecessor
+                .cumulative_credit
+                .checked_add(amount)
+                .unwrap(),
+            receipt_count: recipient_predecessor.receipt_count.checked_add(1).unwrap(),
+            ..recipient_predecessor
+        }
     } else {
-        SettlementOutput::ExternalPayout(amount)
+        AccountState {
+            cumulative_credit: amount,
+            receipt_count: 1,
+            ..AccountState::default()
+        }
     };
     let mut rows = vec![
         (
@@ -353,67 +151,62 @@ fn payment_withdrawal_close(
                         .unwrap(),
                     ..payer_predecessor
                 },
-                outgoing: Some(payment),
-                output: SettlementOutput::Withdrawal(applied),
+                outgoing: Some(outgoing),
+                output: payer_request.map_or(SettlementOutput::None, |_| {
+                    SettlementOutput::Withdrawal(payer_applied)
+                }),
                 prefix: Prefix::default(),
             },
-            payer_shards,
+            out_vector,
+            Some(operator_signature),
         ),
         (
             AccountRow {
                 account: recipient_key,
                 predecessor: recipient_predecessor,
-                successor: AccountState {
-                    balance: recipient_predecessor.balance.checked_add(amount).unwrap(),
-                    active: true,
-                    cumulative_credit: amount,
-                    receipt_count: 1,
-                    ..recipient_predecessor
-                },
+                successor: recipient_successor,
                 outgoing: None,
-                output: recipient_output,
+                output: SettlementOutput::None,
                 prefix: Prefix::default(),
             },
-            recipient_shards,
+            OutVector::empty(epoch, recipient.public_key()),
+            None,
         ),
     ];
     rows.sort_unstable_by(|left, right| left.0.account.cmp(&right.0.account));
     let mut prefix = Prefix::default();
-    for (row, shards) in &mut rows {
-        let (debit, credit, _) = row.checked_deltas().unwrap();
-        let payout = if row.predecessor.active { 0 } else { credit };
-        let row_request = withdrawals.request_for(&row.account);
+    for (row, vector, _) in &mut rows {
+        let (debit, credit, receipts) = row.checked_deltas().unwrap();
+        let deposit = deposits.amount_for(&row.account);
+        let payout = if row.predecessor.active || deposit != 0 {
+            0
+        } else {
+            credit
+        };
+        if payout != 0 {
+            row.output = SettlementOutput::ExternalPayout(payout);
+        }
         let withdrawal = match row.output {
-            SettlementOutput::Withdrawal(amount) => amount,
+            SettlementOutput::Withdrawal(applied) => applied,
             _ => 0,
         };
         prefix = prefix
             .checked_extend(Prefix {
+                deposit,
                 debit,
                 credit,
                 payout,
                 withdrawal,
-                withdrawal_count: u64::from(row_request.is_some()),
-                shard_count: shards.heads().len() as u64,
-                ..Prefix::default()
+                withdrawal_count: u64::from(matches!(row.output, SettlementOutput::Withdrawal(_))),
+                out_count: u64::try_from(vector.entries().len()).unwrap(),
+                in_count: receipts,
             })
             .unwrap();
         row.prefix = prefix;
     }
-    let (rows, shards): (Vec<_>, Vec<_>) = rows.into_iter().unzip();
-    let close = build_close::<Sha256, _, _, PaymentBatchVerifier, _>(
-        cache,
-        context,
-        &DepositBatch::empty(),
-        withdrawals,
-        rows,
-        shards,
-        &mut test_rng(),
-    )
-    .unwrap();
-    let successor = successor_cache(cache, &close);
-    assert_eq!(successor.root(), close.roots.successor);
-    (close, successor)
+    let built = build_prepared(cache, context, deposits, withdrawals, rows, transpose);
+    let successor = successor_cache(cache, &built);
+    (built, successor)
 }
 
 struct RegisteredMaterial {
@@ -427,7 +220,7 @@ struct RegisteredMaterial {
 struct BatchMaterial {
     context: TestContext,
     withdrawals: TestWithdrawals,
-    close: TestClose,
+    close: Built,
     successor: TestCache,
     id: BatchId<ShaDigest>,
 }
@@ -878,21 +671,24 @@ impl RefinementDriver {
             assert_eq!(actual.root(), cache.root());
         }
         let (close, successor) = match batch {
-            spec::Batch::B0 => transfer_with_deposit_close(
+            spec::Batch::B0 => refined_payment_close(
                 &cache,
                 &registered.context,
-                &self.fixture.operator,
+                &self.fixture.operator_ack,
                 &self.fixture.accounts[0],
                 &self.fixture.accounts[1],
-                2,
                 &registered.deposits,
+                &registered.withdrawals,
+                2,
             ),
-            spec::Batch::B1 => external_payout_refinement_close(
+            spec::Batch::B1 => refined_payment_close(
                 &cache,
                 &registered.context,
-                &self.fixture.operator,
+                &self.fixture.operator_ack,
                 &self.fixture.accounts[0],
                 &self.carol,
+                &registered.deposits,
+                &registered.withdrawals,
                 1,
             ),
             // B1C carries Bob's never-queued withdrawal in a boundary close,
@@ -909,28 +705,22 @@ impl RefinementDriver {
             ),
             // Bob spends below his queued amount, so certification degrades
             // the release to zero.
-            spec::Batch::B2D => payment_withdrawal_close(
+            spec::Batch::B2D => refined_payment_close(
                 &cache,
                 &registered.context,
-                &self.fixture.operator,
+                &self.fixture.operator_ack,
                 &self.fixture.accounts[1],
                 &self.fixture.accounts[0],
-                8,
+                &registered.deposits,
                 &registered.withdrawals,
+                8,
             ),
         };
-        let slices = assemble_slices::<Sha256, _, _>(
-            &cache,
-            &registered.context,
-            &registered.deposits,
-            &registered.withdrawals,
-            &close,
-            &Sequential,
-        )
-        .unwrap();
+        let slices = close.prepared.assemble_slices(&cache, &Sequential).unwrap();
         let (vote, sealed) = seal::<Sha256, _, _, PaymentBatchVerifier, _>(
             &self.fixture.signer,
             &registered.context,
+            &self.fixture.operator_bls,
             &registered.deposits,
             &registered.withdrawals,
             &close.header,
@@ -943,14 +733,7 @@ impl RefinementDriver {
         assert_eq!(sealed.header(), &close.header);
         assert_eq!(sealed.roots(), &close.roots);
         let certificate = self.fixture.signer.assemble_exact([vote]).unwrap();
-        let terminal = assemble_terminal_proof::<Sha256, _, _>(
-            &registered.context,
-            &registered.deposits,
-            &registered.withdrawals,
-            &close,
-            &Sequential,
-        )
-        .unwrap();
+        let terminal = close.prepared.terminal_proof().unwrap();
         let result = self.fixture.chain.admit(
             u64::from(self.now),
             close.header,
@@ -989,152 +772,93 @@ impl RefinementDriver {
     fn challenge(&mut self, proven: crate::bajillion::model::challenge::ProvenChallenge) -> bool {
         let target = proven.target();
         let material = self.material(target);
+        let index = ChallengeIndex::new::<Sha256>(&material.context, &material.close).unwrap();
         let challenge = match proven.kind() {
-            spec::ChallengeKind::LatestAcknowledgedSend => {
-                let payment = fork_payment(
-                    &material.context,
-                    &self.fixture.operator,
-                    &self.fixture.accounts[1],
-                    &self.carol,
-                    2,
-                );
-                let index =
-                    ChallengeIndex::new::<Sha256>(&material.context, &material.close).unwrap();
-                let payer = index
-                    .account_lookup(
-                        self.cache(target.candidate().predecessor),
-                        &self.fixture.accounts[1].public_key(),
-                    )
-                    .unwrap();
-                Challenge::LatestAcknowledgedSend {
-                    payment: Box::new(PaymentWitness::from_payment(&payment)),
-                    payer: Box::new(payer),
+            spec::ChallengeKind::HigherDebit => {
+                // A retained countersigned endpoint for a payer the close never advanced.
+                let payer = &self.fixture.accounts[1];
+                let ack = fork_ack(&material.context, &self.fixture.operator, payer, 1, 2);
+                let lookup = account_lookup::<Sha256, _, _>(
+                    &index,
+                    self.cache(target.candidate().predecessor),
+                    &payer.public_key(),
+                )
+                .unwrap();
+                Challenge::HigherAckDebit {
+                    ack: Box::new(AckWitness::from_ack(&ack)),
+                    payer: Box::new(lookup),
                 }
             }
-            spec::ChallengeKind::HigherShardTip => {
-                let selected = material
-                    .close
-                    .rows
-                    .iter()
-                    .find_map(|row| row.outgoing.clone())
-                    .expect("the refined payout close has one outgoing payment");
-                let receipt = SignedReceipt::issue_next::<Sha256, _>(
-                    material.context.payment(),
-                    selected.send(),
-                    selected.recipient(),
-                    selected.receipt().body().shard(),
-                    selected.receipt().body().cumulative_shard_credit(),
-                    selected.receipt().body().index(),
-                    &self.fixture.operator,
+            spec::ChallengeKind::HigherEntry => {
+                // A retained alternative vector crediting the payout recipient above the
+                // committed terminal entry on the same edge.
+                let payer = &self.fixture.accounts[0];
+                let recipient = self.carol.public_key();
+                let retained = OutVector::new(
+                    material.context.payment().epoch(),
+                    payer.public_key(),
+                    vec![OutEntry {
+                        recipient: recipient.clone(),
+                        cumulative: 2,
+                        count: 1,
+                    }],
                 )
                 .unwrap();
-                let payment = Payment::new::<Sha256>(
+                let body = VectorSendBody::new(
                     material.context.payment(),
-                    selected.send().clone(),
-                    receipt,
-                )
-                .unwrap();
-                let index =
-                    ChallengeIndex::new::<Sha256>(&material.context, &material.close).unwrap();
-                let recipient = payment.recipient().clone();
+                    payer.public_key(),
+                    1,
+                    2,
+                    retained.root::<Sha256, ShaDigest>().unwrap(),
+                );
+                let ack = VectorAck::sign_by_authorities(body, payer, &self.fixture.operator);
+                let OutTipLookup::Present {
+                    cumulative,
+                    count,
+                    opening,
+                } = retained.lookup::<Sha256, ShaDigest>(&recipient).unwrap()
+                else {
+                    panic!("the retained vector credits the recipient");
+                };
                 let position = material
                     .close
                     .rows
-                    .binary_search_by(|row| row.account.cmp(&recipient))
-                    .unwrap();
-                let recipient = index
-                    .higher_shard_tip_lookup::<Sha256>(
-                        &recipient,
-                        Some(&material.close.shard_sets[position]),
-                        payment.receipt().body().shard(),
-                    )
-                    .unwrap();
-                Challenge::HigherShardTip {
-                    payment: Box::new(PaymentWitness::from_payment(&payment)),
-                    recipient: Box::new(recipient),
+                    .binary_search_by(|row| row.account.cmp(&payer.public_key()))
+                    .expect("the refined payout close carries the sender row");
+                let sender = higher_entry_lookup::<Sha256, _, _>(
+                    &index,
+                    &payer.public_key(),
+                    Some(&material.close.out_vectors[position]),
+                    &recipient,
+                )
+                .unwrap();
+                Challenge::HigherAckEntry {
+                    entry: Box::new(EntryWitness {
+                        ack: AckWitness::from_ack(&ack),
+                        recipient,
+                        cumulative,
+                        count,
+                        opening,
+                    }),
+                    sender: Box::new(sender),
                 }
             }
-            spec::ChallengeKind::InconsistentReceiptRange => {
-                // The witness send is a two-entry batch so a refined challenge drives one real
-                // multi-entry authorization through witness reconstruction and adjudication.
-                let send = SignedSend::sign_next_batch(
-                    material.context.payment(),
-                    &self.fixture.accounts[1],
-                    vec![
-                        Entry::new(self.carol.public_key(), 5).unwrap(),
-                        Entry::new(self.fixture.accounts[0].public_key(), 1).unwrap(),
-                    ],
-                    0,
-                )
-                .unwrap();
-                let receipt = SignedReceipt::sign_body_by_authority(
-                    ReceiptBody::from_raw_unchecked(
-                        *material.context.payment().anchor(),
-                        material.context.payment().epoch(),
-                        self.carol.public_key(),
-                        0,
-                        5,
-                        send.tx_id::<Sha256>(),
-                        4,
-                        1,
-                    ),
-                    &self.fixture.operator,
-                );
-                let payment =
-                    Payment::new::<Sha256>(material.context.payment(), send, receipt).unwrap();
-                Challenge::InconsistentReceiptRange {
-                    upper: Box::new(PaymentWitness::from_payment(&payment)),
-                    lower: RangeLower::ShardStart,
-                }
-            }
-            spec::ChallengeKind::ReceiptFork(spec::ForkRelation::SameSend) => {
-                let left = fork_payment(
-                    &material.context,
-                    &self.fixture.operator,
-                    &self.fixture.accounts[1],
-                    &self.carol,
-                    2,
-                );
-                let receipt = SignedReceipt::issue_next::<Sha256, _>(
-                    material.context.payment(),
-                    left.send(),
-                    left.recipient(),
-                    1,
-                    0,
-                    0,
-                    &self.fixture.operator,
-                )
-                .unwrap();
-                let right = Payment::new::<Sha256>(
-                    material.context.payment(),
-                    left.send().clone(),
-                    receipt,
-                )
-                .unwrap();
-                Challenge::receipt_fork(&left, &right)
-            }
-            spec::ChallengeKind::ReceiptFork(spec::ForkRelation::SameIndex) => {
-                let left = fork_payment(
+            spec::ChallengeKind::Fork => {
+                let left = fork_ack(
                     &material.context,
                     &self.fixture.operator,
                     &self.fixture.accounts[0],
-                    &self.carol,
+                    1,
                     2,
                 );
-                let right = fork_payment(
+                let right = fork_ack(
                     &material.context,
                     &self.fixture.operator,
-                    &self.fixture.accounts[1],
-                    &self.carol,
+                    &self.fixture.accounts[0],
+                    1,
                     3,
                 );
-                Challenge::receipt_fork(&left, &right)
-            }
-            spec::ChallengeKind::ReceiptFork(spec::ForkRelation::Full) => {
-                // A proven Full fork needs two byte-distinct valid signed sends with one body
-                // digest. The production test signer is strict and deterministic, so this
-                // generic-signature over-approximation has no constructible concrete fixture.
-                return false;
+                ack_fork(&left, &right)
             }
         };
         self.fixture
@@ -1175,25 +899,21 @@ impl RefinementDriver {
     fn claim_withdrawal(&mut self, batch: spec::Batch, source: spec::Batch, position: u8) -> bool {
         let source = self.material(source);
         let account = source.withdrawals.requests().iter().find_map(|request| {
-            let claim = assemble_withdrawal_claim::<Sha256, _, _>(
-                &source.close,
-                &source.withdrawals,
-                request.account(),
-                &Sequential,
-            )
-            .ok()?;
+            let claim = source
+                .close
+                .prepared
+                .withdrawal_claim(&source.withdrawals, request.account())
+                .ok()?;
             (claim.position() == u32::from(position)).then_some(request.account().clone())
         });
         let Some(account) = account else {
             return false;
         };
-        let claim = assemble_withdrawal_claim::<Sha256, _, _>(
-            &source.close,
-            &source.withdrawals,
-            &account,
-            &Sequential,
-        )
-        .unwrap();
+        let claim = source
+            .close
+            .prepared
+            .withdrawal_claim(&source.withdrawals, &account)
+            .unwrap();
         let expected = claim.output().clone();
         let batch_id = self.material(batch).id;
         self.fixture
@@ -1204,11 +924,10 @@ impl RefinementDriver {
 
     fn claim_payout(&mut self, batch: spec::Batch, source: spec::Batch, position: u8) -> bool {
         let source = self.material(source);
-        let claim = assemble_external_payout_claim::<Sha256, _, _>(
-            &source.close,
-            &self.carol.public_key(),
-            &Sequential,
-        );
+        let claim = source
+            .close
+            .prepared
+            .external_payout_claim(&self.carol.public_key());
         let Ok(claim) = claim else {
             return false;
         };
@@ -1775,18 +1494,12 @@ fn challenge_kind_matches(actual: ChallengeKind, expected: spec::ChallengeKind) 
     matches!(
         (actual, expected),
         (
-            ChallengeKind::LatestAcknowledgedSend,
-            spec::ChallengeKind::LatestAcknowledgedSend
+            ChallengeKind::HigherAckDebit,
+            spec::ChallengeKind::HigherDebit
         ) | (
-            ChallengeKind::HigherShardTip,
-            spec::ChallengeKind::HigherShardTip
-        ) | (
-            ChallengeKind::InconsistentReceiptRange,
-            spec::ChallengeKind::InconsistentReceiptRange
-        ) | (
-            ChallengeKind::ReceiptFork,
-            spec::ChallengeKind::ReceiptFork(_)
-        )
+            ChallengeKind::HigherAckEntry,
+            spec::ChallengeKind::HigherEntry
+        ) | (ChallengeKind::AckFork, spec::ChallengeKind::Fork)
     )
 }
 
@@ -1984,11 +1697,7 @@ fn challenge_profile() -> RefinementDriver {
     register_and_admit_refined(&mut driver, spec::Batch::B1);
     queue_refined(&mut driver, spec::WithdrawalId::Amount);
     register_and_admit_refined(&mut driver, spec::Batch::B2);
-    challenge_refined(
-        &mut driver,
-        spec::Batch::B1,
-        spec::ChallengeKind::ReceiptFork(spec::ForkRelation::SameIndex),
-    );
+    challenge_refined(&mut driver, spec::Batch::B1, spec::ChallengeKind::Fork);
     driver.step(spec::SettlementAction::BeginTerminal);
     driver.step_at(5, spec::SettlementAction::Finalize);
     driver.step(spec::SettlementAction::Finalize);
@@ -2017,11 +1726,9 @@ fn challenged_suffix_and_terminal_sender_recovery_refine_production() {
 #[test]
 fn reachable_challenge_capabilities_refine_real_evidence() {
     for kind in [
-        spec::ChallengeKind::LatestAcknowledgedSend,
-        spec::ChallengeKind::HigherShardTip,
-        spec::ChallengeKind::InconsistentReceiptRange,
-        spec::ChallengeKind::ReceiptFork(spec::ForkRelation::SameSend),
-        spec::ChallengeKind::ReceiptFork(spec::ForkRelation::SameIndex),
+        spec::ChallengeKind::HigherDebit,
+        spec::ChallengeKind::HigherEntry,
+        spec::ChallengeKind::Fork,
     ] {
         challenge_kind_profile(kind);
     }
@@ -2107,11 +1814,7 @@ fn carried_fault_profile() -> RefinementDriver {
         spec::DepositId::BobOne,
     ));
     register_and_admit_refined(&mut driver, spec::Batch::B1C);
-    challenge_refined(
-        &mut driver,
-        spec::Batch::B1C,
-        spec::ChallengeKind::ReceiptFork(spec::ForkRelation::SameIndex),
-    );
+    challenge_refined(&mut driver, spec::Batch::B1C, spec::ChallengeKind::Fork);
     driver.step(spec::SettlementAction::BeginTerminal);
     driver.step(spec::SettlementAction::ClaimState(spec::Account::Bob));
     driver.step(spec::SettlementAction::ClaimState(spec::Account::Alice));

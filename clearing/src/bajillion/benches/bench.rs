@@ -11,10 +11,11 @@ mod fixtures;
 mod prepare;
 mod seal;
 mod settlement;
+mod sizes;
 mod state_cache;
 mod validate_close;
+mod verify_ack;
 mod verify_certificate;
-mod verify_payment;
 
 fn main() {
     match std::env::var(BENCH_ENV).as_deref() {
@@ -25,8 +26,9 @@ fn main() {
         Ok("validate-close") => validate_close::benches(),
         Ok("assemble-certificate") => assemble_certificate::benches(),
         Ok("verify-certificate") => verify_certificate::benches(),
-        Ok("verify-payment") => verify_payment::benches(),
+        Ok("verify-ack") => verify_ack::benches(),
         Ok("adjudicate") => adjudicate::benches(),
+        Ok("sizes") => sizes::benches(),
         Ok("blog-chain") => blog_chain::benches(),
         Ok("settlement") => settlement::benches(),
         Ok(value) => panic!("unsupported {BENCH_ENV}={value:?}"),
@@ -38,8 +40,9 @@ fn main() {
             validate_close::benches();
             assemble_certificate::benches();
             verify_certificate::benches();
-            verify_payment::benches();
+            verify_ack::benches();
             adjudicate::benches();
+            sizes::benches();
             blog_chain::benches();
             settlement::benches();
         }

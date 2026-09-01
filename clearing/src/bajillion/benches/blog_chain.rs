@@ -1,20 +1,16 @@
 use super::{
     admission_fixtures::{FAULTS, QUORUM, SLICE_BITS, SLICES, VALIDATORS, Validators},
     fixtures::{
-        ActiveProfile, CloseFixture, WORKERS, active_chain_fixture, kind_label,
-        selected_active_profiles, strategy,
+        ActiveProfile, CloseFixture, WORKERS, active_close_fixture_with_assignment, kind_label,
+        profile_key, proven_challenges, selected_active_profiles, strategy,
     },
 };
 use bytes::Bytes;
 use commonware_clearing::bajillion::{
     admission::{SealedDealing, Vote, bls12381, seal},
     boundary::{SignedWithdrawal, WithdrawalAction},
-    challenge::{
-        Challenge, ChallengeKind, HigherShardTipLookup, Verdict, adjudicate_with_strategy,
-        decode_bounded,
-    },
+    challenge::{Challenge, ChallengeKind, HigherEntryLookup, Verdict, adjudicate, decode_bounded},
     commitment::{Builder, Tree, VectorKind, VectorRoot},
-    credit::{CreditTipLookup, ShardSet},
     settlement::{
         BatchStatus, EpochDeadlinePolicy, HardFaultReason, SettlementChain, SettlementConfig,
     },
@@ -23,6 +19,7 @@ use commonware_clearing::bajillion::{
         BatchId, Header, PreparedClose, ProofSlice, RootBundle, TerminalProof, WithdrawalClaim,
         WithdrawalOutput, prepare_close_with_strategy, validate_close,
     },
+    vector::{OutTipLookup, OutVector, TransposeEntry},
 };
 use commonware_codec::{Decode, Encode, EncodeSize, RangeCfg};
 use commonware_cryptography::{Sha256, Signer as _, sha256::Digest};
@@ -56,15 +53,17 @@ struct WithdrawalClaims {
 
 struct Metrics {
     close_bytes: usize,
+    posted_close_bytes: usize,
     slice_corpus_bytes: usize,
     dealing_bytes: usize,
+    dealt_dealing_bytes: usize,
     dealing_slices: usize,
     header_bytes: usize,
     root_bundle_witness_bytes: usize,
     external_certificate_bytes: usize,
     external_package_bytes: usize,
     validator_chain_commitment_bytes: usize,
-    challenge_recipient_lookup_bytes: usize,
+    challenge_sender_lookup_bytes: usize,
     challenge_bytes: usize,
 }
 
@@ -76,7 +75,7 @@ struct BlogChainFixture {
     commitment: CommitmentPayload,
     terminal_proof: TerminalProof<Digest>,
     verifier: bls12381::Scheme,
-    challenges: [(ChallengeKind, Bytes); 4],
+    challenges: [(ChallengeKind, Bytes); 3],
     claims: [WithdrawalClaims; 2],
     metrics: Metrics,
 }
@@ -89,9 +88,22 @@ impl BlogChainFixture {
         assert_eq!(validators.committee().quorum(), QUORUM);
 
         let assignment = validators.assignment();
-        let (close, proven, claim_signer) = active_chain_fixture(profile, assignment);
+        let close = active_close_fixture_with_assignment(profile, assignment);
+        assert_eq!(close.context.assignment().slice_bits(), SLICE_BITS);
+        assert_eq!(
+            close.context.assignment().committee(),
+            &validators.committee().commitment::<Sha256>()
+        );
+        assert!(close.deposits.is_empty());
+        assert!(close.withdrawals.is_empty());
+
         // Claim fixtures cover the single-output floor and a full withdrawal surge
         // in which every live account exits through one certified close.
+        let claim_position = close
+            .accounts
+            .binary_search_by(|(public, _)| public.cmp(&close.rows[1].account))
+            .expect("the claim account is registered");
+        let claim_signer = close.accounts[claim_position].1.clone();
         let surge = u32::try_from(profile.live_accounts)
             .expect("benchmark account count fits the vector bound");
         let claims = [1, surge].map(|total| WithdrawalClaims {
@@ -104,16 +116,10 @@ impl BlogChainFixture {
                 assert_eq!(fixture.claim.encode().len(), fixture.claim.encode_size());
             }
         }
-        assert_eq!(close.context.assignment().slice_bits(), SLICE_BITS);
-        assert_eq!(
-            close.context.assignment().committee(),
-            &validators.committee().commitment::<Sha256>()
-        );
-        assert!(close.deposits.is_empty());
-        assert!(close.withdrawals.is_empty());
 
         validate_close::<Sha256, _, _, PaymentBatchVerifier, _>(
             &close.context,
+            &close.operator_bls,
             &close.deposits,
             &close.withdrawals,
             close.prepared.close(),
@@ -125,7 +131,13 @@ impl BlogChainFixture {
             .assemble_slices(&close.cache, strategy())
             .expect("benchmark slices are valid");
         assert_eq!(all_slices.len(), SLICES);
-        let close_bytes = close.prepared.close().encode_size();
+        let close_bytes = close.prepared.close().encoded_size();
+        let replica =
+            commonware_clearing::bajillion::posted::Replica::genesis(close.cache.leaves())
+                .expect("benchmark predecessor state is canonical");
+        let posted_close_bytes =
+            commonware_clearing::bajillion::posted::encoded_size(close.prepared.close(), &replica)
+                .expect("benchmark close posts against its own predecessor");
         let slice_corpus_bytes = all_slices.iter().map(EncodeSize::encode_size).sum();
         let (validator, indices, dealing_bytes) =
             validators.largest_assignment(close.context.assignment(), &all_slices);
@@ -133,6 +145,13 @@ impl BlogChainFixture {
             .iter()
             .map(|index| all_slices[usize::from(*index)].clone())
             .collect::<Vec<_>>();
+        let dealt_dealing_bytes = dealing
+            .iter()
+            .cloned()
+            .map(|slice| {
+                commonware_clearing::bajillion::retained::DealtSlice::strip(slice).encode_size()
+            })
+            .sum();
         let validator_scheme = validators.signer(validator);
         drop(all_slices);
 
@@ -147,28 +166,30 @@ impl BlogChainFixture {
             .terminal_proof()
             .expect("benchmark terminal proof is valid");
 
-        let challenge_recipient_lookup_bytes = match &proven.tip {
-            Challenge::HigherShardTip { payment, recipient } => {
-                assert!(matches!(
-                    recipient.as_ref(),
-                    HigherShardTipLookup::Present {
-                        tip: CreditTipLookup::Present { .. },
-                        ..
-                    }
-                ));
-                assert_eq!(payment.shard(), 0);
-                recipient.encode_size()
-            }
-            _ => unreachable!("the blog benchmark uses a higher-shard-tip challenge"),
-        };
-        let challenge_bytes = proven.tip.encode_size();
-        let challenges = proven.challenges().map(|(kind, challenge)| {
+        let proven = proven_challenges(&close);
+        let (challenge_bytes, challenge_sender_lookup_bytes) = proven
+            .iter()
+            .find_map(|(_, challenge)| match challenge {
+                Challenge::HigherAckEntry { sender, .. } => {
+                    assert!(matches!(
+                        sender.as_ref(),
+                        HigherEntryLookup::Present {
+                            entry: OutTipLookup::Present { .. },
+                            ..
+                        }
+                    ));
+                    Some((challenge.encode_size(), sender.encode_size()))
+                }
+                _ => None,
+            })
+            .expect("the proven set carries a higher-entry challenge");
+        let challenges = proven.map(|(kind, challenge)| {
             let encoded = challenge.encode();
             assert_eq!(encoded.len(), challenge.encode_size());
             assert_eq!(
                 decode_bounded::<VerifyingKey, Digest>(encoded.as_ref(), encoded.len())
                     .expect("canonical benchmark challenge decodes"),
-                *challenge
+                challenge
             );
             (kind, encoded)
         });
@@ -183,6 +204,7 @@ impl BlogChainFixture {
         seal::<Sha256, _, _, PaymentBatchVerifier, _>(
             &validator_scheme,
             &close.context,
+            &close.operator_bls,
             &close.deposits,
             &close.withdrawals,
             &close.prepared.close().header,
@@ -198,21 +220,23 @@ impl BlogChainFixture {
         let external_certificate_bytes = commitment.2.encode_size();
         let validator_chain_commitment_bytes = header_bytes;
         assert_eq!(header_bytes, 32);
-        assert_eq!(root_bundle_witness_bytes, 128);
+        assert_eq!(root_bundle_witness_bytes, 164);
         assert_eq!(external_certificate_bytes, 69);
         assert_eq!(external_package_bytes, 101);
         assert_eq!(validator_chain_commitment_bytes, 32);
         let metrics = Metrics {
             close_bytes,
+            posted_close_bytes,
             slice_corpus_bytes,
             dealing_bytes,
+            dealt_dealing_bytes,
             dealing_slices: dealing.len(),
             header_bytes,
             root_bundle_witness_bytes,
             external_certificate_bytes,
             external_package_bytes,
             validator_chain_commitment_bytes,
-            challenge_recipient_lookup_bytes,
+            challenge_sender_lookup_bytes,
             challenge_bytes,
         };
 
@@ -233,7 +257,8 @@ impl BlogChainFixture {
     fn prepare(
         &self,
         rows: Vec<AccountRow<VerifyingKey, Digest>>,
-        shard_sets: Vec<ShardSet<VerifyingKey, Digest>>,
+        out_vectors: Vec<OutVector<VerifyingKey>>,
+        transpose: Vec<TransposeEntry<VerifyingKey>>,
     ) -> PreparedClose<VerifyingKey, Digest> {
         prepare_close_with_strategy::<Sha256, _, _>(
             &self.close.cache,
@@ -241,7 +266,10 @@ impl BlogChainFixture {
             &self.close.deposits,
             &self.close.withdrawals,
             rows,
-            shard_sets,
+            out_vectors,
+            &self.close.out_partials,
+            &self.close.operator_signatures,
+            transpose,
             strategy(),
         )
         .expect("benchmark preparation is valid")
@@ -262,6 +290,7 @@ impl BlogChainFixture {
         seal::<Sha256, _, _, PaymentBatchVerifier, _>(
             &self.validator_scheme,
             &self.close.context,
+            &self.close.operator_bls,
             &self.close.deposits,
             &self.close.withdrawals,
             &self.close.prepared.close().header,
@@ -294,13 +323,11 @@ impl BlogChainFixture {
     fn check_challenge(&self, encoded: &Bytes) -> Verdict {
         let challenge = decode_bounded::<VerifyingKey, Digest>(encoded.as_ref(), encoded.len())
             .expect("benchmark challenge decodes within its exact bound");
-        adjudicate_with_strategy::<Sha256, _>(
+        adjudicate::<Sha256, _, _>(
             &self.close.context,
             &self.commitment.0,
             &self.commitment.1,
-            self.close.context.challenge_deadline(),
             &challenge,
-            strategy(),
         )
         .expect("benchmark challenge is well formed")
     }
@@ -485,7 +512,7 @@ fn preflight_chain(
     validators: &Validators,
     commitment: &CommitmentPayload,
     terminal_proof: &TerminalProof<Digest>,
-    challenges: &[(ChallengeKind, Bytes); 4],
+    challenges: &[(ChallengeKind, Bytes); 3],
 ) {
     // A proven challenge permanently faults the chain, so every kind preflights a fresh one.
     for (kind, encoded) in challenges {
@@ -510,12 +537,11 @@ fn preflight_chain(
             .expect("benchmark commitment can be admitted");
         assert_eq!(batch, commitment.0.batch_id::<Sha256>());
         let verdict = chain
-            .challenge_encoded_with_strategy(
+            .challenge_encoded(
                 close.context.challenge_deadline(),
                 batch,
                 encoded.as_ref(),
                 encoded.len(),
-                strategy(),
             )
             .expect("benchmark challenge can be checked");
         assert_eq!(verdict, Verdict::Proven(*kind));
@@ -539,23 +565,22 @@ fn preflight_chain(
 fn bench_blog_chain(c: &mut Criterion) {
     for (profile_index, profile) in selected_active_profiles() {
         let fixture = BlogChainFixture::new(profile);
-        let live_accounts = profile.live_accounts;
-        let changed = profile.changed_accounts;
-        let credited = profile.credited_accounts;
-        let shards = profile.receive_shards_per_credited;
+        let labels = format!("{} E={}", profile_key(profile), profile.edges());
         eprintln!(
-            "clearing blog chain metrics: profile={profile_index} N={live_accounts} A={changed} B={credited} h={shards} close_W=0 n={VALIDATORS} f={FAULTS} q={QUORUM} slices={SLICES} workers={WORKERS} close_bytes={} slice_corpus_bytes={} validator={} dealing_bytes={} dealing_slices={} header_bytes={} root_bundle_witness_bytes={} external_certificate_bytes={} external_package_bytes={} validator_chain_commitment_bytes={} challenge_recipient_lookup_bytes={} challenge_bytes={}",
+            "clearing blog chain metrics: profile={profile_index} {labels} close_W=0 n={VALIDATORS} f={FAULTS} q={QUORUM} slices={SLICES} workers={WORKERS} close_bytes={} posted_close_bytes={} slice_corpus_bytes={} validator={} dealing_bytes={} dealt_dealing_bytes={} dealing_slices={} header_bytes={} root_bundle_witness_bytes={} external_certificate_bytes={} external_package_bytes={} validator_chain_commitment_bytes={} challenge_sender_lookup_bytes={} challenge_bytes={}",
             fixture.metrics.close_bytes,
+            fixture.metrics.posted_close_bytes,
             fixture.metrics.slice_corpus_bytes,
             usize::from(fixture.validator),
             fixture.metrics.dealing_bytes,
+            fixture.metrics.dealt_dealing_bytes,
             fixture.metrics.dealing_slices,
             fixture.metrics.header_bytes,
             fixture.metrics.root_bundle_witness_bytes,
             fixture.metrics.external_certificate_bytes,
             fixture.metrics.external_package_bytes,
             fixture.metrics.validator_chain_commitment_bytes,
-            fixture.metrics.challenge_recipient_lookup_bytes,
+            fixture.metrics.challenge_sender_lookup_bytes,
             fixture.metrics.challenge_bytes,
         );
         for claims in &fixture.claims {
@@ -574,13 +599,20 @@ fn bench_blog_chain(c: &mut Criterion) {
             );
         }
 
-        let labels = format!("N={live_accounts} A={changed} B={credited} h={shards}");
         c.bench_function(
             &format!("{}/p={profile_index} op=prepare {labels}", module_path!()),
             |b| {
                 b.iter_batched(
-                    || (fixture.close.rows.clone(), fixture.close.shard_sets.clone()),
-                    |(rows, shard_sets)| black_box(fixture.prepare(rows, shard_sets)),
+                    || {
+                        (
+                            fixture.close.rows.clone(),
+                            fixture.close.out_vectors.clone(),
+                            fixture.close.transpose.clone(),
+                        )
+                    },
+                    |(rows, out_vectors, transpose)| {
+                        black_box(fixture.prepare(rows, out_vectors, transpose))
+                    },
                     BatchSize::PerIteration,
                 );
             },

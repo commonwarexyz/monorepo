@@ -16,9 +16,11 @@
 //!
 //! A validator does more than compare aggregate debit and credit. Before voting, it authenticates
 //! its exact assigned [`transition::ProofSlice`] values: their coverage and state ranges, every
-//! changed row, terminal outgoing payment, terminal receive-shard head, boundary contribution,
-//! prefix transition, state update, and signature. The terminal prefix then binds the exact vector
-//! lengths, boundary totals, payment conservation, and successor liability.
+//! changed row, terminal payer-signed vector endpoint, outgoing vector, transpose interval,
+//! accumulator transition, boundary contribution, prefix transition, state update, the slice's
+//! combined operator countersignature, and every payer signature. The terminal boundary then
+//! binds the exact vector lengths, boundary totals, payment conservation, the multiset equality
+//! between the two edge orderings, and successor liability.
 //!
 //! A committee has exactly `n = 3f + 1` validators, every slice has exactly `q = 2f + 1` holders,
 //! and an admission certificate has exactly `q` signers. Assuming at most `f` Byzantine validators
@@ -29,31 +31,32 @@
 //!
 //! ## Payer sequencing and private evidence
 //!
-//! Each payer account is one linear cumulative-debit sequence. A [`payment::SignedSend`] names
-//! one or more recipient-sorted entries under one signature and one cumulative endpoint, so a
-//! batch is accepted or rejected as a whole and advances the sequence by exactly its total. The
-//! operator acknowledges an accepted send with one [`payment::SignedReceipt`] per entry, all
-//! recorded atomically with the debit.
+//! Each payer account is one linear cumulative-debit sequence over one strictly
+//! recipient-sorted, epoch-cumulative outgoing vector ([`vector::OutVector`]). A batch adds
+//! delta entries to that vector, and the payer authorizes it by signing one
+//! [`payment::VectorSendBody`]: the epoch-local batch sequence number, the lifetime cumulative
+//! debit endpoint, and the vector root ([`payment::SendAuthorization`]). The batch is accepted
+//! or rejected as a whole and advances the sequence by exactly its total. The operator accepts
+//! by countersigning the identical body, once for the dual-signed receipt
+//! ([`payment::VectorAck`]) and once, aggregably, for the close's per-slice countersignatures.
 //!
-//! The base safety guarantee assumes a wallet has at most one unacknowledged send for that
-//! account: it stages one exact [`payment::SignedSend`], retries the same bytes after response
-//! loss, verifies and durably commits every linked [`payment::Payment`] entry pair, advances its
-//! locally owned debit, and only then signs the next endpoint. This serializes one payer account,
-//! not independent payers or a recipient's receive shards.
+//! The base safety guarantee assumes a wallet has at most one unacknowledged batch for that
+//! account: it stages one exact [`payment::SendAuthorization`], retries the same bytes after
+//! response loss, verifies and durably commits its acknowledgment and per-entry openings,
+//! advances its locally owned debit, and only then signs the next endpoint. This serializes one
+//! payer account, not independent payers or recipients.
 //!
 //! A later cumulative endpoint authorizes the entire debit delta up to that endpoint, while a
-//! public account row carries only its terminal outgoing payment. If a wallet signs later endpoints
-//! before obtaining earlier receipts, an earlier receipt can be neither held privately nor selected
-//! as the public terminal endpoint. That intentionally pipelined exposure is outside the base safety
-//! guarantee, and it covers the entries of a batch whose receipts the wallet never obtained.
-//!
-//! A send alone is not an accepted payment. The transferable evidence is the linked payer send and
-//! operator receipt. Challenge submission has no caller identity requirement, so neither payer nor
-//! recipient must remain continuously online. The actual assumption is per private receipt: at
-//! least one honest holder must obtain and retain the required payment pair or pairs and get a
-//! challenge included by the inclusive deadline. A recipient that wants an independently
-//! enforceable preconfirmation must obtain that pair before relying on it. The protocol cannot
-//! reconstruct a receipt that no independent holder received or retained.
+//! public account row carries only its terminal endpoint. An authorization alone is not an
+//! accepted payment. The transferable per-edge evidence is one [`payment::EntryReceipt`]: the
+//! dual-signed acknowledgment plus one membership opening of the credited recipient's
+//! cumulative entry under the acknowledged vector root. Challenge submission has no caller
+//! identity requirement, so neither payer nor recipient must remain continuously online. The
+//! actual assumption is per private receipt: at least one honest holder must obtain and retain
+//! the required evidence and get a challenge included by the inclusive deadline. A recipient
+//! that wants an independently enforceable preconfirmation must obtain its entry receipt before
+//! relying on it. The protocol cannot reconstruct a receipt that no independent holder received
+//! or retained.
 //!
 //! ## Availability and settlement
 //!
@@ -82,8 +85,13 @@
 //! Certification alone never changes settlement state or releases custody.
 //!
 //! [`transition::CloseContext`] owns the predecessor state root. [`transition::RootBundle`] holds
-//! the change, withdrawal-output, successor-state, and coverage roots, and
-//! [`transition::Header`] binds all of those contextual roles.
+//! the change, withdrawal-output, successor-state, coverage, and transpose roots plus the exact
+//! transpose leaf count, and [`transition::Header`] binds all of those contextual roles. The
+//! posted corpus ships movers and edges only ([`posted`]): readers hold the previous certified
+//! state as a [`posted::Replica`], live accounts ride as rank gaps, and the transpose,
+//! predecessor states, successor states, and prefixes are all derived rather than shipped.
+//! Dealt slices travel without their unchanged state ([`retained`]): every slice assignee
+//! retains its key interval across closes and hydrates each dealing against it.
 //!
 //! Arrows below are successful transitions. Ordinary validation failure leaves the requested state
 //! unchanged. A call carrying `now` is the exception: it first observes every liveness deadline,
@@ -116,12 +124,12 @@
 //!        |                                                   v
 //!        |                                    +-----------------------------+
 //!        |                                    | C + predecessor StateCache  |
-//!        |                                    | + exact D/W + rows/shards   |
+//!        |                                    | + exact D/W + rows/vectors  |
 //!        |                                    | prepare_close_with_strategy |
 //!        |                                    v                             |
 //!        |                                    | PreparedClose               |
 //!        |                                    | Header + RootBundle         |
-//!        |                                    | four retained Merkle trees  |
+//!        |                                    | five retained Merkle trees  |
 //!        |                                    +--------------+--------------+
 //!        |                                                   |
 //!        |                                    assemble_slices | + StateCache
@@ -136,9 +144,11 @@
 //!        |                                    +-----------------------------+
 //!        |                                    | seal                        |
 //!        |                                    | - authenticate every slice  |
+//!        |                                    |   and its combined operator |
+//!        |                                    |   countersignature          |
 //!        |                                    | - one randomized batch for  |
-//!        |                                    |   every distinct payment    |
-//!        |                                    |   send/receipt signature    |
+//!        |                                    |   every distinct payer      |
+//!        |                                    |   authorization signature   |
 //!        |                                    +------+----------------------+
 //!        |                                           |
 //!        |                              +------------+------------+
@@ -170,9 +180,9 @@
 //! [`transition::EpochContext`] is predecessor-state-root-independent, not liability-independent.
 //! This lets the same payment anchor serve while its predecessor closes. [`transition::CloseContext`]
 //! adds the exact root and verifies the already-committed liability. The embedding must release no
-//! operator-signed receipt until that exact context has registered successfully. A
-//! [`payment::Payment`] is the linked payer send and operator receipt. A bare send is not accepted
-//! payment evidence.
+//! operator-signed acknowledgment until that exact context has registered successfully. A
+//! [`payment::EntryReceipt`] is the dual-signed acknowledgment plus one entry opening. A bare
+//! authorization is not accepted payment evidence.
 //!
 //! Registration activates an immutable, one-shot payment context. `max_admission_delay` bounds
 //! that context's publication window. It is not a periodic heartbeat while the slot is `OPEN`.
@@ -183,12 +193,12 @@
 //! not enter state. Terminal recovery freezes and settles against the last root reached by the
 //! valid finalized prefix.
 //!
-//! [`transition::prepare_close_with_strategy`] constructs the four trees but does not make arbitrary
+//! [`transition::prepare_close_with_strategy`] constructs the five trees but does not make arbitrary
 //! untrusted rows valid. Call [`transition::PreparedClose::validate`] when the application did not
 //! assemble the corpus from inputs it already validated. Prepared state retains the change,
-//! withdrawal-output, successor-state, and coverage trees. Dealing still borrows the predecessor
-//! [`transition::StateCache`]. Settlement admission sees the registered context, typed roots,
-//! terminal proof, and certificate, not the full corpus or every slice.
+//! withdrawal-output, successor-state, coverage, and transpose trees. Dealing still borrows the
+//! predecessor [`transition::StateCache`]. Settlement admission sees the registered context, typed
+//! roots, terminal proof, and certificate, not the full corpus or every slice.
 //!
 //! "Deal" produces every [`transition::ProofSlice`]. Each slice is replicated to an exact
 //! quorum. A validator's "dealing" is its complete assigned subset. [`admission::seal`] rejects any other
@@ -309,11 +319,12 @@
 //! ```
 //!
 //! A challenge is accepted through its batch's inclusive challenge deadline. FIFO finalization
-//! requires `now` to be strictly later. The four proof-to-fault edges are
-//! [`challenge::Challenge::LatestAcknowledgedSend`],
-//! [`challenge::Challenge::HigherShardTip`],
-//! [`challenge::Challenge::InconsistentReceiptRange`], and
-//! [`challenge::Challenge::ReceiptFork`]. [`challenge::Verdict::NoContradiction`] and malformed
+//! requires `now` to be strictly later. The three proof-to-fault edges are
+//! [`challenge::Challenge::HigherAckDebit`],
+//! [`challenge::Challenge::HigherAckEntry`], and
+//! [`challenge::Challenge::AckFork`]. There is no interior receipt range to reason about:
+//! every counted value is a terminal opening under a payer-signed vector root.
+//! [`challenge::Verdict::NoContradiction`] and malformed
 //! evidence do not change batch status. A missed registered admission, an expired staged deposit,
 //! an expired queued or admitted-but-unfinalized withdrawal, or a proven challenge permanently
 //! fences the deployment. The first fault reason and admission fence are retained. A later proof
@@ -361,13 +372,13 @@
 //!
 //! ACCEPTED PAYMENT
 //! ----------------
-//! payer signs one cumulative send (one or more entries)
+//! payer signs one cumulative vector endpoint (one or more entries)
 //!        |
 //!        v
 //! operator verifies and atomically records the debit and every entry credit
 //!        |
 //!        v
-//! operator signs one exact linked receipt per entry
+//! operator countersigns the exact body (receipt and aggregable halves)
 //!        |
 //!        +-- selected in a clean close --> FIFO finalization
 //!        |                                  |              |
@@ -503,12 +514,15 @@ pub mod admission;
 pub mod boundary;
 pub mod challenge;
 pub mod commitment;
-pub mod credit;
-mod parallel;
 pub mod payment;
+pub mod posted;
+pub mod retained;
 pub mod settlement;
 pub mod state;
 pub mod transition;
+pub mod vector;
 
 #[cfg(test)]
 mod model;
+#[cfg(test)]
+mod tests;

@@ -26,8 +26,8 @@ use crate::{
     protocol::{
         AccountCache, Deployment, DepositEvent, INITIAL_BALANCE, Key, PreparedEpoch, Protocol,
         SettlementResult, Timing, accounts, chain_id, clearing_private, committee,
-        dealt_participant, deployment, deployments, identities, operator_key, operator_signer,
-        wallets,
+        dealt_participant, deployment, deployments, identities, operator_ack_key,
+        operator_ack_signer, operator_key, operator_signer, wallets,
     },
     rpc,
     service::{observe, prepare_request},
@@ -37,11 +37,12 @@ use bytes::{Bytes, BytesMut};
 use commonware_broadcast::buffered;
 use commonware_clearing::bajillion::{
     boundary::{DepositBatch, DepositRecord, SignedWithdrawal, WithdrawalAction, WithdrawalBatch},
-    challenge::{Challenge, ChallengeKind},
-    credit::ShardSet,
-    payment::{Payment, SignedReceipt, SignedSend},
+    challenge::{AckWitness, Challenge, ChallengeKind},
+    commitment::VectorRoot,
+    payment::{VectorAck, VectorSendBody},
     state::{AccountRow, AccountState, Prefix, SettlementOutput, StateLeaf},
     transition::{BatchId, StateCache, WithdrawalClaim},
+    vector::OutVector,
 };
 use commonware_codec::{
     Decode as _, DecodeExt as _, Encode as _, EncodeSize as _, Error as CodecError, RangeCfg,
@@ -226,8 +227,12 @@ async fn seal_with(
 /// account set.
 fn two_deployments() -> Vec<Deployment> {
     vec![
-        Deployment::new(operator_key(), accounts()),
-        Deployment::new(operator_signer(1).public_key(), accounts()),
+        Deployment::new(operator_key(), operator_ack_key(0), accounts()),
+        Deployment::new(
+            operator_signer(1).public_key(),
+            operator_ack_key(1),
+            accounts(),
+        ),
     ]
 }
 
@@ -412,7 +417,9 @@ fn build_fixture(
             vec![deposit.clone()],
             predecessor,
             vec![row],
-            vec![ShardSet::empty(epoch, account)],
+            vec![OutVector::empty(epoch, account)],
+            vec![None],
+            Vec::new(),
             successor.clone(),
         )
         .unwrap();
@@ -492,38 +499,34 @@ fn epoch_fixture() -> EpochFixture {
     }
 }
 
-/// A receipt fork over the fixture's payment context, parameterized by the
-/// forked amounts so distinct valid fraud evidence can be built against one
-/// close.
-fn receipt_fork(
+/// An operator acknowledgment fork over the fixture's payment context,
+/// parameterized by the forked cumulative debits so distinct valid fraud
+/// evidence can be built against one close: two countersigned endpoints at
+/// one payer sequence number with different bodies.
+fn ack_fork(
     result: &SettlementResult,
     protocol: &Protocol,
     amounts: (u64, u64),
 ) -> Challenge<Key, Digest> {
     let wallets = wallets();
-    let receiver = wallets[2].public_key();
-    let payment = |payer: usize, amount| {
-        let send = SignedSend::sign_next(
-            &result.payment_context,
-            wallets[payer].signer(),
-            receiver.clone(),
-            amount,
-            0,
-        )
-        .unwrap();
-        let receipt = SignedReceipt::issue_next::<Sha256, _>(
-            &result.payment_context,
-            &send,
-            &receiver,
-            0,
-            0,
-            0,
-            protocol.operator(),
-        )
-        .unwrap();
-        Payment::new::<Sha256>(&result.payment_context, send, receipt).unwrap()
+    let payer = &wallets[0];
+    let send_root = VectorRoot {
+        digest: Sha256::hash(&[b"chain-ack-fork-send-root"]),
     };
-    Challenge::receipt_fork(&payment(0, amounts.0), &payment(1, amounts.1))
+    let ack = |cumulative_debit: u64| {
+        let body = VectorSendBody::new(
+            &result.payment_context,
+            payer.public_key(),
+            0,
+            cumulative_debit,
+            send_root,
+        );
+        VectorAck::sign_by_authorities(body, payer.signer(), protocol.operator())
+    };
+    Challenge::AckFork {
+        left: Box::new(AckWitness::from_ack(&ack(amounts.0))),
+        right: Box::new(AckWitness::from_ack(&ack(amounts.1))),
+    }
 }
 
 /// A signed empty epoch-0 registration: the boundary alone, with the
@@ -713,7 +716,7 @@ fn proven_challenge_inside_the_window_faults_the_deployment() {
         .await;
 
         let batch_id = fixture.result.finalized.batch_id;
-        let evidence = receipt_fork(&fixture.result, &fixture.protocol, (2, 3)).encode();
+        let evidence = ack_fork(&fixture.result, &fixture.protocol, (2, 3)).encode();
         let challenge = SettlementTx::Challenge(ChallengeRequest {
             batch_id,
             evidence: evidence.clone(),
@@ -727,7 +730,7 @@ fn proven_challenge_inside_the_window_faults_the_deployment() {
             &fault,
             Some(Record::Fault(super::state::FaultRecord::Faulted(
                 HardFaultReasonResponse::ProvenChallenge {
-                    kind: ChallengeKind::ReceiptFork,
+                    kind: ChallengeKind::AckFork,
                     ..
                 }
             )))
@@ -742,7 +745,7 @@ fn proven_challenge_inside_the_window_faults_the_deployment() {
         assert_eq!(read(&db, &fault_key(&deployment())).await, fault);
         let different = SettlementTx::Challenge(ChallengeRequest {
             batch_id,
-            evidence: receipt_fork(&fixture.result, &fixture.protocol, (4, 5)).encode(),
+            evidence: ack_fork(&fixture.result, &fixture.protocol, (4, 5)).encode(),
         });
         seal(&db, 4, std::slice::from_ref(&different)).await;
         assert_eq!(read(&db, &fault_key(&deployment())).await, fault);
@@ -772,7 +775,7 @@ fn hard_fault_claims_replay_idempotently() {
             ],
         )
         .await;
-        let evidence = receipt_fork(&fixture.result, &fixture.protocol, (2, 3)).encode();
+        let evidence = ack_fork(&fixture.result, &fixture.protocol, (2, 3)).encode();
         let challenge = SettlementTx::Challenge(ChallengeRequest {
             batch_id: fixture.result.finalized.batch_id,
             evidence,
@@ -991,7 +994,12 @@ fn deployment_fault_is_isolated() {
         let configured = two_deployments();
         let alpha = *configured[0].digest();
         let beta = *configured[1].digest();
-        let beta_protocol = Protocol::with_signer(NonZeroUsize::MIN, operator_signer(1)).unwrap();
+        let beta_protocol = Protocol::with_signer(
+            NonZeroUsize::MIN,
+            operator_signer(1),
+            operator_ack_signer(1),
+        )
+        .unwrap();
         let db = open(context.child("isolated"), "isolated").await;
         let state = genesis_cache();
 
@@ -1168,7 +1176,12 @@ fn deployment_fault_is_isolated() {
 fn unconfigured_deployment_txs_are_rejected() {
     deterministic::Runner::default().start(|context| async move {
         let db = open(context.child("unconfigured"), "unconfigured").await;
-        let foreign = Protocol::with_signer(NonZeroUsize::MIN, operator_signer(7)).unwrap();
+        let foreign = Protocol::with_signer(
+            NonZeroUsize::MIN,
+            operator_signer(7),
+            operator_ack_signer(7),
+        )
+        .unwrap();
 
         // A deposit naming an unconfigured deployment is diagnosed typed and
         // rejected effect-free: no custody record under any scope, no
@@ -2468,8 +2481,8 @@ impl EngineDefinition for Engine {
             initial_sync_target::<deterministic::Context>(),
         );
 
-        let plan =
-            SyncPlan::init(&context.child("stateful_startup"), partition_prefix.clone()).await;
+        let startup = context.child("stateful_startup");
+        let plan = SyncPlan::init(&startup, partition_prefix.clone()).await;
         let _ = plan.should_state_sync(false);
         let provider = ConstantProvider::new(scheme.clone());
 
@@ -3283,8 +3296,8 @@ impl EngineDefinition for Distributed {
             initial_sync_target::<deterministic::Context>(),
         );
 
-        let plan =
-            SyncPlan::init(&context.child("stateful_startup"), partition_prefix.clone()).await;
+        let startup = context.child("stateful_startup");
+        let plan = SyncPlan::init(&startup, partition_prefix.clone()).await;
         let _ = plan.should_state_sync(false);
         let scheme = self.schemes[index.min(self.schemes.len() - 1)].clone();
         let provider = ConstantProvider::new(scheme.clone());
@@ -3504,7 +3517,7 @@ impl EngineDefinition for Distributed {
                         clearing_private(index).unwrap(),
                     )
                     .unwrap(),
-                    operators: vec![(operator_key, deployment())],
+                    operators: vec![(operator_key, deployments().remove(0))],
                     db,
                     partition: format!("{partition_prefix}-dealings"),
                 },
@@ -3638,7 +3651,11 @@ async fn drive(
         deals.push(node::Deal {
             participant,
             peer: peer.clone(),
-            slices: dealings[usize::from(participant)].clone(),
+            slices: dealings[usize::from(participant)]
+                .clone()
+                .into_iter()
+                .map(commonware_clearing::bajillion::retained::DealtSlice::strip)
+                .collect(),
         });
     }
 
@@ -4760,7 +4777,11 @@ impl Walkthrough {
             .map(|op| {
                 let op = u64::try_from(op).expect("the operator count fits u64");
                 participants.push(ed25519::PrivateKey::from_seed(77_777 + op).public_key());
-                crate::protocol::Deployment::new(operator_signer(op).public_key(), accounts())
+                crate::protocol::Deployment::new(
+                    operator_signer(op).public_key(),
+                    operator_ack_key(op),
+                    accounts(),
+                )
             })
             .collect::<Vec<_>>();
         let finalized = (0..participants.len())
@@ -4961,8 +4982,8 @@ impl EngineDefinition for Walkthrough {
             initial_sync_target::<deterministic::Context>(),
         );
 
-        let plan =
-            SyncPlan::init(&context.child("stateful_startup"), partition_prefix.clone()).await;
+        let startup = context.child("stateful_startup");
+        let plan = SyncPlan::init(&startup, partition_prefix.clone()).await;
         let _ = plan.should_state_sync(false);
 
         // Marshal actor.
@@ -5077,8 +5098,9 @@ impl EngineDefinition for Walkthrough {
             let pipeline = node::Pipeline::new(certify_mailbox, &validators)
                 .expect("the walkthrough committee maps to network identities");
             let clearing = operator_signer(u64::try_from(op).expect("the operator index fits u64"));
+            let ack = operator_ack_signer(u64::try_from(op).expect("the operator index fits u64"));
             let sqlite = Arc::new(Mutex::new(
-                Operator::open_remote(Path::new(":memory:"), NZUsize!(1), pipeline, clearing)
+                Operator::open_remote(Path::new(":memory:"), NZUsize!(1), pipeline, clearing, ack)
                     .expect("the walkthrough operator opens"),
             ));
             context.child("observer").spawn({
@@ -5114,9 +5136,9 @@ impl EngineDefinition for Walkthrough {
             let single = self.genesis.deployments.len() == 1;
             context.child("driver").spawn(move |context| async move {
                 let result = if single {
-                    walkthrough(context, genesis, address, queries, deposit).await
+                    Box::pin(walkthrough(context, genesis, address, queries, deposit)).await
                 } else {
-                    tenant(context, genesis, op, address, queries).await
+                    Box::pin(tenant(context, genesis, op, address, queries)).await
                 }
                 .map_err(|error| format!("{error:#}"));
                 finish_driver(&verdicts, &combined, op, result);
@@ -5220,12 +5242,7 @@ impl EngineDefinition for Walkthrough {
             .iter()
             .skip(Self::VALIDATORS)
             .cloned()
-            .zip(
-                self.genesis
-                    .deployments
-                    .iter()
-                    .map(|configured| *configured.digest()),
-            )
+            .zip(self.genesis.deployments.iter().cloned())
             .collect();
         let sealer = da::Sealer::new(
             context.child("sealer"),
@@ -5451,10 +5468,10 @@ async fn walkthrough(
     anyhow::ensure!(payment.epoch == 0, "the payment landed in a foreign epoch");
     anyhow::ensure!(payment.total == 5, "the payment debited another total");
     anyhow::ensure!(
-        payment.acceptance.receipts.len() == 1 && alice.receipt_count() == 1,
+        payment.acceptance.entries.len() == 1 && alice.receipt_count() == 1,
         "the payment's verified receipt is not held durably"
     );
-    let invoice = payment.acceptance.send.tx_id::<Sha256>().into_digest();
+    let invoice = Sha256::hash(&[payment.acceptance.ack.body().encode().as_ref()]);
 
     // Bob's receiver intake fetches, verifies, and settlement-anchors the
     // pair, and his acceptance gate answers from the durably held evidence
@@ -5713,7 +5730,7 @@ async fn tenant(
         }
     };
     anyhow::ensure!(payment.epoch == 0, "the payment landed in a foreign epoch");
-    let invoice = payment.acceptance.send.tx_id::<Sha256>().into_digest();
+    let invoice = Sha256::hash(&[payment.acceptance.ack.body().encode().as_ref()]);
     bob.intake_incoming(&context, &mut bob_chain, operator)
         .await?;
     let credit = bob

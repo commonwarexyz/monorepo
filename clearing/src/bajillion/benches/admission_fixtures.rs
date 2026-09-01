@@ -151,6 +151,7 @@ pub(crate) fn validator_fixture(profile: ActiveProfile) -> ValidatorFixture {
     let close = active_close_fixture_with_assignment(profile, assignment);
     validate_close::<Sha256, _, _, PaymentBatchVerifier, _>(
         &close.context,
+        &close.operator_bls,
         &close.deposits,
         &close.withdrawals,
         close.prepared.close(),
@@ -162,7 +163,7 @@ pub(crate) fn validator_fixture(profile: ActiveProfile) -> ValidatorFixture {
         .assemble_slices(&close.cache, strategy())
         .expect("benchmark slices are valid");
     assert_eq!(all_slices.len(), SLICES);
-    let public_corpus_bytes = close.prepared.close().encode_size();
+    let public_corpus_bytes = close.prepared.close().encoded_size();
     let slice_corpus_bytes = all_slices.iter().map(EncodeSize::encode_size).sum();
     let (validator, indices, assignment_bytes) =
         validators.largest_assignment(close.context.assignment(), &all_slices);

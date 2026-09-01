@@ -1,6 +1,6 @@
 //! In-process single-validator chain over the deterministic runtime.
 //!
-//! The harness executes real blocks through [`state::execute`] against a real
+//! The harness executes real blocks through [`super::state::execute`] against a real
 //! settlement database, certifies every block with a one-participant BLS
 //! threshold committee dealt at startup, and serves the real query wire
 //! protocol (`METHOD_SUBMIT_TX` and `METHOD_READ`), so [`crate::chain::client`]

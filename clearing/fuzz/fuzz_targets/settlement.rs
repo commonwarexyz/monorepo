@@ -8,10 +8,12 @@ use commonware_clearing::bajillion::{
         DepositBatch, DepositRecord, SignedWithdrawal, WithdrawalAction, WithdrawalBatch,
         WithdrawalId,
     },
-    challenge::{Challenge, ChallengeKind, RangeLower, StateOpening, Verdict},
+    challenge::{
+        AckWitness, Challenge, ChallengeKind, EntryWitness, StateOpening, Verdict, account_lookup,
+        higher_entry_lookup,
+    },
     commitment::{self, VectorKind, VectorRoot},
-    credit::{ShardHead, ShardSet},
-    payment::{Payment, PaymentWitness, ReceiptBody, SignedReceipt, SignedSend},
+    payment::{SendAuthorization, VECTOR_ACK_AGGREGATE_NAMESPACE, VectorAck, VectorSendBody},
     settlement::{
         BatchStatus, EpochDeadlinePolicy, HardFaultReason, HardFaultSettlement, PendingBatch,
         SettlementChain, SettlementConfig,
@@ -19,17 +21,18 @@ use commonware_clearing::bajillion::{
     state::{AccountChange, AccountRow, AccountState, Prefix, SettlementOutput, StateLeaf},
     transition::{
         Assignment, BatchId, ChallengeIndex, Close, CloseContext, CloseLimits, EpochContext,
-        ExternalPayout, ExternalPayoutClaim, StateCache, TerminalProof, WithdrawalClaim,
-        WithdrawalOutput, assemble_external_payout_claim, assemble_slices, assemble_terminal_proof,
-        assemble_withdrawal_claim, build_close, validate_close,
+        ExternalPayout, ExternalPayoutClaim, OperatorKey, OperatorSignature, OperatorVariant,
+        PreparedClose, StateCache, TerminalProof, WithdrawalClaim, WithdrawalOutput,
+        prepare_close_with_strategy, validate_close,
     },
+    vector::{OutEntry, OutTipLookup, OutVector, TransposeEntry},
 };
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{
     Hasher, Sha256, Signer,
     bls12381::primitives::{
         group::{Private, Scalar},
-        ops::compute_public,
+        ops::{compute_public, sign_message},
         variant::MinSig,
     },
     sha256::Digest,
@@ -43,6 +46,7 @@ use libfuzzer_sys::fuzz_target;
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     num::{NonZeroU64, NonZeroUsize},
+    sync::Arc,
 };
 
 const MAX_INPUT_BYTES: usize = 16 * 1024;
@@ -69,6 +73,11 @@ type TestTerminalProof = TerminalProof<Digest>;
 type TestExternalPayoutClaim = ExternalPayoutClaim<VerifyingKey, Digest>;
 type TestWithdrawalClaim = WithdrawalClaim<Digest>;
 type Certificate = bls12381::Certificate;
+type BuiltRow = (
+    AccountRow<VerifyingKey, Digest>,
+    OutVector<VerifyingKey>,
+    Option<OperatorSignature>,
+);
 
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {
@@ -165,6 +174,7 @@ struct Prepared {
     terminal_proof: TestTerminalProof,
     close: TestClose,
     successor: TestCache,
+    prepared: Arc<PreparedClose<VerifyingKey, Digest>>,
 }
 
 #[derive(Clone)]
@@ -283,6 +293,8 @@ struct Harness {
     chain: TestChain,
     deployment: Digest,
     operator: SigningKey,
+    operator_ack: Private,
+    operator_bls: OperatorKey,
     validator: bls12381::Scheme,
     committee_digest: Digest,
     accounts: Vec<SigningKey>,
@@ -336,6 +348,8 @@ impl Harness {
         let seed = input.seed.to_be_bytes();
         let deployment = Sha256::hash(&[b"settlement-stateful-fuzz", &seed]);
         let operator = SigningKey::from_seed(input.seed ^ 0xa5a5_a5a5_a5a5_a5a5);
+        let operator_ack = Private::new(Scalar::from((input.seed ^ 0x0f0f_0f0f_0f0f_0f0f).max(1)));
+        let operator_bls = compute_public::<OperatorVariant>(&operator_ack);
         let validator_bls = Private::new(Scalar::from((input.seed ^ 0x1357_9bdf_2468_ace0).max(1)));
         let committee = Committee::new(vec![compute_public::<MinSig>(&validator_bls)])
             .expect("one validator is an exact 3f+1 committee");
@@ -370,6 +384,8 @@ impl Harness {
             chain,
             deployment,
             operator,
+            operator_ack,
+            operator_bls,
             validator,
             committee_digest,
             accounts,
@@ -1018,8 +1034,8 @@ impl Harness {
             admission_deadline,
             challenge_deadline,
         );
-        let (close, successor) = boundary_close(cache, &context, &deposits, &withdrawals);
-        self.finish_prepared(cache, context, deposits, withdrawals, close, successor)
+        let (prepared, successor) = boundary_close(cache, &context, &deposits, &withdrawals);
+        self.finish_prepared(cache, context, deposits, withdrawals, prepared, successor)
     }
 
     fn make_payout_prepared(&self, payer_selector: u8, raw_amount: u8) -> Option<Prepared> {
@@ -1080,25 +1096,39 @@ impl Harness {
             leaf.state.balance.checked_sub(1)?
         };
         let amount = u64::from(raw_amount).wrapping_rem(maximum) + 1;
-        let shard = u64::from(payer_selector % 4);
-        let payment = linked_payment(
-            &context,
-            &self.operator,
-            payer,
-            &recipient,
-            amount,
-            leaf.state.cumulative_debit,
-            shard,
-        );
-        let payer_shards = ShardSet::empty(context.payment().epoch(), leaf.account.clone());
-        let recipient_shards = ShardSet::new(
-            context.payment().epoch(),
-            recipient.clone(),
-            vec![ShardHead::new(shard, payment.clone())],
+        let epoch = context.payment().epoch();
+        let out_vector = OutVector::new(
+            epoch,
+            leaf.account.clone(),
+            vec![OutEntry {
+                recipient: recipient.clone(),
+                cumulative: amount,
+                count: 1,
+            }],
         )
-        .expect("one external receipt is a canonical shard set");
+        .expect("one positive payout entry is canonical");
+        let body = VectorSendBody::new(
+            context.payment(),
+            leaf.account.clone(),
+            1,
+            leaf.state
+                .cumulative_debit
+                .checked_add(amount)
+                .expect("bounded payout debit cannot overflow"),
+            out_vector
+                .root::<Sha256, Digest>()
+                .expect("bounded payout vector commits"),
+        );
+        let operator_signature = bls_ack(&self.operator_ack, &body);
+        let outgoing = SendAuthorization::sign(body.clone(), payer);
+        let transpose = vec![TransposeEntry {
+            recipient: recipient.clone(),
+            payer: leaf.account.clone(),
+            cumulative: amount,
+            count: 1,
+        }];
         let mut payer_successor = leaf.state;
-        payer_successor.cumulative_debit = payment.send().body().cumulative_debit();
+        payer_successor.cumulative_debit = body.cumulative_debit();
         if close_request.is_some() {
             payer_successor.balance = 0;
             payer_successor.active = false;
@@ -1110,17 +1140,18 @@ impl Harness {
             receipt_count: 1,
             ..AccountState::default()
         };
-        let mut pairs = vec![
+        let mut pairs: Vec<BuiltRow> = vec![
             (
                 AccountRow {
                     account: leaf.account.clone(),
                     predecessor: leaf.state,
                     successor: payer_successor,
-                    outgoing: Some(payment),
+                    outgoing: Some(outgoing),
                     output: SettlementOutput::None,
                     prefix: Prefix::default(),
                 },
-                payer_shards,
+                out_vector,
+                Some(operator_signature),
             ),
             (
                 AccountRow {
@@ -1131,13 +1162,14 @@ impl Harness {
                     output: SettlementOutput::None,
                     prefix: Prefix::default(),
                 },
-                recipient_shards,
+                OutVector::empty(epoch, self.external_account()),
+                None,
             ),
         ];
         pairs.sort_unstable_by(|left, right| left.0.account.cmp(&right.0.account));
         let mut prefix = Prefix::default();
-        for (row, shards) in &mut pairs {
-            let (debit, credit, _) = row
+        for (row, vector, _) in &mut pairs {
+            let (debit, credit, receipts) = row
                 .checked_deltas()
                 .expect("constructed payout counters are monotonic");
             let closes_payer = close_request.is_some() && row.account == leaf.account;
@@ -1164,25 +1196,17 @@ impl Harness {
                     withdrawal,
                     payout,
                     withdrawal_count: u64::from(closes_payer),
-                    shard_count: shards.heads().len() as u64,
+                    out_count: u64::try_from(vector.entries().len())
+                        .expect("bounded entry count fits in u64"),
+                    in_count: receipts,
                     ..Prefix::default()
                 })
                 .expect("bounded payout prefixes cannot overflow");
             row.prefix = prefix;
         }
-        let (rows, shard_sets) = pairs.into_iter().unzip();
-        let close = build_close::<Sha256, _, _, PaymentBatchVerifier, _>(
-            cache,
-            &context,
-            &deposits,
-            &withdrawals,
-            rows,
-            shard_sets,
-            &mut test_rng(),
-        )
-        .expect("sanitized external payout close must build");
-        let successor = successor_cache(cache, &close);
-        Some(self.finish_prepared(cache, context, deposits, withdrawals, close, successor))
+        let prepared = build_prepared(cache, &context, &deposits, &withdrawals, pairs, transpose);
+        let successor = successor_cache(cache, prepared.close());
+        Some(self.finish_prepared(cache, context, deposits, withdrawals, prepared, successor))
     }
 
     fn finish_prepared(
@@ -1191,28 +1215,27 @@ impl Harness {
         context: TestContext,
         deposits: TestDeposits,
         withdrawals: TestWithdrawals,
-        close: TestClose,
+        prepared: PreparedClose<VerifyingKey, Digest>,
         successor: TestCache,
     ) -> Prepared {
-        validate_close::<Sha256, _, _, PaymentBatchVerifier, _>(
-            &context,
-            &deposits,
-            &withdrawals,
-            &close,
-            &mut test_rng(),
-        )
-        .expect("sanitized close must validate before deriving settlement outputs");
+        prepared
+            .validate::<Sha256, PaymentBatchVerifier, _>(
+                &context,
+                &self.operator_bls,
+                &deposits,
+                &withdrawals,
+                &mut test_rng(),
+                &Sequential,
+            )
+            .expect("sanitized close must validate before deriving settlement outputs");
+        let close = prepared.close().clone();
         let withdrawal_claims = withdrawals
             .requests()
             .iter()
             .map(|request| {
-                let claim = assemble_withdrawal_claim::<Sha256, _, _>(
-                    &close,
-                    &withdrawals,
-                    request.account(),
-                    &Sequential,
-                )
-                .expect("validated withdrawal has a canonical claim");
+                let claim = prepared
+                    .withdrawal_claim(&withdrawals, request.account())
+                    .expect("validated withdrawal has a canonical claim");
                 let output = claim
                     .verify::<Sha256>(&close.roots.withdrawal_outputs)
                     .expect("validated withdrawal claim verifies");
@@ -1261,14 +1284,9 @@ impl Harness {
         );
         assert!(terminal.withdrawal >= withdrawals.total());
         assert_eq!(terminal.withdrawal, output_total(&withdrawal_outputs));
-        let terminal_proof = assemble_terminal_proof::<Sha256, _, _>(
-            &context,
-            &deposits,
-            &withdrawals,
-            &close,
-            &Sequential,
-        )
-        .expect("sanitized close has a canonical terminal proof");
+        let terminal_proof = prepared
+            .terminal_proof()
+            .expect("sanitized close has a canonical terminal proof");
         let totals = terminal_proof
             .verify::<Sha256, VerifyingKey>(
                 &context,
@@ -1282,12 +1300,9 @@ impl Harness {
         let external_payout_claims = external_payouts
             .iter()
             .map(|payout| {
-                let claim = assemble_external_payout_claim::<Sha256, _, _>(
-                    &close,
-                    &payout.recipient,
-                    &Sequential,
-                )
-                .expect("validated external payout has a canonical claim");
+                let claim = prepared
+                    .external_payout_claim(&payout.recipient)
+                    .expect("validated external payout has a canonical claim");
                 assert_eq!(
                     claim
                         .verify::<Sha256>(&close.roots.change)
@@ -1311,27 +1326,24 @@ impl Harness {
             terminal_proof,
             close,
             successor,
+            prepared: Arc::new(prepared),
         }
     }
 
     fn certificate(&self, prepared: &Prepared) -> Certificate {
         validate_close::<Sha256, _, _, PaymentBatchVerifier, _>(
             &prepared.context,
+            &self.operator_bls,
             &prepared.deposits,
             &prepared.withdrawals,
             &prepared.close,
             &mut test_rng(),
         )
         .expect("sanitized close must validate");
-        let slices = assemble_slices::<Sha256, _, _>(
-            &prepared.predecessor,
-            &prepared.context,
-            &prepared.deposits,
-            &prepared.withdrawals,
-            &prepared.close,
-            &Sequential,
-        )
-        .expect("sanitized close slices must build");
+        let slices = prepared
+            .prepared
+            .assemble_slices(&prepared.predecessor, &Sequential)
+            .expect("sanitized close slices must build");
         let assigned = assigned_slice_indices::<Sha256, _>(
             self.validator.committee(),
             prepared.context.assignment(),
@@ -1344,6 +1356,7 @@ impl Harness {
         let (vote, sealed) = seal::<Sha256, _, _, PaymentBatchVerifier, _>(
             &self.validator,
             &prepared.context,
+            &self.operator_bls,
             &prepared.deposits,
             &prepared.withdrawals,
             &prepared.close.header,
@@ -2089,6 +2102,7 @@ impl Harness {
         ActionOutcome::new(OutcomeClass::Error, Some(&observation))
     }
 
+    /// Builds guaranteed-proven evidence of one challenge kind against a validated close.
     fn challenge_evidence(
         &self,
         family: u8,
@@ -2098,109 +2112,117 @@ impl Harness {
     ) -> (TestChallenge, ChallengeKind) {
         let index = ChallengeIndex::new::<Sha256>(context, close)
             .expect("validated close has a canonical challenge index");
-        let account = &self.accounts[usize::from(family) % self.accounts.len()];
-        let recipient = account.public_key();
-        let previous_debit = close
+        let key = &self.accounts[usize::from(family) % self.accounts.len()];
+        let payer = key.public_key();
+        let row = close
             .rows
-            .iter()
-            .find(|row| row.account == recipient)
-            .map_or_else(
-                || {
-                    predecessor
-                        .leaves()
-                        .iter()
-                        .find(|leaf| leaf.account == recipient)
-                        .map_or(0, |leaf| leaf.state.cumulative_debit)
+            .binary_search_by(|candidate| candidate.account.cmp(&payer))
+            .ok();
+        let terminal_debit = row.map_or_else(
+            || {
+                predecessor
+                    .leaves()
+                    .iter()
+                    .find(|leaf| leaf.account == payer)
+                    .map_or(0, |leaf| leaf.state.cumulative_debit)
+            },
+            |position| close.rows[position].successor.cumulative_debit,
+        );
+        let seq = row
+            .and_then(|position| close.rows[position].outgoing.as_ref())
+            .map_or(0, |send| send.body().seq());
+
+        // A retained vector strictly above the committed terminal entry for (payer, external).
+        let recipient = self.external_account();
+        let committed = row.map(|position| &close.out_vectors[position]);
+        let mut entries = committed.map_or_else(Vec::new, |vector| vector.entries().to_vec());
+        match entries.binary_search_by(|entry| entry.recipient.cmp(&recipient)) {
+            Ok(position) => {
+                entries[position].cumulative = entries[position]
+                    .cumulative
+                    .checked_add(1)
+                    .expect("bounded fixture edge cannot overflow");
+                entries[position].count = entries[position]
+                    .count
+                    .checked_add(1)
+                    .expect("bounded fixture edge cannot overflow");
+            }
+            Err(position) => entries.insert(
+                position,
+                OutEntry {
+                    recipient: recipient.clone(),
+                    cumulative: 1,
+                    count: 1,
                 },
-                |row| row.successor.cumulative_debit,
-            );
-        let shard = u64::from(family);
-        match family % 4 {
+            ),
+        }
+        let retained = OutVector::new(context.payment().epoch(), payer.clone(), entries)
+            .expect("bounded retained vector is canonical");
+        let retained_root = retained
+            .root::<Sha256, Digest>()
+            .expect("bounded retained vector commits");
+        let ack = |seq: u64, debit: u64| {
+            VectorAck::sign_by_authorities(
+                VectorSendBody::new(context.payment(), payer.clone(), seq, debit, retained_root),
+                key,
+                &self.operator,
+            )
+        };
+        let above = terminal_debit
+            .checked_add(1)
+            .expect("bounded fixture debit cannot overflow");
+        match family % 3 {
             0 => (
-                Challenge::LatestAcknowledgedSend {
-                    payment: Box::new(PaymentWitness::from_payment(&linked_payment(
-                        context,
-                        &self.operator,
-                        account,
-                        &recipient,
-                        1,
-                        previous_debit,
-                        shard,
-                    ))),
+                Challenge::HigherAckDebit {
+                    ack: Box::new(AckWitness::from_ack(&ack(seq + 1, above))),
                     payer: Box::new(
-                        index
-                            .account_lookup(predecessor, &recipient)
+                        account_lookup::<Sha256, _, _>(&index, predecessor, &payer)
                             .expect("validated close has canonical payer evidence"),
                     ),
                 },
-                ChallengeKind::LatestAcknowledgedSend,
+                ChallengeKind::HigherAckDebit,
             ),
             1 => {
-                let position = close
-                    .rows
-                    .binary_search_by(|row| row.account.cmp(&recipient));
-                let shards = position.ok().map(|position| &close.shard_sets[position]);
+                let OutTipLookup::Present {
+                    cumulative,
+                    count,
+                    opening,
+                } = retained
+                    .lookup::<Sha256, Digest>(&recipient)
+                    .expect("retained entry has a lookup")
+                else {
+                    panic!("retained vector carries the disputed entry");
+                };
                 (
-                    Challenge::HigherShardTip {
-                        payment: Box::new(PaymentWitness::from_payment(&linked_payment(
-                            context,
-                            &self.operator,
-                            account,
-                            &recipient,
-                            1,
-                            previous_debit,
-                            shard,
-                        ))),
-                        recipient: Box::new(
-                            index
-                                .higher_shard_tip_lookup::<Sha256>(&recipient, shards, shard)
-                                .expect(
-                                    "validated close has canonical composed recipient evidence",
-                                ),
+                    Challenge::HigherAckEntry {
+                        entry: Box::new(EntryWitness {
+                            ack: AckWitness::from_ack(&ack(seq + 1, above)),
+                            recipient: recipient.clone(),
+                            cumulative,
+                            count,
+                            opening,
+                        }),
+                        sender: Box::new(
+                            higher_entry_lookup::<Sha256, _, _>(
+                                &index, &payer, committed, &recipient,
+                            )
+                            .expect("validated close has canonical composed sender evidence"),
                         ),
                     },
-                    ChallengeKind::HigherShardTip,
+                    ChallengeKind::HigherAckEntry,
                 )
             }
-            2 => (
-                Challenge::InconsistentReceiptRange {
-                    upper: Box::new(PaymentWitness::from_payment(&endpoint_payment(
-                        context,
-                        &self.operator,
-                        account,
-                        &recipient,
-                        1,
-                        previous_debit,
-                        shard,
-                        0,
-                        0,
-                    ))),
-                    lower: RangeLower::ShardStart,
-                },
-                ChallengeKind::InconsistentReceiptRange,
-            ),
             _ => (
-                Challenge::receipt_fork(
-                    &linked_payment(
-                        context,
-                        &self.operator,
-                        account,
-                        &recipient,
-                        1,
-                        previous_debit,
-                        shard,
-                    ),
-                    &linked_payment(
-                        context,
-                        &self.operator,
-                        account,
-                        &recipient,
-                        2,
-                        previous_debit,
-                        shard,
-                    ),
-                ),
-                ChallengeKind::ReceiptFork,
+                Challenge::AckFork {
+                    left: Box::new(AckWitness::from_ack(&ack(seq + 1, above))),
+                    right: Box::new(AckWitness::from_ack(&ack(
+                        seq + 1,
+                        above
+                            .checked_add(1)
+                            .expect("bounded fixture debit cannot overflow"),
+                    ))),
+                },
+                ChallengeKind::AckFork,
             ),
         }
     }
@@ -2237,7 +2259,7 @@ impl Harness {
                 prepared.close,
             )
         });
-        let family = mutation % 4;
+        let family = mutation % 3;
         let variant = (mutation / 4) % 4;
         let submitted_batch = if variant == 1 || (!encoded && variant != 0) {
             BatchId::new(self.digest(b"unknown-batch", step))
@@ -3041,9 +3063,10 @@ fn synthetic_external_payout_claim() -> TestExternalPayoutClaim {
         output: SettlementOutput::ExternalPayout(1),
         prefix: Prefix::default(),
     };
-    let shards = ShardSet::empty(0, account);
-    let leaf = AccountChange::from_row::<Sha256>(&row, &shards)
-        .expect("an aligned synthetic change leaf constructs");
+    let leaf = AccountChange::from_row::<Sha256>(
+        &row,
+        commitment::empty_root::<Sha256>(VectorKind::OutEntry),
+    );
     let guard = leaf.guard::<Sha256>();
     let mut builder = commitment::Builder::<Sha256>::new(VectorKind::Change, 1)
         .expect("one synthetic change guard is bounded");
@@ -3084,12 +3107,11 @@ fn expected_external_payouts(
     deposits: &TestDeposits,
     withdrawals: &TestWithdrawals,
 ) -> Vec<ExternalPayout<VerifyingKey>> {
-    assert_eq!(close.rows.len(), close.shard_sets.len());
+    assert_eq!(close.rows.len(), close.out_vectors.len());
     close
         .rows
         .iter()
-        .zip(&close.shard_sets)
-        .filter_map(|(row, shards)| {
+        .filter_map(|row| {
             if row.predecessor != AccountState::default()
                 || row.successor.active
                 || row.successor.balance != 0
@@ -3106,21 +3128,6 @@ fn expected_external_payouts(
             assert_eq!(debit, 0);
             assert!(credit > 0);
             assert!(receipts > 0);
-            assert_eq!(shards.recipient(), &row.account);
-            assert!(!shards.heads().is_empty());
-            let (shard_credit, shard_receipts) = shards
-                .heads()
-                .iter()
-                .try_fold((0_u64, 0_u64), |(credit, receipts), head| {
-                    let receipt = head.payment.receipt().body();
-                    Some((
-                        credit.checked_add(receipt.cumulative_shard_credit())?,
-                        receipts.checked_add(receipt.index())?,
-                    ))
-                })
-                .expect("validated shard totals fit in u64");
-            assert_eq!(shard_credit, credit);
-            assert_eq!(shard_receipts, receipts);
             assert_eq!(row.output, SettlementOutput::ExternalPayout(credit));
             Some(ExternalPayout {
                 recipient: row.account.clone(),
@@ -3137,12 +3144,55 @@ fn payout_total(payouts: &[ExternalPayout<VerifyingKey>]) -> u64 {
         .expect("authenticated external payouts fit custody")
 }
 
+fn bls_ack(private: &Private, body: &VectorSendBody<VerifyingKey, Digest>) -> OperatorSignature {
+    sign_message::<OperatorVariant>(
+        private,
+        VECTOR_ACK_AGGREGATE_NAMESPACE,
+        body.encode().as_ref(),
+    )
+}
+
+fn build_prepared(
+    cache: &TestCache,
+    context: &TestContext,
+    deposits: &TestDeposits,
+    withdrawals: &TestWithdrawals,
+    rows: Vec<BuiltRow>,
+    transpose: Vec<TransposeEntry<VerifyingKey>>,
+) -> PreparedClose<VerifyingKey, Digest> {
+    let mut split_rows = Vec::with_capacity(rows.len());
+    let mut vectors = Vec::with_capacity(rows.len());
+    let mut signatures = Vec::with_capacity(rows.len());
+    for (row, vector, signature) in rows {
+        split_rows.push(row);
+        vectors.push(vector);
+        signatures.push(signature);
+    }
+    let partials = vectors
+        .iter()
+        .map(OutVector::accumulator)
+        .collect::<Vec<_>>();
+    prepare_close_with_strategy::<Sha256, _, _>(
+        cache,
+        context,
+        deposits,
+        withdrawals,
+        split_rows,
+        vectors,
+        &partials,
+        &signatures,
+        transpose,
+        &Sequential,
+    )
+    .expect("sanitized close must prepare")
+}
+
 fn boundary_close(
     cache: &TestCache,
     context: &TestContext,
     deposits: &TestDeposits,
     withdrawals: &TestWithdrawals,
-) -> (TestClose, TestCache) {
+) -> (PreparedClose<VerifyingKey, Digest>, TestCache) {
     let mut changed = BTreeSet::new();
     changed.extend(
         deposits
@@ -3158,8 +3208,7 @@ fn boundary_close(
     );
 
     let mut prefix = Prefix::default();
-    let mut rows = Vec::with_capacity(changed.len());
-    let mut shard_sets = Vec::with_capacity(changed.len());
+    let mut rows: Vec<BuiltRow> = Vec::with_capacity(changed.len());
     for account in changed {
         let predecessor = cache
             .leaves()
@@ -3182,7 +3231,6 @@ fn boundary_close(
             .and_then(|balance| balance.checked_sub(applied))
             .expect("sanitized boundary remains affordable");
         successor.active = successor.balance > 0;
-        let shards = ShardSet::empty(context.payment().epoch(), account.clone());
         let output = withdrawal.map_or(SettlementOutput::None, |_| {
             SettlementOutput::Withdrawal(applied)
         });
@@ -3194,28 +3242,23 @@ fn boundary_close(
                 ..Prefix::default()
             })
             .expect("bounded close totals cannot overflow");
-        rows.push(AccountRow {
-            account,
-            predecessor,
-            successor,
-            outgoing: None,
-            output,
-            prefix,
-        });
-        shard_sets.push(shards);
+        let vector = OutVector::empty(context.payment().epoch(), account.clone());
+        rows.push((
+            AccountRow {
+                account,
+                predecessor,
+                successor,
+                outgoing: None,
+                output,
+                prefix,
+            },
+            vector,
+            None,
+        ));
     }
-    let close = build_close::<Sha256, _, _, PaymentBatchVerifier, _>(
-        cache,
-        context,
-        deposits,
-        withdrawals,
-        rows,
-        shard_sets,
-        &mut test_rng(),
-    )
-    .expect("sanitized boundary close must build");
-    let successor = successor_cache(cache, &close);
-    (close, successor)
+    let prepared = build_prepared(cache, context, deposits, withdrawals, rows, Vec::new());
+    let successor = successor_cache(cache, prepared.close());
+    (prepared, successor)
 }
 
 fn successor_cache(cache: &TestCache, close: &TestClose) -> TestCache {
@@ -3245,75 +3288,6 @@ fn successor_cache(cache: &TestCache, close: &TestClose) -> TestCache {
         StateCache::new::<Sha256>(leaves).expect("successor live state remains canonical");
     assert_eq!(successor.root(), close.roots.successor);
     successor
-}
-
-#[allow(clippy::too_many_arguments)]
-fn linked_payment(
-    context: &TestContext,
-    operator: &SigningKey,
-    payer: &SigningKey,
-    recipient: &VerifyingKey,
-    amount: u64,
-    previous_debit: u64,
-    shard: u64,
-) -> Payment<VerifyingKey, Digest> {
-    let send = SignedSend::sign_next(
-        context.payment(),
-        payer,
-        recipient.clone(),
-        amount,
-        previous_debit,
-    )
-    .expect("positive bounded send signs");
-    let receipt = SignedReceipt::issue_next::<Sha256, _>(
-        context.payment(),
-        &send,
-        recipient,
-        shard,
-        0,
-        0,
-        operator,
-    )
-    .expect("positive bounded receipt issues");
-    Payment::new::<Sha256>(context.payment(), send, receipt)
-        .expect("honestly linked payment verifies")
-}
-
-#[allow(clippy::too_many_arguments)]
-fn endpoint_payment(
-    context: &TestContext,
-    operator: &SigningKey,
-    payer: &SigningKey,
-    recipient: &VerifyingKey,
-    amount: u64,
-    previous_debit: u64,
-    shard: u64,
-    credit: u64,
-    index: u64,
-) -> Payment<VerifyingKey, Digest> {
-    let send = SignedSend::sign_next(
-        context.payment(),
-        payer,
-        recipient.clone(),
-        amount,
-        previous_debit,
-    )
-    .expect("positive bounded send signs");
-    let receipt = SignedReceipt::sign_body_by_authority(
-        ReceiptBody::from_raw_unchecked(
-            *context.payment().anchor(),
-            context.payment().epoch(),
-            recipient.clone(),
-            shard,
-            amount,
-            send.tx_id::<Sha256>(),
-            credit,
-            index,
-        ),
-        operator,
-    );
-    Payment::new::<Sha256>(context.payment(), send, receipt)
-        .expect("authority-signed endpoint remains linked")
 }
 
 fn wrong_cache(cache: &TestCache) -> TestCache {

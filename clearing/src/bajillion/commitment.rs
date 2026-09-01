@@ -18,8 +18,6 @@ const STATE_LEAF_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_STATE_LEAF";
 const STATE_ROOT_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_STATE_ROOT";
 const CHANGE_LEAF_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_CHANGE_LEAF";
 const CHANGE_ROOT_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_CHANGE_ROOT";
-const CREDIT_TIP_LEAF_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_CREDIT_TIP_LEAF";
-const CREDIT_TIP_ROOT_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_CREDIT_TIP_ROOT";
 const DEPOSIT_LEAF_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_DEPOSIT_LEAF";
 const DEPOSIT_ROOT_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_DEPOSIT_ROOT";
 const WITHDRAWAL_LEAF_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_WITHDRAWAL_LEAF";
@@ -28,6 +26,10 @@ const COVERAGE_LEAF_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_COVERAGE_LEAF";
 const COVERAGE_ROOT_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_COVERAGE_ROOT";
 const WITHDRAWAL_OUTPUT_LEAF_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_WITHDRAWAL_OUTPUT_LEAF";
 const WITHDRAWAL_OUTPUT_ROOT_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_WITHDRAWAL_OUTPUT_ROOT";
+const OUT_ENTRY_LEAF_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_OUT_ENTRY_LEAF";
+const OUT_ENTRY_ROOT_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_OUT_ENTRY_ROOT";
+const TRANSPOSE_LEAF_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_TRANSPOSE_LEAF";
+const TRANSPOSE_ROOT_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_TRANSPOSE_ROOT";
 
 /// Maximum number of values in a committed vector or disclosed in one proof.
 ///
@@ -46,16 +48,18 @@ pub enum VectorKind {
     State = 1,
     /// Sorted vector of changed-account guards.
     Change = 2,
-    /// Sorted vector of terminal receive-shard tips.
-    CreditTip = 3,
     /// Chain-sealed deposit vector.
-    Deposit = 4,
+    Deposit = 3,
     /// Chain-sealed withdrawal vector.
-    Withdrawal = 5,
+    Withdrawal = 4,
     /// Gap-free deterministic proof-slice boundaries.
-    Coverage = 6,
+    Coverage = 5,
     /// Validator-derived withdrawal outputs in request order.
-    WithdrawalOutput = 7,
+    WithdrawalOutput = 6,
+    /// Sorted per-payer cumulative outgoing entries.
+    OutEntry = 7,
+    /// Globally sorted recipient-major transpose entries.
+    Transpose = 8,
 }
 
 impl VectorKind {
@@ -63,11 +67,12 @@ impl VectorKind {
         match self {
             Self::State => STATE_LEAF_DOMAIN,
             Self::Change => CHANGE_LEAF_DOMAIN,
-            Self::CreditTip => CREDIT_TIP_LEAF_DOMAIN,
             Self::Deposit => DEPOSIT_LEAF_DOMAIN,
             Self::Withdrawal => WITHDRAWAL_LEAF_DOMAIN,
             Self::Coverage => COVERAGE_LEAF_DOMAIN,
             Self::WithdrawalOutput => WITHDRAWAL_OUTPUT_LEAF_DOMAIN,
+            Self::OutEntry => OUT_ENTRY_LEAF_DOMAIN,
+            Self::Transpose => TRANSPOSE_LEAF_DOMAIN,
         }
     }
 
@@ -75,11 +80,12 @@ impl VectorKind {
         match self {
             Self::State => STATE_ROOT_DOMAIN,
             Self::Change => CHANGE_ROOT_DOMAIN,
-            Self::CreditTip => CREDIT_TIP_ROOT_DOMAIN,
             Self::Deposit => DEPOSIT_ROOT_DOMAIN,
             Self::Withdrawal => WITHDRAWAL_ROOT_DOMAIN,
             Self::Coverage => COVERAGE_ROOT_DOMAIN,
             Self::WithdrawalOutput => WITHDRAWAL_OUTPUT_ROOT_DOMAIN,
+            Self::OutEntry => OUT_ENTRY_ROOT_DOMAIN,
+            Self::Transpose => TRANSPOSE_ROOT_DOMAIN,
         }
     }
 }
@@ -97,11 +103,12 @@ impl Read for VectorKind {
         match u8::read(reader)? {
             1 => Ok(Self::State),
             2 => Ok(Self::Change),
-            3 => Ok(Self::CreditTip),
-            4 => Ok(Self::Deposit),
-            5 => Ok(Self::Withdrawal),
-            6 => Ok(Self::Coverage),
-            7 => Ok(Self::WithdrawalOutput),
+            3 => Ok(Self::Deposit),
+            4 => Ok(Self::Withdrawal),
+            5 => Ok(Self::Coverage),
+            6 => Ok(Self::WithdrawalOutput),
+            7 => Ok(Self::OutEntry),
+            8 => Ok(Self::Transpose),
             tag => Err(CodecError::InvalidEnum(tag)),
         }
     }
@@ -114,14 +121,15 @@ impl FixedSize for VectorKind {
 #[cfg(feature = "arbitrary")]
 impl arbitrary::Arbitrary<'_> for VectorKind {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        Ok(match u.int_in_range(1..=7)? {
+        Ok(match u.int_in_range(1..=8)? {
             1 => Self::State,
             2 => Self::Change,
-            3 => Self::CreditTip,
-            4 => Self::Deposit,
-            5 => Self::Withdrawal,
-            6 => Self::Coverage,
-            7 => Self::WithdrawalOutput,
+            3 => Self::Deposit,
+            4 => Self::Withdrawal,
+            5 => Self::Coverage,
+            6 => Self::WithdrawalOutput,
+            7 => Self::OutEntry,
+            8 => Self::Transpose,
             _ => unreachable!("range contains every vector kind"),
         })
     }

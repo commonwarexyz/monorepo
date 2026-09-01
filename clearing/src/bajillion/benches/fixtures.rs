@@ -1,24 +1,34 @@
 use commonware_clearing::bajillion::{
     boundary::{DepositBatch, WithdrawalBatch},
     challenge::{
-        AccountLookup, Challenge, ChallengeKind, HigherShardTipLookup, RangeLower,
-        ReceiptForkWitness, Verdict, adjudicate,
+        AckWitness, Challenge, ChallengeKind, EntryWitness, Verdict, account_lookup, adjudicate,
+        higher_entry_lookup,
     },
-    credit::{CreditTipLookup, ShardHead, ShardSet},
-    payment::{Entry, Payment, PaymentContext, PaymentWitness, SignedReceipt, SignedSend},
+    payment::{SendAuthorization, VECTOR_ACK_AGGREGATE_NAMESPACE, VectorAck, VectorSendBody},
     state::{AccountRow, AccountState, Prefix, SettlementOutput, StateLeaf},
     transition::{
-        Assignment, ChallengeIndex, Close, CloseContext, CloseLimits, EpochContext, Header,
-        PreparedClose, RootBundle, StateCache, prepare_close_with_strategy,
+        Assignment, ChallengeIndex, CloseContext, CloseLimits, EpochContext, Header, OperatorKey,
+        OperatorSignature, OperatorVariant, PreparedClose, RootBundle, StateCache,
+        prepare_close_with_strategy,
     },
+    vector::{OutEntry, OutTipLookup, OutVector, TransposeEntry},
 };
-use commonware_cryptography::{Hasher, Sha256, Signer as _, sha256::Digest};
+use commonware_codec::Encode as _;
+use commonware_cryptography::{
+    Hasher, Sha256, Signer as _,
+    bls12381::primitives::{
+        group::{Private as BlsPrivate, Scalar},
+        ops::{compute_public, sign_message},
+    },
+    lthash::LtHash,
+    sha256::Digest,
+};
 use commonware_cryptography_curve25519::signing::{
     BatchVerifier as PaymentBatchVerifier, SigningKey, StrictVerifyingKey as VerifyingKey,
 };
-use commonware_parallel::Rayon;
+use commonware_parallel::{Rayon, Strategy};
 use commonware_utils::TestRng;
-use std::{num::NonZeroUsize, ops::Deref, sync::OnceLock};
+use std::{num::NonZeroUsize, sync::OnceLock};
 
 pub(crate) const WORKERS: usize = 8;
 pub(crate) const PROFILE_ENV: &str = "COMMONWARE_CLEARING_PROFILE";
@@ -34,94 +44,117 @@ pub(crate) fn strategy() -> &'static Rayon {
 #[derive(Clone, Copy)]
 pub(crate) struct ActiveProfile {
     pub(crate) live_accounts: usize,
-    pub(crate) changed_accounts: usize,
+    pub(crate) senders: usize,
     pub(crate) credited_accounts: usize,
-    pub(crate) receive_shards_per_credited: usize,
+    pub(crate) out_degree: usize,
 }
 
 impl ActiveProfile {
-    const fn new(
-        live_accounts: usize,
-        changed_accounts: usize,
-        credited_accounts: usize,
-        receive_shards_per_credited: usize,
-    ) -> Self {
-        Self {
-            live_accounts,
-            changed_accounts,
-            credited_accounts,
-            receive_shards_per_credited,
-        }
-    }
-
-    pub(crate) const fn terminal_shards(self) -> usize {
-        self.credited_accounts
-            .checked_mul(self.receive_shards_per_credited)
-            .expect("benchmark terminal shard count fits in usize")
-    }
-
-    const fn credited_state_position(self, credited: usize) -> usize {
-        credited
-            .checked_mul(self.live_accounts)
-            .expect("benchmark credited-account state spacing fits in usize")
-            / self.credited_accounts
-    }
-
-    fn changed_positions(self) -> Vec<usize> {
-        (0..self.changed_accounts)
-            .map(|changed| {
-                changed
-                    .checked_mul(self.live_accounts)
-                    .expect("benchmark changed-account spacing fits in usize")
-                    / self.changed_accounts
-            })
-            .collect()
-    }
-
-    fn credited_accounts(self, changed_positions: &[usize]) -> Vec<usize> {
-        (0..self.credited_accounts)
-            .map(|credited| {
-                changed_positions
-                    .binary_search(&self.credited_state_position(credited))
-                    .expect("every benchmark recipient is a changed account")
-            })
-            .collect()
+    pub(crate) const fn edges(self) -> usize {
+        self.senders * self.out_degree
     }
 }
 
-#[cfg(not(full_bench))]
-pub(crate) const ACTIVE_PROFILES: &[ActiveProfile] = &[
-    ActiveProfile::new(128, 128, 64, 1),
-    ActiveProfile::new(256, 256, 64, 1),
-    ActiveProfile::new(512, 512, 64, 1),
-    ActiveProfile::new(1_024, 1_024, 64, 1),
-];
-
+/// The blog's measured matrix: every account sends one entry, the same 512 accounts
+/// receive, and the live-account count sweeps 1,024 to one million.
 #[cfg(full_bench)]
 pub(crate) const ACTIVE_PROFILES: &[ActiveProfile] = &[
-    ActiveProfile::new(1_024, 1_024, 512, 1),
-    ActiveProfile::new(10_000, 10_000, 512, 1),
-    ActiveProfile::new(100_000, 100_000, 512, 1),
-    ActiveProfile::new(1_000_000, 1_000_000, 512, 1),
+    ActiveProfile {
+        live_accounts: 1_024,
+        senders: 1_024,
+        credited_accounts: 512,
+        out_degree: 1,
+    },
+    ActiveProfile {
+        live_accounts: 10_000,
+        senders: 10_000,
+        credited_accounts: 512,
+        out_degree: 1,
+    },
+    ActiveProfile {
+        live_accounts: 100_000,
+        senders: 100_000,
+        credited_accounts: 512,
+        out_degree: 1,
+    },
+    ActiveProfile {
+        live_accounts: 1_000_000,
+        senders: 1_000_000,
+        credited_accounts: 512,
+        out_degree: 1,
+    },
+    // The active sweep: the account set stays at one million while the movers shrink,
+    // which the sender-vector close's posted and dealt figures scale with.
+    ActiveProfile {
+        live_accounts: 1_000_000,
+        senders: 100_000,
+        credited_accounts: 512,
+        out_degree: 1,
+    },
+    ActiveProfile {
+        live_accounts: 1_000_000,
+        senders: 10_000,
+        credited_accounts: 512,
+        out_degree: 1,
+    },
+    ActiveProfile {
+        live_accounts: 1_000_000,
+        senders: 1_024,
+        credited_accounts: 512,
+        out_degree: 1,
+    },
 ];
 
-fn profile_key(profile: ActiveProfile) -> String {
+#[cfg(not(full_bench))]
+pub(crate) const ACTIVE_PROFILES: &[ActiveProfile] = &[
+    ActiveProfile {
+        live_accounts: 10_000,
+        senders: 10_000,
+        credited_accounts: 500,
+        out_degree: 1,
+    },
+    // Partial participation: most of the account set stays unchanged.
+    ActiveProfile {
+        live_accounts: 10_000,
+        senders: 1_000,
+        credited_accounts: 500,
+        out_degree: 1,
+    },
+    ActiveProfile {
+        live_accounts: 100_000,
+        senders: 100_000,
+        credited_accounts: 500,
+        out_degree: 1,
+    },
+    ActiveProfile {
+        live_accounts: 100_000,
+        senders: 100_000,
+        credited_accounts: 500,
+        out_degree: 10,
+    },
+    // Worst cases: every account pays one hot account, and all pairs at N=1024.
+    ActiveProfile {
+        live_accounts: 100_000,
+        senders: 100_000,
+        credited_accounts: 1,
+        out_degree: 1,
+    },
+    ActiveProfile {
+        live_accounts: 1_024,
+        senders: 1_024,
+        credited_accounts: 1_024,
+        out_degree: 1_023,
+    },
+];
+
+pub(crate) fn profile_key(profile: ActiveProfile) -> String {
     format!(
-        "N={},A={},B={},h={}",
-        profile.live_accounts,
-        profile.changed_accounts,
-        profile.credited_accounts,
-        profile.receive_shards_per_credited,
+        "N={},A={},B={},K={}",
+        profile.live_accounts, profile.senders, profile.credited_accounts, profile.out_degree,
     )
 }
 
 pub(crate) fn selected_active_profiles() -> Vec<(usize, ActiveProfile)> {
-    #[cfg(full_bench)]
-    assert_eq!(
-        ACTIVE_PROFILES.len(),
-        4,
-        "the retained blog matrix has exactly four profiles"
-    );
     let Ok(selector) = std::env::var(PROFILE_ENV) else {
         return ACTIVE_PROFILES.iter().copied().enumerate().collect();
     };
@@ -136,7 +169,7 @@ pub(crate) fn selected_active_profiles() -> Vec<(usize, ActiveProfile)> {
         })
         .unwrap_or_else(|| {
             panic!(
-                "{PROFILE_ENV}={selector:?} is invalid; use a zero-based profile index or N=...,A=...,B=...,h=..."
+                "{PROFILE_ENV}={selector:?} is invalid; use a zero-based profile index or N=...,B=...,K=..."
             )
         });
     vec![(selected, ACTIVE_PROFILES[selected])]
@@ -147,185 +180,101 @@ pub(crate) const STATE_CACHE_SIZES: &[usize] = &[1_024, 16_384];
 #[cfg(full_bench)]
 pub(crate) const STATE_CACHE_SIZES: &[usize] = &[1_024, 16_384, 1_000_000];
 
-const ACCOUNT_SEED_START: u64 = 10_000;
-const OPERATOR_SEED: u64 = 1;
 const EPOCH: u64 = 7;
 const OPENING_BALANCE: u64 = 1_000_000;
+const OPERATOR_SEED: u64 = 1;
+const ACCOUNT_SEED_START: u64 = 10_000;
 const ADMISSION_DEADLINE: u64 = 98;
 const CHALLENGE_DEADLINE: u64 = 99;
 
-pub(crate) type TestPayment = Payment<VerifyingKey, Digest>;
 pub(crate) type TestStateCache = StateCache<VerifyingKey, Digest>;
 
-struct Account {
-    public: VerifyingKey,
-    private: SigningKey,
-}
-
-#[derive(Clone, Copy)]
-struct Edge {
-    payer: usize,
-    recipient: usize,
-    shard: u64,
-}
-
-type EndpointSet = (
-    Vec<Option<TestPayment>>,
-    Vec<Vec<ShardHead<VerifyingKey, Digest>>>,
-);
-
-pub(crate) struct CloseFixture {
-    pub(crate) cache: TestStateCache,
-    pub(crate) context: CloseContext<VerifyingKey, Digest>,
-    pub(crate) deposits: DepositBatch<VerifyingKey>,
-    pub(crate) withdrawals: WithdrawalBatch<VerifyingKey, Digest>,
-    pub(crate) prepared: PreparedClose<VerifyingKey, Digest>,
-}
-
-impl Deref for CloseFixture {
-    type Target = Close<VerifyingKey, Digest>;
-
-    fn deref(&self) -> &Self::Target {
-        self.prepared.close()
-    }
-}
-
-pub(crate) struct PaymentFixture {
-    pub(crate) context: PaymentContext<VerifyingKey, Digest>,
-    pub(crate) payment: TestPayment,
-}
-
-pub(crate) struct ChallengeFixture {
-    pub(crate) context: CloseContext<VerifyingKey, Digest>,
-    pub(crate) header: Header<Digest>,
-    pub(crate) roots: RootBundle<Digest>,
-    latest: Challenge<VerifyingKey, Digest>,
-    pub(crate) tip: Challenge<VerifyingKey, Digest>,
-    range: Challenge<VerifyingKey, Digest>,
-    fork: Challenge<VerifyingKey, Digest>,
-    payer: SigningKey,
-    challenged: VerifyingKey,
-}
-
-impl ChallengeFixture {
-    /// Returns one proven challenge per kind in [`ChallengeKind`] order.
-    pub(crate) const fn challenges(
-        &self,
-    ) -> [(ChallengeKind, &Challenge<VerifyingKey, Digest>); 4] {
-        [
-            (ChallengeKind::LatestAcknowledgedSend, &self.latest),
-            (ChallengeKind::HigherShardTip, &self.tip),
-            (ChallengeKind::InconsistentReceiptRange, &self.range),
-            (ChallengeKind::ReceiptFork, &self.fork),
-        ]
-    }
-}
-
-/// Short benchmark label for one challenge kind.
-pub(crate) const fn kind_label(kind: ChallengeKind) -> &'static str {
-    match kind {
-        ChallengeKind::LatestAcknowledgedSend => "latest",
-        ChallengeKind::HigherShardTip => "tip",
-        ChallengeKind::InconsistentReceiptRange => "range",
-        ChallengeKind::ReceiptFork => "fork",
-    }
-}
-
-fn predecessor_state() -> AccountState {
-    AccountState {
-        balance: OPENING_BALANCE,
-        active: true,
-        ..AccountState::default()
-    }
-}
-
-fn accounts(live_accounts: usize) -> Vec<Account> {
+fn accounts(live_accounts: usize) -> Vec<(VerifyingKey, SigningKey)> {
     let mut accounts = (0..live_accounts)
         .map(|index| {
             let index = u64::try_from(index).expect("benchmark account index fits in u64");
             let private = SigningKey::from_seed(ACCOUNT_SEED_START + index);
-            Account {
-                public: private.public_key(),
-                private,
-            }
+            (private.public_key(), private)
         })
         .collect::<Vec<_>>();
-    accounts.sort_unstable_by(|left, right| left.public.cmp(&right.public));
+    accounts.sort_unstable_by(|left, right| left.0.cmp(&right.0));
     accounts
 }
 
-fn leaves(accounts: &[Account]) -> Vec<StateLeaf<VerifyingKey>> {
-    accounts
-        .iter()
-        .map(|account| StateLeaf {
-            account: account.public.clone(),
-            state: predecessor_state(),
+pub(crate) fn state_leaves(live_accounts: usize) -> Vec<StateLeaf<VerifyingKey>> {
+    accounts(live_accounts)
+        .into_iter()
+        .map(|(public, _)| StateLeaf {
+            account: public,
+            state: AccountState {
+                balance: OPENING_BALANCE,
+                active: true,
+                ..AccountState::default()
+            },
         })
         .collect()
 }
 
-pub(crate) fn state_leaves(live_accounts: usize) -> Vec<StateLeaf<VerifyingKey>> {
-    leaves(&accounts(live_accounts))
+pub(crate) struct CloseFixture {
+    pub(crate) cache: TestStateCache,
+    pub(crate) operator_bls: OperatorKey,
+    pub(crate) context: CloseContext<VerifyingKey, Digest>,
+    pub(crate) deposits: DepositBatch<VerifyingKey>,
+    pub(crate) withdrawals: WithdrawalBatch<VerifyingKey, Digest>,
+    pub(crate) prepared: PreparedClose<VerifyingKey, Digest>,
+    pub(crate) rows: Vec<AccountRow<VerifyingKey, Digest>>,
+    pub(crate) out_vectors: Vec<OutVector<VerifyingKey>>,
+    pub(crate) out_partials: Vec<LtHash>,
+    pub(crate) operator_signatures: Vec<Option<OperatorSignature>>,
+    pub(crate) acks: Vec<VectorAck<VerifyingKey, Digest>>,
+    pub(crate) transpose: Vec<TransposeEntry<VerifyingKey>>,
+    pub(crate) accounts: Vec<(VerifyingKey, SigningKey)>,
+    pub(crate) operator: SigningKey,
 }
 
-fn payment_context(operator: &SigningKey) -> PaymentContext<VerifyingKey, Digest> {
-    PaymentContext::new(
-        Sha256::hash(&[b"clearing-benchmark-anchor"]),
-        EPOCH,
-        operator.public_key(),
-    )
+pub(crate) fn active_close_fixture(profile: ActiveProfile) -> CloseFixture {
+    let assignment = Assignment::new(Sha256::hash(&[b"clearing-benchmark-committee"]), 8)
+        .expect("benchmark assignment is valid");
+    active_close_fixture_with_assignment(profile, assignment)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn signed_payment(
-    context: &PaymentContext<VerifyingKey, Digest>,
-    operator: &SigningKey,
-    payer: &SigningKey,
-    recipient: &SigningKey,
-    shard: u64,
-    previous_debit: u64,
-    previous_credit: u64,
-    previous_index: u64,
-) -> TestPayment {
-    let send = SignedSend::sign_next(context, payer, recipient.public_key(), 1, previous_debit)
-        .expect("benchmark send is valid");
-    let receipt = SignedReceipt::issue_next::<Sha256, _>(
-        context,
-        &send,
-        &recipient.public_key(),
-        shard,
-        previous_credit,
-        previous_index,
-        operator,
-    )
-    .expect("benchmark receipt is valid");
-    Payment::new::<Sha256>(context, send, receipt).expect("benchmark payment is valid")
-}
-
-fn assemble_close_fixture<F>(
-    live_accounts: usize,
-    changed_positions: &[usize],
+/// Builds a close where the first `senders` accounts each send one unit to `out_degree`
+/// recipients drawn round-robin from the first `credited_accounts` accounts. Accounts that
+/// neither send nor receive stay unchanged, so the changed-row count follows the movers
+/// rather than the account set.
+pub(crate) fn active_close_fixture_with_assignment(
+    profile: ActiveProfile,
     assignment: Assignment<Digest>,
-    endpoints: F,
-) -> (CloseFixture, Vec<Account>)
-where
-    F: FnOnce(&PaymentContext<VerifyingKey, Digest>, &SigningKey, &[&Account]) -> EndpointSet,
-{
-    let changed = changed_positions.len();
-    assert!(changed > 0 && changed <= live_accounts);
-    assert!(changed_positions[0] < live_accounts);
+) -> CloseFixture {
+    let ActiveProfile {
+        live_accounts,
+        senders,
+        credited_accounts,
+        out_degree,
+    } = profile;
     assert!(
-        changed_positions
-            .windows(2)
-            .all(|positions| positions[0] < positions[1] && positions[1] < live_accounts)
+        senders <= live_accounts
+            && credited_accounts <= live_accounts
+            && out_degree <= credited_accounts
     );
     let accounts = accounts(live_accounts);
-    let cache = StateCache::new::<Sha256>(leaves(&accounts)).expect("benchmark state is canonical");
-    let changed_accounts = changed_positions
-        .iter()
-        .map(|position| &accounts[*position])
-        .collect::<Vec<_>>();
     let operator = SigningKey::from_seed(OPERATOR_SEED);
+    let operator_bls_private = BlsPrivate::new(Scalar::from(OPERATOR_SEED));
+    let operator_bls = compute_public::<OperatorVariant>(&operator_bls_private);
+
+    let leaves = accounts
+        .iter()
+        .map(|(public, _)| StateLeaf {
+            account: public.clone(),
+            state: AccountState {
+                balance: OPENING_BALANCE,
+                active: true,
+                ..AccountState::default()
+            },
+        })
+        .collect::<Vec<_>>();
+    let cache =
+        StateCache::new_with_strategy::<Sha256>(leaves, strategy()).expect("state is canonical");
     let deposits = DepositBatch::empty();
     let withdrawals = WithdrawalBatch::empty();
     let context = EpochContext::new::<Sha256>(
@@ -341,269 +290,177 @@ where
         assignment,
     )
     .and_then(|epoch| epoch.bind::<Sha256>(&cache, &deposits, &withdrawals))
-    .expect("benchmark close context is valid");
+    .expect("close context is valid");
+
+    // Edge (i -> (i + j) % credited) for each sender i, one unit each. Vector roots and
+    // both signatures are produced per payer through the worker pool.
     let payment_context = context.payment().clone();
+    let per_payer = strategy().map_collect_vec(
+        accounts[..senders].iter().enumerate(),
+        |(index, (public, private))| {
+            let mut entries = (0..out_degree)
+                .map(|j| OutEntry {
+                    recipient: accounts[(index + j) % credited_accounts].0.clone(),
+                    cumulative: 1,
+                    count: 1,
+                })
+                .collect::<Vec<_>>();
+            entries.sort_unstable_by(|left, right| left.recipient.cmp(&right.recipient));
+            let vector =
+                OutVector::new(EPOCH, public.clone(), entries).expect("vector is canonical");
+            let send_root = vector
+                .root::<Sha256, Digest>()
+                .expect("vector root is valid");
+            let body = VectorSendBody::new(
+                &payment_context,
+                public.clone(),
+                0,
+                out_degree as u64,
+                send_root,
+            );
+            let ack = VectorAck::sign_by_authorities(body, private, &operator);
+            let aggregable = sign_message::<OperatorVariant>(
+                &operator_bls_private,
+                VECTOR_ACK_AGGREGATE_NAMESPACE,
+                ack.body().encode().as_ref(),
+            );
+            (vector, ack, aggregable)
+        },
+    );
 
-    let (mut outgoing, incoming) = endpoints(&payment_context, &operator, &changed_accounts);
-    assert_eq!(outgoing.len(), changed);
-    assert_eq!(incoming.len(), changed);
+    let mut incoming = vec![Vec::new(); live_accounts];
+    for (index, (public, _)) in accounts[..senders].iter().enumerate() {
+        for j in 0..out_degree {
+            let recipient = (index + j) % credited_accounts;
+            incoming[recipient].push(TransposeEntry {
+                recipient: accounts[recipient].0.clone(),
+                payer: public.clone(),
+                cumulative: 1,
+                count: 1,
+            });
+        }
+    }
 
-    let mut rows = Vec::with_capacity(changed);
-    let mut shard_sets = Vec::with_capacity(changed);
-    for (index, (account, mut heads)) in changed_accounts.into_iter().zip(incoming).enumerate() {
-        heads.sort_unstable_by_key(|head| head.shard);
-        let sent = outgoing[index]
-            .as_ref()
-            .map_or(0, |payment| payment.send().body().cumulative_debit());
-        let shards = if heads.is_empty() {
-            ShardSet::empty(payment_context.epoch(), account.public.clone())
-        } else {
-            ShardSet::new(payment_context.epoch(), account.public.clone(), heads)
-                .expect("benchmark shards are canonical")
+    let mut sender_material = per_payer.into_iter().map(Some).collect::<Vec<_>>();
+
+    let mut transpose = Vec::new();
+    let mut rows = Vec::with_capacity(senders.max(credited_accounts));
+    let mut out_vectors = Vec::with_capacity(senders.max(credited_accounts));
+    let mut acks = Vec::with_capacity(senders);
+    let mut operator_signatures = Vec::with_capacity(senders.max(credited_accounts));
+    let mut prefix = Prefix::default();
+    for (index, (public, _)) in accounts.iter().enumerate() {
+        let sends = index < senders;
+        let mut group = std::mem::take(&mut incoming[index]);
+        if !sends && group.is_empty() {
+            // Neither sent nor received: the account stays an unchanged live leaf.
+            continue;
+        }
+        group.sort_unstable_by(|left, right| left.payer.cmp(&right.payer));
+        let credit = group.iter().map(|entry| entry.cumulative).sum::<u64>();
+        let receipts = group.iter().map(|entry| entry.count).sum::<u64>();
+        let debit = if sends { out_degree as u64 } else { 0 };
+        let predecessor = AccountState {
+            balance: OPENING_BALANCE,
+            active: true,
+            ..AccountState::default()
         };
-        let (received, receipts) = shards
-            .heads()
-            .iter()
-            .try_fold((0_u64, 0_u64), |(credit, receipts), head| {
-                let receipt = head.payment.receipt().body();
-                Some((
-                    credit.checked_add(receipt.cumulative_shard_credit())?,
-                    receipts.checked_add(receipt.index())?,
-                ))
-            })
-            .expect("benchmark shard totals are representable");
-        assert_ne!(sent + received, 0, "every disclosed account must change");
-        let predecessor = predecessor_state();
         let successor = AccountState {
-            balance: predecessor
-                .balance
-                .checked_sub(sent)
-                .and_then(|balance| balance.checked_add(received))
-                .expect("benchmark balance is valid"),
-            cumulative_debit: sent,
-            cumulative_credit: received,
+            balance: OPENING_BALANCE - debit + credit,
+            cumulative_debit: debit,
+            cumulative_credit: credit,
             receipt_count: receipts,
             active: true,
         };
-        rows.push(AccountRow {
-            account: account.public.clone(),
-            predecessor,
-            successor,
-            outgoing: outgoing[index].take(),
-            output: SettlementOutput::None,
-            prefix: Prefix::default(),
-        });
-        shard_sets.push(shards);
-    }
-
-    let mut prefix = Prefix::default();
-    for (row, shards) in rows.iter_mut().zip(&shard_sets) {
-        let (debit, credit, _) = row.checked_deltas().expect("benchmark counters advance");
         prefix = prefix
             .checked_extend(Prefix {
                 debit,
                 credit,
-                shard_count: u64::try_from(shards.heads().len())
-                    .expect("benchmark shard count fits in u64"),
+                out_count: debit,
+                in_count: group.len() as u64,
                 ..Prefix::default()
             })
-            .expect("benchmark prefix is valid");
-        row.prefix = prefix;
+            .expect("prefix is valid");
+        let (vector, outgoing, aggregable) = if sends {
+            let (vector, ack, aggregable) = sender_material[index]
+                .take()
+                .expect("each sender's material is consumed once");
+            let outgoing = SendAuthorization::from_raw_unchecked(
+                ack.body().clone(),
+                ack.payer_signature().clone(),
+            );
+            acks.push(ack);
+            (vector, Some(outgoing), Some(aggregable))
+        } else {
+            (OutVector::empty(EPOCH, public.clone()), None, None)
+        };
+        rows.push(AccountRow {
+            account: public.clone(),
+            predecessor,
+            successor,
+            outgoing,
+            output: SettlementOutput::None,
+            prefix,
+        });
+        out_vectors.push(vector);
+        operator_signatures.push(aggregable);
+        transpose.extend(group);
     }
 
+    // Senders maintain these partials incrementally at acceptance time, so fixture
+    // construction stands in for the sender fleet here.
+    let out_partials = out_vectors
+        .iter()
+        .map(OutVector::accumulator)
+        .collect::<Vec<_>>();
     let prepared = prepare_close_with_strategy::<Sha256, _, _>(
         &cache,
         &context,
         &deposits,
         &withdrawals,
-        rows,
-        shard_sets,
+        rows.clone(),
+        out_vectors.clone(),
+        &out_partials,
+        &operator_signatures,
+        transpose.clone(),
         strategy(),
     )
-    .expect("benchmark close is valid");
+    .expect("close prepares");
     prepared
         .validate::<Sha256, PaymentBatchVerifier, _>(
             &context,
+            &operator_bls,
             &deposits,
             &withdrawals,
             &mut TestRng::new(0),
             strategy(),
         )
-        .expect("benchmark close is valid");
-    (
-        CloseFixture {
-            cache,
-            context,
-            deposits,
-            withdrawals,
-            prepared,
-        },
+        .expect("close validates");
+    CloseFixture {
+        cache,
+        operator_bls,
+        context,
+        deposits,
+        withdrawals,
+        prepared,
+        rows,
+        out_vectors,
+        out_partials,
+        operator_signatures,
+        acks,
+        transpose,
         accounts,
-    )
+        operator,
+    }
 }
 
-fn make_close_fixture(
-    live_accounts: usize,
-    changed: usize,
-    edges: &[Edge],
-    assignment: Assignment<Digest>,
-) -> (CloseFixture, Vec<Account>) {
-    let changed_positions = (0..changed).collect::<Vec<_>>();
-    assemble_close_fixture(
-        live_accounts,
-        &changed_positions,
-        assignment,
-        |context, operator, accounts| {
-            let mut outgoing = (0..changed).map(|_| None).collect::<Vec<_>>();
-            let mut incoming = (0..changed).map(|_| Vec::new()).collect::<Vec<_>>();
-            for edge in edges {
-                assert!(edge.payer < changed && edge.recipient < changed);
-                assert!(outgoing[edge.payer].is_none());
-                assert!(
-                    !incoming[edge.recipient]
-                        .iter()
-                        .any(|head: &ShardHead<VerifyingKey, Digest>| head.shard == edge.shard)
-                );
-                let payment = signed_payment(
-                    context,
-                    operator,
-                    &accounts[edge.payer].private,
-                    &accounts[edge.recipient].private,
-                    edge.shard,
-                    0,
-                    0,
-                    0,
-                );
-                outgoing[edge.payer] = Some(payment.clone());
-                incoming[edge.recipient].push(ShardHead::new(edge.shard, payment));
-            }
-            (outgoing, incoming)
-        },
-    )
-}
-
-pub(crate) fn active_close_fixture(profile: ActiveProfile) -> CloseFixture {
-    let assignment = Assignment::new(Sha256::hash(&[b"clearing-benchmark-committee"]), 8)
-        .expect("benchmark assignment is valid");
-    active_close_fixture_with_assignment(profile, assignment)
-}
-
-pub(crate) fn active_close_fixture_with_assignment(
-    profile: ActiveProfile,
-    assignment: Assignment<Digest>,
-) -> CloseFixture {
-    active_close_fixture_parts(profile, assignment).0
-}
-
-fn active_close_fixture_parts(
-    profile: ActiveProfile,
-    assignment: Assignment<Digest>,
-) -> (CloseFixture, Vec<Account>) {
-    let ActiveProfile {
-        live_accounts,
-        changed_accounts,
-        credited_accounts,
-        receive_shards_per_credited,
-    } = profile;
-    assert!(changed_accounts > 0 && changed_accounts <= live_accounts);
-    assert!(credited_accounts > 0 && credited_accounts <= changed_accounts);
-    assert!(receive_shards_per_credited > 0);
-    let terminal_shards = profile.terminal_shards();
-    let payment_count = changed_accounts.max(terminal_shards);
-    let changed_positions = profile.changed_positions();
-    let credited_rows = profile.credited_accounts(&changed_positions);
-    assert!((0..credited_accounts).all(|credited| {
-        changed_positions[credited_rows[credited]] == profile.credited_state_position(credited)
-    }));
-
-    let (fixture, accounts) = assemble_close_fixture(
-        live_accounts,
-        &changed_positions,
-        assignment,
-        |context, operator, accounts| {
-            let mut outgoing = (0..changed_accounts).map(|_| None).collect::<Vec<_>>();
-            let mut heads = (0..terminal_shards).map(|_| None).collect::<Vec<_>>();
-            for index in 0..payment_count {
-                let payer = index % changed_accounts;
-                let shard_slot = index % terminal_shards;
-                let credited = shard_slot / receive_shards_per_credited;
-                let recipient = credited_rows[credited];
-                let shard = shard_slot % receive_shards_per_credited;
-                let payment = signed_payment(
-                    context,
-                    operator,
-                    &accounts[payer].private,
-                    &accounts[recipient].private,
-                    u64::try_from(shard).expect("benchmark shard fits in u64"),
-                    u64::try_from(index / changed_accounts)
-                        .expect("benchmark payer sequence fits in u64"),
-                    u64::try_from(index / terminal_shards)
-                        .expect("benchmark shard credit fits in u64"),
-                    u64::try_from(index / terminal_shards)
-                        .expect("benchmark receipt index fits in u64"),
-                );
-                let payer_terminal = index + changed_accounts >= payment_count;
-                let shard_terminal = index + terminal_shards >= payment_count;
-                match (payer_terminal, shard_terminal) {
-                    (true, true) => {
-                        outgoing[payer] = Some(payment.clone());
-                        heads[shard_slot] = Some(payment);
-                    }
-                    (true, false) => outgoing[payer] = Some(payment),
-                    (false, true) => heads[shard_slot] = Some(payment),
-                    (false, false) => unreachable!("one endpoint dimension spans every payment"),
-                }
-            }
-
-            assert!(outgoing.iter().all(Option::is_some));
-            assert!(heads.iter().all(Option::is_some));
-            let mut incoming = (0..changed_accounts)
-                .map(|_| Vec::new())
-                .collect::<Vec<_>>();
-            for (shard_slot, payment) in heads.into_iter().enumerate() {
-                let credited = shard_slot / receive_shards_per_credited;
-                let recipient = credited_rows[credited];
-                let shard = shard_slot % receive_shards_per_credited;
-                incoming[recipient].push(ShardHead::new(
-                    u64::try_from(shard).expect("benchmark shard fits in u64"),
-                    payment.expect("every benchmark shard has a terminal head"),
-                ));
-            }
-            (outgoing, incoming)
-        },
-    );
-
-    assert_eq!(fixture.rows.len(), changed_accounts);
-    assert!(fixture.rows.iter().all(|row| row.outgoing.is_some()));
-    assert_eq!(
-        fixture
-            .shard_sets
-            .iter()
-            .filter(|shards| !shards.heads().is_empty())
-            .count(),
-        credited_accounts
-    );
-    assert_eq!(
-        fixture
-            .shard_sets
-            .iter()
-            .map(|shards| shards.heads().len())
-            .sum::<usize>(),
-        terminal_shards
-    );
-    assert!((0..credited_accounts).all(|credited| {
-        fixture.shard_sets[credited_rows[credited]].heads().len() == receive_shards_per_credited
-    }));
-    (fixture, accounts)
-}
-
-pub(crate) fn payment_fixture() -> PaymentFixture {
-    let operator = SigningKey::from_seed(OPERATOR_SEED);
-    let payer = SigningKey::from_seed(2);
-    let recipient = SigningKey::from_seed(3);
-    let context = payment_context(&operator);
-    let payment = signed_payment(&context, &operator, &payer, &recipient, 4, 0, 0, 0);
-    PaymentFixture { context, payment }
+/// Short benchmark label for one challenge kind.
+pub(crate) const fn kind_label(kind: ChallengeKind) -> &'static str {
+    match kind {
+        ChallengeKind::HigherAckDebit => "debit",
+        ChallengeKind::HigherAckEntry => "entry",
+        ChallengeKind::AckFork => "fork",
+    }
 }
 
 fn assert_proven(
@@ -614,389 +471,118 @@ fn assert_proven(
     kind: ChallengeKind,
 ) {
     assert_eq!(
-        adjudicate::<Sha256, _>(
-            context,
-            header,
-            roots,
-            context.challenge_deadline(),
-            challenge
-        )
-        .expect("benchmark challenge is well formed"),
+        adjudicate::<Sha256, _, _>(context, header, roots, challenge)
+            .expect("benchmark challenge is well formed"),
         Verdict::Proven(kind)
     );
 }
 
-/// Signs the private evidence for the three non-tip contradiction kinds against one close.
+/// Signs one proven challenge per kind in [`ChallengeKind`] order against the fixture close.
 ///
 /// The bench holds the operator and payer signers, so it can produce exactly the acknowledged
-/// pairs a cheating operator would have issued beyond the committed close. Each challenge is
+/// evidence a cheating operator would have issued beyond the committed close. Each challenge is
 /// asserted to adjudicate to its proven kind.
-fn remaining_challenges(
+pub(crate) fn proven_challenges(
     fixture: &CloseFixture,
-    index: &ChallengeIndex<VerifyingKey, Digest>,
-    payer: &SigningKey,
-    forker: &SigningKey,
-    challenged: &SigningKey,
-) -> [Challenge<VerifyingKey, Digest>; 3] {
-    let operator = SigningKey::from_seed(OPERATOR_SEED);
-    let context = fixture.context.payment();
-    let header = fixture.prepared.close().header;
-    let roots = fixture.prepared.close().roots;
-    let row = fixture
-        .rows
-        .binary_search_by(|row| row.account.cmp(&payer.public_key()))
-        .expect("benchmark payer has a changed row");
-    let committed = fixture.rows[row].successor.cumulative_debit;
-    let next_debit = |offset: u64| {
-        committed
-            .checked_add(offset)
-            .expect("benchmark payer debit advances")
-    };
-
-    // A matching acknowledged pair one unit past the payer's public terminal debit marker,
-    // paired with the payer-row membership lookup (an unchanged payer would use the ordered
-    // absence arm instead).
-    let acknowledged = signed_payment(context, &operator, payer, challenged, 0, committed, 0, 0);
-    let lookup = index
-        .account_lookup(&fixture.cache, &payer.public_key())
-        .expect("benchmark payer lookup is aligned");
-    assert!(matches!(lookup, AccountLookup::Present(_)));
-    let latest = Challenge::LatestAcknowledgedSend {
-        payment: Box::new(PaymentWitness::from_payment(&acknowledged)),
-        payer: Box::new(lookup),
-    };
-    assert_proven(
-        &fixture.context,
-        &header,
-        &roots,
-        &latest,
-        ChallengeKind::LatestAcknowledgedSend,
-    );
-
-    // Two linked endpoints in one anchor, recipient, and shard at index distance one. Adjacent
-    // receipts must advance credit by exactly the upper amount, so the skipped credit unit is
-    // infeasible.
-    let lower = signed_payment(
-        context,
-        &operator,
-        payer,
-        challenged,
-        0,
-        next_debit(1),
-        0,
-        0,
-    );
-    let upper = signed_payment(
-        context,
-        &operator,
-        payer,
-        challenged,
-        0,
-        next_debit(2),
-        2,
-        1,
-    );
-    let range = Challenge::InconsistentReceiptRange {
-        upper: Box::new(PaymentWitness::from_payment(&upper)),
-        lower: RangeLower::from_payment(&lower),
-    };
-    assert_proven(
-        &fixture.context,
-        &header,
-        &roots,
-        &range,
-        ChallengeKind::InconsistentReceiptRange,
-    );
-
-    // Two distinct linked receipt bodies reusing one shard index. SameIndex is the canonical
-    // two-pair fork shape. The same-entry relation (SameSend) has the same two-pair shape with
-    // the send shared instead of the index scope.
-    let left = signed_payment(
-        context,
-        &operator,
-        payer,
-        challenged,
-        0,
-        next_debit(3),
-        0,
-        0,
-    );
-    let right = signed_payment(context, &operator, forker, challenged, 0, 0, 2, 0);
-    let fork = Challenge::receipt_fork(&left, &right);
-    assert!(matches!(
-        &fork,
-        Challenge::ReceiptFork { fork }
-            if matches!(fork.as_ref(), ReceiptForkWitness::SameIndex { .. })
-    ));
-    assert_proven(
-        &fixture.context,
-        &header,
-        &roots,
-        &fork,
-        ChallengeKind::ReceiptFork,
-    );
-
-    [latest, range, fork]
-}
-
-pub(crate) fn active_chain_fixture(
-    profile: ActiveProfile,
-    assignment: Assignment<Digest>,
-) -> (CloseFixture, ChallengeFixture, SigningKey) {
-    let (fixture, accounts) = active_close_fixture_parts(profile, assignment);
-    let claim_account = fixture
-        .rows
-        .get(1)
-        .expect("the active profile has a non-first changed row")
-        .account
-        .clone();
-    let claim_account_position = accounts
-        .binary_search_by(|account| account.public.cmp(&claim_account))
-        .expect("the claim account is registered");
-    let claim_signer = accounts[claim_account_position].private.clone();
-    let row_position = fixture
-        .shard_sets
-        .iter()
-        .position(|shards| shards.heads().iter().any(|head| head.shard == 0))
-        .expect("the active profile credits shard zero");
-    assert_eq!(row_position, 0);
-    let public_tip = fixture.shard_sets[row_position]
-        .heads()
-        .iter()
-        .find(|head| head.shard == 0)
-        .expect("the active profile has a shard-zero tip")
-        .payment
-        .clone();
-    let recipient_position = accounts
-        .binary_search_by(|account| account.public.cmp(&fixture.rows[row_position].account))
-        .expect("the challenged recipient is registered");
-    assert_eq!(recipient_position, 0);
-    let public_receipt = public_tip.receipt().body();
-    let previous_debit = fixture.rows[row_position].successor.cumulative_debit;
-    let previous_credit = public_receipt.cumulative_shard_credit();
-    let previous_index = public_receipt.index();
-    let expected_debit = previous_debit
-        .checked_add(1)
-        .expect("benchmark payer debit advances");
-    let expected_credit = previous_credit
-        .checked_add(1)
-        .expect("benchmark shard credit advances");
-    let expected_index = previous_index
-        .checked_add(1)
-        .expect("benchmark shard index advances");
-    let operator = SigningKey::from_seed(OPERATOR_SEED);
-    let retained = signed_payment(
-        fixture.context.payment(),
-        &operator,
-        &accounts[recipient_position].private,
-        &accounts[recipient_position].private,
-        0,
-        previous_debit,
-        previous_credit,
-        previous_index,
-    );
-    retained
-        .verify_linked::<Sha256>(fixture.context.payment())
-        .expect("benchmark retained payment is linked");
-    assert_eq!(retained.recipient(), &fixture.rows[row_position].account);
-    assert_eq!(retained.send().body().cumulative_debit(), expected_debit);
-    assert_eq!(retained.receipt().body().shard(), 0);
-    assert_eq!(
-        retained.receipt().body().cumulative_shard_credit(),
-        expected_credit
-    );
-    assert_eq!(retained.receipt().body().index(), expected_index);
-
-    let index = ChallengeIndex::new::<Sha256>(&fixture.context, fixture.prepared.close())
+) -> [(ChallengeKind, Challenge<VerifyingKey, Digest>); 3] {
+    let close = fixture.prepared.close();
+    let index = ChallengeIndex::new::<Sha256>(&fixture.context, close)
         .expect("benchmark challenge index is valid");
-    let recipient = index
-        .higher_shard_tip_lookup::<Sha256>(
-            &fixture.rows[row_position].account,
-            Some(&fixture.shard_sets[row_position]),
-            0,
-        )
-        .expect("benchmark recipient and shard lookup are aligned");
-    let HigherShardTipLookup::Present { proof, tip, .. } = &recipient else {
-        unreachable!("benchmark recipient is present")
-    };
-    assert_eq!(proof.position, 0);
-    assert_eq!(
-        proof.proof.leaf_count,
-        u32::try_from(fixture.rows.len()).expect("benchmark row count fits in u32")
-    );
-    let CreditTipLookup::Present { opening, .. } = tip else {
-        unreachable!("benchmark shard zero is present")
-    };
-    assert_eq!(opening.position, 0);
-    assert_eq!(
-        opening.proof.leaf_count,
-        u32::try_from(profile.receive_shards_per_credited)
-            .expect("benchmark shard count fits in u32")
-    );
-    let tip = Challenge::HigherShardTip {
-        payment: Box::new(PaymentWitness::from_payment(&retained)),
-        recipient: Box::new(recipient),
-    };
-    let header = fixture.prepared.close().header;
-    let roots = fixture.prepared.close().roots;
-    assert_proven(
-        &fixture.context,
-        &header,
-        &roots,
-        &tip,
-        ChallengeKind::HigherShardTip,
-    );
-    let [latest, range, fork] = remaining_challenges(
-        &fixture,
-        &index,
-        &claim_signer,
-        &accounts[2].private,
-        &accounts[recipient_position].private,
-    );
-    let challenges = ChallengeFixture {
-        context: fixture.context.clone(),
-        header,
-        roots,
-        latest,
-        tip,
-        range,
-        fork,
-        payer: claim_signer.clone(),
-        challenged: fixture.rows[row_position].account.clone(),
-    };
-    (fixture, challenges, claim_signer)
-}
 
-/// Rebuilds the fixture's challenge witness as a batched send with `entries` recipients.
-///
-/// The first entry credits the challenged recipient at the fixture's retained endpoint, so the
-/// contradiction is unchanged. Filler entries pay distinct synthetic recipients, growing only the
-/// signed send that challenge adjudication must hash and verify.
-pub(crate) fn batched_challenge(
-    fixture: &ChallengeFixture,
-    entries: usize,
-) -> Challenge<VerifyingKey, Digest> {
-    const FILLER_SEED_START: u64 = 1_000_000;
-    let Challenge::HigherShardTip { recipient, .. } = &fixture.tip else {
-        unreachable!("the challenge fixture is a higher-shard-tip challenge")
-    };
-    let operator = SigningKey::from_seed(OPERATOR_SEED);
-    let payer = &fixture.payer;
-    let challenged = fixture.challenged.clone();
-    let mut batch = vec![Entry::new(challenged.clone(), 1).expect("benchmark entry is positive")];
-    for filler in 1..entries {
-        let filler = SigningKey::from_seed(FILLER_SEED_START + filler as u64).public_key();
-        batch.push(Entry::new(filler, 1).expect("benchmark entry is positive"));
-    }
-    let send = SignedSend::sign_next_batch(fixture.context.payment(), payer, batch, 1)
-        .expect("benchmark batch signs");
-    let receipt = SignedReceipt::issue_next::<Sha256, _>(
+    let payer_position = 3_usize;
+    let payer_public = close.rows[payer_position].account.clone();
+    let payer_private = fixture
+        .accounts
+        .iter()
+        .find(|(public, _)| *public == payer_public)
+        .map(|(_, private)| private.clone())
+        .expect("the challenged payer is registered");
+
+    // A retained successor vector one unit past the committed terminal on its first edge. Its
+    // acknowledgment contradicts both the public terminal debit and the public terminal entry.
+    let committed = &close.out_vectors[payer_position];
+    let mut entries = committed.entries().to_vec();
+    entries[0].cumulative += 1;
+    entries[0].count += 1;
+    let retained_recipient = entries[0].recipient.clone();
+    let retained =
+        OutVector::new(EPOCH, payer_public.clone(), entries).expect("vector is canonical");
+    let retained_root = retained
+        .root::<Sha256, Digest>()
+        .expect("vector root is valid");
+    let retained_body = VectorSendBody::new(
         fixture.context.payment(),
-        &send,
-        &challenged,
-        0,
+        payer_public.clone(),
         1,
-        1,
-        &operator,
-    )
-    .expect("benchmark batch receipt issues");
-    let payment = Payment::new::<Sha256>(fixture.context.payment(), send, receipt)
-        .expect("benchmark batch payment links");
-    let challenge = Challenge::HigherShardTip {
-        payment: Box::new(PaymentWitness::from_payment(&payment)),
-        recipient: recipient.clone(),
+        close.rows[payer_position].successor.cumulative_debit + 1,
+        retained_root,
+    );
+    let retained_ack =
+        VectorAck::sign_by_authorities(retained_body, &payer_private, &fixture.operator);
+    let OutTipLookup::Present {
+        cumulative,
+        count,
+        opening,
+    } = retained
+        .lookup::<Sha256, Digest>(&retained_recipient)
+        .expect("retained lookup is aligned")
+    else {
+        panic!("retained entry is present");
     };
-    assert_proven(
-        &fixture.context,
-        &fixture.header,
-        &fixture.roots,
-        &challenge,
-        ChallengeKind::HigherShardTip,
-    );
-    challenge
-}
-
-pub(crate) fn challenge_fixture(
-    live_accounts: usize,
-    change_rows: usize,
-    receive_shards: usize,
-) -> ChallengeFixture {
-    assert!(receive_shards > 0 && receive_shards < change_rows);
-    assert_eq!((change_rows - receive_shards - 1) % 2, 0);
-    let mut edges = (0..receive_shards)
-        .map(|shard| Edge {
-            payer: shard + 1,
-            recipient: 0,
-            shard: u64::try_from(shard).expect("benchmark shard fits in u64"),
-        })
-        .collect::<Vec<_>>();
-    let mut account = receive_shards + 1;
-    while account < change_rows {
-        edges.push(Edge {
-            payer: account,
-            recipient: account + 1,
-            shard: 0,
-        });
-        account += 2;
-    }
-
-    let assignment = Assignment::new(Sha256::hash(&[b"clearing-benchmark-committee"]), 8)
-        .expect("benchmark assignment is valid");
-    let (fixture, accounts) = make_close_fixture(live_accounts, change_rows, &edges, assignment);
-    let operator = SigningKey::from_seed(OPERATOR_SEED);
-    let retained = signed_payment(
-        fixture.context.payment(),
-        &operator,
-        &accounts[1].private,
-        &accounts[0].private,
-        0,
-        1,
-        1,
-        1,
-    );
-    let row_position = fixture
-        .rows
-        .binary_search_by(|row| row.account.cmp(&accounts[0].public))
-        .expect("challenged recipient has a changed row");
-    let index = ChallengeIndex::new::<Sha256>(&fixture.context, fixture.prepared.close())
-        .expect("benchmark challenge index is valid");
-    let recipient = index
-        .higher_shard_tip_lookup::<Sha256>(
-            &accounts[0].public,
-            Some(&fixture.shard_sets[row_position]),
-            0,
-        )
-        .expect("benchmark recipient and shard lookup are aligned");
-    let tip = Challenge::HigherShardTip {
-        payment: Box::new(PaymentWitness::from_payment(&retained)),
-        recipient: Box::new(recipient),
+    let debit = Challenge::HigherAckDebit {
+        ack: Box::new(AckWitness::from_ack(&retained_ack)),
+        payer: Box::new(
+            account_lookup::<Sha256, _, _>(&index, &fixture.cache, &payer_public)
+                .expect("benchmark payer lookup is aligned"),
+        ),
     };
-    let context = fixture.context.clone();
-    let header = fixture.prepared.close().header;
-    let roots = fixture.prepared.close().roots;
-    assert_proven(
-        &context,
-        &header,
-        &roots,
-        &tip,
-        ChallengeKind::HigherShardTip,
-    );
-    let [latest, range, fork] = remaining_challenges(
-        &fixture,
-        &index,
-        &accounts[1].private,
-        &accounts[2].private,
-        &accounts[0].private,
-    );
-    ChallengeFixture {
-        context,
-        header,
-        roots,
-        latest,
-        tip,
-        range,
-        fork,
-        payer: accounts[1].private.clone(),
-        challenged: accounts[0].public.clone(),
+    let entry = Challenge::HigherAckEntry {
+        entry: Box::new(EntryWitness {
+            ack: AckWitness::from_ack(&retained_ack),
+            recipient: retained_recipient.clone(),
+            cumulative,
+            count,
+            opening,
+        }),
+        sender: Box::new(
+            higher_entry_lookup::<Sha256, _, _>(
+                &index,
+                &payer_public,
+                Some(committed),
+                &retained_recipient,
+            )
+            .expect("benchmark sender lookup is aligned"),
+        ),
+    };
+
+    // Two countersigned bodies at one payer sequence number.
+    let fork = Challenge::AckFork {
+        left: Box::new(AckWitness::from_ack(&fixture.acks[payer_position])),
+        right: Box::new(AckWitness::from_ack(&{
+            let body = VectorSendBody::new(
+                fixture.context.payment(),
+                payer_public,
+                0,
+                close.rows[payer_position].successor.cumulative_debit + 5,
+                retained_root,
+            );
+            VectorAck::sign_by_authorities(body, &payer_private, &fixture.operator)
+        })),
+    };
+
+    let challenges = [
+        (ChallengeKind::HigherAckDebit, debit),
+        (ChallengeKind::HigherAckEntry, entry),
+        (ChallengeKind::AckFork, fork),
+    ];
+    for (kind, challenge) in &challenges {
+        assert_proven(
+            &fixture.context,
+            &close.header,
+            &close.roots,
+            challenge,
+            *kind,
+        );
     }
+    challenges
 }

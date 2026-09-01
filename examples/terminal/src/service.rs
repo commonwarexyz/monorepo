@@ -78,7 +78,7 @@ pub(crate) fn run_operator(
         // observer, locked around each synchronous call and never across an
         // await.
         let operator = Arc::new(Mutex::new(
-            Operator::open_remote(&database, workers, pipeline, config.clearing)
+            Operator::open_remote(&database, workers, pipeline, config.clearing, config.ack)
                 .context("initialize SQLite operator")?,
         ));
 
@@ -307,7 +307,7 @@ pub(crate) async fn prepare_request<E: Env, C: Chain>(
     let register = match request {
         operator_rpc::OperatorRequest::AcceptSend(request) => operator
             .lock()
-            .send_requires_epoch_registration(&request.send)?,
+            .send_requires_epoch_registration(&request.authorization, &request.entries)?,
         operator_rpc::OperatorRequest::StartClose(request) => {
             let operator = operator.lock();
             if operator.close_already_started(request.expected_epoch)? {
@@ -462,11 +462,8 @@ mod tests {
         protocol::{DepositEvent, deployment, wallets},
     };
     use bytes::Bytes;
-    use commonware_clearing::bajillion::{
-        boundary::{SignedWithdrawal, WithdrawalAction},
-        payment::SignedSend,
-    };
-    use commonware_codec::DecodeExt as _;
+    use commonware_clearing::bajillion::boundary::{SignedWithdrawal, WithdrawalAction};
+    use commonware_codec::{Decode as _, DecodeExt as _, RangeCfg};
     use commonware_runtime::deterministic;
     use commonware_utils::acknowledgement::Exact;
     use std::{
@@ -537,7 +534,8 @@ mod tests {
 
     /// A client whose one validator address answers nothing.
     fn unreachable_client(context: &deterministic::Context) -> Client {
-        let identity = harness::identity(&mut context.child("identity_rng"));
+        let mut identity_rng = context.child("identity_rng");
+        let identity = harness::identity(&mut identity_rng);
         Client::new(
             &identity,
             deployment(),
@@ -806,17 +804,14 @@ mod tests {
             let payer = identities.remove(0);
             let receiver = identities.remove(0);
             let head = operator.lock().payment_head(&payer.public_key()).unwrap();
-            let send = SignedSend::sign_next(
-                &head.context,
-                payer.signer(),
-                receiver.public_key(),
-                7,
-                head.state.cumulative_debit,
-            )
-            .unwrap();
+            let (authorization, entries) = operator
+                .lock()
+                .sign_send(0, &[(receiver.public_key(), 7)])
+                .unwrap();
             let request =
                 operator_rpc::OperatorRequest::AcceptSend(operator_rpc::AcceptSendRequest {
-                    send: send.clone(),
+                    authorization: authorization.clone(),
+                    entries: entries.clone(),
                 });
 
             // An unreachable chain refuses the registration, so nothing is
@@ -832,7 +827,7 @@ mod tests {
             assert!(
                 operator
                     .lock()
-                    .send_requires_epoch_registration(&send)
+                    .send_requires_epoch_registration(&authorization, &entries)
                     .unwrap()
             );
 
@@ -863,17 +858,14 @@ mod tests {
 
             // The re-signed send retriggers the gate, which completes on the
             // same certified registration record, and then commits.
-            let resigned = SignedSend::sign_next(
-                &live.context,
-                payer.signer(),
-                receiver.public_key(),
-                7,
-                live.state.cumulative_debit,
-            )
-            .unwrap();
+            let (resigned, resigned_entries) = operator
+                .lock()
+                .sign_send(0, &[(receiver.public_key(), 7)])
+                .unwrap();
             let request =
                 operator_rpc::OperatorRequest::AcceptSend(operator_rpc::AcceptSendRequest {
-                    send: resigned,
+                    authorization: resigned,
+                    entries: resigned_entries,
                 });
             assert!(
                 prepare_request(&context, &mut good, &operator, &request)
@@ -1015,8 +1007,8 @@ mod tests {
             assert_eq!(agent.receipt_count(), 0);
             let accepted = operator_server.await.unwrap();
             assert_eq!(accepted.total, 7);
-            assert_eq!(accepted.acceptance.receipts[0].body().amount(), 7);
-            assert_eq!(accepted.acceptance.send.body().cumulative_debit(), 7);
+            assert_eq!(accepted.acceptance.entries[0].cumulative, 7);
+            assert_eq!(accepted.acceptance.ack.body().cumulative_debit(), 7);
 
             // The accepted send binds the chain-registered anchor, whose
             // record carries the chain-assigned deadlines.
@@ -1024,7 +1016,7 @@ mod tests {
                 Some(Record::Anchor(anchor)) => anchor,
                 record => panic!("expected the epoch-0 anchor, found {record:?}"),
             };
-            assert_eq!(accepted.acceptance.send.body().anchor(), &registered);
+            assert_eq!(accepted.acceptance.ack.body().anchor(), &registered);
             let admission_deadline = match control.record(registration_key(&deployment())).await {
                 Some(Record::Registration(record)) => record.admission_deadline,
                 record => panic!("expected the registration record, found {record:?}"),
@@ -1044,13 +1036,24 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(settled_count, 0);
-            let persisted_send = agent_database
-                .query_row("SELECT send FROM agent_pending_payment", [], |row| {
-                    row.get::<_, Vec<u8>>(0)
-                })
+            let (persisted_authorization, persisted_entries) = agent_database
+                .query_row(
+                    "SELECT authorization, entries FROM agent_pending_payment",
+                    [],
+                    |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
+                )
                 .unwrap();
-            let pending_send = SignedSend::decode(Bytes::from(persisted_send)).unwrap();
-            assert_eq!(&pending_send, &accepted.acceptance.send);
+            let pending_authorization =
+                commonware_clearing::bajillion::payment::SendAuthorization::decode(Bytes::from(
+                    persisted_authorization,
+                ))
+                .unwrap();
+            let pending_entries = Vec::<crate::protocol::Entry>::decode_cfg(
+                Bytes::from(persisted_entries),
+                &(RangeCfg::new(1..=crate::protocol::MAX_ENTRIES), ()),
+            )
+            .unwrap();
+            assert_eq!(pending_authorization.body(), accepted.acceptance.ack.body());
             drop(agent_database);
 
             let recovered_agent = Agent::open(databases.agent(), 0).unwrap();
@@ -1061,7 +1064,7 @@ mod tests {
             let mut recovered_operator =
                 Operator::open(databases.operator(), NonZeroUsize::MIN).unwrap();
             let persisted_retry = recovered_operator
-                .accept_send(pending_send)
+                .accept_send(pending_authorization, pending_entries)
                 .unwrap()
                 .into_accepted();
             assert_eq!(persisted_retry.acceptance, accepted.acceptance);
@@ -1078,20 +1081,13 @@ mod tests {
             );
             drop(recovered_operator);
 
-            let persisted_operator_receipt = rusqlite::Connection::open(databases.operator())
+            let persisted_operator_ack = rusqlite::Connection::open(databases.operator())
                 .unwrap()
-                .query_row("SELECT encoded FROM payments", [], |row| {
-                    row.get::<_, Vec<u8>>(0)
-                })
+                .query_row("SELECT ack FROM acks", [], |row| row.get::<_, Vec<u8>>(0))
                 .unwrap();
             assert_eq!(
-                Bytes::from(persisted_operator_receipt),
-                accepted
-                    .acceptance
-                    .payments()
-                    .next()
-                    .expect("acceptance has one entry")
-                    .encode()
+                Bytes::from(persisted_operator_ack),
+                accepted.acceptance.ack.encode()
             );
 
             // The operator is gone before its close ever admits, so the

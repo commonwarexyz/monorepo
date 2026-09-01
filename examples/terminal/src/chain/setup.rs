@@ -28,11 +28,13 @@
 use crate::{
     chain::validator::{MAX_PARTICIPANTS, MAX_SUPPORTED_MODE, SHARING_MODE},
     protocol::{
-        Account, Deployment, Key, Timing, accounts, clearing_private, committee, operator_signer,
+        Account, Deployment, Key, Timing, accounts, clearing_private, committee, operator_ack_key,
+        operator_ack_signer, operator_signer,
     },
 };
 use anyhow::Context as _;
 use clap::Args;
+use commonware_clearing::bajillion::transition::OperatorKey;
 use commonware_codec::{Decode as _, Encode as _};
 use commonware_cryptography::{
     Signer as _,
@@ -169,6 +171,11 @@ pub(crate) struct OperatorConfig {
     /// The operator's clearing signing key (a demo protocol constant).
     #[serde(with = "hex_clearing_signer")]
     pub(crate) clearing: ClearingSigner,
+    /// The operator's aggregable-acknowledgment BLS signing key (a demo protocol
+    /// constant): the close carries one combined countersignature per proof slice
+    /// under this key.
+    #[serde(with = "hex_clearing")]
+    pub(crate) ack: ClearingKey,
 }
 
 impl OperatorConfig {
@@ -268,6 +275,10 @@ struct EncodedDeployment {
     /// Hex curve25519 operator clearing public key.
     #[serde(with = "hex_clearing_public")]
     operator: Key,
+    /// Hex BLS aggregable-acknowledgment public key, genesis-fixed like the
+    /// operator clearing key.
+    #[serde(with = "hex_operator_ack")]
+    operator_ack: OperatorKey,
     /// The accounts and initial balances the deployment's genesis machine
     /// opens with.
     accounts: Vec<EncodedAccount>,
@@ -285,6 +296,7 @@ impl From<&Deployment> for EncodedDeployment {
     fn from(deployment: &Deployment) -> Self {
         Self {
             operator: deployment.operator.clone(),
+            operator_ack: deployment.operator_ack,
             accounts: deployment
                 .accounts
                 .iter()
@@ -301,6 +313,7 @@ impl From<EncodedDeployment> for Deployment {
     fn from(encoded: EncodedDeployment) -> Self {
         Self::new(
             encoded.operator,
+            encoded.operator_ack,
             encoded
                 .accounts
                 .into_iter()
@@ -444,7 +457,11 @@ fn run_inner(args: Setup) -> anyhow::Result<()> {
     let deployments = (0..args.operators)
         .map(|index| {
             let index = u64::try_from(index).expect("the operator count fits u64");
-            Deployment::new(operator_signer(index).public_key(), accounts())
+            Deployment::new(
+                operator_signer(index).public_key(),
+                operator_ack_key(index),
+                accounts(),
+            )
         })
         .collect::<Vec<_>>();
     let peers = signers
@@ -520,7 +537,10 @@ fn run_inner(args: Setup) -> anyhow::Result<()> {
     for (index, signer) in operator_signers.into_iter().enumerate() {
         let operator_dir = args.node_dir.join(format!("operator-{index}"));
         fs::create_dir_all(&operator_dir)?;
-        let clearing = operator_signer(u64::try_from(index).expect("operator index fits u64"));
+        let index = u64::try_from(index).expect("operator index fits u64");
+        let clearing = operator_signer(index);
+        let ack = operator_ack_signer(index);
+        let index = usize::try_from(index).expect("operator index fits usize");
         write_json(
             &operator_dir.join("node.json"),
             &OperatorConfig {
@@ -528,6 +548,7 @@ fn run_inner(args: Setup) -> anyhow::Result<()> {
                 listen: operator_addresses[index],
                 dial: operator_addresses[index],
                 clearing,
+                ack,
             },
         )?;
         write_json(&operator_dir.join("network.json"), &network)?;
@@ -743,6 +764,26 @@ mod hex_clearing_public {
     }
 }
 
+/// Serde codec for a hex-encoded BLS aggregable-acknowledgment public key.
+mod hex_operator_ack {
+    use super::*;
+
+    pub(crate) fn serialize<S: Serializer>(
+        value: &OperatorKey,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&hex(&value.encode()))
+    }
+
+    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<OperatorKey, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        let bytes = from_hex(&raw).ok_or_else(|| D::Error::custom("invalid hex"))?;
+        OperatorKey::decode_cfg(bytes.as_slice(), &()).map_err(D::Error::custom)
+    }
+}
+
 /// Serde codec for the hex-encoded threshold [`Identity`].
 mod hex_genesis {
     use super::*;
@@ -814,6 +855,10 @@ mod tests {
             assert_eq!(
                 genesis.deployments[usize::from(index)].operator,
                 operator.clearing.public_key()
+            );
+            assert_eq!(
+                genesis.deployments[usize::from(index)].operator_ack,
+                operator_ack_key(u64::from(index))
             );
         }
 

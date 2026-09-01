@@ -2,11 +2,11 @@
 
 use super::store::{
     AcceptedBatch, CloseRejected, EpochData, ExternalPayoutEvidence, IncomingPayment,
-    MutationFailed, StagedDeposit, StagedWithdrawal, Staging, Store, StoreStatus,
+    MutationFailed, SendVerdict, StagedDeposit, StagedWithdrawal, Staging, Store, StoreStatus,
     StoredCloseOutcome, WithdrawalEvidence,
 };
 #[cfg(test)]
-use super::store::{AccountView, StoreSnapshot};
+use super::store::{AccountView, Endpoint, StoreSnapshot};
 #[cfg(test)]
 use crate::protocol::{MAX_DESTINATION_BYTES, Wallet, wallets};
 use crate::{
@@ -16,10 +16,10 @@ use crate::{
         tx::{AdmitRequest, RegisterEpochRequest},
     },
     protocol::{
-        AccountCache, AccountIdentity, DepositEvent, EpochRegistration, INITIAL_BALANCE, Key,
-        Payment, PreparedEpoch, Protocol, SettlementResult, ensure_amount_withdrawal_horizon,
-        ensure_balance_intake_horizon, ensure_close_horizon, external_identity, identities,
-        openable_epoch_after, short_digest,
+        AccountCache, AccountIdentity, Ack, DepositEvent, Entry, EpochRegistration,
+        INITIAL_BALANCE, Key, PreparedEpoch, Protocol, SettlementResult,
+        ensure_amount_withdrawal_horizon, ensure_balance_intake_horizon, ensure_close_horizon,
+        external_identity, identities, openable_epoch_after, short_digest,
     },
     store::CommitUnknown,
 };
@@ -28,18 +28,22 @@ use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
 use commonware_clearing::bajillion::{
     boundary::{DepositBatch, DepositRecord, SignedWithdrawal, WithdrawalAction, WithdrawalBatch},
-    challenge::{HigherShardTipLookup, StateOpening},
-    commitment::VectorRoot,
-    credit::{ShardHead, ShardSet},
-    payment::{PaymentContext, SignedSend, TxId, verify_receipt_step},
+    challenge::{HigherEntryLookup, StateOpening, higher_entry_lookup},
+    commitment::{VectorKind, VectorRoot},
+    payment::{PaymentContext, SendAuthorization, VECTOR_ACK_AGGREGATE_NAMESPACE, VectorSendBody},
     state::{AccountRow, AccountState, Prefix, SettlementOutput, StateLeaf},
-    transition::{BatchId, ChallengeIndex, ExternalPayoutClaim, WithdrawalClaim},
+    transition::{
+        BatchId, ChallengeIndex, ExternalPayoutClaim, OperatorSignature, OperatorVariant,
+        WithdrawalClaim,
+    },
+    vector::{OutEntry, OutVector, TransposeEntry},
 };
+use commonware_codec::Encode as _;
 #[cfg(test)]
 use commonware_codec::EncodeSize as _;
 #[cfg(test)]
 use commonware_cryptography::Hasher;
-use commonware_cryptography::{Sha256, sha256::Digest};
+use commonware_cryptography::{Sha256, bls12381::primitives::ops::verify_message, sha256::Digest};
 #[cfg(test)]
 use std::num::NonZeroU64;
 #[cfg(test)]
@@ -77,18 +81,22 @@ pub(crate) struct PaymentHead {
 
 /// The operator's verdict on one submitted send.
 pub(crate) enum SendOutcome {
-    /// The send, or its exact replay, is committed with its receipts.
+    /// The send, or its exact replay, is committed with its acceptance.
     Accepted(AcceptedBatch),
     /// Corrective rejection: the send binds a payment context this operator has moved
-    /// past, so its exact bytes can never be accepted. The verdict carries the live
-    /// context and the payer's current cumulative debit endpoint as this operator sees
-    /// it, so the payer can re-sign the same intent locally instead of re-reading the
-    /// head. The claim is unauthenticated by design: a payer signs cumulative debit
-    /// endpoints, and two sends at one endpoint under different contexts can never both
-    /// debit, so adopting a false context only produces a send that never commits.
+    /// past, or an endpoint that does not extend the payer's accepted state, so its
+    /// exact bytes can never be accepted. The verdict carries the live context and the
+    /// payer's accepted endpoint as this operator sees it: its cumulative debit, its
+    /// epoch-local batch sequence, and its cumulative out vector, so the payer can
+    /// adopt, merge, re-sign, and retry locally instead of re-reading the head. The
+    /// claim is unauthenticated by design: a payer signs cumulative debit endpoints,
+    /// and two sends at one endpoint under different contexts can never both debit, so
+    /// adopting a false endpoint only produces a send that never commits.
     Stale {
         context: PaymentContext<Key, Digest>,
         cumulative_debit: u64,
+        seq: u64,
+        entries: Vec<OutEntry<Key>>,
     },
 }
 
@@ -108,13 +116,14 @@ pub(crate) struct WithdrawalOpening {
     pub(crate) opening: StateOpening<Key, Digest>,
 }
 
-/// Committed-side receive-shard evidence for one receiver, reconstructed from retained
-/// epoch data. A receiver resolves the lookup against `change_root` to read the close's
-/// public credit tip for its shard, then challenges when a held receipt exceeds it.
-pub(crate) struct CommittedShardTip {
+/// Committed-side terminal-entry evidence for one (payer, recipient) edge, reconstructed
+/// from retained epoch data. A receiver resolves the lookup against `change_root` to read
+/// the close's public terminal entry for the edge, then challenges when a held receipt
+/// exceeds it.
+pub(crate) struct CommittedEntry {
     pub(crate) batch_id: BatchId<Digest>,
     pub(crate) change_root: VectorRoot<Digest>,
-    pub(crate) lookup: HigherShardTipLookup<Key, Digest>,
+    pub(crate) lookup: HigherEntryLookup<Key, Digest>,
 }
 
 pub(crate) struct CloseFinished {
@@ -187,20 +196,21 @@ impl Operator {
     }
 
     /// Opens the operator over its follower node's close `pipeline`, signing
-    /// as `clearing`: the deployment this operator runs derives from that
-    /// clearing identity.
+    /// as `clearing` with `ack` as its aggregable-acknowledgment BLS key: the
+    /// deployment this operator runs derives from that clearing identity.
     pub(crate) fn open_remote(
         path: &Path,
         workers: NonZeroUsize,
         pipeline: Pipeline,
         clearing: commonware_cryptography_curve25519::signing::SigningKey,
+        ack: commonware_cryptography::bls12381::primitives::group::Private,
     ) -> Result<Self> {
         let identities = identities();
         let store = Store::open(path, &identities)?;
         Self::from_store(
             store,
             identities,
-            Protocol::with_signer(workers, clearing)?,
+            Protocol::with_signer(workers, clearing, ack)?,
             Some(pipeline),
         )
     }
@@ -308,30 +318,40 @@ impl Operator {
     ) -> Result<AcceptedBatch> {
         self.ensure_operating()?;
         ensure!(amount > 0, "payment amount must be positive");
-        let payer = &self.wallets[payer % self.wallets.len()];
+        let payer = payer % self.wallets.len();
         let receiver_index = receiver % self.receiver_count();
         let receiver = if receiver_index == self.wallets.len() {
             self.external.key.clone()
         } else {
             self.wallets[receiver_index].public_key()
         };
-        let head = self.payment_head(&payer.public_key())?;
+        let head = self.payment_head(&self.wallets[payer].public_key())?;
         ensure!(head.state.balance > 0, "selected payer has no balance");
-        let send = SignedSend::sign_next(
-            &head.context,
-            payer.signer(),
-            receiver,
-            amount,
-            head.state.cumulative_debit,
-        )
-        .context("sign payment request")?;
-        match self.accept_send(send)? {
+        let (authorization, entries) = self.sign_send(payer, &[(receiver, amount)])?;
+        match self.accept_send(authorization, entries)? {
             SendOutcome::Accepted(accepted) => Ok(accepted),
 
-            // Mutations are serialized on `&mut self`, so the context cannot move
-            // between the head read above and this acceptance.
-            SendOutcome::Stale { .. } => unreachable!("the live context moved under one borrow"),
+            // Mutations are serialized on `&mut self`, so the endpoint cannot move
+            // between the signing above and this acceptance.
+            SendOutcome::Stale { .. } => unreachable!("the live endpoint moved under one borrow"),
         }
+    }
+
+    /// Signs `deltas` from wallet `payer` at its live accepted endpoint.
+    #[cfg(test)]
+    pub(crate) fn sign_send(
+        &self,
+        payer: usize,
+        deltas: &[(Key, u64)],
+    ) -> Result<(SendAuthorization<Key, Digest>, Vec<Entry>)> {
+        let wallet = &self.wallets[payer % self.wallets.len()];
+        let endpoint = self.store.payer_endpoint(&wallet.public_key())?;
+        sign_send_at(
+            self.registration.context.payment(),
+            wallet,
+            &endpoint,
+            deltas,
+        )
     }
 
     pub(crate) fn payment_head(&self, account: &Key) -> Result<PaymentHead> {
@@ -357,7 +377,8 @@ impl Operator {
         })
     }
 
-    /// Reads the committed batch for one send, a plain durable lookup by transaction id.
+    /// Reads the committed batch for one authorization, a plain durable lookup by its
+    /// signed endpoint.
     ///
     /// This is an optional receipts fetch for a wallet that already decided commitment from
     /// a finalized settlement root. It carries no verdict, so it stays readable across the
@@ -365,19 +386,20 @@ impl Operator {
     /// refuses to read past a storage fault, which is fatal until the operator restarts.
     pub(crate) fn accepted_batch(
         &self,
-        send: &SignedSend<Key, Digest>,
+        authorization: &SendAuthorization<Key, Digest>,
+        entries: &[Entry],
     ) -> Result<Option<AcceptedBatch>> {
         ensure!(
             self.store_fault.is_none(),
             "a storage fault blocks committed-batch reads until the operator restarts"
         );
-        self.store.accepted_batch(send)
+        self.store.accepted_batch(authorization, entries)
     }
 
-    /// Serves accepted linked pairs crediting `receiver` after the caller's durable cursor.
+    /// Serves accepted entry receipts crediting `receiver` after the caller's durable cursor.
     ///
-    /// This is a plain durable read of committed payment rows, so it stays readable across the
-    /// operating fence and refuses only past a storage fault.
+    /// This is a plain durable read of committed serving-log rows, so it stays readable across
+    /// the operating fence and refuses only past a storage fault.
     pub(crate) fn incoming_payments(
         &self,
         receiver: &Key,
@@ -388,104 +410,129 @@ impl Operator {
         self.store.incoming_payments(receiver, after, limit)
     }
 
-    /// Reconstructs one receiver's committed receive-shard evidence for a retained epoch.
+    /// Reconstructs the committed public terminal entry for one (payer, recipient) edge of
+    /// a retained epoch.
     ///
-    /// The close is rebuilt from the retained payment log with the same lookup constructor the
-    /// operator uses for withdrawal openings, so the served [`HigherShardTipLookup`] opens
-    /// against the reconstructed close's own change root. Retention is honest: once a finalized
-    /// epoch's account-state versions are pruned it may no longer reconstruct, which a receiver
-    /// treats as an availability signal and retries.
-    pub(crate) fn committed_shard_tip(
+    /// The close is rebuilt from the retained acknowledgment log with the same lookup
+    /// constructor the challenge tests use, so the served [`HigherEntryLookup`] opens
+    /// against the reconstructed close's own change root. Retention is honest: once a
+    /// finalized epoch's account-state versions are pruned it may no longer reconstruct,
+    /// which a receiver treats as an availability signal and retries.
+    pub(crate) fn committed_entry(
         &self,
-        receiver: &Key,
-        shard: u64,
+        payer: &Key,
+        recipient: &Key,
         epoch: u64,
-    ) -> Result<CommittedShardTip> {
+    ) -> Result<CommittedEntry> {
         self.ensure_store_usable()?;
         let data = self.store.load_at(epoch)?;
         let registration = registration_for(&self.protocol, &data)?;
         let prepared = prepare_epoch(&self.protocol, data, registration)
-            .context("reconstruct committed close for shard-tip evidence")?;
+            .context("reconstruct committed close for entry evidence")?;
         let close = prepared.close();
         let index = ChallengeIndex::new::<Sha256>(prepared.close_context(), close)
-            .context("index committed close for shard-tip evidence")?;
+            .context("index committed close for entry evidence")?;
 
-        // A receiver that received credit has a changed row and terminal shard set. An absent
-        // receiver has neither, and the lookup constructor requires the matching pairing.
-        let shards = close
+        // A changed payer has a row and an aligned out vector (empty for a credit-only
+        // row). An absent payer has neither, and the lookup constructor requires the
+        // matching pairing.
+        let vector = close
             .rows
-            .iter()
-            .position(|row| &row.account == receiver)
-            .map(|position| &close.shard_sets[position]);
-        let lookup = index
-            .higher_shard_tip_lookup::<Sha256>(receiver, shards, shard)
-            .context("compose committed shard-tip lookup")?;
-        Ok(CommittedShardTip {
+            .binary_search_by(|row| row.account.cmp(payer))
+            .ok()
+            .map(|position| &close.out_vectors[position]);
+        let lookup = higher_entry_lookup::<Sha256, _, _>(&index, payer, vector, recipient)
+            .context("compose committed entry lookup")?;
+        Ok(CommittedEntry {
             batch_id: close.header.batch_id::<Sha256>(),
             change_root: close.roots.change,
             lookup,
         })
     }
 
-    pub(crate) fn accept_send(&mut self, send: SignedSend<Key, Digest>) -> Result<SendOutcome> {
+    pub(crate) fn accept_send(
+        &mut self,
+        authorization: SendAuthorization<Key, Digest>,
+        entries: Vec<Entry>,
+    ) -> Result<SendOutcome> {
         self.ensure_operating()?;
-        self.validate_receivers(&send)?;
+        self.validate_recipients(&entries)?;
 
         // A replay lookup is the only pre-mutation probe: the store transaction fully
-        // validates a new send before any mutation, so validating here too would repeat
+        // validates a new batch before any mutation, so validating here too would repeat
         // the same signature checks on every accepted payment.
-        if let Some(accepted) = self.store.accepted_batch(&send)? {
+        if let Some(accepted) = self.store.accepted_batch(&authorization, &entries)? {
             return Ok(SendOutcome::Accepted(accepted));
         }
 
         // A send bound to a context this operator moved past can never be accepted, so
         // it earns the corrective rejection instead of an opaque error: the live context
-        // and the payer's endpoint let an optimistic payer re-sign the same intent from
-        // its local state instead of re-reading the head.
-        let context = self.registration.context.payment();
-        if send.body().epoch() != context.epoch() || send.body().anchor() != context.anchor() {
-            let payer = self
-                .store
-                .current_account(send.body().payer())?
-                .context("payer is not in the current live state")?;
-            ensure!(
-                payer.current.active,
-                "payer is not in the current live state"
-            );
+        // and the payer's endpoint let an optimistic payer merge, re-sign, and retry
+        // from its local state instead of re-reading the head.
+        let context = self.registration.context.payment().clone();
+        let body = authorization.body();
+        let rebound = VectorSendBody::new(
+            &context,
+            body.payer().clone(),
+            body.seq(),
+            body.cumulative_debit(),
+            body.send_root(),
+        );
+        if rebound != *body {
+            let endpoint = self.store.payer_endpoint(body.payer())?;
             return Ok(SendOutcome::Stale {
-                context: context.clone(),
-                cumulative_debit: payer.current.cumulative_debit,
+                context,
+                cumulative_debit: endpoint.cumulative_debit,
+                seq: endpoint.seq,
+                entries: endpoint.entries,
             });
         }
         self.ensure_balance_intake_horizon()?;
         let result = self.store.accept_send(
             self.registration.context.payment(),
-            self.protocol.operator(),
-            send,
-            0,
+            &self.protocol,
+            authorization,
+            &entries,
         );
-        self.guard_store(result).map(SendOutcome::Accepted)
+        match self.guard_store(result)? {
+            SendVerdict::Accepted(accepted) => Ok(SendOutcome::Accepted(*accepted)),
+            SendVerdict::Stale(endpoint) => Ok(SendOutcome::Stale {
+                context,
+                cumulative_debit: endpoint.cumulative_debit,
+                seq: endpoint.seq,
+                entries: endpoint.entries,
+            }),
+        }
     }
 
     /// Reports whether accepting this send must first register the epoch with settlement.
     ///
     /// This probe keeps the full validation of a new live-context send: registering an
     /// epoch starts settlement's liveness clock, so only a payer-authorized send may
-    /// trigger it. A stale-context send short-circuits to `false` instead, because
-    /// acceptance answers it with the corrective rejection and admits nothing.
+    /// trigger it. A stale send short-circuits to `false` instead, because acceptance
+    /// answers it with the corrective rejection and admits nothing.
     pub(crate) fn send_requires_epoch_registration(
         &self,
-        send: &SignedSend<Key, Digest>,
+        authorization: &SendAuthorization<Key, Digest>,
+        entries: &[Entry],
     ) -> Result<bool> {
         self.ensure_operating()?;
-        self.validate_receivers(send)?;
+        self.validate_recipients(entries)?;
         let context = self.registration.context.payment();
-        if send.body().epoch() != context.epoch() || send.body().anchor() != context.anchor() {
+        let body = authorization.body();
+        let rebound = VectorSendBody::new(
+            context,
+            body.payer().clone(),
+            body.seq(),
+            body.cumulative_debit(),
+            body.send_root(),
+        );
+        if rebound != *body {
             return Ok(false);
         }
-        let required = self
-            .store
-            .payment_requires_epoch_registration(context, send, 0)?;
+        let required =
+            self.store
+                .payment_requires_epoch_registration(context, authorization, entries)?;
         if required {
             self.ensure_balance_intake_horizon()?;
         }
@@ -1027,15 +1074,14 @@ impl Operator {
         ensure_close_horizon(self.registration.context.payment().epoch())
     }
 
-    fn validate_receivers(&self, send: &SignedSend<Key, Digest>) -> Result<()> {
-        for entry in send.body().entries() {
-            let receiver = entry.recipient();
+    fn validate_recipients(&self, entries: &[Entry]) -> Result<()> {
+        for entry in entries {
             ensure!(
-                receiver == &self.external.key
+                entry.recipient == self.external.key
                     || self
                         .identities
                         .iter()
-                        .any(|identity| &identity.key == receiver),
+                        .any(|identity| identity.key == entry.recipient),
                 "payment receiver is neither a registered account nor the configured external receiver"
             );
         }
@@ -1547,8 +1593,67 @@ struct AccountActivity {
 struct EpochAssembly {
     predecessor: Vec<StateLeaf<Key>>,
     rows: Vec<AccountRow<Key, Digest>>,
-    shard_sets: Vec<ShardSet<Key, Digest>>,
+    /// Out vectors aligned one-for-one with `rows`.
+    vectors: Vec<OutVector<Key>>,
+    /// Aggregable operator countersignatures aligned one-for-one with `rows`.
+    signatures: Vec<Option<OperatorSignature>>,
+    /// The global recipient-major transpose.
+    transpose: Vec<TransposeEntry<Key>>,
     successor: Vec<StateLeaf<Key>>,
+}
+
+/// Signs `deltas` from `wallet` against `endpoint`, merging them into its cumulative
+/// out vector under `context`.
+#[cfg(test)]
+pub(crate) fn sign_send_at(
+    context: &PaymentContext<Key, Digest>,
+    wallet: &Wallet,
+    endpoint: &Endpoint,
+    deltas: &[(Key, u64)],
+) -> Result<(SendAuthorization<Key, Digest>, Vec<Entry>)> {
+    let mut merged = endpoint.entries.clone();
+    let mut entries = Vec::with_capacity(deltas.len());
+    let mut total = 0_u64;
+    for (recipient, amount) in deltas.iter().cloned() {
+        total = total.checked_add(amount).context("delta total overflow")?;
+        match merged.binary_search_by(|edge| edge.recipient.cmp(&recipient)) {
+            Ok(position) => {
+                merged[position].cumulative = merged[position]
+                    .cumulative
+                    .checked_add(amount)
+                    .context("edge cumulative overflow")?;
+                merged[position].count = merged[position]
+                    .count
+                    .checked_add(1)
+                    .context("edge count overflow")?;
+            }
+            Err(position) => merged.insert(
+                position,
+                OutEntry {
+                    recipient: recipient.clone(),
+                    cumulative: amount,
+                    count: 1,
+                },
+            ),
+        }
+        entries.push(Entry { recipient, amount });
+    }
+    entries.sort_unstable_by(|left, right| left.recipient.cmp(&right.recipient));
+    let vector = OutVector::new(context.epoch(), wallet.public_key(), merged)
+        .context("assemble signed out vector")?;
+    let body = VectorSendBody::new(
+        context,
+        wallet.public_key(),
+        endpoint.seq.checked_add(1).context("sequence overflow")?,
+        endpoint
+            .cumulative_debit
+            .checked_add(total)
+            .context("endpoint overflow")?,
+        vector
+            .root::<Sha256, Digest>()
+            .context("commit signed out vector")?,
+    );
+    Ok((SendAuthorization::sign(body, wallet.signer()), entries))
 }
 
 fn close_tail(predecessor: u64, deposit: u64, credit: u64, debit: u64) -> Result<u64> {
@@ -1565,7 +1670,7 @@ fn prepare_epoch(
     registration: EpochRegistration,
 ) -> Result<PreparedEpoch> {
     ensure!(
-        !data.payments.is_empty() || !data.deposits.is_empty() || !data.withdrawals.is_empty(),
+        !data.acks.is_empty() || !data.deposits.is_empty() || !data.withdrawals.is_empty(),
         "there are no payments, deposits, or withdrawals to close"
     );
     let assembled = assemble_epoch(protocol, &data, &registration)?;
@@ -1579,7 +1684,9 @@ fn prepare_epoch(
         events,
         assembled.predecessor,
         assembled.rows,
-        assembled.shard_sets,
+        assembled.vectors,
+        assembled.signatures,
+        assembled.transpose,
         assembled.successor,
     )
 }
@@ -1604,6 +1711,7 @@ fn assemble_epoch(
         data.epoch == registration.context.payment().epoch(),
         "registration does not match SQLite epoch"
     );
+    let context = registration.context.payment();
     let accounts = data
         .accounts
         .iter()
@@ -1618,147 +1726,180 @@ fn assemble_epoch(
         stored_withdrawals.len() == data.withdrawals.len(),
         "SQLite contains duplicate account withdrawals"
     );
-    // Replay signed endpoints in canonical database order. These checks bind every mutable cache
-    // field back to the immutable payment log before any recovered operator action is allowed.
-    let mut activity = BTreeMap::<Key, AccountActivity>::new();
-    let mut payer_endpoints = accounts
-        .iter()
-        .map(|(key, account)| (key.clone(), account.predecessor.cumulative_debit))
-        .collect::<BTreeMap<_, _>>();
-    let mut payer_batches = BTreeMap::<Key, (TxId<Digest>, SignedSend<Key, Digest>)>::new();
-    let mut receipt_endpoints = BTreeMap::<(Key, u64), (u64, u64)>::new();
-    let mut outgoing = BTreeMap::<Key, Payment>::new();
-    let mut heads = BTreeMap::<Key, BTreeMap<u64, Payment>>::new();
 
-    for stored in &data.payments {
-        let payment = &stored.payment;
-        let payer = payment.payer().clone();
-
-        // Rows of one batched send carry byte-identical copies of one send. The batch's
-        // first row verifies that send and binds the stored transaction id, so a later row
-        // proves only that it carries the same send, that its receipt is operator signed,
-        // and that the receipt links to one exact entry of that verified send.
-        let head_tx_id = match payer_batches
+    // Replay the acknowledgment chain in canonical database order: contiguous epoch-local
+    // sequences per payer, a strictly advancing lifetime debit endpoint, and both
+    // countersignatures on every accepted body. These checks bind every mutable cache
+    // field back to the immutable acknowledgment log before any recovered operator action
+    // is allowed.
+    let mut terminals = BTreeMap::<Key, (Ack, OperatorSignature)>::new();
+    let mut endpoints = BTreeMap::<Key, (u64, u64)>::new();
+    let mut batches = BTreeMap::<(Key, u64), (VectorRoot<Digest>, u64)>::new();
+    for stored in &data.acks {
+        let body = stored.ack.body();
+        let payer = body.payer().clone();
+        let account = accounts
             .get(&payer)
-            .filter(|(tx_id, _)| tx_id.into_digest() == stored.tx_id)
-        {
-            Some((batch_tx_id, batch_send)) => {
-                ensure!(
-                    payment.send() == batch_send,
-                    "stored batch entry does not carry its verified send"
-                );
-                payment
-                    .receipt()
-                    .verify(registration.context.payment())
-                    .with_context(|| format!("verify stored payment {}", stored.sequence))?;
-                ensure!(
-                    payment.receipt().links(batch_send.body(), batch_tx_id),
-                    "stored batch entry is not linked to its send"
-                );
-                None
-            }
-            None => {
-                let tx_id = payment.send().tx_id::<Sha256>();
-                ensure!(
-                    stored.tx_id == tx_id.into_digest(),
-                    "stored transaction id does not match its payment"
-                );
-                payment
-                    .verify_linked_with_strategy::<Sha256>(
-                        registration.context.payment(),
-                        protocol.strategy(),
-                    )
-                    .with_context(|| format!("verify stored payment {}", stored.sequence))?;
-                Some(tx_id)
-            }
-        };
-        let receiver = payment.recipient().clone();
-        let payer_account = accounts
-            .get(&payer)
-            .context("stored payment payer is not registered")?;
-        ensure!(
-            payer_account.name == stored.payer_name,
-            "stored payer label does not match its key"
-        );
-        let receiver_account = accounts.get(&receiver);
-        ensure!(
-            stored.external == receiver_account.is_none(),
-            "stored receiver classification is inconsistent"
-        );
-        if let Some(account) = receiver_account {
-            ensure!(
-                account.name == stored.receiver_name,
-                "stored receiver label does not match its key"
-            );
-        }
-
-        let previous_debit = payer_endpoints
+            .context("stored acknowledgment payer is not registered")?;
+        stored
+            .ack
+            .verify(context)
+            .context("verify stored acknowledgment")?;
+        verify_message::<OperatorVariant>(
+            protocol.operator_ack_key(),
+            VECTOR_ACK_AGGREGATE_NAMESPACE,
+            body.encode().as_ref(),
+            &stored.aggregate,
+        )
+        .map_err(|_| anyhow::anyhow!("stored aggregate countersignature is invalid"))?;
+        let (prior_seq, prior_debit) = endpoints
             .get(&payer)
             .copied()
-            .context("payer endpoint is missing")?;
-        if let Some(tx_id) = head_tx_id {
-            payment
-                .send()
-                .verify_next(registration.context.payment(), previous_debit)
-                .context("stored payer endpoint is not consecutive")?;
-            payer_endpoints.insert(payer.clone(), payment.send().body().cumulative_debit());
-            payer_batches.insert(payer.clone(), (tx_id, payment.send().clone()));
-        } else {
-            // Later entries of one batched send share the endpoint its first entry advanced.
-            ensure!(
-                payment.send().body().cumulative_debit() == previous_debit,
-                "stored batch entry endpoint is inconsistent"
-            );
-        }
-
-        let shard = payment.receipt().body().shard();
-        let endpoint = receipt_endpoints
-            .entry((receiver.clone(), shard))
-            .or_insert((0, 0));
-        verify_receipt_step(endpoint.0, endpoint.1, payment)
-            .context("stored receipt endpoint is not consecutive")?;
-        *endpoint = (
-            payment.receipt().body().cumulative_shard_credit(),
-            payment.receipt().body().index(),
+            .unwrap_or((0, account.predecessor.cumulative_debit));
+        let expected_seq = prior_seq
+            .checked_add(1)
+            .context("batch sequence overflow")?;
+        ensure!(
+            body.seq() == expected_seq,
+            "stored acknowledgment sequence is not consecutive"
         );
+        let delta = body
+            .cumulative_debit()
+            .checked_sub(prior_debit)
+            .filter(|delta| *delta > 0)
+            .context("stored acknowledgment endpoint did not advance")?;
+        batches.insert((payer.clone(), body.seq()), (body.send_root(), delta));
+        endpoints.insert(payer.clone(), (body.seq(), body.cumulative_debit()));
+        terminals.insert(payer, (stored.ack.clone(), stored.aggregate));
+    }
 
+    // Replay the serving log against the acknowledged batches: every entry advances its
+    // edge by exactly its delta, opens under its batch's acknowledged root, and each
+    // batch's deltas sum to its endpoint advance.
+    let mut edges = BTreeMap::<(Key, Key), (u64, u64)>::new();
+    let mut credited = BTreeMap::<(Key, u64), u64>::new();
+    let mut cursor = 0_u64;
+    for stored in &data.entries {
+        ensure!(
+            stored.sequence > cursor,
+            "stored entry cursor is not increasing"
+        );
+        cursor = stored.sequence;
+        let key = (stored.payer.clone(), stored.seq);
+        let (send_root, _) = batches
+            .get(&key)
+            .context("stored entry has no acknowledged batch")?;
+        ensure!(
+            stored.recipient != stored.payer,
+            "stored entry credits its own payer"
+        );
+        ensure!(
+            stored.external == !accounts.contains_key(&stored.recipient),
+            "stored receiver classification is inconsistent"
+        );
+        let edge = edges
+            .entry((stored.payer.clone(), stored.recipient.clone()))
+            .or_insert((0, 0));
+        ensure!(
+            stored.amount > 0
+                && Some(stored.cumulative) == edge.0.checked_add(stored.amount)
+                && Some(stored.count) == edge.1.checked_add(1),
+            "stored entry endpoint is not consecutive"
+        );
+        let entry = OutEntry {
+            recipient: stored.recipient.clone(),
+            cumulative: stored.cumulative,
+            count: stored.count,
+        };
+        stored
+            .opening
+            .verify::<Sha256>(VectorKind::OutEntry, send_root, entry.encode().as_ref())
+            .map_err(|_| anyhow::anyhow!("stored entry opening does not authenticate"))?;
+        *edge = (stored.cumulative, stored.count);
+        let sum = credited.entry(key).or_insert(0);
+        *sum = sum
+            .checked_add(stored.amount)
+            .context("batch credit overflow")?;
+    }
+    for (key, (_, delta)) in &batches {
+        ensure!(
+            credited.get(key) == Some(delta),
+            "stored batch entries do not sum to its endpoint advance"
+        );
+    }
+
+    // The edge table is a cache used on the online payment path. Exact comparison keeps a
+    // corrupt cache from acknowledging a vector the immutable serving log cannot justify.
+    ensure!(
+        data.edges.len() == edges.len(),
+        "stored edge count is inconsistent"
+    );
+    for (stored, ((payer, recipient), (cumulative, count))) in data.edges.iter().zip(&edges) {
+        ensure!(
+            &stored.payer == payer
+                && &stored.entry.recipient == recipient
+                && stored.entry.cumulative == *cumulative
+                && stored.entry.count == *count,
+            "stored edge endpoint is inconsistent"
+        );
+    }
+
+    // Collate per-account activity, per-payer outgoing vectors, and per-recipient
+    // transpose groups from the replayed edges. Payer-major iteration keeps every
+    // outgoing vector recipient-sorted and every incoming group payer-sorted.
+    let mut activity = BTreeMap::<Key, AccountActivity>::new();
+    let mut outgoing = BTreeMap::<Key, Vec<OutEntry<Key>>>::new();
+    let mut incoming = BTreeMap::<Key, Vec<TransposeEntry<Key>>>::new();
+    for ((payer, recipient), (cumulative, count)) in &edges {
         let payer_activity = activity.entry(payer.clone()).or_default();
         payer_activity.debit = payer_activity
             .debit
-            .checked_add(payment.amount())
+            .checked_add(*cumulative)
             .context("payer debit overflow")?;
-        let receiver_activity = activity.entry(receiver.clone()).or_default();
+        let receiver_activity = activity.entry(recipient.clone()).or_default();
         receiver_activity.credit = receiver_activity
             .credit
-            .checked_add(payment.amount())
+            .checked_add(*cumulative)
             .context("receiver credit overflow")?;
         receiver_activity.receipts = receiver_activity
             .receipts
-            .checked_add(1)
+            .checked_add(*count)
             .context("receiver receipt count overflow")?;
-        outgoing.insert(payer, payment.clone());
-        heads
-            .entry(receiver)
+        outgoing.entry(payer.clone()).or_default().push(OutEntry {
+            recipient: recipient.clone(),
+            cumulative: *cumulative,
+            count: *count,
+        });
+        incoming
+            .entry(recipient.clone())
             .or_default()
-            .insert(shard, payment.clone());
+            .push(TransposeEntry {
+                recipient: recipient.clone(),
+                payer: payer.clone(),
+                cumulative: *cumulative,
+                count: *count,
+            });
     }
 
-    // The receive-shard table is a cache used on the online payment path. Exact comparison keeps a
-    // corrupt cache from issuing a receipt that the immutable payment log cannot justify.
-    ensure!(
-        data.receive_shards.len() == receipt_endpoints.len(),
-        "stored receive-shard endpoint count is inconsistent"
-    );
-    for (stored, ((receiver, shard), (credit, index))) in
-        data.receive_shards.iter().zip(&receipt_endpoints)
-    {
+    // Every terminal endpoint must equal its replayed edge total, and every debiting
+    // account must hold a terminal acknowledgment.
+    for (payer, (_, debit)) in &endpoints {
+        let advance = activity.get(payer).map_or(0, |totals| totals.debit);
+        let account = accounts
+            .get(payer)
+            .context("stored acknowledgment payer is not registered")?;
         ensure!(
-            &stored.receiver == receiver
-                && stored.shard == *shard
-                && stored.cumulative_credit == *credit
-                && stored.receipt_index == *index,
-            "stored receive-shard endpoint is inconsistent"
+            Some(*debit) == account.predecessor.cumulative_debit.checked_add(advance),
+            "stored acknowledgment endpoint differs from its edges"
         );
+    }
+    for (account, totals) in &activity {
+        if totals.debit > 0 {
+            ensure!(
+                endpoints.contains_key(account),
+                "stored edges have no acknowledged sender"
+            );
+        }
     }
 
     // Reconcile the materialized account table with the replayed payments and staged deposits.
@@ -1860,11 +2001,14 @@ fn assemble_epoch(
             .cloned(),
     );
 
-    // The same replay produces the canonical changed rows, shard heads, and cumulative prefixes
-    // consumed by root preparation and validator dealings.
+    // The same replay produces the canonical changed rows, aligned out vectors, aggregable
+    // countersignatures, transpose, and cumulative prefixes consumed by root preparation
+    // and validator dealings.
     let mut prefix = Prefix::default();
     let mut rows = Vec::with_capacity(changed.len());
-    let mut shard_sets = Vec::with_capacity(changed.len());
+    let mut vectors = Vec::with_capacity(changed.len());
+    let mut signatures = Vec::with_capacity(changed.len());
+    let mut transpose = Vec::new();
     for account in changed {
         let stored = accounts.get(&account).copied();
         let predecessor = stored.map_or(AccountState::default(), |stored| stored.predecessor);
@@ -1877,18 +2021,27 @@ fn assemble_epoch(
             },
             |stored| stored.current,
         );
-        let terminal_heads = heads
-            .remove(&account)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(shard, payment)| ShardHead::new(shard, payment))
-            .collect::<Vec<_>>();
-        let shards = if terminal_heads.is_empty() {
-            ShardSet::empty(data.epoch, account.clone())
-        } else {
-            ShardSet::new(data.epoch, account.clone(), terminal_heads)
-                .context("construct terminal receive shards")?
+        let out = outgoing.remove(&account).unwrap_or_default();
+        let (vector, outgoing_send, signature) = match terminals.get(&account) {
+            Some((ack, aggregate)) => {
+                let vector = OutVector::new(data.epoch, account.clone(), out)
+                    .context("assemble stored out vector")?;
+                let root = vector
+                    .root::<Sha256, Digest>()
+                    .context("commit stored out vector")?;
+                ensure!(
+                    root == ack.body().send_root(),
+                    "stored out vector does not match its acknowledged root"
+                );
+                let send = SendAuthorization::from_raw_unchecked(
+                    ack.body().clone(),
+                    ack.payer_signature().clone(),
+                );
+                (vector, Some(send), Some(*aggregate))
+            }
+            None => (OutVector::empty(data.epoch, account.clone()), None, None),
         };
+        let group = incoming.remove(&account).unwrap_or_default();
         let deposit = registration.deposits.amount_for(&account);
         let withdrawal = registration.withdrawals.request_for(&account);
         let withdrawal_amount = match withdrawal.map(|request| request.body().action()) {
@@ -1925,19 +2078,23 @@ fn assemble_epoch(
                 deposit,
                 withdrawal: withdrawal_amount,
                 withdrawal_count: u64::from(withdrawal.is_some()),
-                shard_count: u64::try_from(shards.heads().len())
-                    .context("shard count does not fit u64")?,
+                out_count: u64::try_from(vector.entries().len())
+                    .context("out-entry count does not fit u64")?,
+                in_count: u64::try_from(group.len())
+                    .context("transpose entry count does not fit u64")?,
             })
             .context("close prefix overflow")?;
         rows.push(AccountRow {
             account: account.clone(),
             predecessor,
             successor,
-            outgoing: outgoing.remove(&account),
+            outgoing: outgoing_send,
             output,
             prefix,
         });
-        shard_sets.push(shards);
+        vectors.push(vector);
+        signatures.push(signature);
+        transpose.extend(group);
     }
 
     let predecessor = data
@@ -1970,7 +2127,9 @@ fn assemble_epoch(
     Ok(EpochAssembly {
         predecessor,
         rows,
-        shard_sets,
+        vectors,
+        signatures,
+        transpose,
         successor,
     })
 }

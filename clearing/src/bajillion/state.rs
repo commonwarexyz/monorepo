@@ -2,14 +2,14 @@
 
 use crate::bajillion::{
     commitment::VectorRoot,
-    credit::{self, ShardSet},
-    payment::{Payment, SendBody},
+    payment::{SendAuthorization, VectorSendBody},
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_cryptography::{Digest, Hasher, PublicKey};
 
 const CHANGE_OUTGOING_NONE_HASH_NAMESPACE: &[u8] = b"_COMMONWARE_CLEARING_CHANGE_OUTGOING_NONE";
+const CHANGE_OUTGOING_HASH_NAMESPACE: &[u8] = b"_COMMONWARE_CLEARING_CHANGE_OUTGOING";
 const CHANGE_VALUE_HASH_NAMESPACE: &[u8] = b"_COMMONWARE_CLEARING_CHANGE_VALUE";
 
 /// Persistent state for one account row side.
@@ -104,8 +104,10 @@ pub struct Prefix {
     pub withdrawal: u64,
     /// Withdrawal records through this row.
     pub withdrawal_count: u64,
-    /// Terminal receive shards through this row.
-    pub shard_count: u64,
+    /// Outgoing vector entries through this row.
+    pub out_count: u64,
+    /// Transpose entries through this row.
+    pub in_count: u64,
 }
 
 impl Prefix {
@@ -118,7 +120,8 @@ impl Prefix {
             deposit: self.deposit.checked_add(delta.deposit)?,
             withdrawal: self.withdrawal.checked_add(delta.withdrawal)?,
             withdrawal_count: self.withdrawal_count.checked_add(delta.withdrawal_count)?,
-            shard_count: self.shard_count.checked_add(delta.shard_count)?,
+            out_count: self.out_count.checked_add(delta.out_count)?,
+            in_count: self.in_count.checked_add(delta.in_count)?,
         })
     }
 }
@@ -131,12 +134,13 @@ impl Write for Prefix {
         self.deposit.write(buf);
         self.withdrawal.write(buf);
         self.withdrawal_count.write(buf);
-        self.shard_count.write(buf);
+        self.out_count.write(buf);
+        self.in_count.write(buf);
     }
 }
 
 impl FixedSize for Prefix {
-    const SIZE: usize = u64::SIZE * 7;
+    const SIZE: usize = u64::SIZE * 8;
 }
 
 impl Read for Prefix {
@@ -150,7 +154,8 @@ impl Read for Prefix {
             deposit: u64::read(buf)?,
             withdrawal: u64::read(buf)?,
             withdrawal_count: u64::read(buf)?,
-            shard_count: u64::read(buf)?,
+            out_count: u64::read(buf)?,
+            in_count: u64::read(buf)?,
         })
     }
 }
@@ -218,8 +223,11 @@ pub struct AccountRow<P: PublicKey, D: Digest> {
     pub predecessor: AccountState,
     /// State committed by the successor-state root.
     pub successor: AccountState,
-    /// Terminal accepted outgoing payment, present exactly when debit advanced.
-    pub outgoing: Option<Payment<P, D>>,
+    /// Terminal payer-signed vector endpoint, present exactly when debit advanced.
+    ///
+    /// The operator's acceptance reaches the close as one aggregable countersignature per
+    /// proof slice rather than per row.
+    pub outgoing: Option<SendAuthorization<P, D>>,
     /// Claim classification validators recompute from the authenticated local effect.
     pub output: SettlementOutput,
     /// Running totals through this row.
@@ -231,7 +239,7 @@ impl<P, D> arbitrary::Arbitrary<'_> for AccountRow<P, D>
 where
     P: PublicKey + for<'a> arbitrary::Arbitrary<'a>,
     D: Digest + for<'a> arbitrary::Arbitrary<'a>,
-    Payment<P, D>: for<'a> arbitrary::Arbitrary<'a>,
+    SendAuthorization<P, D>: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
@@ -297,7 +305,7 @@ impl<P: PublicKey, D: Digest> Read for AccountRow<P, D> {
             account: P::read(buf)?,
             predecessor: AccountState::read(buf)?,
             successor: AccountState::read(buf)?,
-            outgoing: Option::<Payment<P, D>>::read(buf)?,
+            outgoing: Option::<SendAuthorization<P, D>>::read(buf)?,
             output: SettlementOutput::read(buf)?,
             prefix: Prefix::read(buf)?,
         })
@@ -318,14 +326,15 @@ pub struct AccountChange<P: PublicKey, D: Digest> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ChangeValue<D: Digest> {
     core: ChangeValueCore<D>,
-    credit_tip_root: VectorRoot<D>,
+    send_root: VectorRoot<D>,
 }
 
-/// Change value fields that precede the per-account credit-tip root.
+/// Change value fields that precede the per-account outgoing-vector root.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ChangeValueCore<D: Digest> {
     output: SettlementOutput,
     terminal_debit: u64,
+    terminal_seq: u64,
     outgoing_digest: D,
 }
 
@@ -358,7 +367,7 @@ where
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
             core: u.arbitrary()?,
-            credit_tip_root: u.arbitrary()?,
+            send_root: u.arbitrary()?,
         })
     }
 }
@@ -372,33 +381,32 @@ where
         Ok(Self {
             output: u.arbitrary()?,
             terminal_debit: u.arbitrary()?,
+            terminal_seq: u.arbitrary()?,
             outgoing_digest: u.arbitrary()?,
         })
     }
 }
 
 impl<P: PublicKey, D: Digest> AccountChange<P, D> {
-    /// Derives the compact leaf from one row and its aligned full terminal-head corpus.
+    /// Derives the compact leaf from one row and its committed outgoing-vector root.
     pub fn from_row<H: Hasher<Digest = D>>(
         row: &AccountRow<P, D>,
-        shards: &ShardSet<P, D>,
-    ) -> Result<Self, credit::Error> {
-        if shards.recipient() != &row.account {
-            return Err(credit::Error::RecipientMismatch);
-        }
-        Ok(Self {
+        send_root: VectorRoot<D>,
+    ) -> Self {
+        Self {
             account: row.account.clone(),
             value: ChangeValue {
                 core: ChangeValueCore {
                     output: row.output,
                     terminal_debit: row.successor.cumulative_debit,
+                    terminal_seq: row.outgoing.as_ref().map_or(0, |send| send.body().seq()),
                     outgoing_digest: Self::derive_outgoing_digest::<H>(
-                        row.outgoing.as_ref().map(|payment| payment.send().body()),
+                        row.outgoing.as_ref().map(SendAuthorization::body),
                     ),
                 },
-                credit_tip_root: shards.root::<H>()?,
+                send_root,
             },
-        })
+        }
     }
 
     /// Returns the changed account.
@@ -417,11 +425,7 @@ impl<P: PublicKey, D: Digest> AccountChange<P, D> {
         self.value
     }
 
-    /// Projects the exact leaf committed by the change vector.
-    pub fn guard<H: Hasher<Digest = D>>(&self) -> ChangeGuard<P, D> {
-        ChangeGuard::from_value::<H>(self.account.clone(), &self.value)
-    }
-
+    /// Restores the projection from an already committed compact value.
     pub(crate) const fn from_value(account: P, value: ChangeValue<D>) -> Self {
         Self { account, value }
     }
@@ -431,55 +435,58 @@ impl<P: PublicKey, D: Digest> AccountChange<P, D> {
         self.value.core.terminal_debit
     }
 
-    /// Returns the compact per-account credit-tip root.
-    pub const fn credit_tip_root(&self) -> VectorRoot<D> {
-        self.value.credit_tip_root
+    /// Returns the committed terminal batch sequence number, zero when no debit advanced.
+    pub const fn terminal_seq(&self) -> u64 {
+        self.value.core.terminal_seq
     }
 
-    /// Returns whether `send` is the exact committed terminal outgoing authorization.
-    ///
-    /// The leaf pins the unsigned terminal send body through its transaction identifier. It
-    /// deliberately does not pin one acknowledging receipt: a batched send is acknowledged by
-    /// one receipt per entry, and any of them may accompany the committed evidence.
-    pub fn matches_outgoing<H: Hasher<Digest = D>>(&self, send: &SendBody<P, D>) -> bool {
-        self.value.core.outgoing_digest == Self::derive_outgoing_digest::<H>(Some(send))
+    /// Returns whether the leaf commits a terminal outgoing authorization.
+    pub fn has_outgoing<H: Hasher<Digest = D>>(&self) -> bool {
+        self.value.core.outgoing_digest != Self::derive_outgoing_digest::<H>(None)
     }
 
-    fn derive_outgoing_digest<H: Hasher<Digest = D>>(send: Option<&SendBody<P, D>>) -> D {
-        send.map_or_else(
+    /// Returns the compact per-account outgoing-vector root.
+    pub const fn send_root(&self) -> VectorRoot<D> {
+        self.value.send_root
+    }
+
+    /// Projects the exact leaf committed by the change vector.
+    pub fn guard<H: Hasher<Digest = D>>(&self) -> ChangeGuard<P, D> {
+        ChangeGuard::from_value::<H>(self.account.clone(), &self.value)
+    }
+
+    /// Returns whether `body` is the exact committed terminal outgoing authorization.
+    pub fn matches_outgoing<H: Hasher<Digest = D>>(&self, body: &VectorSendBody<P, D>) -> bool {
+        self.value.core.outgoing_digest == Self::derive_outgoing_digest::<H>(Some(body))
+    }
+
+    fn derive_outgoing_digest<H: Hasher<Digest = D>>(body: Option<&VectorSendBody<P, D>>) -> D {
+        body.map_or_else(
             || H::hash(&[CHANGE_OUTGOING_NONE_HASH_NAMESPACE]),
-            |send| send.tx_id::<H>().into_digest(),
+            |body| {
+                let encoded = body.encode();
+                H::hash(&[CHANGE_OUTGOING_HASH_NAMESPACE, encoded.as_ref()])
+            },
         )
-    }
-
-    /// Returns whether the row and terminal heads have this exact public projection.
-    pub fn matches_projection<H: Hasher<Digest = D>>(
-        &self,
-        row: &AccountRow<P, D>,
-        shards: &ShardSet<P, D>,
-    ) -> bool {
-        Self::from_row::<H>(row, shards).is_ok_and(|derived| self == &derived)
     }
 }
 
 impl<D: Digest> ChangeValue<D> {
-    /// Returns the fields that precede the credit-tip root, which a child proof reconstructs.
+    /// Returns the fields that precede the outgoing-vector root, which a child proof reconstructs.
     #[must_use]
     pub const fn core(&self) -> ChangeValueCore<D> {
         self.core
     }
 
-    /// Restores the exact compact value from its prefix fields and typed credit-tip root.
+    /// Restores the exact compact value from its prefix fields and typed vector root.
     #[must_use]
-    pub const fn from_core(core: ChangeValueCore<D>, credit_tip_root: VectorRoot<D>) -> Self {
-        Self {
-            core,
-            credit_tip_root,
-        }
+    pub const fn from_core(core: ChangeValueCore<D>, send_root: VectorRoot<D>) -> Self {
+        Self { core, send_root }
     }
 
-    pub(crate) const fn credit_tip_root(&self) -> VectorRoot<D> {
-        self.credit_tip_root
+    /// Returns the committed outgoing-vector root.
+    pub const fn send_root(&self) -> VectorRoot<D> {
+        self.send_root
     }
 }
 
@@ -501,7 +508,7 @@ impl<P: PublicKey, D: Digest> ChangeGuard<P, D> {
 impl<D: Digest> Write for ChangeValue<D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.core.write(buf);
-        self.credit_tip_root.write(buf);
+        self.send_root.write(buf);
     }
 }
 
@@ -517,7 +524,7 @@ impl<D: Digest> Read for ChangeValue<D> {
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self {
             core: ChangeValueCore::read(buf)?,
-            credit_tip_root: VectorRoot::read(buf)?,
+            send_root: VectorRoot::read(buf)?,
         })
     }
 }
@@ -526,13 +533,14 @@ impl<D: Digest> Write for ChangeValueCore<D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.output.write(buf);
         self.terminal_debit.write(buf);
+        self.terminal_seq.write(buf);
         self.outgoing_digest.write(buf);
     }
 }
 
 impl<D: Digest> EncodeSize for ChangeValueCore<D> {
     fn encode_size(&self) -> usize {
-        self.output.encode_size() + u64::SIZE + D::SIZE
+        self.output.encode_size() + u64::SIZE * 2 + D::SIZE
     }
 }
 
@@ -543,6 +551,7 @@ impl<D: Digest> Read for ChangeValueCore<D> {
         Ok(Self {
             output: SettlementOutput::read(buf)?,
             terminal_debit: u64::read(buf)?,
+            terminal_seq: u64::read(buf)?,
             outgoing_digest: D::read(buf)?,
         })
     }
@@ -626,7 +635,8 @@ mod tests {
             deposit: 4,
             withdrawal: 5,
             withdrawal_count: 6,
-            shard_count: 7,
+            out_count: 7,
+            in_count: 8,
         };
         assert_eq!(
             prefix.checked_extend(prefix),
@@ -637,7 +647,8 @@ mod tests {
                 deposit: 8,
                 withdrawal: 10,
                 withdrawal_count: 12,
-                shard_count: 14,
+                out_count: 14,
+                in_count: 16,
             })
         );
         assert!(
@@ -665,7 +676,9 @@ mod tests {
     #[test]
     fn change_leaf_binds_challenge_and_settlement_projection() {
         let account = SigningKey::from_seed(1).public_key();
-        let shards = ShardSet::empty(0, account.clone());
+        let send_root = crate::bajillion::commitment::empty_root::<Sha256>(
+            crate::bajillion::commitment::VectorKind::OutEntry,
+        );
         let row = AccountRow::<VerifyingKey, ShaDigest> {
             account: account.clone(),
             predecessor: AccountState {
@@ -686,20 +699,31 @@ mod tests {
                 ..Prefix::default()
             },
         };
-        let leaf = AccountChange::from_row::<Sha256>(&row, &shards).unwrap();
+        let leaf = AccountChange::from_row::<Sha256>(&row, send_root);
         assert_eq!(leaf.account(), &account);
         assert_eq!(leaf.output(), SettlementOutput::Withdrawal(6));
-        assert!(leaf.matches_projection::<Sha256>(&row, &shards));
+        assert_eq!(leaf.send_root(), send_root);
+        assert_eq!(leaf.terminal_seq(), 0);
+        assert!(!leaf.has_outgoing::<Sha256>());
 
         let mut changed_output = row.clone();
         changed_output.output = SettlementOutput::ExternalPayout(6);
-        assert!(!leaf.matches_projection::<Sha256>(&changed_output, &shards));
+        assert_ne!(
+            AccountChange::from_row::<Sha256>(&changed_output, send_root),
+            leaf
+        );
 
         let mut changed_row = row;
         changed_row.successor.balance = 5;
-        assert!(leaf.matches_projection::<Sha256>(&changed_row, &shards));
+        assert_eq!(
+            AccountChange::from_row::<Sha256>(&changed_row, send_root),
+            leaf
+        );
 
         changed_row.successor.cumulative_debit = 1;
-        assert!(!leaf.matches_projection::<Sha256>(&changed_row, &shards));
+        assert_ne!(
+            AccountChange::from_row::<Sha256>(&changed_row, send_root),
+            leaf
+        );
     }
 }

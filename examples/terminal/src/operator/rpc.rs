@@ -1,11 +1,11 @@
 //! Bounded operator RPC bodies and synchronous dispatch.
 
 use super::{
-    actor::{CloseEvent, CommittedShardTip, Operator, SendOutcome},
+    actor::{CloseEvent, CommittedEntry, Operator, SendOutcome},
     store::MAX_INCOMING_PAGE,
 };
 use crate::{
-    protocol::{Acceptance, Key, MAX_ACCOUNTS, MAX_DESTINATION_BYTES, Payment},
+    protocol::{Acceptance, Entry, Key, MAX_ACCOUNTS, MAX_DESTINATION_BYTES, MAX_ENTRIES, Receipt},
     rpc,
 };
 use anyhow::{Context, Result, bail};
@@ -14,11 +14,12 @@ use bytes::{Buf, BufMut, Bytes};
 use commonware_clearing::bajillion::boundary::WithdrawalAction;
 use commonware_clearing::bajillion::{
     boundary::SignedWithdrawal,
-    challenge::{HigherShardTipLookup, StateOpening},
+    challenge::{HigherEntryLookup, StateOpening},
     commitment::VectorRoot,
-    payment::{PaymentContext, SignedSend},
+    payment::{PaymentContext, SendAuthorization},
     state::AccountState,
     transition::{BatchId, ExternalPayoutClaim, WithdrawalClaim},
+    vector::OutEntry,
 };
 use commonware_codec::{
     DecodeExt as _, Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
@@ -42,7 +43,7 @@ pub(crate) const METHOD_EXTERNAL_PAYOUT_EVIDENCE: u8 = 10;
 pub(crate) const METHOD_ACKNOWLEDGE_EXTERNAL_PAYOUT: u8 = 11;
 pub(crate) const METHOD_ACCEPTED_BATCH: u8 = 12;
 pub(crate) const METHOD_INCOMING_PAYMENTS: u8 = 13;
-pub(crate) const METHOD_COMMITTED_SHARD_TIP: u8 = 14;
+pub(crate) const METHOD_COMMITTED_ENTRY: u8 = 14;
 
 const MAX_CLOSE_HEADER_BYTES: usize = 64;
 const MAX_CLOSE_ERROR_BYTES: usize = 1_024;
@@ -167,20 +168,24 @@ key_request!(WithdrawalOpeningRequest);
 key_request!(WithdrawalEvidenceRequest);
 key_request!(ExternalPayoutEvidenceRequest);
 
+/// One submitted batch: the payer-signed vector endpoint and its per-batch delta entries,
+/// strictly recipient-sorted and unique.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct AcceptSendRequest {
-    pub(crate) send: SignedSend<Key, Digest>,
+    pub(crate) authorization: SendAuthorization<Key, Digest>,
+    pub(crate) entries: Vec<Entry>,
 }
 
 impl Write for AcceptSendRequest {
     fn write(&self, buf: &mut impl BufMut) {
-        self.send.write(buf);
+        self.authorization.write(buf);
+        self.entries.write(buf);
     }
 }
 
 impl EncodeSize for AcceptSendRequest {
     fn encode_size(&self) -> usize {
-        self.send.encode_size()
+        self.authorization.encode_size() + self.entries.encode_size()
     }
 }
 
@@ -189,7 +194,8 @@ impl Read for AcceptSendRequest {
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self {
-            send: SignedSend::read(buf)?,
+            authorization: SendAuthorization::read(buf)?,
+            entries: Vec::<Entry>::read_cfg(buf, &(RangeCfg::new(1..=MAX_ENTRIES), ()))?,
         })
     }
 }
@@ -373,18 +379,22 @@ impl Read for AcceptedBatchResponse {
 /// The operator's typed reply to one submitted send.
 ///
 /// The corrective variant keeps head reads off the payment hot path: a payer signing
-/// from its local state learns the operator's live context from the rejection itself,
-/// re-signs the same intent at its own endpoint, and retries once.
+/// from its local state learns the operator's live context and its accepted endpoint
+/// from the rejection itself, adopts them, re-signs the same intent, and retries once.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum AcceptSendResponse {
-    /// The send, or its exact replay, is committed with its receipts.
+    /// The send, or its exact replay, is committed with its acceptance.
     Accepted(AcceptedBatchResponse),
-    /// Corrective rejection: the send binds a context the operator has moved past. It
-    /// carries the operator's live context and the payer's current cumulative debit
-    /// endpoint as the operator sees it.
+    /// Corrective rejection: the send binds a context the operator has moved past, or an
+    /// endpoint that does not extend the payer's accepted state. It carries the
+    /// operator's live context and the payer's accepted endpoint as the operator sees
+    /// it: the cumulative debit, the batch sequence (zero when none), and the payer's
+    /// cumulative out vector, so the wallet can merge and recompute its vector root.
     Stale {
         context: PaymentContext<Key, Digest>,
         cumulative_debit: u64,
+        seq: u64,
+        entries: Vec<OutEntry<Key>>,
     },
 }
 
@@ -395,9 +405,13 @@ impl From<SendOutcome> for AcceptSendResponse {
             SendOutcome::Stale {
                 context,
                 cumulative_debit,
+                seq,
+                entries,
             } => Self::Stale {
                 context,
                 cumulative_debit,
+                seq,
+                entries,
             },
         }
     }
@@ -413,10 +427,14 @@ impl Write for AcceptSendResponse {
             Self::Stale {
                 context,
                 cumulative_debit,
+                seq,
+                entries,
             } => {
                 1u8.write(buf);
                 context.write(buf);
                 cumulative_debit.write(buf);
+                seq.write(buf);
+                entries.write(buf);
             }
         }
     }
@@ -429,7 +447,14 @@ impl EncodeSize for AcceptSendResponse {
             Self::Stale {
                 context,
                 cumulative_debit,
-            } => context.encode_size() + cumulative_debit.encode_size(),
+                seq,
+                entries,
+            } => {
+                context.encode_size()
+                    + cumulative_debit.encode_size()
+                    + seq.encode_size()
+                    + entries.encode_size()
+            }
         }
     }
 }
@@ -443,6 +468,11 @@ impl Read for AcceptSendResponse {
             1 => Ok(Self::Stale {
                 context: PaymentContext::read(buf)?,
                 cumulative_debit: u64::read(buf)?,
+                seq: u64::read(buf)?,
+                entries: Vec::<OutEntry<Key>>::read_cfg(
+                    buf,
+                    &(RangeCfg::new(0..=MAX_ENTRIES), ()),
+                )?,
             }),
             tag => Err(CodecError::InvalidEnum(tag)),
         }
@@ -481,25 +511,26 @@ impl Read for IncomingPaymentsRequest {
     }
 }
 
-/// One accepted linked pair crediting the receiver, with the epoch that accepted it.
+/// One accepted entry receipt crediting the receiver, with its acceptance-order cursor.
+///
+/// The receipt's acknowledged body carries the accepting epoch's anchor, so no separate
+/// epoch field is served.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct IncomingPair {
-    pub(crate) epoch: u64,
-    pub(crate) cursor: u64,
-    pub(crate) payment: Payment,
+    pub(crate) sequence: u64,
+    pub(crate) receipt: Receipt,
 }
 
 impl Write for IncomingPair {
     fn write(&self, buf: &mut impl BufMut) {
-        self.epoch.write(buf);
-        self.cursor.write(buf);
-        self.payment.write(buf);
+        self.sequence.write(buf);
+        self.receipt.write(buf);
     }
 }
 
 impl EncodeSize for IncomingPair {
     fn encode_size(&self) -> usize {
-        self.epoch.encode_size() + self.cursor.encode_size() + self.payment.encode_size()
+        self.sequence.encode_size() + self.receipt.encode_size()
     }
 }
 
@@ -508,9 +539,8 @@ impl Read for IncomingPair {
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self {
-            epoch: u64::read(buf)?,
-            cursor: u64::read(buf)?,
-            payment: Payment::read(buf)?,
+            sequence: u64::read(buf)?,
+            receipt: Receipt::read(buf)?,
         })
     }
 }
@@ -546,50 +576,51 @@ impl Read for IncomingPaymentsResponse {
     }
 }
 
-/// Requests one receiver's committed receive-shard evidence for a retained epoch.
+/// Requests the committed public terminal entry for one (payer, recipient) edge of a
+/// retained epoch.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct CommittedShardTipRequest {
-    pub(crate) account: Key,
-    pub(crate) shard: u64,
+pub(crate) struct CommittedEntryRequest {
     pub(crate) epoch: u64,
+    pub(crate) payer: Key,
+    pub(crate) recipient: Key,
 }
 
-impl Write for CommittedShardTipRequest {
+impl Write for CommittedEntryRequest {
     fn write(&self, buf: &mut impl BufMut) {
-        self.account.write(buf);
-        self.shard.write(buf);
         self.epoch.write(buf);
+        self.payer.write(buf);
+        self.recipient.write(buf);
     }
 }
 
-impl EncodeSize for CommittedShardTipRequest {
+impl EncodeSize for CommittedEntryRequest {
     fn encode_size(&self) -> usize {
-        self.account.encode_size() + self.shard.encode_size() + self.epoch.encode_size()
+        self.epoch.encode_size() + self.payer.encode_size() + self.recipient.encode_size()
     }
 }
 
-impl Read for CommittedShardTipRequest {
+impl Read for CommittedEntryRequest {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self {
-            account: Key::read(buf)?,
-            shard: u64::read(buf)?,
             epoch: u64::read(buf)?,
+            payer: Key::read(buf)?,
+            recipient: Key::read(buf)?,
         })
     }
 }
 
-/// The committed close's identity, its change root, and the composed receive-shard lookup.
+/// The committed close's identity, its change root, and the composed terminal-entry lookup.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct CommittedShardTipResponse {
+pub(crate) struct CommittedEntryResponse {
     pub(crate) batch_id: BatchId<Digest>,
     pub(crate) change_root: VectorRoot<Digest>,
-    pub(crate) lookup: HigherShardTipLookup<Key, Digest>,
+    pub(crate) lookup: HigherEntryLookup<Key, Digest>,
 }
 
-impl From<CommittedShardTip> for CommittedShardTipResponse {
-    fn from(evidence: CommittedShardTip) -> Self {
+impl From<CommittedEntry> for CommittedEntryResponse {
+    fn from(evidence: CommittedEntry) -> Self {
         Self {
             batch_id: evidence.batch_id,
             change_root: evidence.change_root,
@@ -598,7 +629,7 @@ impl From<CommittedShardTip> for CommittedShardTipResponse {
     }
 }
 
-impl Write for CommittedShardTipResponse {
+impl Write for CommittedEntryResponse {
     fn write(&self, buf: &mut impl BufMut) {
         self.batch_id.write(buf);
         self.change_root.write(buf);
@@ -606,20 +637,20 @@ impl Write for CommittedShardTipResponse {
     }
 }
 
-impl EncodeSize for CommittedShardTipResponse {
+impl EncodeSize for CommittedEntryResponse {
     fn encode_size(&self) -> usize {
         self.batch_id.encode_size() + self.change_root.encode_size() + self.lookup.encode_size()
     }
 }
 
-impl Read for CommittedShardTipResponse {
+impl Read for CommittedEntryResponse {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self {
             batch_id: BatchId::read(buf)?,
             change_root: VectorRoot::read(buf)?,
-            lookup: HigherShardTipLookup::read(buf)?,
+            lookup: HigherEntryLookup::read(buf)?,
         })
     }
 }
@@ -956,7 +987,7 @@ pub(crate) enum OperatorRequest {
     ExternalPayoutEvidence(ExternalPayoutEvidenceRequest),
     AcknowledgeExternalPayout(Box<AcknowledgeExternalPayoutRequest>),
     IncomingPayments(IncomingPaymentsRequest),
-    CommittedShardTip(CommittedShardTipRequest),
+    CommittedEntry(CommittedEntryRequest),
 }
 
 pub(crate) fn decode_request(request: rpc::Request) -> Result<OperatorRequest> {
@@ -977,9 +1008,9 @@ pub(crate) fn decode_request(request: rpc::Request) -> Result<OperatorRequest> {
         METHOD_INCOMING_PAYMENTS => IncomingPaymentsRequest::decode(body)
             .map(OperatorRequest::IncomingPayments)
             .context("decode incoming-payments request"),
-        METHOD_COMMITTED_SHARD_TIP => CommittedShardTipRequest::decode(body)
-            .map(OperatorRequest::CommittedShardTip)
-            .context("decode committed-shard-tip request"),
+        METHOD_COMMITTED_ENTRY => CommittedEntryRequest::decode(body)
+            .map(OperatorRequest::CommittedEntry)
+            .context("decode committed-entry request"),
         METHOD_WITHDRAWAL_OPENING => WithdrawalOpeningRequest::decode(body)
             .map(OperatorRequest::WithdrawalOpening)
             .context("decode withdrawal-opening request"),
@@ -1027,13 +1058,13 @@ fn dispatch(operator: &mut Operator, request: OperatorRequest) -> Result<Bytes> 
         }
         OperatorRequest::AcceptSend(request) => {
             let outcome = operator
-                .accept_send(request.send)
+                .accept_send(request.authorization, request.entries)
                 .context("accept payment send")?;
             Ok(AcceptSendResponse::from(outcome).encode())
         }
         OperatorRequest::AcceptedBatch(request) => {
             let batch = operator
-                .accepted_batch(&request.send)
+                .accepted_batch(&request.authorization, &request.entries)
                 .context("read accepted batch")?;
             Ok(batch.map(AcceptedBatchResponse::from).encode())
         }
@@ -1114,18 +1145,17 @@ fn dispatch(operator: &mut Operator, request: OperatorRequest) -> Result<Bytes> 
             let pairs = page
                 .into_iter()
                 .map(|incoming| IncomingPair {
-                    epoch: incoming.epoch,
-                    cursor: incoming.sequence,
-                    payment: incoming.payment,
+                    sequence: incoming.sequence,
+                    receipt: incoming.receipt,
                 })
                 .collect();
             Ok(IncomingPaymentsResponse { next_cursor, pairs }.encode())
         }
-        OperatorRequest::CommittedShardTip(request) => {
+        OperatorRequest::CommittedEntry(request) => {
             let evidence = operator
-                .committed_shard_tip(&request.account, request.shard, request.epoch)
-                .context("read committed shard-tip evidence")?;
-            Ok(CommittedShardTipResponse::from(evidence).encode())
+                .committed_entry(&request.payer, &request.recipient, request.epoch)
+                .context("read committed entry evidence")?;
+            Ok(CommittedEntryResponse::from(evidence).encode())
         }
     }
 }
@@ -1230,11 +1260,12 @@ pub(crate) async fn accepted_batch<E: Network>(
     .context("decode accepted batch")
 }
 
-/// Fetches one page of the pairs crediting the caller's account after its durable cursor.
+/// Fetches one page of the receipts crediting the caller's account after its durable cursor.
 ///
 /// This is the receiver's intake, not a display cache: a receiver may rely on a payment only
-/// once its verified pair is durably held, so the caller verifies and persists every returned
-/// pair before treating any credit as reliance-grade. Absence or failure changes nothing.
+/// once its verified receipt is durably held, so the caller verifies and persists every
+/// returned receipt before treating any credit as reliance-grade. Absence or failure changes
+/// nothing.
 pub(crate) async fn incoming_payments<E: Network>(
     network: &E,
     address: SocketAddr,
@@ -1246,25 +1277,20 @@ pub(crate) async fn incoming_payments<E: Network>(
     .context("decode incoming payments")
 }
 
-/// Fetches one receiver's committed receive-shard evidence for a retained epoch.
+/// Fetches the committed public terminal entry for one (payer, recipient) edge of a
+/// retained epoch.
 ///
 /// This is the availability dependence of reconciliation: the operator can refuse to serve the
 /// lookup but cannot forge one, since it opens against the committed close's own change root.
-pub(crate) async fn committed_shard_tip<E: Network>(
+pub(crate) async fn committed_entry<E: Network>(
     network: &E,
     address: SocketAddr,
-    request: CommittedShardTipRequest,
-) -> Result<CommittedShardTipResponse> {
-    CommittedShardTipResponse::decode(
-        invoke(
-            network,
-            address,
-            METHOD_COMMITTED_SHARD_TIP,
-            request.encode(),
-        )
-        .await?,
+    request: CommittedEntryRequest,
+) -> Result<CommittedEntryResponse> {
+    CommittedEntryResponse::decode(
+        invoke(network, address, METHOD_COMMITTED_ENTRY, request.encode()).await?,
     )
-    .context("decode committed shard-tip evidence")
+    .context("decode committed entry evidence")
 }
 
 pub(crate) async fn withdrawal_opening<E: Network>(
@@ -1716,21 +1742,23 @@ mod tests {
         .unwrap();
         assert_eq!(head.state.balance, 93);
 
-        let send = SignedSend::sign_next(
-            &head.context,
-            payer.signer(),
-            wallets[0].public_key(),
-            5,
-            head.state.cumulative_debit,
-        )
-        .unwrap();
+        let (authorization, entries) = operator
+            .sign_send(0, &[(wallets[0].public_key(), 5)])
+            .unwrap();
         let accepted = accepted_body(success_body(handle(
             &mut operator,
-            request(METHOD_ACCEPT_SEND, AcceptSendRequest { send }.encode()),
+            request(
+                METHOD_ACCEPT_SEND,
+                AcceptSendRequest {
+                    authorization,
+                    entries,
+                }
+                .encode(),
+            ),
         )));
         assert_eq!(accepted.epoch, 0);
         assert_eq!(accepted.total, 5);
-        assert_eq!(accepted.acceptance.receipts[0].body().amount(), 5);
+        assert_eq!(accepted.acceptance.entries[0].cumulative, 5);
         accepted.acceptance.verify(&head.context).unwrap();
 
         let started = StartCloseResponse::decode(success_body(handle(
@@ -1836,30 +1864,20 @@ mod tests {
     #[test]
     fn payment_resolution_response_round_trips_every_variant() {
         let mut operator = operator();
-        let mut wallets = wallets();
-        let payer = wallets.remove(0);
-        let head = PaymentHeadResponse::decode(success_body(handle(
+        let wallets = wallets();
+        let (authorization, entries) = operator
+            .sign_send(0, &[(wallets[1].public_key(), 5)])
+            .unwrap();
+        let accepted = accepted_body(success_body(handle(
             &mut operator,
             request(
-                METHOD_PAYMENT_HEAD,
-                PaymentHeadRequest {
-                    account: payer.public_key(),
+                METHOD_ACCEPT_SEND,
+                AcceptSendRequest {
+                    authorization,
+                    entries,
                 }
                 .encode(),
             ),
-        )))
-        .unwrap();
-        let send = SignedSend::sign_next(
-            &head.context,
-            payer.signer(),
-            wallets[0].public_key(),
-            5,
-            head.state.cumulative_debit,
-        )
-        .unwrap();
-        let accepted = accepted_body(success_body(handle(
-            &mut operator,
-            request(METHOD_ACCEPT_SEND, AcceptSendRequest { send }.encode()),
         )));
 
         for response in [Some(accepted), None] {
@@ -1881,36 +1899,43 @@ mod tests {
     #[test]
     fn accept_send_response_round_trips_every_variant() {
         let mut operator = operator();
-        let mut wallets = wallets();
-        let payer = wallets.remove(0);
+        let wallets = wallets();
         let head = PaymentHeadResponse::decode(success_body(handle(
             &mut operator,
             request(
                 METHOD_PAYMENT_HEAD,
                 PaymentHeadRequest {
-                    account: payer.public_key(),
+                    account: wallets[0].public_key(),
                 }
                 .encode(),
             ),
         )))
         .unwrap();
-        let send = SignedSend::sign_next(
-            &head.context,
-            payer.signer(),
-            wallets[0].public_key(),
-            5,
-            head.state.cumulative_debit,
-        )
-        .unwrap();
+        let (authorization, entries) = operator
+            .sign_send(0, &[(wallets[1].public_key(), 5)])
+            .unwrap();
         let accepted = AcceptSendResponse::decode(success_body(handle(
             &mut operator,
-            request(METHOD_ACCEPT_SEND, AcceptSendRequest { send }.encode()),
+            request(
+                METHOD_ACCEPT_SEND,
+                AcceptSendRequest {
+                    authorization,
+                    entries,
+                }
+                .encode(),
+            ),
         )))
         .unwrap();
         assert!(matches!(accepted, AcceptSendResponse::Accepted(_)));
         let stale = AcceptSendResponse::Stale {
             context: head.context,
             cumulative_debit: 7,
+            seq: 2,
+            entries: vec![OutEntry {
+                recipient: wallets[1].public_key(),
+                cumulative: 7,
+                count: 1,
+            }],
         };
 
         for response in [accepted, stale] {

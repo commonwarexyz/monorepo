@@ -108,7 +108,7 @@ use commonware_clearing::bajillion::{
         Registered, SettlementChain, SettlementError,
     },
     state::{AccountState, StateLeaf},
-    transition::{BatchId, ExternalPayout, StateCache, WithdrawalOutput},
+    transition::{BatchId, ExternalPayout, OperatorKey, StateCache, WithdrawalOutput},
 };
 use commonware_codec::{
     Decode, Encode as _, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
@@ -533,19 +533,17 @@ impl Read for ExternalPayoutResponse {
 
 const fn challenge_kind_tag(kind: ChallengeKind) -> u8 {
     match kind {
-        ChallengeKind::LatestAcknowledgedSend => 0,
-        ChallengeKind::HigherShardTip => 1,
-        ChallengeKind::InconsistentReceiptRange => 2,
-        ChallengeKind::ReceiptFork => 3,
+        ChallengeKind::HigherAckDebit => 0,
+        ChallengeKind::HigherAckEntry => 1,
+        ChallengeKind::AckFork => 2,
     }
 }
 
 const fn challenge_kind_from_tag(tag: u8) -> Result<ChallengeKind, CodecError> {
     match tag {
-        0 => Ok(ChallengeKind::LatestAcknowledgedSend),
-        1 => Ok(ChallengeKind::HigherShardTip),
-        2 => Ok(ChallengeKind::InconsistentReceiptRange),
-        3 => Ok(ChallengeKind::ReceiptFork),
+        0 => Ok(ChallengeKind::HigherAckDebit),
+        1 => Ok(ChallengeKind::HigherAckEntry),
+        2 => Ok(ChallengeKind::AckFork),
         _ => Err(CodecError::Invalid(
             "clearing_terminal::ChallengeKind",
             "unknown challenge kind tag",
@@ -1429,6 +1427,12 @@ where
 /// transaction is a harmless no-op or a typed conflict.
 pub(crate) struct Machine {
     chain: SettlementChain<Sha256, Key>,
+    /// The deployment's aggregable-acknowledgment public key.
+    ///
+    /// Genesis-fixed alongside the operator clearing key and persisted with
+    /// the machine so the DA sealer can verify a dealing's combined operator
+    /// countersignatures against the deployment it routes to.
+    operator_ack: OperatorKey,
     /// Last advanced block height.
     height: u64,
     /// Last advanced block timestamp (milliseconds since the Unix epoch).
@@ -1442,6 +1446,7 @@ pub(crate) struct Machine {
 impl Write for Machine {
     fn write(&self, buf: &mut impl BufMut) {
         self.chain.write(buf);
+        self.operator_ack.write(buf);
         self.height.write(buf);
         self.timestamp.write(buf);
     }
@@ -1449,7 +1454,10 @@ impl Write for Machine {
 
 impl EncodeSize for Machine {
     fn encode_size(&self) -> usize {
-        self.chain.encode_size() + self.height.encode_size() + self.timestamp.encode_size()
+        self.chain.encode_size()
+            + self.operator_ack.encode_size()
+            + self.height.encode_size()
+            + self.timestamp.encode_size()
     }
 }
 
@@ -1459,6 +1467,7 @@ impl Read for Machine {
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self {
             chain: SettlementChain::read_cfg(buf, &MACHINE_BOUNDS)?,
+            operator_ack: OperatorKey::read(buf)?,
             height: u64::read(buf)?,
             timestamp: u64::read(buf)?,
         })
@@ -1495,9 +1504,15 @@ impl Machine {
         .expect("the genesis settlement configuration is valid");
         Self {
             chain,
+            operator_ack: config.operator_ack,
             height: 0,
             timestamp: 0,
         }
+    }
+
+    /// The deployment's genesis-fixed aggregable-acknowledgment public key.
+    pub(crate) const fn operator_ack(&self) -> &OperatorKey {
+        &self.operator_ack
     }
 
     /// Returns the live registered close: the bound context with the exact
@@ -2562,7 +2577,7 @@ mod codec_tests {
         for reason in [
             HardFaultReasonResponse::ProvenChallenge {
                 batch_id,
-                kind: ChallengeKind::HigherShardTip,
+                kind: ChallengeKind::HigherAckEntry,
             },
             HardFaultReasonResponse::ExpiredDeposit {
                 account: account.clone(),

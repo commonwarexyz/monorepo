@@ -3,8 +3,8 @@
 //! Receipts remain durable because this example has no authenticated signal that their challenge
 //! windows closed. An embedding may prune them only after obtaining that signal.
 //!
-//! The receiver's held incoming pairs follow the same discipline. Each is a self-verified
-//! (send, receipt) pair credited to this wallet, durably retained so a receiver can enforce its
+//! The receiver's held incoming receipts follow the same discipline. Each is a self-verified
+//! entry receipt crediting this wallet, durably retained so a receiver can enforce its
 //! preconfirmation. They are irreplaceable once the operator is gone, so like the recovery
 //! openings they are counterparty-death-surviving evidence, never an overwritable cache.
 
@@ -12,8 +12,8 @@ use crate::{
     chain::state as chain_state,
     operator::rpc as operator_rpc,
     protocol::{
-        Acceptance, DepositEvent, Key, MAX_ACCEPTANCE_BYTES, MAX_ACCOUNTS, MAX_PAYMENT_BYTES,
-        Payment,
+        Acceptance, Ack, DepositEvent, Entry, Key, MAX_ACCEPTANCE_BYTES, MAX_ACCOUNTS, MAX_ENTRIES,
+        Receipt,
     },
     store::CommitUnknown,
 };
@@ -21,25 +21,35 @@ use anyhow::{Context, Result, ensure};
 use commonware_clearing::bajillion::{
     challenge::StateOpening,
     commitment::{VectorKind, VectorRoot},
-    payment::{PaymentContext, SignedSend},
+    payment::{PaymentContext, SendAuthorization, VectorSendBody},
     state::AccountState,
     transition::BatchId,
+    vector::{OutEntry, OutVector},
 };
-use commonware_codec::{DecodeExt as _, Encode as _, FixedSize};
-use commonware_cryptography::{Sha256, sha256::Digest};
+use commonware_codec::{Decode as _, DecodeExt as _, Encode as _, FixedSize, RangeCfg};
+use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
 use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
 use std::path::Path;
 
-const SCHEMA_VERSION: i64 = 13;
+const SCHEMA_VERSION: i64 = 14;
 const MAX_PENDING_CLAIM_BYTES: usize = 16 * 1024;
 const MIN_STATE_OPENING_BYTES: usize = Key::SIZE + AccountState::SIZE + u32::SIZE * 2 + 1;
 const MAX_STATE_OPENING_BYTES: usize =
     Key::SIZE + AccountState::SIZE + u32::SIZE * 2 + 1 + Digest::SIZE * u32::BITS as usize;
 const DEPOSIT_EVENT_BYTES: usize = Digest::SIZE + Key::SIZE + u64::SIZE;
+const AUTHORIZATION_BYTES: usize = SendAuthorization::<Key, Digest>::SIZE;
+/// Bounds one encoded delta-entry list: a bounded length prefix plus [`MAX_ENTRIES`] fixed
+/// entries.
+const MAX_DELTA_BYTES: usize = 5 + MAX_ENTRIES * (Key::SIZE + u64::SIZE);
+/// Bounds one encoded held [`Receipt`]: the fixed acknowledgment and entry fields plus a
+/// full-depth membership opening.
+const MAX_RECEIPT_BYTES: usize =
+    Ack::SIZE + Key::SIZE + u64::SIZE * 2 + u32::SIZE * 2 + 1 + Digest::SIZE * u32::BITS as usize;
 
 #[derive(Clone)]
 pub(crate) struct PendingPayment {
-    pub(crate) send: SignedSend<Key, Digest>,
+    pub(crate) authorization: SendAuthorization<Key, Digest>,
+    pub(crate) entries: Vec<Entry>,
     pub(crate) recovery_root: VectorRoot<Digest>,
 }
 
@@ -106,35 +116,44 @@ pub(crate) struct IncomingSummary {
     pub(crate) cursor: u64,
 }
 
-/// One verified incoming pair ready to persist: its acceptance cursor, credited metadata,
-/// and the canonical [`Payment`] bytes.
+/// One verified incoming receipt ready to persist: the payer-signed body digest keying it,
+/// the credited edge endpoint, the delta amount versus the previously held entry, its
+/// acceptance cursor, and the canonical [`Receipt`] bytes.
 pub(crate) struct IncomingRecord {
-    pub(crate) tx_id: Digest,
+    pub(crate) id: Digest,
     pub(crate) payer: Key,
     pub(crate) epoch: u64,
     pub(crate) anchor: Digest,
-    pub(crate) shard: u64,
-    pub(crate) cumulative_shard_credit: u64,
-    pub(crate) receipt_index: u64,
+    pub(crate) seq: u64,
+    pub(crate) cumulative: u64,
+    pub(crate) count: u64,
     pub(crate) amount: u64,
     pub(crate) cursor: u64,
-    pub(crate) pair: Payment,
+    pub(crate) receipt: Receipt,
 }
 
-/// The wallet's highest held receipt in one receive shard of one epoch.
-pub(crate) struct HeldReceipt {
-    pub(crate) shard: u64,
-    pub(crate) cumulative_shard_credit: u64,
-    pub(crate) receipt_index: u64,
-    pub(crate) pair: Payment,
+/// The wallet's highest held receipt on one payer edge of one epoch.
+pub(crate) struct HeldEntry {
+    pub(crate) payer: Key,
+    pub(crate) cumulative: u64,
+    pub(crate) count: u64,
+    pub(crate) receipt: Receipt,
 }
 
 /// One held credit answering a receiver's service-accounting query.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct IncomingCredit {
     pub(crate) epoch: u64,
-    pub(crate) shard: u64,
     pub(crate) amount: u64,
+}
+
+/// The wallet's durable prior vector state for one signing context: the accepted batch
+/// sequence, the lifetime cumulative debit at that sequence, and the cumulative
+/// per-recipient entries.
+pub(crate) struct VectorState {
+    pub(crate) seq: u64,
+    pub(crate) cumulative_debit: u64,
+    pub(crate) entries: Vec<OutEntry<Key>>,
 }
 
 /// The durable outcome of reconciling one epoch's held credits.
@@ -576,21 +595,80 @@ impl Store {
         result
     }
 
+    /// Reads the wallet's durable prior vector state for `context`.
+    ///
+    /// Returns `None` when no state is stored or the stored state binds another
+    /// `(epoch, anchor)`: a fresh context always starts from the empty vector at
+    /// sequence zero.
+    pub(crate) fn vector_state(
+        &self,
+        context: &PaymentContext<Key, Digest>,
+    ) -> Result<Option<VectorState>> {
+        self.ensure_usable()?;
+        let Some((epoch, anchor, state)) = read_vector_state(&self.connection)? else {
+            return Ok(None);
+        };
+        if epoch != context.epoch() || anchor != *context.anchor() {
+            return Ok(None);
+        }
+        ensure!(
+            state.cumulative_debit == latest_debit(&self.connection)?,
+            "the durable vector state is behind the wallet endpoint: stale wallet database"
+        );
+        Ok(Some(state))
+    }
+
+    /// Durably adopts the operator's accepted endpoint as the prior vector state for a
+    /// corrected context.
+    ///
+    /// The adoption is safe under the same endpoint-exclusivity rule as the corrective
+    /// retry itself: it is applied only when the corrective names the wallet's own
+    /// cumulative debit, so a false vector claim can only produce a send that never
+    /// commits.
+    pub(crate) fn adopt_vector(
+        &mut self,
+        context: &PaymentContext<Key, Digest>,
+        seq: u64,
+        cumulative_debit: u64,
+        entries: &[OutEntry<Key>],
+    ) -> Result<()> {
+        self.ensure_usable()?;
+
+        // Canonicalize the operator claim before it becomes durable state.
+        OutVector::new(context.epoch(), self.account.clone(), entries.to_vec())
+            .context("validate adopted vector entries")?;
+        let result = write_vector_transaction(
+            &mut self.connection,
+            context.epoch(),
+            context.anchor(),
+            seq,
+            cumulative_debit,
+            entries,
+        );
+        self.finish_mutation(result)
+    }
+
     pub(crate) fn stage_payment(
         &mut self,
-        send: &SignedSend<Key, Digest>,
+        authorization: &SendAuthorization<Key, Digest>,
+        entries: &[Entry],
         recovery_root: &VectorRoot<Digest>,
         previous_debit: u64,
     ) -> Result<()> {
         self.ensure_usable()?;
-        validate_send(send, &self.account, &self.operator, previous_debit)?;
-        sql_u64(send.body().cumulative_debit(), "pending cumulative debit")?;
-        let encoded = send.encode();
-        ensure!(
-            encoded.len() <= MAX_PAYMENT_BYTES,
-            "signed send encoding exceeds its bound"
-        );
-
+        validate_authorization(
+            authorization,
+            entries,
+            &self.account,
+            &self.operator,
+            previous_debit,
+        )?;
+        sql_u64(
+            authorization.body().cumulative_debit(),
+            "pending cumulative debit",
+        )?;
+        let encoded = authorization.encode();
+        let encoded_entries = encode_entries(entries)?;
         let encoded_root = recovery_root.encode();
         let result = stage_payment_transaction(
             &mut self.connection,
@@ -599,52 +677,59 @@ impl Store {
             previous_debit,
             encoded_root.as_ref(),
             encoded.as_ref(),
+            encoded_entries.as_ref(),
         );
         self.finish_mutation(result)
     }
 
     /// Marks the outstanding send submitted before its bytes go on the wire, so the ledger
     /// never claims less than what may have reached the operator.
-    pub(crate) fn mark_payment_submitted(&mut self, send: &SignedSend<Key, Digest>) -> Result<()> {
+    pub(crate) fn mark_payment_submitted(
+        &mut self,
+        authorization: &SendAuthorization<Key, Digest>,
+    ) -> Result<()> {
         self.ensure_usable()?;
-        let encoded = send.encode();
+        let encoded = authorization.encode();
         let result = mark_payment_submitted_transaction(&mut self.connection, encoded.as_ref());
         self.finish_mutation(result)
     }
 
-    /// Replaces the outstanding staged send with a re-signed copy of the same intent
-    /// under a corrected context.
+    /// Replaces the outstanding staged authorization with a re-signed copy of the same
+    /// intent under a corrected context and adopted endpoint.
     ///
-    /// The replacement must carry the exact entries and cumulative debit endpoint of the
-    /// send it replaces, so the two differ only in their `(epoch, anchor)` binding. That
-    /// is what keeps a corrective retry safe against a Byzantine operator that claims
-    /// rejection while keeping the replaced bytes: two sends at one endpoint under
-    /// different contexts can never both debit, so at most one of them ever commits and
-    /// the ledger's endpoint arithmetic stays exact regardless of which one it is.
+    /// The replacement must carry the exact delta entries and cumulative debit endpoint of
+    /// the authorization it replaces. That is what keeps a corrective retry safe against a
+    /// Byzantine operator that claims rejection while keeping the replaced bytes: two sends
+    /// at one endpoint can never both debit, so at most one of them ever commits and the
+    /// ledger's endpoint arithmetic stays exact regardless of which one it is.
     pub(crate) fn restage_payment(
         &mut self,
-        replaced: &SignedSend<Key, Digest>,
-        send: &SignedSend<Key, Digest>,
+        replaced: &SendAuthorization<Key, Digest>,
+        authorization: &SendAuthorization<Key, Digest>,
+        entries: &[Entry],
         previous_debit: u64,
     ) -> Result<()> {
         self.ensure_usable()?;
-        validate_send(send, &self.account, &self.operator, previous_debit)?;
+        validate_authorization(
+            authorization,
+            entries,
+            &self.account,
+            &self.operator,
+            previous_debit,
+        )?;
         ensure!(
-            send.body().entries() == replaced.body().entries()
-                && send.body().cumulative_debit() == replaced.body().cumulative_debit(),
+            authorization.body().cumulative_debit() == replaced.body().cumulative_debit(),
             "a corrective retry must re-sign the exact staged intent"
         );
         let encoded_replaced = replaced.encode();
-        let encoded = send.encode();
-        ensure!(
-            encoded.len() <= MAX_PAYMENT_BYTES,
-            "signed send encoding exceeds its bound"
-        );
+        let encoded = authorization.encode();
+        let encoded_entries = encode_entries(entries)?;
         let result = restage_payment_transaction(
             &mut self.connection,
             previous_debit,
             encoded_replaced.as_ref(),
             encoded.as_ref(),
+            encoded_entries.as_ref(),
         );
         self.finish_mutation(result)
     }
@@ -657,14 +742,18 @@ impl Store {
     /// deliberately left in place. It is keyed by full root, can be shared with an already
     /// committed sibling payment read at the same finalized head, and stays load-bearing
     /// for frozen-root recovery.
-    pub(crate) fn abandon_payment(&mut self, send: &SignedSend<Key, Digest>) -> Result<()> {
+    pub(crate) fn abandon_payment(
+        &mut self,
+        authorization: &SendAuthorization<Key, Digest>,
+    ) -> Result<()> {
         self.ensure_usable()?;
-        let endpoint = sql_u64(send.body().cumulative_debit(), "abandoned cumulative debit")?;
-        let tx_id = send.tx_id::<Sha256>().into_digest();
-        let encoded = send.encode();
+        let body = authorization.body();
+        let endpoint = sql_u64(body.cumulative_debit(), "abandoned cumulative debit")?;
+        let id = body_id(body);
+        let encoded = authorization.encode();
         let result = abandon_payment_transaction(
             &mut self.connection,
-            tx_id.as_ref(),
+            id.as_ref(),
             endpoint,
             encoded.as_ref(),
         );
@@ -672,29 +761,104 @@ impl Store {
     }
 
     /// Durably commits a send proven finalized whose operator receipts are not held, and
-    /// advances the endpoint.
+    /// advances the endpoint and the vector state.
     ///
     /// The caller must hold settlement's proof of commitment: a verified finalized-root
     /// opening whose endpoint equals the send's successor endpoint. The pipelined-exposure
     /// carve-out lets the next send proceed without the receipts.
     pub(crate) fn finalize_payment_unheld(
         &mut self,
-        send: &SignedSend<Key, Digest>,
+        authorization: &SendAuthorization<Key, Digest>,
+        entries: &[Entry],
         previous_debit: u64,
     ) -> Result<()> {
         self.ensure_usable()?;
-        validate_send(send, &self.account, &self.operator, previous_debit)?;
-        let endpoint = sql_u64(send.body().cumulative_debit(), "finalized cumulative debit")?;
-        let tx_id = send.tx_id::<Sha256>().into_digest();
-        let encoded = send.encode();
+        validate_authorization(
+            authorization,
+            entries,
+            &self.account,
+            &self.operator,
+            previous_debit,
+        )?;
+        let body = authorization.body();
+        let merged = self.merged_vector(body, entries, previous_debit)?;
+        let endpoint = sql_u64(body.cumulative_debit(), "finalized cumulative debit")?;
+        let id = body_id(body);
+        let encoded = authorization.encode();
+        let vector = VectorWrite {
+            epoch: body.epoch(),
+            anchor: *body.anchor(),
+            seq: body.seq(),
+            cumulative_debit: body.cumulative_debit(),
+            entries: merged,
+        };
         let result = finalize_payment_unheld_transaction(
             &mut self.connection,
             previous_debit,
-            tx_id.as_ref(),
+            id.as_ref(),
             endpoint,
             encoded.as_ref(),
+            &vector,
         );
         self.finish_mutation(result)
+    }
+
+    /// Merges the staged deltas into the durable prior vector state and requires the
+    /// result to commit exactly the signed root, returning the merged entries.
+    fn merged_vector(
+        &self,
+        body: &VectorSendBody<Key, Digest>,
+        entries: &[Entry],
+        previous_debit: u64,
+    ) -> Result<Vec<OutEntry<Key>>> {
+        let prior = read_vector_state(&self.connection)?
+            .filter(|(epoch, anchor, _)| *epoch == body.epoch() && anchor == body.anchor());
+        let (prior_seq, mut merged) = match prior {
+            Some((_, _, state)) => {
+                ensure!(
+                    state.cumulative_debit == previous_debit,
+                    "the durable vector state is not at the committing endpoint"
+                );
+                (state.seq, state.entries)
+            }
+            None => (0, Vec::new()),
+        };
+        ensure!(
+            prior_seq.checked_add(1) == Some(body.seq()),
+            "the committed batch does not extend the durable vector sequence"
+        );
+        for entry in entries {
+            match merged.binary_search_by(|edge| edge.recipient.cmp(&entry.recipient)) {
+                Ok(position) => {
+                    merged[position].cumulative = merged[position]
+                        .cumulative
+                        .checked_add(entry.amount)
+                        .context("edge cumulative overflow")?;
+                    merged[position].count = merged[position]
+                        .count
+                        .checked_add(1)
+                        .context("edge count overflow")?;
+                }
+                Err(position) => merged.insert(
+                    position,
+                    OutEntry {
+                        recipient: entry.recipient.clone(),
+                        cumulative: entry.amount,
+                        count: 1,
+                    },
+                ),
+            }
+        }
+        let vector = OutVector::new(body.epoch(), self.account.clone(), merged)
+            .context("assemble committed out vector")?;
+        ensure!(
+            vector
+                .root::<Sha256, Digest>()
+                .context("commit merged out vector")?
+                == body.send_root(),
+            "the committed batch does not extend the durable vector state"
+        );
+        Ok(vector.entries().to_vec())
     }
 
     /// Records every accepted payment at or below a finalized endpoint as finalized.
@@ -714,47 +878,73 @@ impl Store {
         Ok(())
     }
 
-    /// Durably commits one accepted send's receipts and advances the endpoint.
+    /// Durably commits one accepted send's receipts and advances the endpoint and the
+    /// vector state.
     pub(crate) fn commit_payment(
         &mut self,
         acceptance: &Acceptance,
+        authorization: &SendAuthorization<Key, Digest>,
+        entries: &[Entry],
         previous_debit: u64,
         receipt_count: u64,
     ) -> Result<u64> {
         self.ensure_usable()?;
         validate_acceptance(acceptance, &self.account, &self.operator)?;
-        let send = &acceptance.send;
-
-        // The acceptance verification above already authenticated this exact send, so only
-        // the debit-chain step remains: the endpoint must be the exact successor of the
-        // caller's previous debit.
         ensure!(
-            send.body().is_next(previous_debit),
+            acceptance.ack.body() == authorization.body(),
+            "acceptance does not acknowledge the staged endpoint"
+        );
+        let body = acceptance.ack.body();
+
+        // The acceptance verification above already authenticated this exact endpoint, so
+        // the remaining checks bind it to the staged intent: the endpoint must be the
+        // exact successor of the caller's previous debit by the delta total, and the
+        // opened entries must credit the staged recipients positionally.
+        let total = entry_total(entries)?;
+        ensure!(
+            previous_debit.checked_add(total) == Some(body.cumulative_debit()),
             "accepted debit is not the exact successor"
         );
-        let endpoint = sql_u64(send.body().cumulative_debit(), "accepted cumulative debit")?;
+        ensure!(
+            acceptance.entries.len() == entries.len()
+                && acceptance
+                    .entries
+                    .iter()
+                    .zip(entries)
+                    .all(|(opened, delta)| opened.recipient == delta.recipient),
+            "acceptance entries do not credit the staged recipients"
+        );
+        let merged = self.merged_vector(body, entries, previous_debit)?;
+        let endpoint = sql_u64(body.cumulative_debit(), "accepted cumulative debit")?;
         let receipts =
-            u64::try_from(acceptance.receipts.len()).context("agent receipt count overflow")?;
+            u64::try_from(acceptance.entries.len()).context("agent receipt count overflow")?;
         let next_receipt_count = receipt_count
             .checked_add(receipts)
             .context("agent receipt count overflow")?;
         sql_u64(next_receipt_count, "agent receipt count")?;
-        let tx_id = send.tx_id::<Sha256>().into_digest();
-        let encoded_send = send.encode();
+        let id = body_id(body);
+        let encoded_authorization = authorization.encode();
         let encoded = acceptance.encode();
         ensure!(
             encoded.len() <= MAX_ACCEPTANCE_BYTES,
             "acceptance encoding exceeds its bound"
         );
-
+        let vector = VectorWrite {
+            epoch: body.epoch(),
+            anchor: *body.anchor(),
+            seq: body.seq(),
+            cumulative_debit: body.cumulative_debit(),
+            entries: merged,
+        };
         let result = commit_payment_transaction(
             &mut self.connection,
             previous_debit,
-            tx_id.as_ref(),
+            id.as_ref(),
             endpoint,
             receipts,
-            encoded_send.as_ref(),
+            encoded_authorization.as_ref(),
             encoded.as_ref(),
+            &vector,
         );
         self.finish_mutation(result).map(|()| next_receipt_count)
     }
@@ -805,13 +995,15 @@ impl Store {
         self.finish_mutation(result)
     }
 
-    /// Durably records one verified intake page: the accepted pairs and the advanced cursor.
+    /// Durably records one verified intake page: the accepted receipts and the advanced
+    /// cursor.
     ///
-    /// The pairs and the cursor commit together, so a receiver that observes the cursor
+    /// The receipts and the cursor commit together, so a receiver that observes the cursor
     /// advance is guaranteed to hold every credit up to it. Insertion is idempotent per
-    /// transaction id, so a crash before this commit leaves the cursor unchanged and the
-    /// exact page refetches and reinserts without duplication. Only self-verified pairs
-    /// reach here: an invalid pair is never stored, yet the cursor still advances past it.
+    /// payer-signed body digest, so a crash before this commit leaves the cursor unchanged
+    /// and the exact page refetches and reinserts without duplication. Only self-verified
+    /// receipts reach here: an invalid receipt is never stored, yet the cursor still
+    /// advances past it.
     pub(crate) fn record_incoming(
         &mut self,
         records: &[IncomingRecord],
@@ -819,10 +1011,22 @@ impl Store {
     ) -> Result<IncomingSummary> {
         self.ensure_usable()?;
         for record in records {
-            let encoded = record.pair.encode();
+            let body = record.receipt.ack.body();
             ensure!(
-                !encoded.is_empty() && encoded.len() <= MAX_PAYMENT_BYTES,
-                "incoming pair encoding exceeds its bound"
+                record.id == body_id(body)
+                    && &record.payer == body.payer()
+                    && record.epoch == body.epoch()
+                    && record.anchor == *body.anchor()
+                    && record.seq == body.seq()
+                    && record.cumulative == record.receipt.cumulative
+                    && record.count == record.receipt.count,
+                "incoming record does not project its receipt"
+            );
+            ensure!(record.amount > 0, "incoming record credits no value");
+            let encoded = record.receipt.encode();
+            ensure!(
+                !encoded.is_empty() && encoded.len() <= MAX_RECEIPT_BYTES,
+                "incoming receipt encoding exceeds its bound"
             );
             sql_u64(record.cursor, "incoming cursor")?;
         }
@@ -832,32 +1036,49 @@ impl Store {
     }
 
     /// Answers the receiver's service-accounting question: has `payer` paid this account under
-    /// transaction `tx_id`, and for how much? The payer chooses the transaction id by signing
-    /// its send, so it is the natural invoice reference.
-    pub(crate) fn paid(&self, payer: &Key, tx_id: &Digest) -> Result<Option<IncomingCredit>> {
+    /// the batch identified by `id`, and for how much? The id is the digest of the
+    /// payer-signed acknowledgment body, so it is the natural invoice reference.
+    pub(crate) fn paid(&self, payer: &Key, id: &Digest) -> Result<Option<IncomingCredit>> {
         self.ensure_usable()?;
         self.connection
             .query_row(
-                "SELECT epoch, shard, amount FROM agent_incoming
-                 WHERE payer = ?1 AND tx_id = ?2",
-                params![payer.as_ref(), tx_id.as_ref()],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, i64>(2)?,
-                    ))
-                },
+                "SELECT epoch, amount FROM agent_incoming
+                 WHERE payer = ?1 AND id = ?2",
+                params![payer.as_ref(), id.as_ref()],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
             )
             .optional()?
-            .map(|(epoch, shard, amount)| {
+            .map(|(epoch, amount)| {
                 Ok(IncomingCredit {
                     epoch: from_sql_u64(epoch, "incoming epoch")?,
-                    shard: from_sql_u64(shard, "incoming shard")?,
                     amount: from_sql_u64(amount, "incoming amount")?,
                 })
             })
             .transpose()
+    }
+
+    /// Returns the highest held (cumulative, count) endpoint on one payer edge of one
+    /// epoch, so intake can compute the per-edge delta of a newly served receipt.
+    pub(crate) fn held_edge(&self, payer: &Key, epoch: u64) -> Result<Option<(u64, u64)>> {
+        self.ensure_usable()?;
+        let mut statement = self.connection.prepare(
+            "SELECT cumulative, count FROM agent_incoming WHERE payer = ?1 AND epoch = ?2",
+        )?;
+        let mut held: Option<(u64, u64)> = None;
+        for row in statement.query_map(
+            params![payer.as_ref(), sql_u64(epoch, "held epoch")?],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )? {
+            let (cumulative, count) = row?;
+            let endpoint = (
+                from_sql_u64(cumulative, "held cumulative")?,
+                from_sql_u64(count, "held count")?,
+            );
+            if held.is_none_or(|best| endpoint > best) {
+                held = Some(endpoint);
+            }
+        }
+        Ok(held)
     }
 
     /// Returns the epochs holding incoming credits that reconciliation has not yet decided.
@@ -875,46 +1096,64 @@ impl Store {
         Ok(epochs)
     }
 
-    /// Returns the wallet's highest held receipt in each receive shard of one epoch.
-    pub(crate) fn held_receipts(&self, epoch: u64, operator: &Key) -> Result<Vec<HeldReceipt>> {
+    /// Returns the wallet's highest held receipt on each payer edge of one epoch.
+    pub(crate) fn held_receipts(&self, epoch: u64, operator: &Key) -> Result<Vec<HeldEntry>> {
         self.ensure_usable()?;
-
-        // SQLite resolves the bare columns from the row selected by the single max() aggregate,
-        // so each group yields the terminal receipt of its shard.
         let mut statement = self.connection.prepare(
-            "SELECT shard, MAX(cumulative_shard_credit), receipt_index, length(pair), pair
-             FROM agent_incoming WHERE epoch = ?1 GROUP BY shard ORDER BY shard",
+            "SELECT payer, cumulative, count, length(receipt), receipt
+             FROM agent_incoming WHERE epoch = ?1 ORDER BY payer",
         )?;
-        let held = statement
+        let rows = statement
             .query_map([sql_u64(epoch, "epoch")?], |row| {
-                let shard = from_sql_u64(row.get(0)?, "held shard").map_err(to_sqlite_error)?;
-                let cumulative_shard_credit =
-                    from_sql_u64(row.get(1)?, "held credit").map_err(to_sqlite_error)?;
-                let receipt_index =
-                    from_sql_u64(row.get(2)?, "held index").map_err(to_sqlite_error)?;
-                let encoded = read_bounded_blob(row, 3, 4, MAX_PAYMENT_BYTES, "held pair")?;
-                let pair = Payment::decode(encoded.as_slice()).map_err(|error| {
-                    to_sqlite_error(anyhow::anyhow!("decode held pair: {error}"))
-                })?;
-                Ok(HeldReceipt {
-                    shard,
-                    cumulative_shard_credit,
-                    receipt_index,
-                    pair,
-                })
+                let payer = row.get::<_, Vec<u8>>(0)?;
+                let cumulative =
+                    from_sql_u64(row.get(1)?, "held cumulative").map_err(to_sqlite_error)?;
+                let count = from_sql_u64(row.get(2)?, "held count").map_err(to_sqlite_error)?;
+                let encoded = read_bounded_blob(row, 3, 4, MAX_RECEIPT_BYTES, "held receipt")?;
+                Ok((payer, cumulative, count, encoded))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
 
-        // Re-verify each terminal pair against its own context before it can back a challenge.
-        for receipt in &held {
-            let context = context_for_send(receipt.pair.send(), operator);
-            receipt
-                .pair
-                .verify_linked::<Sha256>(&context)
-                .context("verify held incoming pair")?;
+        // Fold to the terminal receipt per edge: the highest (cumulative, count) endpoint.
+        let mut held = Vec::<HeldEntry>::new();
+        for (payer, cumulative, count, encoded) in rows {
+            let payer = Key::decode(payer.as_slice()).context("decode held payer")?;
+            let receipt =
+                Receipt::decode(encoded.as_slice()).context("decode held incoming receipt")?;
+            match held.last_mut() {
+                Some(last) if last.payer == payer => {
+                    if (cumulative, count) > (last.cumulative, last.count) {
+                        *last = HeldEntry {
+                            payer,
+                            cumulative,
+                            count,
+                            receipt,
+                        };
+                    }
+                }
+                _ => held.push(HeldEntry {
+                    payer,
+                    cumulative,
+                    count,
+                    receipt,
+                }),
+            }
+        }
+
+        // Re-verify each terminal receipt against its own context before it can back a
+        // challenge.
+        for entry in &held {
+            let context = context_for_body(entry.receipt.ack.body(), operator);
+            entry
+                .receipt
+                .verify::<Sha256>(&context)
+                .context("verify held incoming receipt")?;
             ensure!(
-                receipt.pair.recipient() == &self.account,
-                "held incoming pair credits another account"
+                entry.receipt.recipient == self.account
+                    && entry.receipt.cumulative == entry.cumulative
+                    && entry.receipt.count == entry.count
+                    && entry.receipt.ack.body().payer() == &entry.payer,
+                "held incoming receipt does not credit this account's edge"
             );
         }
         Ok(held)
@@ -947,13 +1186,14 @@ impl Store {
     }
 }
 
-/// Verifies one acceptance owned by `account`: every entry pair is linked and in entry order.
+/// Verifies one acceptance owned by `account`: the dual-signed endpoint and every opened
+/// entry under its committed root.
 fn validate_acceptance(acceptance: &Acceptance, account: &Key, operator: &Key) -> Result<()> {
     ensure!(
-        acceptance.send.body().payer() == account,
+        acceptance.ack.body().payer() == account,
         "accepted payment belongs to another payer"
     );
-    acceptance.verify(&context_for_send(&acceptance.send, operator))
+    acceptance.verify(&context_for_body(acceptance.ack.body(), operator))
 }
 
 enum SchemaPresence {
@@ -965,6 +1205,8 @@ fn schema_presence(connection: &Connection) -> Result<SchemaPresence> {
     let has_meta = table_exists(connection, "agent_meta")?;
     let has_openings = table_exists(connection, "agent_state_openings")?;
     let has_context = table_exists(connection, "agent_context")?;
+    let has_vector = table_exists(connection, "agent_vector")?;
+    let has_vector_entries = table_exists(connection, "agent_vector_entries")?;
     let has_pending = table_exists(connection, "agent_pending_payment")?;
     let has_pending_deposit = table_exists(connection, "agent_pending_deposit")?;
     let has_pending_claims = table_exists(connection, "agent_pending_claims")?;
@@ -980,6 +1222,7 @@ fn schema_presence(connection: &Connection) -> Result<SchemaPresence> {
                     AND name NOT LIKE 'sqlite_%'
                     AND name NOT IN (
                         'agent_meta', 'agent_state_openings', 'agent_context',
+                        'agent_vector', 'agent_vector_entries',
                         'agent_pending_payment', 'agent_pending_deposit',
                         'agent_pending_claims', 'agent_completed_claims', 'agent_payments',
                         'agent_incoming_cursor', 'agent_incoming', 'agent_reconciled'
@@ -989,7 +1232,7 @@ fn schema_presence(connection: &Connection) -> Result<SchemaPresence> {
                     AND name NOT LIKE 'sqlite_autoindex_%'
                     AND name NOT IN (
                         'agent_payments_settled',
-                        'agent_incoming_payer_tx', 'agent_incoming_epoch_shard'
+                        'agent_incoming_payer_id', 'agent_incoming_epoch_payer'
                     ))
              LIMIT 1
          )",
@@ -1000,6 +1243,8 @@ fn schema_presence(connection: &Connection) -> Result<SchemaPresence> {
     if !has_meta
         && !has_openings
         && !has_context
+        && !has_vector
+        && !has_vector_entries
         && !has_pending
         && !has_pending_deposit
         && !has_pending_claims
@@ -1016,6 +1261,8 @@ fn schema_presence(connection: &Connection) -> Result<SchemaPresence> {
         has_meta
             && has_openings
             && has_context
+            && has_vector
+            && has_vector_entries
             && has_pending
             && has_pending_deposit
             && has_pending_claims
@@ -1096,11 +1343,27 @@ fn initialize_schema(
              FOREIGN KEY (root) REFERENCES agent_state_openings(root)
          );
 
+         CREATE TABLE agent_vector (
+             singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+             epoch INTEGER NOT NULL CHECK (epoch >= 0),
+             anchor BLOB NOT NULL CHECK (length(anchor) = {digest_size}),
+             seq INTEGER NOT NULL CHECK (seq >= 0),
+             cumulative_debit INTEGER NOT NULL CHECK (cumulative_debit >= 0),
+             FOREIGN KEY (singleton) REFERENCES agent_meta(singleton) ON DELETE CASCADE
+         );
+
+         CREATE TABLE agent_vector_entries (
+             recipient BLOB NOT NULL PRIMARY KEY CHECK (length(recipient) = {key_size}),
+             cumulative INTEGER NOT NULL CHECK (cumulative > 0),
+             count INTEGER NOT NULL CHECK (count > 0 AND count <= cumulative)
+         );
+
          CREATE TABLE agent_pending_payment (
              singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
              recovery_root BLOB NOT NULL CHECK (length(recovery_root) = {root_size}),
-             send BLOB NOT NULL CHECK (
-                 length(send) BETWEEN 1 AND {max_send_size}
+             authorization BLOB NOT NULL CHECK (length(authorization) = {authorization_size}),
+             entries BLOB NOT NULL CHECK (
+                 length(entries) BETWEEN 1 AND {max_delta_size}
              ),
              state INTEGER NOT NULL CHECK (state IN (1, 2)),
              FOREIGN KEY (singleton) REFERENCES agent_meta(singleton) ON DELETE CASCADE,
@@ -1134,11 +1397,12 @@ fn initialize_schema(
          );
 
          CREATE TABLE agent_payments (
-             tx_id BLOB PRIMARY KEY CHECK (length(tx_id) = {digest_size}),
+             id BLOB PRIMARY KEY CHECK (length(id) = {digest_size}),
              cumulative_debit INTEGER NOT NULL CHECK (cumulative_debit > 0),
              recovery_root BLOB NOT NULL CHECK (length(recovery_root) = {root_size}),
-             send BLOB NOT NULL CHECK (
-                 length(send) BETWEEN 1 AND {max_send_size}
+             authorization BLOB NOT NULL CHECK (length(authorization) = {authorization_size}),
+             entries BLOB NOT NULL CHECK (
+                 length(entries) BETWEEN 1 AND {max_delta_size}
              ),
              state INTEGER NOT NULL CHECK (state IN (3, 4, 5)),
              receipts INTEGER CHECK (receipts IS NULL OR receipts > 0),
@@ -1160,19 +1424,19 @@ fn initialize_schema(
          );
 
          CREATE TABLE agent_incoming (
-             tx_id BLOB PRIMARY KEY CHECK (length(tx_id) = {digest_size}),
+             id BLOB PRIMARY KEY CHECK (length(id) = {digest_size}),
              payer BLOB NOT NULL CHECK (length(payer) = {key_size}),
              epoch INTEGER NOT NULL CHECK (epoch >= 0),
              anchor BLOB NOT NULL CHECK (length(anchor) = {digest_size}),
-             shard INTEGER NOT NULL CHECK (shard >= 0),
-             cumulative_shard_credit INTEGER NOT NULL CHECK (cumulative_shard_credit >= 0),
-             receipt_index INTEGER NOT NULL CHECK (receipt_index >= 0),
-             amount INTEGER NOT NULL CHECK (amount >= 0),
+             seq INTEGER NOT NULL CHECK (seq >= 0),
+             cumulative INTEGER NOT NULL CHECK (cumulative > 0),
+             count INTEGER NOT NULL CHECK (count > 0 AND count <= cumulative),
+             amount INTEGER NOT NULL CHECK (amount > 0),
              cursor INTEGER NOT NULL CHECK (cursor > 0),
-             pair BLOB NOT NULL CHECK (length(pair) BETWEEN 1 AND {max_pair_size})
+             receipt BLOB NOT NULL CHECK (length(receipt) BETWEEN 1 AND {max_receipt_size})
          );
-         CREATE INDEX agent_incoming_payer_tx ON agent_incoming (payer, tx_id);
-         CREATE INDEX agent_incoming_epoch_shard ON agent_incoming (epoch, shard);
+         CREATE INDEX agent_incoming_payer_id ON agent_incoming (payer, id);
+         CREATE INDEX agent_incoming_epoch_payer ON agent_incoming (epoch, payer);
 
          CREATE TABLE agent_reconciled (
              epoch INTEGER PRIMARY KEY CHECK (epoch >= 0),
@@ -1182,13 +1446,14 @@ fn initialize_schema(
         digest_size = Digest::SIZE,
         root_size = VectorRoot::<Digest>::SIZE,
         context_size = PaymentContext::<Key, Digest>::SIZE,
-        max_send_size = MAX_PAYMENT_BYTES,
+        authorization_size = AUTHORIZATION_BYTES,
+        max_delta_size = MAX_DELTA_BYTES,
         max_acceptance_size = MAX_ACCEPTANCE_BYTES,
         min_opening_size = MIN_STATE_OPENING_BYTES,
         max_opening_size = MAX_STATE_OPENING_BYTES,
         max_claim_size = MAX_PENDING_CLAIM_BYTES,
         batch_id_size = BatchId::<Digest>::SIZE,
-        max_pair_size = MAX_PAYMENT_BYTES,
+        max_receipt_size = MAX_RECEIPT_BYTES,
         deposit_event_size = DEPOSIT_EVENT_BYTES,
     );
     let encoded_account = account.encode();
@@ -1266,9 +1531,15 @@ fn read_state(connection: &Connection, account: &Key, operator: &Key) -> Result<
     let (pending_withdrawal_claim, pending_payout_claim) =
         read_pending_claims(connection, account)?;
     if let Some(pending) = &pending_payment {
-        validate_send(&pending.send, account, operator, cumulative_debit)?;
+        validate_authorization(
+            &pending.authorization,
+            &pending.entries,
+            account,
+            operator,
+            cumulative_debit,
+        )?;
         sql_u64(
-            pending.send.body().cumulative_debit(),
+            pending.authorization.body().cumulative_debit(),
             "pending cumulative debit",
         )?;
     }
@@ -1336,12 +1607,13 @@ fn read_receipt_state(
     )?;
 
     // The endpoint is carried by the latest committed row: an acceptance when receipts are
-    // held, or a bare finalized send when the finalized root proved commitment without them.
+    // held, or a bare finalized authorization when the finalized root proved commitment
+    // without them.
     let stored = connection
         .query_row(
             "SELECT cumulative_debit, receipts,
                     length(recovery_root), recovery_root,
-                    length(send), send,
+                    length(authorization), authorization,
                     length(acceptance), acceptance
              FROM agent_payments
              WHERE state IN (?1, ?2)
@@ -1353,7 +1625,7 @@ fn read_receipt_state(
                     row.get::<_, i64>(0)?,
                     row.get::<_, Option<i64>>(1)?,
                     read_fixed_blob(row, 2, 3, VectorRoot::<Digest>::SIZE, "recovery root")?,
-                    read_bounded_blob(row, 4, 5, MAX_PAYMENT_BYTES, "retained send")?,
+                    read_fixed_blob(row, 4, 5, AUTHORIZATION_BYTES, "retained authorization")?,
                     read_optional_bounded_blob(
                         row,
                         6,
@@ -1365,7 +1637,8 @@ fn read_receipt_state(
             },
         )
         .optional()?;
-    let Some((stored_endpoint, stored_receipts, encoded_root, encoded_send, encoded)) = stored
+    let Some((stored_endpoint, stored_receipts, encoded_root, encoded_authorization, encoded)) =
+        stored
     else {
         ensure!(receipt_count == 0, "agent receipt count is inconsistent");
         return Ok((0, 0));
@@ -1375,6 +1648,19 @@ fn read_receipt_state(
         VectorRoot::decode(encoded_root.as_slice()).context("decode receipt recovery root")?;
     read_recovery_opening(connection, &recovery_root, account)?
         .context("receipt recovery opening is missing")?;
+    let authorization = SendAuthorization::decode(encoded_authorization.as_slice())
+        .context("decode retained authorization")?;
+    ensure!(
+        authorization.body().payer() == account,
+        "retained authorization belongs to another payer"
+    );
+    authorization
+        .verify(&context_for_body(authorization.body(), operator))
+        .map_err(|error| anyhow::anyhow!("verify retained authorization: {error}"))?;
+    ensure!(
+        authorization.body().cumulative_debit() == stored_endpoint,
+        "retained authorization has another debit endpoint"
+    );
     match (encoded, stored_receipts) {
         (Some(encoded), Some(stored_receipts)) => {
             let stored_receipts = from_sql_u64(stored_receipts, "retained receipt count")?;
@@ -1383,32 +1669,15 @@ fn read_receipt_state(
             validate_acceptance(&acceptance, account, operator)
                 .context("verify retained acceptance")?;
             ensure!(
-                acceptance.send.encode().as_ref() == encoded_send.as_slice(),
-                "retained acceptance does not carry its ledger send"
+                acceptance.ack.body() == authorization.body(),
+                "retained acceptance does not acknowledge its ledger authorization"
             );
             ensure!(
-                u64::try_from(acceptance.receipts.len()).ok() == Some(stored_receipts),
+                u64::try_from(acceptance.entries.len()).ok() == Some(stored_receipts),
                 "retained acceptance receipt count is inconsistent"
             );
-            ensure!(
-                acceptance.send.body().cumulative_debit() == stored_endpoint,
-                "retained acceptance has another debit endpoint"
-            );
         }
-        (None, None) => {
-            let send = SignedSend::decode(encoded_send.as_slice())
-                .context("decode retained finalized send")?;
-            ensure!(
-                send.body().payer() == account,
-                "retained finalized send belongs to another payer"
-            );
-            send.verify(&context_for_send(&send, operator))
-                .context("verify retained finalized send")?;
-            ensure!(
-                send.body().cumulative_debit() == stored_endpoint,
-                "retained finalized send has another debit endpoint"
-            );
-        }
+        (None, None) => {}
         _ => anyhow::bail!("retained receipt count and acceptance disagree"),
     }
     Ok((stored_endpoint, receipt_count))
@@ -1466,7 +1735,8 @@ fn read_pending_payment(connection: &Connection, account: &Key) -> Result<Option
     let mut statement = connection.prepare(
         "SELECT singleton,
                 length(recovery_root), recovery_root,
-                length(send), send,
+                length(authorization), authorization,
+                length(entries), entries,
                 state
          FROM agent_pending_payment
          ORDER BY singleton
@@ -1487,8 +1757,10 @@ fn read_pending_payment(connection: &Connection, account: &Key) -> Result<Option
         VectorRoot::<Digest>::SIZE,
         "pending recovery root",
     )?;
-    let encoded_send = read_bounded_blob(row, 3, 4, MAX_PAYMENT_BYTES, "pending signed send")?;
-    let state = row.get::<_, i64>(5)?;
+    let encoded_authorization =
+        read_fixed_blob(row, 3, 4, AUTHORIZATION_BYTES, "pending authorization")?;
+    let encoded_entries = read_bounded_blob(row, 5, 6, MAX_DELTA_BYTES, "pending entries")?;
+    let state = row.get::<_, i64>(7)?;
     ensure!(
         state == PaymentState::Staged as i64 || state == PaymentState::Submitted as i64,
         "pending payment state is not canonical"
@@ -1502,7 +1774,9 @@ fn read_pending_payment(connection: &Connection, account: &Key) -> Result<Option
     read_recovery_opening(connection, &recovery_root, account)?
         .context("pending recovery opening is missing")?;
     Ok(Some(PendingPayment {
-        send: SignedSend::decode(encoded_send.as_slice()).context("decode pending signed send")?,
+        authorization: SendAuthorization::decode(encoded_authorization.as_slice())
+            .context("decode pending authorization")?,
+        entries: decode_entries(encoded_entries.as_slice())?,
         recovery_root,
     }))
 }
@@ -1721,22 +1995,201 @@ fn read_recovery_opening(
     Ok(Some(opening))
 }
 
-fn validate_send(
-    send: &SignedSend<Key, Digest>,
+/// Verifies one staged authorization owned by `account`: the payer signature, the canonical
+/// delta entries, and the exact-successor endpoint over `previous_debit`. Returns the checked
+/// delta total.
+fn validate_authorization(
+    authorization: &SendAuthorization<Key, Digest>,
+    entries: &[Entry],
     account: &Key,
     operator: &Key,
     previous_debit: u64,
-) -> Result<()> {
+) -> Result<u64> {
+    let body = authorization.body();
     ensure!(
-        send.body().payer() == account,
+        body.payer() == account,
         "pending payment belongs to another payer"
     );
-    send.verify_next(&context_for_send(send, operator), previous_debit)
-        .context("verify pending debit successor")
+    authorization
+        .verify(&context_for_body(body, operator))
+        .context("verify pending payer authorization")?;
+    let total = entry_total(entries)?;
+    ensure!(body.seq() > 0, "pending batch sequence must be positive");
+    ensure!(
+        previous_debit.checked_add(total) == Some(body.cumulative_debit()),
+        "pending debit is not the exact successor"
+    );
+    Ok(total)
 }
 
-fn context_for_send(send: &SignedSend<Key, Digest>, operator: &Key) -> PaymentContext<Key, Digest> {
-    PaymentContext::new(*send.body().anchor(), send.body().epoch(), operator.clone())
+/// Validates the canonical delta-entry shape and returns the checked total.
+fn entry_total(entries: &[Entry]) -> Result<u64> {
+    ensure!(!entries.is_empty(), "batched send credits no entries");
+    ensure!(
+        entries.len() <= MAX_ENTRIES,
+        "batched send exceeds the entry bound"
+    );
+    ensure!(
+        entries
+            .windows(2)
+            .all(|pair| pair[0].recipient < pair[1].recipient),
+        "batch entries are not strictly recipient-sorted"
+    );
+    let mut total = 0_u64;
+    for entry in entries {
+        ensure!(entry.amount > 0, "batch entry amount must be positive");
+        total = total
+            .checked_add(entry.amount)
+            .context("batch total overflow")?;
+    }
+    Ok(total)
+}
+
+fn context_for_body(
+    body: &VectorSendBody<Key, Digest>,
+    operator: &Key,
+) -> PaymentContext<Key, Digest> {
+    PaymentContext::new(*body.anchor(), body.epoch(), operator.clone())
+}
+
+/// The payer-signed body digest keying ledger and incoming rows.
+fn body_id(body: &VectorSendBody<Key, Digest>) -> Digest {
+    Sha256::hash(&[body.encode().as_ref()])
+}
+
+fn encode_entries(entries: &[Entry]) -> Result<Vec<u8>> {
+    let encoded = entries.to_vec().encode().to_vec();
+    ensure!(
+        !encoded.is_empty() && encoded.len() <= MAX_DELTA_BYTES,
+        "delta entries encoding exceeds its bound"
+    );
+    Ok(encoded)
+}
+
+fn decode_entries(encoded: &[u8]) -> Result<Vec<Entry>> {
+    Vec::<Entry>::decode_cfg(encoded, &(RangeCfg::new(1..=MAX_ENTRIES), ()))
+        .context("decode delta entries")
+}
+
+/// The vector state written durably alongside an endpoint-advancing conclusion.
+struct VectorWrite {
+    epoch: u64,
+    anchor: Digest,
+    seq: u64,
+    cumulative_debit: u64,
+    entries: Vec<OutEntry<Key>>,
+}
+
+/// Reads the stored vector state with its context key, without matching it to a caller
+/// context.
+fn read_vector_state(connection: &Connection) -> Result<Option<(u64, Digest, VectorState)>> {
+    let header = connection
+        .query_row(
+            "SELECT singleton, epoch, length(anchor), anchor, seq, cumulative_debit
+             FROM agent_vector",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    read_fixed_blob(row, 2, 3, Digest::SIZE, "vector anchor")?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((singleton, epoch, anchor, seq, cumulative_debit)) = header else {
+        return Ok(None);
+    };
+    ensure!(
+        singleton == 1,
+        "agent database vector singleton is not canonical"
+    );
+    let mut statement = connection.prepare(
+        "SELECT length(recipient), recipient, cumulative, count
+         FROM agent_vector_entries ORDER BY recipient",
+    )?;
+    let entries = statement
+        .query_map([], |row| {
+            let recipient = read_fixed_blob(row, 0, 1, Key::SIZE, "vector recipient")?;
+            Ok((recipient, row.get::<_, i64>(2)?, row.get::<_, i64>(3)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .into_iter()
+        .map(|(recipient, cumulative, count)| {
+            Ok(OutEntry {
+                recipient: Key::decode(recipient.as_slice()).context("decode vector recipient")?,
+                cumulative: from_sql_u64(cumulative, "vector cumulative")?,
+                count: from_sql_u64(count, "vector count")?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(Some((
+        from_sql_u64(epoch, "vector epoch")?,
+        Digest::decode(anchor.as_slice()).context("decode vector anchor")?,
+        VectorState {
+            seq: from_sql_u64(seq, "vector sequence")?,
+            cumulative_debit: from_sql_u64(cumulative_debit, "vector cumulative debit")?,
+            entries,
+        },
+    )))
+}
+
+/// Replaces the durable vector state inside `transaction`.
+fn replace_vector_rows(
+    transaction: &rusqlite::Transaction<'_>,
+    epoch: u64,
+    anchor: &Digest,
+    seq: u64,
+    cumulative_debit: u64,
+    entries: &[OutEntry<Key>],
+) -> Result<()> {
+    transaction.execute(
+        "INSERT INTO agent_vector (singleton, epoch, anchor, seq, cumulative_debit)
+         VALUES (1, ?1, ?2, ?3, ?4)
+         ON CONFLICT(singleton) DO UPDATE SET
+             epoch = excluded.epoch,
+             anchor = excluded.anchor,
+             seq = excluded.seq,
+             cumulative_debit = excluded.cumulative_debit",
+        params![
+            sql_u64(epoch, "vector epoch")?,
+            anchor.as_ref(),
+            sql_u64(seq, "vector sequence")?,
+            sql_u64(cumulative_debit, "vector cumulative debit")?,
+        ],
+    )?;
+    transaction.execute("DELETE FROM agent_vector_entries", [])?;
+    let mut insert = transaction.prepare_cached(
+        "INSERT INTO agent_vector_entries (recipient, cumulative, count) VALUES (?1, ?2, ?3)",
+    )?;
+    for entry in entries {
+        insert.execute(params![
+            entry.recipient.as_ref(),
+            sql_u64(entry.cumulative, "vector cumulative")?,
+            sql_u64(entry.count, "vector count")?,
+        ])?;
+    }
+    Ok(())
+}
+
+fn write_vector_transaction(
+    connection: &mut Connection,
+    epoch: u64,
+    anchor: &Digest,
+    seq: u64,
+    cumulative_debit: u64,
+    entries: &[OutEntry<Key>],
+) -> Result<()> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .context("begin vector state adoption")?;
+    replace_vector_rows(&transaction, epoch, anchor, seq, cumulative_debit, entries)?;
+    transaction
+        .commit()
+        .map_err(|source| CommitUnknown::new("vector state adoption", source))?;
+    Ok(())
 }
 
 fn retain_recovery_opening_transaction(
@@ -1816,6 +2269,11 @@ fn clear_context_transaction(connection: &mut Connection) -> Result<()> {
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .context("begin signing context invalidation")?;
     transaction.execute("DELETE FROM agent_context WHERE singleton = 1", [])?;
+
+    // The prior vector state shares the invalidation lifecycle. Rebuilding it costs one
+    // corrective rejection on the next send, which re-teaches the operator's endpoint.
+    transaction.execute("DELETE FROM agent_vector WHERE singleton = 1", [])?;
+    transaction.execute("DELETE FROM agent_vector_entries", [])?;
     transaction
         .commit()
         .map_err(|source| CommitUnknown::new("signing context invalidation", source))?;
@@ -1828,7 +2286,8 @@ fn stage_payment_transaction(
     recovery_root: &VectorRoot<Digest>,
     previous_debit: u64,
     encoded_root: &[u8],
-    encoded_send: &[u8],
+    encoded_authorization: &[u8],
+    encoded_entries: &[u8],
 ) -> Result<()> {
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -1846,9 +2305,15 @@ fn stage_payment_transaction(
     )?;
     ensure!(!pending_exists, "another payment is already staged");
     transaction.execute(
-        "INSERT INTO agent_pending_payment (singleton, recovery_root, send, state)
-         VALUES (1, ?1, ?2, ?3)",
-        params![encoded_root, encoded_send, PaymentState::Staged as i64],
+        "INSERT INTO agent_pending_payment (
+             singleton, recovery_root, authorization, entries, state
+         ) VALUES (1, ?1, ?2, ?3, ?4)",
+        params![
+            encoded_root,
+            encoded_authorization,
+            encoded_entries,
+            PaymentState::Staged as i64,
+        ],
     )?;
     transaction
         .commit()
@@ -1858,14 +2323,14 @@ fn stage_payment_transaction(
 
 fn mark_payment_submitted_transaction(
     connection: &mut Connection,
-    encoded_send: &[u8],
+    encoded_authorization: &[u8],
 ) -> Result<()> {
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .context("begin payment submission mark")?;
     let marked = transaction.execute(
-        "UPDATE agent_pending_payment SET state = ?1 WHERE singleton = 1 AND send = ?2",
-        params![PaymentState::Submitted as i64, encoded_send],
+        "UPDATE agent_pending_payment SET state = ?1 WHERE singleton = 1 AND authorization = ?2",
+        params![PaymentState::Submitted as i64, encoded_authorization],
     )?;
     ensure!(marked == 1, "no staged payment matched the submission mark");
     transaction
@@ -1878,7 +2343,8 @@ fn restage_payment_transaction(
     connection: &mut Connection,
     previous_debit: u64,
     encoded_replaced: &[u8],
-    encoded_send: &[u8],
+    encoded_authorization: &[u8],
+    encoded_entries: &[u8],
 ) -> Result<()> {
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -1889,9 +2355,14 @@ fn restage_payment_transaction(
     );
     ensure!(
         transaction.execute(
-            "UPDATE agent_pending_payment SET send = ?1, state = ?2
-             WHERE singleton = 1 AND send = ?3",
-            params![encoded_send, PaymentState::Staged as i64, encoded_replaced],
+            "UPDATE agent_pending_payment SET authorization = ?1, state = ?2
+             WHERE singleton = 1 AND authorization = ?3 AND entries = ?4",
+            params![
+                encoded_authorization,
+                PaymentState::Staged as i64,
+                encoded_replaced,
+                encoded_entries,
+            ],
         )? == 1,
         "pending payment changed before the corrective restage"
     );
@@ -1901,7 +2372,8 @@ fn restage_payment_transaction(
     Ok(())
 }
 
-/// Moves the outstanding slot's exact send into the ledger and clears the slot.
+/// Moves the outstanding slot's exact authorization into the ledger, clears the slot, and
+/// replaces the durable vector state when the conclusion advances the endpoint.
 ///
 /// An endpoint-advancing conclusion supplies the caller's committed debit, which must
 /// still be the ledger's latest endpoint inside this same transaction.
@@ -1913,12 +2385,13 @@ fn conclude_payment_transaction(
     connection: &mut Connection,
     operation: &'static str,
     previous_debit: Option<u64>,
-    tx_id: &[u8],
+    id: &[u8],
     endpoint: i64,
     state: PaymentState,
     receipts: Option<i64>,
-    encoded_send: &[u8],
+    encoded_authorization: &[u8],
     encoded_acceptance: Option<&[u8]>,
+    vector: Option<&VectorWrite>,
 ) -> Result<()> {
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -1932,28 +2405,39 @@ fn conclude_payment_transaction(
     ensure!(
         transaction.execute(
             "INSERT INTO agent_payments (
-                 tx_id, cumulative_debit, recovery_root, send, state, receipts, acceptance
+                 id, cumulative_debit, recovery_root, authorization, entries,
+                 state, receipts, acceptance
              )
-             SELECT ?1, ?2, recovery_root, send, ?3, ?4, ?5
-             FROM agent_pending_payment WHERE singleton = 1 AND send = ?6",
+             SELECT ?1, ?2, recovery_root, authorization, entries, ?3, ?4, ?5
+             FROM agent_pending_payment WHERE singleton = 1 AND authorization = ?6",
             params![
-                tx_id,
+                id,
                 endpoint,
                 state as i64,
                 receipts,
                 encoded_acceptance,
-                encoded_send,
+                encoded_authorization,
             ],
         )? == 1,
         "pending payment changed before {operation}"
     );
     ensure!(
         transaction.execute(
-            "DELETE FROM agent_pending_payment WHERE singleton = 1 AND send = ?1",
-            [encoded_send],
+            "DELETE FROM agent_pending_payment WHERE singleton = 1 AND authorization = ?1",
+            [encoded_authorization],
         )? == 1,
         "pending payment changed before {operation}"
     );
+    if let Some(vector) = vector {
+        replace_vector_rows(
+            &transaction,
+            vector.epoch,
+            &vector.anchor,
+            vector.seq,
+            vector.cumulative_debit,
+            &vector.entries,
+        )?;
+    }
     transaction
         .commit()
         .map_err(|source| CommitUnknown::new(operation, source))?;
@@ -1962,19 +2446,20 @@ fn conclude_payment_transaction(
 
 fn abandon_payment_transaction(
     connection: &mut Connection,
-    tx_id: &[u8],
+    id: &[u8],
     endpoint: i64,
-    encoded_send: &[u8],
+    encoded_authorization: &[u8],
 ) -> Result<()> {
     conclude_payment_transaction(
         connection,
         "payment abandonment",
         None,
-        tx_id,
+        id,
         endpoint,
         PaymentState::Abandoned,
         None,
-        encoded_send,
+        encoded_authorization,
+        None,
         None,
     )
 }
@@ -1982,20 +2467,22 @@ fn abandon_payment_transaction(
 fn finalize_payment_unheld_transaction(
     connection: &mut Connection,
     previous_debit: u64,
-    tx_id: &[u8],
+    id: &[u8],
     endpoint: i64,
-    encoded_send: &[u8],
+    encoded_authorization: &[u8],
+    vector: &VectorWrite,
 ) -> Result<()> {
     conclude_payment_transaction(
         connection,
         "finalized payment commit",
         Some(previous_debit),
-        tx_id,
+        id,
         endpoint,
         PaymentState::Finalized,
         None,
-        encoded_send,
+        encoded_authorization,
         None,
+        Some(vector),
     )
 }
 
@@ -2025,22 +2512,24 @@ fn observe_finalized_transaction(connection: &mut Connection, endpoint: i64) -> 
 fn commit_payment_transaction(
     connection: &mut Connection,
     previous_debit: u64,
-    tx_id: &[u8],
+    id: &[u8],
     endpoint: i64,
     receipts: u64,
-    encoded_send: &[u8],
+    encoded_authorization: &[u8],
     encoded_acceptance: &[u8],
+    vector: &VectorWrite,
 ) -> Result<()> {
     conclude_payment_transaction(
         connection,
         "accepted payment",
         Some(previous_debit),
-        tx_id,
+        id,
         endpoint,
         PaymentState::Accepted,
         Some(sql_u64(receipts, "retained receipt count")?),
-        encoded_send,
+        encoded_authorization,
         Some(encoded_acceptance),
+        Some(vector),
     )
 }
 
@@ -2107,21 +2596,20 @@ fn record_incoming_transaction(
     {
         let mut insert = transaction.prepare_cached(
             "INSERT INTO agent_incoming (
-                 tx_id, payer, epoch, anchor, shard,
-                 cumulative_shard_credit, receipt_index, amount, cursor, pair
+                 id, payer, epoch, anchor, seq, cumulative, count, amount, cursor, receipt
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-             ON CONFLICT(tx_id) DO NOTHING",
+             ON CONFLICT(id) DO NOTHING",
         )?;
         for record in records {
-            let encoded = record.pair.encode();
+            let encoded = record.receipt.encode();
             insert.execute(params![
-                record.tx_id.as_ref(),
+                record.id.as_ref(),
                 record.payer.as_ref(),
                 sql_u64(record.epoch, "incoming epoch")?,
                 record.anchor.as_ref(),
-                sql_u64(record.shard, "incoming shard")?,
-                sql_u64(record.cumulative_shard_credit, "incoming credit")?,
-                sql_u64(record.receipt_index, "incoming index")?,
+                sql_u64(record.seq, "incoming sequence")?,
+                sql_u64(record.cumulative, "incoming cumulative")?,
+                sql_u64(record.count, "incoming count")?,
                 sql_u64(record.amount, "incoming amount")?,
                 sql_u64(record.cursor, "incoming cursor")?,
                 encoded.as_ref(),
@@ -2422,7 +2910,6 @@ mod tests {
     use super::*;
     use crate::protocol::{Wallet, deployment, identities, operator_key, wallets};
     use commonware_clearing::bajillion::{state::StateLeaf, transition::StateCache};
-    use commonware_cryptography::Hasher as _;
     use std::{
         fs,
         path::{Path, PathBuf},
@@ -2486,9 +2973,40 @@ mod tests {
         (cache.root(), cache.opening(account).unwrap())
     }
 
-    fn signed_send(wallet: &Wallet, anchor: &[u8]) -> SignedSend<Key, Digest> {
+    /// Signs one single-entry batch of `amount` at sequence one from the empty vector.
+    fn sign_delta(
+        context: &PaymentContext<Key, Digest>,
+        wallet: &Wallet,
+        amount: u64,
+    ) -> (SendAuthorization<Key, Digest>, Vec<Entry>) {
+        let recipient = identities().remove(1).key;
+        let entries = vec![Entry {
+            recipient: recipient.clone(),
+            amount,
+        }];
+        let vector = OutVector::new(
+            context.epoch(),
+            wallet.public_key(),
+            vec![OutEntry {
+                recipient,
+                cumulative: amount,
+                count: 1,
+            }],
+        )
+        .unwrap();
+        let body = VectorSendBody::new(
+            context,
+            wallet.public_key(),
+            1,
+            amount,
+            vector.root::<Sha256, Digest>().unwrap(),
+        );
+        (SendAuthorization::sign(body, wallet.signer()), entries)
+    }
+
+    fn signed_send(wallet: &Wallet, anchor: &[u8]) -> (SendAuthorization<Key, Digest>, Vec<Entry>) {
         let context = PaymentContext::new(Sha256::hash(&[anchor]), 1, operator_key());
-        SignedSend::sign_next(&context, wallet.signer(), identities().remove(1).key, 1, 0).unwrap()
+        sign_delta(&context, wallet, 1)
     }
 
     #[test]
@@ -2544,42 +3062,32 @@ mod tests {
         let (root, opening) = recovery_evidence(&account, 100);
         let (mut store, _) = open_store(database.path(), &account);
         store.retain_recovery_opening(&root, &opening).unwrap();
-        let staged = signed_send(&wallet, b"restage-original");
-        store.stage_payment(&staged, &root, 0).unwrap();
+        let (staged, entries) = signed_send(&wallet, b"restage-original");
+        store.stage_payment(&staged, &entries, &root, 0).unwrap();
 
         // A different amount is another intent, so the replacement is refused.
         let corrected =
             PaymentContext::new(Sha256::hash(&[b"restage-corrected"]), 2, operator_key());
-        let other_intent = SignedSend::sign_next(
-            &corrected,
-            wallet.signer(),
-            identities().remove(1).key,
-            2,
-            0,
-        )
-        .unwrap();
+        let (other_intent, other_entries) = sign_delta(&corrected, &wallet, 2);
         let error = store
-            .restage_payment(&staged, &other_intent, 0)
+            .restage_payment(&staged, &other_intent, &other_entries, 0)
             .unwrap_err();
         assert!(format!("{error:#}").contains("exact staged intent"));
         drop(store);
 
         // The exact intent re-signed under the corrected context replaces the slot.
         let (mut store, _) = open_store(database.path(), &account);
-        let resigned = SignedSend::sign_next(
-            &corrected,
-            wallet.signer(),
-            identities().remove(1).key,
-            1,
-            0,
-        )
-        .unwrap();
-        store.restage_payment(&staged, &resigned, 0).unwrap();
+        let (resigned, resigned_entries) = sign_delta(&corrected, &wallet, 1);
+        assert_eq!(resigned_entries, entries);
+        store
+            .restage_payment(&staged, &resigned, &resigned_entries, 0)
+            .unwrap();
         drop(store);
 
         let (_, state) = open_store(database.path(), &account);
         let pending = state.pending_payment.unwrap();
-        assert_eq!(pending.send, resigned);
+        assert_eq!(pending.authorization, resigned);
+        assert_eq!(pending.entries, entries);
         assert_eq!(pending.recovery_root, root);
     }
 
@@ -2594,11 +3102,10 @@ mod tests {
                 .connection
                 .execute(
                     "INSERT INTO agent_incoming (
-                         tx_id, payer, epoch, anchor, shard,
-                         cumulative_shard_credit, receipt_index, amount, cursor, pair
-                     ) VALUES (?1, ?2, ?3, ?4, 0, ?5, 0, ?5, ?6, x'01')",
+                         id, payer, epoch, anchor, seq, cumulative, count, amount, cursor, receipt
+                     ) VALUES (?1, ?2, ?3, ?4, 1, ?5, 1, ?5, ?6, x'01')",
                     params![
-                        Sha256::hash(&[b"credit-tx", &[tag]]).as_ref(),
+                        Sha256::hash(&[b"credit-id", &[tag]]).as_ref(),
                         payer.as_ref(),
                         epoch,
                         Sha256::hash(&[b"credit-anchor"]).as_ref(),
@@ -2667,11 +3174,11 @@ mod tests {
         let database = TempDatabase::new();
         let wallet = wallets().remove(0);
         let account = wallet.public_key();
-        let send = signed_send(&wallet, b"missing-recovery-opening");
+        let (send, entries) = signed_send(&wallet, b"missing-recovery-opening");
         let (root, _) = recovery_evidence(&account, 100);
         let (mut store, _) = open_store(database.path(), &account);
 
-        let error = store.stage_payment(&send, &root, 0).unwrap_err();
+        let error = store.stage_payment(&send, &entries, &root, 0).unwrap_err();
         assert!(format!("{error:#}").contains("payment recovery opening is missing"));
         assert!(store.poisoned);
         drop(store);
@@ -2692,7 +3199,7 @@ mod tests {
         let database = TempDatabase::new();
         let wallet = wallets().remove(0);
         let account = wallet.public_key();
-        let send = signed_send(&wallet, b"pending-original-recovery-root");
+        let (send, entries) = signed_send(&wallet, b"pending-original-recovery-root");
         let (original_root, original_opening) = recovery_evidence(&account, 100);
         let (later_root, later_opening) = recovery_evidence(&account, 200);
         assert_ne!(original_root, later_root);
@@ -2703,12 +3210,15 @@ mod tests {
         store
             .retain_recovery_opening(&later_root, &later_opening)
             .unwrap();
-        store.stage_payment(&send, &original_root, 0).unwrap();
+        store
+            .stage_payment(&send, &entries, &original_root, 0)
+            .unwrap();
         drop(store);
 
         let (store, state) = open_store(database.path(), &account);
         let pending = state.pending_payment.unwrap();
-        assert_eq!(pending.send, send);
+        assert_eq!(pending.authorization, send);
+        assert_eq!(pending.entries, entries);
         assert_eq!(pending.recovery_root, original_root);
         assert_eq!(
             store.recovery_opening(&pending.recovery_root).unwrap(),
@@ -2721,11 +3231,11 @@ mod tests {
         let database = TempDatabase::new();
         let wallet = wallets().remove(0);
         let account = wallet.public_key();
-        let send = signed_send(&wallet, b"oversized-recovery-opening");
+        let (send, entries) = signed_send(&wallet, b"oversized-recovery-opening");
         let (root, opening) = recovery_evidence(&account, 100);
         let (mut store, _) = open_store(database.path(), &account);
         store.retain_recovery_opening(&root, &opening).unwrap();
-        store.stage_payment(&send, &root, 0).unwrap();
+        store.stage_payment(&send, &entries, &root, 0).unwrap();
         drop(store);
 
         let connection = Connection::open(database.path()).unwrap();
@@ -2911,9 +3421,7 @@ mod tests {
             1,
             operator_key(),
         );
-        let send =
-            SignedSend::sign_next(&context, wallet.signer(), identities().remove(1).key, 1, 0)
-                .unwrap();
+        let (send, entries) = sign_delta(&context, &wallet, 1);
         let cache = StateCache::new::<Sha256>(vec![StateLeaf {
             account: account.clone(),
             state: AccountState {
@@ -2926,7 +3434,7 @@ mod tests {
         let root = cache.root();
         let opening = cache.opening(&account).unwrap();
         store.retain_recovery_opening(&root, &opening).unwrap();
-        store.stage_payment(&send, &root, 0).unwrap();
+        store.stage_payment(&send, &entries, &root, 0).unwrap();
         drop(store);
         let connection = Connection::open(pending.path()).unwrap();
         connection
