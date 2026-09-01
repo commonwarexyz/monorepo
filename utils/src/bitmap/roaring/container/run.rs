@@ -11,7 +11,7 @@
 use super::{array, bitmap};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
-use bytes::{Buf, BufMut};
+use bytes::Buf;
 use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, Write};
 use core::ops::Range;
 
@@ -24,7 +24,7 @@ pub const MAX_RUNS: usize = 32768;
 ///
 /// Each entry is an inclusive range `[start, end]`. Entries are sorted by `start` and
 /// kept disjoint and non-adjacent: adjacent or overlapping runs are merged on insertion.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, EncodeSize, Write)]
 pub struct Run {
     /// Sorted vector of `(start, end)` inclusive ranges.
     ///
@@ -338,21 +338,6 @@ impl Run {
     /// Returns the maximum value in the container, if any.
     pub fn max(&self) -> Option<u16> {
         self.runs.last().map(|&(_, end)| end)
-    }
-}
-
-impl Write for Run {
-    fn write(&self, buf: &mut impl BufMut) {
-        // Slice encoding writes the length varint followed by each (start, end) pair.
-        self.runs.as_slice().write(buf);
-    }
-}
-
-impl EncodeSize for Run {
-    fn encode_size(&self) -> usize {
-        // Length varint + 4 bytes per run (two u16s). Must match slice encoding which uses
-        // usize for the length prefix.
-        self.runs.len().encode_size() + self.runs.len() * 4
     }
 }
 

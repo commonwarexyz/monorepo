@@ -3,7 +3,7 @@
 use crate::TryFromIterator;
 #[cfg(not(feature = "std"))]
 use alloc::{collections::VecDeque, vec, vec::Vec};
-use bytes::{Buf, BufMut};
+use bytes::Buf;
 use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
 use core::{
     num::NonZeroUsize,
@@ -87,7 +87,7 @@ pub enum Error {
 }
 
 /// A vector that is guaranteed to contain at least one element.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, EncodeSize, Write)]
 pub struct NonEmptyVec<T>(Vec<T>);
 
 impl<T> NonEmptyVec<T> {
@@ -376,18 +376,6 @@ impl<'a, T> IntoIterator for &'a mut NonEmptyVec<T> {
 
     fn into_iter(self) -> Self::IntoIter {
         self.0.iter_mut()
-    }
-}
-
-impl<T: Write> Write for NonEmptyVec<T> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.0.write(buf);
-    }
-}
-
-impl<T: EncodeSize> EncodeSize for NonEmptyVec<T> {
-    fn encode_size(&self) -> usize {
-        self.0.encode_size()
     }
 }
 

@@ -27,7 +27,7 @@
 //! `< pruned_below`. The [`Read`] impl validates this on decode.
 
 use super::Bitmap;
-use bytes::{Buf, BufMut};
+use bytes::Buf;
 use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write};
 use core::ops::Range;
 
@@ -40,7 +40,7 @@ const CONTAINER_MASK: u64 = CONTAINER_SIZE - 1;
 /// A [`Bitmap`] paired with a "pruned-below" watermark.
 ///
 /// See the module-level documentation for semantics and granularity.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, EncodeSize, Write)]
 pub struct Prunable {
     /// The lowest value that may exist in the bitmap. Always a multiple of 65536.
     pruned_below: u64,
@@ -198,19 +198,6 @@ impl FromIterator<u64> for Prunable {
         let mut p = Self::new();
         p.extend(iter);
         p
-    }
-}
-
-impl Write for Prunable {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.pruned_below.write(buf);
-        self.bitmap.write(buf);
-    }
-}
-
-impl EncodeSize for Prunable {
-    fn encode_size(&self) -> usize {
-        self.pruned_below.encode_size() + self.bitmap.encode_size()
     }
 }
 

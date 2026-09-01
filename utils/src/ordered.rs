@@ -2,7 +2,7 @@
 
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
-use bytes::{Buf, BufMut};
+use bytes::Buf;
 use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
 use core::{
     fmt,
@@ -34,7 +34,7 @@ pub enum Error {
 use crate::{Faults, Participant, TryFromIterator};
 
 /// An ordered, deduplicated collection of items.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, EncodeSize, Write)]
 pub struct Set<T>(Vec<T>);
 
 impl<T: fmt::Debug> fmt::Debug for Set<T> {
@@ -89,18 +89,6 @@ impl<T> Set<T> {
     /// Returns an iterator over the items in the collection.
     pub fn iter(&self) -> core::slice::Iter<'_, T> {
         self.into_iter()
-    }
-}
-
-impl<T: Write> Write for Set<T> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.0.write(buf);
-    }
-}
-
-impl<T: EncodeSize> EncodeSize for Set<T> {
-    fn encode_size(&self) -> usize {
-        self.0.encode_size()
     }
 }
 
@@ -292,7 +280,7 @@ impl<T: Ord> Quorum for Set<T> {
 }
 
 /// An ordered, deduplicated collection of key-value pairs.
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash, EncodeSize, Write)]
 pub struct Map<K, V> {
     keys: Set<K>,
     values: Vec<V>,
@@ -530,19 +518,6 @@ impl<K, V> From<Map<K, V>> for Vec<(K, V)> {
     }
 }
 
-impl<K: Write, V: Write> Write for Map<K, V> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.keys.write(buf);
-        self.values.write(buf);
-    }
-}
-
-impl<K: EncodeSize, V: EncodeSize> EncodeSize for Map<K, V> {
-    fn encode_size(&self) -> usize {
-        self.keys.encode_size() + self.values.encode_size()
-    }
-}
-
 impl<K: Read + Ord, V: Read> Read for Map<K, V> {
     type Cfg = (RangeCfg<usize>, K::Cfg, V::Cfg);
 
@@ -618,7 +593,7 @@ where
 }
 
 /// An ordered, deduplicated collection of key-value pairs with unique values.
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash, EncodeSize, Write)]
 pub struct BiMap<K, V> {
     inner: Map<K, V>,
 }
@@ -810,18 +785,6 @@ impl<K: Ord + Clone, V: Clone + Eq + Hash, const N: usize> TryFrom<&[(K, V); N]>
 impl<K, V> From<BiMap<K, V>> for Vec<(K, V)> {
     fn from(wrapped: BiMap<K, V>) -> Self {
         wrapped.inner.into()
-    }
-}
-
-impl<K: Write, V: Write> Write for BiMap<K, V> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.inner.write(buf);
-    }
-}
-
-impl<K: EncodeSize, V: EncodeSize> EncodeSize for BiMap<K, V> {
-    fn encode_size(&self) -> usize {
-        self.inner.encode_size()
     }
 }
 
