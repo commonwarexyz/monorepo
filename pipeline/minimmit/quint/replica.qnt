@@ -251,19 +251,22 @@ module replica {
         }
     }
 
-    // Enter a new view, unless it is older than the current view.
+    // Enter the next view on a certificate for the current view (Algorithm 1, lines 16-22).
+    // Views advance one at a time: a certificate for a later view does not move the replica.
+    // It stays in the store and takes effect via `on_stored_certificate` once its view is current.
     pure def enter_new_view(self: ReplicaState, cert: Certificate): ReplicaState = {
         val new_view = cert_view(cert) + 1
+        val advance = self.view == cert_view(cert)
         if (not(VIEWS.contains(new_view)))
             self // no change
         else
             {
                 ...self,
-                propose_sent: if (self.view < new_view) false else self.propose_sent,
-                nullified: if (self.view < new_view) false else self.nullified,
-                timer_cancelled: if (self.view < new_view) false else self.timer_cancelled,
+                propose_sent: if (advance) false else self.propose_sent,
+                nullified: if (advance) false else self.nullified,
+                timer_cancelled: if (advance) false else self.timer_cancelled,
                 view: 
-                    if (self.view < new_view) new_view else self.view,
+                    if (advance) new_view else self.view,
                 last_finalized: 
                     if (self.last_finalized < cert_view(cert) and cert_kind(cert) == FinalizationKind)
                         cert_view(cert)
@@ -424,6 +427,12 @@ module replica {
                 sent_certificate != Set(),
                 nondet cert = oneOf(sent_certificate)
                 on_certificate(id, cert)
+            },
+            pure val label_stored_certificate = true
+            all {
+                store_certificate.get(id) != Set(),
+                nondet cert = oneOf(store_certificate.get(id))
+                on_stored_certificate(id, cert)
             },
         },
     }
@@ -705,14 +714,37 @@ module replica {
         }
     }
 
+    // Algorithm 1, lines 16-22, as a state condition rather than an arrival handler: a
+    // certificate that was stored for a later view acts once that view becomes current.
+    // With `is_new_cert = false`, `_process_certificate` neither stores, forwards, nor commits
+    // again; it only votes along (for a notarization) and enters the next view.
+    action on_stored_certificate(id: ReplicaId, cert: Certificate): bool = all {
+        val self = replica_state.get(id)
+
+        all {
+            cert.in(store_certificate.get(id)),
+            cert_view(cert) == self.view,
+            _process_certificate(id, cert, false),
+
+            // unchanged
+            sent_proposal' = sent_proposal,
+            store_vote' = store_vote,
+            leader' = leader,
+            ghost_proposal' = ghost_proposal,
+            ghost_block_parent' = ghost_block_parent,
+        }
+    }
+
     action _process_certificate(id: ReplicaId, cert: Certificate, is_new_cert: bool): bool = all {
         val self = replica_state.get(id)
+        // Algorithm 1, line 20: vote along with an M-notarization for the current view. This
+        // does not depend on `is_new_cert`, so a notarization that was stored for a later view
+        // still triggers the vote once that view becomes current (`on_stored_certificate`).
         val should_send_notarize_vote = and {
             self.view == cert_view(cert),
             not(self.has_notarized()),
             not(self.nullified),
             cert_kind(cert) == NotarizationKind or cert_kind(cert) == FinalizationKind,
-            is_new_cert
         }
 
         all {
