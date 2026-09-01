@@ -923,6 +923,7 @@ impl<'a> World<'a> {
         };
         let state = &self.replicas[replica];
         let runner = &state.runner;
+        runner.machine.assert_artifact_indices();
         let mut replayed = Machine::restore(runner.profile.clone(), runner.checkpoint.clone())
             .expect("the invariant replay checkpoint must restore");
         for event in &runner.journal {

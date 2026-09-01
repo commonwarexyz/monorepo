@@ -2618,15 +2618,14 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     }
 
     fn has_exit_for(&self, view: View) -> bool {
-        self.artifacts.values().any(|entry| {
-            matches!(entry.state, ArtifactState::Ready)
-                && (matches!(
-                    entry.artifact.as_ref(),
-                    Artifact::Nullification(proof) if proof.view() == view
-                ) || matches!(
-                    entry.artifact.as_ref(),
-                    Artifact::Vqc(proof) if proof.view() == view
-                ))
+        self.artifacts_by_view.get(&view).is_some_and(|ids| {
+            ids.iter().filter_map(|id| self.artifacts.get(id)).any(|entry| {
+                matches!(entry.state, ArtifactState::Ready)
+                    && matches!(
+                        entry.artifact.as_ref(),
+                        Artifact::Nullification(_) | Artifact::Vqc(_)
+                    )
+            })
         })
     }
 
@@ -3047,6 +3046,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                 self.dependency_slots += 1;
             }
             let ticket = VerificationTicket::new(job, id, observation);
+            self.index_artifact(id, &artifact);
             self.artifacts.insert(
                 id,
                 ArtifactEntry {
@@ -3432,6 +3432,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             let Some(entry) = self.artifacts.remove(&id) else {
                 continue;
             };
+            self.unindex_artifact(id, &entry.artifact);
             self.reject_finality(id, entry.observation, &entry.artifact)?;
             self.views.reject(id, &entry.artifact);
             if entry.future {
@@ -4361,16 +4362,71 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         Some((header.chain(), header.height()))
     }
 
-    fn forget_ready_artifacts(&mut self, mut forget: impl FnMut(&Artifact<V, H::Digest>) -> bool) {
-        let ids = self
-            .artifacts
-            .iter()
-            .filter_map(|(id, entry)| {
-                (!entry.future
-                    && !self.durable_artifact_references.contains_key(id)
-                    && matches!(entry.state, ArtifactState::Ready)
-                    && forget(&entry.artifact))
-                .then_some(*id)
+    /// Records a retained artifact in the retirement indices.
+    fn index_artifact(&mut self, id: ArtifactId<H::Digest>, artifact: &Artifact<V, H::Digest>) {
+        if let Some(view) = artifact.view() {
+            self.artifacts_by_view.entry(view).or_default().insert(id);
+        }
+        if let Some(position) = Self::artifact_position(artifact) {
+            self.artifacts_by_position
+                .entry(position)
+                .or_default()
+                .insert(id);
+        }
+    }
+
+    /// Removes an artifact from the retirement indices once it leaves the retained map.
+    fn unindex_artifact(&mut self, id: ArtifactId<H::Digest>, artifact: &Artifact<V, H::Digest>) {
+        if let Some(view) = artifact.view()
+            && let Some(ids) = self.artifacts_by_view.get_mut(&view)
+        {
+            ids.remove(&id);
+            if ids.is_empty() {
+                self.artifacts_by_view.remove(&view);
+            }
+        }
+        if let Some(position) = Self::artifact_position(artifact)
+            && let Some(ids) = self.artifacts_by_position.get_mut(&position)
+        {
+            ids.remove(&id);
+            if ids.is_empty() {
+                self.artifacts_by_position.remove(&position);
+            }
+        }
+    }
+
+    /// Returns the retained artifacts at or below each chain's retention floor.
+    fn artifacts_below_floors<'a>(
+        &'a self,
+        floors: &'a [Height],
+    ) -> impl Iterator<Item = ArtifactId<H::Digest>> + 'a {
+        floors.iter().enumerate().flat_map(move |(chain, floor)| {
+            let chain = ChainId::new(chain as u32);
+            self.artifacts_by_position
+                .range((chain, Height::zero())..=(chain, *floor))
+                .flat_map(|(_, ids)| ids.iter().copied())
+        })
+    }
+
+    /// Returns the retained artifacts belonging to views at or below `view`.
+    fn artifacts_through_view(
+        &self,
+        view: View,
+    ) -> impl Iterator<Item = ArtifactId<H::Digest>> + '_ {
+        self.artifacts_by_view
+            .range(..=view)
+            .flat_map(|(_, ids)| ids.iter().copied())
+    }
+
+    /// Forgets the ready, unreferenced artifacts among `candidates`.
+    fn forget_ready(&mut self, candidates: impl Iterator<Item = ArtifactId<H::Digest>>) {
+        let ids = candidates
+            .filter(|id| {
+                self.artifacts.get(id).is_some_and(|entry| {
+                    !entry.future
+                        && !self.durable_artifact_references.contains_key(id)
+                        && matches!(entry.state, ArtifactState::Ready)
+                })
             })
             .collect::<Vec<_>>();
         for id in ids {
@@ -4378,6 +4434,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                 .artifacts
                 .remove(&id)
                 .expect("selected ready artifact remains retained");
+            self.unindex_artifact(id, &entry.artifact);
             if let Artifact::Vqc(certificate) = entry.artifact.as_ref() {
                 let certificate = certificate.id::<H>();
                 if self.vqcs.get(&certificate) == Some(&id) {
@@ -4404,17 +4461,13 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     fn forget_retired_artifacts(&mut self) -> Result<(), StepError> {
         let view = self.durable.retired_view;
         let waiting = self
-            .artifacts
-            .iter()
-            .filter_map(|(id, entry)| {
-                (!entry.future
-                    && !self.durable_artifact_references.contains_key(id)
-                    && matches!(entry.state, ArtifactState::Waiting(_))
-                    && entry
-                        .artifact
-                        .view()
-                        .is_some_and(|artifact_view| artifact_view <= view))
-                .then_some(*id)
+            .artifacts_through_view(view)
+            .filter(|id| {
+                self.artifacts.get(id).is_some_and(|entry| {
+                    !entry.future
+                        && !self.durable_artifact_references.contains_key(id)
+                        && matches!(entry.state, ArtifactState::Waiting(_))
+                })
             })
             .collect::<Vec<_>>();
         for id in waiting {
@@ -4423,16 +4476,11 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         let floors = (0..self.durable.certified_tips.len())
             .map(|chain| self.chain_retention_height(chain))
             .collect::<Vec<_>>();
-        self.forget_ready_artifacts(|artifact| {
-            artifact
-                .view()
-                .is_some_and(|artifact_view| artifact_view <= view)
-                || Self::artifact_position(artifact).is_some_and(|(chain, height)| {
-                    floors
-                        .get(chain.get() as usize)
-                        .is_some_and(|floor| height <= *floor)
-                })
-        });
+        let candidates = self
+            .artifacts_through_view(view)
+            .chain(self.artifacts_below_floors(&floors))
+            .collect::<Vec<_>>();
+        self.forget_ready(candidates.into_iter());
         Ok(())
     }
 
@@ -4898,13 +4946,8 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                 let floors = (0..self.durable.certified_tips.len())
                     .map(|chain| self.chain_retention_height(chain))
                     .collect::<Vec<_>>();
-                self.forget_ready_artifacts(|artifact| {
-                    Self::artifact_position(artifact).is_some_and(|(chain, height)| {
-                        floors
-                            .get(chain.get() as usize)
-                            .is_some_and(|floor| height <= *floor)
-                    })
-                });
+                let candidates = self.artifacts_below_floors(&floors).collect::<Vec<_>>();
+                self.forget_ready(candidates.into_iter());
             }
             Change::ViewCertificateCreated { artifact } => {
                 let artifact_id = artifact.id::<H>();
@@ -5638,6 +5681,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         self.claim_finality(id, observation, Arc::clone(&artifact))?;
         self.validate_finality(id, observation, &artifact)?;
         let provisions = self.retain_provider_index(id, &artifact);
+        self.index_artifact(id, &artifact);
         self.artifacts.insert(
             id,
             ArtifactEntry {

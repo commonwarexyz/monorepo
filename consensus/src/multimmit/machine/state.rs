@@ -625,6 +625,11 @@ pub(super) struct Machine<H: Hasher, V: Variant> {
     pub(crate) next_job: u64,
     pub(crate) next_barrier: u64,
     pub(crate) artifacts: BTreeMap<ArtifactId<H::Digest>, ArtifactEntry<V, H::Digest>>,
+    /// Retained view-scoped artifacts by view, so retirement visits only the views it retires.
+    pub(crate) artifacts_by_view: BTreeMap<View, BTreeSet<ArtifactId<H::Digest>>>,
+    /// Retained chain artifacts by chain and height, so retirement visits only heights at or
+    /// below a chain's retention floor.
+    pub(crate) artifacts_by_position: BTreeMap<(ChainId, Height), BTreeSet<ArtifactId<H::Digest>>>,
     pub(crate) vqcs: BTreeMap<CertificateId<H::Digest>, ArtifactId<H::Digest>>,
     pub(crate) jobs: BTreeMap<JobId, Vec<VerificationTicket<H::Digest>>>,
     pub(crate) future: BTreeSet<(View, ArtifactId<H::Digest>)>,
@@ -729,6 +734,8 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             next_job: 0,
             next_barrier: 0,
             artifacts: BTreeMap::new(),
+            artifacts_by_view: BTreeMap::new(),
+            artifacts_by_position: BTreeMap::new(),
             vqcs: BTreeMap::new(),
             jobs: BTreeMap::new(),
             future: BTreeSet::new(),
@@ -904,6 +911,52 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     }
 
     /// Projects current state for deterministic tests, including staged changes.
+    /// Checks that the retirement indices mirror the retained artifact map exactly.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) fn assert_artifact_indices(&self) {
+        let mut by_view = 0usize;
+        for (view, ids) in &self.artifacts_by_view {
+            assert!(!ids.is_empty(), "empty view index bucket at {view:?}");
+            for id in ids {
+                let entry = self.artifacts.get(id).expect("indexed artifact is retained");
+                assert_eq!(entry.artifact.view(), Some(*view), "view index disagrees");
+                by_view += 1;
+            }
+        }
+        let mut by_position = 0usize;
+        for (position, ids) in &self.artifacts_by_position {
+            assert!(!ids.is_empty(), "empty position index bucket at {position:?}");
+            for id in ids {
+                let entry = self.artifacts.get(id).expect("indexed artifact is retained");
+                let header = match entry.artifact.as_ref() {
+                    Artifact::TransactionBlock(block) => block.header(),
+                    Artifact::DaVote(vote) => vote.header(),
+                    Artifact::DaCertificate(certificate) => certificate.header(),
+                    other => panic!("position index holds a view artifact: {other:?}"),
+                };
+                assert_eq!((header.chain(), header.height()), *position);
+                by_position += 1;
+            }
+        }
+        let expected_views = self
+            .artifacts
+            .values()
+            .filter(|entry| entry.artifact.view().is_some())
+            .count();
+        let expected_positions = self
+            .artifacts
+            .values()
+            .filter(|entry| {
+                matches!(
+                    entry.artifact.as_ref(),
+                    Artifact::TransactionBlock(_) | Artifact::DaVote(_) | Artifact::DaCertificate(_)
+                )
+            })
+            .count();
+        assert_eq!(by_view, expected_views, "view index size");
+        assert_eq!(by_position, expected_positions, "position index size");
+    }
+
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) fn live_snapshot_for_test(&self) -> Snapshot<V, H::Digest> {
         Snapshot::new::<H>(
