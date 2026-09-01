@@ -31,7 +31,6 @@ use commonware_utils::{
     N3f1, PrioritySet,
     futures::{Pool as FuturesPool, rebind},
     non_empty,
-    ordered::Quorum,
 };
 use futures::future::{self, Either};
 use rand_core::CryptoRng;
@@ -52,6 +51,14 @@ enum Pending<S: Scheme, D: Digest> {
 
     /// Verified by the automaton. Now stores the digest.
     Verified(D, BTreeMap<Epoch, BTreeMap<Participant, Ack<S, D>>>),
+}
+
+fn has_quorum_weight<S: Scheme, D: Digest>(scheme: &S, acks: &[&Ack<S, D>]) -> bool {
+    let participants = scheme.participants();
+    let weight = participants
+        .sum_ordered_weights(acks.iter().map(|ack| ack.attestation.signer))
+        .expect("stored acknowledgements must have unique ordered signers");
+    weight >= participants.quorum_weight::<N3f1>()
 }
 
 /// The type returned by the `pending` pool, used by the application to return which digest is
@@ -492,7 +499,6 @@ impl<
     /// inapplicable (e.g. unknown scheme, non-pending height, digest mismatch).
     /// Duplicate acks are accepted as no-ops.
     async fn handle_ack(mut self, ack: &Ack<P::Scheme, D>) -> (Self, bool) {
-        // Get the quorum (from scheme participants for the ack's epoch)
         let scheme = match self.scheme(ack.epoch) {
             Ok(scheme) => scheme,
             Err(err) => {
@@ -500,8 +506,6 @@ impl<
                 return (self, false);
             }
         };
-        let quorum = scheme.participants().quorum_count::<N3f1>() as usize;
-
         // Get the acks and check digest consistency
         let acks_by_epoch = match self.pending.get_mut(&ack.item.height) {
             None => {
@@ -533,9 +537,7 @@ impl<
             .values()
             .filter(|a| a.item.digest == ack.item.digest)
             .collect::<Vec<_>>();
-        if filtered.len() >= quorum {
-            // Every stored acknowledgement is verified and signer-unique, so a same-item quorum
-            // satisfies the certificate scheme's assembly contract.
+        if has_quorum_weight(&*scheme, &filtered) {
             let certificate =
                 Certificate::from_acks(&*scheme, non_empty![@filtered], &self.strategy)
                     .expect("verified acknowledgement quorum must assemble");
@@ -990,7 +992,7 @@ mod tests {
     use commonware_runtime::{
         Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
-    use commonware_utils::{NZU16, NZUsize, NonZeroDuration};
+    use commonware_utils::{NZU16, NZUsize, NonZeroDuration, TryCollect, ordered::Committee};
 
     #[derive(Clone)]
     struct NoopBlocker;
@@ -1001,6 +1003,80 @@ mod tests {
         fn block(&mut self, _peer: Self::PublicKey) -> Feedback {
             Feedback::Ok
         }
+    }
+
+    fn weighted_fixture(weights: &[u64]) -> Fixture<ed25519::Scheme> {
+        let mut rng = commonware_utils::test_rng();
+        let Fixture {
+            participants,
+            private_keys,
+            ..
+        } = ed25519::fixture(
+            &mut rng,
+            b"aggregation-weighted-quorum",
+            u32::try_from(weights.len()).expect("test committee must fit in u32"),
+        );
+        let committee: Committee<_> = participants
+            .iter()
+            .cloned()
+            .zip(weights.iter().copied())
+            .try_collect()
+            .expect("test committee must be valid");
+        let schemes = private_keys
+            .iter()
+            .cloned()
+            .map(|private_key| {
+                ed25519::Scheme::signer(
+                    b"aggregation-weighted-quorum",
+                    committee.clone(),
+                    private_key,
+                )
+                .expect("private key must belong to test committee")
+            })
+            .collect();
+        let verifier = ed25519::Scheme::verifier(b"aggregation-weighted-quorum", committee);
+
+        Fixture {
+            participants,
+            private_keys,
+            schemes,
+            verifier,
+        }
+    }
+
+    #[test]
+    fn acknowledgement_quorum_uses_weight() {
+        let epoch = Epoch::new(111);
+        let item = Item {
+            height: Height::new(7),
+            digest: Sha256::hash(&[b"payload"]),
+        };
+
+        let light_majority = weighted_fixture(&[1, 1, 1, 6]);
+        let acks: Vec<_> = light_majority
+            .schemes
+            .iter()
+            .map(|scheme| Ack::sign(scheme, epoch, item.clone()).unwrap())
+            .collect();
+        assert!(!has_quorum_weight(
+            &light_majority.verifier,
+            &[&acks[0], &acks[1], &acks[2]],
+        ));
+        assert!(has_quorum_weight(
+            &light_majority.verifier,
+            &[&acks[0], &acks[1], &acks[2], &acks[3]],
+        ));
+
+        let heavy_quorum = weighted_fixture(&[4, 1, 1, 1]);
+        let acks: Vec<_> = heavy_quorum
+            .schemes
+            .iter()
+            .map(|scheme| Ack::sign(scheme, epoch, item.clone()).unwrap())
+            .collect();
+        assert!(has_quorum_weight(
+            &heavy_quorum.verifier,
+            &[&acks[0], &acks[1]],
+        ));
     }
 
     #[test]

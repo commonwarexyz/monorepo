@@ -31,7 +31,7 @@
 //! - Requesting externally synchronized [commonware_cryptography::Digest]s
 //! - Signing said digests with the configured scheme's signature type
 //! - Multicasting signatures/shares to other validators
-//! - Assembling certificates from a quorum of signatures
+//! - Assembling certificates from a quorum weight of signatures
 //! - Monitoring recovery progress and notifying the application layer of recoveries
 //!
 //! The engine interacts with four main components:
@@ -59,9 +59,11 @@
 //! In aggregation, participants never gossip recovered certificates. Rather, they gossip [types::TipAck]s
 //! with signatures over some height and their latest tip. This approach reduces the overhead of running aggregation
 //! concurrently with a consensus mechanism and consistently results in local recovery on stable networks. To increase
-//! the likelihood of local recovery, participants should tune the [Config::activity_timeout] to a value larger than the expected
-//! drift of online participants (even if all participants are synchronous the tip advancement logic will advance to the `f+1`th highest
-//! reported tip and drop all work below that tip minus the [Config::activity_timeout]).
+//! the likelihood of local recovery, participants should tune the [Config::activity_timeout] to a
+//! value larger than the expected drift of online participants. Even if all participants are
+//! synchronous, tip advancement may skip to the greatest height reported by more than the maximum
+//! faulty committee weight and drop all work below that tip minus the
+//! [Config::activity_timeout].
 //!
 //! ## Epoch-Independent Signatures
 //!
