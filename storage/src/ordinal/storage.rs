@@ -4,12 +4,12 @@ use commonware_codec::{Buf, CodecFixed, FixedSize, Read, ReadExt, Write as Codec
 use commonware_cryptography::{Crc32, crc32};
 use commonware_formatting::hex;
 use commonware_runtime::{
-    Blob, BufMut, Error as RError, IoBuf, WriteOptions,
-    buffer::{Read as ReadBuffer, Write},
+    Blob, BufMut, Error as RError, Handle, IoBuf, WriteOptions,
+    buffer::{OwnedView, Read as ReadBuffer, Write},
     telemetry::metrics::{Counter, MetricsExt as _},
 };
 use commonware_utils::bitmap::BitMap;
-use futures::future::try_join_all;
+use futures::future::{join_all, try_join_all};
 use std::{
     collections::{BTreeMap, BTreeSet, btree_map::Entry},
     marker::PhantomData,
@@ -21,6 +21,26 @@ use tracing::{debug, warn};
 struct Record<V: CodecFixed<Cfg = ()>> {
     value: V,
     crc: u32,
+}
+
+/// Owned read of one ordinal record at a captured logical section size.
+pub(crate) struct ReadStep<B: Blob, V: CodecFixed<Cfg = ()>> {
+    blob: OwnedView<B>,
+    index: u64,
+    offset: u64,
+    _phantom: PhantomData<V>,
+}
+
+impl<B: Blob, V: CodecFixed<Cfg = ()>> ReadStep<B, V> {
+    /// Read and validate the captured record.
+    pub(crate) async fn execute(self) -> Result<V, Error> {
+        let read_buf = self
+            .blob
+            .read_at(self.offset, Record::<V>::SIZE)
+            .await?
+            .coalesce();
+        Record::<V>::decode_valid(read_buf).ok_or(Error::InvalidRecord(self.index))
+    }
 }
 
 impl<V: CodecFixed<Cfg = ()>> Record<V> {
@@ -345,6 +365,25 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
         Ok(Some(value))
     }
 
+    /// Capture a read of one existing index without performing I/O.
+    fn read_step(&self, index: u64) -> Option<ReadStep<E::Blob, V>> {
+        self.intervals.get(&index)?;
+
+        let items_per_blob = self.config.items_per_blob.get();
+        let section = index / items_per_blob;
+        let blob = self
+            .blobs
+            .get(&section)
+            .expect("interval references a missing ordinal section");
+        let offset = (index % items_per_blob) * Record::<V>::SIZE as u64;
+        Some(ReadStep {
+            blob: blob.view(),
+            index,
+            offset,
+            _phantom: PhantomData,
+        })
+    }
+
     /// See [Ordinal::has].
     fn has(&self, index: u64) -> bool {
         self.has.inc();
@@ -421,24 +460,24 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
 
     /// See [Ordinal::sync].
     async fn sync(&mut self) -> Result<(), Error> {
+        self.start_sync().await.await?;
+        Ok(())
+    }
+
+    /// See [Ordinal::start_sync].
+    async fn start_sync(&mut self) -> Handle<()> {
         self.syncs.inc();
 
-        if self.pending.is_empty() {
-            return Ok(());
-        }
-
-        let futures: Vec<_> = self
+        let futures = self
             .blobs
             .iter_mut()
             .filter(|(section, _)| self.pending.contains(section))
-            .map(|(_, blob)| blob.sync())
-            .collect();
-        try_join_all(futures).await?;
-
-        // Clear pending sections.
+            .map(|(_, blob)| blob.start_sync())
+            .collect::<Vec<_>>();
+        let handles = join_all(futures).await;
         self.pending.clear();
 
-        Ok(())
+        Handle::from_future(async move { try_join_all(handles).await.map(|_| ()) })
     }
 
     /// See [Ordinal::destroy].
@@ -505,6 +544,11 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         self.0.get(index).await
     }
 
+    /// Capture a read of one existing index without performing I/O.
+    pub(crate) fn read_step(&self, index: u64) -> Option<ReadStep<E::Blob, V>> {
+        self.0.read_step(index)
+    }
+
     /// Check if an index exists.
     pub fn has(&self, index: u64) -> bool {
         self.0.has(index)
@@ -556,6 +600,12 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
     pub async fn sync(mut self) -> Result<Self, Error> {
         self.0.sync().await?;
         Ok(self)
+    }
+
+    /// Begin syncing pending entries and return ownership before durability completes.
+    pub(crate) async fn start_sync(mut self) -> (Self, Handle<()>) {
+        let handle = self.0.start_sync().await;
+        (self, handle)
     }
 
     /// Destroy [Ordinal] and remove all data.

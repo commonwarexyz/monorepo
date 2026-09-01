@@ -76,6 +76,40 @@ pub enum Error {
     Runtime(#[from] commonware_runtime::Error),
     #[error("corruption: {0}")]
     Corruption(String),
+    /// A blob whose checksum verified could not be decoded.
+    ///
+    /// The checksum proves the bytes are exactly the ones that were written, so both blobs are
+    /// left intact and the mismatch is reported instead of truncating durable state. Restore the
+    /// key type and codec configuration the data was written with, then reopen.
+    #[error("blob {blob} is undecodable: {reason}")]
+    Undecodable {
+        /// Which of the two atomic blobs failed to decode.
+        blob: usize,
+        /// The key whose entry failed, absent when the key itself did not decode.
+        key: Option<String>,
+        /// What the decoder could not read.
+        reason: Undecodable,
+    },
+}
+
+/// Why a checksum-valid blob could not be decoded.
+#[derive(Debug, Error)]
+pub enum Undecodable {
+    /// The key type rejected the encoded key.
+    #[error("key is malformed: {0}")]
+    Key(commonware_codec::Error),
+    /// The key decoded but does not re-encode to the bytes it consumed.
+    #[error("key is not canonical")]
+    KeyEncoding,
+    /// The value codec rejected the encoded value under the configured bounds.
+    #[error("value is malformed: {0}")]
+    Value(commonware_codec::Error),
+    /// The value decoded but does not re-encode to the bytes it consumed.
+    #[error("value is not canonical")]
+    ValueEncoding,
+    /// An entry consumed no bytes, so decoding cannot make progress.
+    #[error("entry made no decoding progress")]
+    Stalled,
 }
 
 /// Configuration for [Metadata] storage.
@@ -92,19 +126,47 @@ pub struct Config<C> {
 mod tests {
     use super::*;
     use bytes::Bytes;
+    use commonware_cryptography::Crc32;
     use commonware_formatting::hex;
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{
-        Blob, Metrics as _, ReadOptions, Runner, Storage, Supervisor as _, WriteOptions,
+        Blob, Handle, Metrics as _, ReadOptions, Runner, Storage, Supervisor as _, WriteOptions,
         deterministic,
         mocks::{
             DelayedSyncContext, PendingSyncs, RecordingContext, Recordings, WriteFaultContext,
             WriteFaults, drive_pending_syncs, fail_pending_syncs, release_pending_syncs,
         },
     };
-    use commonware_utils::sequence::U64;
+    use commonware_utils::sequence::{U64, Unit};
     use futures::FutureExt as _;
     use rand::{Rng, RngExt as _};
+    use std::num::NonZeroUsize;
+
+    #[test_traced]
+    fn test_bounded_init_discards_oversized_blob() {
+        deterministic::Runner::default().start(|context| async move {
+            let (blob, _) = context.open("test", b"left").await.unwrap();
+            blob.resize(65).await.unwrap();
+            blob.sync().await.unwrap();
+            drop(blob);
+
+            let metadata = Metadata::<_, Unit, Unit>::init_bounded(
+                context.child("open"),
+                Config {
+                    partition: "test".into(),
+                    codec_config: (),
+                },
+                NonZeroUsize::new(64).unwrap(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(metadata.get(&Unit), None);
+            drop(metadata);
+
+            let (_, len) = context.open("test", b"left").await.unwrap();
+            assert_eq!(len, 0);
+        });
+    }
 
     fn assert_options(recordings: &Recordings, reads: &[ReadOptions], writes: &[WriteOptions]) {
         let snapshot = recordings.snapshot();
@@ -227,6 +289,106 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_checksum_valid_zero_progress_encoding_is_reported() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut encoded = 0u64.to_be_bytes().to_vec();
+            encoded.push(1);
+            let checksum = Crc32::checksum(&encoded);
+            encoded.extend_from_slice(&checksum.to_be_bytes());
+            let written = encoded.len() as u64;
+            let (blob, _) = context.open("test", b"left").await.unwrap();
+            blob.write_at(0, encoded, WriteOptions::SYNC).await.unwrap();
+            drop(blob);
+
+            let error = Metadata::<_, Unit, Unit>::init(
+                context.child("open"),
+                Config {
+                    partition: "test".into(),
+                    codec_config: (),
+                },
+            )
+            .await
+            .unwrap_err();
+            assert!(matches!(
+                error,
+                Error::Undecodable {
+                    blob: 0,
+                    reason: Undecodable::Stalled,
+                    ..
+                }
+            ));
+
+            let (_, len) = context.open("test", b"left").await.unwrap();
+            assert_eq!(len, written);
+        });
+    }
+
+    #[test_traced]
+    fn test_narrowed_codec_config_preserves_both_blobs() {
+        deterministic::Runner::default().start(|context| async move {
+            // Two syncs so both atomic blobs hold a complete, checksum-valid copy.
+            let key = U64::new(42);
+            let value = b"0123456789".to_vec();
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(
+                context.child("write"),
+                Config {
+                    partition: "test".into(),
+                    codec_config: ((0..).into(), ()),
+                },
+            )
+            .await
+            .unwrap();
+            metadata.put(key.clone(), value.clone());
+            metadata = metadata.sync().await.unwrap();
+            metadata.put(key.clone(), value.clone());
+            metadata.sync().await.unwrap();
+
+            let (_, left) = context.open("test", b"left").await.unwrap();
+            let (_, right) = context.open("test", b"right").await.unwrap();
+            assert!(left > 0 && right > 0);
+
+            // A configuration that cannot represent the stored value is a deployment mistake, not
+            // corruption, so it must not consume either durable copy.
+            let error = Metadata::<_, U64, Vec<u8>>::init(
+                context.child("narrow"),
+                Config {
+                    partition: "test".into(),
+                    codec_config: ((0..=4).into(), ()),
+                },
+            )
+            .await
+            .unwrap_err();
+            let Error::Undecodable {
+                blob,
+                key: reported,
+                reason: Undecodable::Value(_),
+            } = error
+            else {
+                panic!("a checksum-valid value must fail decoding, not the envelope");
+            };
+            assert_eq!(blob, 0);
+            assert_eq!(reported.as_deref(), Some(key.to_string().as_str()));
+
+            let (_, narrowed_left) = context.open("test", b"left").await.unwrap();
+            let (_, narrowed_right) = context.open("test", b"right").await.unwrap();
+            assert_eq!(narrowed_left, left);
+            assert_eq!(narrowed_right, right);
+
+            // Restoring the original configuration recovers the value.
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(
+                context.child("reopen"),
+                Config {
+                    partition: "test".into(),
+                    codec_config: ((0..).into(), ()),
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(metadata.get(&key), Some(&value));
+        });
+    }
+
+    #[test_traced]
     fn test_start_sync_pipelined_destroy() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -286,6 +448,99 @@ mod tests {
             // and fails, consuming the store, without writing the only durable copy.
             metadata.put(U64::new(1), vec![4]);
             assert!(metadata.start_sync().await.is_err());
+        });
+    }
+
+    #[test_traced]
+    fn test_start_sync_after_dependency_failure_fails_next_sync() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(
+                context.child("metadata"),
+                Config {
+                    partition: "test".into(),
+                    codec_config: ((0..).into(), ()),
+                },
+            )
+            .await
+            .unwrap();
+            metadata.put(U64::new(1), vec![3; 10]);
+            metadata.put(U64::new(2), vec![4; 10]);
+            metadata = metadata.sync().await.unwrap();
+            metadata = metadata.sync().await.unwrap();
+
+            metadata.put(U64::new(1), vec![5; 10]);
+
+            let dependency = Handle::ready(Err(commonware_runtime::Error::Closed));
+            let (mut metadata, handle) = metadata.start_sync_after(dependency).await.unwrap();
+            assert!(handle.await.is_err());
+            let buffer = context.encode();
+            assert!(buffer.contains("sync_rewrites_total 2"), "{buffer}");
+            assert!(buffer.contains("sync_overwrites_total 0"), "{buffer}");
+            assert!(
+                buffer.contains("runtime_storage_write_bytes_total 100"),
+                "{buffer}"
+            );
+
+            metadata.put(U64::new(1), vec![6; 10]);
+            assert!(metadata.start_sync().await.is_err());
+            let buffer = context.encode();
+            assert!(
+                buffer.contains("runtime_storage_write_bytes_total 100"),
+                "{buffer}"
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_start_sync_after_preserves_delta_writes() {
+        deterministic::Runner::default().start(|context| async move {
+            let cfg = Config {
+                partition: "test".into(),
+                codec_config: ((0..).into(), ()),
+            };
+            let mut metadata =
+                Metadata::<_, U64, Vec<u8>>::init(context.child("first"), cfg.clone())
+                    .await
+                    .unwrap();
+            metadata.put(U64::new(1), vec![1; 10]);
+            metadata.put(U64::new(2), vec![2; 10]);
+            metadata = metadata.sync().await.unwrap();
+            metadata = metadata.sync().await.unwrap();
+
+            metadata.put(U64::new(1), vec![3; 10]);
+            let (mut metadata, handle) = metadata
+                .start_sync_after(Handle::ready(Ok(())))
+                .await
+                .unwrap();
+            handle.await.unwrap();
+            let buffer = context.encode();
+            assert!(buffer.contains("first_sync_rewrites_total 2"), "{buffer}");
+            assert!(buffer.contains("first_sync_overwrites_total 1"), "{buffer}");
+            assert!(
+                buffer.contains("runtime_storage_write_bytes_total 123"),
+                "{buffer}"
+            );
+
+            metadata.put(U64::new(1), vec![4; 20]);
+            let (metadata, handle) = metadata
+                .start_sync_after(Handle::ready(Ok(())))
+                .await
+                .unwrap();
+            handle.await.unwrap();
+            let buffer = context.encode();
+            assert!(buffer.contains("first_sync_rewrites_total 3"), "{buffer}");
+            assert!(buffer.contains("first_sync_overwrites_total 1"), "{buffer}");
+            assert!(
+                buffer.contains("runtime_storage_write_bytes_total 183"),
+                "{buffer}"
+            );
+
+            drop(metadata);
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(metadata.get(&U64::new(1)), Some(&vec![4; 20]));
+            assert_eq!(metadata.get(&U64::new(2)), Some(&vec![2; 10]));
         });
     }
 

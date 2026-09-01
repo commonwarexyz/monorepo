@@ -1,7 +1,9 @@
 //! Buffers for reading and writing to [crate::Blob]s.
 
 use crate::WriteOptions;
+use commonware_utils::sync::Mutex;
 use futures::future::{BoxFuture, FutureExt as _, Shared};
+use std::{collections::VecDeque, sync::Arc};
 
 pub mod paged;
 mod read;
@@ -9,23 +11,23 @@ mod tip;
 mod write;
 
 pub use read::Read;
-pub use write::Write;
+pub use write::{OwnedView, Write};
 
-/// A shared sync result.
+/// A shared operation result.
 ///
 /// Handles returned by [Completion::handle] are detached observers of the same shared result:
-/// dropping one neither cancels the underlying sync nor consumes its result, and every
+/// dropping one neither cancels the underlying operation nor consumes its result, and every
 /// observer sees the same outcome.
 #[derive(Clone)]
 struct Completion(Shared<BoxFuture<'static, Result<(), crate::Error>>>);
 
 impl Completion {
-    /// Return a handle for the sync result.
+    /// Return a handle for the operation result.
     fn handle(&self) -> crate::Handle<()> {
         crate::Handle::from_future(self.0.clone())
     }
 
-    /// Wait for the sync result.
+    /// Wait for the operation result.
     async fn wait(&self) -> Result<(), crate::Error> {
         self.0.clone().await
     }
@@ -37,24 +39,138 @@ impl From<crate::Handle<()>> for Completion {
     }
 }
 
+/// Tracks blob writes that were submitted with [crate::Blob::start_write_at] but whose completion
+/// has not been observed yet.
+///
+/// A submitted write may not have reached the blob, so the blob must not be read at those
+/// offsets, synced, resized, or rewritten until [Writeback::settle] returns. Cloning shares the
+/// same set, which lets read views captured from a writer settle its writes without owning it.
+///
+/// A failed write is fatal for the blob: the first failure is retained and returned by every
+/// later settle, so nothing proceeds on a blob whose contents are unknown.
+#[derive(Clone, Default)]
+struct Writeback {
+    state: Arc<Mutex<WritebackState>>,
+}
+
+/// One submitted write.
+#[derive(Clone)]
+struct Submitted {
+    /// Sequence number ordering this write against the others.
+    sequence: u64,
+    /// Logical offset the write starts at. Writes are submitted in increasing order and cover
+    /// contiguous ranges, so everything below the oldest unobserved start has already landed.
+    start: u64,
+    /// Shared completion for the write.
+    completion: Completion,
+}
+
+#[derive(Default)]
+struct WritebackState {
+    /// Submitted writes whose completion has not been observed, in submission order.
+    submitted: VecDeque<Submitted>,
+    /// Sequence number for the next submission.
+    next: u64,
+    /// The first observed write failure.
+    failed: Option<crate::Error>,
+}
+
+impl Writeback {
+    /// Number of submitted writes whose completion has not been observed.
+    fn len(&self) -> usize {
+        self.state.lock().submitted.len()
+    }
+
+    /// Record a write submitted at logical offset `start`.
+    fn push(&self, start: u64, completion: Completion) {
+        let mut state = self.state.lock();
+        let sequence = state.next;
+        state.next += 1;
+        state.submitted.push_back(Submitted {
+            sequence,
+            start,
+            completion,
+        });
+    }
+
+    /// Return the oldest unobserved write, or the retained failure.
+    fn oldest(&self) -> Result<Option<Submitted>, crate::Error> {
+        let state = self.state.lock();
+        if let Some(err) = &state.failed {
+            return Err(err.clone());
+        }
+        Ok(state.submitted.front().cloned())
+    }
+
+    /// Wait for the oldest submitted write to land.
+    async fn settle_oldest(&self) -> Result<(), crate::Error> {
+        let Some(oldest) = self.oldest()? else {
+            return Ok(());
+        };
+        let result = oldest.completion.wait().await;
+        let mut state = self.state.lock();
+        if let Err(err) = result {
+            // Retain the failure so no later caller can act on unknown blob contents.
+            state.failed.get_or_insert_with(|| err.clone());
+            state.submitted.clear();
+            return Err(err);
+        }
+        // A concurrent settle may already have removed this write.
+        while state
+            .submitted
+            .front()
+            .is_some_and(|observed| observed.sequence <= oldest.sequence)
+        {
+            state.submitted.pop_front();
+        }
+        Ok(())
+    }
+
+    /// Wait for every submitted write that covers a byte below logical offset `end` to land.
+    ///
+    /// A read of `[.., end)` observes the blob's own bytes there once this returns.
+    async fn settle_through(&self, end: u64) -> Result<(), crate::Error> {
+        while self.oldest()?.is_some_and(|oldest| oldest.start < end) {
+            self.settle_oldest().await?;
+        }
+        Ok(())
+    }
+
+    /// Wait for every submitted write to land.
+    async fn settle(&self) -> Result<(), crate::Error> {
+        while self.oldest()?.is_some() {
+            self.settle_oldest().await?;
+        }
+        Ok(())
+    }
+}
+
 /// Tracks whether blob mutations still need a sync.
 ///
-/// Callers rely on three properties:
-/// - Every operation that mutates the blob first waits for an in-flight sync, so a started
-///   sync's coverage is never disturbed by later writes.
-/// - [SyncState::start_sync] on a [SyncState::Pending] state returns the in-flight sync's
-///   handle (completed syncs resolve immediately), so re-requesting a sync is a cheap way to
-///   observe outstanding work.
+/// Callers rely on four properties:
+/// - Every operation that mutates bytes an in-flight sync covers first waits for that sync, so a
+///   started sync's coverage is never disturbed by later writes. [SyncState::start_write_at] is
+///   the sole exception: its caller guarantees the submitted write lands where a crash still
+///   recovers everything the in-flight sync promised.
+/// - [SyncState::start_sync] on a [SyncState::Pending] state whose sync covers every mutation
+///   returns that sync's handle (completed syncs resolve immediately), so re-requesting a sync is
+///   a cheap way to observe outstanding work. When writes were submitted after the sync started,
+///   a new barrier is started for them instead.
+/// - A barrier only covers submitted writes the caller has already observed, so callers must
+///   await their handles before requesting one.
 /// - A failure is never lost: every handle cloned from the shared completion reports it, and
 ///   an unobserved failure surfaces from [SyncState::wait_for_pending] on the next operation,
 ///   which also marks the state [SyncState::Dirty] since the mutations still need durability.
+///   Submitting a write does not wait for the in-flight sync, so a sync that fails while writes
+///   are being submitted is reported by the next operation that waits for it.
 enum SyncState {
     // No unsynced mutations.
     Clean,
     // Unsynced mutations need a sync.
     Dirty,
-    // A started sync is in flight.
-    Pending(Completion),
+    // A started sync is in flight. `uncovered` records whether writes submitted after it started
+    // still need a barrier of their own.
+    Pending { sync: Completion, uncovered: bool },
 }
 
 impl SyncState {
@@ -66,20 +182,34 @@ impl SyncState {
     /// Mark a new unsynced mutation.
     fn mark_dirty(&mut self) {
         assert!(
-            !matches!(self, Self::Pending(_)),
+            !matches!(self, Self::Pending { .. }),
             "pending sync must be joined before marking dirty"
         );
         *self = Self::Dirty;
     }
 
+    /// Mark an unsynced mutation submitted while a sync may still be in flight.
+    ///
+    /// The in-flight sync keeps its own coverage; this only records that the submitted write
+    /// needs a barrier of its own.
+    fn mark_uncovered(&mut self) {
+        match self {
+            Self::Pending { uncovered, .. } => *uncovered = true,
+            _ => *self = Self::Dirty,
+        }
+    }
+
     /// Wait for an in-flight sync before reusing or mutating the blob.
     async fn wait_for_pending(&mut self) -> Result<(), crate::Error> {
-        let Self::Pending(pending) = self else {
+        let Self::Pending { sync, uncovered } = self else {
             return Ok(());
         };
-        match pending.wait().await {
+        let uncovered = *uncovered;
+        let result = sync.wait().await;
+        match result {
             Ok(()) => {
-                *self = Self::Clean;
+                // Writes submitted after the sync started are still unsynced.
+                *self = if uncovered { Self::Dirty } else { Self::Clean };
                 Ok(())
             }
             Err(err) => {
@@ -122,8 +252,33 @@ impl SyncState {
                 *self = Self::Clean;
                 Ok(())
             }
-            Self::Pending(_) => unreachable!("pending sync waited above"),
+            Self::Pending { .. } => unreachable!("pending sync waited above"),
         }
+    }
+
+    /// Submit a write without waiting for it to land, returning a handle for its completion.
+    ///
+    /// Unlike every other mutation, this does not wait for an in-flight sync. The caller is
+    /// responsible for only submitting writes that leave the bytes that sync covers recoverable;
+    /// the paged writer's flush path documents the argument for its own writes.
+    ///
+    /// The caller owns the returned handle and must await it before anything that depends on the
+    /// write having landed, including every durability barrier this state starts.
+    async fn start_write_at(
+        &mut self,
+        blob: &impl crate::Blob,
+        offset: u64,
+        bufs: impl Into<crate::IoBufs> + Send,
+        options: WriteOptions,
+    ) -> crate::Handle<()> {
+        assert!(
+            !options.contains(WriteOptions::SYNC),
+            "a submitted write cannot carry its own durability"
+        );
+        // The write may land at any point from here on, so it needs a later sync regardless of
+        // whether the caller ever observes its completion.
+        self.mark_uncovered();
+        blob.start_write_at(offset, bufs, options).await
     }
 
     /// Resize the blob and require a later sync.
@@ -135,6 +290,9 @@ impl SyncState {
     }
 
     /// Make all pending mutations durable before returning.
+    ///
+    /// The barrier covers writes submitted while an earlier sync was in flight, so the caller
+    /// must have observed those writes' completion first.
     async fn sync(&mut self, blob: &impl crate::Blob) -> Result<(), crate::Error> {
         self.wait_for_pending().await?;
         if matches!(self, Self::Clean) {
@@ -146,17 +304,33 @@ impl SyncState {
     }
 
     /// Start making pending mutations durable and return a handle for completion.
+    ///
+    /// Writes submitted after the in-flight sync started are not covered by it, so this waits
+    /// for that sync and starts a barrier that does cover them. The caller must have observed
+    /// those writes' completion first.
     async fn start_sync(&mut self, blob: &impl crate::Blob) -> crate::Handle<()> {
+        if let Self::Pending { sync, uncovered } = self {
+            if !*uncovered {
+                // The in-flight sync covers every mutation, so observing it is enough.
+                return sync.handle();
+            }
+            if let Err(err) = self.wait_for_pending().await {
+                return crate::Handle::ready(Err(err));
+            }
+        }
         match self {
             Self::Clean => crate::Handle::ready(Ok(())),
             Self::Dirty => {
                 // Store a shared completion so repeated calls observe the same sync.
                 let pending = Completion::from(blob.start_sync().await);
                 let handle = pending.handle();
-                *self = Self::Pending(pending);
+                *self = Self::Pending {
+                    sync: pending,
+                    uncovered: false,
+                };
                 handle
             }
-            Self::Pending(pending) => pending.handle(),
+            Self::Pending { .. } => unreachable!("a covered sync returned above"),
         }
     }
 }

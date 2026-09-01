@@ -7,7 +7,7 @@
 //! exactly one place.
 
 use super::CacheRef;
-use crate::{Blob, Error, IoBufMut, IoBufs};
+use crate::{Blob, Error, IoBuf, IoBufMut, IoBufs, buffer::Writeback};
 use futures::stream::{FuturesUnordered, StreamExt};
 use std::num::NonZeroUsize;
 
@@ -25,6 +25,138 @@ pub struct View<'a, B: Blob> {
     pub(super) tail_offset: u64,
     /// Logical bytes at `[tail_offset, size)`. May be empty.
     pub(super) tail: &'a [u8],
+    /// Appends the originating writer submitted to `blob` but has not observed. A blob read must
+    /// settle them first; reads served from the tail or the page cache never need to. `None` when
+    /// the blob cannot have submitted appends outstanding.
+    pub(super) writeback: Option<&'a Writeback>,
+}
+
+/// An owned, immutable logical view of a paged [`Writer`](super::Writer).
+///
+/// Constructing a view with [`Writer::view`](super::Writer::view) is synchronous and
+/// constant-time: it clones the blob and cache handles and shares the writer's immutable tail
+/// buffer. Capture does not flush or sync the writer. Later appends use the existing copy-on-write
+/// path and are excluded by the captured size and tail.
+///
+/// Blob-backed full pages remain subject to rewinds made through the writer. Callers that retain a
+/// view must not resize into its captured range. Removing the blob by name is safe because the view
+/// owns a blob handle and inherits [`crate::Storage`]'s read-after-remove guarantee.
+#[derive(Clone)]
+pub struct OwnedView<B: Blob> {
+    blob: B,
+    cache_ref: CacheRef,
+    id: u64,
+    size: u64,
+    tail_offset: u64,
+    tail: IoBuf,
+    writeback: Writeback,
+}
+
+impl<B: Blob> OwnedView<B> {
+    /// Construct an owned view from a fixed logical boundary and tail.
+    pub(super) const fn new(
+        blob: B,
+        cache_ref: CacheRef,
+        id: u64,
+        size: u64,
+        tail_offset: u64,
+        tail: IoBuf,
+        writeback: Writeback,
+    ) -> Self {
+        Self {
+            blob,
+            cache_ref,
+            id,
+            size,
+            tail_offset,
+            tail,
+            writeback,
+        }
+    }
+
+    /// Returns a borrowed view over the captured state.
+    fn borrowed(&self) -> View<'_, B> {
+        View {
+            blob: &self.blob,
+            cache_ref: &self.cache_ref,
+            id: self.id,
+            size: self.size,
+            tail_offset: self.tail_offset,
+            tail: self.tail.as_ref(),
+            writeback: Some(&self.writeback),
+        }
+    }
+
+    /// Returns the logical size captured by this view.
+    pub const fn size(&self) -> u64 {
+        self.size
+    }
+
+    /// Read into `buf` if it can be done synchronously without I/O. Returns `true` only if all
+    /// bytes were satisfied from the page cache and/or captured tail. When `false` is returned,
+    /// the contents of `buf` are unspecified.
+    pub fn try_read_sync_into(&self, buf: &mut [u8], offset: u64) -> bool {
+        self.borrowed().try_read_sync_into(buf, offset)
+    }
+
+    /// Reads bytes starting at `offset` into `buf`.
+    pub async fn read_into(&self, buf: &mut [u8], offset: u64) -> Result<(), Error> {
+        self.borrowed().read_into(buf, offset).await
+    }
+
+    /// Read exactly `len` immutable bytes starting at `offset`.
+    pub async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
+        self.borrowed().read_at(offset, len).await
+    }
+
+    /// Reads up to `len` bytes starting at `offset`, but only as many as are available.
+    ///
+    /// Returns the buffer (truncated to actual bytes read) and the number of bytes read. Returns an
+    /// error if no bytes are available at the given offset.
+    pub async fn read_up_to(
+        &self,
+        offset: u64,
+        len: usize,
+        bufs: impl Into<IoBufMut> + Send,
+    ) -> Result<(IoBufMut, usize), Error> {
+        self.borrowed().read_up_to(offset, len, bufs).await
+    }
+
+    /// Read multiple fixed-size items at sorted byte offsets into a contiguous caller buffer.
+    ///
+    /// `buf` must be exactly `offsets.len() * item_size` bytes. All offsets must be sorted,
+    /// non-overlapping, and within bounds.
+    ///
+    /// Returns the number of items fully served without a blob read. Remaining items required at
+    /// least one blob read.
+    pub async fn read_many_into(
+        &self,
+        buf: &mut [u8],
+        offsets: &[u64],
+        item_size: NonZeroUsize,
+    ) -> Result<usize, Error> {
+        self.borrowed()
+            .read_many_into(buf, offsets, item_size)
+            .await
+    }
+
+    /// Like [`Self::read_many_into`], but synchronous and cache-only. Returns the indices of items
+    /// that require a blob read. Their slots in `buf` hold unspecified bytes.
+    pub fn try_read_many_sync_into(
+        &self,
+        buf: &mut [u8],
+        offsets: &[u64],
+        item_size: NonZeroUsize,
+    ) -> Vec<usize> {
+        self.borrowed()
+            .try_read_many_sync_into(buf, offsets, item_size)
+    }
+
+    /// Like [`Self::try_read_many_sync_into`], but for variable-length `(offset, len)` ranges:
+    /// `buf` holds one slot per range, back to back.
+    pub fn try_read_ranges_sync_into(&self, buf: &mut [u8], ranges: &[(u64, usize)]) -> Vec<usize> {
+        self.borrowed().try_read_ranges_sync_into(buf, ranges)
+    }
 }
 
 impl<B: Blob> Clone for View<'_, B> {
@@ -36,6 +168,15 @@ impl<B: Blob> Clone for View<'_, B> {
 impl<B: Blob> Copy for View<'_, B> {}
 
 impl<B: Blob> View<'_, B> {
+    /// Wait for every append the originating writer submitted that covers a byte below `end`, so
+    /// a blob read of `[.., end)` cannot observe bytes the blob has not taken yet.
+    async fn settle_writeback(&self, end: u64) -> Result<(), Error> {
+        match self.writeback {
+            Some(writeback) => writeback.settle_through(end).await,
+            None => Ok(()),
+        }
+    }
+
     /// Copy any in-memory tail overlap into `buf`, returning the remaining prefix length.
     fn copy_tail_overlap(&self, buf: &mut [u8], offset: u64) -> usize {
         let tail_start = self.tail_offset.max(offset);
@@ -108,6 +249,8 @@ impl<B: Blob> View<'_, B> {
 
         let uncached_offset = offset + cached as u64;
         let uncached_len = remaining - cached;
+        self.settle_writeback(uncached_offset + uncached_len as u64)
+            .await?;
         self.cache_ref
             .read(
                 self.blob,
@@ -179,7 +322,12 @@ impl<B: Blob> View<'_, B> {
             return Ok(offsets.len());
         }
 
-        // Slow path: read remaining ranges from the underlying blob, concurrently.
+        // Slow path: read remaining ranges from the underlying blob, concurrently. The ranges
+        // are sorted, so the last one ends past every other.
+        let end = cache_ranges
+            .last()
+            .map_or(0, |(buf, offset)| offset + buf.len() as u64);
+        self.settle_writeback(end).await?;
         let mut reads = cache_ranges
             .iter_mut()
             .map(|(item_buf, offset)| self.cache_ref.read(self.blob, self.id, item_buf, *offset))

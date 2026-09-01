@@ -74,7 +74,6 @@ use crate::{
     simplex::elector::{self, Terms},
     types::{Participant, Round, TermLength, View},
 };
-use commonware_cryptography::certificate::Scheme;
 use commonware_p2p::simulated::SplitTarget;
 use commonware_utils::ordered::Set;
 use rand::{Rng, RngExt as _, seq::SliceRandom};
@@ -301,14 +300,13 @@ pub struct ElectorState<E> {
     round_leaders: Arc<[Participant]>,
 }
 
-impl<S, C> elector::Config<S> for Elector<C>
+impl<P: commonware_cryptography::PublicKey, Evidence, C> elector::Config<P, Evidence> for Elector<C>
 where
-    S: Scheme,
-    C: elector::Config<S>,
+    C: elector::Config<P, Evidence>,
 {
     type Elector = ElectorState<C::Elector>;
 
-    fn build(self, participants: &Set<S::PublicKey>) -> Self::Elector {
+    fn build(self, participants: &Set<P>) -> Self::Elector {
         ElectorState {
             fallback: self.fallback.build(participants),
             round_leaders: self.round_leaders,
@@ -316,16 +314,15 @@ where
     }
 }
 
-impl<S, E> elector::Elector<S> for ElectorState<E>
+impl<Evidence, E> elector::Elector<Evidence> for ElectorState<E>
 where
-    S: Scheme,
-    E: elector::Elector<S>,
+    E: elector::Elector<Evidence>,
 {
     fn terms(&self) -> Terms {
         self.fallback.terms()
     }
 
-    fn elect(&self, round: Round, certificate: Option<&S::Certificate>) -> Participant {
+    fn elect(&self, round: Round, certificate: Option<&Evidence>) -> Participant {
         let idx = term_index(round.view(), self.fallback.terms().length());
         if let Some(&leader) = self.round_leaders.get(idx) {
             return leader;
@@ -2224,7 +2221,10 @@ mod tests {
             .map(|seed| PrivateKey::from_seed(seed).public_key())
             .collect();
         let participants = Set::try_from(participants).expect("participants should be unique");
-        let twins = <Elector<RoundRobin<Sha256>> as elector::Config<ed25519::Scheme>>::build(
+        let twins = <Elector<RoundRobin<Sha256>> as elector::Config<
+            <ed25519::Scheme as commonware_cryptography::certificate::Verifier>::PublicKey,
+            (),
+        >>::build(
             Elector::new(
                 RoundRobin::<Sha256>::default(),
                 &case.scenario,
@@ -2232,15 +2232,15 @@ mod tests {
             ),
             &participants,
         );
-        let fallback = <RoundRobin<Sha256> as elector::Config<ed25519::Scheme>>::build(
-            RoundRobin::<Sha256>::default(),
-            &participants,
-        );
+        let fallback = <RoundRobin<Sha256> as elector::Config<
+            <ed25519::Scheme as commonware_cryptography::certificate::Verifier>::PublicKey,
+            (),
+        >>::build(RoundRobin::<Sha256>::default(), &participants);
 
         for (round_idx, round_scenario) in case.scenario.rounds().iter().enumerate() {
             let round = Round::new(Epoch::new(0), View::new((round_idx as u64) + 1));
             assert_eq!(
-                twins.elect(round, None),
+                twins.elect(round, None::<&()>),
                 Participant::from_usize(round_scenario.leader()),
                 "unexpected leader in scripted attack round"
             );
@@ -2248,7 +2248,10 @@ mod tests {
 
         for view in (framework.rounds as u64 + 1)..=20 {
             let round = Round::new(Epoch::new(333), View::new(view));
-            assert_eq!(twins.elect(round, None), fallback.elect(round, None));
+            assert_eq!(
+                twins.elect(round, None::<&()>),
+                fallback.elect(round, None::<&()>)
+            );
         }
     }
 
@@ -2273,7 +2276,10 @@ mod tests {
             .collect();
         let participants = Set::try_from(participants).expect("participants should be unique");
         let term_length = TermLength::new(NZU32!(3));
-        let twins = <Elector<RoundRobin<Sha256>> as elector::Config<ed25519::Scheme>>::build(
+        let twins = <Elector<RoundRobin<Sha256>> as elector::Config<
+            <ed25519::Scheme as commonware_cryptography::certificate::Verifier>::PublicKey,
+            (),
+        >>::build(
             Elector::new(
                 RoundRobin::<Sha256>::default().with_term(
                     term_length,
@@ -2285,7 +2291,10 @@ mod tests {
             ),
             &participants,
         );
-        let fallback = <RoundRobin<Sha256> as elector::Config<ed25519::Scheme>>::build(
+        let fallback = <RoundRobin<Sha256> as elector::Config<
+            <ed25519::Scheme as commonware_cryptography::certificate::Verifier>::PublicKey,
+            (),
+        >>::build(
             RoundRobin::<Sha256>::default().with_term(
                 term_length,
                 Duration::from_secs(10),
@@ -2296,14 +2305,17 @@ mod tests {
 
         for view in 1..=3 {
             let round = Round::new(Epoch::new(0), View::new(view));
-            assert_eq!(twins.elect(round, None), Participant::new(0));
+            assert_eq!(twins.elect(round, None::<&()>), Participant::new(0));
         }
         for view in 4..=6 {
             let round = Round::new(Epoch::new(0), View::new(view));
-            assert_eq!(twins.elect(round, None), Participant::new(2));
+            assert_eq!(twins.elect(round, None::<&()>), Participant::new(2));
         }
 
         let round = Round::new(Epoch::new(333), View::new(7));
-        assert_eq!(twins.elect(round, None), fallback.elect(round, None));
+        assert_eq!(
+            twins.elect(round, None::<&()>),
+            fallback.elect(round, None::<&()>)
+        );
     }
 }

@@ -21,7 +21,7 @@ use std::time::Duration;
 
 pub struct Config<
     S: Scheme,
-    L: Elector<S>,
+    L: Elector<S::Certificate>,
     B: Blocker,
     D: Digest,
     A: CertifiableAutomaton,
@@ -59,7 +59,7 @@ mod tests {
                 batcher,
                 resolver::{self, MailboxMessage},
             },
-            elector::{self, Config as _, Random, RandomVersion, RoundRobin, RoundRobinElector},
+            elector::{self, Random, RandomVersion, RoundRobin, RoundRobinElector},
             metrics::TimeoutReason,
             mocks, quorum,
             scheme::{
@@ -252,7 +252,7 @@ mod tests {
     where
         E: BufferPooler + Clock + CryptoRng + Spawner + Storage + Metrics,
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         let signing = schemes[options.local_index].clone();
         let me = participants[options.local_index].clone();
@@ -464,7 +464,7 @@ mod tests {
     )
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         let VoterFloorStart {
             partition,
@@ -884,7 +884,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -1127,7 +1127,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -1415,7 +1415,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -1542,7 +1542,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -1686,7 +1686,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -1818,7 +1818,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -2026,9 +2026,10 @@ mod tests {
             // Figure out who the leader will be for view 2
             let view2_round = Round::new(epoch, View::new(2));
             let elector_config = RoundRobin::<Sha256>::default();
-            let temp_elector: RoundRobinElector<S> =
-                elector_config.clone().build(schemes[0].participants());
-            let leader_idx = temp_elector.elect(view2_round, None);
+            let temp_elector: RoundRobinElector = elector_config
+                .clone()
+                .rotation(schemes[0].participants().len());
+            let leader_idx = temp_elector.leader(view2_round);
             let leader = participants[usize::from(leader_idx)].clone();
 
             // Create a voter with the leader's identity
@@ -2059,7 +2060,9 @@ mod tests {
             // Initialize voter actor
             let voter_cfg = Config {
                 scheme: leader_scheme.clone(),
-                elector: elector_config.clone().build(leader_scheme.participants()),
+                elector: elector_config
+                    .clone()
+                    .rotation(leader_scheme.participants().len()),
                 blocker: oracle.control(leader.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -2212,7 +2215,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -2485,7 +2488,7 @@ mod tests {
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
-            let elector = elector.build(schemes[0].participants());
+            let elector = elector.rotation(schemes[0].participants().len());
             let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
 
             let app_cfg = mocks::application::Config::<Sha256, _> {
@@ -2911,9 +2914,9 @@ mod tests {
                 ViewDelta::new(0),
             );
             let first_round = Round::new(Epoch::new(333), View::new(1));
-            let built_elector: RoundRobinElector<S> =
-                elector.clone().build(schemes[0].participants());
-            let leader_idx = built_elector.elect(first_round, None);
+            let built_elector: RoundRobinElector =
+                elector.clone().rotation(schemes[0].participants().len());
+            let leader_idx = built_elector.leader(first_round);
             let leader = participants[usize::from(leader_idx)].clone();
             let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
                 &context,
@@ -3158,10 +3161,10 @@ mod tests {
                 Duration::from_secs(30),
                 ViewDelta::new(2),
             );
-            let built_elector: elector::RoundRobinElector<ed25519::Scheme> =
-                elector.clone().build(schemes[0].participants());
+            let built_elector: elector::RoundRobinElector =
+                elector.clone().rotation(schemes[0].participants().len());
             let local_index =
-                usize::from(built_elector.elect(Round::new(epoch, View::new(1)), None));
+                usize::from(built_elector.leader(Round::new(epoch, View::new(1))));
 
             let (_mailbox, mut batcher_receiver, _, _relay, _) = setup_voter(
                 &context,
@@ -3254,10 +3257,10 @@ mod tests {
                 Duration::from_secs(30),
                 ViewDelta::new(2),
             );
-            let built_elector: elector::RoundRobinElector<ed25519::Scheme> =
-                elector.clone().build(schemes[0].participants());
+            let built_elector: elector::RoundRobinElector =
+                elector.clone().rotation(schemes[0].participants().len());
             let local_index =
-                usize::from(built_elector.elect(Round::new(epoch, View::new(1)), None));
+                usize::from(built_elector.leader(Round::new(epoch, View::new(1))));
 
             let pending_syncs = PendingSyncs::default();
             let voter_context = DelayedSyncContext {
@@ -3454,9 +3457,9 @@ mod tests {
                 Duration::from_secs(30),
                 ViewDelta::new(2),
             );
-            let built_elector: elector::RoundRobinElector<ed25519::Scheme> =
-                elector.clone().build(schemes[0].participants());
-            let leader_idx = built_elector.elect(Round::new(epoch, View::new(1)), None);
+            let built_elector: elector::RoundRobinElector =
+                elector.clone().rotation(schemes[0].participants().len());
+            let leader_idx = built_elector.leader(Round::new(epoch, View::new(1)));
             let local_index = (usize::from(leader_idx) + 1) % participants.len();
             let leader = participants[usize::from(leader_idx)].clone();
             let verify_requests = Arc::new(Mutex::new(Vec::new()));
@@ -3580,9 +3583,9 @@ mod tests {
                 Duration::from_secs(30),
                 ViewDelta::new(2),
             );
-            let built_elector: elector::RoundRobinElector<ed25519::Scheme> =
-                elector.clone().build(schemes[0].participants());
-            let leader_idx = built_elector.elect(Round::new(epoch, View::new(1)), None);
+            let built_elector: elector::RoundRobinElector =
+                elector.clone().rotation(schemes[0].participants().len());
+            let leader_idx = built_elector.leader(Round::new(epoch, View::new(1)));
             let local_index = (usize::from(leader_idx) + 1) % participants.len();
             let leader = participants[usize::from(leader_idx)].clone();
             let verify_requests = Arc::new(Mutex::new(Vec::new()));
@@ -3743,7 +3746,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         // This is a regression test as the resolver didn't use to send
         // finalizations to the voter
@@ -3850,7 +3853,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -4114,7 +4117,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -4337,7 +4340,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -4590,7 +4593,7 @@ mod tests {
 
             let voter_cfg = Config {
                 scheme: signing.clone(),
-                elector: elector.clone().build(signing.participants()),
+                elector: elector.clone().rotation(signing.participants().len()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -4710,7 +4713,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -4935,10 +4938,9 @@ mod tests {
                 start_test_network_with_peers(context.child("network"), participants.clone(), true)
                     .await;
             let elector = RoundRobin::<Sha256>::default();
-            let built_elector: RoundRobinElector<ed25519::Scheme> =
-                elector.clone().build(schemes[0].participants());
-            let leader_index =
-                usize::from(built_elector.elect(Round::new(epoch, View::new(1)), None));
+            let built_elector: RoundRobinElector =
+                elector.clone().rotation(schemes[0].participants().len());
+            let leader_index = usize::from(built_elector.leader(Round::new(epoch, View::new(1))));
             let local_index = (leader_index + 1) % schemes.len();
             let verify_requests = Arc::new(Mutex::new(Vec::new()));
             let (mut mailbox, mut batcher_receiver, _, relay, reporter) = setup_voter(
@@ -5017,7 +5019,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -5212,7 +5214,7 @@ mod tests {
 
             let voter_cfg = Config {
                 scheme: signing.clone(),
-                elector: elector.clone().build(signing.participants()),
+                elector: elector.clone().rotation(signing.participants().len()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -5444,7 +5446,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -5768,7 +5770,7 @@ mod tests {
             // Build and start the voter wired to the observing application.
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: elector.clone().build(schemes[0].participants()),
+                elector: elector.clone().rotation(schemes[0].participants().len()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -5928,7 +5930,7 @@ mod tests {
             // Build and start the pre-restart voter.
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: elector.clone().build(schemes[0].participants()),
+                elector: elector.clone().rotation(schemes[0].participants().len()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -6029,7 +6031,7 @@ mod tests {
             // Build and start the post-restart voter against the same journal partition.
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: elector.clone().build(schemes[0].participants()),
+                elector: elector.clone().rotation(schemes[0].participants().len()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -6199,7 +6201,7 @@ mod tests {
             // guaranteeing the journal contains no `Nullify` either.
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: elector.clone().build(schemes[0].participants()),
+                elector: elector.clone().rotation(schemes[0].participants().len()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -6311,7 +6313,7 @@ mod tests {
             // (dropped) propose request.
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: elector.clone().build(schemes[0].participants()),
+                elector: elector.clone().rotation(schemes[0].participants().len()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -6478,7 +6480,7 @@ mod tests {
             // Build and start the pre-restart voter.
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: elector.clone().build(schemes[0].participants()),
+                elector: elector.clone().rotation(schemes[0].participants().len()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -6592,7 +6594,7 @@ mod tests {
             // Build and start the post-restart voter against the same journal partition.
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: elector.clone().build(schemes[0].participants()),
+                elector: elector.clone().rotation(schemes[0].participants().len()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -6759,7 +6761,7 @@ mod tests {
             // Build and start the voter wired to the observing application.
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: elector.clone().build(schemes[0].participants()),
+                elector: elector.clone().rotation(schemes[0].participants().len()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -6933,7 +6935,7 @@ mod tests {
             // Build and start the pre-restart voter.
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: elector.clone().build(schemes[0].participants()),
+                elector: elector.clone().rotation(schemes[0].participants().len()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -7033,7 +7035,7 @@ mod tests {
             // Build and start the post-restart voter against the same journal partition.
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: elector.clone().build(schemes[0].participants()),
+                elector: elector.clone().rotation(schemes[0].participants().len()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -7209,7 +7211,7 @@ mod tests {
             // conflicting notarization reaches the voter.
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: elector.clone().build(schemes[0].participants()),
+                elector: elector.clone().rotation(schemes[0].participants().len()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -7345,7 +7347,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -7638,7 +7640,7 @@ mod tests {
     ) where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -7941,9 +7943,7 @@ mod tests {
 
             // Setup application mock and voter
             let elector = RoundRobin::<Sha256>::default();
-            let built_elector: RoundRobinElector<S> = elector
-                .clone()
-                .build(&participants.clone().try_into().unwrap());
+            let built_elector: RoundRobinElector = elector.clone().rotation(participants.len());
             let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter(
                 &context,
                 &oracle,
@@ -7972,7 +7972,7 @@ mod tests {
             )
             .await;
             assert_ne!(
-                built_elector.elect(Round::new(Epoch::new(333), target_view), None),
+                built_elector.leader(Round::new(Epoch::new(333), target_view)),
                 Participant::new(0),
                 "we should not be leader at view 3"
             );
@@ -8060,9 +8060,7 @@ mod tests {
 
             // Setup application mock and voter
             let elector = RoundRobin::<Sha256>::default();
-            let built_elector: RoundRobinElector<S> = elector
-                .clone()
-                .build(&participants.clone().try_into().unwrap());
+            let built_elector: RoundRobinElector = elector.clone().rotation(participants.len());
             let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
                 &context,
                 &oracle,
@@ -8091,7 +8089,7 @@ mod tests {
             )
             .await;
             assert_ne!(
-                built_elector.elect(Round::new(Epoch::new(333), target_view), None),
+                built_elector.leader(Round::new(Epoch::new(333), target_view)),
                 Participant::new(0),
                 "we should not be leader at view 3"
             );
@@ -8212,9 +8210,7 @@ mod tests {
 
             // Setup application mock and voter
             let elector = RoundRobin::<Sha256>::default();
-            let built_elector: RoundRobinElector<S> = elector
-                .clone()
-                .build(&participants.clone().try_into().unwrap());
+            let built_elector: RoundRobinElector = elector.clone().rotation(participants.len());
             let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter(
                 &context,
                 &oracle,
@@ -8243,7 +8239,7 @@ mod tests {
             )
             .await;
             assert_eq!(
-                built_elector.elect(Round::new(Epoch::new(333), target_view), None),
+                built_elector.leader(Round::new(Epoch::new(333), target_view)),
                 Participant::new(0),
                 "we should be leader at view 2"
             );
@@ -8653,7 +8649,7 @@ mod tests {
 
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: elector.clone().build(schemes[0].participants()),
+                elector: elector.clone().rotation(schemes[0].participants().len()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -8766,7 +8762,7 @@ mod tests {
 
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: elector.clone().build(schemes[0].participants()),
+                elector: elector.clone().rotation(schemes[0].participants().len()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -9803,7 +9799,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
+        L: elector::Config<S::PublicKey, S::Certificate>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -10042,7 +10038,7 @@ mod tests {
 
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: elector.clone().build(schemes[0].participants()),
+                elector: elector.clone().rotation(schemes[0].participants().len()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -10322,7 +10318,7 @@ mod tests {
 
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: elector.clone().build(schemes[0].participants()),
+                elector: elector.clone().rotation(schemes[0].participants().len()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -10480,7 +10476,7 @@ mod tests {
 
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: elector.clone().build(schemes[0].participants()),
+                elector: elector.clone().rotation(schemes[0].participants().len()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -10597,7 +10593,7 @@ mod tests {
 
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: elector.clone().build(schemes[0].participants()),
+                elector: elector.clone().rotation(schemes[0].participants().len()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -10749,7 +10745,7 @@ mod tests {
 
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: elector.clone().build(schemes[0].participants()),
+                elector: elector.clone().rotation(schemes[0].participants().len()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -10891,7 +10887,7 @@ mod tests {
 
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: elector.clone().build(schemes[0].participants()),
+                elector: elector.clone().rotation(schemes[0].participants().len()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -11030,7 +11026,7 @@ mod tests {
 
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: elector.clone().build(schemes[0].participants()),
+                elector: elector.clone().rotation(schemes[0].participants().len()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),

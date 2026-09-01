@@ -19,11 +19,12 @@
 //! # Durability and Recovery
 //!
 //! `put` updates the underlying [crate::freezer::Freezer] and [crate::ordinal::Ordinal]
-//! eagerly, but data is not committed until `sync` succeeds. Sync first makes the freezer
-//! and ordinal data durable, then commits metadata that names the freezer checkpoint and ordinal
-//! section bits. On restart, this metadata is the source of truth: lower-layer data not described by
-//! metadata is treated as uncommitted and may be removed during initialization. If no freezer
-//! checkpoint has been committed yet, initialization starts from an empty archive.
+//! eagerly, but data is not committed until `sync` succeeds or a `start_sync` handle completes.
+//! Both operations first make the freezer and ordinal data durable, then commit metadata that names
+//! the freezer checkpoint and ordinal section bits. On restart, this metadata is the source of truth:
+//! lower-layer data not described by metadata is treated as uncommitted and may be removed during
+//! initialization. If no freezer checkpoint has been committed yet, initialization starts from an
+//! empty archive.
 //!
 //! # Querying for Gaps
 //!
@@ -77,7 +78,7 @@
 mod storage;
 use commonware_runtime::buffer::paged::CacheRef;
 use std::num::{NonZeroU64, NonZeroUsize};
-pub use storage::Archive;
+pub use storage::{Archive, ReadOutcome, ReadRequest, ReadStep};
 
 /// Configuration for [Archive] storage.
 #[derive(Clone)]
@@ -143,12 +144,177 @@ mod tests {
     use super::*;
     use crate::archive::Archive as ArchiveTrait;
     use commonware_cryptography::{Hasher, Sha256, sha256::Digest};
-    use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
+    use commonware_runtime::{
+        BufferPooler, Runner, Supervisor as _,
+        buffer::paged::CacheRef,
+        deterministic,
+        mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs},
+    };
     use commonware_utils::{NZU16, NZU64, NZUsize};
     use std::num::NonZeroU16;
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
+
+    fn start_sync_config(context: &impl BufferPooler) -> Config<()> {
+        Config {
+            metadata_partition: "start-sync-metadata".into(),
+            freezer_table_partition: "start-sync-table".into(),
+            freezer_table_initial_size: 64,
+            freezer_table_resize_frequency: 4,
+            freezer_table_resize_chunk_size: 64,
+            freezer_key_partition: "start-sync-key".into(),
+            freezer_key_page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            freezer_value_partition: "start-sync-value".into(),
+            freezer_value_target_size: 1024,
+            freezer_value_compression: None,
+            ordinal_partition: "start-sync-ordinal".into(),
+            items_per_section: NZU64!(1),
+            freezer_key_write_buffer: NZUsize!(1024),
+            freezer_value_write_buffer: NZUsize!(1024),
+            ordinal_write_buffer: NZUsize!(1024),
+            replay_buffer: NZUsize!(1024),
+            codec_config: (),
+        }
+    }
+
+    async fn execute_read(
+        archive: &Archive<deterministic::Context, Digest, i32>,
+        mut request: ReadRequest<Digest>,
+    ) -> Option<i32> {
+        loop {
+            match archive
+                .read_step(request)
+                .expect("read step should capture")
+                .execute()
+                .await
+                .expect("read step should execute")
+            {
+                ReadOutcome::Done(value) => return value,
+                ReadOutcome::Continue(next) => request = next,
+            }
+        }
+    }
+
+    #[test]
+    fn test_read_steps_capture_key_head_and_resolve_index() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let key = Sha256::hash(&[b"key"]);
+            let archive: Archive<_, Digest, i32> =
+                Archive::init(context.child("storage"), start_sync_config(&context))
+                    .await
+                    .unwrap();
+            let archive = archive.put(1, key, &10).await.unwrap();
+            let captured = archive
+                .read_step(ReadRequest::key(key))
+                .expect("key head should capture");
+            let archive = archive.put(2, key, &20).await.unwrap();
+
+            assert!(matches!(
+                captured.execute().await.unwrap(),
+                ReadOutcome::Done(Some(10))
+            ));
+            assert_eq!(
+                execute_read(&archive, ReadRequest::key(key)).await,
+                Some(20)
+            );
+            assert_eq!(
+                execute_read(&archive, ReadRequest::index(1)).await,
+                Some(10)
+            );
+            assert_eq!(execute_read(&archive, ReadRequest::index(3)).await, None);
+        });
+    }
+
+    #[test]
+    fn test_read_steps_follow_resized_head_mirror() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut cfg = start_sync_config(&context);
+            cfg.freezer_table_initial_size = 2;
+            cfg.freezer_table_resize_frequency = 1;
+            cfg.freezer_table_resize_chunk_size = 1;
+            let mut archive: Archive<_, Digest, i32> =
+                Archive::init(context.child("storage"), cfg).await.unwrap();
+            let keys = [
+                Sha256::hash(&[b"first"]),
+                Sha256::hash(&[b"second"]),
+                Sha256::hash(&[b"third"]),
+                Sha256::hash(&[b"fourth"]),
+            ];
+
+            for (index, key) in keys.iter().copied().enumerate() {
+                archive = archive
+                    .put(index as u64, key, &(index as i32))
+                    .await
+                    .unwrap();
+                archive = archive.sync().await.unwrap();
+            }
+
+            for (index, key) in keys.into_iter().enumerate() {
+                assert_eq!(
+                    execute_read(&archive, ReadRequest::key(key)).await,
+                    Some(index as i32)
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn test_start_sync_returns_ownership_and_isolates_cut() {
+        let executor = deterministic::Runner::default();
+        let (_, checkpoint) = executor.start_and_recover(|context| async move {
+            let pending = PendingSyncs::default();
+            let context = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let cfg = start_sync_config(&context);
+            let first_key = Sha256::hash(&[b"first"]);
+            let second_key = Sha256::hash(&[b"second"]);
+
+            let archive: Archive<_, Digest, i32> =
+                Archive::init(context.child("storage"), cfg).await.unwrap();
+            let archive = archive.put(1, first_key, &10).await.unwrap();
+
+            pending.arm();
+            let (archive, handle) = archive.start_sync().await.unwrap();
+            assert!(
+                pending.calls() > 0,
+                "start_sync must begin lower-layer durability before returning"
+            );
+            assert!(
+                !pending.lock().is_empty(),
+                "start_sync must return while lower-layer durability is pending"
+            );
+
+            let archive = archive.put(2, second_key, &20).await.unwrap();
+            drive_pending_syncs(&pending, handle).await.unwrap();
+            drop(archive);
+        });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let archive: Archive<_, Digest, i32> =
+                Archive::init(context.child("reopen"), start_sync_config(&context))
+                    .await
+                    .unwrap();
+            assert_eq!(
+                archive
+                    .get(crate::archive::Identifier::Index(1))
+                    .await
+                    .unwrap(),
+                Some(10)
+            );
+            assert_eq!(
+                archive
+                    .get(crate::archive::Identifier::Index(2))
+                    .await
+                    .unwrap(),
+                None
+            );
+        });
+    }
 
     #[test]
     fn test_unclean_shutdown() {

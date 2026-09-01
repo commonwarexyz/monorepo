@@ -22,7 +22,7 @@ use tracing::debug;
 pub struct Engine<
     E: BufferPooler + Clock + CryptoRng + Spawner + Storage + Metrics,
     S: Scheme<D>,
-    L: elector::Config<S>,
+    L: elector::Config<S::PublicKey, S::Certificate>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
     A: CertifiableAutomaton<Context = Context<D, S::PublicKey>, Digest = D>,
@@ -45,7 +45,7 @@ pub struct Engine<
 impl<
     E: BufferPooler + Clock + CryptoRng + Spawner + Storage + Metrics,
     S: Scheme<D>,
-    L: elector::Config<S>,
+    L: elector::Config<S::PublicKey, S::Certificate>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
     A: CertifiableAutomaton<Context = Context<D, S::PublicKey>, Digest = D>,

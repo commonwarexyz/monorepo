@@ -636,7 +636,7 @@ mod tests {
     use super::{super::test_helpers::*, *};
     use crate::{
         simplex::{
-            elector::{Config as _, Elector as _, RoundRobin, RoundRobinElector},
+            elector::{RoundRobin, RoundRobinElector},
             scheme::ed25519,
             types::{Notarization, Notarize},
         },
@@ -996,10 +996,10 @@ mod tests {
                 verifier,
                 ..
             } = ed25519::fixture(&mut context, NAMESPACE, 4);
-            let elector: RoundRobinElector<TestScheme> = RoundRobin::<Sha256>::default()
+            let elector: RoundRobinElector = RoundRobin::<Sha256>::default()
                 .with_term(TERM_LENGTH, Duration::from_secs(1), ViewDelta::new(0))
-                .build(schemes[0].participants());
-            let leader = usize::from(elector.elect(Round::new(EPOCH, View::new(1)), None));
+                .rotation(schemes[0].participants().len());
+            let leader = usize::from(elector.leader(Round::new(EPOCH, View::new(1))));
             assert_eq!(
                 leader, 2,
                 "fixture must leave the stable leader unavailable"

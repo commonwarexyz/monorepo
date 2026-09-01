@@ -83,6 +83,7 @@ fn main() {
                 endpoint: format!("http://{}:4318/v1/traces", hosts.monitoring.private),
                 name: public_key.to_string(),
                 rate: probability!(1.0),
+                run_id: None,
             })
         } else {
             None

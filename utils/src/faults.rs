@@ -100,7 +100,8 @@ impl Faults for N3f1 {
 /// Tolerates up to `f = (n-1)/5` faults with quorum size `q = n - f` (also
 /// provided as [`l_quorum`](Self::l_quorum)).
 ///
-/// Also provides [`m_quorum`](Self::m_quorum) which computes `2f + 1`.
+/// Also provides helpers for the quorum and rank formulas used by `n >= 5f + 1`
+/// protocols.
 ///
 /// # Example
 ///
@@ -124,6 +125,17 @@ impl Faults for N5f1 {
 }
 
 impl N5f1 {
+    /// Compute `f + 1`.
+    ///
+    /// Any set of this size contains at least one correct participant.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `n` is zero, negative, or exceeds `u32::MAX`.
+    pub fn f_plus_one(n: impl ToPrimitive) -> u32 {
+        Self::max_faults(n) + 1
+    }
+
     /// Compute `2f + 1`.
     ///
     /// # Panics
@@ -137,6 +149,15 @@ impl N5f1 {
         2 * Self::max_faults(n) + 1
     }
 
+    /// Compute `3f + 1`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `n` is zero, negative, or exceeds `u32::MAX`.
+    pub fn three_f_plus_one(n: impl ToPrimitive) -> u32 {
+        3 * Self::max_faults(n) + 1
+    }
+
     /// Compute `n - f`.
     ///
     /// This is equivalent to [`Self::quorum`].
@@ -147,6 +168,19 @@ impl N5f1 {
     pub fn l_quorum(n: impl ToPrimitive) -> u32 {
         Self::quorum(n)
     }
+
+    /// Compute `n - 2f`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `n` is zero, negative, or exceeds `u32::MAX`.
+    pub fn n_minus_two_f(n: impl ToPrimitive) -> u32 {
+        let n = n
+            .to_u32()
+            .expect("n must be a non-negative integer that fits in u32");
+        assert!(n > 0, "n must not be zero");
+        n - 2 * Self::max_faults(n)
+    }
 }
 
 #[cfg(test)]
@@ -154,6 +188,7 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
     use rstest::rstest;
+    use std::panic::{UnwindSafe, catch_unwind};
 
     #[test]
     #[should_panic(expected = "n must not be zero")]
@@ -224,47 +259,84 @@ mod tests {
         N5f1::l_quorum(0);
     }
 
+    #[test]
+    #[should_panic(expected = "n must not be zero")]
+    fn test_bft5f1_f_plus_one_zero_panics() {
+        N5f1::f_plus_one(0);
+    }
+
+    #[test]
+    #[should_panic(expected = "n must not be zero")]
+    fn test_bft5f1_three_f_plus_one_zero_panics() {
+        N5f1::three_f_plus_one(0);
+    }
+
+    #[test]
+    #[should_panic(expected = "n must not be zero")]
+    fn test_bft5f1_n_minus_two_f_zero_panics() {
+        N5f1::n_minus_two_f(0);
+    }
+
     #[rstest]
     // n=1 to n=5: f=0
-    #[case(1, 0, 1, 1)]
-    #[case(2, 0, 2, 1)]
-    #[case(3, 0, 3, 1)]
-    #[case(4, 0, 4, 1)]
-    #[case(5, 0, 5, 1)]
+    #[case(1, 0, 1, 1, 1, 1, 1)]
+    #[case(2, 0, 2, 1, 1, 1, 2)]
+    #[case(3, 0, 3, 1, 1, 1, 3)]
+    #[case(4, 0, 4, 1, 1, 1, 4)]
+    #[case(5, 0, 5, 1, 1, 1, 5)]
     // n=6 to n=10: f=1
-    #[case(6, 1, 5, 3)]
-    #[case(7, 1, 6, 3)]
-    #[case(8, 1, 7, 3)]
-    #[case(9, 1, 8, 3)]
-    #[case(10, 1, 9, 3)]
+    #[case(6, 1, 5, 3, 2, 4, 4)]
+    #[case(7, 1, 6, 3, 2, 4, 5)]
+    #[case(8, 1, 7, 3, 2, 4, 6)]
+    #[case(9, 1, 8, 3, 2, 4, 7)]
+    #[case(10, 1, 9, 3, 2, 4, 8)]
     // n=11 to n=15: f=2
-    #[case(11, 2, 9, 5)]
-    #[case(12, 2, 10, 5)]
-    #[case(13, 2, 11, 5)]
-    #[case(14, 2, 12, 5)]
-    #[case(15, 2, 13, 5)]
+    #[case(11, 2, 9, 5, 3, 7, 7)]
+    #[case(12, 2, 10, 5, 3, 7, 8)]
+    #[case(13, 2, 11, 5, 3, 7, 9)]
+    #[case(14, 2, 12, 5, 3, 7, 10)]
+    #[case(15, 2, 13, 5, 3, 7, 11)]
     // n=16 to n=20: f=3
-    #[case(16, 3, 13, 7)]
-    #[case(17, 3, 14, 7)]
-    #[case(18, 3, 15, 7)]
-    #[case(19, 3, 16, 7)]
-    #[case(20, 3, 17, 7)]
+    #[case(16, 3, 13, 7, 4, 10, 10)]
+    #[case(17, 3, 14, 7, 4, 10, 11)]
+    #[case(18, 3, 15, 7, 4, 10, 12)]
+    #[case(19, 3, 16, 7, 4, 10, 13)]
+    #[case(20, 3, 17, 7, 4, 10, 14)]
     // n=21: f=4
-    #[case(21, 4, 17, 9)]
+    #[case(21, 4, 17, 9, 5, 13, 13)]
+    #[case(100, 19, 81, 39, 20, 58, 62)]
+    #[case(
+        u32::MAX,
+        858_993_458,
+        3_435_973_837,
+        1_717_986_917,
+        858_993_459,
+        2_576_980_375,
+        2_576_980_379
+    )]
     fn test_bft5f1_quorums(
         #[case] n: u32,
         #[case] expected_f: u32,
         #[case] expected_l_quorum: u32,
         #[case] expected_m_quorum: u32,
+        #[case] expected_f_plus_one: u32,
+        #[case] expected_three_f_plus_one: u32,
+        #[case] expected_n_minus_two_f: u32,
     ) {
         assert_eq!(N5f1::max_faults(n), expected_f);
         assert_eq!(N5f1::quorum(n), expected_l_quorum);
         assert_eq!(N5f1::l_quorum(n), expected_l_quorum);
         assert_eq!(N5f1::m_quorum(n), expected_m_quorum);
+        assert_eq!(N5f1::f_plus_one(n), expected_f_plus_one);
+        assert_eq!(N5f1::three_f_plus_one(n), expected_three_f_plus_one);
+        assert_eq!(N5f1::n_minus_two_f(n), expected_n_minus_two_f);
 
         // Verify invariants
         assert_eq!(n, expected_f + expected_l_quorum); // n = f + q
         assert_eq!(expected_m_quorum, 2 * expected_f + 1); // m = 2f + 1
+        assert_eq!(expected_f_plus_one, expected_f + 1);
+        assert_eq!(expected_three_f_plus_one, 3 * expected_f + 1);
+        assert_eq!(expected_n_minus_two_f, n - 2 * expected_f);
     }
 
     #[test]
@@ -289,6 +361,23 @@ mod tests {
         assert_eq!(N5f1::quorum(10usize), 9);
         assert_eq!(N5f1::m_quorum(10i32), 3);
         assert_eq!(N5f1::l_quorum(10i64), 9);
+        assert_eq!(N5f1::f_plus_one(10u8), 2);
+        assert_eq!(N5f1::three_f_plus_one(10u16), 4);
+        assert_eq!(N5f1::n_minus_two_f(10u64), 8);
+    }
+
+    #[test]
+    fn test_bft5f1_helpers_reject_invalid_integers() {
+        fn assert_panics(f: impl FnOnce() -> u32 + UnwindSafe) {
+            assert!(catch_unwind(f).is_err());
+        }
+
+        assert_panics(|| N5f1::f_plus_one(-1i32));
+        assert_panics(|| N5f1::three_f_plus_one(-1i32));
+        assert_panics(|| N5f1::n_minus_two_f(-1i32));
+        assert_panics(|| N5f1::f_plus_one(u64::MAX));
+        assert_panics(|| N5f1::three_f_plus_one(u64::MAX));
+        assert_panics(|| N5f1::n_minus_two_f(u64::MAX));
     }
 
     #[test]
@@ -319,23 +408,27 @@ mod tests {
         /// N5f1 quorum relationships must hold for all valid participant counts.
         ///
         /// For n >= 6 (where f >= 1):
-        /// - M-quorum (2f+1) < L-quorum (n-f)
-        /// - Both quorums must be achievable (<= n)
+        /// - every helper equals its defining formula; and
+        /// - `f+1 <= 2f+1 <= 3f+1 <= n-2f <= n-f <= n`.
         #[test]
         fn test_n5f1_quorum_relationships(n in 6u32..10_000) {
+            let f = N5f1::max_faults(n);
+            let smallest = N5f1::f_plus_one(n);
             let m = N5f1::m_quorum(n);
+            let three_f_plus_one = N5f1::three_f_plus_one(n);
+            let availability = N5f1::n_minus_two_f(n);
             let l = N5f1::l_quorum(n);
 
-            // M-quorum must be strictly less than L-quorum
-            prop_assert!(
-                m < l,
-                "M-quorum ({}) should be less than L-quorum ({}) for n={}",
-                m, l, n
-            );
-
-            // Both quorums must be achievable
-            prop_assert!(m <= n, "M-quorum ({}) should be <= n ({})", m, n);
-            prop_assert!(l <= n, "L-quorum ({}) should be <= n ({})", l, n);
+            prop_assert_eq!(smallest, f + 1);
+            prop_assert_eq!(m, 2 * f + 1);
+            prop_assert_eq!(three_f_plus_one, 3 * f + 1);
+            prop_assert_eq!(availability, n - 2 * f);
+            prop_assert_eq!(l, n - f);
+            prop_assert!(smallest <= m);
+            prop_assert!(m <= three_f_plus_one);
+            prop_assert!(three_f_plus_one <= availability);
+            prop_assert!(availability <= l);
+            prop_assert!(l <= n);
         }
 
         /// BFT safety property: two quorums must intersect in at least one honest node.
