@@ -1,6 +1,7 @@
 pub mod bounds;
 pub mod disrupter;
 pub mod invariants;
+pub mod multimmit_engine;
 pub mod simplex;
 pub mod strategy;
 pub mod types;
