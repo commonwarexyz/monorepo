@@ -26,6 +26,7 @@ pub(crate) struct ChainProposalPass<V: Variant, D: Digest> {
     payloads: Vec<D>,
     attempted: usize,
     limit: usize,
+    frontier: bool,
     frontier_payloads: u64,
 }
 
@@ -2185,6 +2186,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             payloads: Vec::new(),
             attempted: 0,
             limit: profile.protocol().codec_config().pipeline_depth(),
+            frontier: profile.frontier_proposals(),
             frontier_payloads: 0,
         })
     }
@@ -2193,10 +2195,11 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
     ///
     /// Each step appends the next consecutive block, preferring this node's own DA choice: a
     /// durably journaled DA vote outranks any other record, whatever its validation state
-    /// here. When no DA choice extends the parent, the step references the producer-attested
-    /// frontier instead: any signature-verified header extending the current parent, whether
-    /// or not its payload has arrived locally. Frontier entries let proposals advance at
-    /// header speed instead of body-ingest speed. Entries certify nothing and voters report
+    /// here. When no DA choice extends the parent and the profile allows frontier proposals,
+    /// the step references the producer-attested frontier instead: any signature-verified
+    /// header extending the current parent, whether or not its payload has arrived locally.
+    /// Frontier entries let proposals advance at header speed instead of body-ingest speed.
+    /// Otherwise the pass ends at the local DA frontier. Entries certify nothing and voters report
     /// only the positions they endorse, so an entry whose payload never circulates costs what
     /// a junk entry costs: slots on the referenced producer's own chain, nothing elsewhere.
     pub(crate) fn resume_proposal_pass<H: Hasher<Digest = D>>(
@@ -2216,15 +2219,17 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
                 .ok_or(ChainError::Context)?
                 .get(&height)
                 .filter(|choice| choice.header.parent() == pass.parent.digest());
-            let (header, block_ref, frontier) = match endorsed {
-                Some(choice) => (&choice.header, choice.block_ref, false),
-                None => match self.attested_header(chain, height, pass.parent.digest()) {
-                    Some(header) => (header, header.block_ref::<H>(), true),
-                    None => {
-                        pass.attempted = pass.limit;
-                        return self.finish_proposal_pass(pass);
-                    }
-                },
+            let attested = pass
+                .frontier
+                .then(|| self.attested_header(chain, height, pass.parent.digest()))
+                .flatten();
+            let (header, block_ref, frontier) = match (endorsed, attested) {
+                (Some(choice), _) => (&choice.header, choice.block_ref, false),
+                (None, Some(header)) => (header, header.block_ref::<H>(), true),
+                (None, None) => {
+                    pass.attempted = pass.limit;
+                    return self.finish_proposal_pass(pass);
+                }
             };
             pass.payloads.push(header.body_digest());
             pass.parent = block_ref;

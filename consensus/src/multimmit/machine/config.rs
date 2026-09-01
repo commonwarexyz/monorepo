@@ -65,6 +65,16 @@ pub struct Tuning {
     pub view_retention: ViewDelta,
     /// The largest canonical protocol artifact this deployment accepts.
     pub max_artifact_bytes: NonZeroUsize,
+    /// Whether a leader's proposal may reference producer-attested headers beyond the blocks it
+    /// has DA-voted itself.
+    ///
+    /// Enabled, proposals advance at header speed and voters report positions below the proposed
+    /// tips for blocks whose bodies have not reached them, which deviates their votes from the
+    /// certificate reference entry. Disabled, the leader proposes only its own DA-voted prefix,
+    /// as the paper's `ProposeChains` does, and fresh blocks reach the ordering through
+    /// extensions. Either choice is local leader policy; proposal validity and extraction are
+    /// unchanged.
+    pub frontier_proposals: bool,
 }
 
 impl Default for Tuning {
@@ -74,6 +84,7 @@ impl Default for Tuning {
             production_interval: Duration::from_millis(250),
             view_retention: ViewDelta::new(64),
             max_artifact_bytes: NonZeroUsize::new(1024 * 1024).expect("one mebibyte is non-zero"),
+            frontier_proposals: true,
         }
     }
 }
@@ -214,6 +225,7 @@ pub struct Profile<H: Hasher, V: Variant> {
     timers: Timers,
     view_retention: ViewDelta,
     resources: ResourceLimits,
+    frontier_proposals: bool,
     marker: PhantomData<V>,
 }
 
@@ -225,6 +237,7 @@ impl<H: Hasher, V: Variant> Clone for Profile<H, V> {
             timers: self.timers,
             view_retention: self.view_retention,
             resources: self.resources,
+            frontier_proposals: self.frontier_proposals,
             marker: PhantomData,
         }
     }
@@ -345,6 +358,7 @@ impl<H: Hasher, V: Variant> Profile<H, V> {
             timers,
             view_retention: tuning.view_retention,
             resources,
+            frontier_proposals: tuning.frontier_proposals,
             marker: PhantomData,
         })
     }
@@ -416,6 +430,7 @@ impl<H: Hasher, V: Variant> Profile<H, V> {
             timers,
             view_retention: tuning.view_retention,
             resources,
+            frontier_proposals: tuning.frontier_proposals,
             marker: PhantomData,
         })
     }
@@ -443,6 +458,11 @@ impl<H: Hasher, V: Variant> Profile<H, V> {
     /// Returns the hard local resource ceilings.
     pub const fn resources(&self) -> ResourceLimits {
         self.resources
+    }
+
+    /// Returns whether proposals may reference attested headers beyond the local DA frontier.
+    pub const fn frontier_proposals(&self) -> bool {
+        self.frontier_proposals
     }
 
     /// Returns the application-validation width available to each producer chain.

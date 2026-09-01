@@ -351,6 +351,27 @@ fn profile_with_retention(
     .unwrap()
 }
 
+fn profile_without_frontier_proposals(
+    role: Role,
+    participants: usize,
+    pipeline_depth: u32,
+) -> Profile<Sha256, MinPk> {
+    let resources = resources();
+    Profile::with_limits(
+        config_for(Epoch::new(7), participants, pipeline_depth),
+        role,
+        Tuning {
+            view_timeout: Duration::from_secs(1),
+            production_interval: Duration::from_millis(100),
+            view_retention: retention_for(resources, participants),
+            frontier_proposals: false,
+            ..Tuning::default()
+        },
+        resources,
+    )
+    .unwrap()
+}
+
 fn persist(machine: &mut TestMachine, job: &PersistJob<MinPk, Digest>) -> Step<MinPk, Digest> {
     let step = machine
         .step(Input::Persisted(BarrierAck::new(
@@ -10318,6 +10339,33 @@ fn proposals_reference_authenticated_blocks_beyond_the_local_da_frontier() {
         "the proposal must extend past the local DA frontier along attested headers",
     );
     assert_eq!(frontier, 2);
+}
+
+#[test]
+fn proposals_stop_at_the_local_da_frontier_when_frontier_proposals_are_disabled() {
+    let mut machine = Machine::new(profile_without_frontier_proposals(
+        Role::Validator(Participant::new(0)),
+        6,
+        3,
+    ));
+    let start = machine.step(Input::Start).unwrap();
+    persist(&mut machine, &persist_job(&start));
+    let genesis = machine.profile().protocol().genesis().tips()[1];
+    let headers = frontier_chain(&machine, 3);
+
+    let endorsed = validate_block(&mut machine, headers[0].clone(), 1);
+    persist(&mut machine, &persist_job(&endorsed));
+    let _ = authenticate_block(&mut machine, headers[1].clone(), 1);
+    let _ = authenticate_block(&mut machine, headers[2].clone(), 1);
+
+    let profile = machine.profile().clone();
+    let (proposal, frontier) = machine.chain.proposal(&profile, genesis).unwrap();
+    assert_eq!(
+        proposal.payloads(),
+        &[headers[0].body_digest()],
+        "without frontier proposals the pass must end at the local DA frontier",
+    );
+    assert_eq!(frontier, 0);
 }
 
 #[test]
