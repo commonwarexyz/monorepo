@@ -10,7 +10,7 @@ use bytes::Bytes;
 use commonware_codec::{EncodeSize, FixedSize, varint::UInt};
 use commonware_cryptography::{Digest, bls12381::primitives::variant::Variant};
 use commonware_utils::N5f1;
-use std::{collections::HashSet, sync::Arc};
+use std::{collections::HashSet, num::NonZeroUsize, sync::Arc};
 
 /// Resource limits that are immutable within an epoch.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -122,6 +122,16 @@ impl CodecConfig {
     /// Returns the minimum votes required for a V-QC designation, `2f + 1`.
     pub fn designation_quorum(self) -> usize {
         N5f1::m_quorum(self.participants) as usize
+    }
+
+    /// Returns the largest canonical artifact this configuration can encode, or `None` when the
+    /// committee's bounds do not fit the wire format.
+    ///
+    /// A deployment's artifact byte limit must cover this value: a V-QC whose votes all deviate
+    /// carries every voter's positions and extensions for every chain, so the figure grows with
+    /// participants, chains, pipeline depth, and extension bound together.
+    pub fn max_artifact_bytes<V: Variant, D: Digest>(self) -> Option<NonZeroUsize> {
+        NonZeroUsize::new(self.encoded_bounds::<V, D>().ok()?.max_artifact_bytes())
     }
 
     /// Computes exact encoded maxima for this epoch's bounded protocol objects.

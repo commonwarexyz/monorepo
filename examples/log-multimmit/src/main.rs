@@ -327,6 +327,15 @@ fn profile(
     index: usize,
     frontier_proposals: bool,
 ) -> Profile<Sha256, MinPk> {
+    // The largest artifact grows with participants, chains, pipeline depth, and extension bound
+    // together, so the limit follows the committee instead of a fixed figure.
+    let defaults = Tuning::default();
+    let max_artifact_bytes = committee
+        .config
+        .codec_config()
+        .max_artifact_bytes::<MinPk, Sha256Digest>()
+        .expect("protocol bounds are representable")
+        .max(defaults.max_artifact_bytes);
     Profile::new(
         committee.config.clone(),
         Role::Validator(Participant::new(index as u32)),
@@ -334,8 +343,8 @@ fn profile(
             view_timeout: Duration::from_secs(2),
             production_interval: PRODUCTION_RETRY_INTERVAL,
             view_retention: ViewDelta::new(VIEW_RETENTION),
+            max_artifact_bytes,
             frontier_proposals,
-            ..Tuning::default()
         },
     )
     .expect("profile is valid")
