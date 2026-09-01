@@ -3,7 +3,7 @@
 
 use std::{
     fs::{File, OpenOptions, TryLockError},
-    io::{self, Read as _, Seek as _, SeekFrom, Write as _},
+    io,
     path::Path,
     sync::Arc,
 };
@@ -30,11 +30,11 @@ const HOLD_NAME: &str = ".hold";
 ///
 /// The lock is held by the open file description, not by the file's existence:
 /// the operating system releases it when the holding process exits (cleanly or
-/// not), so a crashed run never requires manual cleanup and the hold file is
-/// never deleted. Its contents (the pid of the last holder) are a debugging
-/// breadcrumb, never a liveness signal, and a startup blocked on the hold logs
-/// them. The lock is bound to the hold file's inode: removing or recreating the
-/// storage directory while a run may still be alive voids the exclusion.
+/// not), so a crashed run never requires manual cleanup. The hold file is empty
+/// and never deleted. It is only a lock target, so the holder of a contended
+/// lock is found with the usual tools (`lsof`, `fuser`) rather than from its
+/// contents. The lock is bound to the hold file's inode: removing or recreating
+/// the storage directory while a run may still be alive voids the exclusion.
 ///
 /// A storage instance kept alive past its run (e.g. a context escaping
 /// `Runner::start`) keeps the hold, blocking a successor on the same
@@ -53,10 +53,10 @@ pub(crate) struct Hold {
 impl Hold {
     /// Acquire the hold for `dir`, creating the directory and hold file if
     /// missing. Blocks until any previous holder releases, warning first if
-    /// the hold is contended.
+    /// the hold is contended. A handled signal does not interrupt the wait.
     pub(crate) fn acquire(dir: &Path) -> io::Result<Arc<Self>> {
         std::fs::create_dir_all(dir)?;
-        let mut file = OpenOptions::new()
+        let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
@@ -65,12 +65,8 @@ impl Hold {
         match file.try_lock() {
             Ok(()) => {}
             Err(TryLockError::WouldBlock) => {
-                // Name the holder so a blocked startup can be diagnosed from the log alone.
-                let mut holder = String::new();
-                let _ = file.read_to_string(&mut holder);
                 warn!(
                     directory = %dir.display(),
-                    holder = holder.trim(),
                     "waiting for storage directory hold (operations from a previous run may still be finishing)"
                 );
 
@@ -85,19 +81,14 @@ impl Hold {
             }
             Err(TryLockError::Error(err)) => return Err(err),
         }
-
-        // Record the holder's pid as a debugging breadcrumb.
-        let _ = file.set_len(0);
-        let _ = file.seek(SeekFrom::Start(0));
-        let _ = file.write_all(format!("{}\n", std::process::id()).as_bytes());
         Ok(Arc::new(Self { _file: file }))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::HOLD_NAME;
-    use crate::storage::{has_partitions, validate_partition_name};
+    use super::{HOLD_NAME, Hold};
+    use crate::storage::validate_partition_name;
     use std::fs;
 
     #[test]
@@ -109,24 +100,14 @@ mod tests {
     }
 
     #[test]
-    fn test_has_partitions() {
-        let base =
-            std::env::temp_dir().join(format!("commonware_has_partitions_{}", std::process::id()));
-        let _ = fs::remove_dir_all(&base);
-
-        // An unreadable (here, missing) directory is reported as holding
-        // partitions so the startup flush is never skipped by accident.
-        assert!(has_partitions(&base));
-
-        // A directory holding only the hold file has no partitions.
-        fs::create_dir_all(&base).unwrap();
-        fs::write(base.join(HOLD_NAME), b"1\n").unwrap();
-        assert!(!has_partitions(&base));
-
-        // A subdirectory is a partition that could hold unsynced blob data.
-        fs::create_dir(base.join("partition")).unwrap();
-        assert!(has_partitions(&base));
-
-        let _ = fs::remove_dir_all(&base);
+    fn test_acquire_fails_on_unusable_root() {
+        // A root occupied by a regular file can be neither created nor locked,
+        // which fails storage construction.
+        let dir =
+            std::env::temp_dir().join(format!("commonware_hold_occupied_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::write(&dir, b"not a directory").unwrap();
+        assert!(Hold::acquire(&dir).is_err());
+        let _ = fs::remove_file(&dir);
     }
 }

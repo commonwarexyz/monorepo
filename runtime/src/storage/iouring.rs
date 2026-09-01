@@ -490,9 +490,9 @@ mod tests {
         BufferPool::new(BufferPoolConfig::for_storage(), scope)
     }
 
-    /// Acquire a hold on a fresh temporary directory for blobs built without a storage.
-    fn test_hold() -> Arc<Hold> {
-        Hold::acquire(&create_test_directory()).unwrap()
+    /// Acquire a hold on a test's directory for blobs built without a storage.
+    fn test_hold(storage_directory: &Path) -> Arc<Hold> {
+        Hold::acquire(storage_directory).unwrap()
     }
 
     /// Build a fresh storage instance rooted in a unique temporary directory.
@@ -557,11 +557,10 @@ mod tests {
             tx.send(()).unwrap();
             drop(second);
         });
-        assert!(
-            rx.recv_timeout(std::time::Duration::from_millis(200))
-                .is_err(),
-            "second instance acquired the hold while an open blob kept it"
-        );
+        match rx.recv_timeout(std::time::Duration::from_millis(200)) {
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            other => panic!("second instance did not stay blocked on the hold: {other:?}"),
+        }
         drop(blob);
         rx.recv_timeout(std::time::Duration::from_secs(10))
             .expect("second instance did not acquire the hold after the blob dropped");
@@ -1164,7 +1163,7 @@ mod tests {
             submitter,
             pool,
             Layout::V0.data_offset(),
-            test_hold(),
+            test_hold(&storage_directory),
         );
 
         let empty = blob.read_at(0, 0, ReadOptions::DONT_CACHE).await.unwrap();
@@ -1234,7 +1233,7 @@ mod tests {
             submitter,
             pool,
             Layout::V0.data_offset(),
-            test_hold(),
+            test_hold(&storage_directory),
         );
         // Sync should fail through the blob-specific wrapper before any kernel work is attempted.
         let err = blob
@@ -1274,7 +1273,7 @@ mod tests {
             submitter,
             pool,
             Layout::V0.data_offset(),
-            test_hold(),
+            test_hold(&storage_directory),
         );
         let err = blob
             .start_sync()
@@ -1318,7 +1317,7 @@ mod tests {
             submitter,
             pool,
             Layout::V0.data_offset(),
-            test_hold(),
+            test_hold(&storage_directory),
         );
         let err = blob
             .resize(0)
@@ -1357,7 +1356,7 @@ mod tests {
             submitter.clone(),
             pool,
             Layout::V0.data_offset(),
-            test_hold(),
+            test_hold(&storage_directory),
         );
         // The request should reach the kernel and come back as a wrapped sync failure.
         let err = blob

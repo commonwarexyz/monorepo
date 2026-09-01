@@ -392,6 +392,15 @@ impl Drop for TaskGuard {
 }
 
 /// Implementation of [crate::Runner] for the `tokio` runtime.
+///
+/// [crate::Runner::start] holds the configured storage directory for the run:
+/// it takes an exclusive advisory lock on a `.hold` file at the directory root
+/// and releases it only once the run's storage and every operation that storage
+/// dispatched have finished, including operations whose futures were dropped
+/// mid-flight. A start on a directory another run still holds blocks, after
+/// logging a warning, until that hold releases. A `Context`, `Storage`, or
+/// `Blob` retained past `start` keeps the hold, so it must be dropped before the
+/// next start on the same directory.
 pub struct Runner {
     cfg: Config,
 }
@@ -485,13 +494,8 @@ impl crate::Runner for Runner {
 
         // Make any storage a prior process left in the page cache crash-durable before we open it,
         // so the data read during init is durable. This runs under the hold, after any straggling
-        // writes from a previous run have landed, so the flush covers them too. A directory holding
-        // no partitions has nothing to flush, so the flush is skipped for it. Freshness is judged
-        // here, under the hold, rather than before acquiring it, so a directory another instance
-        // populated while we waited is not mistaken for empty.
-        if crate::storage::has_partitions(&self.cfg.storage_directory)
-            && let Err(e) = crate::storage::sync(&self.cfg.storage_directory)
-        {
+        // writes from a previous run have landed, so the flush covers them too.
+        if let Err(e) = crate::storage::sync(&self.cfg.storage_directory) {
             panic!(
                 "failed to sync storage filesystem at startup ({}): {e}",
                 self.cfg.storage_directory.display()
@@ -1094,7 +1098,7 @@ mod tests {
     }
 
     #[test]
-    fn test_runner_restart_waits_for_straggling_write() {
+    fn test_runner_restart_after_dropped_write() {
         let cfg = Config::new();
         let storage_directory = cfg.storage_directory().clone();
         const LEN: usize = 64 * 1024 * 1024;

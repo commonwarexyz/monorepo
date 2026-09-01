@@ -292,7 +292,7 @@ mod tests {
     use commonware_utils::sys_rng;
     use futures::FutureExt as _;
     use rand::RngExt as _;
-    use std::env;
+    use std::{env, sync::mpsc::RecvTimeoutError};
 
     fn test_pool() -> BufferPool {
         let mut registry = Registry::default();
@@ -363,11 +363,10 @@ mod tests {
             tx.send(()).unwrap();
             drop(second);
         });
-        assert!(
-            rx.recv_timeout(std::time::Duration::from_millis(200))
-                .is_err(),
-            "second instance acquired the hold while an open blob kept it"
-        );
+        match rx.recv_timeout(std::time::Duration::from_millis(200)) {
+            Err(RecvTimeoutError::Timeout) => {}
+            other => panic!("second instance did not stay blocked on the hold: {other:?}"),
+        }
         drop(blob);
         rx.recv_timeout(std::time::Duration::from_secs(10))
             .expect("second instance did not acquire the hold after the blob dropped");
@@ -391,11 +390,10 @@ mod tests {
             tx.send(()).unwrap();
             drop(second);
         });
-        assert!(
-            rx.recv_timeout(std::time::Duration::from_millis(200))
-                .is_err(),
-            "second instance acquired the hold while the first held it"
-        );
+        match rx.recv_timeout(std::time::Duration::from_millis(200)) {
+            Err(RecvTimeoutError::Timeout) => {}
+            other => panic!("second instance did not stay blocked on the hold: {other:?}"),
+        }
         drop(first);
         rx.recv_timeout(std::time::Duration::from_secs(10))
             .expect("second instance did not acquire the hold after the first released it");

@@ -44,26 +44,6 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         }
     }
 
-    /// Whether `dir` holds any partition: a subdirectory that could contain blob data a prior
-    /// instance left unsynced. The runtime calls this under the storage hold to decide whether a
-    /// startup [sync] is needed, since a directory with no partitions has nothing to flush.
-    ///
-    /// A directory that cannot be read (including an entry whose type cannot be determined) is
-    /// reported as holding partitions, so an uncertain directory is flushed rather than skipped.
-    pub(crate) fn has_partitions(dir: &std::path::Path) -> bool {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return true;
-        };
-        for entry in entries {
-            let is_dir = entry.and_then(|entry| entry.file_type()).map(|t| t.is_dir());
-            match is_dir {
-                Ok(false) => {}
-                _ => return true,
-            }
-        }
-        false
-    }
-
     pub(crate) mod hold;
 });
 
