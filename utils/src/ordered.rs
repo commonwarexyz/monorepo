@@ -283,6 +283,13 @@ impl<P: Ord> Committee<P> {
         self.total_weight
     }
 
+    /// Returns whether every participant has the same weight.
+    pub fn is_uniform(&self) -> bool {
+        self.weights()
+            .windows(2)
+            .all(|weights| weights[0] == weights[1])
+    }
+
     /// Returns the participant key at the given index.
     pub fn key(&self, index: Participant) -> Option<&P> {
         self.members.get(usize::from(index))
@@ -1167,7 +1174,11 @@ mod test {
                 committee.profile::<N3f1>().minimum_quorum_cardinality,
                 set.quorum_count::<N3f1>()
             );
+            assert!(committee.is_uniform());
         }
+
+        let non_uniform = Committee::try_from_iter([(0u8, 1), (1, 2)]).unwrap();
+        assert!(!non_uniform.is_uniform());
     }
 
     #[test]

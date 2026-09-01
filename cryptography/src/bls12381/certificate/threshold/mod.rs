@@ -68,13 +68,6 @@ pub struct Generic<P: PublicKey, V: Variant, N: Namespace> {
 }
 
 impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
-    fn has_uniform_weights(participants: &Committee<P>) -> bool {
-        participants
-            .weights()
-            .windows(2)
-            .all(|weights| weights[0] == weights[1])
-    }
-
     /// Constructs a signer instance with a private share and evaluated public polynomial
     /// compatible with the specified fault model.
     ///
@@ -91,7 +84,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     /// participant.
     ///
     /// * `namespace` - base namespace for domain separation
-    /// * `participants` - ordered set of participant identity keys
+    /// * `participants` - ordered committee of participant identity keys and weights
     /// * `polynomial` - public polynomial for threshold verification
     /// * `share` - local threshold share for signing
     pub fn signer<M: Faults>(
@@ -100,7 +93,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         polynomial: Sharing<V>,
         share: Share,
     ) -> Option<Self> {
-        if !Self::has_uniform_weights(&participants) {
+        if !participants.is_uniform() {
             return None;
         }
         assert_eq!(
@@ -144,14 +137,14 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     /// and fault model.
     ///
     /// * `namespace` - base namespace for domain separation
-    /// * `participants` - ordered set of participant identity keys
+    /// * `participants` - ordered committee of participant identity keys and weights
     /// * `polynomial` - public polynomial for threshold verification
     pub fn verifier<M: Faults>(
         namespace: &[u8],
         participants: Committee<P>,
         polynomial: Sharing<V>,
     ) -> Option<Self> {
-        if !Self::has_uniform_weights(&participants) {
+        if !participants.is_uniform() {
             return None;
         }
         assert_eq!(
@@ -182,13 +175,14 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     /// Returns `None` if the committee is non-uniform.
     ///
     /// * `namespace` - base namespace for domain separation
+    /// * `participants` - ordered committee of participant identity keys and weights
     /// * `identity` - public identity of the committee (constant across reshares)
     pub fn certificate_verifier(
         namespace: &[u8],
         participants: Committee<P>,
         identity: V::Public,
     ) -> Option<Self> {
-        if !Self::has_uniform_weights(&participants) {
+        if !participants.is_uniform() {
             return None;
         }
         Some(Self {

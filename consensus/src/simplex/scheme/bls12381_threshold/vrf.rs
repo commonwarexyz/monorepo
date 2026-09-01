@@ -124,14 +124,6 @@ pub struct Scheme<P: PublicKey, V: Variant> {
 }
 
 impl<P: PublicKey, V: Variant> Scheme<P, V> {
-    /// Returns whether every participant has the same weight.
-    fn is_uniform(participants: &Committee<P>) -> bool {
-        participants
-            .weights()
-            .windows(2)
-            .all(|weights| weights[0] == weights[1])
-    }
-
     /// Constructs a signer instance with a private share and evaluated public polynomial.
     ///
     /// The participant identity keys are used for committee ordering and indexing.
@@ -156,7 +148,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         polynomial: Sharing<V>,
         share: Share,
     ) -> Option<Self> {
-        if !Self::is_uniform(&participants) {
+        if !participants.is_uniform() {
             return None;
         }
         assert_eq!(
@@ -205,7 +197,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         participants: Committee<P>,
         polynomial: Sharing<V>,
     ) -> Option<Self> {
-        if !Self::is_uniform(&participants) {
+        if !participants.is_uniform() {
             return None;
         }
         assert_eq!(
@@ -242,7 +234,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         participants: Committee<P>,
         identity: V::Public,
     ) -> Option<Self> {
-        if !Self::is_uniform(&participants) {
+        if !participants.is_uniform() {
             return None;
         }
         Some(Self {
