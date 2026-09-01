@@ -9,7 +9,11 @@ use std::{
 };
 use tracing::warn;
 
-/// Name of the hold file within the storage directory.
+/// Name of the hold file at the storage directory root.
+///
+/// This never collides with stored data. Blobs live one level down inside a
+/// partition directory, so none can occupy the root, and `validate_partition_name`
+/// rejects the `.` in `.hold`, so no partition can either.
 const HOLD_NAME: &str = ".hold";
 
 /// An exclusive hold on a storage directory, backed by an OS advisory lock on
@@ -87,5 +91,19 @@ impl Hold {
         let _ = file.seek(SeekFrom::Start(0));
         let _ = file.write_all(format!("{}\n", std::process::id()).as_bytes());
         Ok(Arc::new(Self { _file: file }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HOLD_NAME;
+    use crate::storage::validate_partition_name;
+
+    #[test]
+    fn test_hold_name_rejected_as_partition() {
+        // The hold file sits at the storage root alongside partition
+        // directories, so its name must never pass partition validation. A
+        // partition named after it would occupy the hold's own path.
+        assert!(validate_partition_name(HOLD_NAME).is_err());
     }
 }
