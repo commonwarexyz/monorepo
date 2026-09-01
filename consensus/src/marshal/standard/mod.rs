@@ -112,8 +112,12 @@ mod tests {
         vec::NonEmptyVec,
     };
     use std::{
+        collections::BTreeMap,
         num::{NonZeroU32, NonZeroU64, NonZeroUsize},
-        sync::Arc,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
         time::Duration,
     };
 
@@ -142,6 +146,43 @@ mod tests {
 
         fn scoped(&self, _: Epoch) -> Option<Scoped<S>> {
             Some(Scoped::verifier(self.scheme.clone()))
+        }
+    }
+
+    /// A signing provider whose scopes each survive a fixed number of lookups
+    /// and then retire, modeling an application that prunes an epoch between a
+    /// delivery's admission and its batched verification.
+    #[derive(Clone, Default)]
+    struct RetiringProvider {
+        scopes: BTreeMap<Epoch, (Arc<S>, Arc<AtomicUsize>)>,
+    }
+
+    impl RetiringProvider {
+        fn with(mut self, epoch: Epoch, scheme: S, remaining: usize) -> Self {
+            self.scopes.insert(
+                epoch,
+                (Arc::new(scheme), Arc::new(AtomicUsize::new(remaining))),
+            );
+            self
+        }
+
+        /// Returns true once `epoch` has been looked up as many times as allowed,
+        /// which confirms the admission path consulted the provider.
+        fn retired(&self, epoch: Epoch) -> bool {
+            self.scopes[&epoch].1.load(Ordering::Acquire) == 0
+        }
+    }
+
+    impl Provider for RetiringProvider {
+        type Scope = Epoch;
+        type Scheme = S;
+
+        fn scoped(&self, epoch: Epoch) -> Option<Scoped<S>> {
+            let (scheme, remaining) = self.scopes.get(&epoch)?;
+            remaining
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
+                .ok()?;
+            Some(Scoped::scheme(Arc::clone(scheme)))
         }
     }
 
@@ -6395,6 +6436,228 @@ mod tests {
             assert!(
                 !response_rx.await.expect("delivery response missing"),
                 "finalization whose epoch mismatches the height's epoch must blame the peer"
+            );
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_finalized_delivery_verifies_after_scope_retires() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let height = Height::new(1);
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let block = make_raw_block(Sha256::hash(&[b""]), height, 100);
+            let proposal = Proposal::new(round, View::zero(), StandardHarness::commitment(&block));
+            let finalization = StandardHarness::make_finalization(proposal, &schemes, QUORUM);
+            let application = Application::<B>::manual_ack();
+
+            // The scope survives exactly the admission lookup, so it is gone by
+            // the time the batched verification runs.
+            let provider = RetiringProvider::default().with(Epoch::zero(), schemes[0].clone(), 1);
+            let (_mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "finalized-delivery-scope-retires",
+                provider.clone(),
+                application.clone(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+            )
+            .await;
+
+            let (response, response_rx) = oneshot::channel();
+            assert!(
+                resolver
+                    .enqueue(handler::Message::Deliver {
+                        delivery: Delivery {
+                            key: handler::Key::Finalized { height },
+                            subscribers: NonEmptyVec::new((
+                                handler::Annotation::Finalized(handler::Finalized::ByHeight {
+                                    height
+                                }),
+                                tracing::Span::none(),
+                            )),
+                        },
+                        value: (finalization, block.clone()).encode(),
+                        response,
+                    })
+                    .accepted()
+            );
+            assert!(
+                response_rx.await.expect("delivery response missing"),
+                "finalization admitted under a live scope must not blame the peer"
+            );
+            assert!(
+                provider.retired(Epoch::zero()),
+                "admission must have consumed the scope"
+            );
+            assert_eq!(application.acknowledged().await, Height::zero());
+            assert_eq!(application.acknowledged().await, height);
+            assert_eq!(
+                application.blocks().get(&height).unwrap().digest(),
+                block.digest()
+            );
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_notarized_delivery_verifies_after_scope_retires() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
+            let proposal = Proposal::new(round, View::zero(), StandardHarness::commitment(&block));
+            let notarization = StandardHarness::make_notarization(proposal, &schemes, QUORUM);
+
+            // The scope survives exactly the admission lookup, so it is gone by
+            // the time the batched verification runs.
+            let provider = RetiringProvider::default().with(Epoch::zero(), schemes[0].clone(), 1);
+            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "notarized-delivery-scope-retires",
+                provider.clone(),
+                Application::<B>::manual_ack(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+            )
+            .await;
+
+            let (response, response_rx) = oneshot::channel();
+            assert!(
+                resolver
+                    .enqueue(handler::Message::Deliver {
+                        delivery: Delivery {
+                            key: handler::Key::Notarized { round },
+                            subscribers: NonEmptyVec::new((
+                                handler::Annotation::Notarization { round },
+                                tracing::Span::none(),
+                            )),
+                        },
+                        value: (notarization, block.clone()).encode(),
+                        response,
+                    })
+                    .accepted()
+            );
+            assert!(
+                response_rx.await.expect("delivery response missing"),
+                "notarization admitted under a live scope must not blame the peer"
+            );
+            assert!(
+                provider.retired(Epoch::zero()),
+                "admission must have consumed the scope"
+            );
+            assert_eq!(
+                mailbox
+                    .get_block(&block.digest())
+                    .await
+                    .map(|cached| cached.digest()),
+                Some(block.digest()),
+                "notarized block verified under the admission scope must be cached"
+            );
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_finalized_batch_verifies_each_epoch_under_admission_scope() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            // Distinct committees per epoch, so a certificate only verifies under
+            // its own epoch's scope.
+            let Fixture { schemes: first, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let Fixture {
+                schemes: second, ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let early_height = Height::new(1);
+            let early_block = make_raw_block(Sha256::hash(&[b""]), early_height, 100);
+            let early_finalization = StandardHarness::make_finalization(
+                Proposal::new(
+                    Round::new(Epoch::zero(), View::new(1)),
+                    View::zero(),
+                    StandardHarness::commitment(&early_block),
+                ),
+                &first,
+                QUORUM,
+            );
+            let late_height = Height::new(BLOCKS_PER_EPOCH.get() + 1);
+            let late_block = make_raw_block(Sha256::hash(&[b"late"]), late_height, 2100);
+            let late_finalization = StandardHarness::make_finalization(
+                Proposal::new(
+                    Round::new(Epoch::new(1), View::new(late_height.get())),
+                    View::zero(),
+                    StandardHarness::commitment(&late_block),
+                ),
+                &second,
+                QUORUM,
+            );
+            let application = Application::<B>::manual_ack();
+
+            // Epoch 0 retires right after its admission lookup while epoch 1
+            // stays live. Both deliveries land in one batch, so each epoch group
+            // must be verified under the scope its own items were admitted with.
+            let provider = RetiringProvider::default()
+                .with(Epoch::zero(), first[0].clone(), 1)
+                .with(Epoch::new(1), second[0].clone(), usize::MAX);
+            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "finalized-batch-mixed-scopes",
+                provider.clone(),
+                application.clone(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+            )
+            .await;
+
+            let mut responses = Vec::new();
+            for (height, finalization, block) in [
+                (early_height, early_finalization, early_block.clone()),
+                (late_height, late_finalization, late_block.clone()),
+            ] {
+                let (response, response_rx) = oneshot::channel();
+                assert!(
+                    resolver
+                        .enqueue(handler::Message::Deliver {
+                            delivery: Delivery {
+                                key: handler::Key::Finalized { height },
+                                subscribers: NonEmptyVec::new((
+                                    handler::Annotation::Finalized(handler::Finalized::ByHeight {
+                                        height
+                                    }),
+                                    tracing::Span::none(),
+                                )),
+                            },
+                            value: (finalization, block).encode(),
+                            response,
+                        })
+                        .accepted()
+                );
+                responses.push(response_rx);
+            }
+            for response_rx in responses {
+                assert!(
+                    response_rx.await.expect("delivery response missing"),
+                    "every delivery admitted under a live scope must be accepted"
+                );
+            }
+            assert!(
+                provider.retired(Epoch::zero()),
+                "admission must have consumed the retired scope"
+            );
+            assert_eq!(application.acknowledged().await, Height::zero());
+            assert_eq!(application.acknowledged().await, early_height);
+            assert_eq!(
+                mailbox
+                    .get_finalization(late_height)
+                    .await
+                    .map(|finalization| finalization.proposal.payload),
+                Some(StandardHarness::commitment(&late_block)),
+                "finalization verified under the live epoch's scope must be stored"
             );
         });
     }

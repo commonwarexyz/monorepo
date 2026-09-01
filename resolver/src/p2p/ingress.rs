@@ -110,7 +110,8 @@ where
     ///
     /// Targets are automatically cleared when the fetch succeeds or is canceled.
     /// When a peer is blocked for invalid data, only that peer is removed from
-    /// the target set.
+    /// the target set. A fetch whose every target has been blocked can never be
+    /// served and is retired.
     ///
     /// If the engine has shut down, this is a no-op.
     fn fetch_targeted(

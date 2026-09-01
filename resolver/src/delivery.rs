@@ -10,6 +10,7 @@ use crate::{Consumer, Delivery, Outcome};
 use commonware_utils::futures::{AbortablePool, Aborter};
 use futures::future::Aborted;
 use std::collections::{HashMap, hash_map::Entry as HashMapEntry};
+use tracing::warn;
 
 /// Completed consumer validation for a delivery.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -222,7 +223,8 @@ where
 
     /// Wait for the next consumer validation result.
     ///
-    /// Returns [`Aborted`] when the delivery was canceled before completion.
+    /// Returns [`Aborted`] when the delivery was canceled before completion. A
+    /// verdict sender dropped by the consumer completes as [`Outcome::Ignored`].
     /// Successful completions clear the active delivery slot for that key so it
     /// can be retried or redelivered. Completions for an older same-key delivery
     /// are treated as aborted.
@@ -261,12 +263,21 @@ where
         let mut consumer = self.consumer.clone();
         let receiver = consumer.deliver(delivery, value);
         let aborter = self.deliveries.push(async move {
+            let outcome = match receiver.await {
+                Ok(outcome) => outcome.into(),
+                // The consumer dropped the delivery without judging it, so no one is
+                // waiting on this key. Retire the fetch without penalizing its source.
+                Err(_) => {
+                    warn!(key = ?completed.key, "consumer dropped delivery without a verdict");
+                    Outcome::Ignored
+                }
+            };
             PooledCompletion {
                 generation,
                 completion: Completion {
                     context,
                     delivery: completed,
-                    outcome: receiver.await.map(Into::into).unwrap_or(Outcome::Invalid),
+                    outcome,
                 },
             }
         });
@@ -436,6 +447,28 @@ mod tests {
             assert_eq!(completed.context, 2);
             assert_eq!(completed.delivery.key, key);
             assert_eq!(completed.outcome, Outcome::Complete);
+        });
+    }
+
+    #[test]
+    fn test_dropped_verdict_completes_as_ignored() {
+        let runner = Runner::default();
+        runner.start(|_| async move {
+            let (consumer, mut senders) = PendingConsumer::new();
+            let mut tracker = Tracker::<PendingConsumer, u8>::new(consumer);
+            let key = MockKey(3);
+
+            tracker.insert(key.clone());
+            tracker.deliver(delivery(key.clone()), 4, Bytes::from("unjudged"));
+            drop(senders.recv().await.unwrap());
+
+            let completed = tracker
+                .next_completion()
+                .await
+                .expect("dropped verdict should complete");
+            assert_eq!(completed.context, 4);
+            assert_eq!(completed.delivery.key, key);
+            assert_eq!(completed.outcome, Outcome::Ignored);
         });
     }
 

@@ -170,6 +170,11 @@ commonware_macros::stability_scope!(BETA {
         /// cancels the fetch via [`Resolver::retain`]. When this happens, the
         /// resolver discards the validation result.
         ///
+        /// If the consumer drops the sender without reporting a verdict, the
+        /// resolver treats the delivery as [`crate::Outcome::Ignored`] and retires
+        /// the fetch without penalizing its source. A consumer that still needs
+        /// the key must fetch it again.
+        ///
         /// Implementations of [`Resolver`] must only invoke `deliver` for keys that were
         /// previously requested via [`Resolver::fetch`] (or [`TargetedResolver`] variants).
         ///

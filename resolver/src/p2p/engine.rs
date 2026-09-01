@@ -455,6 +455,10 @@ where
                     if !already_accepted {
                         self.metrics.fetch.inc(Status::Success);
                         self.inflight.accept_response(&key, self.context.as_ref());
+
+                        // The accepted response serves later subscribers locally,
+                        // so the key no longer needs any peer.
+                        self.fetcher.clear_targets(&key);
                     }
                     self.inflight.redeliver(Delivery { key, subscribers });
                 } else {
@@ -493,12 +497,23 @@ where
                 }
 
                 // If the data is invalid, block the peer and try again. Blocking the
-                // peer also removes any targets associated with it.
+                // peer also removes it from every target set, and a key left with
+                // no targets can never be served, so such fetches are retired.
                 commonware_p2p::block!(self.blocker, peer.clone(), "invalid data received");
-                self.fetcher.block(peer);
                 self.metrics.fetch.inc(Status::Failure);
                 self.inflight.discard_response(&key);
-                self.fetcher.add_retry(key);
+                let retired = self.fetcher.block(peer);
+                for unservable in &retired {
+                    warn!(key = ?unservable, "every target blocked, retiring fetch");
+                    if *unservable != key {
+                        self.metrics.fetch.inc(Status::Failure);
+                    }
+                    self.inflight.cancel(unservable);
+                    self.subscribers.remove(unservable);
+                }
+                if !retired.contains(&key) {
+                    self.fetcher.add_retry(key);
+                }
             }
             Outcome::Ignored => {
                 // The consumer no longer needs the key. Retire the entire fetch without

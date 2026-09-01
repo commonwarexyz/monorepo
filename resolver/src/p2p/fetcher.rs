@@ -89,6 +89,9 @@ pub struct Config<P: PublicKey> {
 /// the peer might be slow or might receive the data later. Targets are only removed when:
 /// - A peer is blocked (sent invalid data)
 /// - The fetch succeeds (all targets for that key are cleared)
+///
+/// A blocked peer never becomes eligible again, so a key whose every target has been blocked can
+/// never be served. Blocking drops such fetches and returns their keys for the caller to retire.
 pub struct Fetcher<E, P, Key, NetS>
 where
     E: Clock + Rng + Metrics,
@@ -496,14 +499,27 @@ where
 
     /// Blocks a peer from being used to fetch data.
     ///
-    /// Also removes the peer from all target sets.
-    pub fn block(&mut self, peer: P) {
-        // Remove peer from all target sets (keeping empty entries)
-        for targets in self.targets.values_mut() {
+    /// Also removes the peer from all target sets. A key left with no targets can
+    /// never be served, so its fetch is dropped and the key is returned for the
+    /// caller to retire.
+    pub fn block(&mut self, peer: P) -> Vec<Key> {
+        let mut retired = Vec::new();
+        self.targets.retain(|key, targets| {
             targets.remove(&peer);
+            if targets.is_empty() {
+                retired.push(key.clone());
+            }
+            !targets.is_empty()
+        });
+        for key in &retired {
+            if let Some(id) = self.key_to_id.remove(key) {
+                self.active.remove(&id);
+                self.requests.remove(&id);
+            }
+            self.pending.remove(key);
         }
-
         self.excluded.insert(peer);
+        retired
     }
 
     /// Add target peers for fetching a key.
@@ -1805,8 +1821,8 @@ mod tests {
             assert_eq!(fetcher.targets.get(&MockKey(2)).unwrap().len(), 2);
             assert_eq!(fetcher.targets.get(&MockKey(3)).unwrap().len(), 1);
 
-            // Block peer1
-            fetcher.block(peer1.clone());
+            // Block peer1. Every key keeps at least one target, so none is retired.
+            assert!(fetcher.block(peer1.clone()).is_empty());
 
             // peer1 should be removed from all target sets
             let key1_targets = fetcher.targets.get(&MockKey(1)).unwrap();
@@ -1824,21 +1840,52 @@ mod tests {
             assert_eq!(key3_targets.len(), 1);
             assert!(key3_targets.contains(&peer2));
 
-            // Block peer2 - should remove from MockKey(1) and MockKey(3)
-            fetcher.block(peer2);
-
-            // MockKey(1) now has empty targets (entry kept to prevent fallback)
-            assert!(fetcher.targets.contains_key(&MockKey(1)));
-            assert!(fetcher.targets.get(&MockKey(1)).unwrap().is_empty());
+            // Block peer2. MockKey(1) and MockKey(3) lose their last target, so
+            // they can never be served and are retired rather than left waiting.
+            let mut retired = fetcher.block(peer2);
+            retired.sort();
+            assert_eq!(retired, vec![MockKey(1), MockKey(3)]);
+            assert!(!fetcher.targets.contains_key(&MockKey(1)));
+            assert!(!fetcher.targets.contains_key(&MockKey(3)));
 
             // MockKey(2) still has peer3
             let key2_targets = fetcher.targets.get(&MockKey(2)).unwrap();
             assert_eq!(key2_targets.len(), 1);
             assert!(key2_targets.contains(&peer3));
+        });
+    }
 
-            // MockKey(3) now has empty targets (entry kept to prevent fallback)
-            assert!(fetcher.targets.contains_key(&MockKey(3)));
-            assert!(fetcher.targets.get(&MockKey(3)).unwrap().is_empty());
+    #[test]
+    fn test_block_retires_unservable_fetches() {
+        let runner = Runner::default();
+        runner.start(|context| async {
+            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
+            let peer1 = PrivateKey::from_seed(1).public_key();
+            let peer2 = PrivateKey::from_seed(2).public_key();
+
+            // A pending fetch and an active fetch target only peer1, a third
+            // fetch also targets peer2.
+            fetcher.add_targets(MockKey(1), [peer1.clone()]);
+            fetcher.add_ready(MockKey(1));
+            fetcher.add_targets(MockKey(2), [peer1.clone()]);
+            add_test_active(&mut fetcher, 7, MockKey(2));
+            fetcher.add_targets(MockKey(3), [peer1.clone(), peer2]);
+            fetcher.add_ready(MockKey(3));
+            assert_eq!(fetcher.len_pending(), 2);
+            assert_eq!(fetcher.len_active(), 1);
+
+            // Blocking peer1 drops the two fetches it alone could serve.
+            let mut retired = fetcher.block(peer1);
+            retired.sort();
+            assert_eq!(retired, vec![MockKey(1), MockKey(2)]);
+            assert!(!fetcher.contains(&MockKey(1)));
+            assert!(!fetcher.contains(&MockKey(2)));
+            assert!(fetcher.contains(&MockKey(3)));
+            assert_eq!(fetcher.len_pending(), 1);
+            assert_eq!(fetcher.len_active(), 0);
+            assert!(!fetcher.has_targets(&MockKey(1)));
+            assert!(!fetcher.has_targets(&MockKey(2)));
+            assert!(fetcher.has_targets(&MockKey(3)));
         });
     }
 

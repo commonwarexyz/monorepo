@@ -39,7 +39,8 @@
 //!
 //! These modifications only apply to in-progress fetches. Once a fetch succeeds, is pruned, or is
 //! ignored by the consumer, the targets for that key are cleared automatically. Blocking a peer
-//! removes that peer from every target set while leaving other targets available for retries.
+//! removes that peer from every target set while leaving other targets available for retries. A
+//! fetch whose every target has been blocked can never be served, so it is retired.
 //!
 //! # Subscribers
 //!
@@ -1037,6 +1038,72 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_dropped_verdict_retires_fetch_without_blocking_peer() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2]).await;
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+
+            let key = Key(1);
+            let mut prod2 = Producer::default();
+            prod2.insert(key.clone(), Bytes::from("data for key 1"));
+
+            let (cons1, mut deliveries) = HoldingConsumer::new();
+
+            let scheme = schemes.remove(0);
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            );
+
+            let scheme = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                dummy_consumer(),
+                prod2,
+            );
+
+            mailbox1.fetch(key.clone());
+            let (delivered, verdict) = deliveries.recv().await.unwrap();
+            assert_eq!(delivered, key);
+
+            // Drop the verdict, as a consumer does when it stops with the
+            // delivery still queued. No one is waiting on the key, so the fetch
+            // is retired rather than retried, and the peer stays unblocked
+            // because nothing is known about what it served.
+            drop(verdict);
+            select! {
+                _ = deliveries.recv() => panic!("retired fetch must not be retried"),
+                _ = context.sleep(Duration::from_secs(1)) => {},
+            };
+            assert!(oracle.blocked().await.unwrap().is_empty());
+
+            // The retired key is not deduplicated against, so a fresh fetch runs.
+            mailbox1.fetch(key.clone());
+            let (delivered, verdict) = deliveries.recv().await.unwrap();
+            assert_eq!(delivered, key);
+            verdict.send_lossy(Outcome::Complete);
+
+            let metrics = context.encode();
+            assert_eq!(
+                status_metric_total(&metrics, "actor_fetch_total", "Dropped"),
+                1
+            );
+        });
+    }
+
+    #[test_traced]
     fn test_ignored_delivery_retires_late_subscribers_without_rating_or_retry() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
@@ -1936,6 +2003,277 @@ mod tests {
             assert_eq!(
                 status_metric_total(&metrics, "actor_fetch_total", "Success"),
                 1
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_blocked_last_target_retires_fetch() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2, 3]).await;
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
+
+            // Peer 2 serves an invalid response for key 1 and has nothing for
+            // key 2. Peer 3 has both but is not a target.
+            let key1 = Key(1);
+            let key2 = Key(2);
+            let data1 = Bytes::from("data for key 1");
+            let data2 = Bytes::from("data for key 2");
+            let mut prod2 = Producer::default();
+            prod2.insert(key1.clone(), Bytes::from("garbage"));
+            let mut prod3 = Producer::default();
+            prod3.insert(key1.clone(), data1.clone());
+            prod3.insert(key2.clone(), data2.clone());
+
+            let (gate_sender, gate_receiver) = oneshot::channel();
+            let (cons1, mut deliveries, mut started) = BlockingSubscriberRecordingConsumer::new(
+                context.child("consumer"),
+                vec![(gate_receiver, Outcome::Invalid)],
+            );
+
+            let scheme = schemes.remove(0);
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            );
+
+            let scheme = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                dummy_consumer(),
+                prod2,
+            );
+
+            let scheme = schemes.remove(0);
+            let _mailbox3 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                dummy_consumer(),
+                prod3,
+            );
+
+            let stale1 = SubscriberTag(1);
+            let stale2 = SubscriberTag(2);
+            mailbox1.fetch_targeted(
+                Fetch {
+                    key: key1.clone(),
+                    subscriber: stale1.clone(),
+                    span: tracing::Span::none(),
+                },
+                non_empty_vec![peers[1].clone()],
+            );
+            mailbox1.fetch_targeted(
+                Fetch {
+                    key: key2.clone(),
+                    subscriber: stale2,
+                    span: tracing::Span::none(),
+                },
+                non_empty_vec![peers[1].clone()],
+            );
+            assert_eq!(
+                started.recv().await.expect("delivery did not start"),
+                Delivery {
+                    key: key1.clone(),
+                    subscribers: non_empty_vec![(stale1, tracing::Span::none())],
+                }
+            );
+            gate_sender.send(()).unwrap();
+            wait_for_blocked(&context, &oracle, &peers[0], &peers[1]).await;
+
+            // Both keys targeted only the blocked peer, so neither is retried
+            // against anyone else.
+            select! {
+                delivery = started.recv() => panic!("retired fetch was retried: {delivery:?}"),
+                _ = context.sleep(Duration::from_secs(1)) => {},
+            };
+
+            // The retired fetches left no state behind: fresh fetches for the
+            // same keys carry only their own subscribers.
+            let fresh1 = SubscriberTag(3);
+            let fresh2 = SubscriberTag(4);
+            mailbox1.fetch_targeted(
+                Fetch {
+                    key: key1.clone(),
+                    subscriber: fresh1.clone(),
+                    span: tracing::Span::none(),
+                },
+                non_empty_vec![peers[2].clone()],
+            );
+            mailbox1.fetch_targeted(
+                Fetch {
+                    key: key2.clone(),
+                    subscriber: fresh2.clone(),
+                    span: tracing::Span::none(),
+                },
+                non_empty_vec![peers[2].clone()],
+            );
+            let mut expected = vec![
+                (
+                    Delivery {
+                        key: key1,
+                        subscribers: non_empty_vec![(fresh1, tracing::Span::none())],
+                    },
+                    data1,
+                ),
+                (
+                    Delivery {
+                        key: key2,
+                        subscribers: non_empty_vec![(fresh2, tracing::Span::none())],
+                    },
+                    data2,
+                ),
+            ];
+            let mut delivered = vec![
+                deliveries.recv().await.expect("consumer channel closed"),
+                deliveries.recv().await.expect("consumer channel closed"),
+            ];
+            expected.sort_by(|a, b| a.0.key.cmp(&b.0.key));
+            delivered.sort_by(|a, b| a.0.key.cmp(&b.0.key));
+            assert_eq!(delivered, expected);
+        });
+    }
+
+    #[test_traced]
+    fn test_blocked_target_keeps_accepted_redelivery() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2]).await;
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+
+            // Peer 2 serves key 1 correctly and key 2 with garbage.
+            let key1 = Key(1);
+            let key2 = Key(2);
+            let data1 = Bytes::from("data for key 1");
+            let mut prod2 = Producer::default();
+            prod2.insert(key1.clone(), data1.clone());
+            prod2.insert(key2.clone(), Bytes::from("garbage"));
+
+            let (first_gate, first_gate_rx) = oneshot::channel();
+            let (redelivery_gate, redelivery_gate_rx) = oneshot::channel();
+            let (invalid_gate, invalid_gate_rx) = oneshot::channel();
+            let (cons1, mut deliveries, mut started) = BlockingSubscriberRecordingConsumer::new(
+                context.child("consumer"),
+                vec![
+                    (first_gate_rx, Outcome::Complete),
+                    (redelivery_gate_rx, Outcome::Complete),
+                    (invalid_gate_rx, Outcome::Invalid),
+                ],
+            );
+
+            let scheme = schemes.remove(0);
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            );
+
+            let scheme = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                dummy_consumer(),
+                prod2,
+            );
+
+            // A late subscriber joins while the first response is being validated,
+            // so the accepted response is redelivered to it locally.
+            let first = SubscriberTag(1);
+            let late = SubscriberTag(2);
+            mailbox1.fetch_targeted(
+                Fetch {
+                    key: key1.clone(),
+                    subscriber: first.clone(),
+                    span: tracing::Span::none(),
+                },
+                non_empty_vec![peers[1].clone()],
+            );
+            assert_eq!(
+                started.recv().await.expect("delivery did not start"),
+                Delivery {
+                    key: key1.clone(),
+                    subscribers: non_empty_vec![(first.clone(), tracing::Span::none())],
+                }
+            );
+            mailbox1.fetch_targeted(
+                Fetch {
+                    key: key1.clone(),
+                    subscriber: late.clone(),
+                    span: tracing::Span::none(),
+                },
+                non_empty_vec![peers[1].clone()],
+            );
+            context.sleep(Duration::from_millis(100)).await;
+            first_gate.send(()).unwrap();
+            assert_eq!(
+                deliveries.recv().await.expect("consumer channel closed"),
+                (
+                    Delivery {
+                        key: key1.clone(),
+                        subscribers: non_empty_vec![(first, tracing::Span::none())],
+                    },
+                    data1.clone()
+                )
+            );
+            assert_eq!(
+                started.recv().await.expect("redelivery did not start"),
+                Delivery {
+                    key: key1.clone(),
+                    subscribers: non_empty_vec![(late.clone(), tracing::Span::none())],
+                }
+            );
+
+            // Blocking the peer for key 2 must not retire key 1, whose accepted
+            // response no longer needs any peer.
+            mailbox1.fetch_targeted(
+                Fetch {
+                    key: key2.clone(),
+                    subscriber: SubscriberTag(3),
+                    span: tracing::Span::none(),
+                },
+                non_empty_vec![peers[1].clone()],
+            );
+            assert_eq!(
+                started.recv().await.expect("delivery did not start").key,
+                key2
+            );
+            invalid_gate.send(()).unwrap();
+            wait_for_blocked(&context, &oracle, &peers[0], &peers[1]).await;
+
+            redelivery_gate.send(()).unwrap();
+            assert_eq!(
+                deliveries.recv().await.expect("consumer channel closed"),
+                (
+                    Delivery {
+                        key: key1,
+                        subscribers: non_empty_vec![(late, tracing::Span::none())],
+                    },
+                    data1
+                )
             );
         });
     }

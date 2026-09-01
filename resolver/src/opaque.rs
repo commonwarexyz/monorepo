@@ -987,6 +987,64 @@ mod tests {
     }
 
     #[test]
+    fn dropped_verdict_retires_without_retry() {
+        Runner::default().start(|context| async move {
+            let fetcher = MockFetcher::default();
+            fetcher.push(1, Some(Bytes::from_static(b"unjudged")));
+            fetcher.push(1, Some(Bytes::from_static(b"fresh")));
+            let consumer = MockConsumer::default();
+            let mut resolver =
+                start_resolver(context.child("resolver"), fetcher.clone(), consumer.clone());
+
+            assert!(
+                resolver
+                    .fetch(Fetch {
+                        key: 1,
+                        subscriber: 10,
+                        span: tracing::Span::none(),
+                    })
+                    .accepted()
+            );
+            let delivery = wait_for_delivery(&context, &consumer).await;
+            assert_eq!(delivery.value, Bytes::from_static(b"unjudged"));
+
+            // Drop the verdict, as a consumer does when it stops with the delivery
+            // still queued. No one is waiting on the key, so the fetch is retired
+            // rather than retried.
+            drop(delivery);
+
+            context
+                .sleep(RETRY_TIMEOUT + Duration::from_millis(10))
+                .await;
+            assert_eq!(fetcher.calls(), 1);
+            assert_eq!(consumer.len(), 0);
+            assert!(
+                context
+                    .encode()
+                    .contains("resolver_actor_fetch_total{status=\"Dropped\"} 1")
+            );
+
+            // The retired key is not deduplicated against, so a fresh fetch runs.
+            assert!(
+                resolver
+                    .fetch(Fetch {
+                        key: 1,
+                        subscriber: 10,
+                        span: tracing::Span::none(),
+                    })
+                    .accepted()
+            );
+            let delivery = wait_for_delivery(&context, &consumer).await;
+            assert_eq!(delivery.value, Bytes::from_static(b"fresh"));
+            delivery
+                .response
+                .send(Outcome::Complete)
+                .expect("response dropped");
+            assert_eq!(fetcher.calls(), 2);
+        });
+    }
+
+    #[test]
     fn accepted_redelivery_rejection_does_not_refetch() {
         Runner::default().start(|context| async move {
             let fetcher = MockFetcher::default();
