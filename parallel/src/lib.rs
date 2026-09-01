@@ -89,6 +89,7 @@ commonware_macros::stability_scope!(BETA {
             };
 
             mod policy;
+            mod topology;
         } else {
             extern crate alloc;
             use alloc::vec::Vec;
@@ -1073,6 +1074,14 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                     // Offload: hand the job to the pool. The worker records the job wall (so
                     // job estimates survive a dropped future), and the awaiting future records
                     // the round-trip overhead when it observes the result.
+                    //
+                    // The executor pins itself to the submitter's LLC domain for the job's
+                    // duration: spawned jobs exchange data with their caller, and a one-time
+                    // migration is orders cheaper than cross-domain traffic for the job's life.
+                    // The pin target resolves before the measured round trip begins: the first
+                    // resolution discovers the process-wide topology (a sysfs scan), and that
+                    // one-time cost would otherwise inflate this callsite's overhead estimate.
+                    let domain = topology::spawn_domain();
                     let spawn_start = measure.then(Instant::now);
                     let (tx, mut rx) = oneshot::channel();
                     let s = self.clone();
@@ -1084,6 +1093,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                     };
                     let worker_recorder = recorder.clone();
                     self.thread_pool.spawn(move || {
+                        let _affinity = topology::AffinityGuard::pin(domain);
                         let job_start = worker_recorder.is_some().then(Instant::now);
 
                         // Catch the panic so a panicking job propagates to the awaiting task
