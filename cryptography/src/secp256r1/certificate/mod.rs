@@ -91,7 +91,7 @@ impl<P: crate::PublicKey, N: Namespace> Generic<P, N> {
         })
     }
 
-    /// Returns the ordered set of identity keys.
+    /// Returns the ordered committee of identity keys.
     pub const fn participants(&self) -> &Committee<P> {
         &self.committee
     }
