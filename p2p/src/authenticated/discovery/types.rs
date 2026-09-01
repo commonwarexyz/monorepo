@@ -49,9 +49,10 @@ pub struct PayloadConfig {
 }
 
 /// Payload is the only allowed message format that can be sent between peers.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, EncodeSize, Write)]
 pub enum Payload<C: PublicKey> {
     /// Arbitrary data sent between peers.
+    #[codec(tag = 0)]
     Data(Data),
 
     /// A greeting message containing the peer's own information.
@@ -59,49 +60,18 @@ pub enum Payload<C: PublicKey> {
     /// This must be the first message sent after connection establishment.
     /// The connection will be terminated if this message is not received first
     /// or if it is received more than once.
+    #[codec(tag = 1)]
     Greeting(Info<C>),
 
     /// Bit vector that represents the peers a peer knows about.
     ///
     /// Also used as a ping message to keep the connection alive.
+    #[codec(tag = 2)]
     BitVec(BitVec),
 
     /// A vector of verifiable peer information.
+    #[codec(tag = 3)]
     Peers(Vec<Info<C>>),
-}
-
-impl<C: PublicKey> EncodeSize for Payload<C> {
-    fn encode_size(&self) -> usize {
-        (match self {
-            Self::Data(data) => data.encode_size(),
-            Self::Greeting(info) => info.encode_size(),
-            Self::BitVec(bit_vec) => bit_vec.encode_size(),
-            Self::Peers(peers) => peers.encode_size(),
-        }) + 1
-    }
-}
-
-impl<C: PublicKey> Write for Payload<C> {
-    fn write(&self, buf: &mut impl BufMut) {
-        match self {
-            Self::Data(data) => {
-                DATA_PREFIX.write(buf);
-                data.write(buf);
-            }
-            Self::Greeting(info) => {
-                GREETING_PREFIX.write(buf);
-                info.write(buf);
-            }
-            Self::BitVec(bit_vec) => {
-                BIT_VEC_PREFIX.write(buf);
-                bit_vec.write(buf);
-            }
-            Self::Peers(peers) => {
-                PEERS_PREFIX.write(buf);
-                peers.write(buf);
-            }
-        }
-    }
 }
 
 impl<C: PublicKey> Read for Payload<C> {

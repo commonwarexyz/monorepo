@@ -1,22 +1,18 @@
 //! Shared address types for p2p networking.
 
-use commonware_codec::{EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write};
-use commonware_runtime::{Buf, BufMut, Error as RuntimeError, Resolver};
+use commonware_codec::{EncodeSize, Read, Write};
+use commonware_runtime::{Error as RuntimeError, Resolver};
 use commonware_utils::{Hostname, IpAddrExt};
 use std::net::{IpAddr, SocketAddr};
 
-const INGRESS_SOCKET_PREFIX: u8 = 0;
-const INGRESS_DNS_PREFIX: u8 = 1;
-
-const ADDRESS_SYMMETRIC_PREFIX: u8 = 0;
-const ADDRESS_ASYMMETRIC_PREFIX: u8 = 1;
-
 /// What we dial to connect to a peer.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, EncodeSize, Read, Write)]
 pub enum Ingress {
     /// IP-based ingress address.
+    #[codec(tag = 0)]
     Socket(SocketAddr),
     /// DNS-based ingress address.
+    #[codec(tag = 1)]
     Dns {
         /// Hostname to resolve.
         host: Hostname,
@@ -91,52 +87,6 @@ impl Ingress {
     }
 }
 
-impl Write for Ingress {
-    fn write(&self, buf: &mut impl BufMut) {
-        match self {
-            Self::Socket(addr) => {
-                INGRESS_SOCKET_PREFIX.write(buf);
-                addr.write(buf);
-            }
-            Self::Dns { host, port } => {
-                INGRESS_DNS_PREFIX.write(buf);
-                host.write(buf);
-                port.write(buf);
-            }
-        }
-    }
-}
-
-impl EncodeSize for Ingress {
-    fn encode_size(&self) -> usize {
-        u8::SIZE
-            + match self {
-                Self::Socket(addr) => addr.encode_size(),
-                Self::Dns { host, port } => host.encode_size() + port.encode_size(),
-            }
-    }
-}
-
-impl Read for Ingress {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        let prefix = u8::read(buf)?;
-        match prefix {
-            INGRESS_SOCKET_PREFIX => {
-                let addr = SocketAddr::read(buf)?;
-                Ok(Self::Socket(addr))
-            }
-            INGRESS_DNS_PREFIX => {
-                let host = Hostname::read(buf)?;
-                let port = u16::read(buf)?;
-                Ok(Self::Dns { host, port })
-            }
-            other => Err(CodecError::InvalidEnum(other)),
-        }
-    }
-}
-
 impl From<SocketAddr> for Ingress {
     fn from(addr: SocketAddr) -> Self {
         Self::Socket(addr)
@@ -144,11 +94,13 @@ impl From<SocketAddr> for Ingress {
 }
 
 /// Full address specification for peer-to-peer networking.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, EncodeSize, Read, Write)]
 pub enum Address {
     /// Same address for both ingress (dialing) and egress (IP filtering).
+    #[codec(tag = 0)]
     Symmetric(SocketAddr),
     /// Different addresses for ingress and egress.
+    #[codec(tag = 1)]
     Asymmetric {
         /// The address we dial to connect.
         ingress: Ingress,
@@ -179,54 +131,6 @@ impl Address {
         match self {
             Self::Symmetric(addr) => *addr,
             Self::Asymmetric { egress, .. } => *egress,
-        }
-    }
-}
-
-impl Write for Address {
-    fn write(&self, buf: &mut impl BufMut) {
-        match self {
-            Self::Symmetric(addr) => {
-                ADDRESS_SYMMETRIC_PREFIX.write(buf);
-                addr.write(buf);
-            }
-            Self::Asymmetric { ingress, egress } => {
-                ADDRESS_ASYMMETRIC_PREFIX.write(buf);
-                ingress.write(buf);
-                egress.write(buf);
-            }
-        }
-    }
-}
-
-impl EncodeSize for Address {
-    fn encode_size(&self) -> usize {
-        u8::SIZE
-            + match self {
-                Self::Symmetric(addr) => addr.encode_size(),
-                Self::Asymmetric { ingress, egress } => {
-                    ingress.encode_size() + egress.encode_size()
-                }
-            }
-    }
-}
-
-impl Read for Address {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        let prefix = u8::read(buf)?;
-        match prefix {
-            ADDRESS_SYMMETRIC_PREFIX => {
-                let addr = SocketAddr::read(buf)?;
-                Ok(Self::Symmetric(addr))
-            }
-            ADDRESS_ASYMMETRIC_PREFIX => {
-                let ingress = Ingress::read(buf)?;
-                let egress = SocketAddr::read(buf)?;
-                Ok(Self::Asymmetric { ingress, egress })
-            }
-            other => Err(CodecError::InvalidEnum(other)),
         }
     }
 }
@@ -312,7 +216,7 @@ mod tests {
         // Manually encode an invalid DNS entry with a hostname that's too long
         // (Hostname::new() would reject this, so we encode manually)
         let mut buf = Vec::new();
-        INGRESS_DNS_PREFIX.write(&mut buf);
+        1u8.write(&mut buf);
         let long_hostname = "a".repeat(300);
         long_hostname.len().write(&mut buf);
         buf.extend(long_hostname.as_bytes());

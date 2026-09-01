@@ -1,6 +1,6 @@
 use crate::authenticated::data::Data;
 use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
-use commonware_runtime::{Buf, BufMut};
+use commonware_runtime::Buf;
 
 /// Prefix that identifies the message as a Data message.
 pub const DATA_PREFIX: u8 = crate::authenticated::data::DATA_PREFIX; // 0
@@ -8,39 +8,18 @@ pub const DATA_PREFIX: u8 = crate::authenticated::data::DATA_PREFIX; // 0
 pub const PING_PREFIX: u8 = 1;
 
 /// The messages that can be sent between peers.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, EncodeSize, Write)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub enum Message {
+    #[codec(tag = 0)]
     Data(Data),
+    #[codec(tag = 1)]
     Ping,
 }
 
 impl From<Data> for Message {
     fn from(data: Data) -> Self {
         Self::Data(data)
-    }
-}
-
-impl EncodeSize for Message {
-    fn encode_size(&self) -> usize {
-        (match self {
-            Self::Data(data) => data.encode_size(),
-            Self::Ping => 0, // Ping has no payload
-        }) + 1 // 1 bytes for Message discriminant
-    }
-}
-
-impl Write for Message {
-    fn write(&self, buf: &mut impl BufMut) {
-        match self {
-            Self::Data(data) => {
-                DATA_PREFIX.write(buf); // Discriminant for Data
-                data.write(buf);
-            }
-            Self::Ping => {
-                PING_PREFIX.write(buf); // Discriminant for Ping
-            }
-        }
     }
 }
 
