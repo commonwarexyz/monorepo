@@ -5,6 +5,8 @@
 //! The coding marshal couples the consensus pipeline with erasure-coded block broadcast.
 //! Blocks are produced by an application, encoded into [`types::Shard`]s, fanned out to peers, and
 //! later reconstructed when a notarization or finalization proves that the data is needed.
+//! The coding marshal supports uniform committees with `4..=u16::MAX` participants. For other
+//! committees, it declines to propose and rejects every payload.
 //! Compared to [`super::standard`], this variant makes more efficient usage of the network's bandwidth
 //! by spreading the load of block dissemination across all participants.
 //!

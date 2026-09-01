@@ -915,6 +915,7 @@ where
         };
 
         let committee = scheme.participants();
+        // No payload is valid for a known unsupported committee. Vote false rather than abstaining.
         let Some(coding_config) = coding_config_for_committee(committee) else {
             warn!(
                 round = %consensus_context.round,
