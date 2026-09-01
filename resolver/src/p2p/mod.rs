@@ -44,7 +44,7 @@
 //! later local redelivery judged ambiguous retries against any peer. Blocking a peer removes that
 //! peer from every target set while leaving other targets available for retries. A fetch whose
 //! every target has been blocked, including one issued against already blocked peers, can never
-//! be served, so it is retired.
+//! be served, so it is retired along with any response from that peer still being validated.
 //!
 //! # Subscribers
 //!
@@ -54,14 +54,16 @@
 //! [`Resolver::retain`](crate::Resolver::retain) predicate. When the fetch resolves, the
 //! key and currently retained subscribers are supplied to
 //! [`Consumer::deliver`](crate::Consumer::deliver). Subscribers added while response validation
-//! is in progress are delivered the same accepted response locally.
+//! is in progress are delivered the same response locally, once it is accepted or when the
+//! consumer drops its verdict without judging it.
 //!
 //! While a response is being validated, its key remains in flight, so no further request is sent.
 //! New fetches for the key only attach subscribers or targets. A complete outcome retires the
 //! delivered subscribers, an ambiguous outcome retries the key, an invalid outcome blocks the
 //! serving peer and retries the key unless no target remains, and an ignored outcome retires the
-//! entire key without scoring the serving peer. When a peer-visible key admits multiple valid responses, a consumer should
-//! return an ambiguous outcome if the delivered response does not satisfy every subscriber,
+//! entire key without scoring the serving peer. When a peer-visible key admits multiple valid
+//! responses, a consumer should return an ambiguous outcome if the delivered response does not
+//! satisfy every subscriber,
 //! allowing the resolver to try another response.
 //!
 //! # Scheduling

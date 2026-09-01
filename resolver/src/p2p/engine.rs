@@ -529,9 +529,16 @@ where
                 commonware_p2p::block!(self.blocker, peer.clone(), "invalid data received");
                 self.metrics.fetch.inc(Status::Failure);
                 self.inflight.discard_response(&key);
-                let retired = self.fetcher.block(peer);
+                let retired = self.fetcher.block(peer.clone());
+                if !retired.is_empty() {
+                    warn!(
+                        ?peer,
+                        count = retired.len(),
+                        "every target blocked, retiring fetches"
+                    );
+                }
                 for unservable in &retired {
-                    warn!(key = ?unservable, "every target blocked, retiring fetch");
+                    debug!(key = ?unservable, "retiring fetch");
 
                     // The rejected response already counted a failure for this key.
                     if *unservable != key {

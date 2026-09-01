@@ -95,9 +95,10 @@ where
         self.entries.get(key).and_then(Self::non_empty)
     }
 
-    /// Remove subscribers that just received a valid delivery, dropping the
-    /// tracker's reference to their spans (the delivered consumer still holds a
-    /// clone).
+    /// Remove subscribers whose delivery has completed, dropping the tracker's
+    /// reference to their spans (the delivered consumer still holds a clone).
+    /// The delivery need not have been judged valid: a dropped verdict retires
+    /// the same subscribers.
     ///
     /// Returns the remaining subscribers (with spans) for the key, or `None` if
     /// the key is now complete or was not tracked.

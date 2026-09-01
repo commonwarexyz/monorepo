@@ -2,7 +2,7 @@
 //!
 //! Resolvers often need the same delivery lifecycle: keep a fetch alive while
 //! `Consumer::deliver` validates a response, abort that validation if the fetch
-//! is pruned, and reuse an accepted response for subscribers that were added
+//! is pruned, and reuse a cached response for subscribers that were added
 //! while validation was in progress. This module owns that lifecycle without
 //! making assumptions about how data is fetched.
 
@@ -26,7 +26,7 @@ pub struct Completion<K, S, Context = ()> {
     pub outcome: Option<Outcome>,
 }
 
-// Cached response that can be redelivered after the consumer accepts it.
+// Cached response that can be redelivered while it is accepted or still unjudged.
 struct Response<Context, V> {
     context: Context,
     value: V,
@@ -160,9 +160,9 @@ where
 
     /// Deliver a newly received response to the consumer.
     ///
-    /// The response is cached so that, after the consumer accepts it, later
-    /// retained subscribers can be redelivered the same bytes with
-    /// [`redeliver`](Self::redeliver). Panics if the key is not tracked.
+    /// The response is cached so that later retained subscribers can be
+    /// redelivered the same bytes with [`redeliver`](Self::redeliver) once the
+    /// consumer accepts it or drops its verdict. Panics if the key is not tracked.
     pub fn deliver(
         &mut self,
         delivery: Delivery<Con::Key, Con::Subscriber>,

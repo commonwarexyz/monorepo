@@ -116,7 +116,8 @@ commonware_macros::stability_scope!(BETA {
     pub enum Outcome {
         /// The response is invalid for the peer-visible key.
         ///
-        /// Network resolvers may penalize the serving peer before retrying.
+        /// Network resolvers may penalize the serving peer before retrying, and
+        /// retire a fetch left with no peer that could serve it.
         Invalid,
 
         /// The response is valid and satisfies every delivered subscriber.

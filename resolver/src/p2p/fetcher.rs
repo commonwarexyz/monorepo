@@ -92,7 +92,7 @@ pub struct Config<P: PublicKey> {
 ///
 /// A blocked peer never becomes eligible again and is never added as a target. A key whose every
 /// target has been blocked can never be served, so blocking drops such fetches and returns their
-/// keys for the caller to retire, and adding only blocked targets to a new key reports the same.
+/// keys for the caller to retire, and adding only blocked targets to a new key returns false.
 pub struct Fetcher<E, P, Key, NetS>
 where
     E: Clock + Rng + Metrics,
@@ -502,7 +502,8 @@ where
     ///
     /// Also removes the peer from all target sets. A key left with no targets can
     /// never be served, so its fetch is dropped and the key is returned for the
-    /// caller to retire.
+    /// caller to retire, along with any response from the peer it is still
+    /// validating.
     pub fn block(&mut self, peer: P) -> Vec<Key> {
         let mut retired = Vec::new();
         self.targets.retain(|key, targets| {
@@ -534,7 +535,8 @@ where
     /// happen for a key that had none: such a fetch can never be served and the
     /// caller should retire it.
     ///
-    /// Clears the waiter to allow immediate retry if the fetch was blocked waiting for targets.
+    /// Otherwise clears the waiter to allow immediate retry if the fetch was
+    /// blocked waiting for targets.
     pub fn add_targets(&mut self, key: Key, peers: impl IntoIterator<Item = P>) -> bool {
         let excluded = &self.excluded;
         let peers = peers.into_iter().filter(|peer| !excluded.contains(peer));
@@ -557,8 +559,8 @@ where
     /// Clear targeting for a key.
     ///
     /// If there is an ongoing fetch for this key, it will try any available peer instead
-    /// of being restricted to targets. Also used to clean up targets after a successful
-    /// or cancelled fetch.
+    /// of being restricted to targets. Also used to clean up targets once a response is
+    /// accepted or the fetch is retired.
     ///
     /// Clears the waiter to allow immediate retry with any available peer.
     pub fn clear_targets(&mut self, key: &Key) {

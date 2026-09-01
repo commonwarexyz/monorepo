@@ -73,7 +73,7 @@ where
 
     /// Begin a consumer delivery for a network response, attaching the abort handle.
     /// Spawns `consumer.deliver(delivery, value)` as an in-flight future and records
-    /// the response so later subscribers can be delivered the same accepted bytes.
+    /// the response so later subscribers can be delivered the same bytes.
     pub(super) fn deliver(
         &mut self,
         delivery: Delivery<Con::Key, Con::Subscriber>,
