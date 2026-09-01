@@ -126,6 +126,9 @@ stability_scope!(BETA {
         fn max_encode_size(cfg: &Self::Cfg) -> usize;
     }
 });
+stability_scope!(ALPHA {
+    pub mod multimmit;
+});
 stability_scope!(ALPHA, cfg(any(test, feature = "mocks")) {
     pub mod twins;
 });
@@ -368,7 +371,8 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     ///
     /// The consensus engine supplies only an item's digest, never its contents. It is up to the
     /// relay to efficiently broadcast the full item to other participants. In [`simplex`], the
-    /// item is the payload a leader proposed.
+    /// item is the payload a leader proposed. In [`multimmit`], it is a transaction block header
+    /// (see [Application Contract](multimmit#application-contract)).
     pub trait Relay: Clone + Send + 'static {
         /// Identity digest of the item to disseminate.
         type Digest: Digest;
