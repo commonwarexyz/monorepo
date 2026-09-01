@@ -61,8 +61,9 @@ use std::sync::OnceLock;
 /// [`Lazy`] can be serialized and deserialized, implementing [`Read`], [`Write`],
 /// and [`EncodeSize`], based on the underlying implementation of `T`.
 ///
-/// Furthermore, we implement [`Eq`], [`Ord`], [`Hash`] based on the implementation
-/// of `T` as well. These methods will force deserialization of the value.
+/// Equality, ordering, and hashing compare the canonical encoding, so they never force
+/// decoding. Because encodings are canonical, this agrees with `T`'s own equality for values
+/// that decode, and it keeps distinct undecodable byte strings distinct.
 #[derive(Clone)]
 pub struct Lazy<T: Read> {
     /// This should only be `None` if `value` is initialized.
@@ -223,30 +224,66 @@ impl<T: Read + FixedSize> Read for Lazy<T> {
 //
 // We want to provide some convenience functions which might exist on the underlying
 // value in a Lazy. To do so, we really on `get` to access that value.
+//
+// Comparison and hashing work on the canonical encoding instead: deferred bytes are already
+// that encoding, and an eagerly constructed value encodes far more cheaply than deferred bytes
+// decode (for group elements, decoding also runs a subgroup check).
 
-impl<T: Read + PartialEq> PartialEq for Lazy<T> {
+impl<T: Read> Lazy<T> {
+    /// Returns the value if it has already been decoded, without forcing a decode.
+    #[cfg(feature = "std")]
+    fn decoded(&self) -> Option<&T> {
+        self.value.get().and_then(Option::as_ref)
+    }
+
+    /// Returns the value if it has already been decoded, without forcing a decode.
+    #[cfg(not(feature = "std"))]
+    const fn decoded(&self) -> Option<&T> {
+        self.value.as_ref()
+    }
+}
+
+impl<T: Read + Write + EncodeSize> Lazy<T> {
+    /// Returns the canonical encoding without decoding deferred bytes.
+    fn encoded(&self) -> Bytes {
+        match &self.pending {
+            Some(pending) => pending.bytes.clone(),
+            None => self
+                .get()
+                .expect("Lazy should have a value if pending is None")
+                .encode(),
+        }
+    }
+}
+
+impl<T: Read + Write + EncodeSize + PartialEq> PartialEq for Lazy<T> {
     fn eq(&self, other: &Self) -> bool {
-        self.get() == other.get()
+        // Two decoded values compare directly; otherwise the canonical encodings decide, which
+        // never decodes and only allocates when one side was constructed from a value.
+        match (self.decoded(), other.decoded()) {
+            (Some(left), Some(right)) => left == right,
+            _ => self.encoded() == other.encoded(),
+        }
     }
 }
 
-impl<T: Read + Eq> Eq for Lazy<T> {}
+impl<T: Read + Write + EncodeSize + PartialEq> Eq for Lazy<T> {}
 
-impl<T: Read + PartialOrd> PartialOrd for Lazy<T> {
+impl<T: Read + Write + EncodeSize + PartialEq> PartialOrd for Lazy<T> {
     fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
-        self.get().partial_cmp(&other.get())
+        Some(self.cmp(other))
     }
 }
 
-impl<T: Read + Ord> Ord for Lazy<T> {
+impl<T: Read + Write + EncodeSize + PartialEq> Ord for Lazy<T> {
     fn cmp(&self, other: &Self) -> core::cmp::Ordering {
-        self.get().cmp(&other.get())
+        self.encoded().cmp(&other.encoded())
     }
 }
 
-impl<T: Read + Hash> Hash for Lazy<T> {
+impl<T: Read + Write + EncodeSize> Hash for Lazy<T> {
     fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
-        self.get().hash(state);
+        self.encoded().hash(state);
     }
 }
 
@@ -297,6 +334,52 @@ mod test {
         fn arbitrary_with(_args: Self::Parameters) -> Self::Strategy {
             (0..=100u8).prop_map(Small).boxed()
         }
+    }
+
+    /// A byte whose decoding is counted, to prove comparisons never decode.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct Counted(u8);
+
+    static DECODES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    impl FixedSize for Counted {
+        const SIZE: usize = 1;
+    }
+
+    impl Write for Counted {
+        fn write(&self, buf: &mut impl bytes::BufMut) {
+            self.0.write(buf);
+        }
+    }
+
+    impl Read for Counted {
+        type Cfg = ();
+
+        fn read_cfg(buf: &mut impl bytes::Buf, _cfg: &Self::Cfg) -> Result<Self, crate::Error> {
+            DECODES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Self(u8::read_cfg(buf, &())?))
+        }
+    }
+
+    #[test]
+    fn comparisons_and_hashing_do_not_decode() {
+        use core::hash::{Hash, Hasher};
+        let a = Lazy::<Counted>::deferred(&mut Counted(7).encode(), ());
+        let b = Lazy::<Counted>::deferred(&mut Counted(7).encode(), ());
+        let c = Lazy::<Counted>::deferred(&mut Counted(9).encode(), ());
+        let eager = Lazy::new(Counted(7));
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        assert_eq!(a, eager);
+        assert!(a < c);
+        let mut ha = std::collections::hash_map::DefaultHasher::new();
+        let mut hb = std::collections::hash_map::DefaultHasher::new();
+        a.hash(&mut ha);
+        eager.hash(&mut hb);
+        assert_eq!(ha.finish(), hb.finish());
+        assert_eq!(DECODES.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(a.get(), Some(&Counted(7)));
+        assert_eq!(DECODES.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     proptest! {
