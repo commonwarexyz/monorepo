@@ -33,7 +33,10 @@ where
     <<Self::Scheme as certificate::Verifier>::Certificate as Read>::Cfg: Default,
 {
     type Scheme: Scheme<Sha256Digest, PublicKey = Ed25519PublicKey>;
-    type Elector: elector::Config<Self::Scheme>;
+    type Elector: elector::Config<
+            <Self::Scheme as certificate::Verifier>::PublicKey,
+            <Self::Scheme as certificate::Verifier>::Certificate,
+        >;
     fn elector(term_length: TermLength, optimistic_views: ViewDelta) -> Self::Elector;
     fn fixture(
         context: &mut deterministic::Context,

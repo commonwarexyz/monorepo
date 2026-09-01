@@ -1,0 +1,3785 @@
+//! Proposal selection, view-message collection, and deterministic view exits.
+
+use super::{
+    Artifact, ArtifactId, ChainState, Observation, Profile, ProposalRequest, Role, SignRequest,
+    ViewNullification, ViewSnapshot, ViewStance, ViewTransition, VoteBodyPass, VoteBodyProgress,
+    VoteRequest,
+    algebra::{
+        DerivedVqc, Tips, ValidatedVqc, validate_vqc, validate_vqc_votes, validate_vqc_with_votes,
+    },
+};
+use crate::{
+    Epochable, Viewable,
+    multimmit::{
+        config::CodecConfig,
+        scheme::bls12381_threshold::{CertificateVotes, Error as SchemeError},
+        types::{
+            Anchor, CertificateId, LeaderBlock, Nullification, Nullify, ProposalParent,
+            SelectedCommitments, SignedLeaderBlock, TipRecord, ViewMessage, Vote, VoteBody, Vqc,
+            genesis_history,
+        },
+    },
+    types::{Attributable, Height, Participant, Round, View},
+};
+use bytes::Bytes;
+use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use std::{
+    collections::{BTreeMap, BTreeSet, BinaryHeap},
+    ops::Bound::{Excluded, Unbounded},
+    sync::Arc,
+};
+
+/// Removes the ordered prefix selected by `retired`, stopping at the first retained key.
+/// The predicate must select a contiguous prefix of the map's key order.
+pub(super) fn drain_prefix<K: Ord, V>(
+    entries: &mut BTreeMap<K, V>,
+    mut retired: impl FnMut(&K) -> bool,
+) -> impl Iterator<Item = (K, V)> {
+    std::iter::from_fn(move || {
+        if entries
+            .first_key_value()
+            .is_some_and(|(key, _)| retired(key))
+        {
+            entries.pop_first()
+        } else {
+            None
+        }
+    })
+}
+
+#[derive(Clone, Debug)]
+struct ProposalRecord<V: Variant, D: Digest> {
+    observation: Observation,
+    artifact: Arc<Artifact<V, D>>,
+}
+
+enum RegularSignPass<V: Variant, D: Digest> {
+    Vote {
+        view: View,
+        pass: VoteBodyPass<V, D>,
+        ready: Option<VoteRequest<D>>,
+    },
+    Proposal {
+        view: View,
+        parent: ParentRecord<V, D>,
+        attach_parent: bool,
+        next_chain: usize,
+        proposals: Vec<crate::multimmit::types::ChainProposal<V, D>>,
+    },
+}
+
+pub(crate) struct RegularSignDrive<V: Variant, D: Digest> {
+    pub(crate) processed: usize,
+    pub(crate) complete: bool,
+    pub(crate) request: Option<SignRequest<V, D>>,
+}
+
+pub(super) struct LeaderRecord<V: Variant, D: Digest> {
+    observation: Observation,
+    artifact: Arc<Artifact<V, D>>,
+}
+
+#[derive(Clone, Debug)]
+struct ParentRecord<V: Variant, D: Digest> {
+    id: CertificateId<D>,
+    view: View,
+    history: D,
+    canonical: Bytes,
+    certificate: Option<Arc<Artifact<V, D>>>,
+    tips: Arc<Tips<D>>,
+    commitments: SelectedCommitments<D>,
+    /// Each chain's proposed tip height in the view this record's V-QC certified.
+    proposed: Vec<Height>,
+    messages: usize,
+}
+
+#[derive(Clone, Debug)]
+struct MessageRecord<V: Variant, D: Digest> {
+    id: ArtifactId<D>,
+    observation: Observation,
+    artifact: Arc<Artifact<V, D>>,
+}
+
+#[derive(Clone, Debug)]
+struct NullifyRecord<V: Variant, D: Digest> {
+    observation: Observation,
+    artifact: Arc<Artifact<V, D>>,
+}
+
+#[derive(Clone, Debug)]
+struct NullificationRecord<V: Variant, D: Digest> {
+    id: ArtifactId<D>,
+    observation: Observation,
+    artifact: Arc<Artifact<V, D>>,
+}
+
+#[derive(Clone, Debug)]
+struct VqcRecord<V: Variant, D: Digest> {
+    artifact_id: ArtifactId<D>,
+    id: CertificateId<D>,
+    observation: Observation,
+    artifact: Arc<Artifact<V, D>>,
+}
+
+impl<V: Variant, D: Digest> ProposalRecord<V, D> {
+    fn block(&self) -> &SignedLeaderBlock<V, D> {
+        let Artifact::LeaderBlock(block) = self.artifact.as_ref() else {
+            unreachable!("proposal records contain leader blocks");
+        };
+        block
+    }
+}
+
+enum MessageRef<'a, V: Variant, D: Digest> {
+    Vote(&'a Vote<V, D>),
+    NoVote,
+}
+
+#[derive(Copy, Clone)]
+enum VqcEligibility {
+    Target,
+    Other,
+}
+
+impl<V: Variant, D: Digest> LeaderRecord<V, D> {
+    fn block(&self) -> &LeaderBlock<V, D> {
+        match self.artifact.as_ref() {
+            Artifact::LeaderBlock(block) => block.block(),
+            Artifact::Vqc(certificate) => certificate.leader(),
+            _ => unreachable!("leader records contain proposals or V-QCs"),
+        }
+    }
+
+    const fn observation(&self) -> Observation {
+        self.observation
+    }
+}
+
+impl<V: Variant, D: Digest> MessageRecord<V, D> {
+    fn message(&self) -> MessageRef<'_, V, D> {
+        match self.artifact.as_ref() {
+            Artifact::Vote(vote) => MessageRef::Vote(vote),
+            Artifact::NoVote(_) => MessageRef::NoVote,
+            _ => unreachable!("view-message records contain votes or novotes"),
+        }
+    }
+
+    fn vqc_eligibility(&self, target: D, leader: &LeaderBlock<V, D>) -> Option<VqcEligibility> {
+        match self.message() {
+            MessageRef::Vote(vote) if vote.body().leader() == target => vote
+                .body()
+                .valid_for_digest(leader, target)
+                .then_some(VqcEligibility::Target),
+            MessageRef::Vote(_) | MessageRef::NoVote => Some(VqcEligibility::Other),
+        }
+    }
+}
+
+impl<V: Variant, D: Digest> NullifyRecord<V, D> {
+    fn share(&self) -> &Nullify<V> {
+        let Artifact::Nullify(share) = self.artifact.as_ref() else {
+            unreachable!("nullify records contain nullify shares");
+        };
+        share
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Claim {
+    Proposal(View),
+    ViewMessage(View, Participant),
+    Nullify(View, Participant),
+    Nullification(View),
+    Vqc(View),
+}
+
+impl Claim {
+    const fn certificate_view(self) -> View {
+        match self {
+            Self::Proposal(view)
+            | Self::ViewMessage(view, _)
+            | Self::Nullify(view, _)
+            | Self::Nullification(view)
+            | Self::Vqc(view) => view,
+        }
+    }
+}
+
+/// Identifies one exact view-certificate construction request.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct ViewCertificateId(u64);
+
+impl ViewCertificateId {
+    /// Returns the generation-local sequence.
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// Exact verified shares selected for one nullification.
+#[derive(Clone, Debug)]
+pub(crate) struct NullificationRecoveryJob<V: Variant> {
+    id: ViewCertificateId,
+    generation: u64,
+    shares: Arc<[Nullify<V>]>,
+}
+
+impl<V: Variant> NullificationRecoveryJob<V> {
+    /// Returns the job identifier.
+    pub const fn id(&self) -> ViewCertificateId {
+        self.id
+    }
+
+    /// Returns the process generation issuing the job.
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Returns the exact canonical signer subset in participant order.
+    pub fn shares(&self) -> &[Nullify<V>] {
+        &self.shares
+    }
+}
+
+/// Completion of one exact nullification recovery request.
+#[derive(Clone, Debug)]
+pub(crate) struct NullificationRecoveryCompletion<V: Variant> {
+    id: ViewCertificateId,
+    generation: u64,
+    certificate: Nullification<V>,
+}
+
+impl<V: Variant> NullificationRecoveryCompletion<V> {
+    /// Creates a matched recovery completion.
+    pub const fn new(
+        id: ViewCertificateId,
+        generation: u64,
+        certificate: Nullification<V>,
+    ) -> Self {
+        Self {
+            id,
+            generation,
+            certificate,
+        }
+    }
+
+    /// Returns the completed job identifier.
+    pub const fn id(&self) -> ViewCertificateId {
+        self.id
+    }
+}
+
+/// Exact verified view messages selected for one V-QC.
+#[derive(Clone, Debug)]
+pub(crate) struct VqcAggregateJob<V: Variant, D: Digest> {
+    id: ViewCertificateId,
+    generation: u64,
+    leader: LeaderBlock<V, D>,
+    messages: Arc<[Arc<Artifact<V, D>>]>,
+    transcript: VqcTranscript<D>,
+}
+
+impl<V: Variant, D: Digest> VqcAggregateJob<V, D> {
+    /// Returns the job identifier.
+    pub const fn id(&self) -> ViewCertificateId {
+        self.id
+    }
+
+    /// Returns the process generation issuing the job.
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Returns the designated unsigned leader block.
+    pub const fn leader(&self) -> &LeaderBlock<V, D> {
+        &self.leader
+    }
+
+    /// Reconstructs the exact canonical message subset in participant order.
+    ///
+    /// The job retains shared canonical artifacts. Consumers materialize owned protocol messages
+    /// only while executing the aggregation.
+    pub fn messages(&self) -> impl ExactSizeIterator<Item = ViewMessage<V, D>> + '_ {
+        self.messages
+            .iter()
+            .map(|artifact| match artifact.as_ref() {
+                Artifact::Vote(vote) => ViewMessage::Vote(vote.clone()),
+                Artifact::NoVote(vote) => ViewMessage::NoVote(vote.clone()),
+                _ => unreachable!("V-QC jobs contain votes or novotes"),
+            })
+    }
+}
+
+/// Completion of one exact V-QC aggregation request.
+#[derive(Clone, Debug)]
+pub(crate) struct VqcAggregateCompletion<V: Variant, D: Digest> {
+    id: ViewCertificateId,
+    generation: u64,
+    artifact: Arc<Artifact<V, D>>,
+    prepared: Option<PreparedVqcCompletion<V, D>>,
+}
+
+#[derive(Clone, Debug)]
+struct PreparedVqcCompletion<V: Variant, D: Digest> {
+    // Only the view owner constructs job transcripts. Clones retain this allocation, so its
+    // identity binds the worker's checked certificate to the exact still-pending request.
+    messages: Arc<[Arc<Artifact<V, D>>]>,
+    derived: DerivedVqc<V, D>,
+}
+
+impl<V: Variant, D: Digest> VqcAggregateCompletion<V, D> {
+    /// Creates an unprepared completion for exercising the admission fallback.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn new(id: ViewCertificateId, generation: u64, certificate: Vqc<V, D>) -> Self {
+        Self {
+            id,
+            generation,
+            artifact: Arc::new(Artifact::Vqc(certificate)),
+            prepared: None,
+        }
+    }
+
+    /// Checks the selected transcript and derives certificate projections in the worker.
+    pub(crate) fn prepare<H: Hasher<Digest = D>>(
+        job: &VqcAggregateJob<V, D>,
+        certificate: Vqc<V, D>,
+        config: CodecConfig,
+    ) -> Result<Self, SchemeError> {
+        if !vqc_matches_job::<H, V, D>(&certificate, &job.leader, &job.messages, config) {
+            return Err(SchemeError::Transcript);
+        }
+        let leader = certificate.leader().digest::<H>();
+        let mut votes = CertificateVotes {
+            leader,
+            designated: Vec::new(),
+            conflicting: Vec::new(),
+        };
+        for artifact in job.messages.iter() {
+            if let Artifact::Vote(vote) = artifact.as_ref() {
+                let target = if vote.body().leader() == leader {
+                    &mut votes.designated
+                } else {
+                    &mut votes.conflicting
+                };
+                target.push((vote.signer(), vote.body().clone()));
+            }
+        }
+        let validated = validate_vqc_with_votes::<H, V, D>(&certificate, config, votes)
+            .map_err(|_| SchemeError::Transcript)?;
+        let derived =
+            DerivedVqc::new::<H>(certificate, validated).map_err(|_| SchemeError::Transcript)?;
+        Ok(Self {
+            id: job.id,
+            generation: job.generation,
+            artifact: Arc::clone(&derived.artifact),
+            prepared: Some(PreparedVqcCompletion {
+                messages: Arc::clone(&job.messages),
+                derived,
+            }),
+        })
+    }
+
+    pub(super) fn derived(&self) -> Option<&DerivedVqc<V, D>> {
+        self.prepared.as_ref().map(|prepared| &prepared.derived)
+    }
+
+    pub(super) fn take_validated(&mut self) -> Option<ValidatedVqc<D>> {
+        self.prepared
+            .take()
+            .map(|prepared| prepared.derived.validated)
+    }
+
+    /// Returns the completed job identifier.
+    pub const fn id(&self) -> ViewCertificateId {
+        self.id
+    }
+
+    /// Returns the aggregated certificate.
+    pub fn certificate(&self) -> &Vqc<V, D> {
+        let Artifact::Vqc(certificate) = self.artifact.as_ref() else {
+            unreachable!("V-QC completions contain a V-QC")
+        };
+        certificate
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum ViewEffect<V: Variant, D: Digest> {
+    RecoverNullification(NullificationRecoveryJob<V>),
+    AggregateVqc(VqcAggregateJob<V, D>),
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CertificateDrive {
+    pub processed: usize,
+    pub complete: bool,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct Exit<V: Variant, D: Digest> {
+    pub proof: Arc<Artifact<V, D>>,
+    pub rescue: Option<LeaderBlock<V, D>>,
+}
+
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+enum TransitionState {
+    #[default]
+    Active,
+    Exited,
+}
+
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+enum StanceState {
+    #[default]
+    Unchosen,
+    Voted,
+    NoVoted,
+}
+
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+enum NullificationState {
+    #[default]
+    Unsigned,
+    Signed,
+}
+
+/// One explicit input to the per-view product machine.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ViewSlotInput {
+    Propose,
+    Vote,
+    NoVote,
+    Nullify,
+    Exit,
+}
+
+/// The state dimension changed by one accepted per-view input.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ViewSlotOutput {
+    Proposed,
+    Voted,
+    NoVoted,
+    Nullified,
+    Exited,
+    Unchanged,
+}
+
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+struct ViewProductState {
+    transition: TransitionState,
+    stance: StanceState,
+    nullification: NullificationState,
+    proposed: bool,
+}
+
+impl ViewProductState {
+    fn apply(&mut self, input: ViewSlotInput) -> Option<ViewSlotOutput> {
+        use ViewSlotInput::{Exit, NoVote, Nullify, Propose, Vote};
+
+        match input {
+            Propose if self.transition == TransitionState::Active && !self.proposed => {
+                self.proposed = true;
+                Some(ViewSlotOutput::Proposed)
+            }
+            Propose if self.proposed => Some(ViewSlotOutput::Unchanged),
+            Vote if self.transition == TransitionState::Active
+                && self.stance == StanceState::Unchosen
+                && self.nullification == NullificationState::Unsigned =>
+            {
+                self.stance = StanceState::Voted;
+                Some(ViewSlotOutput::Voted)
+            }
+            Vote if self.stance == StanceState::Voted => Some(ViewSlotOutput::Unchanged),
+            NoVote
+                if self.transition == TransitionState::Active
+                    && self.stance == StanceState::Unchosen =>
+            {
+                self.stance = StanceState::NoVoted;
+                Some(ViewSlotOutput::NoVoted)
+            }
+            NoVote if self.stance == StanceState::NoVoted => Some(ViewSlotOutput::Unchanged),
+            Nullify if self.transition == TransitionState::Active => {
+                let output = if self.nullification == NullificationState::Signed {
+                    ViewSlotOutput::Unchanged
+                } else {
+                    self.nullification = NullificationState::Signed;
+                    ViewSlotOutput::Nullified
+                };
+                Some(output)
+            }
+            Exit if self.transition == TransitionState::Active => {
+                self.transition = TransitionState::Exited;
+                Some(ViewSlotOutput::Exited)
+            }
+            Exit => Some(ViewSlotOutput::Unchanged),
+            Propose | Vote | NoVote | Nullify => None,
+        }
+    }
+
+    const fn can_vote(self) -> bool {
+        matches!(self.transition, TransitionState::Active)
+            && matches!(self.stance, StanceState::Unchosen)
+            && matches!(self.nullification, NullificationState::Unsigned)
+    }
+
+    const fn has_voted(self) -> bool {
+        matches!(self.stance, StanceState::Voted)
+    }
+
+    const fn nullified(self) -> bool {
+        matches!(self.nullification, NullificationState::Signed)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ViewSlot<V: Variant, D: Digest> {
+    state: ViewProductState,
+    proposal: Option<LeaderBlock<V, D>>,
+    vote: Option<VoteBody<D>>,
+    exit: Option<ArtifactId<D>>,
+}
+
+impl<V: Variant, D: Digest> Default for ViewSlot<V, D> {
+    fn default() -> Self {
+        Self {
+            state: ViewProductState::default(),
+            proposal: None,
+            vote: None,
+            exit: None,
+        }
+    }
+}
+
+impl<V: Variant, D: Digest> ViewSlot<V, D> {
+    fn observe_proposal(&mut self, block: LeaderBlock<V, D>) -> Result<(), ViewError> {
+        if let Some(existing) = &self.proposal {
+            return (existing == &block)
+                .then_some(())
+                .ok_or(ViewError::ProposalConflict);
+        }
+        self.state
+            .apply(ViewSlotInput::Propose)
+            .ok_or(ViewError::ProposalConflict)?;
+        self.proposal = Some(block);
+        Ok(())
+    }
+
+    fn observe_vote(&mut self, body: VoteBody<D>) -> Result<(), ViewError> {
+        if let Some(existing) = &self.vote {
+            return (existing == &body)
+                .then_some(())
+                .ok_or(ViewError::VoteConflict);
+        }
+        self.state
+            .apply(ViewSlotInput::Vote)
+            .ok_or(ViewError::VoteNoVoteConflict)?;
+        self.vote = Some(body);
+        Ok(())
+    }
+
+    fn observe_novote(&mut self) -> Result<(), ViewError> {
+        self.state
+            .apply(ViewSlotInput::NoVote)
+            .ok_or(ViewError::VoteNoVoteConflict)?;
+        Ok(())
+    }
+
+    fn observe_nullify(&mut self) {
+        let _ = self.state.apply(ViewSlotInput::Nullify);
+    }
+
+    fn observe_exit(&mut self, proof: ArtifactId<D>) {
+        if self.state.apply(ViewSlotInput::Exit).is_some() {
+            self.exit.get_or_insert(proof);
+        }
+    }
+}
+
+/// Consensus-layer facts and local safety choices for one epoch.
+pub(crate) struct ViewState<V: Variant, D: Digest> {
+    pub(super) config: CodecConfig,
+    retired_transitions: View,
+    proposal_anchor_view: View,
+    proposal_nullified_through: View,
+    parents: BTreeMap<CertificateId<D>, ParentRecord<V, D>>,
+    parents_by_view: BTreeMap<View, Vec<CertificateId<D>>>,
+    pub(super) leaders: BTreeMap<(View, D), LeaderRecord<V, D>>,
+    proposals: BTreeMap<View, Vec<ProposalRecord<V, D>>>,
+    messages: BTreeMap<View, BTreeMap<Participant, Vec<MessageRecord<V, D>>>>,
+    message_locations: BTreeMap<ArtifactId<D>, (View, Participant, Observation)>,
+    sticky_messages: BTreeMap<View, BTreeMap<Participant, MessageRecord<V, D>>>,
+    nullify_shares: BTreeMap<View, BTreeMap<Participant, NullifyRecord<V, D>>>,
+    nullifications: BTreeMap<View, Vec<NullificationRecord<V, D>>>,
+    vqcs: BTreeMap<View, Vec<VqcRecord<V, D>>>,
+    claims: BTreeMap<Claim, BTreeMap<ArtifactId<D>, Observation>>,
+    claim_cohorts: BTreeMap<Claim, BTreeMap<u64, usize>>,
+    message_claim_cohorts: BTreeMap<View, BTreeMap<u64, usize>>,
+    nullify_claim_cohorts: BTreeMap<View, BTreeMap<u64, usize>>,
+    slots: BTreeMap<View, ViewSlot<V, D>>,
+    post_vote_evidence: BTreeMap<View, BTreeSet<Participant>>,
+    timeout_cutoffs: BTreeMap<View, TimeoutCutoff<D>>,
+    certificate_jobs: BTreeMap<ViewCertificateId, ViewCertificateJob<V, D>>,
+    pending_nullifications: BTreeMap<View, Observation>,
+    pending_vqcs: BTreeMap<View, Observation>,
+    assembled_nullifications: BTreeSet<View>,
+    /// Latest strictly extending transcript for each target. Per-view aggregation is serialized,
+    /// and completing a job invalidates that view's scan before another candidate is selected.
+    assembled_vqcs: BTreeMap<(View, D), Vec<ArtifactId<D>>>,
+    forwarded_nullifications: BTreeSet<View>,
+    forwarded_vqcs: BTreeMap<View, CertificateId<D>>,
+    forwardable_nullifications: BTreeSet<View>,
+    forwardable_vqcs: BTreeSet<View>,
+    ready_certificate_views: BTreeSet<View>,
+    certificate_scan: Option<CertificateScan<V, D>>,
+    regular_sign_pass: Option<RegularSignPass<V, D>>,
+    /// Cumulative verified headers admitted while this node's sealed proposal view was still
+    /// current: the direct count of proposal-quantization misses at this leader's own slots.
+    headers_after_seal: u64,
+    /// Cumulative proposal-pass restarts triggered by verified header admissions, making a
+    /// zero miss count interpretable against constant restarting.
+    header_restarts: u64,
+    /// Header-triggered restarts consumed by the identified view's in-flight pass.
+    pass_restarts: (View, u8),
+    next_certificate: u64,
+    capabilities: Vec<ViewEffect<V, D>>,
+    /// Highest admitted L-QC not yet consumed by the durable signing floor.
+    ///
+    /// Finality evidence owns its proof because it can outlive its general ready-artifact cache
+    /// entry. Equal-view arrivals retain the first proof.
+    finality_proof: Option<FinalityProof<V, D>>,
+}
+
+struct FinalityProof<V: Variant, D: Digest> {
+    view: View,
+    artifact: Arc<Artifact<V, D>>,
+    derived: DerivedVqc<V, D>,
+}
+
+#[derive(Clone, Debug)]
+enum ViewCertificateJob<V: Variant, D: Digest> {
+    Nullification {
+        job: NullificationRecoveryJob<V>,
+        observation: Observation,
+    },
+    Vqc {
+        job: VqcAggregateJob<V, D>,
+        observation: Observation,
+    },
+}
+
+#[derive(Clone, Debug)]
+enum TimeoutCutoff<D: Digest> {
+    Vote(VoteRequest<D>),
+    Timeout,
+}
+
+pub(crate) struct PreparedArtifact<V: Variant, D: Digest> {
+    pub artifact: Arc<Artifact<V, D>>,
+    pub observation: Observation,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct VqcTranscript<D: Digest> {
+    view: View,
+    target: D,
+    messages: Vec<ArtifactId<D>>,
+}
+
+#[derive(Clone, Debug)]
+struct VqcCandidate<D: Digest> {
+    target: D,
+    observation: Observation,
+    transcript: VqcTranscript<D>,
+}
+
+#[derive(Clone, Debug)]
+struct PreparedVqc<V: Variant, D: Digest> {
+    candidate: VqcCandidate<D>,
+    messages: Arc<[Arc<Artifact<V, D>>]>,
+}
+
+#[derive(Clone, Debug)]
+struct PreparedNullification<V: Variant> {
+    observation: Observation,
+    shares: Arc<[Nullify<V>]>,
+}
+
+enum PreparedCertificate<V: Variant, D: Digest> {
+    Vqc(PreparedVqc<V, D>),
+    Nullification(PreparedNullification<V>),
+}
+
+struct ForwardCandidates<V: Variant, D: Digest> {
+    vqc: Option<(Observation, Arc<Artifact<V, D>>)>,
+    nullification: Option<(Observation, Arc<Artifact<V, D>>)>,
+}
+
+#[derive(Clone, Debug)]
+struct CertificateScan<V: Variant, D: Digest> {
+    view: View,
+    pending_messages: Option<u64>,
+    pending_nullifies: Option<u64>,
+    support: BTreeMap<D, usize>,
+    best_vqc: Option<PreparedVqc<V, D>>,
+    nullification: Option<PreparedNullification<V>>,
+    phase: CertificateScanPhase<V, D>,
+}
+
+#[derive(Clone, Debug)]
+enum CertificateScanPhase<V: Variant, D: Digest> {
+    CountSupport {
+        cursor: Option<Participant>,
+    },
+    FindTarget {
+        cursor: Option<D>,
+    },
+    EvaluateTarget {
+        target: D,
+        cursor: Option<Participant>,
+        eligible: usize,
+        targets: usize,
+        message_cohorts: BinaryHeap<u64>,
+        target_cohorts: BinaryHeap<u64>,
+    },
+    SelectTarget {
+        target: D,
+        cohort: u64,
+        limit: usize,
+        cursor: Option<Participant>,
+        eligible: usize,
+        remaining_targets: usize,
+        visited: usize,
+        target_count: usize,
+        observation: Option<Observation>,
+        messages: Vec<Arc<Artifact<V, D>>>,
+        ids: Vec<ArtifactId<D>>,
+    },
+    CountNullifications {
+        cursor: Option<Participant>,
+        cohorts: BinaryHeap<u64>,
+    },
+    SelectNullifications {
+        cohort: u64,
+        cursor: Option<Participant>,
+        observation: Option<Observation>,
+        shares: Vec<Nullify<V>>,
+    },
+    Complete,
+}
+
+impl<V: Variant, D: Digest> ViewState<V, D> {
+    pub(crate) fn new<H: Hasher<Digest = D>>(profile: &Profile<H, V>) -> Self {
+        let genesis = profile.protocol().genesis();
+        let tips = Tips::new(genesis.tips().to_vec())
+            .expect("validated genesis has one tip per canonical chain");
+        let parent = ParentRecord {
+            id: genesis.vqc(),
+            view: View::zero(),
+            history: genesis_history::<H>(genesis),
+            canonical: Bytes::new(),
+            certificate: None,
+            proposed: genesis.tips().iter().map(|tip| tip.height()).collect(),
+            tips: Arc::new(tips),
+            commitments: SelectedCommitments::new(genesis.epoch(), Vec::new()),
+            messages: 0,
+        };
+        Self {
+            config: profile.protocol().codec_config(),
+            retired_transitions: View::zero(),
+            proposal_anchor_view: View::zero(),
+            proposal_nullified_through: View::zero(),
+            parents: BTreeMap::from([(genesis.vqc(), parent)]),
+            parents_by_view: BTreeMap::from([(View::zero(), vec![genesis.vqc()])]),
+            leaders: BTreeMap::new(),
+            proposals: BTreeMap::new(),
+            messages: BTreeMap::new(),
+            message_locations: BTreeMap::new(),
+            sticky_messages: BTreeMap::new(),
+            nullify_shares: BTreeMap::new(),
+            nullifications: BTreeMap::new(),
+            vqcs: BTreeMap::new(),
+            claims: BTreeMap::new(),
+            claim_cohorts: BTreeMap::new(),
+            message_claim_cohorts: BTreeMap::new(),
+            nullify_claim_cohorts: BTreeMap::new(),
+            slots: BTreeMap::new(),
+            post_vote_evidence: BTreeMap::new(),
+            timeout_cutoffs: BTreeMap::new(),
+            certificate_jobs: BTreeMap::new(),
+            pending_nullifications: BTreeMap::new(),
+            pending_vqcs: BTreeMap::new(),
+            assembled_nullifications: BTreeSet::new(),
+            assembled_vqcs: BTreeMap::new(),
+            forwarded_nullifications: BTreeSet::new(),
+            forwarded_vqcs: BTreeMap::new(),
+            forwardable_nullifications: BTreeSet::new(),
+            forwardable_vqcs: BTreeSet::new(),
+            ready_certificate_views: BTreeSet::new(),
+            certificate_scan: None,
+            regular_sign_pass: None,
+            headers_after_seal: 0,
+            header_restarts: 0,
+            pass_restarts: (View::zero(), 0),
+            next_certificate: 0,
+            capabilities: Vec::new(),
+            finality_proof: None,
+        }
+    }
+
+    /// Applies E3 after Finality admits a full L-QC.
+    pub(crate) fn observe_finality<H: Hasher<Digest = D>>(
+        &mut self,
+        artifact: &Arc<Artifact<V, D>>,
+        derived: Option<DerivedVqc<V, D>>,
+    ) -> Result<bool, ViewError> {
+        let Artifact::Lqc(certificate) = artifact.as_ref() else {
+            return Err(ViewError::Certificate);
+        };
+        if self
+            .finality_proof
+            .as_ref()
+            .is_some_and(|proof| proof.view >= certificate.view())
+        {
+            return Ok(false);
+        }
+        let derived = match derived {
+            Some(derived) => derived,
+            None => DerivedVqc::from_lqc::<H>(certificate, self.config)
+                .map_err(|_| ViewError::Certificate)?,
+        };
+        self.finality_proof = Some(FinalityProof {
+            view: certificate.view(),
+            artifact: Arc::clone(artifact),
+            derived,
+        });
+        Ok(true)
+    }
+
+    /// Returns the highest admitted L-QC above the durable signing floor.
+    ///
+    /// The candidate is deliberately independent of the current view: an L-QC whose
+    /// aggregation completes after its view exits is still portable finality evidence, and the
+    /// floor it raises retires the same signing authority whether or not it also advances the
+    /// view. Requiring the candidate to cover the current view would make floor progress a
+    /// race against the ordinary exit, which the aggregation loses whenever it is not inline.
+    pub(crate) fn signing_floor_candidate(&self, floor: View) -> Option<Arc<Artifact<V, D>>> {
+        self.finality_proof
+            .as_ref()
+            .and_then(|proof| (proof.view > floor).then(|| Arc::clone(&proof.artifact)))
+    }
+
+    /// Reuses the projection only for the immutable proof that owns it.
+    pub(crate) fn finality_anchor(
+        &self,
+        artifact: &Arc<Artifact<V, D>>,
+    ) -> Option<&DerivedVqc<V, D>> {
+        self.finality_proof
+            .as_ref()
+            .and_then(|proof| Arc::ptr_eq(&proof.artifact, artifact).then_some(&proof.derived))
+    }
+
+    /// Returns selected paths owned by this certificate or the leader's retained parent.
+    pub(crate) fn selected_commitments(
+        &self,
+        artifact: &Arc<Artifact<V, D>>,
+    ) -> Option<&SelectedCommitments<D>> {
+        match artifact.as_ref() {
+            Artifact::Vqc(certificate) => self
+                .parents_by_view
+                .get(&certificate.view())?
+                .iter()
+                .filter_map(|id| self.parents.get(id))
+                .find(|parent| {
+                    parent
+                        .certificate
+                        .as_ref()
+                        .is_some_and(|retained| Arc::ptr_eq(retained, artifact))
+                })
+                .map(|parent| &parent.commitments),
+            Artifact::Lqc(_) => self
+                .finality_anchor(artifact)
+                .map(|derived| derived.validated.commitments()),
+            Artifact::LeaderBlock(block) => self
+                .parents
+                .get(&block.block().parent())
+                .map(|parent| &parent.commitments),
+            _ => None,
+        }
+    }
+
+    /// Reconstructs the exact safe-tip opening committed by a leader from its retained parent.
+    pub(crate) fn leader_history<H: Hasher<Digest = D>>(
+        &self,
+        leader: &LeaderBlock<V, D>,
+    ) -> Result<Arc<TipRecord<D>>, ViewError> {
+        let parent = self
+            .parents
+            .get(&leader.parent())
+            .ok_or(ViewError::MissingParent)?;
+        let history = Arc::new(
+            TipRecord::new(
+                parent.history,
+                parent.tips.blocks().to_vec(),
+                parent.proposed.clone(),
+            )
+            .map_err(|_| ViewError::Proposal)?,
+        );
+        (history.commitment::<H>() == leader.history())
+            .then_some(history)
+            .ok_or(ViewError::Proposal)
+    }
+
+    pub(crate) fn retire_finality_proofs_through(&mut self, floor: View) {
+        if self
+            .finality_proof
+            .as_ref()
+            .is_some_and(|proof| proof.view <= floor)
+        {
+            self.finality_proof = None;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retained_finality_proofs(&self) -> usize {
+        usize::from(self.finality_proof.is_some())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retained_vqc_transcripts(&self) -> usize {
+        self.assembled_vqcs.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retained_exit_proofs(&self) -> BTreeMap<View, ArtifactId<D>> {
+        self.slots
+            .iter()
+            .filter_map(|(view, slot)| slot.exit.map(|proof| (*view, proof)))
+            .collect()
+    }
+
+    fn slot_state(&self, view: View) -> ViewProductState {
+        self.slots
+            .get(&view)
+            .map_or_else(ViewProductState::default, |slot| slot.state)
+    }
+
+    fn slot_mut(&mut self, view: View) -> &mut ViewSlot<V, D> {
+        self.slots.entry(view).or_default()
+    }
+
+    pub(crate) fn retire_transitions_through(&mut self, floor: View) {
+        if floor <= self.retired_transitions {
+            return;
+        }
+        self.retired_transitions = floor;
+        let retained = |view: &View| *view > floor;
+
+        drain_prefix(&mut self.leaders, |(view, _)| !retained(view)).for_each(drop);
+        drain_prefix(&mut self.proposals, |view| !retained(view)).for_each(drop);
+        for (_, messages) in drain_prefix(&mut self.messages, |view| !retained(view)) {
+            for records in messages.values() {
+                for record in records {
+                    self.message_locations.remove(&record.id);
+                }
+            }
+        }
+        drain_prefix(&mut self.sticky_messages, |view| !retained(view)).for_each(drop);
+        drain_prefix(&mut self.nullify_shares, |view| !retained(view)).for_each(drop);
+        drain_prefix(&mut self.nullifications, |view| !retained(view)).for_each(drop);
+        drain_prefix(&mut self.vqcs, |view| !retained(view)).for_each(drop);
+        // Claim ordering groups variants before views, so each variant has its own prefix.
+        for (first, last) in [
+            (Claim::Proposal(View::zero()), Claim::Proposal(floor)),
+            (
+                Claim::ViewMessage(View::zero(), Participant::new(0)),
+                Claim::ViewMessage(floor, Participant::new(u32::MAX)),
+            ),
+            (
+                Claim::Nullify(View::zero(), Participant::new(0)),
+                Claim::Nullify(floor, Participant::new(u32::MAX)),
+            ),
+            (
+                Claim::Nullification(View::zero()),
+                Claim::Nullification(floor),
+            ),
+            (Claim::Vqc(View::zero()), Claim::Vqc(floor)),
+        ] {
+            for (claim, _) in self.claims.extract_if(first..=last, |_, _| true) {
+                self.claim_cohorts.remove(&claim);
+            }
+        }
+        drain_prefix(&mut self.message_claim_cohorts, |view| !retained(view)).for_each(drop);
+        drain_prefix(&mut self.nullify_claim_cohorts, |view| !retained(view)).for_each(drop);
+        drain_prefix(&mut self.slots, |view| !retained(view)).for_each(drop);
+        drain_prefix(&mut self.post_vote_evidence, |view| !retained(view)).for_each(drop);
+        drain_prefix(&mut self.timeout_cutoffs, |view| !retained(view)).for_each(drop);
+        self.certificate_jobs.retain(|_, job| match job {
+            ViewCertificateJob::Nullification { job, .. } => job
+                .shares()
+                .first()
+                .is_some_and(|share| retained(&share.view())),
+            ViewCertificateJob::Vqc { job, .. } => retained(&job.leader().view()),
+        });
+        drain_prefix(&mut self.pending_nullifications, |view| !retained(view)).for_each(drop);
+        drain_prefix(&mut self.pending_vqcs, |view| !retained(view)).for_each(drop);
+        drain_prefix(&mut self.assembled_vqcs, |(view, _)| !retained(view)).for_each(drop);
+        for views in [
+            &mut self.assembled_nullifications,
+            &mut self.forwardable_nullifications,
+            &mut self.forwardable_vqcs,
+            &mut self.ready_certificate_views,
+        ] {
+            views.extract_if(..=floor, |_| true).for_each(drop);
+        }
+        if self
+            .certificate_scan
+            .as_ref()
+            .is_some_and(|scan| !retained(&scan.view))
+        {
+            self.certificate_scan = None;
+        }
+        self.capabilities.retain(|effect| match effect {
+            ViewEffect::RecoverNullification(job) => job
+                .shares()
+                .first()
+                .is_some_and(|share| retained(&share.view())),
+            ViewEffect::AggregateVqc(job) => retained(&job.leader().view()),
+        });
+    }
+
+    /// Retains forwarding facts for live views and exact retained proposal parents.
+    ///
+    /// Parent provenance allows proposals to omit a certificate already authorized for dissemination.
+    /// Retire parents first so facts below the floor remain bounded by retained parents.
+    pub(crate) fn retire_forwarded_through(&mut self, floor: View) {
+        self.forwarded_vqcs
+            .extract_if(..=floor, |_, id| !self.parents.contains_key(id))
+            .for_each(drop);
+        self.forwarded_nullifications
+            .extract_if(..=floor, |_| true)
+            .for_each(drop);
+    }
+
+    pub(crate) fn retire_parents_through(
+        &mut self,
+        floor: View,
+        anchor: Option<CertificateId<D>>,
+    ) -> Vec<CertificateId<D>> {
+        if floor.is_zero() {
+            return Vec::new();
+        }
+        let live_leader_parents = self
+            .leaders
+            .values()
+            .map(|leader| leader.block().parent())
+            .collect::<BTreeSet<_>>();
+        let mut removed = Vec::new();
+        self.parents_by_view
+            .extract_if((Excluded(View::zero()), Excluded(floor)), |_, ids| {
+                ids.retain(|id| {
+                    if Some(*id) == anchor || live_leader_parents.contains(id) {
+                        return true;
+                    }
+                    self.parents.remove(id);
+                    removed.push(*id);
+                    false
+                });
+                ids.is_empty()
+            })
+            .for_each(drop);
+        removed.sort_unstable();
+        removed
+    }
+
+    pub(crate) const fn restore_proposal_frontier(
+        &mut self,
+        anchor: View,
+        nullified_through: View,
+    ) {
+        self.proposal_anchor_view = anchor;
+        self.proposal_nullified_through = nullified_through;
+    }
+
+    pub(crate) fn restore_snapshot(&mut self, snapshot: &ViewSnapshot<V, D>) {
+        self.slots = snapshot
+            .slots
+            .iter()
+            .map(|(view, saved)| {
+                let transition = match saved.transition {
+                    ViewTransition::Active => TransitionState::Active,
+                    ViewTransition::Exited(_) => TransitionState::Exited,
+                };
+                let stance = match &saved.stance {
+                    ViewStance::Unchosen => StanceState::Unchosen,
+                    ViewStance::Voted(_) => StanceState::Voted,
+                    ViewStance::NoVoted => StanceState::NoVoted,
+                };
+                let nullification = match saved.nullification {
+                    ViewNullification::Unsigned => NullificationState::Unsigned,
+                    ViewNullification::Signed => NullificationState::Signed,
+                };
+                let exit = match saved.transition {
+                    ViewTransition::Active => None,
+                    ViewTransition::Exited(proof) => Some(proof),
+                };
+                let slot = ViewSlot {
+                    state: ViewProductState {
+                        transition,
+                        stance,
+                        nullification,
+                        proposed: saved.proposal.is_some(),
+                    },
+                    proposal: saved.proposal.clone(),
+                    vote: match &saved.stance {
+                        ViewStance::Voted(body) => Some(body.clone()),
+                        ViewStance::Unchosen | ViewStance::NoVoted => None,
+                    },
+                    exit,
+                };
+                (*view, slot)
+            })
+            .collect();
+    }
+
+    /// Records the exact proof whose durable transition exited `view`.
+    pub(crate) fn observe_exit(&mut self, view: View, proof: ArtifactId<D>) {
+        self.slot_mut(view).observe_exit(proof);
+    }
+
+    fn vqc_forwarded(&self, view: View) -> bool {
+        self.forwarded_vqcs.contains_key(&view)
+    }
+
+    fn nullification_forwarded(&self, view: View) -> bool {
+        self.forwarded_nullifications.contains(&view)
+    }
+
+    pub(crate) fn claim(
+        &mut self,
+        id: ArtifactId<D>,
+        observation: Observation,
+        artifact: &Artifact<V, D>,
+    ) {
+        let Some(claim) = Self::claim_for(artifact) else {
+            return;
+        };
+        let previous = self
+            .claims
+            .entry(claim)
+            .or_default()
+            .insert(id, observation);
+        if let Some(previous) = previous {
+            self.remove_claim_cohort(claim, previous.cohort());
+        }
+        self.insert_claim_cohort(claim, observation.cohort());
+        {
+            let view = claim.certificate_view();
+            self.refresh_view(view);
+        }
+    }
+
+    pub(crate) fn reject(&mut self, id: ArtifactId<D>, artifact: &Artifact<V, D>) {
+        let Some(claim) = Self::claim_for(artifact) else {
+            return;
+        };
+        self.remove_claim(claim, id);
+        if let Claim::ViewMessage(view, participant) = claim {
+            self.remove_message(id, view, participant);
+            self.settle_message(view, participant);
+            if self.slot_state(view).has_voted() {
+                self.rebuild_post_vote_evidence(view);
+            }
+        }
+        {
+            let view = claim.certificate_view();
+            self.refresh_view(view);
+        }
+    }
+
+    pub(crate) fn observe<H: Hasher<Digest = D>>(
+        &mut self,
+        id: ArtifactId<D>,
+        observation: Observation,
+        artifact: &Arc<Artifact<V, D>>,
+        mut validated_vqc: Option<ValidatedVqc<D>>,
+        profile: &Profile<H, V>,
+    ) -> Result<(), ViewError> {
+        let certificate_view = Self::claim_for(artifact).map(Claim::certificate_view);
+        if let Some(claim) = Self::claim_for(artifact) {
+            self.remove_claim(claim, id);
+        }
+        if artifact
+            .view()
+            .is_some_and(|view| view <= self.retired_transitions)
+        {
+            match artifact.as_ref() {
+                Artifact::Vqc(certificate) => {
+                    self.observe_vqc::<H>(
+                        id,
+                        observation,
+                        artifact,
+                        validated_vqc.take(),
+                        profile,
+                    )?;
+                    self.refresh_view(certificate.view());
+                    return Ok(());
+                }
+                Artifact::Nullification(certificate)
+                    if !self.nullification_forwarded(certificate.view()) =>
+                {
+                    self.observe_nullification(id, observation, Arc::clone(artifact));
+                    self.refresh_view(certificate.view());
+                    return Ok(());
+                }
+                Artifact::Nullification(_) => return Ok(()),
+                _ if artifact
+                    .view()
+                    .is_some_and(|view| view < self.retired_transitions) =>
+                {
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+        match artifact.as_ref() {
+            Artifact::LeaderBlock(_) => {
+                self.observe_proposal::<H>(observation, artifact)?;
+            }
+            Artifact::Vote(vote) => {
+                self.observe_message(id, observation, Arc::clone(artifact));
+                self.settle_message(vote.view(), vote.signer());
+            }
+            Artifact::NoVote(novote) => {
+                self.observe_message(id, observation, Arc::clone(artifact));
+                self.settle_message(novote.view(), novote.signer());
+            }
+            Artifact::Nullify(_) => {
+                self.observe_nullify(observation, Arc::clone(artifact));
+            }
+            Artifact::Nullification(_) => {
+                self.observe_nullification(id, observation, Arc::clone(artifact));
+            }
+            Artifact::Vqc(_) => {
+                self.observe_vqc::<H>(id, observation, artifact, validated_vqc.take(), profile)?;
+            }
+            Artifact::TransactionBlock(_)
+            | Artifact::DaVote(_)
+            | Artifact::DaCertificate(_)
+            | Artifact::Lqc(_) => {}
+        }
+        if let Some(view) = certificate_view {
+            self.refresh_view(view);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn observe_sign_request(
+        &mut self,
+        request: &SignRequest<V, D>,
+    ) -> Result<(), ViewError> {
+        match request {
+            SignRequest::LeaderBlock(request) => {
+                self.observe_local_proposal(request.block().clone())
+            }
+            SignRequest::Vote(request) => self.observe_local_vote(request.body().clone()),
+            SignRequest::NoVote { round, .. } => self.observe_local_novote(round.view()),
+            SignRequest::Nullify { round, .. } => {
+                self.slot_mut(round.view()).observe_nullify();
+                Ok(())
+            }
+            SignRequest::DaVote(_) => {
+                if matches!(
+                    self.regular_sign_pass,
+                    Some(RegularSignPass::Proposal { .. })
+                ) {
+                    self.regular_sign_pass = None;
+                }
+                Ok(())
+            }
+            SignRequest::TransactionBlock(_) => Ok(()),
+        }
+    }
+
+    pub(crate) fn observe_durable_artifact(
+        &mut self,
+        artifact: &Artifact<V, D>,
+        role: Role,
+    ) -> Result<(), ViewError> {
+        match artifact {
+            Artifact::LeaderBlock(block) if role == Role::Validator(block.signer()) => {
+                self.observe_local_proposal(block.block().clone())
+            }
+            Artifact::Vote(vote) if role == Role::Validator(vote.signer()) => {
+                self.observe_local_vote(vote.body().clone())
+            }
+            Artifact::NoVote(vote) if role == Role::Validator(vote.signer()) => {
+                self.observe_local_novote(vote.view())
+            }
+            Artifact::Nullify(share) if role == Role::Validator(share.signer()) => {
+                self.slot_mut(share.view()).observe_nullify();
+                Ok(())
+            }
+            Artifact::Nullification(certificate) => {
+                self.assembled_nullifications.insert(certificate.view());
+                self.refresh_view(certificate.view());
+                Ok(())
+            }
+            Artifact::Vqc(certificate) => {
+                self.refresh_view(certificate.view());
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    pub(crate) fn observe_forwarded<H: Hasher<Digest = D>>(&mut self, artifact: &Artifact<V, D>) {
+        let view = match artifact {
+            Artifact::Vqc(certificate) => {
+                self.forwarded_vqcs
+                    .insert(certificate.view(), certificate.id::<H>());
+                if certificate.view() <= self.retired_transitions {
+                    self.vqcs.remove(&certificate.view());
+                    self.forwardable_vqcs.remove(&certificate.view());
+                }
+                certificate.view()
+            }
+            Artifact::Nullification(certificate) => {
+                self.forwarded_nullifications.insert(certificate.view());
+                if certificate.view() <= self.retired_transitions {
+                    self.nullifications.remove(&certificate.view());
+                    self.forwardable_nullifications.remove(&certificate.view());
+                }
+                certificate.view()
+            }
+            _ => return,
+        };
+        self.refresh_view(view);
+    }
+
+    pub(crate) fn drive_regular_sign_request<H: Hasher<Digest = D>>(
+        &mut self,
+        profile: &Profile<H, V>,
+        view: View,
+        chain: &ChainState<V, D>,
+        budget: usize,
+    ) -> Result<RegularSignDrive<V, D>, ViewError> {
+        if !matches!(profile.role(), Role::Validator(_)) || !self.slot_state(view).can_vote() {
+            self.regular_sign_pass = None;
+            return Ok(RegularSignDrive {
+                processed: 0,
+                complete: true,
+                request: None,
+            });
+        }
+        let stale = self
+            .regular_sign_pass
+            .as_ref()
+            .is_some_and(|pass| match pass {
+                RegularSignPass::Vote { view: pass, .. }
+                | RegularSignPass::Proposal { view: pass, .. } => *pass != view,
+            });
+        if stale {
+            self.regular_sign_pass = None;
+        }
+        if self.regular_sign_pass.is_none() {
+            self.regular_sign_pass = self.begin_regular_sign_pass::<H>(profile, view, chain)?;
+        }
+        if self.regular_sign_pass.is_none() {
+            return Ok(RegularSignDrive {
+                processed: 0,
+                complete: true,
+                request: None,
+            });
+        }
+
+        if let Some(RegularSignPass::Vote {
+            ready: Some(request),
+            ..
+        }) = self.regular_sign_pass.as_ref()
+        {
+            return Ok(RegularSignDrive {
+                processed: 0,
+                complete: true,
+                request: Some(SignRequest::Vote(request.clone())),
+            });
+        }
+
+        let mut processed = 0;
+        while processed < budget {
+            processed += 1;
+            let progress = match self
+                .regular_sign_pass
+                .as_mut()
+                .expect("the regular signing pass was initialized")
+            {
+                RegularSignPass::Vote { pass, ready, .. } => {
+                    match chain
+                        .resume_vote_body_pass::<H>(profile, pass)
+                        .map_err(|_| ViewError::Chain)?
+                    {
+                        VoteBodyProgress::Pending => None,
+                        VoteBodyProgress::Complete(body) => {
+                            let request = VoteRequest::new(body);
+                            *ready = Some(request.clone());
+                            Some(SignRequest::Vote(request))
+                        }
+                    }
+                }
+                RegularSignPass::Proposal {
+                    view,
+                    parent,
+                    attach_parent,
+                    next_chain,
+                    proposals,
+                } => {
+                    if let Some(tip) = parent.tips.blocks().get(*next_chain).copied() {
+                        proposals.push(
+                            chain
+                                .propose_chain::<H>(profile, tip)
+                                .map_err(|_| ViewError::Chain)?,
+                        );
+                        *next_chain += 1;
+                        None
+                    } else {
+                        Some(Self::finish_proposal_request::<H>(
+                            profile,
+                            *view,
+                            parent,
+                            *attach_parent,
+                            proposals,
+                        )?)
+                    }
+                }
+            };
+            if let Some(request) = progress {
+                if matches!(request, SignRequest::LeaderBlock(_)) {
+                    self.regular_sign_pass = None;
+                }
+                return Ok(RegularSignDrive {
+                    processed,
+                    complete: true,
+                    request: Some(request),
+                });
+            }
+        }
+
+        Ok(RegularSignDrive {
+            processed,
+            complete: false,
+            request: None,
+        })
+    }
+
+    /// Returns the cumulative count of verified headers admitted while the local sealed
+    /// proposal's view was still current.
+    pub(crate) const fn headers_after_seal(&self) -> u64 {
+        self.headers_after_seal
+    }
+
+    /// Returns the cumulative count of header-triggered proposal-pass restarts.
+    pub(crate) const fn header_restarts(&self) -> u64 {
+        self.header_restarts
+    }
+
+    /// How many times one view's proposal pass may restart on header admissions.
+    ///
+    /// Each restart re-walks the pass from scratch under the same core credits, so the cap
+    /// guarantees a seal after bounded work even under a sustained header stream; headers
+    /// arriving past the cap are referenced by whatever the walk reads when it resumes.
+    const HEADER_RESTARTS: u8 = 4;
+
+    /// Reacts to a verified producer header entering chain state.
+    ///
+    /// An in-flight proposal pass restarts so its next walk can reference the header,
+    /// mirroring the restart on reserved DA votes in [`Self::observe_sign_request`], bounded
+    /// per view by [`Self::HEADER_RESTARTS`]. A header landing while this node's sealed
+    /// proposal for `view` is still current is counted instead: it missed this leader slot
+    /// and rides a later proposal.
+    pub(crate) fn observe_attested_header(&mut self, view: View) {
+        if let Some(RegularSignPass::Proposal {
+            view: pass_view, ..
+        }) = self.regular_sign_pass
+        {
+            let consumed = if self.pass_restarts.0 == pass_view {
+                self.pass_restarts.1
+            } else {
+                0
+            };
+            if consumed < Self::HEADER_RESTARTS {
+                self.pass_restarts = (pass_view, consumed + 1);
+                self.header_restarts = self.header_restarts.saturating_add(1);
+                self.regular_sign_pass = None;
+            }
+            return;
+        }
+        if self
+            .slots
+            .get(&view)
+            .is_some_and(|slot| slot.proposal.is_some())
+        {
+            self.headers_after_seal = self.headers_after_seal.saturating_add(1);
+        }
+    }
+
+    pub(crate) fn regular_vote_in_progress(&self, view: View) -> bool {
+        matches!(
+            self.regular_sign_pass,
+            Some(RegularSignPass::Vote { view: pass, .. }) if pass == view
+        )
+    }
+
+    fn begin_regular_sign_pass<H: Hasher<Digest = D>>(
+        &self,
+        profile: &Profile<H, V>,
+        view: View,
+        chain: &ChainState<V, D>,
+    ) -> Result<Option<RegularSignPass<V, D>>, ViewError> {
+        let Role::Validator(me) = profile.role() else {
+            return Ok(None);
+        };
+        if let Some(proposal) = self.valid_proposal::<H>(profile, view)? {
+            let leader = proposal.block().clone();
+            let pass = chain.begin_vote_body_pass(profile, leader);
+            return Ok(Some(RegularSignPass::Vote {
+                view,
+                pass,
+                ready: None,
+            }));
+        }
+
+        let leader = profile.protocol().leader(view);
+        if me != leader
+            || self
+                .slots
+                .get(&view)
+                .is_some_and(|slot| slot.proposal.is_some())
+        {
+            return Ok(None);
+        }
+        let parent = self
+            .select_anchor(view)
+            .cloned()
+            .ok_or(ViewError::MissingParent)?;
+        if !self.gap_is_nullified(parent.view, view) {
+            return Ok(None);
+        }
+        let attach_parent = parent.certificate.is_some()
+            && self.forwarded_vqcs.get(&parent.view) != Some(&parent.id);
+        Ok(Some(RegularSignPass::Proposal {
+            view,
+            parent,
+            attach_parent,
+            next_chain: 0,
+            proposals: Vec::with_capacity(self.config.chains()),
+        }))
+    }
+
+    fn finish_proposal_request<H: Hasher<Digest = D>>(
+        profile: &Profile<H, V>,
+        view: View,
+        parent: &ParentRecord<V, D>,
+        attach_parent: bool,
+        proposals: &[crate::multimmit::types::ChainProposal<V, D>],
+    ) -> Result<SignRequest<V, D>, ViewError> {
+        let parent_proof = match parent.certificate.as_deref() {
+            None if parent.id == profile.protocol().genesis().vqc()
+                && parent.view == View::zero() =>
+            {
+                ProposalParent::Genesis
+            }
+            None => unreachable!("only the genesis anchor lacks a V-QC"),
+            Some(Artifact::Vqc(certificate)) => {
+                ProposalParent::Exact(Arc::new(certificate.clone()))
+            }
+            Some(_) => unreachable!("non-genesis parent records contain V-QCs"),
+        };
+        let block = LeaderBlock::new(
+            Round::new(profile.protocol().epoch(), view),
+            parent.id,
+            TipRecord::new(
+                parent.history,
+                parent.tips.blocks().to_vec(),
+                parent.proposed.clone(),
+            )
+            .map_err(|_| ViewError::Proposal)?
+            .commitment::<H>(),
+            proposals.to_vec(),
+            profile.protocol().codec_config(),
+        )
+        .map_err(|_| ViewError::Proposal)?;
+        Ok(SignRequest::LeaderBlock(ProposalRequest::new(
+            block,
+            parent_proof,
+            attach_parent,
+        )))
+    }
+
+    pub(crate) fn timeout_requests<H: Hasher<Digest = D>>(
+        &self,
+        profile: &Profile<H, V>,
+        view: View,
+    ) -> Option<Arc<[SignRequest<V, D>]>> {
+        let Role::Validator(_) = profile.role() else {
+            return None;
+        };
+        if !matches!(
+            self.timeout_cutoffs.get(&view),
+            Some(TimeoutCutoff::Timeout)
+        ) || !self.slot_state(view).can_vote()
+        {
+            return None;
+        }
+        let round = Round::new(profile.protocol().epoch(), view);
+        Some(Arc::from([
+            SignRequest::NoVote { round },
+            SignRequest::Nullify { round },
+        ]))
+    }
+
+    pub(crate) fn cutoff_vote(&self, view: View) -> Option<SignRequest<V, D>> {
+        if !self.slot_state(view).can_vote() {
+            return None;
+        }
+        let TimeoutCutoff::Vote(request) = self.timeout_cutoffs.get(&view)? else {
+            return None;
+        };
+        Some(SignRequest::Vote(request.clone()))
+    }
+
+    pub(crate) fn timeout_cutoff_flags(&self, view: View) -> (bool, bool) {
+        match self.timeout_cutoffs.get(&view) {
+            Some(TimeoutCutoff::Vote(_)) => (true, false),
+            Some(TimeoutCutoff::Timeout) => (false, true),
+            None => (false, false),
+        }
+    }
+
+    pub(crate) fn exit<H: Hasher<Digest = D>>(
+        &self,
+        profile: &Profile<H, V>,
+        view: View,
+        proof: Arc<Artifact<V, D>>,
+    ) -> Option<Exit<V, D>> {
+        if proof.view() != Some(view) {
+            return None;
+        }
+        let rescue = match (profile.role(), proof.as_ref()) {
+            (Role::Validator(_), Artifact::Vqc(certificate))
+                if self.slot_state(view).can_vote() =>
+            {
+                Some(certificate.leader().clone())
+            }
+            _ => None,
+        };
+        Some(Exit { proof, rescue })
+    }
+
+    pub(crate) fn rescue_vote<H: Hasher<Digest = D>>(
+        &self,
+        profile: &Profile<H, V>,
+        chain: &ChainState<V, D>,
+        leader: &LeaderBlock<V, D>,
+    ) -> Result<SignRequest<V, D>, ViewError> {
+        chain
+            .vote_body::<H>(profile, leader)
+            .map(VoteRequest::new)
+            .map(SignRequest::Vote)
+            .map_err(|_| ViewError::Chain)
+    }
+
+    pub(crate) fn post_vote_nullify<H: Hasher<Digest = D>>(
+        &self,
+        profile: &Profile<H, V>,
+        view: View,
+    ) -> Option<SignRequest<V, D>> {
+        let Role::Validator(_) = profile.role() else {
+            return None;
+        };
+        if !self.slot_state(view).has_voted() || self.slot_state(view).nullified() {
+            return None;
+        }
+        if self.post_vote_evidence.get(&view).map_or(0, BTreeSet::len)
+            < profile.protocol().codec_config().designation_quorum()
+        {
+            return None;
+        }
+        Some(SignRequest::Nullify {
+            round: Round::new(profile.protocol().epoch(), view),
+        })
+    }
+
+    pub(crate) fn fire_timer<H: Hasher<Digest = D>>(
+        &mut self,
+        profile: &Profile<H, V>,
+        view: View,
+        chain: &ChainState<V, D>,
+    ) -> Result<(), ViewError> {
+        if self.timeout_cutoffs.contains_key(&view) || !self.slot_state(view).can_vote() {
+            return Ok(());
+        }
+        let cutoff = match (profile.role(), self.valid_proposal::<H>(profile, view)?) {
+            (Role::Validator(_), Some(proposal)) if self.slot_state(view).can_vote() => {
+                let SignRequest::Vote(request) =
+                    self.vote_request::<H>(profile, chain, proposal.block())?
+                else {
+                    unreachable!("vote request helper returns a vote")
+                };
+                TimeoutCutoff::Vote(request)
+            }
+            _ => TimeoutCutoff::Timeout,
+        };
+        self.timeout_cutoffs.insert(view, cutoff);
+        Ok(())
+    }
+
+    pub(crate) fn next_forward(&self) -> Option<Arc<Artifact<V, D>>> {
+        let vqc_view = self.forwardable_vqcs.first().copied();
+        let nullification_view = self.forwardable_nullifications.first().copied();
+        let (vqc, nullification) = match (vqc_view, nullification_view) {
+            (Some(vqc), Some(nullification)) if vqc == nullification => {
+                let candidates = self.forward_candidates(vqc);
+                (candidates.vqc, candidates.nullification)
+            }
+            (Some(vqc), Some(nullification)) => (
+                self.forward_candidates(vqc).vqc,
+                self.forward_candidates(nullification).nullification,
+            ),
+            (Some(vqc), None) => (self.forward_candidates(vqc).vqc, None),
+            (None, Some(nullification)) => {
+                (None, self.forward_candidates(nullification).nullification)
+            }
+            (None, None) => (None, None),
+        };
+        match (vqc, nullification) {
+            (Some((left_observation, left)), Some((right_observation, right))) => {
+                Some(if left_observation.cohort() <= right_observation.cohort() {
+                    left
+                } else {
+                    right
+                })
+            }
+            (Some((_, artifact)), None) | (None, Some((_, artifact))) => Some(artifact),
+            (None, None) => None,
+        }
+    }
+
+    pub(crate) fn drive_certificates<H: Hasher<Digest = D>>(
+        &mut self,
+        profile: &Profile<H, V>,
+        generation: u64,
+        current: View,
+        slots: usize,
+        budget: usize,
+    ) -> Result<CertificateDrive, ViewError> {
+        self.drive_view_certificates(profile, generation, current, slots, budget)
+    }
+
+    /// Returns every verified vote and novote retained for `view`, in participant order.
+    pub(crate) fn verified_messages(&self, view: View) -> Vec<Arc<Artifact<V, D>>> {
+        self.messages.get(&view).map_or_else(Vec::new, |messages| {
+            messages
+                .values()
+                .flatten()
+                .map(|record| Arc::clone(&record.artifact))
+                .collect()
+        })
+    }
+
+    pub(crate) fn deferred_certificate_view(&self, current: View) -> Option<View> {
+        self.ready_certificate_views
+            .iter()
+            .copied()
+            .find(|view| *view != current)
+    }
+
+    pub(crate) fn drive_deferred_certificate<H: Hasher<Digest = D>>(
+        &mut self,
+        profile: &Profile<H, V>,
+        generation: u64,
+        view: View,
+        slots: usize,
+        budget: usize,
+    ) -> Result<CertificateDrive, ViewError> {
+        self.drive_view_certificates(profile, generation, view, slots, budget)
+    }
+
+    fn drive_view_certificates<H: Hasher<Digest = D>>(
+        &mut self,
+        profile: &Profile<H, V>,
+        generation: u64,
+        view: View,
+        slots: usize,
+        budget: usize,
+    ) -> Result<CertificateDrive, ViewError> {
+        if slots == 0 || budget == 0 {
+            return Ok(CertificateDrive {
+                processed: 0,
+                complete: slots == 0,
+            });
+        }
+        let mut processed = 0;
+        // A scan already in progress for another view finishes first. Discarding it would let
+        // the current view and a deferred ready view reset each other's partial scans on
+        // alternating drives, which never terminates once one pass exceeds a service budget.
+        if let Some(mut other) = self.certificate_scan.take_if(|scan| scan.view != view) {
+            while processed < budget && !matches!(other.phase, CertificateScanPhase::Complete) {
+                processed += usize::from(self.advance_certificate_scan(&mut other));
+            }
+            if !matches!(other.phase, CertificateScanPhase::Complete) {
+                self.certificate_scan = Some(other);
+                return Ok(CertificateDrive {
+                    processed,
+                    complete: false,
+                });
+            }
+            self.finish_certificate_scan::<H>(profile, generation, other)?;
+            if processed >= budget {
+                return Ok(CertificateDrive {
+                    processed,
+                    complete: false,
+                });
+            }
+        }
+        let mut scan = self
+            .certificate_scan
+            .take()
+            .unwrap_or_else(|| self.start_certificate_scan(view));
+        while processed < budget && !matches!(scan.phase, CertificateScanPhase::Complete) {
+            processed += usize::from(self.advance_certificate_scan(&mut scan));
+        }
+        if !matches!(scan.phase, CertificateScanPhase::Complete) {
+            self.certificate_scan = Some(scan);
+            return Ok(CertificateDrive {
+                processed,
+                complete: false,
+            });
+        }
+
+        self.finish_certificate_scan::<H>(profile, generation, scan)?;
+        Ok(CertificateDrive {
+            processed,
+            complete: true,
+        })
+    }
+
+    fn start_certificate_scan(&self, view: View) -> CertificateScan<V, D> {
+        CertificateScan {
+            view,
+            pending_messages: self
+                .message_claim_cohorts
+                .get(&view)
+                .and_then(BTreeMap::first_key_value)
+                .map(|(cohort, _)| *cohort),
+            pending_nullifies: self
+                .nullify_claim_cohorts
+                .get(&view)
+                .and_then(BTreeMap::first_key_value)
+                .map(|(cohort, _)| *cohort),
+            support: BTreeMap::new(),
+            best_vqc: None,
+            nullification: None,
+            phase: CertificateScanPhase::CountSupport { cursor: None },
+        }
+    }
+
+    fn complete_certificate_scan(&self, view: View) -> CertificateScan<V, D> {
+        let mut scan = self.start_certificate_scan(view);
+        while !matches!(scan.phase, CertificateScanPhase::Complete) {
+            self.advance_certificate_scan(&mut scan);
+        }
+        scan
+    }
+
+    /// Advances exactly one retained participant or target boundary.
+    fn advance_certificate_scan(&self, scan: &mut CertificateScan<V, D>) -> bool {
+        let phase = core::mem::replace(&mut scan.phase, CertificateScanPhase::Complete);
+        scan.phase = match phase {
+            CertificateScanPhase::CountSupport { cursor } => {
+                let Some((participant, record)) = self.next_sticky_message(scan.view, cursor)
+                else {
+                    return {
+                        scan.phase = CertificateScanPhase::FindTarget { cursor: None };
+                        false
+                    };
+                };
+                if scan
+                    .pending_messages
+                    .is_none_or(|pending| record.observation.cohort() < pending)
+                    && let MessageRef::Vote(vote) = record.message()
+                {
+                    *scan.support.entry(vote.body().leader()).or_default() += 1;
+                }
+                CertificateScanPhase::CountSupport {
+                    cursor: Some(participant),
+                }
+            }
+            CertificateScanPhase::FindTarget { cursor } => {
+                let Some((target, support)) = next_map_entry(&scan.support, cursor) else {
+                    return {
+                        scan.phase = CertificateScanPhase::CountNullifications {
+                            cursor: None,
+                            cohorts: BinaryHeap::new(),
+                        };
+                        false
+                    };
+                };
+                let usable = *support >= self.config.designation_quorum()
+                    && self.leaders.contains_key(&(scan.view, target));
+                if usable {
+                    CertificateScanPhase::EvaluateTarget {
+                        target,
+                        cursor: None,
+                        eligible: 0,
+                        targets: 0,
+                        message_cohorts: BinaryHeap::new(),
+                        target_cohorts: BinaryHeap::new(),
+                    }
+                } else {
+                    CertificateScanPhase::FindTarget {
+                        cursor: Some(target),
+                    }
+                }
+            }
+            CertificateScanPhase::EvaluateTarget {
+                target,
+                cursor,
+                mut eligible,
+                mut targets,
+                mut message_cohorts,
+                mut target_cohorts,
+            } => {
+                let Some((participant, record)) = self.next_sticky_message(scan.view, cursor)
+                else {
+                    if eligible < self.config.view_quorum()
+                        || targets < self.config.designation_quorum()
+                    {
+                        return {
+                            scan.phase = CertificateScanPhase::FindTarget {
+                                cursor: Some(target),
+                            };
+                            false
+                        };
+                    }
+                    let cohort = *message_cohorts
+                        .peek()
+                        .expect("a quorum fills the message cohort heap")
+                        .max(
+                            target_cohorts
+                                .peek()
+                                .expect("a designation quorum fills the target cohort heap"),
+                        )
+                        .max(&self.leaders[&(scan.view, target)].observation().cohort());
+                    let limit = if self.assembled_vqcs.contains_key(&(scan.view, target)) {
+                        eligible
+                    } else {
+                        self.config.view_quorum()
+                    };
+                    return {
+                        scan.phase = CertificateScanPhase::SelectTarget {
+                            target,
+                            cohort: if limit == eligible { u64::MAX } else { cohort },
+                            limit,
+                            cursor: None,
+                            eligible,
+                            remaining_targets: targets,
+                            visited: 0,
+                            target_count: 0,
+                            observation: Some(self.leaders[&(scan.view, target)].observation()),
+                            messages: Vec::with_capacity(limit),
+                            ids: Vec::with_capacity(limit),
+                        };
+                        false
+                    };
+                };
+                if scan
+                    .pending_messages
+                    .is_none_or(|pending| record.observation.cohort() < pending)
+                    && let Some(kind) =
+                        record.vqc_eligibility(target, self.leaders[&(scan.view, target)].block())
+                {
+                    eligible += 1;
+                    retain_smallest(
+                        &mut message_cohorts,
+                        record.observation.cohort(),
+                        self.config.view_quorum(),
+                    );
+                    if matches!(kind, VqcEligibility::Target) {
+                        targets += 1;
+                        retain_smallest(
+                            &mut target_cohorts,
+                            record.observation.cohort(),
+                            self.config.designation_quorum(),
+                        );
+                    }
+                }
+                CertificateScanPhase::EvaluateTarget {
+                    target,
+                    cursor: Some(participant),
+                    eligible,
+                    targets,
+                    message_cohorts,
+                    target_cohorts,
+                }
+            }
+            CertificateScanPhase::SelectTarget {
+                target,
+                cohort,
+                limit,
+                cursor,
+                eligible,
+                mut remaining_targets,
+                mut visited,
+                mut target_count,
+                mut observation,
+                mut messages,
+                mut ids,
+            } => {
+                let next = (messages.len() < limit)
+                    .then(|| self.next_sticky_message(scan.view, cursor))
+                    .flatten();
+                let Some((participant, record)) = next else {
+                    if messages.len() == limit && target_count >= self.config.designation_quorum() {
+                        let observation = observation.expect("leader supplies an observation");
+                        let candidate = VqcCandidate {
+                            target,
+                            observation,
+                            transcript: VqcTranscript {
+                                view: scan.view,
+                                target,
+                                messages: ids,
+                            },
+                        };
+                        let prepared = PreparedVqc {
+                            candidate,
+                            messages: messages.into(),
+                        };
+                        if self.vqc_transcript_is_new(&prepared.candidate.transcript)
+                            && scan.best_vqc.as_ref().is_none_or(|best| {
+                                (prepared.candidate.observation, prepared.candidate.target)
+                                    < (best.candidate.observation, best.candidate.target)
+                            })
+                        {
+                            scan.best_vqc = Some(prepared);
+                        }
+                    }
+                    return {
+                        scan.phase = CertificateScanPhase::FindTarget {
+                            cursor: Some(target),
+                        };
+                        false
+                    };
+                };
+                let kind = (record.observation.cohort() <= cohort
+                    && scan
+                        .pending_messages
+                        .is_none_or(|pending| record.observation.cohort() < pending))
+                .then(|| record.vqc_eligibility(target, self.leaders[&(scan.view, target)].block()))
+                .flatten();
+                if let Some(kind) = kind {
+                    let is_target = matches!(kind, VqcEligibility::Target);
+                    remaining_targets -= usize::from(is_target);
+                    let slots_after = limit - messages.len() - 1;
+                    let enough_entries = eligible - visited > slots_after;
+                    let enough_targets =
+                        target_count + usize::from(is_target) + remaining_targets.min(slots_after)
+                            >= self.config.designation_quorum();
+                    if messages.len() < limit && enough_entries && enough_targets {
+                        messages.push(Arc::clone(&record.artifact));
+                        ids.push(record.id);
+                        target_count += usize::from(is_target);
+                        observation = Some(observation.map_or(record.observation, |current| {
+                            current.max(record.observation)
+                        }));
+                    }
+                    visited += 1;
+                }
+                CertificateScanPhase::SelectTarget {
+                    target,
+                    cohort,
+                    limit,
+                    cursor: Some(participant),
+                    eligible,
+                    remaining_targets,
+                    visited,
+                    target_count,
+                    observation,
+                    messages,
+                    ids,
+                }
+            }
+            CertificateScanPhase::CountNullifications {
+                cursor,
+                mut cohorts,
+            } => {
+                let Some((participant, record)) = self.next_nullify(scan.view, cursor) else {
+                    scan.phase = if cohorts.len() < self.config.nullification_quorum() {
+                        CertificateScanPhase::Complete
+                    } else {
+                        CertificateScanPhase::SelectNullifications {
+                            cohort: *cohorts
+                                .peek()
+                                .expect("a quorum fills the nullification heap"),
+                            cursor: None,
+                            observation: None,
+                            shares: Vec::with_capacity(self.config.nullification_quorum()),
+                        }
+                    };
+                    return false;
+                };
+                if scan
+                    .pending_nullifies
+                    .is_none_or(|pending| record.observation.cohort() < pending)
+                {
+                    retain_smallest(
+                        &mut cohorts,
+                        record.observation.cohort(),
+                        self.config.nullification_quorum(),
+                    );
+                }
+                CertificateScanPhase::CountNullifications {
+                    cursor: Some(participant),
+                    cohorts,
+                }
+            }
+            CertificateScanPhase::SelectNullifications {
+                cohort,
+                cursor,
+                mut observation,
+                mut shares,
+            } => {
+                let Some((participant, record)) = self.next_nullify(scan.view, cursor) else {
+                    if shares.len() == self.config.nullification_quorum() {
+                        scan.nullification = Some(PreparedNullification {
+                            observation: observation.expect("selected shares have an observation"),
+                            shares: shares.into(),
+                        });
+                    }
+                    return {
+                        scan.phase = CertificateScanPhase::Complete;
+                        false
+                    };
+                };
+                if shares.len() < self.config.nullification_quorum()
+                    && record.observation.cohort() <= cohort
+                    && scan
+                        .pending_nullifies
+                        .is_none_or(|pending| record.observation.cohort() < pending)
+                {
+                    shares.push(record.share().clone());
+                    observation = Some(observation.map_or(record.observation, |current| {
+                        current.max(record.observation)
+                    }));
+                }
+                CertificateScanPhase::SelectNullifications {
+                    cohort,
+                    cursor: Some(participant),
+                    observation,
+                    shares,
+                }
+            }
+            CertificateScanPhase::Complete => CertificateScanPhase::Complete,
+        };
+        true
+    }
+
+    fn next_sticky_message(
+        &self,
+        view: View,
+        cursor: Option<Participant>,
+    ) -> Option<(Participant, &MessageRecord<V, D>)> {
+        let messages = self.sticky_messages.get(&view)?;
+        cursor.map_or_else(
+            || {
+                messages
+                    .first_key_value()
+                    .map(|(participant, record)| (*participant, record))
+            },
+            |cursor| {
+                messages
+                    .range((Excluded(cursor), Unbounded))
+                    .next()
+                    .map(|(participant, record)| (*participant, record))
+            },
+        )
+    }
+
+    fn next_nullify(
+        &self,
+        view: View,
+        cursor: Option<Participant>,
+    ) -> Option<(Participant, &NullifyRecord<V, D>)> {
+        let shares = self.nullify_shares.get(&view)?;
+        cursor.map_or_else(
+            || {
+                shares
+                    .first_key_value()
+                    .map(|(participant, record)| (*participant, record))
+            },
+            |cursor| {
+                shares
+                    .range((Excluded(cursor), Unbounded))
+                    .next()
+                    .map(|(participant, record)| (*participant, record))
+            },
+        )
+    }
+
+    fn finish_certificate_scan<H: Hasher<Digest = D>>(
+        &mut self,
+        profile: &Profile<H, V>,
+        generation: u64,
+        scan: CertificateScan<V, D>,
+    ) -> Result<(), ViewError> {
+        let view = scan.view;
+        let vqc_forwarded = self.vqc_forwarded(view);
+        let nullification_forwarded = self.nullification_forwarded(view);
+        let unresolved = self.unresolved_exit_key(view, vqc_forwarded, nullification_forwarded);
+        let held = self.held_exit_key(view, vqc_forwarded, nullification_forwarded);
+        let allowed = |key: (u64, u8)| {
+            unresolved.is_none_or(|unresolved| key < unresolved)
+                && held.is_none_or(|held| key <= held)
+        };
+
+        let vqc = scan.best_vqc.filter(|prepared| {
+            !self.pending_vqcs.contains_key(&view)
+                && allowed((prepared.candidate.observation.cohort(), 0))
+        });
+        let nullification = scan.nullification.filter(|prepared| {
+            !nullification_forwarded
+                && !self.pending_nullifications.contains_key(&view)
+                && !self.assembled_nullifications.contains(&view)
+                && !self
+                    .nullifications
+                    .get(&view)
+                    .and_then(|records| records.first())
+                    .is_some_and(|record| {
+                        record.observation.cohort() < prepared.observation.cohort()
+                    })
+                && allowed((prepared.observation.cohort(), 1))
+        });
+        let prepared = match (vqc, nullification) {
+            (Some(vqc), Some(nullification)) => {
+                if (vqc.candidate.observation.cohort(), 0)
+                    <= (nullification.observation.cohort(), 1)
+                {
+                    Some(PreparedCertificate::Vqc(vqc))
+                } else {
+                    Some(PreparedCertificate::Nullification(nullification))
+                }
+            }
+            (Some(vqc), None) => Some(PreparedCertificate::Vqc(vqc)),
+            (None, Some(nullification)) => Some(PreparedCertificate::Nullification(nullification)),
+            (None, None) => None,
+        };
+        let mut rescan = false;
+
+        match prepared {
+            Some(PreparedCertificate::Vqc(prepared)) => {
+                let candidate = prepared.candidate;
+                let leader = self.leaders[&(view, candidate.target)].block().clone();
+                let exit_covered = vqc_forwarded || nullification_forwarded;
+                let config = profile.protocol().codec_config();
+                let valid = validate_vqc_votes::<H, V, D>(
+                    &leader,
+                    prepared.messages.iter().filter_map(|artifact| {
+                        let Artifact::Vote(vote) = artifact.as_ref() else {
+                            return None;
+                        };
+                        (vote.body().leader() == candidate.target)
+                            .then_some((vote.signer(), vote.body()))
+                    }),
+                    config,
+                )
+                .is_ok();
+                let materialized =
+                    self.vqc_transcript_materialized::<H>(&leader, &prepared.messages, config);
+                if !valid || exit_covered && materialized {
+                    self.assembled_vqcs.insert(
+                        (candidate.transcript.view, candidate.transcript.target),
+                        candidate.transcript.messages,
+                    );
+                    rescan = materialized;
+                } else {
+                    let id = self.next_certificate_id()?;
+                    let job = VqcAggregateJob {
+                        id,
+                        generation,
+                        leader,
+                        messages: prepared.messages,
+                        transcript: candidate.transcript,
+                    };
+                    self.certificate_jobs.insert(
+                        id,
+                        ViewCertificateJob::Vqc {
+                            job: job.clone(),
+                            observation: candidate.observation,
+                        },
+                    );
+                    self.pending_vqcs.insert(view, candidate.observation);
+                    self.capabilities.push(ViewEffect::AggregateVqc(job));
+                }
+            }
+            Some(PreparedCertificate::Nullification(prepared)) => {
+                let id = self.next_certificate_id()?;
+                let job = NullificationRecoveryJob {
+                    id,
+                    generation,
+                    shares: prepared.shares,
+                };
+                self.certificate_jobs.insert(
+                    id,
+                    ViewCertificateJob::Nullification {
+                        job: job.clone(),
+                        observation: prepared.observation,
+                    },
+                );
+                self.pending_nullifications
+                    .insert(view, prepared.observation);
+                self.capabilities
+                    .push(ViewEffect::RecoverNullification(job));
+            }
+            None => {}
+        }
+        self.ready_certificate_views.remove(&view);
+        if rescan {
+            self.refresh_view(view);
+        }
+        Ok(())
+    }
+
+    fn refresh_view(&mut self, view: View) {
+        if self
+            .certificate_scan
+            .as_ref()
+            .is_some_and(|scan| scan.view == view)
+        {
+            self.certificate_scan = None;
+        }
+        let messages = self.sticky_messages.get(&view).map_or(0, BTreeMap::len);
+        let nullifies = self.nullify_shares.get(&view).map_or(0, BTreeMap::len);
+        if messages >= self.config.view_quorum() || nullifies >= self.config.nullification_quorum()
+        {
+            self.ready_certificate_views.insert(view);
+        } else {
+            self.ready_certificate_views.remove(&view);
+        }
+
+        // Only live views have a first-forwarding duty. Certificates resolved for retired
+        // views supply finality evidence and proposal parents.
+        let live = view > self.retired_transitions;
+        let candidates = live.then(|| self.forward_candidates(view));
+        let vqc = candidates
+            .as_ref()
+            .is_some_and(|candidates| candidates.vqc.is_some());
+        if vqc {
+            self.forwardable_vqcs.insert(view);
+        } else {
+            self.forwardable_vqcs.remove(&view);
+        }
+
+        let nullification = candidates
+            .as_ref()
+            .is_some_and(|candidates| candidates.nullification.is_some());
+        if nullification {
+            self.forwardable_nullifications.insert(view);
+        } else {
+            self.forwardable_nullifications.remove(&view);
+        }
+    }
+
+    pub(crate) fn take_effects(&mut self) -> Vec<ViewEffect<V, D>> {
+        std::mem::take(&mut self.capabilities)
+    }
+
+    pub(crate) fn certificate_reservations(&self) -> usize {
+        self.certificate_jobs.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retained_forwarded_vqcs(&self) -> usize {
+        self.forwarded_vqcs.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retained_parents(&self) -> usize {
+        self.parents.len()
+    }
+
+    /// Prepares a nullification recovery completion, or consumes a stale completion.
+    ///
+    /// Returning `None` releases a matching job whose dispatch generation is no longer current
+    /// and re-derives the view's readiness, so a completion that cannot commit can never strand
+    /// the view behind a pending marker.
+    pub(crate) fn prepare_nullification(
+        &mut self,
+        completion: &NullificationRecoveryCompletion<V>,
+        generation: u64,
+    ) -> Result<Option<PreparedArtifact<V, D>>, ViewError> {
+        if matches!(
+            self.certificate_jobs.get(&completion.id),
+            Some(ViewCertificateJob::Nullification { job, .. }) if job.generation != generation
+        ) {
+            self.abandon_certificate_job(completion.id);
+            return Ok(None);
+        }
+        if completion.generation != generation {
+            return Ok(None);
+        }
+        let Some(ViewCertificateJob::Nullification { job, observation }) =
+            self.certificate_jobs.get(&completion.id)
+        else {
+            return Ok(None);
+        };
+        let certificate = &completion.certificate;
+        let Some(first) = job.shares.first() else {
+            return Err(ViewError::CompletionMismatch);
+        };
+        if certificate.round() != first.round() || certificate.certificate().get().is_none() {
+            return Err(ViewError::CompletionMismatch);
+        }
+        Ok(Some(PreparedArtifact {
+            artifact: Arc::new(Artifact::Nullification(certificate.clone())),
+            observation: *observation,
+        }))
+    }
+
+    pub(crate) fn finish_nullification(&mut self, id: ViewCertificateId) {
+        let Some(ViewCertificateJob::Nullification { job, .. }) = self.certificate_jobs.remove(&id)
+        else {
+            return;
+        };
+        if let Some(first) = job.shares.first() {
+            self.pending_nullifications.remove(&first.view());
+            self.assembled_nullifications.insert(first.view());
+            self.refresh_view(first.view());
+        }
+    }
+
+    /// Prepares a V-QC aggregation completion, or consumes a stale completion.
+    ///
+    /// Returning `None` releases a matching job whose dispatch generation is no longer current
+    /// and re-derives the view's readiness, so a completion that cannot commit can never strand
+    /// the view behind a pending marker.
+    pub(crate) fn prepare_vqc<H: Hasher<Digest = D>>(
+        &mut self,
+        profile: &Profile<H, V>,
+        completion: &VqcAggregateCompletion<V, D>,
+        generation: u64,
+    ) -> Result<Option<PreparedArtifact<V, D>>, ViewError> {
+        if matches!(
+            self.certificate_jobs.get(&completion.id),
+            Some(ViewCertificateJob::Vqc { job, .. }) if job.generation != generation
+        ) {
+            self.abandon_certificate_job(completion.id);
+            return Ok(None);
+        }
+        if completion.generation != generation {
+            return Ok(None);
+        }
+        let Some(ViewCertificateJob::Vqc { job, observation }) =
+            self.certificate_jobs.get(&completion.id)
+        else {
+            return Ok(None);
+        };
+        let matches = completion.prepared.as_ref().map_or_else(
+            || {
+                vqc_matches_job::<H, V, D>(
+                    completion.certificate(),
+                    &job.leader,
+                    &job.messages,
+                    profile.protocol().codec_config(),
+                )
+            },
+            |prepared| Arc::ptr_eq(&job.messages, &prepared.messages),
+        );
+        if job.generation != completion.generation || !matches {
+            return Err(ViewError::CompletionMismatch);
+        }
+        Ok(Some(PreparedArtifact {
+            artifact: Arc::clone(&completion.artifact),
+            observation: *observation,
+        }))
+    }
+
+    pub(crate) fn finish_vqc(&mut self, id: ViewCertificateId) {
+        let Some(ViewCertificateJob::Vqc { job, .. }) = self.certificate_jobs.remove(&id) else {
+            return;
+        };
+        let view = job.leader.view();
+        self.pending_vqcs.remove(&view);
+        self.assembled_vqcs.insert(
+            (job.transcript.view, job.transcript.target),
+            job.transcript.messages,
+        );
+        self.refresh_view(view);
+    }
+
+    /// Reports whether a certificate assembly is marked in flight for the view.
+    #[cfg(test)]
+    pub(crate) fn certificate_pending(&self, view: View) -> bool {
+        self.pending_vqcs.contains_key(&view) || self.pending_nullifications.contains_key(&view)
+    }
+
+    /// Reports whether the view re-derived as ready for certificate work.
+    #[cfg(test)]
+    pub(crate) fn certificate_ready(&self, view: View) -> bool {
+        self.ready_certificate_views.contains(&view)
+    }
+
+    /// Releases a certificate job without an assembled certificate and re-derives readiness.
+    ///
+    /// The retained shares survive the job, so the view re-enters the ready set on the same
+    /// call when its quorum still holds, instead of waiting behind a pending marker whose
+    /// completion was consumed.
+    fn abandon_certificate_job(&mut self, id: ViewCertificateId) {
+        match self.certificate_jobs.remove(&id) {
+            Some(ViewCertificateJob::Nullification { job, .. }) => {
+                if let Some(first) = job.shares.first() {
+                    let view = first.view();
+                    self.pending_nullifications.remove(&view);
+                    self.refresh_view(view);
+                }
+            }
+            Some(ViewCertificateJob::Vqc { job, .. }) => {
+                let view = job.leader.view();
+                self.pending_vqcs.remove(&view);
+                self.refresh_view(view);
+            }
+            None => {}
+        }
+    }
+
+    fn claim_for(artifact: &Artifact<V, D>) -> Option<Claim> {
+        match artifact {
+            Artifact::LeaderBlock(block) => Some(Claim::Proposal(block.view())),
+            Artifact::Vote(vote) => Some(Claim::ViewMessage(vote.view(), vote.signer())),
+            Artifact::NoVote(vote) => Some(Claim::ViewMessage(vote.view(), vote.signer())),
+            Artifact::Nullify(share) => Some(Claim::Nullify(share.view(), share.signer())),
+            Artifact::Nullification(certificate) => Some(Claim::Nullification(certificate.view())),
+            Artifact::Vqc(certificate) => Some(Claim::Vqc(certificate.view())),
+            Artifact::TransactionBlock(_)
+            | Artifact::DaVote(_)
+            | Artifact::DaCertificate(_)
+            | Artifact::Lqc(_) => None,
+        }
+    }
+
+    fn remove_claim(&mut self, claim: Claim, id: ArtifactId<D>) {
+        let Some(claims) = self.claims.get_mut(&claim) else {
+            return;
+        };
+        let Some(observation) = claims.remove(&id) else {
+            return;
+        };
+        if claims.is_empty() {
+            self.claims.remove(&claim);
+        }
+        self.remove_claim_cohort(claim, observation.cohort());
+    }
+
+    fn insert_claim_cohort(&mut self, claim: Claim, cohort: u64) {
+        *self
+            .claim_cohorts
+            .entry(claim)
+            .or_default()
+            .entry(cohort)
+            .or_default() += 1;
+        let aggregate = match claim {
+            Claim::ViewMessage(view, _) => self.message_claim_cohorts.entry(view).or_default(),
+            Claim::Nullify(view, _) => self.nullify_claim_cohorts.entry(view).or_default(),
+            Claim::Proposal(_) | Claim::Nullification(_) | Claim::Vqc(_) => return,
+        };
+        *aggregate.entry(cohort).or_default() += 1;
+    }
+
+    fn remove_claim_cohort(&mut self, claim: Claim, cohort: u64) {
+        remove_cohort(&mut self.claim_cohorts, claim, cohort);
+        match claim {
+            Claim::ViewMessage(view, _) => {
+                remove_cohort(&mut self.message_claim_cohorts, view, cohort);
+            }
+            Claim::Nullify(view, _) => {
+                remove_cohort(&mut self.nullify_claim_cohorts, view, cohort);
+            }
+            Claim::Proposal(_) | Claim::Nullification(_) | Claim::Vqc(_) => {}
+        }
+    }
+
+    fn observe_proposal<H: Hasher<Digest = D>>(
+        &mut self,
+        observation: Observation,
+        artifact: &Arc<Artifact<V, D>>,
+    ) -> Result<(), ViewError> {
+        let Artifact::LeaderBlock(block) = artifact.as_ref() else {
+            unreachable!("proposal observation contains a leader block");
+        };
+        self.record_leader::<H>(observation, artifact);
+        let records = self.proposals.entry(block.view()).or_default();
+        if let Some(record) = records
+            .iter_mut()
+            .find(|record| record.artifact.as_ref() == artifact.as_ref())
+        {
+            record.observation = record.observation.min(observation);
+            records.sort_unstable_by_key(|record| record.observation);
+            return Ok(());
+        }
+        let index = records.partition_point(|record| record.observation < observation);
+        records.insert(
+            index,
+            ProposalRecord {
+                observation,
+                artifact: Arc::clone(artifact),
+            },
+        );
+        Ok(())
+    }
+
+    fn record_leader<H: Hasher<Digest = D>>(
+        &mut self,
+        observation: Observation,
+        artifact: &Arc<Artifact<V, D>>,
+    ) {
+        let leader = match artifact.as_ref() {
+            Artifact::LeaderBlock(block) => block.block(),
+            Artifact::Vqc(certificate) => certificate.leader(),
+            _ => unreachable!("leader sources are proposals or V-QCs"),
+        };
+        self.record_leader_digest(observation, artifact, leader.view(), leader.digest::<H>());
+    }
+
+    fn record_leader_digest(
+        &mut self,
+        observation: Observation,
+        artifact: &Arc<Artifact<V, D>>,
+        view: View,
+        digest: D,
+    ) {
+        let key = (view, digest);
+        self.leaders
+            .entry(key)
+            .and_modify(|record| {
+                if observation < record.observation {
+                    record.observation = observation;
+                    record.artifact = Arc::clone(artifact);
+                }
+            })
+            .or_insert_with(|| LeaderRecord {
+                observation,
+                artifact: Arc::clone(artifact),
+            });
+    }
+
+    fn observe_message(
+        &mut self,
+        id: ArtifactId<D>,
+        observation: Observation,
+        artifact: Arc<Artifact<V, D>>,
+    ) {
+        let (view, signer) = match artifact.as_ref() {
+            Artifact::Vote(vote) => (vote.view(), vote.signer()),
+            Artifact::NoVote(vote) => (vote.view(), vote.signer()),
+            _ => unreachable!("view-message observation contains a vote or novote"),
+        };
+        if let Some((existing_view, existing_signer, existing_observation)) =
+            self.message_locations.get(&id).copied()
+        {
+            debug_assert_eq!((existing_view, existing_signer), (view, signer));
+            if observation >= existing_observation {
+                return;
+            }
+            let records = self
+                .messages
+                .get_mut(&view)
+                .expect("indexed view exists")
+                .get_mut(&signer)
+                .expect("indexed signer exists");
+            let index = records
+                .binary_search_by_key(&existing_observation, |record| record.observation)
+                .expect("indexed observation exists");
+            let mut record = records.remove(index);
+            debug_assert_eq!(record.id, id);
+            debug_assert_eq!(record.artifact.as_ref(), artifact.as_ref());
+            record.observation = observation;
+            let index = records.partition_point(|record| record.observation < observation);
+            records.insert(index, record);
+            self.message_locations
+                .insert(id, (view, signer, observation));
+            return;
+        }
+
+        let opposes_local_vote = self
+            .slots
+            .get(&view)
+            .and_then(|slot| slot.vote.as_ref())
+            .is_some_and(|voted| {
+                let message = match artifact.as_ref() {
+                    Artifact::Vote(vote) => MessageRef::Vote(vote),
+                    Artifact::NoVote(_) => MessageRef::NoVote,
+                    _ => unreachable!("view-message observation contains a vote or novote"),
+                };
+                message_opposes(message, voted)
+            });
+        let records = self
+            .messages
+            .entry(view)
+            .or_default()
+            .entry(signer)
+            .or_default();
+        let record = MessageRecord {
+            id,
+            observation,
+            artifact,
+        };
+        if records
+            .last()
+            .is_none_or(|existing| existing.observation < observation)
+        {
+            records.push(record);
+        } else {
+            let index = records.partition_point(|record| record.observation < observation);
+            records.insert(index, record);
+        }
+        self.message_locations
+            .insert(id, (view, signer, observation));
+        if opposes_local_vote {
+            self.post_vote_evidence
+                .entry(view)
+                .or_default()
+                .insert(signer);
+        }
+    }
+
+    fn remove_message(&mut self, id: ArtifactId<D>, view: View, signer: Participant) {
+        let Some((recorded_view, recorded_signer, _)) = self.message_locations.remove(&id) else {
+            return;
+        };
+        debug_assert_eq!((recorded_view, recorded_signer), (view, signer));
+
+        let remove_view = self.messages.get_mut(&view).is_some_and(|messages| {
+            let remove_signer = messages.get_mut(&signer).is_some_and(|records| {
+                records.retain(|record| record.id != id);
+                records.is_empty()
+            });
+            if remove_signer {
+                messages.remove(&signer);
+            }
+            messages.is_empty()
+        });
+        if remove_view {
+            self.messages.remove(&view);
+        }
+
+        let remove_sticky_view = self.sticky_messages.get_mut(&view).is_some_and(|messages| {
+            if messages.get(&signer).is_some_and(|record| record.id == id) {
+                messages.remove(&signer);
+            }
+            messages.is_empty()
+        });
+        if remove_sticky_view {
+            self.sticky_messages.remove(&view);
+        }
+    }
+
+    fn settle_message(&mut self, view: View, participant: Participant) {
+        if self
+            .sticky_messages
+            .get(&view)
+            .is_some_and(|messages| messages.contains_key(&participant))
+        {
+            return;
+        }
+        let Some(record) = self
+            .messages
+            .get(&view)
+            .and_then(|messages| messages.get(&participant))
+            .and_then(|records| records.first())
+            .cloned()
+        else {
+            return;
+        };
+        if self
+            .first_claim_cohort(Claim::ViewMessage(view, participant))
+            .is_some_and(|cohort| cohort <= record.observation.cohort())
+        {
+            return;
+        }
+        self.sticky_messages
+            .entry(view)
+            .or_default()
+            .insert(participant, record);
+    }
+
+    fn observe_nullify(&mut self, observation: Observation, artifact: Arc<Artifact<V, D>>) {
+        let Artifact::Nullify(share) = artifact.as_ref() else {
+            unreachable!("nullify observation contains a nullify share");
+        };
+        let view = share.view();
+        let signer = share.signer();
+        let records = self.nullify_shares.entry(view).or_default();
+        match records.get(&signer) {
+            Some(existing) if existing.observation <= observation => {}
+            _ => {
+                records.insert(
+                    signer,
+                    NullifyRecord {
+                        observation,
+                        artifact,
+                    },
+                );
+            }
+        }
+        if self.slot_state(view).has_voted() {
+            self.post_vote_evidence
+                .entry(view)
+                .or_default()
+                .insert(signer);
+        }
+    }
+
+    fn observe_nullification(
+        &mut self,
+        id: ArtifactId<D>,
+        observation: Observation,
+        artifact: Arc<Artifact<V, D>>,
+    ) {
+        let Artifact::Nullification(certificate) = artifact.as_ref() else {
+            unreachable!("nullification observation contains a nullification");
+        };
+        let records = self.nullifications.entry(certificate.view()).or_default();
+        if let Some(record) = records.iter_mut().find(|record| record.id == id) {
+            record.observation = record.observation.min(observation);
+            records.sort_unstable_by_key(|record| (record.observation, record.id));
+            return;
+        }
+        records.push(NullificationRecord {
+            id,
+            observation,
+            artifact,
+        });
+        records.sort_unstable_by_key(|record| (record.observation, record.id));
+    }
+
+    fn observe_vqc<H: Hasher<Digest = D>>(
+        &mut self,
+        artifact_id: ArtifactId<D>,
+        observation: Observation,
+        artifact: &Arc<Artifact<V, D>>,
+        validated: Option<ValidatedVqc<D>>,
+        profile: &Profile<H, V>,
+    ) -> Result<(), ViewError> {
+        let Artifact::Vqc(certificate) = artifact.as_ref() else {
+            unreachable!("V-QC observation contains a V-QC");
+        };
+        let validated = match validated {
+            Some(validated) => validated,
+            None => validate_vqc::<H, V, D>(certificate, profile.protocol().codec_config())
+                .map_err(|_| ViewError::Certificate)?,
+        };
+        let leader = validated.leader();
+        let id = self.retain_validated_vqc_parent(artifact, validated)?;
+        if certificate.view() <= self.retired_transitions && self.vqc_forwarded(certificate.view())
+        {
+            return Ok(());
+        }
+        self.record_leader_digest(observation, artifact, certificate.view(), leader);
+        let records = self.vqcs.entry(certificate.view()).or_default();
+        if let Some(record) = records
+            .iter_mut()
+            .find(|record| record.artifact_id == artifact_id)
+        {
+            record.observation = record.observation.min(observation);
+            records.sort_unstable_by_key(|record| (record.observation, record.id));
+            return Ok(());
+        }
+        records.push(VqcRecord {
+            artifact_id,
+            id,
+            observation,
+            artifact: Arc::clone(artifact),
+        });
+        records.sort_unstable_by_key(|record| (record.observation, record.id));
+        Ok(())
+    }
+
+    /// Retains a V-QC as a proposal parent without scheduling standalone forwarding.
+    pub(crate) fn retain_vqc_parent<H: Hasher<Digest = D>>(
+        &mut self,
+        artifact: &Arc<Artifact<V, D>>,
+        profile: &Profile<H, V>,
+    ) -> Result<CertificateId<D>, ViewError> {
+        let Artifact::Vqc(certificate) = artifact.as_ref() else {
+            return Err(ViewError::Certificate);
+        };
+        // A retained Arc owns the validation of this exact immutable certificate. Other
+        // allocations, including decoded copies, must establish their own validity.
+        if let Some(ids) = self.parents_by_view.get(&certificate.view()) {
+            for id in ids {
+                let parent = &self.parents[id];
+                if parent
+                    .certificate
+                    .as_ref()
+                    .is_some_and(|retained| Arc::ptr_eq(retained, artifact))
+                {
+                    return Ok(*id);
+                }
+            }
+        }
+        let validated = validate_vqc::<H, V, D>(certificate, profile.protocol().codec_config())
+            .map_err(|_| ViewError::Certificate)?;
+        self.retain_validated_vqc_parent(artifact, validated)
+    }
+
+    pub(crate) fn retain_validated_vqc_parent(
+        &mut self,
+        artifact: &Arc<Artifact<V, D>>,
+        validated: ValidatedVqc<D>,
+    ) -> Result<CertificateId<D>, ViewError> {
+        let Artifact::Vqc(certificate) = artifact.as_ref() else {
+            return Err(ViewError::Certificate);
+        };
+        let (id, canonical, tips, commitments) = validated.into_parts();
+        let record = ParentRecord {
+            id,
+            view: certificate.view(),
+            history: certificate.leader().history(),
+            canonical,
+            certificate: Some(Arc::clone(artifact)),
+            proposed: certificate.leader().proposed_heights(),
+            tips,
+            commitments,
+            messages: certificate.tally().signers().count()
+                + certificate.novoters().count()
+                + certificate.conflicting_votes().len(),
+        };
+        if let Some(existing) = self.parents.get(&id) {
+            return (existing.canonical == record.canonical)
+                .then_some(id)
+                .ok_or(ViewError::Certificate);
+        }
+
+        self.parents.insert(id, record);
+        let ids = self.parents_by_view.entry(certificate.view()).or_default();
+        let index = ids.binary_search(&id).unwrap_or_else(|index| index);
+        ids.insert(index, id);
+        Ok(id)
+    }
+
+    fn observe_local_proposal(&mut self, block: LeaderBlock<V, D>) -> Result<(), ViewError> {
+        self.slot_mut(block.view()).observe_proposal(block)
+    }
+
+    fn observe_local_vote(&mut self, body: VoteBody<D>) -> Result<(), ViewError> {
+        let view = body.view();
+        self.slot_mut(view).observe_vote(body)?;
+        self.rebuild_post_vote_evidence(view);
+        Ok(())
+    }
+
+    fn observe_local_novote(&mut self, view: View) -> Result<(), ViewError> {
+        self.slot_mut(view).observe_novote()
+    }
+
+    fn valid_proposal<H: Hasher<Digest = D>>(
+        &self,
+        profile: &Profile<H, V>,
+        view: View,
+    ) -> Result<Option<&SignedLeaderBlock<V, D>>, ViewError> {
+        let records = self
+            .proposals
+            .get(&view)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let Some(record) = records.first() else {
+            return Ok(None);
+        };
+        // Observation linearizes receipt into the paper's State. Verification may complete out
+        // of order, but an unresolved proposal could still authenticate as an equivocation and
+        // invalidate the direct-vote route's precisely-one-proposal precondition.
+        if self.first_claim_cohort(Claim::Proposal(view)).is_some() {
+            return Ok(None);
+        }
+        if records.get(1).is_some() {
+            return Ok(None);
+        }
+        let block = record.block().block();
+        let Some(parent) = self.parents.get(&block.parent()) else {
+            return Ok(None);
+        };
+        if parent.view >= view
+            || !self.gap_is_nullified(parent.view, view)
+            || !self.proposal_extends(profile, block, parent)?
+        {
+            return Ok(None);
+        }
+        Ok(Some(record.block()))
+    }
+
+    fn proposal_extends<H: Hasher<Digest = D>>(
+        &self,
+        profile: &Profile<H, V>,
+        block: &LeaderBlock<V, D>,
+        parent: &ParentRecord<V, D>,
+    ) -> Result<bool, ViewError> {
+        if block.proposals().len() != parent.tips.blocks().len() {
+            return Ok(false);
+        }
+        let history = TipRecord::new(
+            parent.history,
+            parent.tips.blocks().to_vec(),
+            parent.proposed.clone(),
+        )
+        .map_err(|_| ViewError::Proposal)?;
+        if history.commitment::<H>() != block.history() {
+            return Ok(false);
+        }
+        for (proposal, tip) in block.proposals().iter().zip(parent.tips.blocks()) {
+            match proposal.anchor() {
+                Anchor::Tip(actual) if actual == tip => {}
+                Anchor::Certificate(certificate)
+                    if certificate.header().chain() == tip.chain()
+                        && certificate.header().height() > tip.height()
+                        && certificate.epoch() == profile.protocol().epoch() => {}
+                _ => return Ok(false),
+            }
+        }
+        Ok(true)
+    }
+
+    fn vote_request<H: Hasher<Digest = D>>(
+        &self,
+        profile: &Profile<H, V>,
+        chain: &ChainState<V, D>,
+        leader: &LeaderBlock<V, D>,
+    ) -> Result<SignRequest<V, D>, ViewError> {
+        let body = chain
+            .vote_body::<H>(profile, leader)
+            .map_err(|_| ViewError::Chain)?;
+        Ok(SignRequest::Vote(VoteRequest::new(body)))
+    }
+
+    /// Returns whether every view strictly between `parent` and `child` was nullified.
+    ///
+    /// A proposal may only skip views that provably could not have finalized. Retirement drops the
+    /// live nullification records, so a retired view is answered by the forwarded set instead: a
+    /// machine may only leave a view whose exit proof it durably forwarded, which makes that set a
+    /// complete witness for every view this node has passed.
+    pub(crate) fn gap_is_nullified(&self, parent: View, child: View) -> bool {
+        self.first_missing_nullification(parent, child).is_none()
+    }
+
+    pub(crate) fn has_nullification(&self, view: View) -> bool {
+        view > self.proposal_anchor_view && view <= self.proposal_nullified_through
+            || self.nullifications.contains_key(&view)
+            || self.forwarded_nullifications.contains(&view)
+    }
+
+    /// Returns the lowest unresolved skipped view required by an exact proposal parent.
+    ///
+    /// Incoming proposals always participate. The selected local anchor participates only when the
+    /// caller can propose in this view, which avoids speculative resolver work on followers.
+    pub(crate) fn missing_nullification(
+        &self,
+        child: View,
+        include_local_anchor: bool,
+    ) -> Option<View> {
+        let proposal = self
+            .proposals
+            .get(&child)
+            .into_iter()
+            .flatten()
+            .filter_map(|record| self.parents.get(&record.block().block().parent()))
+            .filter(|parent| parent.certificate.is_some())
+            .filter_map(|parent| self.first_missing_nullification(parent.view, child))
+            .min();
+        let local = include_local_anchor
+            .then(|| self.select_anchor(child))
+            .flatten()
+            .filter(|parent| parent.certificate.is_some())
+            .and_then(|parent| self.first_missing_nullification(parent.view, child));
+        proposal.into_iter().chain(local).min()
+    }
+
+    fn first_missing_nullification(&self, parent: View, child: View) -> Option<View> {
+        let Some(mut view) = parent.get().checked_add(1) else {
+            return Some(parent);
+        };
+        while view < child.get() {
+            let gap = View::new(view);
+            if !self.has_nullification(gap) {
+                return Some(gap);
+            }
+            let Some(next) = view.checked_add(1) else {
+                return Some(gap);
+            };
+            view = next;
+        }
+        None
+    }
+
+    fn select_anchor(&self, view: View) -> Option<&ParentRecord<V, D>> {
+        let (_, ids) = self.parents_by_view.range(..view).next_back()?;
+        ids.iter()
+            .filter_map(|id| self.parents.get(id))
+            .min_by(|left, right| {
+                right.messages.cmp(&left.messages).then_with(|| {
+                    left.canonical
+                        .cmp(&right.canonical)
+                        .then_with(|| left.id.cmp(&right.id))
+                })
+            })
+    }
+
+    fn vqc_transcript_is_new(&self, candidate: &VqcTranscript<D>) -> bool {
+        let Some(previous) = self.assembled_vqcs.get(&(candidate.view, candidate.target)) else {
+            return true;
+        };
+        candidate.messages.len() > previous.len()
+            && previous
+                .iter()
+                .all(|message| candidate.messages.contains(message))
+    }
+
+    fn vqc_transcript_materialized<H: Hasher<Digest = D>>(
+        &self,
+        leader: &LeaderBlock<V, D>,
+        messages: &[Arc<Artifact<V, D>>],
+        config: CodecConfig,
+    ) -> bool {
+        self.parents_by_view
+            .get(&leader.view())
+            .into_iter()
+            .flatten()
+            .filter_map(|id| self.parents.get(id)?.certificate.as_deref())
+            .any(|artifact| {
+                let Artifact::Vqc(certificate) = artifact else {
+                    unreachable!("proposal parents contain V-QCs");
+                };
+                vqc_matches_job::<H, V, D>(certificate, leader, messages, config)
+            })
+    }
+
+    fn forward_candidates(&self, view: View) -> ForwardCandidates<V, D> {
+        let mut vqc = (!self.vqc_forwarded(view))
+            .then(|| {
+                let records = self.vqcs.get(&view)?;
+                let earliest = records.first()?.observation.cohort();
+                records
+                    .iter()
+                    .filter(|record| record.observation.cohort() == earliest)
+                    .min_by_key(|record| (record.observation, record.id))
+                    .map(|record| (record.observation, Arc::clone(&record.artifact)))
+            })
+            .flatten();
+        let mut nullification = (!self.nullification_forwarded(view))
+            .then(|| {
+                let records = self.nullifications.get(&view)?;
+                let earliest = records.first()?.observation.cohort();
+                records
+                    .iter()
+                    .filter(|record| record.observation.cohort() == earliest)
+                    .min_by_key(|record| record.id)
+                    .map(|record| (record.observation, Arc::clone(&record.artifact)))
+            })
+            .flatten();
+
+        let wait_for_vqc = !self.vqc_forwarded(view);
+        let wait_for_nullification = !self.nullification_forwarded(view);
+        vqc = vqc.filter(|(observation, _)| {
+            !self.unresolved_exit_blocks(
+                view,
+                (observation.cohort(), 0),
+                true,
+                wait_for_nullification,
+            )
+        });
+        nullification = nullification.filter(|(observation, _)| {
+            !self.unresolved_exit_blocks(view, (observation.cohort(), 1), wait_for_vqc, true)
+        });
+        if vqc.is_none() && nullification.is_none() {
+            return ForwardCandidates { vqc, nullification };
+        }
+
+        let scan = self.complete_certificate_scan(view);
+        vqc = vqc.filter(|(observation, _)| {
+            !self.local_exit_blocks(
+                &scan,
+                (observation.cohort(), 0),
+                true,
+                wait_for_nullification,
+            )
+        });
+        nullification = nullification.filter(|(observation, _)| {
+            !self.local_exit_blocks(&scan, (observation.cohort(), 1), wait_for_vqc, true)
+        });
+        ForwardCandidates { vqc, nullification }
+    }
+
+    fn unresolved_exit_blocks(
+        &self,
+        view: View,
+        candidate: (u64, u8),
+        wait_for_vqc: bool,
+        wait_for_nullification: bool,
+    ) -> bool {
+        if wait_for_vqc
+            && (self.claim_at_or_before(Claim::Vqc(view), candidate, 0)
+                || self.claim_at_or_before(Claim::Proposal(view), candidate, 0)
+                || self.cohort_at_or_before(&self.message_claim_cohorts, view, candidate, 0)
+                || self
+                    .pending_vqcs
+                    .get(&view)
+                    .is_some_and(|observation| (observation.cohort(), 0) <= candidate))
+        {
+            return true;
+        }
+        wait_for_nullification
+            && (self.claim_at_or_before(Claim::Nullification(view), candidate, 1)
+                || self.cohort_at_or_before(&self.nullify_claim_cohorts, view, candidate, 1)
+                || self
+                    .pending_nullifications
+                    .get(&view)
+                    .is_some_and(|observation| (observation.cohort(), 1) <= candidate))
+    }
+
+    fn local_exit_blocks(
+        &self,
+        scan: &CertificateScan<V, D>,
+        candidate: (u64, u8),
+        wait_for_vqc: bool,
+        wait_for_nullification: bool,
+    ) -> bool {
+        if wait_for_vqc
+            && !self.pending_vqcs.contains_key(&scan.view)
+            && scan.best_vqc.as_ref().is_some_and(|local| {
+                self.assembled_vqcs
+                    .get(&(scan.view, local.candidate.target))
+                    .is_none_or(|messages| *messages != local.candidate.transcript.messages)
+                    && (local.candidate.observation.cohort(), 0) <= candidate
+            })
+        {
+            return true;
+        }
+        wait_for_nullification
+            && !self.assembled_nullifications.contains(&scan.view)
+            && !self.pending_nullifications.contains_key(&scan.view)
+            && scan
+                .nullification
+                .as_ref()
+                .is_some_and(|local| (local.observation.cohort(), 1) <= candidate)
+    }
+
+    fn claim_at_or_before(&self, claim: Claim, candidate: (u64, u8), priority: u8) -> bool {
+        self.first_claim_cohort(claim)
+            .is_some_and(|cohort| (cohort, priority) <= candidate)
+    }
+
+    fn first_claim_cohort(&self, claim: Claim) -> Option<u64> {
+        self.claim_cohorts
+            .get(&claim)
+            .and_then(BTreeMap::first_key_value)
+            .map(|(cohort, _)| *cohort)
+    }
+
+    fn cohort_at_or_before(
+        &self,
+        index: &BTreeMap<View, BTreeMap<u64, usize>>,
+        view: View,
+        candidate: (u64, u8),
+        priority: u8,
+    ) -> bool {
+        index
+            .get(&view)
+            .and_then(|cohorts| cohorts.first_key_value())
+            .is_some_and(|(cohort, _)| (*cohort, priority) <= candidate)
+    }
+
+    fn held_exit_key(
+        &self,
+        view: View,
+        vqc_forwarded: bool,
+        nullification_forwarded: bool,
+    ) -> Option<(u64, u8)> {
+        let vqc = (!vqc_forwarded)
+            .then(|| {
+                self.vqcs
+                    .get(&view)
+                    .and_then(|records| records.first())
+                    .map(|record| (record.observation.cohort(), 0))
+            })
+            .flatten();
+        let nullification = (!nullification_forwarded)
+            .then(|| {
+                self.nullifications
+                    .get(&view)
+                    .and_then(|records| records.first())
+                    .map(|record| (record.observation.cohort(), 1))
+            })
+            .flatten();
+        match (vqc, nullification) {
+            (Some(left), Some(right)) => Some(left.min(right)),
+            (Some(key), None) | (None, Some(key)) => Some(key),
+            (None, None) => None,
+        }
+    }
+
+    fn unresolved_exit_key(
+        &self,
+        view: View,
+        vqc_forwarded: bool,
+        nullification_forwarded: bool,
+    ) -> Option<(u64, u8)> {
+        let vqc = if vqc_forwarded {
+            None
+        } else {
+            self.first_claim_cohort(Claim::Vqc(view))
+                .map(|cohort| (cohort, 0))
+                .into_iter()
+                .chain(
+                    self.first_claim_cohort(Claim::Proposal(view))
+                        .map(|cohort| (cohort, 0)),
+                )
+                .chain(
+                    self.message_claim_cohorts
+                        .get(&view)
+                        .and_then(BTreeMap::first_key_value)
+                        .map(|(cohort, _)| (*cohort, 0)),
+                )
+                .chain(
+                    self.pending_vqcs
+                        .get(&view)
+                        .map(|observation| (observation.cohort(), 0)),
+                )
+                .min()
+        };
+        let nullification = if nullification_forwarded {
+            None
+        } else {
+            self.first_claim_cohort(Claim::Nullification(view))
+                .map(|cohort| (cohort, 1))
+                .into_iter()
+                .chain(
+                    self.nullify_claim_cohorts
+                        .get(&view)
+                        .and_then(BTreeMap::first_key_value)
+                        .map(|(cohort, _)| (*cohort, 1)),
+                )
+                .chain(
+                    self.pending_nullifications
+                        .get(&view)
+                        .map(|observation| (observation.cohort(), 1)),
+                )
+                .min()
+        };
+        match (vqc, nullification) {
+            (Some(left), Some(right)) => Some(left.min(right)),
+            (Some(key), None) | (None, Some(key)) => Some(key),
+            (None, None) => None,
+        }
+    }
+
+    fn rebuild_post_vote_evidence(&mut self, view: View) {
+        let Some(voted) = self.slots.get(&view).and_then(|slot| slot.vote.as_ref()) else {
+            return;
+        };
+        let mut evidence = self
+            .nullify_shares
+            .get(&view)
+            .map(|shares| shares.keys().copied().collect::<BTreeSet<_>>())
+            .unwrap_or_default();
+        if let Some(messages) = self.messages.get(&view) {
+            for (participant, records) in messages {
+                if records
+                    .iter()
+                    .any(|record| message_opposes(record.message(), voted))
+                {
+                    evidence.insert(*participant);
+                }
+            }
+        }
+        self.post_vote_evidence.insert(view, evidence);
+    }
+
+    fn next_certificate_id(&mut self) -> Result<ViewCertificateId, ViewError> {
+        let id = ViewCertificateId(self.next_certificate);
+        self.next_certificate = self
+            .next_certificate
+            .checked_add(1)
+            .ok_or(ViewError::IdentifierExhausted)?;
+        Ok(id)
+    }
+}
+
+fn message_opposes<V: Variant, D: Digest>(
+    message: MessageRef<'_, V, D>,
+    voted: &VoteBody<D>,
+) -> bool {
+    match message {
+        MessageRef::NoVote => true,
+        MessageRef::Vote(vote) => vote.body().leader() != voted.leader(),
+    }
+}
+
+fn remove_cohort<K: Copy + Ord>(
+    index: &mut BTreeMap<K, BTreeMap<u64, usize>>,
+    key: K,
+    cohort: u64,
+) {
+    let Some(cohorts) = index.get_mut(&key) else {
+        return;
+    };
+    let Some(count) = cohorts.get_mut(&cohort) else {
+        return;
+    };
+    *count -= 1;
+    if *count == 0 {
+        cohorts.remove(&cohort);
+    }
+    if cohorts.is_empty() {
+        index.remove(&key);
+    }
+}
+
+fn next_map_entry<D: Digest>(
+    entries: &BTreeMap<D, usize>,
+    cursor: Option<D>,
+) -> Option<(D, &usize)> {
+    cursor.map_or_else(
+        || entries.first_key_value().map(|(key, value)| (*key, value)),
+        |cursor| {
+            entries
+                .range((Excluded(cursor), Unbounded))
+                .next()
+                .map(|(key, value)| (*key, value))
+        },
+    )
+}
+
+fn retain_smallest(values: &mut BinaryHeap<u64>, value: u64, limit: usize) {
+    values.push(value);
+    if values.len() > limit {
+        values.pop();
+    }
+}
+
+fn vqc_matches_job<H, V, D>(
+    certificate: &Vqc<V, D>,
+    leader: &LeaderBlock<V, D>,
+    messages: &[Arc<Artifact<V, D>>],
+    config: CodecConfig,
+) -> bool
+where
+    H: Hasher<Digest = D>,
+    V: Variant,
+    D: Digest,
+{
+    if certificate.leader() != leader
+        || certificate.signature().is_none()
+        || certificate.validate(config).is_err()
+    {
+        return false;
+    }
+    enum MessageBody<D: Digest> {
+        Vote(VoteBody<D>),
+        NoVote,
+    }
+    let mut actual = BTreeMap::<Participant, MessageBody<D>>::new();
+    let leader_digest = leader.digest::<H>();
+    for signer in certificate.tally().signers().iter() {
+        let Ok(body) =
+            certificate
+                .tally()
+                .vote_with_leader_digest(leader, leader_digest, signer, config)
+        else {
+            return false;
+        };
+        actual.insert(signer, MessageBody::Vote(body));
+    }
+    for signer in certificate.novoters().iter() {
+        actual.insert(signer, MessageBody::NoVote);
+    }
+    for conflict in certificate.conflicting_votes() {
+        let Ok(body) = conflict.vote_body(leader.round(), config) else {
+            return false;
+        };
+        actual.insert(conflict.signer(), MessageBody::Vote(body));
+    }
+    if actual.len() != messages.len() {
+        return false;
+    }
+    messages.iter().all(|expected| match expected.as_ref() {
+        Artifact::Vote(vote) => {
+            matches!(actual.get(&vote.signer()), Some(MessageBody::Vote(body)) if vote.body() == body)
+        }
+        Artifact::NoVote(vote) => {
+            matches!(actual.get(&vote.signer()), Some(MessageBody::NoVote))
+        }
+        _ => false,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        Artifact, ArtifactId, Claim, NullificationState, Observation, Participant, Role,
+        StanceState, TransitionState, View, ViewProductState, ViewSlotInput, ViewSlotOutput,
+        ViewState, drain_prefix,
+    };
+    use crate::multimmit::machine::tests::{leader, profile_for, start_profile, view_vote};
+    use commonware_cryptography::{Hasher, Sha256};
+    use std::{collections::BTreeMap, sync::Arc};
+
+    #[test]
+    fn retirement_prefix_skips_the_live_suffix() {
+        for live in [8, 16_384] {
+            let mut entries = (0..live).map(|key| (key, key)).collect::<BTreeMap<_, _>>();
+            let mut expected = entries.clone();
+            let mut full_checks = 0;
+            expected.retain(|key, _| {
+                full_checks += 1;
+                *key > 3
+            });
+            let mut prefix_checks = 0;
+            let removed = drain_prefix(&mut entries, |key| {
+                prefix_checks += 1;
+                *key <= 3
+            })
+            .collect::<Vec<_>>();
+            assert_eq!(entries, expected);
+            assert_eq!(removed, [(0, 0), (1, 1), (2, 2), (3, 3)]);
+            assert_eq!(prefix_checks, 5);
+            assert_eq!(full_checks, live);
+            assert!(prefix_checks < full_checks);
+        }
+    }
+
+    #[test]
+    fn retirement_prefix_handles_boundaries_and_compound_keys() {
+        let mut entries = BTreeMap::from([
+            ((View::zero(), 0), 0),
+            ((View::new(1), 0), 1),
+            ((View::new(1), 1), 2),
+            ((View::new(u64::MAX), 0), 3),
+        ]);
+        assert_eq!(
+            drain_prefix(&mut entries, |(view, _)| *view <= View::zero()).count(),
+            1
+        );
+        assert_eq!(
+            drain_prefix(&mut entries, |(view, _)| *view <= View::zero()).count(),
+            0
+        );
+        assert_eq!(
+            drain_prefix(&mut entries, |(view, _)| *view <= View::new(1)).count(),
+            2
+        );
+        assert_eq!(
+            drain_prefix(&mut entries, |(view, _)| *view <= View::new(u64::MAX)).count(),
+            1
+        );
+        assert_eq!(drain_prefix(&mut entries, |_| true).count(), 0);
+    }
+
+    #[test]
+    fn retirement_preserves_message_and_claim_indices() {
+        let (machine, _) = start_profile(profile_for(Role::Observer, 6, 2));
+        let mut views = ViewState::new(machine.profile());
+        for view in [1, 2, 3] {
+            let block = leader(&machine, view);
+            for signer in [0, 1] {
+                let artifact = Arc::new(Artifact::Vote(view_vote(&machine, &block, signer)));
+                let id = artifact.id::<Sha256>();
+                views.observe_message(id, Observation::new(9, signer), Arc::clone(&artifact));
+                views.observe_message(id, Observation::new(7, signer), artifact);
+            }
+            let view = View::new(view);
+            for claim in [
+                Claim::Proposal(view),
+                Claim::ViewMessage(view, Participant::new(0)),
+                Claim::ViewMessage(view, Participant::new(u32::MAX)),
+                Claim::Nullify(view, Participant::new(0)),
+                Claim::Nullify(view, Participant::new(u32::MAX)),
+                Claim::Nullification(view),
+                Claim::Vqc(view),
+            ] {
+                for cohort in [7u64, 9] {
+                    let id = ArtifactId::new(Sha256::hash(&[&cohort.to_le_bytes()]));
+                    views
+                        .claims
+                        .entry(claim)
+                        .or_default()
+                        .insert(id, Observation::new(cohort, 0));
+                    views.insert_claim_cohort(claim, cohort);
+                }
+            }
+        }
+        let mut expected_messages = views.message_locations.clone();
+        let mut expected_claims = views.claims.clone();
+        let mut expected_cohorts = views.claim_cohorts.clone();
+        let mut expected_message_cohorts = views.message_claim_cohorts.clone();
+        let mut expected_nullify_cohorts = views.nullify_claim_cohorts.clone();
+        for floor in [0, 1, 1, 0, 2, u64::MAX] {
+            let floor = View::new(floor);
+            views.retire_transitions_through(floor);
+            expected_messages.retain(|_, (view, _, _)| *view > floor);
+            expected_claims.retain(|claim, _| claim.certificate_view() > floor);
+            expected_cohorts.retain(|claim, _| claim.certificate_view() > floor);
+            expected_message_cohorts.retain(|view, _| *view > floor);
+            expected_nullify_cohorts.retain(|view, _| *view > floor);
+            assert_eq!(views.message_locations, expected_messages);
+            assert_eq!(views.claims, expected_claims);
+            assert_eq!(views.claim_cohorts, expected_cohorts);
+            assert_eq!(views.message_claim_cohorts, expected_message_cohorts);
+            assert_eq!(views.nullify_claim_cohorts, expected_nullify_cohorts);
+            let locations = views
+                .messages
+                .iter()
+                .flat_map(|(view, signers)| {
+                    signers.iter().flat_map(move |(signer, records)| {
+                        records
+                            .iter()
+                            .map(move |record| (record.id, (*view, *signer, record.observation)))
+                    })
+                })
+                .collect::<BTreeMap<_, _>>();
+            assert_eq!(locations, expected_messages);
+        }
+    }
+
+    #[test]
+    fn product_state_table_is_exhaustive() {
+        let transitions = [TransitionState::Active, TransitionState::Exited];
+        let stances = [
+            StanceState::Unchosen,
+            StanceState::Voted,
+            StanceState::NoVoted,
+        ];
+        let nullifications = [NullificationState::Unsigned, NullificationState::Signed];
+        let inputs = [
+            ViewSlotInput::Propose,
+            ViewSlotInput::Vote,
+            ViewSlotInput::NoVote,
+            ViewSlotInput::Nullify,
+            ViewSlotInput::Exit,
+        ];
+
+        let mut cases = 0;
+        for transition in transitions {
+            for stance in stances {
+                for nullification in nullifications {
+                    for proposed in [false, true] {
+                        for input in inputs {
+                            let before = ViewProductState {
+                                transition,
+                                stance,
+                                nullification,
+                                proposed,
+                            };
+                            let mut actual = before;
+                            let output = actual.apply(input);
+
+                            match (input, output) {
+                                (ViewSlotInput::Propose, Some(ViewSlotOutput::Proposed)) => {
+                                    assert_eq!(transition, TransitionState::Active);
+                                    assert!(!proposed);
+                                    assert!(actual.proposed);
+                                }
+                                (ViewSlotInput::Propose, Some(ViewSlotOutput::Unchanged)) => {
+                                    assert!(proposed);
+                                    assert_eq!(actual, before);
+                                }
+                                (ViewSlotInput::Vote, Some(ViewSlotOutput::Voted)) => {
+                                    assert_eq!(transition, TransitionState::Active);
+                                    assert_eq!(stance, StanceState::Unchosen);
+                                    assert_eq!(nullification, NullificationState::Unsigned);
+                                    assert_eq!(actual.stance, StanceState::Voted);
+                                }
+                                (ViewSlotInput::Vote, Some(ViewSlotOutput::Unchanged)) => {
+                                    assert_eq!(stance, StanceState::Voted);
+                                    assert_eq!(actual, before);
+                                }
+                                (ViewSlotInput::NoVote, Some(ViewSlotOutput::NoVoted)) => {
+                                    assert_eq!(transition, TransitionState::Active);
+                                    assert_eq!(stance, StanceState::Unchosen);
+                                    assert_eq!(actual.stance, StanceState::NoVoted);
+                                }
+                                (ViewSlotInput::NoVote, Some(ViewSlotOutput::Unchanged)) => {
+                                    assert_eq!(stance, StanceState::NoVoted);
+                                    assert_eq!(actual, before);
+                                }
+                                (ViewSlotInput::Nullify, Some(ViewSlotOutput::Nullified)) => {
+                                    assert_eq!(transition, TransitionState::Active);
+                                    assert_eq!(nullification, NullificationState::Unsigned);
+                                    assert_eq!(actual.nullification, NullificationState::Signed);
+                                }
+                                (ViewSlotInput::Nullify, Some(ViewSlotOutput::Unchanged)) => {
+                                    assert_eq!(transition, TransitionState::Active);
+                                    assert_eq!(nullification, NullificationState::Signed);
+                                    assert_eq!(actual, before);
+                                }
+                                (ViewSlotInput::Exit, Some(ViewSlotOutput::Exited)) => {
+                                    assert_eq!(transition, TransitionState::Active);
+                                    assert_eq!(actual.transition, TransitionState::Exited);
+                                }
+                                (ViewSlotInput::Exit, Some(ViewSlotOutput::Unchanged)) => {
+                                    assert_eq!(transition, TransitionState::Exited);
+                                    assert_eq!(actual, before);
+                                }
+                                (_, None) => assert_eq!(actual, before),
+                                pair => panic!("unexpected product transition: {pair:?}"),
+                            }
+                            cases += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(cases, 120);
+    }
+
+    #[test]
+    fn timer_and_post_vote_nullification_are_orthogonal() {
+        let mut state = ViewProductState::default();
+        assert!(state.can_vote());
+        assert_eq!(
+            state.apply(ViewSlotInput::Vote),
+            Some(ViewSlotOutput::Voted)
+        );
+        assert!(!state.can_vote());
+        assert_eq!(
+            state.apply(ViewSlotInput::Nullify),
+            Some(ViewSlotOutput::Nullified)
+        );
+        assert!(state.has_voted());
+        assert!(state.nullified());
+
+        let mut nullified_first = ViewProductState::default();
+        assert_eq!(
+            nullified_first.apply(ViewSlotInput::Nullify),
+            Some(ViewSlotOutput::Nullified)
+        );
+        assert_eq!(nullified_first.apply(ViewSlotInput::Vote), None);
+    }
+}
+
+/// A contradictory authenticated view fact or malformed derived transition.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum ViewError {
+    #[error("a local leader proposal conflicts with an earlier durable choice")]
+    ProposalConflict,
+    #[error("a local vote conflicts with an earlier durable choice")]
+    VoteConflict,
+    #[error("a local vote conflicts with a durable novote choice")]
+    VoteNoVoteConflict,
+    #[error("the selected proposal is malformed")]
+    Proposal,
+    #[error("the selected parent certificate is malformed")]
+    Certificate,
+    #[error("the selected proposal parent is unavailable")]
+    MissingParent,
+    #[error("a producer-chain fact required by the view transition is malformed")]
+    Chain,
+    #[error("a view-certificate completion does not match its issued transcript")]
+    CompletionMismatch,
+    #[error("a view-certificate identifier overflowed")]
+    IdentifierExhausted,
+}

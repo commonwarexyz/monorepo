@@ -220,7 +220,7 @@ where
             PublicKey = <P::Scheme as Verifier>::PublicKey,
             Plan = Plan<<P::Scheme as Verifier>::PublicKey>,
         >,
-    L: Elector<P::Scheme>,
+    L: Elector<<P::Scheme as Verifier>::PublicKey, <P::Scheme as Verifier>::Certificate>,
     T: Strategy,
     ACK: Acknowledgement,
 {
@@ -270,7 +270,7 @@ where
             PublicKey = <P::Scheme as Verifier>::PublicKey,
             Plan = Plan<<P::Scheme as Verifier>::PublicKey>,
         >,
-    L: Elector<P::Scheme>,
+    L: Elector<<P::Scheme as Verifier>::PublicKey, <P::Scheme as Verifier>::Certificate>,
     T: Strategy,
     ACK: Acknowledgement,
 {

@@ -184,8 +184,9 @@ broadcast{2, size=200}
 
 5. **wait{<id>, threshold=<threshold> [, delay=(<msg_delay>,<comp_delay>)]}**
    - Description: (All peers) Blocks until the threshold number of messages with the given ID are received. Records the latency from simulation start, then advances.
-   - Parameters: Same as `collect`.
+   - Parameters: Same as `collect`. Fault-bound thresholds additionally accept `f+1`, `2f+1`, `3f+1`, `n-f`, or `n-2f` together with `resilience=<R>`, where the protocol assumes `n >= Rf+1`.
    - Example: `wait{0, threshold=40%}`
+   - Exact fault-bound example: `wait{0, threshold=n-f, resilience=5}` computes `f=floor((n-1)/5)` before evaluating `n-f`.
    - Use case: Peers wait for a certain fraction of the network to acknowledge or respond.
 
 ### Compound Commands with Logical Operators
@@ -226,4 +227,27 @@ cargo run -- --distribution us-west-1:5:125000000,us-east-1:5:125000000,eu-west-
 
 # With asymmetric bandwidth (varying by region to simulate different network conditions)
 cargo run -- --distribution us-west-1:5:200000000/100000000,us-east-1:5:200000000/100000000,eu-west-1:5:150000000/75000000,ap-northeast-1:5:100000000/50000000 minimmit.lazy
+```
+
+## Simulating Multimmit
+
+The 50-node Multimmit scripts model the paper's common-case transport shape with 50 producer
+chains: every producer disseminates one transaction block while the correct leader sends its leader
+block and referenced V-QC, then validators multicast ordinary votes and finalize after `n-f=41`
+votes. The small and large variants use 32KiB and 1MiB transaction blocks respectively.
+
+The scripts use the paper's approximate `K=50`, `d=3`, `e=2` sizes: an 11.5KB leader block, a
+15KB good-case V-QC, and a conservative 3.5KB vote. DA shares and certificates are omitted because
+they form in the background and are not on the transaction-finality critical path. Consequently,
+the reported terminal wait is leader-block finality under concurrent transaction dissemination,
+not proof that a particular transaction block was immediately emitted by the ordering sweep.
+
+```bash
+# Two-region, 50 validators at 1Gbps per validator
+cargo run --release -- multimmit_large_block_50.lazy \
+  --distribution us-west-2:25:125000000,us-east-1:25:125000000
+
+# Global, 50 validators at 1Gbps per validator
+cargo run --release -- multimmit_large_block_50.lazy \
+  --distribution us-west-1:5:125000000,us-east-1:5:125000000,eu-west-1:5:125000000,ap-northeast-1:5:125000000,eu-north-1:5:125000000,ap-south-1:5:125000000,sa-east-1:5:125000000,eu-central-1:5:125000000,ap-northeast-2:5:125000000,ap-southeast-2:5:125000000
 ```
