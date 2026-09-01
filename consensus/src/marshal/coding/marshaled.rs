@@ -90,7 +90,7 @@ use crate::{
         },
         coding::{
             Coding, shards,
-            types::{CodedBlock, coding_config_for_participants, hash_context},
+            types::{CodedBlock, coding_config_for_committee, hash_context},
             validation::{ProposalError, validate_block, validate_proposal},
         },
         core,
@@ -698,9 +698,17 @@ where
             return rx;
         };
 
-        let n_participants =
-            u16::try_from(scheme.participants().len()).expect("too many participants");
-        let coding_config = coding_config_for_participants(n_participants);
+        let committee = scheme.participants();
+        let Some(coding_config) = coding_config_for_committee(committee) else {
+            warn!(
+                round = %consensus_context.round,
+                participants = committee.len(),
+                uniform = committee.is_uniform(),
+                "coding does not support the epoch committee"
+            );
+            let (_, rx) = oneshot::channel();
+            return rx;
+        };
 
         // Metrics
         let build_duration = self.build_duration.clone();
@@ -906,9 +914,18 @@ where
             return rx;
         };
 
-        let n_participants =
-            u16::try_from(scheme.participants().len()).expect("too many participants");
-        let coding_config = coding_config_for_participants(n_participants);
+        let committee = scheme.participants();
+        let Some(coding_config) = coding_config_for_committee(committee) else {
+            warn!(
+                round = %consensus_context.round,
+                participants = committee.len(),
+                uniform = committee.is_uniform(),
+                "coding does not support the epoch committee"
+            );
+            let (tx, rx) = oneshot::channel();
+            tx.send_lossy(false);
+            return rx;
+        };
         let is_reproposal = payload == consensus_context.parent.1;
 
         // Validate proposal-level invariants:

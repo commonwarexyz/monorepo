@@ -8,7 +8,7 @@ use commonware_codec::{BufsMut, EncodeSize, Read, ReadExt, Write};
 use commonware_coding::{Config as CodingConfig, Scheme};
 use commonware_cryptography::{Committable, Digestible, Hasher};
 use commonware_parallel::{Sequential, Strategy};
-use commonware_utils::{Faults, N3f1, NZU16};
+use commonware_utils::{Faults, N3f1, NZU16, ordered::Committee};
 use std::{
     marker::PhantomData,
     sync::{Arc, OnceLock},
@@ -573,6 +573,18 @@ pub fn coding_config_for_participants(n_participants: u16) -> CodingConfig {
     }
 }
 
+/// Computes the [`CodingConfig`] for a committee supported by the coding marshal.
+///
+/// Returns `None` for non-uniform committees or participant counts outside
+/// `4..=u16::MAX`.
+pub fn coding_config_for_committee<P: Ord>(committee: &Committee<P>) -> Option<CodingConfig> {
+    if !committee.is_uniform() {
+        return None;
+    }
+    let n_participants = u16::try_from(committee.len()).ok()?;
+    (n_participants >= 4).then(|| coding_config_for_participants(n_participants))
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -582,6 +594,7 @@ mod test {
     use commonware_coding::{CodecConfig, ReedSolomon};
     use commonware_cryptography::{Digest, Sha256, sha256::Digest as Sha256Digest};
     use commonware_runtime::{BufferPooler, Runner, deterministic, iobuf::EncodeExt};
+    use commonware_utils::{TryCollect, ordered::Committee};
 
     const MAX_SHARD_SIZE: CodecConfig = CodecConfig {
         maximum_shard_size: 1024 * 1024, // 1 MiB
@@ -632,6 +645,48 @@ mod test {
     #[should_panic(expected = "Need at least 4 participants to maintain fault tolerance")]
     fn test_coding_config_for_participants_panics_for_small_sets() {
         let _ = coding_config_for_participants(3);
+    }
+
+    #[test]
+    fn test_coding_config_for_committee_rejects_unsupported_committees() {
+        let too_small = (0..3u32)
+            .map(|participant| (participant, 1))
+            .try_collect::<Committee<_>>()
+            .unwrap();
+        assert_eq!(coding_config_for_committee(&too_small), None);
+
+        let non_uniform = [(0u32, 1), (1, 1), (2, 1), (3, 2)]
+            .into_iter()
+            .try_collect::<Committee<_>>()
+            .unwrap();
+        assert_eq!(coding_config_for_committee(&non_uniform), None);
+
+        let too_large = (0..=u32::from(u16::MAX))
+            .map(|participant| (participant, 1))
+            .try_collect::<Committee<_>>()
+            .unwrap();
+        assert_eq!(coding_config_for_committee(&too_large), None);
+    }
+
+    #[test]
+    fn test_coding_config_for_committee_accepts_uniform_boundaries() {
+        let minimum = (0..4u32)
+            .map(|participant| (participant, 7))
+            .try_collect::<Committee<_>>()
+            .unwrap();
+        assert_eq!(
+            coding_config_for_committee(&minimum),
+            Some(coding_config_for_participants(4))
+        );
+
+        let maximum = (0..u32::from(u16::MAX))
+            .map(|participant| (participant, 1))
+            .try_collect::<Committee<_>>()
+            .unwrap();
+        assert_eq!(
+            coding_config_for_committee(&maximum),
+            Some(coding_config_for_participants(u16::MAX))
+        );
     }
 
     #[test]

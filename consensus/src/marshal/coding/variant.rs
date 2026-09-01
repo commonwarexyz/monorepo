@@ -4,7 +4,7 @@ use crate::{
         ancestry::BlockProvider,
         coding::{
             shards,
-            types::{CodedBlock, CodedBlockCfg, StoredCodedBlock, coding_config_for_participants},
+            types::{CodedBlock, CodedBlockCfg, StoredCodedBlock, coding_config_for_committee},
         },
         core::{Buffer, CommitmentFallback, Mailbox, Retirement, Variant},
     },
@@ -86,9 +86,8 @@ where
     where
         S: SimplexScheme<Self::Commitment>,
     {
-        let n_participants = u16::try_from(scheme.participants().len())
-            .expect("scheme must have at most 2^16-1 participants");
-        payload.config() == coding_config_for_participants(n_participants)
+        coding_config_for_committee(scheme.participants())
+            .is_some_and(|config| payload.config() == config)
     }
 
     fn block_cfg(
