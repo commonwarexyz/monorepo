@@ -15,11 +15,12 @@ use commonware_storage_fuzz::{
     bounded_buffer, bounded_entropy, bounded_items, bounded_nonzero_rate, bounded_page_cache_size,
     bounded_page_size, faulted_recovery,
 };
-use commonware_utils::{FuzzRng, Probability};
+use commonware_utils::{FuzzRng, Probability, sync::RwLock};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::BTreeMap,
     num::{NonZeroU16, NonZeroU64, NonZeroUsize},
+    sync::Arc,
 };
 
 /// Item size for queue entries (32 bytes like a hash digest).
@@ -71,6 +72,9 @@ struct FuzzInput {
     sync_failure_rate: Probability,
     /// Failure and byte-retention configuration for write operations.
     write_config: deterministic::WriteConfig,
+    /// Remove failure rate (percent) armed only around each Sync drive, sampled per blob
+    /// removal so the internal prune can fail after removing only some sections.
+    remove_failure: u8,
     /// Sequence of operations to execute.
     operations: Vec<QueueOperation>,
     /// Byte stream driving the runtime rng: all in-run randomness, fault sampling, and the
@@ -209,6 +213,9 @@ async fn run_operations(
     mut queue: Queue<deterministic::Context, Vec<u8>>,
     operations: &[QueueOperation],
     items_per_section: u64,
+    faults: &Arc<RwLock<deterministic::FaultConfig>>,
+    op_faults: &deterministic::FaultConfig,
+    sync_faults: &deterministic::FaultConfig,
 ) -> RecoveryState {
     let mut state = RecoveryState::new();
 
@@ -313,21 +320,35 @@ async fn run_operations(
                 queue
             }
 
-            QueueOperation::Sync => match queue.sync().await {
-                Ok(queue) => {
-                    // sync = commit + prune, so success means ALL
-                    // previously uncommitted items are now durable too.
-                    state.commit_succeeded();
-                    state.update_ack_floor(queue.ack_floor());
-                    state.sync_succeeded(queue.ack_floor(), queue.size(), items_per_section);
-                    queue
+            QueueOperation::Sync => {
+                // Remove faults are armed only around the Sync drive: its internal prune is
+                // the only remove site, and a failed removal strands a partially pruned image
+                // for recovery to observe.
+                *faults.write() = sync_faults.clone();
+                let result = queue.sync().await;
+                *faults.write() = op_faults.clone();
+                match result {
+                    Ok(queue) => {
+                        // sync = commit + prune, so success means ALL
+                        // previously uncommitted items are now durable too.
+                        state.commit_succeeded();
+                        state.update_ack_floor(queue.ack_floor());
+                        state.sync_succeeded(queue.ack_floor(), queue.size(), items_per_section);
+                        queue
+                    }
+                    Err(_) => {
+                        // The internal prune can fail after removing whole sections, so the
+                        // recovered floor may land anywhere between the last synced boundary
+                        // and the blob-aligned ack floor. `sync_succeeded` is deliberately not
+                        // called: `synced_boundary` stays at the last completed Sync, which
+                        // remains a valid floor because removals only move the boundary
+                        // forward.
+                        state.commit_failed();
+                        state.mark_mutable_error();
+                        return state;
+                    }
                 }
-                Err(_) => {
-                    state.commit_failed();
-                    state.mark_mutable_error();
-                    return state;
-                }
-            },
+            }
 
             QueueOperation::Reset => {
                 queue.reset();
@@ -414,7 +435,9 @@ async fn verify_recovery_after_mutable_error(
     );
 
     // Successful prunes remove blobs durably, so the boundary cannot regress even
-    // when a later operation failed.
+    // when a later operation failed. A failed Sync's partial prune can only advance
+    // the floor further, at most to the blob-aligned ack floor, which the requested
+    // floor ceiling above already admits.
     assert!(
         ack_floor >= state.synced_boundary,
         "recovered ack floor {ack_floor} regressed below the last synced boundary {}",
@@ -490,6 +513,7 @@ fn fuzz(input: FuzzInput) {
     let operations = input.operations.clone();
     let sync_failure_rate = input.sync_failure_rate;
     let write_config = input.write_config;
+    let remove_rate = Probability::new(u64::from(input.remove_failure) % 101, 100).unwrap();
 
     let runner = deterministic::Runner::new(cfg);
 
@@ -512,15 +536,27 @@ fn fuzz(input: FuzzInput) {
                 .unwrap();
 
             // Enable fault injection
-            let fault_config = deterministic::FaultConfig {
+            let op_faults = deterministic::FaultConfig {
                 sync_rate: Some(sync_failure_rate),
                 write_rate: Some(write_config),
                 ..Default::default()
             };
+            let sync_faults = deterministic::FaultConfig {
+                remove_rate: Some(remove_rate),
+                ..op_faults.clone()
+            };
             let faults = ctx.storage_fault_config();
-            *faults.write() = fault_config;
+            *faults.write() = op_faults.clone();
 
-            run_operations(queue, &operations, items_per_section.get()).await
+            run_operations(
+                queue,
+                &operations,
+                items_per_section.get(),
+                &faults,
+                &op_faults,
+                &sync_faults,
+            )
+            .await
         }
     });
 

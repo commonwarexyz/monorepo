@@ -10,6 +10,13 @@
 //! and reopens the repaired result. A section whose blob holds no valid page recovers to
 //! logical size zero and skips the gate, so when the image contains one the target appends a
 //! probe item to it before the replay to catch an init that over-blocks.
+//!
+//! The op stream can also prune sections, with remove faults armed only around each prune
+//! drive. A completed prune durably removed every section blob below its floor and gates later
+//! mutations below it, so the target routes later appends above the floor and drops the pruned
+//! sections' expectations. A failed prune removed an oldest-first prefix of the live sections
+//! below its floor, with the faulted removal leaving its own blob intact, so the oracle accepts
+//! exactly the images whose surviving covered sections form a nonempty suffix.
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Crc32;
@@ -23,13 +30,17 @@ use commonware_storage::journal::{Error, segmented::variable};
 use commonware_storage_fuzz::{bounded_entropy, faulted_recovery, release_oldest_pending_sync};
 use commonware_utils::{FuzzRng, NZUsize, Probability};
 use libfuzzer_sys::fuzz_target;
-use std::{collections::BTreeMap, num::NonZeroU16};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    num::NonZeroU16,
+};
 
 type Journal = variable::Journal<DelayedSyncContext<deterministic::Context>, Vec<u8>>;
 
 const PAGE_SIZE: usize = 128;
 const PAGE_CHECKSUM_RECORD_SIZE: usize = commonware_runtime::buffer::paged::CHECKSUM_SIZE as usize;
 const MAX_ITEM_LEN: usize = 48;
+const SECTIONS: u64 = 4;
 
 #[derive(Arbitrary, Clone, Debug)]
 struct FuzzInput {
@@ -39,6 +50,13 @@ struct FuzzInput {
     subset: bool,
     /// Per-item target section selector.
     routes: [u8; 32],
+    /// Per-item action applied after its append: usually nothing, with one arm driving a
+    /// prune whose floor the op's high bits select.
+    ops: [u8; 32],
+    /// Remove failure rate (percent) armed only around every prune drive, sampled per
+    /// section-blob removal so a prune can fail partway through the manager's oldest-first
+    /// removal sweep.
+    remove_failure: u8,
     /// Whether the interrupted final sync is driven through the armed gate to
     /// completion before the crash, or left parked with one section's flush
     /// volatile so the crash tears it per the retention policy.
@@ -70,7 +88,7 @@ fn items(input: &FuzzInput) -> Vec<(u64, Vec<u8>)> {
     let count = usize::from(input.count % 32) + 1;
     (0..count)
         .map(|id| {
-            let section = u64::from(input.routes[id % input.routes.len()] % 4);
+            let section = u64::from(input.routes[id % input.routes.len()]) % SECTIONS;
             let len = (id * 7) % MAX_ITEM_LEN;
             (section, vec![id as u8; len])
         })
@@ -265,75 +283,143 @@ async fn recover_once(context: deterministic::Context) -> Result<(), Error> {
 fn fuzz(input: FuzzInput) {
     let script = items(&input);
     let baseline = usize::from(input.baseline) % (script.len() + 1);
-    let phase_script = script.clone();
+    let phase_script = script;
     let phase_input = input.clone();
     let cfg =
         deterministic::Config::default().with_rng(Box::new(FuzzRng::new(input.entropy.clone())));
     let runner = deterministic::Runner::new(cfg);
-    let (durable, checkpoint) = runner.start_and_recover(move |context| async move {
-        let fault_config = context.storage_fault_config();
-        let pending = PendingSyncs::default();
-        let context = DelayedSyncContext {
-            inner: context,
-            pending: pending.clone(),
-        };
-        let mut journal = Journal::init(context.child("journal"), config(&context))
-            .await
-            .expect("initial init failed");
-        let mut durable: BTreeMap<u64, usize> = BTreeMap::new();
-
-        // The extra iteration reaches baseline == script length: everything synced,
-        // with the crash tearing only the no-op final sync.
-        for offset in 0..=phase_script.len() {
-            if offset == baseline && baseline > 0 {
-                journal = drive_pending_syncs(&pending, journal.sync_all())
-                    .await
-                    .expect("baseline sync failed");
-                for (section, _) in &phase_script[..baseline] {
-                    *durable.entry(*section).or_default() += 1;
-                }
-            }
-            let Some((section, item)) = phase_script.get(offset) else {
-                break;
+    let ((durable, effective, live, doomed), checkpoint) =
+        runner.start_and_recover(move |context| async move {
+            let fault_config = context.storage_fault_config();
+            let remove_rate =
+                Probability::new(u64::from(phase_input.remove_failure) % 101, 100).unwrap();
+            let pending = PendingSyncs::default();
+            let context = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
             };
-            (journal, _, _) = journal.append(*section, item).await.expect("append failed");
-        }
+            let mut journal = Journal::init(context.child("journal"), config(&context))
+                .await
+                .expect("initial init failed");
 
-        // Interrupt the final sync behind the armed one-shot gate: the first section's
-        // durability barrier parks with its flush left volatile (every other section
-        // syncs durably), so the crash tears that section's bytes per the retention
-        // policy. Releasing the gate and polling again instead completes the sync.
-        *fault_config.write() = deterministic::FaultConfig {
-            write_rate: Some(WriteConfig {
-                failure_rate: Probability::new(0, 1).unwrap(),
-                retention_rate: Probability::new(u64::from(phase_input.retention % 101), 100)
-                    .unwrap(),
-                mode: if phase_input.subset {
-                    PartialWriteMode::Subset
-                } else {
-                    PartialWriteMode::Prefix
-                },
-            }),
-            ..Default::default()
-        };
-        pending.arm();
-        let mut sync = Box::pin(journal.sync_all());
-        for _ in 0..usize::from(phase_input.final_polls) % 2 + 1 {
-            if let Some(result) = futures::future::poll_immediate(sync.as_mut()).await {
-                // A sync that ran to completion is an observed barrier: it must
-                // succeed and every scripted item becomes durable.
-                drop(result.expect("interrupted sync failed"));
-                durable.clear();
-                for (section, _) in &phase_script {
-                    *durable.entry(*section).or_default() += 1;
+            // Items covered by a completed sync per still-live section.
+            let mut durable: BTreeMap<u64, usize> = BTreeMap::new();
+
+            // The per-section append streams actually issued after prune-aware routing,
+            // the model for every image authenticity check.
+            let mut effective: BTreeMap<u64, Vec<Vec<u8>>> = BTreeMap::new();
+
+            // Sections whose blobs currently exist, mirroring the manager's map.
+            let mut live: BTreeSet<u64> = BTreeSet::new();
+
+            // The prune floor from completed prunes.
+            let mut floor = 0u64;
+
+            // Live sections a failed prune covered, oldest first, each removed or retained
+            // depending on where the faulted removal stopped the sweep.
+            let mut doomed: Vec<u64> = Vec::new();
+
+            // The extra iteration reaches baseline == script length: everything synced,
+            // with the crash tearing only the no-op final sync.
+            for offset in 0..=phase_script.len() {
+                if offset == baseline && baseline > 0 {
+                    journal = drive_pending_syncs(&pending, journal.sync_all())
+                        .await
+                        .expect("baseline sync failed");
+                    durable = live
+                        .iter()
+                        .map(|&section| (section, effective[&section].len()))
+                        .collect();
                 }
-                break;
+                let Some(&(section, ref item)) = phase_script.get(offset) else {
+                    break;
+                };
+
+                // Route appends above the prune floor: appending below it fails with
+                // AlreadyPrunedToSection.
+                let section = if section < floor {
+                    floor + section % (SECTIONS - floor)
+                } else {
+                    section
+                };
+                (journal, _, _) = journal.append(section, item).await.expect("append failed");
+                effective.entry(section).or_default().push(item.clone());
+                live.insert(section);
+
+                // Prune arm: remove faults are armed only around the drive so a prune can
+                // fail partway through the manager's oldest-first removal sweep.
+                let op = phase_input.ops[offset % phase_input.ops.len()];
+                if op & 0x07 == 7 {
+                    let min = u64::from(op >> 3) % SECTIONS;
+                    *fault_config.write() = deterministic::FaultConfig {
+                        remove_rate: Some(remove_rate),
+                        ..Default::default()
+                    };
+                    let result = drive_pending_syncs(&pending, journal.prune(min)).await;
+                    *fault_config.write() = deterministic::FaultConfig::default();
+                    match result {
+                        Ok((next, did_prune)) => {
+                            journal = next;
+                            if did_prune {
+                                // The completed prune durably removed every blob below the
+                                // floor and gates later mutations below it.
+                                floor = floor.max(min);
+                                live.retain(|&candidate| candidate >= min);
+                                durable.retain(|&candidate, _| candidate >= min);
+                            }
+                        }
+                        Err(_) => {
+                            // The failed prune consumed the journal after removing an
+                            // oldest-first prefix of the live sections below the floor,
+                            // with the faulted removal leaving its own blob intact. The
+                            // run crashes here with those sections in an ambiguous state
+                            // the oracle resolves from the image.
+                            doomed = live
+                                .iter()
+                                .copied()
+                                .filter(|&candidate| candidate < min)
+                                .collect();
+                            return (durable, effective, live, doomed);
+                        }
+                    }
+                }
             }
-            release_oldest_pending_sync(&pending);
-        }
-        drop(sync);
-        durable
-    });
+
+            // Interrupt the final sync behind the armed one-shot gate: the first section's
+            // durability barrier parks with its flush left volatile (every other section
+            // syncs durably), so the crash tears that section's bytes per the retention
+            // policy. Releasing the gate and polling again instead completes the sync.
+            *fault_config.write() = deterministic::FaultConfig {
+                write_rate: Some(WriteConfig {
+                    failure_rate: Probability::new(0, 1).unwrap(),
+                    retention_rate: Probability::new(u64::from(phase_input.retention % 101), 100)
+                        .unwrap(),
+                    mode: if phase_input.subset {
+                        PartialWriteMode::Subset
+                    } else {
+                        PartialWriteMode::Prefix
+                    },
+                }),
+                ..Default::default()
+            };
+            pending.arm();
+            let mut sync = Box::pin(journal.sync_all());
+            for _ in 0..usize::from(phase_input.final_polls) % 2 + 1 {
+                if let Some(result) = futures::future::poll_immediate(sync.as_mut()).await {
+                    // A sync that ran to completion is an observed barrier: it must
+                    // succeed and every routed item in a live section becomes durable.
+                    drop(result.expect("interrupted sync failed"));
+                    durable = live
+                        .iter()
+                        .map(|&section| (section, effective[&section].len()))
+                        .collect();
+                    break;
+                }
+                release_oldest_pending_sync(&pending);
+            }
+            drop(sync);
+            (durable, effective, live, doomed)
+        });
 
     let checkpoint = faulted_recovery(checkpoint, recover_once);
 
@@ -341,40 +427,79 @@ fn fuzz(input: FuzzInput) {
         *context.storage_fault_config().write() = deterministic::FaultConfig::default();
         let (mut expected, empty) = recover_expected(&context, "segmented-variable-recovery").await;
 
-        // Under the crash model every legal image is a per-section prefix of the
-        // scripted items (retention keeps subsets of submitted bytes, and a stale
+        // Sections are created only by appends and removed only by prunes, and both effects
+        // apply directly to storage and survive the crash. A section a completed prune
+        // removed must be gone, a live section the failed prune did not cover must be
+        // present, and nothing else may appear.
+        for section in effective.keys() {
+            if !live.contains(section) {
+                assert!(
+                    !expected.contains_key(section),
+                    "a pruned section's blob survived the crash in section {section}"
+                );
+            }
+        }
+        for section in expected.keys() {
+            assert!(
+                effective.contains_key(section),
+                "crash image contains a section never appended to: {section}"
+            );
+        }
+        for &section in &live {
+            if !doomed.contains(&section) {
+                assert!(
+                    expected.contains_key(&section),
+                    "an unpruned section vanished from the crash image: {section}"
+                );
+            }
+        }
+
+        // The failed prune removes oldest first and stops at its faulted removal, which
+        // leaves that blob intact, so the covered sections split into an absent prefix
+        // and a nonempty present suffix.
+        if !doomed.is_empty() {
+            let survivors: Vec<u64> = doomed
+                .iter()
+                .copied()
+                .filter(|section| expected.contains_key(section))
+                .collect();
+            assert!(
+                !survivors.is_empty(),
+                "the faulted removal must leave its own section behind"
+            );
+            assert_eq!(
+                survivors.as_slice(),
+                &doomed[doomed.len() - survivors.len()..],
+                "a failed prune removed sections out of order"
+            );
+        }
+
+        // Under the crash model every legal image is a per-section prefix of the routed
+        // append stream (retention keeps subsets of submitted bytes, and a stale
         // checksum slot exposes an older prefix), so a flush path that rewrites,
         // reorders, or fabricates CRC-valid frames must be caught here.
         for (&section, (_, frames)) in &expected {
-            let scripted: Vec<&Vec<u8>> = script
-                .iter()
-                .filter(|(candidate, _)| *candidate == section)
-                .map(|(_, item)| item)
-                .collect();
+            let routed = effective.get(&section).map_or(&[][..], Vec::as_slice);
             assert!(
-                frames.len() <= scripted.len()
-                    && frames
-                        .iter()
-                        .zip(&scripted)
-                        .all(|(frame, item)| frame == *item),
+                frames.len() <= routed.len()
+                    && frames.iter().zip(routed).all(|(frame, item)| frame == item),
                 "crash image diverges from the scripted prefix in section {section}"
             );
         }
 
-        // Every item covered by a completed sync must survive the crash in order.
+        // Every item covered by a completed sync must survive the crash in order, except
+        // in a section the failed prune removed along with its durable prefix.
         for (section, count) in &durable {
-            let baseline_items: Vec<Vec<u8>> = script
-                .iter()
-                .filter(|(candidate, _)| candidate == section)
-                .take(*count)
-                .map(|(_, item)| item.clone())
-                .collect();
+            if doomed.contains(section) && !expected.contains_key(section) {
+                continue;
+            }
             let (_, frames) = expected
                 .get(section)
                 .expect("a synced section is missing from the crash image");
+            let baseline_items = &effective[section][..*count];
             assert!(
                 frames.len() >= baseline_items.len()
-                    && frames[..baseline_items.len()] == baseline_items[..],
+                    && frames[..baseline_items.len()] == *baseline_items,
                 "a synced item was lost or reordered in section {section}"
             );
         }

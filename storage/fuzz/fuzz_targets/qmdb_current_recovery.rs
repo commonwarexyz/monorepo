@@ -65,6 +65,12 @@ struct FuzzInput {
     #[arbitrary(with = bounded_nonzero_rate)]
     sync_failure_rate: Probability,
     write_config: deterministic::WriteConfig,
+    /// Remove failure rate (percent) armed only around each prune drive, sampled per blob
+    /// removal so the ops-log prune inside can fail after removing only some blobs, leaving
+    /// pruning metadata ahead of a partially pruned log. Currently latent: the sync boundary
+    /// is bitmap-chunk aligned, so the log removes nothing below 256 committed operations,
+    /// beyond reachable input sizes.
+    remove_failure: u8,
     operations: Vec<CurrentOperation>,
     /// Byte stream driving the runtime rng: all in-run randomness, fault sampling, and the
     /// faulted recovery chain's depth and shapes.
@@ -229,6 +235,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
     };
     let sync_failure_rate = input.sync_failure_rate;
     let write_config = input.write_config;
+    let remove_rate = Probability::new(u64::from(input.remove_failure) % 101, 100).unwrap();
     let operations = input.operations.clone();
     let suffix = suffix_base.to_string();
 
@@ -316,7 +323,24 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
                             }
                         };
                         let boundary = db.sync_boundary();
-                        match db.prune(boundary).await {
+
+                        // Remove faults are armed only around the prune drive: the ops-log
+                        // prune inside can then fail after removing only some blobs, leaving
+                        // pruning metadata ahead of a partially pruned log (the supported
+                        // mid-prune crash shape) for recovery to reconcile.
+                        *fault_cfg.write() = deterministic::FaultConfig {
+                            remove_rate: Some(remove_rate),
+                            sync_rate: Some(sync_failure_rate),
+                            write_rate: Some(write_config),
+                            ..Default::default()
+                        };
+                        let result = db.prune(boundary).await;
+                        *fault_cfg.write() = deterministic::FaultConfig {
+                            sync_rate: Some(sync_failure_rate),
+                            write_rate: Some(write_config),
+                            ..Default::default()
+                        };
+                        match result {
                             Ok(db) => db,
                             Err(_) => break,
                         }
@@ -324,7 +348,9 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
                 };
             }
 
-            // A failed prune leaves both the committed state and the root unchanged.
+            // A failed prune leaves both the committed state and the root unchanged, even
+            // when its log removals tore partway: pruning drops only history below the sync
+            // boundary and never alters the live snapshot or its root.
             let allowed = failure.unwrap_or_else(|| vec![(committed, committed_root)]);
             (known_keys.into_iter().collect::<Vec<_>>(), allowed)
         }

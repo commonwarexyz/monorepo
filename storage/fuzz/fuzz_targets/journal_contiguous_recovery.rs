@@ -41,7 +41,9 @@
 //!
 //! The operation phase runs under write/sync/resize fault injection. `write_config` controls write
 //! failures and whether retained bytes form a prefix or arbitrary subset, while
-//! `partial_resize_rate` can stop a failed truncation at an intermediate length.
+//! `partial_resize_rate` can stop a failed truncation at an intermediate length. Each prune drive
+//! additionally arms input-driven remove failures, sampled per blob removal, so a prune can fail
+//! after removing only some of its blobs and strand a partially pruned image for recovery.
 //!
 //! # Positions
 //!
@@ -172,6 +174,10 @@ struct FuzzInput {
     /// Probability that a resize failure is partial.
     #[arbitrary(with = bounded_rate)]
     partial_resize_rate: Probability,
+    /// Remove failure rate armed only around each prune drive, sampled per blob removal so a
+    /// prune can fail after removing only some of its blobs (removals run oldest-first).
+    #[arbitrary(with = bounded_rate)]
+    remove_failure_rate: Probability,
     /// Operations to execute, split into one `ops` list per cycle at each `Crash` or
     /// `Reset` marker.
     #[arbitrary(with = bounded_operations)]
@@ -194,6 +200,7 @@ struct Params {
     sync_rate: Probability,
     resize_rate: Probability,
     partial_resize_rate: Probability,
+    remove_rate: Probability,
 }
 
 impl Params {
@@ -207,6 +214,15 @@ impl Params {
                 partial_rate: self.partial_resize_rate,
             }),
             ..Default::default()
+        }
+    }
+
+    /// The fault config armed around each prune drive: the op-phase faults plus remove
+    /// failures, so a prune can fail after removing only some of its blobs.
+    fn prune_fault_config(&self) -> deterministic::FaultConfig {
+        deterministic::FaultConfig {
+            remove_rate: Some(self.remove_rate),
+            ..self.fault_config()
         }
     }
 }
@@ -704,11 +720,13 @@ fn assert_replay_suffix(items: &[(u64, Item)], start: u64, bounds: &Range<u64>) 
 /// which may have left the journal inconsistent. The journal is then dropped to crash. Reads and
 /// replays never fault, so a bad one panics instead of ending the cycle.
 async fn run_ops<J: FuzzJournal>(
+    ctx: &deterministic::Context,
     mut journal: J,
     expected: &mut Expected,
     ops: &[JournalOperation],
     params: Params,
 ) {
+    let faults = ctx.storage_fault_config();
     for op in ops {
         // A mutation error ends the cycle.
         journal = match op {
@@ -834,7 +852,14 @@ async fn run_ops<J: FuzzJournal>(
                     start: boundary,
                     end: size,
                 } = journal.bounds();
-                match journal.prune(*min_pos).await {
+
+                // Remove faults are armed only around the prune drive: blob removals are the
+                // only removes a cycle issues, and a failed removal strands a partially pruned
+                // image for the next recovery to reconcile.
+                *faults.write() = params.prune_fault_config();
+                let result = journal.prune(*min_pos).await;
+                *faults.write() = params.fault_config();
+                match result {
                     Ok((journal, pruned)) => {
                         // The boundary only moves forward, and the returned bool's contract
                         // (true iff items were pruned) must match the observed move.
@@ -865,6 +890,10 @@ async fn run_ops<J: FuzzJournal>(
                         );
 
                         // A failed prune advances the boundary at most to the section floor.
+                        // Removals run oldest-first, so a remove fault can strand the boundary
+                        // at any blob boundary up to it (or leave it unmoved when the failure
+                        // preceded every removal). The instance is consumed, so the cycle ends
+                        // here as a crash with the boundary anywhere in that range.
                         let capped = (*min_pos).min(size);
                         let section_floor =
                             capped / params.items_per_section * params.items_per_section;
@@ -991,7 +1020,7 @@ where
 
         // Faults on for the operation phase; returning drops the journal (the crash).
         *ctx.storage_fault_config().write() = params.fault_config();
-        run_ops(journal, &mut expected, &cycle.ops, params).await;
+        run_ops(&ctx, journal, &mut expected, &cycle.ops, params).await;
         expected
     })
 }
@@ -1072,6 +1101,7 @@ where
         sync_rate: input.sync_failure_rate,
         resize_rate: input.resize_failure_rate,
         partial_resize_rate: input.partial_resize_rate,
+        remove_rate: input.remove_failure_rate,
     };
     let partition = format!("crash-recovery-{tag}");
     let cycles = split_into_cycles(&input.operations);

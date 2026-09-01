@@ -17,9 +17,12 @@ use commonware_storage_fuzz::{
     bounded_buffer, bounded_entropy, bounded_items, bounded_nonzero_rate, bounded_page_cache_size,
     bounded_page_size, faulted_recovery,
 };
-use commonware_utils::{FuzzRng, NZU64, Probability};
+use commonware_utils::{FuzzRng, NZU64, Probability, sync::RwLock};
 use libfuzzer_sys::fuzz_target;
-use std::num::{NonZeroU16, NonZeroUsize};
+use std::{
+    num::{NonZeroU16, NonZeroUsize},
+    sync::Arc,
+};
 
 /// Data size for leaves.
 const DATA_SIZE: usize = 32;
@@ -67,6 +70,10 @@ struct FuzzInput {
     sync_failure_rate: Probability,
     /// Failure and byte-retention configuration for write operations.
     write_config: deterministic::WriteConfig,
+    /// Remove failure rate (percent) armed only around each prune drive, sampled per blob
+    /// removal so the journal prune inside can fail after removing only some blobs, leaving
+    /// the durable metadata boundary ahead of a partially pruned journal.
+    remove_failure: u8,
     /// Sequence of operations to execute.
     operations: Vec<MerkleOperation>,
     /// Byte stream driving the runtime rng: all in-run randomness, fault sampling, and the
@@ -110,6 +117,9 @@ async fn run_operations<F: MerkleFamily>(
     mut merkle: Merkle<F>,
     hasher: &StandardHasher<Sha256>,
     operations: &[MerkleOperation],
+    faults: &Arc<RwLock<deterministic::FaultConfig>>,
+    op_faults: &deterministic::FaultConfig,
+    prune_faults: &deterministic::FaultConfig,
 ) -> ExpectedBounds {
     let mut min_size = 0u64;
     let mut max_size = merkle.size().as_u64();
@@ -171,11 +181,20 @@ async fn run_operations<F: MerkleFamily>(
                 let safe_loc = (*loc).min(leaves);
 
                 if safe_loc > current_pruned {
-                    match merkle.prune(Location::new(safe_loc)).await {
+                    // Remove faults are armed only around the prune drive, so the journal
+                    // prune inside can fail after removing only some blobs.
+                    *faults.write() = prune_faults.clone();
+                    let result = merkle.prune(Location::new(safe_loc)).await;
+                    *faults.write() = op_faults.clone();
+                    match result {
                         Err(_) => {
                             // The error is opaque: the prune may have failed before its
                             // internal sync proved anything durable, so this ceiling is
-                            // conservative.
+                            // conservative and the size/leaves floors stay uncredited. A
+                            // torn remove instead fails after the metadata durably recorded
+                            // `safe_loc`, and recovery completes the journal prune to that
+                            // boundary, so the recovered boundary can land anywhere up to
+                            // this ceiling.
                             max_pruned = max_pruned.max(safe_loc);
                             break;
                         }
@@ -203,8 +222,15 @@ async fn run_operations<F: MerkleFamily>(
                 let current_pruned = merkle.bounds().start.as_u64();
 
                 if leaves != 0 && current_pruned < leaves {
-                    match merkle.prune_all().await {
+                    // Same remove-fault window as PruneToLoc: prune_all is a prune to the
+                    // current leaf count.
+                    *faults.write() = prune_faults.clone();
+                    let result = merkle.prune_all().await;
+                    *faults.write() = op_faults.clone();
+                    match result {
                         Err(_) => {
+                            // The same conservative ceiling as PruneToLoc: a torn remove can
+                            // leave the recovered boundary anywhere up to the leaf count.
                             max_pruned = max_pruned.max(leaves);
                             break;
                         }
@@ -268,6 +294,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
     let operations = input.operations.clone();
     let sync_failure_rate = input.sync_failure_rate;
     let write_config = input.write_config;
+    let remove_rate = Probability::new(u64::from(input.remove_failure) % 101, 100).unwrap();
 
     // Phase 1: Execute operations with fault injection until crash
     let (bounds, checkpoint) = runner.start_and_recover(|ctx| {
@@ -292,13 +319,26 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
             .unwrap();
 
             let storage_fault_cfg = ctx.storage_fault_config();
-            *storage_fault_cfg.write() = deterministic::FaultConfig {
+            let op_faults = deterministic::FaultConfig {
                 sync_rate: Some(sync_failure_rate),
                 write_rate: Some(write_config),
                 ..Default::default()
             };
+            let prune_faults = deterministic::FaultConfig {
+                remove_rate: Some(remove_rate),
+                ..op_faults.clone()
+            };
+            *storage_fault_cfg.write() = op_faults.clone();
 
-            run_operations(merkle, &hasher, &operations).await
+            run_operations(
+                merkle,
+                &hasher,
+                &operations,
+                &storage_fault_cfg,
+                &op_faults,
+                &prune_faults,
+            )
+            .await
         }
     });
 
