@@ -148,7 +148,7 @@ impl RMap {
     /// # Complexity
     ///
     /// O((M + 1) log N), where N is the number of ranges in the map and M is the number of ranges
-    /// that overlap the removal range. One seek finds the first candidate; each overlapping range
+    /// that overlap the removal range. One seek finds the first candidate. Each overlapping range
     /// then costs one removal and at most two insertions.
     ///
     /// # Example
@@ -376,7 +376,7 @@ impl RMap {
     ///
     /// O(log N + G + M) where N is the number of ranges in [RMap], G is the number of gaps
     /// visited (at most N), and M is the number of missing items returned (at most `max`).
-    /// One seek positions the scan; the gaps are then visited in order without further lookups.
+    /// One seek positions the scan. The gaps are then visited in order without further lookups.
     ///
     /// # Example
     ///
@@ -414,7 +414,7 @@ impl RMap {
             _ => start,
         };
 
-        // Each range at or after `current` closes one gap: collect from it, then step past the range.
+        // Each range at or after `current` closes one gap. Collect from it, then step past the range.
         for (&r_start, &r_end) in self.ranges.range(current..) {
             if r_start > current {
                 let remaining = (max - missing.len()) as u64;
