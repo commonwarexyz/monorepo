@@ -1087,6 +1087,15 @@ where
             ) else {
                 continue;
             };
+            if let Some(metrics) = &self.metrics {
+                metrics.final_sweeps.inc();
+                metrics.emitted_slots.inc_by(sweep.planned());
+                let unsettled = fact.settled().iter().filter(|settled| !**settled).count();
+                metrics.unsettled_chains.inc_by(unsettled as u64);
+                if sweep.halted() {
+                    metrics.emission_halts.inc();
+                }
+            }
             let mut batch = PublicationBatch::<H, V, B>::new(self.max_commit_outputs, 0);
             self.process_final_sweep(&mut sweep, &mut batch).await?;
             self.commit_pending(&mut batch).await?;

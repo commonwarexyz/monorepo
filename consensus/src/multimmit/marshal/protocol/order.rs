@@ -260,6 +260,10 @@ pub(in crate::multimmit::marshal) struct FinalSweep<D: Digest> {
     base: Vec<BlockRef<D>>,
     target: Vec<BlockRef<D>>,
     coordinates: Coordinates,
+    /// Whether an unsettled chain cut the sweep short of the final tips.
+    halted: bool,
+    /// Slots the sweep will emit.
+    planned: u64,
 }
 
 impl<D: Digest> FinalSweep<D> {
@@ -306,10 +310,17 @@ impl<D: Digest> FinalSweep<D> {
                 chain: base.len() - 1,
             }),
         };
+        let complete = (max_offset > 0).then(|| Coordinate {
+            offset: max_offset,
+            chain: base.len() - 1,
+        });
+        let maxima = truncate_deltas(&deltas, back);
         Ok(Self {
             base: base.to_vec(),
             target,
-            coordinates: Coordinates::new(truncate_deltas(&deltas, back)),
+            halted: cutoff.is_some() && back != complete,
+            planned: maxima.iter().sum(),
+            coordinates: Coordinates::new(maxima),
         })
     }
 
@@ -334,6 +345,16 @@ impl<D: Digest> FinalSweep<D> {
 
     pub(in crate::multimmit::marshal) fn target(&self) -> &[BlockRef<D>] {
         &self.target
+    }
+
+    /// Returns whether an unsettled chain deferred slots below the final tips to a later view.
+    pub(in crate::multimmit::marshal) const fn halted(&self) -> bool {
+        self.halted
+    }
+
+    /// Returns how many slots this sweep emits in total.
+    pub(in crate::multimmit::marshal) const fn planned(&self) -> u64 {
+        self.planned
     }
 }
 
@@ -675,10 +696,21 @@ mod tests {
         let base = tips(&[0, 0]);
         let target = tips(&[1, 2]);
         let mut settled = FinalSweep::new(&base, target.clone(), vec![true, true]).unwrap();
+        assert!(!settled.halted());
+        assert_eq!(settled.planned(), 3);
         assert_eq!(coordinates(settled.by_ref()), vec![(0, 1), (1, 1), (1, 2)]);
 
-        let mut unsettled = FinalSweep::new(&base, target, vec![false, true]).unwrap();
+        let mut unsettled = FinalSweep::new(&base, target.clone(), vec![false, true]).unwrap();
+        assert!(unsettled.halted());
+        assert_eq!(unsettled.planned(), 2);
         assert_eq!(coordinates(unsettled.by_ref()), vec![(0, 1), (1, 1)]);
+
+        // An unsettled chain with no new block may still gain one at the first offset, so the
+        // sweep halts before emitting anything.
+        let mut idle = FinalSweep::new(&tips(&[1, 0]), target, vec![false, true]).unwrap();
+        assert!(idle.halted());
+        assert_eq!(idle.planned(), 0);
+        assert!(coordinates(idle.by_ref()).is_empty());
     }
 
     #[test]
