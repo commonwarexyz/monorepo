@@ -32,6 +32,16 @@
 //! a reporter that acknowledges every block after exposing its compact coordinates to the
 //! terminal UI.
 //!
+//! # Network Planes
+//!
+//! Every node runs two authenticated networks over one identity key. The consensus plane
+//! (`port`) carries the data-availability channel, consensus artifacts, certificates, and the
+//! engine's artifact resolver. The bulk plane (`port + 1`) carries only complete block bodies:
+//! `commonware-broadcast` gossip and the `commonware-resolver` body backfill. A peer sender
+//! writes whole messages in priority order, so a vote queued behind a 512 KiB body waits for
+//! that body to drain; separate listeners give the two planes separate TCP connections per peer
+//! and remove that head-of-line term from every consensus hop.
+//!
 //! # Usage (Run at Least 6 to Make Progress)
 //!
 //! _To run this example, you must first install [Rust](https://www.rust-lang.org/tools/install)._
@@ -48,10 +58,11 @@
 //! ## Participant 1
 //!
 //! ```sh
-//! cargo run --release -- --bootstrappers 0@127.0.0.1:3000 --me 1@3001 --participants 0,1,2,3,4,5 --producers 0,1 --storage-dir /tmp/commonware-log-multimmit/1
+//! cargo run --release -- --bootstrappers 0@127.0.0.1:3000 --me 1@3002 --participants 0,1,2,3,4,5 --producers 0,1 --storage-dir /tmp/commonware-log-multimmit/1
 //! ```
 //!
-//! Repeat for participants 2 through 5, incrementing the key and port.
+//! Repeat for participants 2 through 5, incrementing the key and advancing the port by two: each
+//! node also binds `port + 1` for the bulk plane.
 
 mod application;
 mod deploy;
@@ -82,7 +93,7 @@ use commonware_cryptography::{
 };
 use commonware_deployer::aws::{Hosts, METRICS_PORT};
 use commonware_p2p::{
-    Manager as _,
+    Blocker, Manager as _,
     authenticated::{self, discovery},
 };
 use commonware_parallel::{Rayon, Strategy as _};
@@ -111,10 +122,21 @@ static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 /// Signature namespace for this example's consensus deployment.
 const CONSENSUS_NAMESPACE: &[u8] = b"_COMMONWARE_LOG_MULTIMMIT_CONSENSUS";
 
-/// Network namespace for this example's authenticated peer traffic.
+/// Network namespace for this example's authenticated consensus-plane traffic.
 const P2P_NAMESPACE: &[u8] = b"_COMMONWARE_LOG_MULTIMMIT_P2P";
 
+/// Network namespace for this example's authenticated bulk-plane traffic.
+///
+/// The bulk plane is a second network reachable on its own port, so it signs handshakes under
+/// its own namespace and a handshake for one plane cannot authenticate the other.
+const P2P_BULK_NAMESPACE: &[u8] = b"_COMMONWARE_LOG_MULTIMMIT_P2P_BULK";
+
+/// Ports between the consensus listener and the bulk listener.
+const BULK_PORT_OFFSET: u16 = 1;
+
+/// Bulk-plane channel carrying exact block backfill.
 const MARSHAL_RESOLVER_CHANNEL: u64 = 4;
+/// Bulk-plane channel carrying complete block bodies.
 const MARSHAL_BROADCAST_CHANNEL: u64 = 5;
 
 /// Body resolver traffic bypasses ordinary outbound traffic.
@@ -213,6 +235,10 @@ struct Cli {
     #[arg(long)]
     me: Option<String>,
 
+    /// Port for this node's bulk block plane. Defaults to the consensus port plus one.
+    #[arg(long)]
+    bulk_port: Option<u16>,
+
     /// Every participant's key, in committee order.
     #[arg(long, value_delimiter = ',', num_args = 1..)]
     participants: Vec<u64>,
@@ -287,6 +313,7 @@ enum Command {
 struct RunConfig {
     key: u64,
     port: u16,
+    bulk_port: u16,
     participants: Vec<u64>,
     producers: Vec<u64>,
     bootstrappers: Vec<(u64, SocketAddr)>,
@@ -322,6 +349,45 @@ impl Reporter for ApplicationReporter {
         match self {
             Self::Headless(reporter) => reporter.report(activity),
             Self::Gui(reporter) => reporter.report(activity),
+        }
+    }
+}
+
+/// Blocks a peer on the consensus plane and the bulk plane together.
+///
+/// Each network keeps its own connection to a peer, so a block applied to one plane leaves the
+/// other connected. Misbehavior observed anywhere disconnects the peer everywhere.
+#[derive(Clone)]
+struct BothPlanes {
+    consensus: discovery::Oracle<ed25519::PublicKey>,
+    bulk: discovery::Oracle<ed25519::PublicKey>,
+}
+
+impl BothPlanes {
+    const fn new(
+        consensus: discovery::Oracle<ed25519::PublicKey>,
+        bulk: discovery::Oracle<ed25519::PublicKey>,
+    ) -> Self {
+        Self { consensus, bulk }
+    }
+}
+
+impl Blocker for BothPlanes {
+    type PublicKey = ed25519::PublicKey;
+
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "fans out a block already logged by the caller's block! site"
+    )]
+    fn block(&mut self, peer: Self::PublicKey) -> Feedback {
+        // Always attempt both planes, then report the least successful outcome so a caller that
+        // treats `Closed` as fatal sees a closed tracker on either plane.
+        let consensus = self.consensus.block(peer.clone());
+        let bulk = self.bulk.block(peer);
+        match (consensus, bulk) {
+            (Feedback::Closed, _) | (_, Feedback::Closed) => Feedback::Closed,
+            (Feedback::Backoff, _) | (_, Feedback::Backoff) => Feedback::Backoff,
+            (Feedback::Ok, Feedback::Ok) => Feedback::Ok,
         }
     }
 }
@@ -428,6 +494,18 @@ fn producer_participants(participants: &[u64], producers: &[u64]) -> Vec<Partici
         .collect()
 }
 
+/// Derives a peer's bulk-plane address from its consensus-plane address.
+///
+/// Every node shifts its bulk listener off its consensus listener by the same offset, so this is
+/// the only rule needed to dial a peer on the bulk plane once its consensus address is known.
+const fn bulk_address(consensus: SocketAddr, offset: u16) -> SocketAddr {
+    let port = consensus
+        .port()
+        .checked_add(offset)
+        .expect("bulk port must be representable");
+    SocketAddr::new(consensus.ip(), port)
+}
+
 fn resolver_response_capacity(max_block_size: usize) -> usize {
     max_block_size
         .checked_mul(RESOLVER_RESPONSE_BLOCKS)
@@ -498,14 +576,28 @@ fn main() {
         .collect::<Vec<_>>();
 
     // Configure bootstrappers (if provided)
+    //
+    // Every node shifts its bulk listener off its consensus listener by the same amount, so a
+    // bootstrapper's bulk address is its consensus address shifted by the local offset.
+    assert!(
+        config.bulk_port > port,
+        "bulk port must be above the consensus port"
+    );
+    let bulk_port_offset = config.bulk_port - port;
     let mut bootstrapper_identities = Vec::new();
+    let mut bulk_bootstrapper_identities = Vec::new();
     for (key, address) in &config.bootstrappers {
         let position = config
             .participants
             .iter()
             .position(|participant| participant == key)
             .expect("bootstrapper must be a participant");
-        bootstrapper_identities.push((committee.identities[position].clone(), (*address).into()));
+        let identity = committee.identities[position].clone();
+        bulk_bootstrapper_identities.push((
+            identity.clone(),
+            bulk_address(*address, bulk_port_offset).into(),
+        ));
+        bootstrapper_identities.push((identity, (*address).into()));
     }
 
     // Initialize context
@@ -523,11 +615,22 @@ fn main() {
     let max_peers_per_set =
         authenticated::peer_set_limit(validators.iter(), &network_key.public_key());
     let p2p_cfg = discovery::Config::local(
-        network_key,
+        network_key.clone(),
         P2P_NAMESPACE,
         SocketAddr::new(config.listen_ip, port),
         SocketAddr::new(config.public_ip, port),
         bootstrapper_identities,
+        max_peers_per_set,
+        max_network_message_size,
+    );
+    // The bulk plane carries the largest message in the deployment (a bounded backfill response),
+    // so it keeps the same ceiling as the consensus plane rather than a tighter one.
+    let p2p_bulk_cfg = discovery::Config::local(
+        network_key,
+        P2P_BULK_NAMESPACE,
+        SocketAddr::new(config.listen_ip, config.bulk_port),
+        SocketAddr::new(config.public_ip, config.bulk_port),
+        bulk_bootstrapper_identities,
         max_peers_per_set,
         max_network_message_size,
     );
@@ -567,11 +670,19 @@ fn main() {
             );
             Some((gui, status, reporter))
         };
-        tracing::info!(key = ?signer.public_key(), port, "loaded signer");
+        tracing::info!(key = ?signer.public_key(), port, bulk_port = config.bulk_port, "loaded signer");
 
-        // Initialize network
+        // Initialize both networks.
+        //
+        // Complete block bodies get their own listener, and therefore their own TCP connection
+        // per peer. A peer sender writes whole messages in priority order, so a vote sharing a
+        // connection with a 512 KiB body waits for that body to drain. Both networks track the
+        // same peer set at the same index under one identity key.
         let (mut network, mut oracle) = discovery::Network::new(context.child("network"), p2p_cfg);
-        oracle.track(0, validators);
+        oracle.track(0, validators.clone());
+        let (mut bulk_network, mut bulk_oracle) =
+            discovery::Network::new(context.child("bulk_network"), p2p_bulk_cfg);
+        bulk_oracle.track(0, validators);
 
         // Register one channel per Multimmit protocol plane.
         //
@@ -585,9 +696,11 @@ fn main() {
         let consensus = network.register(1, quota);
         let certificates = network.register(2, quota);
         let engine_resolver = network.register(3, quota);
-        let marshal_resolver = network.register(MARSHAL_RESOLVER_CHANNEL, quota);
-        let marshal_broadcast = network.register(MARSHAL_BROADCAST_CHANNEL, quota);
+        let marshal_resolver = bulk_network.register(MARSHAL_RESOLVER_CHANNEL, quota);
+        let marshal_broadcast = bulk_network.register(MARSHAL_BROADCAST_CHANNEL, quota);
         network.start();
+        bulk_network.start();
+        let blocker = BothPlanes::new(oracle.clone(), bulk_oracle.clone());
 
         // Start complete-block broadcast, durable marshal storage, and exact peer backfill.
         // Body decode embeds the full-body digest check, so inbound bodies are decoded on the
@@ -604,8 +717,8 @@ fn main() {
                 deque_size: 1_024,
                 priority: false,
                 codec_config: application::Body::codec_config(config.body_size),
-                peer_provider: oracle.clone(),
-                blocker: oracle.clone(),
+                peer_provider: bulk_oracle.clone(),
+                blocker: blocker.clone(),
                 strategy: strategy.clone(),
             },
         );
@@ -670,8 +783,8 @@ fn main() {
         let (resolver_engine, resolver_mailbox) = resolver::Engine::new_with_preferred_peers(
             context.child("body_resolver"),
             resolver::Config {
-                peer_provider: oracle.clone(),
-                blocker: oracle.clone(),
+                peer_provider: bulk_oracle,
+                blocker: blocker.clone(),
                 consumer: resolver_bridge.clone(),
                 producer: resolver_bridge,
                 mailbox_size: NZUsize!(1_024),
@@ -733,7 +846,7 @@ fn main() {
                 relay: application.clone(),
                 reporter: application,
                 strategy,
-                blocker: oracle,
+                blocker,
                 profile,
                 partition_prefix: String::from("log-multimmit"),
                 mailbox_size: NZUsize!(1_024),
@@ -857,9 +970,16 @@ fn load_run_config(cli: Cli) -> RunConfig {
         })
         .collect();
 
+    let port = port.parse::<u16>().expect("port not well-formed");
+    let bulk_port = cli.bulk_port.unwrap_or_else(|| {
+        port.checked_add(BULK_PORT_OFFSET)
+            .expect("bulk port must be representable")
+    });
+
     RunConfig {
         key: key.parse().expect("key not well-formed"),
-        port: port.parse().expect("port not well-formed"),
+        port,
+        bulk_port,
         participants: cli.participants,
         producers: cli.producers,
         bootstrappers,
@@ -924,6 +1044,7 @@ fn load_remote_config(config_path: PathBuf, hosts_path: PathBuf) -> RunConfig {
     RunConfig {
         key: config.key,
         port: config.port,
+        bulk_port: config.bulk_port,
         participants: config.participants,
         producers: config.producers,
         bootstrappers,
@@ -1000,6 +1121,20 @@ mod tests {
         for pool in [network, storage] {
             assert!(pool.max_tracked_bytes() <= 2 * 1024 * 1024 * 1024);
         }
+    }
+
+    #[test]
+    fn bulk_addresses_shift_the_consensus_port() {
+        let consensus = SocketAddr::from_str("127.0.0.1:3000").expect("address parses");
+        assert_eq!(
+            bulk_address(consensus, BULK_PORT_OFFSET),
+            SocketAddr::from_str("127.0.0.1:3001").expect("address parses")
+        );
+        let remote = SocketAddr::from_str("10.0.0.7:4000").expect("address parses");
+        assert_eq!(
+            bulk_address(remote, 100),
+            SocketAddr::from_str("10.0.0.7:4100").expect("address parses")
+        );
     }
 
     #[test]

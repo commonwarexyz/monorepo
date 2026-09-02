@@ -1,5 +1,6 @@
 //! Remote deployment bundle generation.
 
+use crate::BULK_PORT_OFFSET;
 use clap::Args;
 use commonware_deployer::aws;
 use serde::{Deserialize, Serialize};
@@ -124,9 +125,13 @@ pub struct Deploy {
     #[arg(long, default_value_t = DEFAULT_MARSHAL_MATERIALIZED_CACHE_BYTES)]
     marshal_materialized_cache_bytes: usize,
 
-    /// Validator P2P port.
+    /// Validator consensus-plane port.
     #[arg(long, default_value_t = 3000)]
     port: u16,
+
+    /// Validator bulk-plane port. Defaults to the consensus-plane port plus one.
+    #[arg(long)]
+    bulk_port: Option<u16>,
 
     /// Enable CPU profiling on validators.
     #[arg(long, default_value_t = false)]
@@ -153,6 +158,7 @@ pub struct Deploy {
 pub struct NodeConfig {
     pub key: u64,
     pub port: u16,
+    pub bulk_port: u16,
     pub participants: Vec<u64>,
     pub producers: Vec<u64>,
     pub bootstrappers: Vec<u64>,
@@ -238,6 +244,10 @@ impl Deploy {
             "every producer must be a validator"
         );
         assert!(self.port != 0, "port must be non-zero");
+        assert!(
+            self.bulk_port() > self.port,
+            "bulk port must be above the consensus-plane port"
+        );
         assert!(self.bootstrappers > 0, "need at least one bootstrapper");
         assert!(
             self.bootstrappers <= self.nodes,
@@ -290,6 +300,7 @@ impl Deploy {
             let config = NodeConfig {
                 key: *key,
                 port: self.port,
+                bulk_port: self.bulk_port(),
                 participants: participants.clone(),
                 producers: producers.clone(),
                 bootstrappers: bootstrappers.clone(),
@@ -307,6 +318,18 @@ impl Deploy {
             };
             write_yaml(&self.output_dir.join(format!("node-{key}.yaml")), &config);
         }
+    }
+
+    /// Port every validator binds for the bulk block plane.
+    ///
+    /// The deployed binary derives every peer's bulk address by shifting that peer's
+    /// consensus address by the local offset, so all validators must share this offset.
+    fn bulk_port(&self) -> u16 {
+        self.bulk_port.unwrap_or_else(|| {
+            self.port
+                .checked_add(BULK_PORT_OFFSET)
+                .expect("bulk port must be representable")
+        })
     }
 
     fn producers(&self) -> Vec<u64> {
@@ -360,11 +383,18 @@ impl Deploy {
                 dashboard: DASHBOARD_FILE.to_string(),
             },
             instances,
-            ports: vec![aws::PortConfig {
-                protocol: "tcp".to_string(),
-                port: self.port,
-                cidr: "0.0.0.0/0".to_string(),
-            }],
+            ports: vec![
+                aws::PortConfig {
+                    protocol: "tcp".to_string(),
+                    port: self.port,
+                    cidr: "0.0.0.0/0".to_string(),
+                },
+                aws::PortConfig {
+                    protocol: "tcp".to_string(),
+                    port: self.bulk_port(),
+                    cidr: "0.0.0.0/0".to_string(),
+                },
+            ],
         }
     }
 }
@@ -394,6 +424,42 @@ mod tests {
             .try_get_matches_from(args)
             .unwrap();
         Deploy::from_arg_matches(&matches).unwrap()
+    }
+
+    #[test]
+    fn both_planes_are_opened_by_the_security_group() {
+        let default = parse(&["deploy"]);
+        assert_eq!(default.bulk_port(), 3_001);
+        let config = default.deployer_config();
+        let ports = config
+            .ports
+            .iter()
+            .map(|port| port.port)
+            .collect::<Vec<_>>();
+        assert_eq!(ports, [3_000, 3_001]);
+
+        let explicit = parse(&["deploy", "--port", "4000", "--bulk-port", "4100"]);
+        assert_eq!(explicit.bulk_port(), 4_100);
+        let ports = explicit
+            .deployer_config()
+            .ports
+            .iter()
+            .map(|port| port.port)
+            .collect::<Vec<_>>();
+        assert_eq!(ports, [4_000, 4_100]);
+    }
+
+    #[test]
+    #[should_panic(expected = "bulk port must be above the consensus-plane port")]
+    fn bulk_port_must_not_collide_with_the_consensus_plane() {
+        parse(&["deploy", "--port", "3000", "--bulk-port", "3000"]).validate();
+    }
+
+    #[test]
+    fn node_configs_carry_both_ports() {
+        let deploy = parse(&["deploy"]);
+        assert_eq!(deploy.port, 3_000);
+        assert_eq!(deploy.bulk_port(), 3_001);
     }
 
     #[test]

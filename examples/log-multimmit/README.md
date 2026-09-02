@@ -45,6 +45,22 @@ the resulting stream to an application reporter. In terminal mode the reporter r
 coordinates and digests for the total-order pane, then acknowledges every `Exact`; headless mode
 acknowledges without retaining the stream.
 
+# Network Planes
+
+Every node runs two authenticated `commonware-p2p` networks over one identity key, so the two
+kinds of traffic get separate TCP connections to each peer:
+
+- **Consensus plane** (`port`): the data-availability channel, consensus artifacts, certificates,
+  and the engine's artifact resolver.
+- **Bulk plane** (`port + 1`): complete block bodies only, meaning `commonware-broadcast` body
+  gossip and `commonware-resolver` body backfill.
+
+A peer sender writes whole messages in priority order, so on one connection a vote queued behind a
+512 KiB body waits for that body to drain. On a 50-node cluster a third of the peer connections
+held an unsent body frame at any instant. Separate listeners remove that head-of-line term from
+every consensus hop. Both planes track the same peer set at the same index and a peer blocked on
+one plane is blocked on both.
+
 # Usage (Run at Least 6 to Make Progress)
 
 _To run this example, you must first install [Rust](https://www.rust-lang.org/tools/install)._
@@ -60,7 +76,8 @@ mprocs
 ```
 
 Storage persists under `/tmp/commonware-log-multimmit`, so stopping and restarting a pane resumes
-that node where it left off.
+that node where it left off. Local consensus ports advance by two because every node also binds
+`port + 1`; `--bulk-port` overrides that placement.
 
 ## One at a Time
 
@@ -73,31 +90,31 @@ cargo run --release -- --me 0@3000 --participants 0,1,2,3,4,5 --producers 0,1 --
 ### Participant 1
 
 ```bash
-cargo run --release -- --bootstrappers 0@127.0.0.1:3000 --me 1@3001 --participants 0,1,2,3,4,5 --producers 0,1 --storage-dir /tmp/commonware-log-multimmit/1
+cargo run --release -- --bootstrappers 0@127.0.0.1:3000 --me 1@3002 --participants 0,1,2,3,4,5 --producers 0,1 --storage-dir /tmp/commonware-log-multimmit/1
 ```
 
 ### Participant 2
 
 ```bash
-cargo run --release -- --bootstrappers 0@127.0.0.1:3000 --me 2@3002 --participants 0,1,2,3,4,5 --producers 0,1 --storage-dir /tmp/commonware-log-multimmit/2
+cargo run --release -- --bootstrappers 0@127.0.0.1:3000 --me 2@3004 --participants 0,1,2,3,4,5 --producers 0,1 --storage-dir /tmp/commonware-log-multimmit/2
 ```
 
 ### Participant 3
 
 ```bash
-cargo run --release -- --bootstrappers 0@127.0.0.1:3000 --me 3@3003 --participants 0,1,2,3,4,5 --producers 0,1 --storage-dir /tmp/commonware-log-multimmit/3
+cargo run --release -- --bootstrappers 0@127.0.0.1:3000 --me 3@3006 --participants 0,1,2,3,4,5 --producers 0,1 --storage-dir /tmp/commonware-log-multimmit/3
 ```
 
 ### Participant 4
 
 ```bash
-cargo run --release -- --bootstrappers 0@127.0.0.1:3000 --me 4@3004 --participants 0,1,2,3,4,5 --producers 0,1 --storage-dir /tmp/commonware-log-multimmit/4
+cargo run --release -- --bootstrappers 0@127.0.0.1:3000 --me 4@3008 --participants 0,1,2,3,4,5 --producers 0,1 --storage-dir /tmp/commonware-log-multimmit/4
 ```
 
 ### Participant 5
 
 ```bash
-cargo run --release -- --bootstrappers 0@127.0.0.1:3000 --me 5@3005 --participants 0,1,2,3,4,5 --producers 0,1 --storage-dir /tmp/commonware-log-multimmit/5
+cargo run --release -- --bootstrappers 0@127.0.0.1:3000 --me 5@3010 --participants 0,1,2,3,4,5 --producers 0,1 --storage-dir /tmp/commonware-log-multimmit/5
 ```
 
 # Remote Deployment
@@ -121,8 +138,9 @@ cargo run --release -- deploy \
 The six nodes are assigned round-robin across the two regions, placing three in `us-west-2` and
 three in `us-east-1`. `--nodes` changes the committee size (six is the minimum), `--producers`
 selects producer keys in chain order (and defaults to every validator), while `--bootstrappers`,
-storage IOPS and throughput, marshal cache budgets, profiling, trace sampling, P2P port,
-dashboard, and binary filename can also be overridden. `--body-size` controls the complete junk
+storage IOPS and throughput, marshal cache budgets, profiling, trace sampling, the two P2P ports
+(`--port` and `--bulk-port`), dashboard, and binary filename can also be overridden. The generated
+`config.yaml` opens both ports in the validator security group. `--body-size` controls the complete junk
 payload generated for every producer block. The command creates node configs, `dashboard.json`,
 and the deployer's `config.yaml`. Validator gp3 volumes default to 16,000 IOPS and 1,250 MiB/s;
 the monitoring volume remains independently configurable. The command does not create cloud
