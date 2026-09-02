@@ -1,4 +1,4 @@
-use super::{Config, Error};
+use super::{Config, Error, Undecodable};
 use crate::{Context, SyncCompletion};
 use commonware_codec::{Codec, Copying, FixedSize, ReadExt};
 use commonware_cryptography::{Crc32, crc32};
@@ -185,6 +185,21 @@ enum Loaded<B: Blob, K: Span, V> {
 }
 
 impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
+    /// Reports a checksum-valid blob the configured codec cannot read, leaving it on disk.
+    fn undecodable(index: usize, key: Option<&K>, reason: Undecodable) -> Error {
+        let key = key.map(ToString::to_string);
+        warn!(
+            blob = index,
+            key = key.as_deref(),
+            %reason,
+            "metadata blob is undecodable: preserving both blobs"
+        );
+        Error::Undecodable {
+            blob: index,
+            key,
+            reason,
+        }
+    }
     /// See [Metadata::init].
     async fn init(
         context: E,
@@ -324,7 +339,8 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
         let version = u64::from_be_bytes(bytes[..8].try_into().unwrap());
 
         // Extract data. Integrity proves the bytes were written together, not that their encoding
-        // is valid for the current codec.
+        // is valid for the current codec, so a failure past this point is a codec or configuration
+        // mismatch rather than corruption and both blobs are preserved for the operator.
         let mut data = BTreeMap::new();
         let mut lengths = HashMap::new();
         let mut cursor = u64::SIZE;
@@ -335,14 +351,16 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
             let key = match K::read(&mut encoded) {
                 Ok(key) => key,
                 Err(error) => {
-                    warn!(blob = index, %error, "metadata key is malformed");
-                    return Ok(Loaded::Invalid(blob));
+                    return Err(Self::undecodable(index, None, Undecodable::Key(error)));
                 }
             };
             let key_bytes = before - encoded.remaining();
             if key.encode_size() != key_bytes {
-                warn!(blob = index, "metadata key is non-canonical");
-                return Ok(Loaded::Invalid(blob));
+                return Err(Self::undecodable(
+                    index,
+                    Some(&key),
+                    Undecodable::KeyEncoding,
+                ));
             }
             cursor += key_bytes;
 
@@ -350,18 +368,23 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
             let value = match V::read_cfg(&mut encoded, codec_config) {
                 Ok(value) => value,
                 Err(error) => {
-                    warn!(blob = index, %error, "metadata value is malformed");
-                    return Ok(Loaded::Invalid(blob));
+                    return Err(Self::undecodable(
+                        index,
+                        Some(&key),
+                        Undecodable::Value(error),
+                    ));
                 }
             };
             let value_bytes = before - encoded.remaining();
             if value.encode_size() != value_bytes {
-                warn!(blob = index, "metadata value is non-canonical");
-                return Ok(Loaded::Invalid(blob));
+                return Err(Self::undecodable(
+                    index,
+                    Some(&key),
+                    Undecodable::ValueEncoding,
+                ));
             }
             if encoded.remaining() == entry_bytes {
-                warn!(blob = index, "metadata entry made no decoding progress");
-                return Ok(Loaded::Invalid(blob));
+                return Err(Self::undecodable(index, Some(&key), Undecodable::Stalled));
             }
             lengths.insert(key.clone(), Info::new(cursor, value_bytes));
             cursor += value_bytes;
