@@ -93,33 +93,18 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         polynomial: Sharing<V>,
         share: Share,
     ) -> Option<Self> {
-        if !participants.is_uniform() {
-            return None;
-        }
-        assert_eq!(
-            polynomial.total().get() as usize,
-            participants.len(),
-            "polynomial total must equal participant len"
-        );
-        assert_eq!(
-            polynomial.required(),
-            participants.quorum_count::<M>(),
-            "polynomial threshold must equal quorum"
-        );
-        #[cfg(feature = "std")]
-        polynomial.precompute_partial_publics();
+        let mut scheme = Self::verifier::<M>(namespace, participants, polynomial)?;
+        let Role::Verifier { polynomial } = scheme.role else {
+            unreachable!("verifier constructor must create a verifier role")
+        };
         let partial_public = polynomial
             .partial_public(share.index)
             .expect("share index must match participant indices");
-        if partial_public == share.public::<V>() {
-            Some(Self {
-                participants,
-                namespace: N::derive(namespace),
-                role: Role::Signer { polynomial, share },
-            })
-        } else {
-            None
+        if partial_public != share.public::<V>() {
+            return None;
         }
+        scheme.role = Role::Signer { polynomial, share };
+        Some(scheme)
     }
 
     /// Produces a verifier for the specified fault model that can authenticate signatures
@@ -171,6 +156,9 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     ///
     /// This lightweight verifier can authenticate recovered threshold certificates but cannot
     /// verify individual signatures or partial signatures.
+    /// After construction, the committee is retained for [`Self::participants`]; certificate
+    /// verification uses only `identity`. Callers must ensure the committee corresponds to that
+    /// identity.
     ///
     /// Returns `None` if the committee is non-uniform.
     ///
@@ -609,6 +597,10 @@ macro_rules! impl_certificate_bls12381_threshold {
             }
 
             /// Creates a lightweight verifier that only checks recovered certificates.
+            ///
+            /// After construction, `participants` is retained for `participants()` and is not
+            /// consulted during certificate verification. Callers must ensure it corresponds to
+            /// `identity`.
             pub fn certificate_verifier(
                 namespace: &[u8],
                 participants: commonware_utils::ordered::Committee<P>,

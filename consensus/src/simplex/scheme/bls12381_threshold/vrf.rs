@@ -223,6 +223,9 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     ///
     /// This lightweight verifier can authenticate recovered threshold certificates but cannot
     /// verify individual votes or partial signatures.
+    /// After construction, `participants` is retained for [`Self::participants`] and is not
+    /// consulted during certificate verification. Callers must ensure it corresponds to
+    /// `identity`.
     ///
     /// * `namespace` - base namespace for domain separation
     /// * `participants` - ordered committee of participant identity keys and weights
