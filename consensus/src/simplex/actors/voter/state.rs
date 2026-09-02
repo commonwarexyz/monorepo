@@ -1987,11 +1987,12 @@ mod tests {
             validators.try_into().expect("validator count fits in u32"),
         );
         let scheme = fixture.schemes[signer].clone();
+        let elector = config.build(scheme.participants());
         let mut state = State::new(
             context.child("state"),
             Config {
-                scheme: scheme.clone(),
-                elector: config.build(certificate::Scheme::participants(&scheme)),
+                scheme,
+                elector,
                 epoch: Epoch::new(epoch),
                 view_retention: ViewDelta::new(view_retention),
                 leader_timeout: Duration::from_secs(1),
