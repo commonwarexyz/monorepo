@@ -389,7 +389,7 @@ impl<F: Family, D: Digest> Mem<F, D> {
     }
 
     /// Overwrite the node at `pos`, which may have been pruned since the batch carrying the
-    /// overwrite was forked. A pinned node takes the new digest so the root and the proofs of
+    /// overwrite was merkleized. A pinned node takes the new digest so the root and the proofs of
     /// retained leaves reflect it. Any other pruned node no longer contributes to either, so its
     /// digest is discarded.
     fn overwrite(&mut self, pos: Position<F>, digest: D) {
@@ -403,8 +403,8 @@ impl<F: Family, D: Digest> Mem<F, D> {
 
     /// Apply a merkleized batch. Already-committed ancestors are skipped automatically.
     ///
-    /// Pruning this structure after the batch was forked does not invalidate the batch: applying
-    /// it yields the same state as applying it before the prune.
+    /// Pruning this structure after the batch was merkleized does not invalidate the batch:
+    /// applying it yields the same state as applying it before the prune.
     ///
     /// # Errors
     ///
