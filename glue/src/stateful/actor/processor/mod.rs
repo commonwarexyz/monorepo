@@ -3798,7 +3798,7 @@ mod tests {
     }
 
     #[test]
-    fn execution_duplicate_finalization_skips_finalized_hook() {
+    fn execution_duplicate_finalization_skips_hooks() {
         deterministic::Runner::default().start(|context| async move {
             let (mut harness, observations) = Harness::new_with_finalized_observer(context).await;
             let genesis = Block::genesis();

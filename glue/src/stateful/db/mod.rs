@@ -10,7 +10,7 @@
 //! 2. [`Merkleized`]: a sealed batch with a computed root.
 //! 3. Finalization applies the sealed batch via [`ManagedDb::apply`]. It then requests durability
 //!    via [`ManagedDb::finalize`] and observes completion through [`Barrier`]. A barrier covers the
-//!    state applied before it was requested. Later batches may reach storage while it is pending.
+//!    state applied before it was requested. Later batches may be applied while it is pending.
 //!
 //! [`DatabaseSet`] groups one or more [`ManagedDb`] instances into one logical
 //! unit for execution and commit.

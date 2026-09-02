@@ -120,6 +120,15 @@ where
     ) {
     }
 
+    async fn finalized(
+        &mut self,
+        _context: (E, Self::Context),
+        _block: &Self::Block,
+        _captured: Self::Captured,
+        _readers: <Self::Databases as DatabaseSet<E>>::Readers,
+    ) {
+    }
+
     fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {
         Target::new(block.state_root, block.range.clone())
     }

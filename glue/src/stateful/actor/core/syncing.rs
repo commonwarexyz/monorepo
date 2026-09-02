@@ -768,6 +768,8 @@ mod tests {
                 .as_mut()
                 .expect("harness must contain a sync artifact")
                 .databases = Shared::new("test", TestDb::gated(control.clone()));
+            let (application, hooks) = TestApp::observe_finalization();
+            harness.syncing.application = application;
 
             // Completion metadata must not be written until the handoff batch is durable.
             pending.arm();
@@ -826,6 +828,11 @@ mod tests {
             assert!(first_waiter.await.is_ok());
             assert!(second_waiter.await.is_ok());
             assert_eq!(control.pruned.lock().as_slice(), &[8]);
+            assert_eq!(
+                hooks.load(Ordering::SeqCst),
+                4,
+                "both applied handoff blocks must run capture and finalized",
+            );
 
             // The completed height is durable: reopen the metadata partition.
             let reopened =

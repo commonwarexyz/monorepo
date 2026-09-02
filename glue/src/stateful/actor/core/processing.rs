@@ -412,10 +412,12 @@ where
                     acknowledgement,
                     retry_mailbox,
                 }) => {
-                    let process = info_span!(parent: &span, "stateful.actor.finalized");
                     if skip_finalized_block(&mut self.skip_finalized_until, block.height()) {
+                        // The block is already reflected in the database set by a
+                        // completed state sync, so there is nothing to capture or apply.
                         acknowledgement.acknowledge();
                     } else {
+                        let process = info_span!(parent: &span, "stateful.actor.finalized");
                         let boundary = self.processor.finalization_boundary(block.as_ref());
                         let (retry, reject) = verifications
                             .quiesce_where(|progress| boundary.disposition(progress))
@@ -431,6 +433,10 @@ where
                                 ))
                                 .await;
                             let Some(Applied { barrier, prune }) = applied else {
+                                // A duplicate report is the startup anchor redelivered by
+                                // marshal: genesis on a fresh boot or a newly installed
+                                // floor. Its state is durable before the actor starts, so
+                                // no barrier is needed.
                                 acknowledgement.acknowledge();
                                 return;
                             };
@@ -666,6 +672,15 @@ mod tests {
             _readers: <Self::Databases as DatabaseSet<deterministic::Context>>::Readers,
         ) {
         }
+
+        async fn finalized(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            _block: &Self::Block,
+            _captured: Self::Captured,
+            _readers: <Self::Databases as DatabaseSet<deterministic::Context>>::Readers,
+        ) {
+        }
     }
 
     #[derive(Clone)]
@@ -737,6 +752,15 @@ mod tests {
             _context: (deterministic::Context, Self::Context),
             _block: &Self::Block,
             _batches: &TestMerkleized,
+            _readers: <Self::Databases as DatabaseSet<deterministic::Context>>::Readers,
+        ) {
+        }
+
+        async fn finalized(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            _block: &Self::Block,
+            _captured: Self::Captured,
             _readers: <Self::Databases as DatabaseSet<deterministic::Context>>::Readers,
         ) {
         }
@@ -1792,7 +1816,7 @@ mod tests {
     }
 
     #[test]
-    fn fresh_boot_genesis_skips_finalized_hook() {
+    fn fresh_boot_genesis_skips_hooks() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let genesis = TestBlock::new(0, 0);
             let mut signing = context.child("signing");
@@ -2760,6 +2784,7 @@ mod tests {
             )
             .await;
             let (finalized_gate, finalized_started, finalized_release) = application_gate();
+            let capture_calls = Arc::new(AtomicUsize::new(0));
             let applied_finalizations: Arc<Mutex<Vec<Height>>> = Arc::default();
             let app = ReplayGatedApp {
                 gates: Arc::default(),
@@ -2767,7 +2792,7 @@ mod tests {
                 finalized_gate: Arc::new(Mutex::new(Some(finalized_gate))),
                 gate_height: block1.height(),
                 apply_calls: Arc::new(AtomicUsize::new(0)),
-                capture_calls: Arc::new(AtomicUsize::new(0)),
+                capture_calls: capture_calls.clone(),
                 verify_calls: Arc::new(AtomicUsize::new(0)),
                 applied_finalizations: applied_finalizations.clone(),
             };
@@ -2798,6 +2823,7 @@ mod tests {
                 .await
                 .expect("finalized handoff should start");
             assert_eq!(control.applied.load(Ordering::Relaxed), 1);
+            assert_eq!(capture_calls.load(Ordering::SeqCst), 1);
             assert_eq!(applied_finalizations.lock().as_slice(), &[Height::new(1)]);
             assert_eq!(control.flushes.lock().len(), 1);
             assert!(poll!(&mut waiter1).is_pending());
@@ -2811,6 +2837,7 @@ mod tests {
             while control.applied.load(Ordering::Relaxed) < 2 {
                 context.sleep(Duration::from_millis(10)).await;
             }
+            assert_eq!(capture_calls.load(Ordering::SeqCst), 2);
             assert_eq!(
                 applied_finalizations.lock().as_slice(),
                 &[Height::new(1), Height::new(2)],

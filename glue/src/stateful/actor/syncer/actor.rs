@@ -393,6 +393,16 @@ mod tests {
         ) {
             unreachable!("WedgeApp only serves the syncer harness")
         }
+
+        async fn finalized(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            _block: &Self::Block,
+            _captured: Self::Captured,
+            _readers: <Self::Databases as DatabaseSet<deterministic::Context>>::Readers,
+        ) {
+            unreachable!("WedgeApp only serves the syncer harness")
+        }
     }
 
     #[test]

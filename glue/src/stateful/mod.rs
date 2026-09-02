@@ -312,9 +312,10 @@ where
 
     /// Capture data from winning batches before they are applied.
     ///
-    /// The wrapper calls this immediately before applying each winning batch
-    /// set. It does not call this for blocks merely reflected through recovery
-    /// or state sync.
+    /// The wrapper calls this immediately before applying each block's winning
+    /// batches. It does not call this for blocks already reflected in the
+    /// database set: the genesis block on a fresh boot, blocks reconciled at
+    /// startup, and blocks covered by state sync.
     ///
     /// Only reads completed through `readers` during this call are guaranteed
     /// to observe database state before `batches`. Retain owned values instead
@@ -325,8 +326,13 @@ where
     /// This future and [`finalized`](Self::finalized) are awaited on the
     /// stateful actor's serial mailbox path. The actor cannot process other
     /// mailbox messages while either is pending. Keep this capture cheap and
-    /// spawn expensive follow-on work from `finalized` instead of awaiting it
-    /// on this path. Applications with nothing to capture return `()`.
+    /// spawn expensive follow-on work from [`finalized`](Self::finalized)
+    /// instead of awaiting it on this path. Applications with nothing to
+    /// capture return `()`.
+    ///
+    /// # Panics
+    ///
+    /// Implementations should panic if capturing pre-apply state fails.
     fn capture(
         &mut self,
         context: (E, Self::Context),
@@ -337,17 +343,17 @@ where
 
     /// Observe a finalized block after its winning batches are applied.
     ///
-    /// The wrapper calls this after every successful [`DatabaseSet::apply`] in
-    /// application order. `captured` is the value returned by
-    /// [`capture`](Self::capture) for the exact applied batches. The block's
-    /// state is readable from the databases, but durability through that block
-    /// may still be pending. A database barrier may run
-    /// concurrently with this future. The wrapper releases the block's marshal
-    /// acknowledgement only after this future resolves and a barrier covering
-    /// the block completes.
+    /// The wrapper calls this after every [`DatabaseSet::apply`] in application
+    /// order. `captured` is the value returned by [`capture`](Self::capture)
+    /// for the exact applied batches. The block's state is readable from the
+    /// databases, but durability through that block may still be pending. A
+    /// database barrier may run concurrently with this future. The wrapper
+    /// releases the block's marshal acknowledgement only after this future
+    /// resolves and a barrier covering the block completes.
     ///
-    /// State sync and recovery may reflect finalized blocks without applying
-    /// their individual batches. Those blocks do not invoke this hook.
+    /// Blocks already reflected in the database set invoke neither this hook
+    /// nor [`capture`](Self::capture): the genesis block on a fresh boot,
+    /// blocks reconciled at startup, and blocks covered by state sync.
     /// Consecutive hook calls may therefore skip heights after state sync.
     ///
     /// This hook receives read-only database handles and may overlap verification
@@ -356,19 +362,17 @@ where
     /// execution, not from this observer.
     ///
     /// A crash after this hook runs but before a database sync covering the
-    /// block and marshal's processed position are durable may cause the batch
-    /// to be applied and observed again after restart.
+    /// block and marshal's processed position are durable may cause the block's
+    /// batches to be captured, applied, and observed again after restart.
     ///
     /// # Panics
     ///
     /// Implementations should panic if observing finalized state fails.
     fn finalized(
         &mut self,
-        _context: (E, Self::Context),
-        _block: &Self::Block,
-        _captured: Self::Captured,
-        _readers: <Self::Databases as DatabaseSet<E>>::Readers,
-    ) -> impl Future<Output = ()> + Send {
-        async {}
-    }
+        context: (E, Self::Context),
+        block: &Self::Block,
+        captured: Self::Captured,
+        readers: <Self::Databases as DatabaseSet<E>>::Readers,
+    ) -> impl Future<Output = ()> + Send;
 }
