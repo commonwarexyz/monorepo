@@ -23,7 +23,7 @@
 //! digest. Proposal recovery remains actor-owned.
 
 use crate::stateful::{
-    Application, Input, Proposed, PruneConfig,
+    Application, Finalized, Input, Proposed, PruneConfig,
     actor::{core::Verification, metrics::Metrics as StatefulMetrics},
     db::{Anchor, Barrier, DatabaseSet},
 };
@@ -874,6 +874,8 @@ where
                 digest, last_processed.digest,
                 "received conflicting finalized block at processed height",
             );
+            self.notify_finalized(context, block, Finalized::Synchronized)
+                .await;
             return None;
         }
 
@@ -932,13 +934,23 @@ where
         if let Some(owner) = reconstruction {
             owner.finish(Ok(()));
         }
+        let artifact = self
+            .app
+            .capture_finalized(
+                (context.child("capture_finalized"), block.context()),
+                block,
+                &batch,
+                self.execution.databases.readers(),
+            )
+            .await;
         self.execution.databases.apply(batch).await;
         let barrier = if start_sync {
             Some(self.execution.databases.finalize().await)
         } else {
             None
         };
-        self.notify_finalized(context, block).await;
+        self.notify_finalized(context, block, Finalized::Applied(artifact))
+            .await;
         let prune = self
             .pruning
             .as_mut()
@@ -949,13 +961,19 @@ where
         Some(Applied { barrier, prune })
     }
 
-    /// Notify the application that marshal delivered a finalized block already
-    /// reflected in the database set.
-    pub(super) async fn notify_finalized(&mut self, context: &E, block: &A::Block) {
+    /// Notify the application after a finalized block is reflected in the
+    /// database set.
+    pub(super) async fn notify_finalized(
+        &mut self,
+        context: &E,
+        block: &A::Block,
+        provenance: Finalized<A::FinalizedArtifact>,
+    ) {
         self.app
             .finalized(
                 (context.child("finalized"), block.context()),
                 block,
+                provenance,
                 self.execution.databases.readers(),
             )
             .await;
@@ -1526,7 +1544,7 @@ mod tests {
         ReplayClaim, ReplayFlights, ReplayTracking, VerificationProgress, fetch_ancestor,
     };
     use crate::stateful::{
-        Application, Input, Proposed, PruneConfig,
+        Application, Finalized, Input, Proposed, PruneConfig,
         actor::metrics::Metrics as StatefulMetrics,
         db::{Anchor, Barrier, DatabaseSet, Merkleized as _, Shared, Unmerkleized as _},
     };
@@ -1796,10 +1814,30 @@ mod tests {
         )
     }
 
+    #[derive(Debug, PartialEq, Eq)]
+    struct CapturedArtifact {
+        prior_counter: Option<u64>,
+        batch_counter: u64,
+        batch_height: u64,
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum FinalizedObservation {
+        Applied {
+            artifact: CapturedArtifact,
+            post_counter: u64,
+            post_height: u64,
+        },
+        Synchronized {
+            post_counter: u64,
+            post_height: u64,
+        },
+    }
+
     #[derive(Clone)]
     struct ExecutionApp {
         genesis: Block,
-        finalized_observer: Option<Arc<Mutex<Vec<u64>>>>,
+        finalized_observer: Option<Arc<Mutex<Vec<FinalizedObservation>>>>,
         apply_probe: Option<ApplicationProbe>,
         finalized_probe: Option<ApplicationProbe>,
     }
@@ -1814,16 +1852,16 @@ mod tests {
             }
         }
 
-        fn with_finalized_observer() -> (Self, Arc<Mutex<Vec<u64>>>) {
-            let finalized_values = Arc::new(Mutex::new(Vec::new()));
+        fn with_finalized_observer() -> (Self, Arc<Mutex<Vec<FinalizedObservation>>>) {
+            let observations = Arc::new(Mutex::new(Vec::new()));
             (
                 Self {
                     genesis: Block::genesis(),
-                    finalized_observer: Some(finalized_values.clone()),
+                    finalized_observer: Some(observations.clone()),
                     apply_probe: None,
                     finalized_probe: None,
                 },
-                finalized_values,
+                observations,
             )
         }
 
@@ -1849,6 +1887,7 @@ mod tests {
         type Context = TestContext;
         type Block = Block;
         type Databases = DbSet<deterministic::Context>;
+        type FinalizedArtifact = CapturedArtifact;
         type Provider = ();
         type Input = ();
 
@@ -1910,25 +1949,79 @@ mod tests {
             Self::execute(block.height(), block.context.round.view(), batches).await
         }
 
+        async fn capture_finalized(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            block: &Self::Block,
+            batches: &TestMerkleized,
+            readers: <Self::Databases as DatabaseSet<deterministic::Context>>::Readers,
+        ) -> Self::FinalizedArtifact {
+            let prior_counter = readers
+                .read()
+                .await
+                .get(&counter_key())
+                .await
+                .expect("database read should succeed")
+                .map(|value| digest_to_u64(&value));
+            let pending = batches.new_batch();
+            let batch_counter = pending
+                .get(&counter_key())
+                .await
+                .expect("batch read should succeed")
+                .map(|value| digest_to_u64(&value))
+                .expect("winning batch should contain a counter");
+            let batch_height = pending
+                .get(&height_key(block.height()))
+                .await
+                .expect("batch read should succeed")
+                .map(|value| digest_to_u64(&value))
+                .expect("winning batch should contain its height");
+            CapturedArtifact {
+                prior_counter,
+                batch_counter,
+                batch_height,
+            }
+        }
+
         async fn finalized(
             &mut self,
             _context: (deterministic::Context, Self::Context),
             block: &Self::Block,
+            provenance: Finalized<Self::FinalizedArtifact>,
             readers: <Self::Databases as DatabaseSet<deterministic::Context>>::Readers,
         ) {
             if let Some(probe) = &self.finalized_probe {
                 probe.call(block.digest()).await;
             }
-            let Some(observer) = self.finalized_observer.clone() else {
+            let Some(observer) = &self.finalized_observer else {
                 return;
             };
             let db = readers.read().await;
-            let value = db
+            let post_height = db
                 .get(&height_key(block.height()))
                 .await
                 .expect("database read should succeed")
+                .map(|value| digest_to_u64(&value))
                 .expect("finalized height should be reflected in the database set");
-            observer.lock().push(digest_to_u64(&value));
+            let post_counter = db
+                .get(&counter_key())
+                .await
+                .expect("database read should succeed")
+                .map(|value| digest_to_u64(&value))
+                .expect("finalized counter should be reflected in the database set");
+            drop(db);
+            let observation = match provenance {
+                Finalized::Applied(artifact) => FinalizedObservation::Applied {
+                    artifact,
+                    post_counter,
+                    post_height,
+                },
+                Finalized::Synchronized => FinalizedObservation::Synchronized {
+                    post_counter,
+                    post_height,
+                },
+            };
+            observer.lock().push(observation);
         }
 
         fn sync_targets(
@@ -2028,13 +2121,13 @@ mod tests {
 
         async fn new_with_finalized_observer(
             context: deterministic::Context,
-        ) -> (Self, Arc<Mutex<Vec<u64>>>) {
+        ) -> (Self, Arc<Mutex<Vec<FinalizedObservation>>>) {
             let provider = MapProvider::default();
             let config = qmdb_config(&next_partition_prefix(), &context);
-            let (app, finalized_values) = ExecutionApp::with_finalized_observer();
+            let (app, observations) = ExecutionApp::with_finalized_observer();
             (
                 Self::with_app(context, provider, config, app).await,
-                finalized_values,
+                observations,
             )
         }
 
@@ -2655,8 +2748,7 @@ mod tests {
     #[test]
     fn finalized_reader_preserves_retained_replay_base() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
-            let (mut harness, finalized_values) =
-                Harness::new_with_finalized_observer(context).await;
+            let (mut harness, observations) = Harness::new_with_finalized_observer(context).await;
             let genesis = Block::genesis();
             let parent = harness.stage_pending_child(&genesis, View::new(1)).await;
             let (child, _) = harness.build_child(&parent, View::new(2)).await;
@@ -2737,7 +2829,10 @@ mod tests {
                 .await
                 .expect("finalized block should be newly applied");
             assert_durable(barrier).await;
-            assert_eq!(finalized_values.lock().as_slice(), [1]);
+            assert!(matches!(
+                observations.lock().as_slice(),
+                [FinalizedObservation::Applied { post_height: 1, .. }]
+            ));
 
             retry_release
                 .send(())
@@ -3675,43 +3770,69 @@ mod tests {
     }
 
     #[test]
-    fn execution_finalized_hook_runs_for_each_applied_block() {
+    fn execution_finalized_handoff_preserves_cached_and_reconstructed_artifacts() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut harness, finalized_values) =
+            let (mut harness, observations) =
                 Harness::new_with_finalized_observer(context).await;
             let genesis = Block::genesis();
             let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
             let block2 = harness.stage_pending_child(&block1, View::new(2)).await;
 
             assert!(harness.finalize(block1).await);
+            harness.processor.clear_pending();
+            let probe = ApplicationProbe::new(block2.digest(), []);
+            harness.processor.app.apply_probe = Some(probe.clone());
             assert!(harness.finalize(block2).await);
             assert_eq!(
-                finalized_values.lock().clone(),
-                vec![1, 2],
-                "finalized hook should observe every applied block",
+                probe.calls(),
+                1,
+                "block2 should be reconstructed through Application::apply",
+            );
+
+            assert_eq!(
+                observations.lock().as_slice(),
+                [
+                    FinalizedObservation::Applied {
+                        artifact: CapturedArtifact {
+                            prior_counter: None,
+                            batch_counter: 1,
+                            batch_height: 1,
+                        },
+                        post_counter: 1,
+                        post_height: 1,
+                    },
+                    FinalizedObservation::Applied {
+                        artifact: CapturedArtifact {
+                            prior_counter: Some(1),
+                            batch_counter: 2,
+                            batch_height: 2,
+                        },
+                        post_counter: 2,
+                        post_height: 2,
+                    },
+                ],
+                "capture should see pre-apply state and finalized should receive the artifact after apply",
             );
         });
     }
 
     #[test]
-    fn execution_finalized_hook_runs_for_already_reflected_block() {
+    fn execution_duplicate_finalization_is_synchronized() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut harness, finalized_values) =
-                Harness::new_with_finalized_observer(context).await;
+            let (mut harness, observations) = Harness::new_with_finalized_observer(context).await;
             let genesis = Block::genesis();
-            let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
+            let block = harness.stage_pending_child(&genesis, View::new(1)).await;
 
-            assert!(harness.finalize(block1.clone()).await);
+            assert!(harness.finalize(block.clone()).await);
+            observations.lock().clear();
+            assert!(!harness.finalize(block).await);
 
-            finalized_values.lock().clear();
-            harness
-                .processor
-                .notify_finalized(harness.context_cell.as_present(), &block1)
-                .await;
             assert_eq!(
-                finalized_values.lock().clone(),
-                vec![1],
-                "finalized hook should run for blocks already reflected in the database set",
+                observations.lock().as_slice(),
+                [FinalizedObservation::Synchronized {
+                    post_counter: 1,
+                    post_height: 1,
+                }],
             );
         });
     }

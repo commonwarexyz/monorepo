@@ -135,6 +135,19 @@ pub struct Input<Upstream, Provider> {
     pub provider: Provider,
 }
 
+/// Describes whether a finalized notification applied winning batches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Finalized<T> {
+    /// The block's winning batches were captured and applied.
+    Applied(T),
+
+    /// The block was already reflected without winning batches to capture.
+    ///
+    /// This includes startup anchors, recovery alignment, and completed state
+    /// sync. It does not identify which path reflected the block.
+    Synchronized,
+}
+
 /// A stateful application whose storage is managed by a [`DatabaseSet`].
 ///
 /// Implementors receive [`DatabaseSet::Unmerkleized`] batches and
@@ -173,6 +186,11 @@ where
 
     /// The set of databases managed on behalf of this application.
     type Databases: DatabaseSet<E>;
+
+    /// Owned data captured from winning batches before they are applied.
+    ///
+    /// Applications with nothing to capture use `()`.
+    type FinalizedArtifact: Send + 'static;
 
     /// The stateful-owned provider, supplied through
     /// [`Config::provider`](crate::stateful::Config::provider).
@@ -305,17 +323,41 @@ where
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> impl Future<Output = <Self::Databases as DatabaseSet<E>>::Merkleized> + Send;
 
+    /// Capture data from winning batches before they are applied.
+    ///
+    /// Only reads completed through `readers` during this call are guaranteed
+    /// to observe database state before `batches`. Retain owned values instead
+    /// of reader handles when the pre-apply state is required later. The
+    /// returned artifact is passed unchanged to [`finalized`](Self::finalized)
+    /// after the batches are applied.
+    ///
+    /// Finalization of this block and every later block waits for this future.
+    /// Keep it to cheap reads and defer expensive work behind the durable
+    /// handoff. Applications with nothing to capture return `()`.
+    fn capture_finalized(
+        &mut self,
+        context: (E, Self::Context),
+        block: &Self::Block,
+        batches: &<Self::Databases as DatabaseSet<E>>::Merkleized,
+        readers: <Self::Databases as DatabaseSet<E>>::Readers,
+    ) -> impl Future<Output = Self::FinalizedArtifact> + Send;
+
     /// Observe a finalized block after it is reflected in the database set.
     ///
     /// Once the database set is ready, the wrapper calls this for every
     /// finalized block it receives from marshal before releasing that block's
     /// marshal acknowledgement. Blocks applied through normal processing are
-    /// reported after [`DatabaseSet::apply`] succeeds: the block's state is
+    /// reported after [`DatabaseSet::apply`] succeeds. The block's state is
     /// readable from the databases, but durability through that block may still
-    /// be pending. When an earlier database sync is active, the sync covering
-    /// this block may not have started yet. Blocks already reflected by startup
-    /// reconciliation or completed state sync are reported without reapplying
-    /// them.
+    /// be pending. A database barrier may run concurrently with this future.
+    /// The wrapper releases the block's marshal acknowledgement only after this
+    /// future resolves and a barrier covering the block completes.
+    ///
+    /// [`Finalized::Applied`] carries the artifact captured from the exact
+    /// batches applied for this notification. [`Finalized::Synchronized`]
+    /// means the block was already reflected and no winning batches were
+    /// available. This can occur for the startup anchor on a fresh boot, after
+    /// recovery alignment, or following completed state sync.
     ///
     /// During peer state sync, a finalized block may be absorbed into a recorded sync target and
     /// acknowledged without invoking this hook. Blocks still pending when sync completes are
@@ -327,10 +369,10 @@ where
     /// descendants. Result-affecting mutations must be made through normal block
     /// execution, not from this observer.
     ///
-    /// For blocks that are reported, this is an at-least-once notification inherited from
-    /// marshal's reporter stream: a crash after this hook runs but before a database sync covering
-    /// the block and marshal's processed position are durable may cause the same block to be
-    /// reported again.
+    /// For blocks that are reported, this is an at-least-once notification
+    /// inherited from marshal's reporter stream. A crash after this hook runs
+    /// but before a database sync covering the block and marshal's processed
+    /// position are durable may cause the same block to be reported again.
     ///
     /// # Panics
     ///
@@ -339,6 +381,7 @@ where
         &mut self,
         _context: (E, Self::Context),
         _block: &Self::Block,
+        _provenance: Finalized<Self::FinalizedArtifact>,
         _readers: <Self::Databases as DatabaseSet<E>>::Readers,
     ) -> impl Future<Output = ()> + Send {
         async {}

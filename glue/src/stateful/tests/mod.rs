@@ -18,7 +18,7 @@ use crate::{
         property::Property,
     },
     stateful::{
-        Application, Config as StatefulConfig, Input, Proposed, PruneConfig,
+        Application, Config as StatefulConfig, Finalized, Input, Proposed, PruneConfig,
         Stateful as StatefulActor, SyncPlan,
         db::{AttachableResolver, DatabaseSet, Merkleized as _, Shared, SyncEngineConfig},
     },
@@ -952,6 +952,7 @@ impl Application<deterministic::Context> for GatedMultiApp {
     type Context = <MultiApp as Application<deterministic::Context>>::Context;
     type Block = MultiBlock;
     type Databases = MultiDatabaseSet<deterministic::Context>;
+    type FinalizedArtifact = <MultiApp as Application<deterministic::Context>>::FinalizedArtifact;
     type Provider = ();
     type Input = ();
 
@@ -1015,16 +1016,35 @@ impl Application<deterministic::Context> for GatedMultiApp {
         .await
     }
 
+    async fn capture_finalized(
+        &mut self,
+        context: (deterministic::Context, Self::Context),
+        block: &Self::Block,
+        batches: &<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized,
+        readers: <Self::Databases as DatabaseSet<deterministic::Context>>::Readers,
+    ) -> Self::FinalizedArtifact {
+        <MultiApp as Application<deterministic::Context>>::capture_finalized(
+            &mut self.inner,
+            context,
+            block,
+            batches,
+            readers,
+        )
+        .await
+    }
+
     async fn finalized(
         &mut self,
         context: (deterministic::Context, Self::Context),
         block: &Self::Block,
+        provenance: Finalized<Self::FinalizedArtifact>,
         readers: <Self::Databases as DatabaseSet<deterministic::Context>>::Readers,
     ) {
         <MultiApp as Application<deterministic::Context>>::finalized(
             &mut self.inner,
             context,
             block,
+            provenance,
             readers,
         )
         .await;

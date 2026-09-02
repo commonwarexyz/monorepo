@@ -20,8 +20,8 @@ use crate::{
         reporter::MonitorReporter,
     },
     stateful::{
-        Application, Config as StatefulConfig, Input, Proposed, Stateful as StatefulActor,
-        SyncPlan,
+        Application, Config as StatefulConfig, Finalized, Input, Proposed,
+        Stateful as StatefulActor, SyncPlan,
         db::{
             DatabaseSet, Merkleized as _, Shared, SyncEngineConfig, Unmerkleized as _,
             p2p as qmdb_resolver,
@@ -375,6 +375,7 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E>
     type Context = Context<sha256::Digest, ed25519::PublicKey>;
     type Block = Block;
     type Databases = Database<E>;
+    type FinalizedArtifact = ();
     type Provider = ();
     type Input = ReshareInput<(), MinPk, ed25519::PrivateKey, TestDirectory>;
 
@@ -428,10 +429,20 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E>
         Self::execute(block.height(), batches).await
     }
 
+    async fn capture_finalized(
+        &mut self,
+        _context: (E, Self::Context),
+        _block: &Self::Block,
+        _batches: &<Self::Databases as DatabaseSet<E>>::Merkleized,
+        _readers: <Self::Databases as DatabaseSet<E>>::Readers,
+    ) {
+    }
+
     async fn finalized(
         &mut self,
         context: (E, Self::Context),
         block: &Self::Block,
+        _provenance: Finalized<Self::FinalizedArtifact>,
         _readers: <Self::Databases as DatabaseSet<E>>::Readers,
     ) {
         self.processed
