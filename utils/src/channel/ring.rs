@@ -90,16 +90,20 @@ impl<T: Send + Sync> Sender<T> {
     pub fn send_lossy(&self, item: T) -> bool {
         let mut shared = self.shared.lock();
 
+        // Nothing will ever read a buffered item once the receiver is gone.
         if shared.receiver_dropped {
             return false;
         }
 
+        // Make room by evicting the oldest item rather than blocking the sender.
         let old_item = if shared.buffer.len() >= shared.capacity {
             shared.buffer.pop_front()
         } else {
             None
         };
 
+        // Buffer the item and take the receiver's waker so it can be woken
+        // once the lock is released.
         shared.buffer.push_back(item);
         let waker = shared.receiver_waker.take();
         drop(shared);
@@ -107,6 +111,7 @@ impl<T: Send + Sync> Sender<T> {
         // Drop the old item after the lock is released to avoid potential mutex poisoning
         drop(old_item);
 
+        // Wake a receiver parked on an empty buffer.
         if let Some(w) = waker {
             w.wake();
         }
