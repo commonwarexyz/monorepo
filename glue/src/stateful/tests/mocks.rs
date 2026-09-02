@@ -305,7 +305,7 @@ impl<
     type Context = SimplexContext<Sha256Digest, ed25519::PublicKey>;
     type Block = TestBlock;
     type Databases = TestDatabases;
-    type FinalizedArtifact = ();
+    type Captured = ();
     type Provider = ();
     type Input = ();
 
@@ -345,7 +345,7 @@ impl<
         TestMerkleized
     }
 
-    async fn capture_finalized(
+    async fn capture(
         &mut self,
         _context: (E, Self::Context),
         _block: &Self::Block,
@@ -361,7 +361,7 @@ impl<
         &mut self,
         _context: (E, Self::Context),
         _block: &Self::Block,
-        _artifact: Self::FinalizedArtifact,
+        _captured: Self::Captured,
         _readers: <Self::Databases as DatabaseSet<E>>::Readers,
     ) {
         if let Some(hooks) = &self.finalization_hooks {

@@ -54,7 +54,7 @@ where
     type Context = Context<sha256::Digest, ed25519::PublicKey>;
     type Block = Block;
     type Databases = Database<E>;
-    type FinalizedArtifact = ();
+    type Captured = ();
     type Provider = ();
     type Input = ReshareInput<(), MinSig, ed25519::PrivateKey>;
 
@@ -111,7 +111,7 @@ where
         Self::execute(block.height(), batches).await
     }
 
-    async fn capture_finalized(
+    async fn capture(
         &mut self,
         _context: (E, Self::Context),
         _block: &Self::Block,

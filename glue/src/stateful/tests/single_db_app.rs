@@ -217,7 +217,7 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
     type Context = Context<sha256::Digest, ed25519::PublicKey>;
     type Block = Block;
     type Databases = SingleDatabaseSet<E>;
-    type FinalizedArtifact = ();
+    type Captured = ();
     type Provider = ();
     type Input = ();
 
@@ -274,7 +274,7 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         Self::execute(block.height(), batches).await
     }
 
-    async fn capture_finalized(
+    async fn capture(
         &mut self,
         _context: (E, Self::Context),
         _block: &Self::Block,

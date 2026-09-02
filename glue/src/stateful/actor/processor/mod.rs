@@ -932,10 +932,10 @@ where
         if let Some(owner) = reconstruction {
             owner.finish(Ok(()));
         }
-        let artifact = self
+        let captured = self
             .app
-            .capture_finalized(
-                (context.child("capture_finalized"), block.context()),
+            .capture(
+                (context.child("capture"), block.context()),
                 block,
                 &batch,
                 self.execution.databases.readers(),
@@ -951,7 +951,7 @@ where
             .finalized(
                 (context.child("finalized"), block.context()),
                 block,
-                artifact,
+                captured,
                 self.execution.databases.readers(),
             )
             .await;
@@ -1801,7 +1801,7 @@ mod tests {
     }
 
     #[derive(Debug, PartialEq, Eq)]
-    struct CapturedArtifact {
+    struct Captured {
         prior_counter: Option<u64>,
         batch_counter: u64,
         batch_view: u64,
@@ -1809,7 +1809,7 @@ mod tests {
 
     #[derive(Debug, PartialEq, Eq)]
     struct FinalizedObservation {
-        artifact: CapturedArtifact,
+        captured: Captured,
         post_counter: u64,
         post_view: u64,
     }
@@ -1867,7 +1867,7 @@ mod tests {
         type Context = TestContext;
         type Block = Block;
         type Databases = DbSet<deterministic::Context>;
-        type FinalizedArtifact = CapturedArtifact;
+        type Captured = Captured;
         type Provider = ();
         type Input = ();
 
@@ -1929,13 +1929,13 @@ mod tests {
             Self::execute(block.height(), block.context.round.view(), batches).await
         }
 
-        async fn capture_finalized(
+        async fn capture(
             &mut self,
             _context: (deterministic::Context, Self::Context),
             block: &Self::Block,
             batches: &TestMerkleized,
             readers: <Self::Databases as DatabaseSet<deterministic::Context>>::Readers,
-        ) -> Self::FinalizedArtifact {
+        ) -> Self::Captured {
             let prior_counter = readers
                 .read()
                 .await
@@ -1956,7 +1956,7 @@ mod tests {
                 .expect("batch read should succeed")
                 .map(|value| digest_to_u64(&value))
                 .expect("winning batch should contain its view");
-            CapturedArtifact {
+            Captured {
                 prior_counter,
                 batch_counter,
                 batch_view,
@@ -1967,7 +1967,7 @@ mod tests {
             &mut self,
             _context: (deterministic::Context, Self::Context),
             block: &Self::Block,
-            artifact: Self::FinalizedArtifact,
+            captured: Self::Captured,
             readers: <Self::Databases as DatabaseSet<deterministic::Context>>::Readers,
         ) {
             if let Some(probe) = &self.finalized_probe {
@@ -1991,7 +1991,7 @@ mod tests {
                 .expect("finalized counter should be reflected in the database set");
             drop(db);
             let observation = FinalizedObservation {
-                artifact,
+                captured,
                 post_counter,
                 post_view,
             };
@@ -3744,7 +3744,7 @@ mod tests {
     }
 
     #[test]
-    fn execution_finalized_handoff_preserves_cached_and_reconstructed_artifacts() {
+    fn execution_finalized_handoff_preserves_cached_and_reconstructed_captures() {
         deterministic::Runner::default().start(|context| async move {
             let (mut harness, observations) =
                 Harness::new_with_finalized_observer(context).await;
@@ -3774,7 +3774,7 @@ mod tests {
                 observations.lock().as_slice(),
                 [
                     FinalizedObservation {
-                        artifact: CapturedArtifact {
+                        captured: Captured {
                             prior_counter: None,
                             batch_counter: 1,
                             batch_view: 7,
@@ -3783,7 +3783,7 @@ mod tests {
                         post_view: 7,
                     },
                     FinalizedObservation {
-                        artifact: CapturedArtifact {
+                        captured: Captured {
                             prior_counter: Some(1),
                             batch_counter: 2,
                             batch_view: 11,
@@ -3792,7 +3792,7 @@ mod tests {
                         post_view: 11,
                     },
                 ],
-                "capture should see pre-apply state and finalized should receive the artifact after apply",
+                "capture should see pre-apply state and finalized should receive the captured value after apply",
             );
         });
     }

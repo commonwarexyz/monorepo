@@ -193,7 +193,7 @@ impl<DB> Shared<DB> {
 /// Unlike [`Shared`], this handle cannot acquire a write slot, construct or
 /// apply batches, finalize database state, prune, or rewind. Applications
 /// receive readers in
-/// [`Application::capture_finalized`](super::Application::capture_finalized)
+/// [`Application::capture`](super::Application::capture)
 /// and [`Application::finalized`](super::Application::finalized) so observing
 /// finalized state cannot invalidate concurrent speculative batches.
 ///

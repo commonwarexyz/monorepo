@@ -603,7 +603,7 @@ mod tests {
         type Context = <TestApp as Application<deterministic::Context>>::Context;
         type Block = TestBlock;
         type Databases = TestDatabases;
-        type FinalizedArtifact = ();
+        type Captured = ();
         type Provider = ();
         type Input = ();
 
@@ -658,7 +658,7 @@ mod tests {
             TestMerkleized
         }
 
-        async fn capture_finalized(
+        async fn capture(
             &mut self,
             _context: (deterministic::Context, Self::Context),
             _block: &Self::Block,
@@ -680,7 +680,7 @@ mod tests {
         type Context = <TestApp as Application<deterministic::Context>>::Context;
         type Block = TestBlock;
         type Databases = TestDatabases;
-        type FinalizedArtifact = ();
+        type Captured = ();
         type Provider = ();
         type Input = ();
 
@@ -732,7 +732,7 @@ mod tests {
             TestMerkleized
         }
 
-        async fn capture_finalized(
+        async fn capture(
             &mut self,
             _context: (deterministic::Context, Self::Context),
             _block: &Self::Block,
@@ -759,7 +759,7 @@ mod tests {
         type Context = <TestApp as Application<deterministic::Context>>::Context;
         type Block = TestBlock;
         type Databases = TestDatabases;
-        type FinalizedArtifact = Height;
+        type Captured = Height;
         type Provider = ();
         type Input = ();
 
@@ -813,13 +813,13 @@ mod tests {
             TestMerkleized
         }
 
-        async fn capture_finalized(
+        async fn capture(
             &mut self,
             _context: (deterministic::Context, Self::Context),
             block: &Self::Block,
             _batches: &TestMerkleized,
             _readers: <Self::Databases as DatabaseSet<deterministic::Context>>::Readers,
-        ) -> Self::FinalizedArtifact {
+        ) -> Self::Captured {
             self.capture_calls.fetch_add(1, Ordering::SeqCst);
             block.height()
         }
@@ -828,7 +828,7 @@ mod tests {
             &mut self,
             _context: (deterministic::Context, Self::Context),
             _block: &Self::Block,
-            height: Self::FinalizedArtifact,
+            height: Self::Captured,
             _readers: <Self::Databases as DatabaseSet<deterministic::Context>>::Readers,
         ) {
             self.applied_finalizations.lock().push(height);

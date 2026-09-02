@@ -177,7 +177,7 @@ where
     /// Owned data captured from winning batches before they are applied.
     ///
     /// Applications with nothing to capture use `()`.
-    type FinalizedArtifact: Send;
+    type Captured: Send;
 
     /// The stateful-owned provider, supplied through
     /// [`Config::provider`](crate::stateful::Config::provider).
@@ -319,7 +319,7 @@ where
     /// Only reads completed through `readers` during this call are guaranteed
     /// to observe database state before `batches`. Retain owned values instead
     /// of reader handles when the pre-apply state is required later. The
-    /// returned artifact is passed unchanged to [`finalized`](Self::finalized)
+    /// returned value is passed unchanged to [`finalized`](Self::finalized)
     /// after the batches are applied.
     ///
     /// This future and [`finalized`](Self::finalized) are awaited on the
@@ -327,21 +327,21 @@ where
     /// mailbox messages while either is pending. Keep this capture cheap and
     /// spawn expensive follow-on work from `finalized` instead of awaiting it
     /// on this path. Applications with nothing to capture return `()`.
-    fn capture_finalized(
+    fn capture(
         &mut self,
         context: (E, Self::Context),
         block: &Self::Block,
         batches: &<Self::Databases as DatabaseSet<E>>::Merkleized,
         readers: <Self::Databases as DatabaseSet<E>>::Readers,
-    ) -> impl Future<Output = Self::FinalizedArtifact> + Send;
+    ) -> impl Future<Output = Self::Captured> + Send;
 
     /// Observe a finalized block after its winning batches are applied.
     ///
     /// The wrapper calls this after every successful [`DatabaseSet::apply`] in
-    /// application order. `artifact` is the value returned by
-    /// [`capture_finalized`](Self::capture_finalized) for the exact applied
-    /// batches. The block's state is readable from the databases, but durability
-    /// through that block may still be pending. A database barrier may run
+    /// application order. `captured` is the value returned by
+    /// [`capture`](Self::capture) for the exact applied batches. The block's
+    /// state is readable from the databases, but durability through that block
+    /// may still be pending. A database barrier may run
     /// concurrently with this future. The wrapper releases the block's marshal
     /// acknowledgement only after this future resolves and a barrier covering
     /// the block completes.
@@ -366,7 +366,7 @@ where
         &mut self,
         _context: (E, Self::Context),
         _block: &Self::Block,
-        _artifact: Self::FinalizedArtifact,
+        _captured: Self::Captured,
         _readers: <Self::Databases as DatabaseSet<E>>::Readers,
     ) -> impl Future<Output = ()> + Send {
         async {}

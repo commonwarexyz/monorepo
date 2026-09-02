@@ -952,7 +952,7 @@ impl Application<deterministic::Context> for GatedMultiApp {
     type Context = <MultiApp as Application<deterministic::Context>>::Context;
     type Block = MultiBlock;
     type Databases = MultiDatabaseSet<deterministic::Context>;
-    type FinalizedArtifact = <MultiApp as Application<deterministic::Context>>::FinalizedArtifact;
+    type Captured = <MultiApp as Application<deterministic::Context>>::Captured;
     type Provider = ();
     type Input = ();
 
@@ -1016,14 +1016,14 @@ impl Application<deterministic::Context> for GatedMultiApp {
         .await
     }
 
-    async fn capture_finalized(
+    async fn capture(
         &mut self,
         context: (deterministic::Context, Self::Context),
         block: &Self::Block,
         batches: &<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized,
         readers: <Self::Databases as DatabaseSet<deterministic::Context>>::Readers,
-    ) -> Self::FinalizedArtifact {
-        <MultiApp as Application<deterministic::Context>>::capture_finalized(
+    ) -> Self::Captured {
+        <MultiApp as Application<deterministic::Context>>::capture(
             &mut self.inner,
             context,
             block,
@@ -1037,14 +1037,14 @@ impl Application<deterministic::Context> for GatedMultiApp {
         &mut self,
         context: (deterministic::Context, Self::Context),
         block: &Self::Block,
-        artifact: Self::FinalizedArtifact,
+        captured: Self::Captured,
         readers: <Self::Databases as DatabaseSet<deterministic::Context>>::Readers,
     ) {
         <MultiApp as Application<deterministic::Context>>::finalized(
             &mut self.inner,
             context,
             block,
-            artifact,
+            captured,
             readers,
         )
         .await;

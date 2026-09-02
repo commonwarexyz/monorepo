@@ -343,7 +343,7 @@ mod tests {
         type Context = SimplexContext<Sha256Digest, ed25519::PublicKey>;
         type Block = TestBlock;
         type Databases = WedgeSet;
-        type FinalizedArtifact = ();
+        type Captured = ();
         type Provider = ();
         type Input = ();
 
@@ -384,7 +384,7 @@ mod tests {
             unreachable!("WedgeApp only serves the syncer harness")
         }
 
-        async fn capture_finalized(
+        async fn capture(
             &mut self,
             _context: (deterministic::Context, Self::Context),
             _block: &Self::Block,
