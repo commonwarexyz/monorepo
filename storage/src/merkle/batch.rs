@@ -63,10 +63,10 @@
 //! applied. Invalid batches must not be used: their methods may return incorrect data rather than
 //! erroring.
 //!
-//! Pruning the base after a batch has been merkleized does not invalidate it: applying the batch
-//! then yields the same state as applying it before the prune (see [`Mem::apply_batch`]). An
-//! unmerkleized batch still reads sibling digests from the base while merkleizing, so it must be
-//! merkleized before the base is pruned past any leaf it updates.
+//! Pruning the base after a batch has been merkleized does not invalidate it: prune and apply
+//! commute (see [`Mem::apply_batch`]). An unmerkleized batch still reads sibling digests from the
+//! base while merkleizing, so it must be merkleized before the base is pruned past any leaf it
+//! updates.
 //!
 //! # Example (MMR)
 //!

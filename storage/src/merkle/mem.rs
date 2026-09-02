@@ -403,8 +403,8 @@ impl<F: Family, D: Digest> Mem<F, D> {
 
     /// Apply a merkleized batch. Already-committed ancestors are skipped automatically.
     ///
-    /// Pruning this structure after the batch was merkleized does not invalidate the batch:
-    /// applying it yields the same state as applying it before the prune.
+    /// Pruning this structure after the batch was merkleized does not invalidate the batch: prune
+    /// and apply commute.
     ///
     /// # Errors
     ///
@@ -1366,57 +1366,73 @@ mod tests {
 
     /// Pruning between applying a parent and applying its child must not drop overwrites below
     /// the new boundary, whether they belong to the child or to an unapplied overwrite-only
-    /// ancestor in between.
+    /// ancestor in between. An applied overwrite-only parent leaves the size unchanged, so the
+    /// child cannot tell it was applied and re-applies it, which must not change the state.
     fn apply_batch_chain_after_prune_matches_prune_after_apply<F: Family>() {
         let hasher: H = Standard::new(ForwardFold);
         for n in 1..=12u64 {
             let mem = build_raw::<F>(&hasher, n);
             for update_loc in 0..n {
-                for (middle, append) in [(false, false), (false, true), (true, false), (true, true)]
-                {
-                    // Chain: Mem -> parent (append) [-> middle (overwrite only)] -> child.
-                    let parent = mem
-                        .new_batch()
-                        .add(&hasher, b"parent")
-                        .merkleize(&mem, &hasher);
-                    let child_parent = if middle {
-                        parent
-                            .new_batch()
-                            .update_leaf(&hasher, Location::new(0), b"middle")
-                            .unwrap()
-                            .merkleize(&mem, &hasher)
-                    } else {
-                        parent.clone()
-                    };
-                    let child = {
-                        let batch = child_parent
-                            .new_batch()
-                            .update_leaf(&hasher, Location::new(update_loc), b"child")
-                            .unwrap();
-                        let batch = if append {
-                            batch.add(&hasher, b"appended")
-                        } else {
-                            batch
+                for parent_append in [false, true] {
+                    for (middle, append) in
+                        [(false, false), (false, true), (true, false), (true, true)]
+                    {
+                        // Chain: Mem -> parent (append or overwrite only) [-> middle (overwrite
+                        // only)] -> child.
+                        let parent = {
+                            let batch = mem.new_batch();
+                            let batch = if parent_append {
+                                batch.add(&hasher, b"parent")
+                            } else {
+                                batch
+                                    .update_leaf(&hasher, Location::new(0), b"parent")
+                                    .unwrap()
+                            };
+                            batch.merkleize(&mem, &hasher)
                         };
-                        batch.merkleize(&mem, &hasher)
-                    };
-                    let root = child.root(&mem, &hasher, 0).unwrap();
-                    let case = format!("n={n} update={update_loc} middle={middle} append={append}");
+                        let child_parent = if middle {
+                            parent
+                                .new_batch()
+                                .update_leaf(&hasher, Location::new(0), b"middle")
+                                .unwrap()
+                                .merkleize(&mem, &hasher)
+                        } else {
+                            parent.clone()
+                        };
+                        let child = {
+                            let batch = child_parent
+                                .new_batch()
+                                .update_leaf(&hasher, Location::new(update_loc), b"child")
+                                .unwrap();
+                            let batch = if append {
+                                batch.add(&hasher, b"appended")
+                            } else {
+                                batch
+                            };
+                            batch.merkleize(&mem, &hasher)
+                        };
+                        let root = child.root(&mem, &hasher, 0).unwrap();
+                        let case = format!(
+                            "n={n} update={update_loc} parent_append={parent_append} \
+                             middle={middle} append={append}"
+                        );
 
-                    for prune_to in 1..=(n + 1) {
-                        let prune_to = Location::new(prune_to);
-                        let mut expected = mem.clone();
-                        expected.apply_batch(&parent).unwrap();
-                        expected.apply_batch(&child).unwrap();
-                        expected.prune(prune_to).unwrap();
+                        let leaves = n + u64::from(parent_append);
+                        for prune_to in 1..=leaves {
+                            let prune_to = Location::new(prune_to);
+                            let mut expected = mem.clone();
+                            expected.apply_batch(&parent).unwrap();
+                            expected.apply_batch(&child).unwrap();
+                            expected.prune(prune_to).unwrap();
 
-                        let mut actual = mem.clone();
-                        actual.apply_batch(&parent).unwrap();
-                        actual.prune(prune_to).unwrap();
-                        actual.apply_batch(&child).unwrap();
+                            let mut actual = mem.clone();
+                            actual.apply_batch(&parent).unwrap();
+                            actual.prune(prune_to).unwrap();
+                            actual.apply_batch(&child).unwrap();
 
-                        let context = format!("{case} prune={prune_to}");
-                        assert_same_state(&hasher, &actual, &expected, root, &context);
+                            let context = format!("{case} prune={prune_to}");
+                            assert_same_state(&hasher, &actual, &expected, root, &context);
+                        }
                     }
                 }
             }
