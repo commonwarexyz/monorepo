@@ -25,7 +25,7 @@
 use crate::stateful::{
     Application, Input, Proposed, PruneConfig,
     actor::{core::Verification, metrics::Metrics as StatefulMetrics},
-    db::{Anchor, Barrier, DatabaseSet},
+    db::{Anchor, Barrier, DatabaseSet, Publisher, SnapshotsOf},
 };
 use commonware_consensus::{
     Block, CertifiableBlock, Heightable, Roundable,
@@ -479,7 +479,11 @@ impl Cancellation for Verification {
 }
 
 /// State applied for a newly finalized block.
-pub(super) struct Applied<T> {
+pub(super) struct Applied<T, S> {
+    /// A snapshot of the database set, captured when this block started durability.
+    /// `None` while an earlier sync is still active.
+    pub(super) snapshots: Option<S>,
+
     /// Durability started for this block, when no earlier sync was active.
     pub(super) barrier: Option<Barrier>,
 
@@ -687,6 +691,23 @@ where
         &self.execution.databases
     }
 
+    /// Capture a snapshot of the database set's applied state and publish it
+    /// at the processed height.
+    ///
+    /// Returns a future that captures a clone of the set rather than `&self`,
+    /// so it stays `Send` without requiring `Application: Sync`.
+    pub(super) fn publish_snapshot<'p>(
+        &self,
+        publisher: &'p mut Publisher<SnapshotsOf<A::Databases, E>>,
+    ) -> impl Future<Output = ()> + Send + 'p {
+        let databases = self.execution.databases.clone();
+        let height = self.execution.last_processed().height;
+        async move {
+            let snapshots = databases.snapshot().await;
+            publisher.publish(height, snapshots);
+        }
+    }
+
     pub(super) fn last_processed(&self) -> Anchor<PendingDigest<A, E>> {
         self.execution.last_processed()
     }
@@ -858,7 +879,7 @@ where
         context: &E,
         block: &A::Block,
         start_sync: bool,
-    ) -> Option<Applied<PendingSyncTargets<A, E>>> {
+    ) -> Option<Applied<PendingSyncTargets<A, E>, SnapshotsOf<A::Databases, E>>> {
         let finalized = Anchor::from(block);
         let (height, digest) = (finalized.height, finalized.digest);
         let last_processed = self.execution.last_processed();
@@ -933,10 +954,11 @@ where
             owner.finish(Ok(()));
         }
         self.execution.databases.apply(batch).await;
-        let barrier = if start_sync {
-            Some(self.execution.databases.finalize().await)
+        let (snapshots, barrier) = if start_sync {
+            let (snapshots, barrier) = self.execution.databases.finalize().await;
+            (Some(snapshots), Some(barrier))
         } else {
-            None
+            (None, None)
         };
         self.notify_finalized(context, block).await;
         let prune = self
@@ -946,7 +968,11 @@ where
         self.execution.finish_finalization(finalized);
         timer.observe(context);
 
-        Some(Applied { barrier, prune })
+        Some(Applied {
+            snapshots,
+            barrier,
+            prune,
+        })
     }
 
     /// Notify the application that marshal delivered a finalized block already
@@ -2127,7 +2153,11 @@ mod tests {
                 <DbSet<deterministic::Context> as DatabaseSet<deterministic::Context>>::SyncTargets,
             >,
         > {
-            let Applied { barrier, prune } = self
+            let Applied {
+                snapshots: _,
+                barrier,
+                prune,
+            } = self
                 .processor
                 .finalize(self.context_cell.as_present(), &block, true)
                 .await

@@ -15,6 +15,7 @@ use commonware_cryptography::{
 use commonware_runtime::{Buf, BufMut, Error as RuntimeError, Handle};
 use commonware_utils::{channel::oneshot, sync::Mutex};
 use std::{
+    cell::RefCell,
     convert::Infallible,
     sync::{
         Arc,
@@ -63,6 +64,18 @@ struct PruneGate {
     release: oneshot::Receiver<()>,
 }
 
+/// Signals that a snapshot capture has started, then blocks it until the test releases it.
+struct SnapshotGate {
+    started: oneshot::Sender<()>,
+    release: oneshot::Receiver<()>,
+}
+
+thread_local! {
+    /// Single-use gate consumed by the next [`TestDb`] snapshot capture. Parks an actor's
+    /// startup publish between database recovery and mailbox polling.
+    static SNAPSHOT_GATE: RefCell<Option<SnapshotGate>> = const { RefCell::new(None) };
+}
+
 /// Shared observer for a gated [`TestDb`]: parked flush releases and recorded
 /// prune targets.
 #[derive(Clone, Default)]
@@ -97,6 +110,7 @@ impl FlushControl {
 pub(crate) struct TestDb {
     sync: Mutex<Option<Handle<()>>>,
     control: Option<FlushControl>,
+    finalized: u64,
 }
 
 impl TestDb {
@@ -104,6 +118,7 @@ impl TestDb {
         Self {
             sync: Mutex::new(Some(handle)),
             control: None,
+            finalized: 0,
         }
     }
 
@@ -111,7 +126,27 @@ impl TestDb {
         Self {
             sync: Mutex::new(None),
             control: Some(control),
+            finalized: 0,
         }
+    }
+
+    /// Gates the next snapshot capture on this thread. The receiver reports entry, and
+    /// sending on the returned sender lets the capture continue.
+    pub(crate) fn gate_next_snapshot() -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (started, started_rx) = oneshot::channel();
+        let (release, release_rx) = oneshot::channel();
+        SNAPSHOT_GATE.with(|gate| {
+            assert!(
+                gate.borrow_mut()
+                    .replace(SnapshotGate {
+                        started,
+                        release: release_rx,
+                    })
+                    .is_none(),
+                "snapshot gate already installed",
+            );
+        });
+        (started_rx, release)
     }
 }
 
@@ -121,6 +156,18 @@ impl<E: Send> ManagedDb<E> for TestDb {
     type Error = Infallible;
     type Config = ();
     type SyncTarget = u64;
+    type Snapshot = u64;
+
+    async fn snapshot(self) -> Result<(Self, Self::Snapshot), Self::Error> {
+        if let Some(mut gate) = SNAPSHOT_GATE.with(|gate| gate.borrow_mut().take()) {
+            gate.started
+                .send(())
+                .expect("test must await the snapshot gate");
+            let _ = (&mut gate.release).await;
+        }
+        let snapshot = self.finalized;
+        Ok((self, snapshot))
+    }
 
     fn initial_sync_target() -> Self::SyncTarget {
         unreachable!("TestDb is constructed directly in tests")
@@ -138,25 +185,27 @@ impl<E: Send> ManagedDb<E> for TestDb {
         true
     }
 
-    async fn apply(self, _batch: Self::Merkleized) -> Result<Self, Self::Error> {
+    async fn apply(mut self, _batch: Self::Merkleized) -> Result<Self, Self::Error> {
+        self.finalized += 1;
         if let Some(control) = &self.control {
             control.applied.fetch_add(1, Ordering::Relaxed);
         }
         Ok(self)
     }
 
-    async fn finalize(self) -> Result<(Self, Handle<()>), Self::Error> {
+    async fn finalize(self) -> Result<(Self, Self::Snapshot, Handle<()>), Self::Error> {
+        let snapshot = self.finalized;
         if let Some(control) = &self.control {
             let (release, released) = oneshot::channel();
             control.flushes.lock().push(release);
-            return Ok((self, Handle::from_receiver(released)));
+            return Ok((self, snapshot, Handle::from_receiver(released)));
         }
         let handle = self
             .sync
             .lock()
             .take()
             .unwrap_or_else(|| Handle::ready(Ok(())));
-        Ok((self, handle))
+        Ok((self, snapshot, handle))
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Self::Error> {
