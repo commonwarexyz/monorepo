@@ -2333,7 +2333,7 @@ fn lqc_output_waits_for_earlier_owner_claim() {
     }
 
     let blocked = finality
-        .validate_finality_claim::<Sha256>(later_id, later_observation, &later, &profile)
+        .validate_finality_claim::<Sha256>(later_id, later_observation, &later, &profile, None)
         .unwrap();
     assert!(blocked.is_empty());
 
@@ -2404,6 +2404,7 @@ fn later_duplicate_completion_preserves_an_earlier_finality_observation() {
             first_observation,
             &certificate,
             &profile,
+            None,
         )
         .unwrap();
     assert!(blocked.is_empty());
@@ -2421,6 +2422,7 @@ fn later_duplicate_completion_preserves_an_earlier_finality_observation() {
             duplicate_observation,
             &certificate,
             &profile,
+            None,
         )
         .unwrap();
     assert!(duplicate.is_empty());
@@ -2474,7 +2476,7 @@ fn retiring_pending_finality_claim_releases_later_certificate() {
             .unwrap();
     }
     let blocked = finality
-        .validate_finality_claim::<Sha256>(later_id, later_observation, &later, &profile)
+        .validate_finality_claim::<Sha256>(later_id, later_observation, &later, &profile, None)
         .unwrap();
     assert!(blocked.is_empty());
 

@@ -9,7 +9,7 @@
 
 use super::{
     Artifact, ArtifactId, Observation, Profile,
-    algebra::{FinalTips, PoolExtractor},
+    algebra::{FinalTips, PoolExtractor, VerifiedVote, vote_evidence},
 };
 use crate::{
     Epochable,
@@ -21,7 +21,6 @@ use crate::{
     },
     types::{Attributable, Participant, Round, View},
 };
-use commonware_codec::Encode;
 use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
 use std::{
     collections::{BTreeMap, BTreeSet, btree_map::Entry},
@@ -29,7 +28,6 @@ use std::{
 };
 
 const FINALITY_EVIDENCE_NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_MULTIMMIT_FINALITY_EVIDENCE";
-const FINALITY_VOTE_NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_MULTIMMIT_FINALITY_VOTE";
 
 pub(super) type PoolKey<D> = (Round, D);
 type VoteArtifacts<V, D> = Arc<[Arc<Artifact<V, D>>]>;
@@ -197,6 +195,23 @@ pub(super) struct FinalityClaim<V: Variant, D: Digest> {
     pub(super) artifact: Arc<Artifact<V, D>>,
     reservations: PoolReservations<D>,
     verdict: ClaimVerdict,
+    /// Derivations the compute pool produced while verifying a certificate, held until the
+    /// claim is observed so the voter thread never rebuilds or hashes the attested votes.
+    derivations: Option<CertificateDerivations<D>>,
+}
+
+/// Expensive derivations of one verified certificate, produced off the voter thread.
+#[derive(Clone, Debug)]
+pub(crate) enum CertificateDerivations<D: Digest> {
+    Vqc {
+        leader: D,
+        votes: Vec<VerifiedVote<D>>,
+    },
+    Lqc {
+        leader: D,
+        tips: FinalTips<D>,
+        votes: Vec<VerifiedVote<D>>,
+    },
 }
 
 impl<V: Variant, D: Digest> FinalityClaim<V, D> {
@@ -210,6 +225,7 @@ impl<V: Variant, D: Digest> FinalityClaim<V, D> {
             artifact,
             reservations,
             verdict: ClaimVerdict::Pending,
+            derivations: None,
         }
     }
 
@@ -979,7 +995,14 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
         artifact: &Arc<Artifact<V, D>>,
         profile: &Profile<H, V>,
     ) -> Result<FinalityOutputs<V, D>, FinalityError> {
-        self.resolve_finality_claim::<H>(id, observation, artifact, ClaimVerdict::Rejected, profile)
+        self.resolve_finality_claim::<H>(
+            id,
+            observation,
+            artifact,
+            ClaimVerdict::Rejected,
+            profile,
+            None,
+        )
     }
 
     pub(super) fn validate_finality_claim<H: Hasher<Digest = D>>(
@@ -988,6 +1011,7 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
         observation: Observation,
         artifact: &Arc<Artifact<V, D>>,
         profile: &Profile<H, V>,
+        derivations: Option<CertificateDerivations<D>>,
     ) -> Result<FinalityOutputs<V, D>, FinalityError> {
         if matches!(artifact.as_ref(), Artifact::Lqc(_)) && self.is_retired(artifact) {
             // Diagnostic retention may discard an L-QC claim before verification completes.
@@ -999,7 +1023,14 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
                 Arc::clone(artifact),
             )]);
         }
-        self.resolve_finality_claim::<H>(id, observation, artifact, ClaimVerdict::Valid, profile)
+        self.resolve_finality_claim::<H>(
+            id,
+            observation,
+            artifact,
+            ClaimVerdict::Valid,
+            profile,
+            derivations,
+        )
     }
 
     fn resolve_finality_claim<H: Hasher<Digest = D>>(
@@ -1009,6 +1040,7 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
         artifact: &Arc<Artifact<V, D>>,
         verdict: ClaimVerdict,
         profile: &Profile<H, V>,
+        derivations: Option<CertificateDerivations<D>>,
     ) -> Result<FinalityOutputs<V, D>, FinalityError> {
         let Some(claim) = self.finality_claims.get(&id) else {
             // A discarded artifact may already have drained its claim as valid; the rejection
@@ -1035,6 +1067,9 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
             .get_mut(&id)
             .expect("the reconciled finality claim remains retained");
         claim.verdict = verdict;
+        if derivations.is_some() {
+            claim.derivations = derivations;
+        }
         if !claim.ordered() {
             let claim = self
                 .finality_claims
@@ -1164,14 +1199,19 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
                 self.reject_finality::<H>(id, claim.artifact.as_ref())?;
             }
             ClaimVerdict::Valid => {
+                let derived_leader = match claim.derivations.as_ref() {
+                    Some(CertificateDerivations::Vqc { leader, .. })
+                    | Some(CertificateDerivations::Lqc { leader, .. }) => Some(*leader),
+                    None => None,
+                };
                 let certificate_key = match claim.artifact.as_ref() {
                     Artifact::Vqc(certificate) => Some((
                         certificate.leader().round(),
-                        certificate.leader().digest::<H>(),
+                        derived_leader.unwrap_or_else(|| certificate.leader().digest::<H>()),
                     )),
                     Artifact::Lqc(certificate) => Some((
                         certificate.leader().round(),
-                        certificate.leader().digest::<H>(),
+                        derived_leader.unwrap_or_else(|| certificate.leader().digest::<H>()),
                     )),
                     _ => None,
                 };
@@ -1371,11 +1411,13 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
             }
             Artifact::Vqc(certificate) => {
                 self.observe_leader::<H>(id, observation, certificate.leader().clone(), true)?;
-                self.observe_vqc::<H>(id, observation, certificate, claim)?;
+                let derivations = claim.derivations.take();
+                self.observe_vqc::<H>(id, observation, certificate, claim, derivations)?;
             }
             Artifact::Lqc(certificate) => {
                 self.observe_leader::<H>(id, observation, certificate.leader().clone(), true)?;
-                self.observe_lqc::<H>(id, observation, certificate)?;
+                let derivations = claim.derivations.take();
+                self.observe_lqc::<H>(id, observation, certificate, derivations)?;
             }
             Artifact::Vote(vote) => {
                 let key = Self::slot(vote).0;
@@ -1723,26 +1765,49 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
         observation: Observation,
         certificate: &Vqc<V, D>,
         claim: &FinalityClaim<V, D>,
+        derivations: Option<CertificateDerivations<D>>,
     ) -> Result<(), FinalityError> {
-        let leader = certificate.leader();
-        for signer in certificate.tally().signers().iter() {
-            let body = certificate
-                .tally()
-                .vote::<V, H>(leader, signer, self.config)
-                .map_err(|_| FinalityError::Algebra)?;
-            if claim.retains((body.round(), body.leader())) {
-                self.observe_aggregate_vote::<H>(id, observation, signer, body)?;
-            }
-        }
-        for conflict in certificate.conflicting_votes() {
-            let body = conflict
-                .vote_body(leader.round(), self.config)
-                .map_err(|_| FinalityError::Algebra)?;
-            if claim.retains((body.round(), body.leader())) {
-                self.observe_aggregate_vote::<H>(id, observation, conflict.signer(), body)?;
+        let votes = match derivations {
+            Some(CertificateDerivations::Vqc { votes, .. }) => votes,
+            _ => Self::expand_vqc_votes::<H>(certificate, self.config)?,
+        };
+        for vote in votes {
+            if claim.retains((vote.body.round(), vote.body.leader())) {
+                self.observe_aggregate_vote::<H>(
+                    id,
+                    observation,
+                    vote.signer,
+                    vote.body,
+                    vote.evidence,
+                )?;
             }
         }
         Ok(())
+    }
+
+    /// Rebuilds every attested vote of a V-QC in place: the recovery path, where no compute-pool
+    /// derivation accompanies the certificate.
+    fn expand_vqc_votes<H: Hasher<Digest = D>>(
+        certificate: &Vqc<V, D>,
+        config: CodecConfig,
+    ) -> Result<Vec<VerifiedVote<D>>, FinalityError> {
+        let leader = certificate.leader();
+        let tally = certificate.tally();
+        let mut votes =
+            Vec::with_capacity(tally.signers().count() + certificate.conflicting_votes().len());
+        for signer in tally.signers().iter() {
+            let body = tally
+                .vote::<V, H>(leader, signer, config)
+                .map_err(|_| FinalityError::Algebra)?;
+            votes.push(VerifiedVote::new::<H>(signer, body));
+        }
+        for conflict in certificate.conflicting_votes() {
+            let body = conflict
+                .vote_body(leader.round(), config)
+                .map_err(|_| FinalityError::Algebra)?;
+            votes.push(VerifiedVote::new::<H>(conflict.signer(), body));
+        }
+        Ok(votes)
     }
 
     fn observe_aggregate_vote<H: Hasher<Digest = D>>(
@@ -1751,6 +1816,7 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
         observation: Observation,
         signer: Participant,
         body: VoteBody<D>,
+        evidence: D,
     ) -> Result<(), FinalityError> {
         let key = (body.round(), body.leader());
         let pending = self.pending_finality.entry(key).or_default();
@@ -1760,7 +1826,7 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
             VoteRecord {
                 id,
                 observation,
-                evidence: vote_evidence::<H, D>(signer, &body),
+                evidence,
                 body,
                 artifact: None,
             },
@@ -1776,23 +1842,39 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
         id: ArtifactId<D>,
         observation: Observation,
         certificate: &Lqc<V, D>,
+        derivations: Option<CertificateDerivations<D>>,
     ) -> Result<(), FinalityError> {
         let leader = certificate.leader();
-        let mut votes = Vec::with_capacity(certificate.tally().signers().count());
-        for signer in certificate.tally().signers().iter() {
-            let body = certificate
-                .tally()
-                .vote::<V, H>(leader, signer, self.config)
+        let (leader_digest, tips, votes) = match derivations {
+            Some(CertificateDerivations::Lqc {
+                leader,
+                tips,
+                votes,
+            }) => (leader, tips, votes),
+            _ => {
+                // Recovery path: no compute-pool derivation accompanies the certificate.
+                let tally = certificate.tally();
+                let mut expanded = Vec::with_capacity(tally.signers().count());
+                for signer in tally.signers().iter() {
+                    let body = tally
+                        .vote::<V, H>(leader, signer, self.config)
+                        .map_err(|_| FinalityError::Algebra)?;
+                    expanded.push((signer, body));
+                }
+                let tips = FinalTips::from_pool::<H, V, _>(
+                    leader,
+                    expanded.iter().map(|(signer, body)| (*signer, body)),
+                    self.config,
+                )
                 .map_err(|_| FinalityError::Algebra)?;
-            votes.push((signer, body));
-        }
-        let tips = FinalTips::from_pool::<H, V, _>(
-            leader,
-            votes.iter().map(|(signer, body)| (*signer, body)),
-            self.config,
-        )
-        .map_err(|_| FinalityError::Algebra)?;
-        let key = (leader.round(), leader.digest::<H>());
+                let votes = expanded
+                    .into_iter()
+                    .map(|(signer, body)| VerifiedVote::new::<H>(signer, body))
+                    .collect();
+                (leader.digest::<H>(), tips, votes)
+            }
+        };
+        let key = (leader.round(), leader_digest);
         let fact = finality_fact(
             FinalityId::Lqc(id),
             leader,
@@ -1825,8 +1907,8 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
                 .lqc = LqcState::Complete;
         }
 
-        for (signer, body) in votes {
-            self.observe_aggregate_vote::<H>(id, observation, signer, body)?;
+        for vote in votes {
+            self.observe_aggregate_vote::<H>(id, observation, vote.signer, vote.body, vote.evidence)?;
         }
         Ok(())
     }
@@ -2154,16 +2236,6 @@ where
             .map(|vote| vote.evidence.as_ref()),
     );
     H::hash(&transcript)
-}
-
-fn vote_evidence<H, D>(signer: Participant, body: &VoteBody<D>) -> D
-where
-    H: Hasher<Digest = D>,
-    D: Digest,
-{
-    let signer = u64::from(signer.get()).to_be_bytes();
-    let body = body.encode();
-    H::hash(&[FINALITY_VOTE_NAMESPACE, &signer, body.as_ref()])
 }
 
 fn finality_fact<V: Variant, D: Digest>(
