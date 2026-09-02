@@ -369,6 +369,185 @@ where
             ancestor_items: Vec::new(),
         })
     }
+
+    /// Generate a proof of inclusion for items starting at `start_loc`.
+    ///
+    /// Returns a proof and the items corresponding to the leaves in the range `start_loc..end_loc`,
+    /// where `end_loc` is the minimum of the current item count and `start_loc + max_ops`.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [Error::Merkle] with [merkle::Error::LocationOverflow] if `start_loc` >
+    ///   [Family::MAX_LEAVES].
+    /// - Returns [Error::Merkle] with [merkle::Error::RangeOutOfBounds] if `start_loc` >= current
+    ///   item count.
+    /// - Returns [Error::Journal] with [crate::journal::Error::ItemPruned] if `start_loc` has been
+    ///   pruned.
+    pub async fn proof(
+        &self,
+        start_loc: Location<F>,
+        max_ops: NonZeroU64,
+        inactive_peaks: usize,
+    ) -> Result<(Proof<F, H::Digest>, Vec<C::Item>), Error<F>> {
+        self.historical_proof(self.size(), start_loc, max_ops, inactive_peaks)
+            .await
+    }
+
+    /// Inclusion proof for the items `batch` appends, anchored at the batch's speculative tip.
+    ///
+    /// Nodes below the batch chain are read from this journal's
+    /// [Merkle store][crate::merkle::mem::Mem], which retains them at least until
+    /// the batch's changes are flushed.
+    pub fn speculative_proof(
+        &self,
+        batch: &MerkleizedBatch<F, H::Digest, C::Item, S>,
+        inactive_peaks: usize,
+    ) -> Result<Proof<F, H::Digest>, Error<F>> {
+        let end = batch.size();
+        let start = Location::new(end - batch.items().len() as u64);
+        self.merkle
+            .with_mem(|mem| {
+                batch.range_proof(mem, &self.hasher, start..Location::new(end), inactive_peaks)
+            })
+            .map_err(Error::Merkle)
+    }
+
+    /// Generate a historical proof with respect to the state of the Merkle structure when it had
+    /// `historical_leaves` leaves.
+    ///
+    /// Returns a proof and the items corresponding to the leaves in the range `start_loc..end_loc`,
+    /// where `end_loc` is the minimum of `historical_leaves` and `start_loc + max_ops`.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [Error::Merkle] with [merkle::Error::RangeOutOfBounds] if `start_loc` >=
+    ///   `historical_leaves` or `historical_leaves` > number of items in the journal.
+    /// - Returns [Error::Journal] with [crate::journal::Error::ItemPruned] if `start_loc` has been
+    ///   pruned.
+    pub async fn historical_proof(
+        &self,
+        historical_leaves: Location<F>,
+        start_loc: Location<F>,
+        max_ops: NonZeroU64,
+        inactive_peaks: usize,
+    ) -> Result<(Proof<F, H::Digest>, Vec<C::Item>), Error<F>> {
+        let bounds = self.journal.bounds();
+
+        if *historical_leaves > bounds.end {
+            return Err(merkle::Error::RangeOutOfBounds(Location::new(bounds.end)).into());
+        }
+        if start_loc >= historical_leaves {
+            return Err(merkle::Error::RangeOutOfBounds(start_loc).into());
+        }
+
+        let end_loc = std::cmp::min(historical_leaves, start_loc.saturating_add(max_ops.get()));
+
+        let hasher = self.hasher.clone();
+        let proof = self
+            .merkle
+            .historical_range_proof(
+                &hasher,
+                historical_leaves,
+                start_loc..end_loc,
+                inactive_peaks,
+            )
+            .await?;
+
+        let positions: Vec<u64> = (*start_loc..*end_loc).collect();
+        let ops = self.journal.read_many(&positions).await?;
+
+        Ok((proof, ops))
+    }
+
+    /// Like [`Contiguous::read_many`], but returns the items partitioned into the shards the
+    /// probe ran with. Concatenating the shards yields the items in `positions` order.
+    ///
+    /// Large batches shard the page-cache probe across the strategy pool. Each shard
+    /// assembles its own hits while they are still cache-hot on the probing worker, so bulk
+    /// callers that can consume partitioned results (e.g. the floor raise, which classifies
+    /// candidates in chunks) skip the serial reassembly a flat result would require.
+    pub(crate) async fn read_many_sharded(
+        &self,
+        positions: &[u64],
+    ) -> Result<Vec<Vec<C::Item>>, JournalError> {
+        // An empty batch cannot shard: the parallel arm's chunk math needs a non-zero chunk
+        // size, and the policy may explore that arm at any batch size.
+        if positions.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Probe page-cache hits synchronously and complete the misses with one batched read.
+        // The strategy policy decides per batch size whether the probe runs on the calling
+        // thread or sharded across the pool (one scratch buffer per shard and one cache-lock
+        // acquisition per blob a shard touches). The sortedness assert keeps contract
+        // violations deterministic: past it, a non-increasing batch would only trip per-shard
+        // validation when an inversion lands inside a single shard.
+        assert!(
+            positions.is_sorted_by(|a, b| a < b),
+            "positions must be strictly increasing"
+        );
+        let strategy = self.strategy();
+        let journal = &self.journal;
+
+        // Each shard yields its hits densely plus the shard-local indices it declined.
+        let probe = |positions: &[u64]| -> (Vec<C::Item>, Vec<usize>) {
+            let probed = journal.try_read_many_sync(positions);
+            let mut hits = Vec::with_capacity(probed.len());
+            let mut missed = Vec::new();
+            for (idx, item) in probed.into_iter().enumerate() {
+                match item {
+                    Some(item) => hits.push(item),
+                    None => missed.push(idx),
+                }
+            }
+            (hits, missed)
+        };
+        let shards: Vec<(Vec<C::Item>, Vec<usize>)> = strategy.run(
+            positions.len(),
+            || vec![probe(positions)],
+            || {
+                let manual = strategy.manual();
+                let shard_len = positions.len().div_ceil(manual.parallelism());
+                manual.map_collect_vec(positions.chunks(shard_len).collect::<Vec<_>>(), &probe)
+            },
+        );
+
+        // The declined positions are a strictly increasing subsequence of `positions`, so one
+        // batched read serves them all. Each shard covers the slice of `positions` starting
+        // at the previous shards' total item count, whatever geometry the probe ran with.
+        let mut misses: Vec<u64> = Vec::new();
+        let mut offset = 0;
+        for (hits, missed) in &shards {
+            misses.extend(missed.iter().map(|idx| positions[offset + idx]));
+            offset += hits.len() + missed.len();
+        }
+        if misses.is_empty() {
+            return Ok(shards.into_iter().map(|(hits, _)| hits).collect());
+        }
+        let mut fetched = journal.read_many(&misses).await?.into_iter();
+
+        // Weave the fetched items back into each shard that declined positions.
+        let mut result = Vec::with_capacity(shards.len());
+        for (hits, missed) in shards {
+            if missed.is_empty() {
+                result.push(hits);
+                continue;
+            }
+            let total = hits.len() + missed.len();
+            let mut woven = Vec::with_capacity(total);
+            let mut hits = hits.into_iter();
+            let mut missed = missed.into_iter().peekable();
+            for idx in 0..total {
+                if missed.next_if_eq(&idx).is_some() {
+                    woven.push(fetched.next().expect("one fetched item per miss"));
+                } else {
+                    woven.push(hits.next().expect("one probed item per hit"));
+                }
+            }
+            result.push(woven);
+        }
+        Ok(result)
+    }
 }
 
 impl<F, E, C, H, S> Journal<F, E, C, H, S>
@@ -411,16 +590,7 @@ where
 
         Ok(self)
     }
-}
 
-impl<F, E, C, H, S> Journal<F, E, C, H, S>
-where
-    F: Family,
-    E: Context,
-    C: Mutable<Item: EncodeShared>,
-    H: Hasher,
-    S: Strategy,
-{
     /// Create a new [Journal] from the given components after aligning the Merkle structure with
     /// the journal.
     #[boxed]
@@ -635,114 +805,7 @@ where
 
         Ok((self, boundary, journal_pruned || boundary > merkle_boundary))
     }
-}
 
-impl<F, E, C, H, S> Journal<F, E, C, H, S>
-where
-    F: Family,
-    E: Context,
-    C: Contiguous<Item: EncodeShared>,
-    H: Hasher,
-    S: Strategy,
-{
-    /// Generate a proof of inclusion for items starting at `start_loc`.
-    ///
-    /// Returns a proof and the items corresponding to the leaves in the range `start_loc..end_loc`,
-    /// where `end_loc` is the minimum of the current item count and `start_loc + max_ops`.
-    ///
-    /// # Errors
-    ///
-    /// - Returns [Error::Merkle] with [merkle::Error::LocationOverflow] if `start_loc` >
-    ///   [Family::MAX_LEAVES].
-    /// - Returns [Error::Merkle] with [merkle::Error::RangeOutOfBounds] if `start_loc` >= current
-    ///   item count.
-    /// - Returns [Error::Journal] with [crate::journal::Error::ItemPruned] if `start_loc` has been
-    ///   pruned.
-    pub async fn proof(
-        &self,
-        start_loc: Location<F>,
-        max_ops: NonZeroU64,
-        inactive_peaks: usize,
-    ) -> Result<(Proof<F, H::Digest>, Vec<C::Item>), Error<F>> {
-        self.historical_proof(self.size(), start_loc, max_ops, inactive_peaks)
-            .await
-    }
-
-    /// Inclusion proof for the items `batch` appends, anchored at the batch's speculative tip.
-    ///
-    /// Nodes below the batch chain are read from this journal's
-    /// [Merkle store][crate::merkle::mem::Mem], which retains them at least until
-    /// the batch's changes are flushed.
-    pub fn speculative_proof(
-        &self,
-        batch: &MerkleizedBatch<F, H::Digest, C::Item, S>,
-        inactive_peaks: usize,
-    ) -> Result<Proof<F, H::Digest>, Error<F>> {
-        let end = batch.size();
-        let start = Location::new(end - batch.items().len() as u64);
-        self.merkle
-            .with_mem(|mem| {
-                batch.range_proof(mem, &self.hasher, start..Location::new(end), inactive_peaks)
-            })
-            .map_err(Error::Merkle)
-    }
-
-    /// Generate a historical proof with respect to the state of the Merkle structure when it had
-    /// `historical_leaves` leaves.
-    ///
-    /// Returns a proof and the items corresponding to the leaves in the range `start_loc..end_loc`,
-    /// where `end_loc` is the minimum of `historical_leaves` and `start_loc + max_ops`.
-    ///
-    /// # Errors
-    ///
-    /// - Returns [Error::Merkle] with [merkle::Error::RangeOutOfBounds] if `start_loc` >=
-    ///   `historical_leaves` or `historical_leaves` > number of items in the journal.
-    /// - Returns [Error::Journal] with [crate::journal::Error::ItemPruned] if `start_loc` has been
-    ///   pruned.
-    pub async fn historical_proof(
-        &self,
-        historical_leaves: Location<F>,
-        start_loc: Location<F>,
-        max_ops: NonZeroU64,
-        inactive_peaks: usize,
-    ) -> Result<(Proof<F, H::Digest>, Vec<C::Item>), Error<F>> {
-        let bounds = self.journal.bounds();
-
-        if *historical_leaves > bounds.end {
-            return Err(merkle::Error::RangeOutOfBounds(Location::new(bounds.end)).into());
-        }
-        if start_loc >= historical_leaves {
-            return Err(merkle::Error::RangeOutOfBounds(start_loc).into());
-        }
-
-        let end_loc = std::cmp::min(historical_leaves, start_loc.saturating_add(max_ops.get()));
-
-        let hasher = self.hasher.clone();
-        let proof = self
-            .merkle
-            .historical_range_proof(
-                &hasher,
-                historical_leaves,
-                start_loc..end_loc,
-                inactive_peaks,
-            )
-            .await?;
-
-        let positions: Vec<u64> = (*start_loc..*end_loc).collect();
-        let ops = self.journal.read_many(&positions).await?;
-
-        Ok((proof, ops))
-    }
-}
-
-impl<F, E, C, H, S> Journal<F, E, C, H, S>
-where
-    F: Family,
-    E: Context,
-    C: Mutable<Item: EncodeShared>,
-    H: Hasher,
-    S: Strategy,
-{
     /// Destroy the authenticated journal, removing all data from disk.
     #[boxed]
     pub async fn destroy(self) -> Result<(), Error<F>> {
@@ -808,105 +871,6 @@ where
             journal,
             hasher,
         })
-    }
-}
-
-impl<F, E, C, H, S> Journal<F, E, C, H, S>
-where
-    F: Family,
-    E: Context,
-    C: Contiguous<Item: EncodeShared>,
-    H: Hasher,
-    S: Strategy,
-{
-    /// Like [`Contiguous::read_many`], but returns the items partitioned into the shards the
-    /// probe ran with. Concatenating the shards yields the items in `positions` order.
-    ///
-    /// Large batches shard the page-cache probe across the strategy pool. Each shard
-    /// assembles its own hits while they are still cache-hot on the probing worker, so bulk
-    /// callers that can consume partitioned results (e.g. the floor raise, which classifies
-    /// candidates in chunks) skip the serial reassembly a flat result would require.
-    pub(crate) async fn read_many_sharded(
-        &self,
-        positions: &[u64],
-    ) -> Result<Vec<Vec<C::Item>>, JournalError> {
-        // An empty batch cannot shard: the parallel arm's chunk math needs a non-zero chunk
-        // size, and the policy may explore that arm at any batch size.
-        if positions.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        // Probe page-cache hits synchronously and complete the misses with one batched read.
-        // The strategy policy decides per batch size whether the probe runs on the calling
-        // thread or sharded across the pool (one scratch buffer per shard and one cache-lock
-        // acquisition per blob a shard touches). The sortedness assert keeps contract
-        // violations deterministic: past it, a non-increasing batch would only trip per-shard
-        // validation when an inversion lands inside a single shard.
-        assert!(
-            positions.is_sorted_by(|a, b| a < b),
-            "positions must be strictly increasing"
-        );
-        let strategy = self.strategy();
-        let journal = &self.journal;
-
-        // Each shard yields its hits densely plus the shard-local indices it declined.
-        let probe = |positions: &[u64]| -> (Vec<C::Item>, Vec<usize>) {
-            let probed = journal.try_read_many_sync(positions);
-            let mut hits = Vec::with_capacity(probed.len());
-            let mut missed = Vec::new();
-            for (idx, item) in probed.into_iter().enumerate() {
-                match item {
-                    Some(item) => hits.push(item),
-                    None => missed.push(idx),
-                }
-            }
-            (hits, missed)
-        };
-        let shards: Vec<(Vec<C::Item>, Vec<usize>)> = strategy.run(
-            positions.len(),
-            || vec![probe(positions)],
-            || {
-                let manual = strategy.manual();
-                let shard_len = positions.len().div_ceil(manual.parallelism());
-                manual.map_collect_vec(positions.chunks(shard_len).collect::<Vec<_>>(), &probe)
-            },
-        );
-
-        // The declined positions are a strictly increasing subsequence of `positions`, so one
-        // batched read serves them all. Each shard covers the slice of `positions` starting
-        // at the previous shards' total item count, whatever geometry the probe ran with.
-        let mut misses: Vec<u64> = Vec::new();
-        let mut offset = 0;
-        for (hits, missed) in &shards {
-            misses.extend(missed.iter().map(|idx| positions[offset + idx]));
-            offset += hits.len() + missed.len();
-        }
-        if misses.is_empty() {
-            return Ok(shards.into_iter().map(|(hits, _)| hits).collect());
-        }
-        let mut fetched = journal.read_many(&misses).await?.into_iter();
-
-        // Weave the fetched items back into each shard that declined positions.
-        let mut result = Vec::with_capacity(shards.len());
-        for (hits, missed) in shards {
-            if missed.is_empty() {
-                result.push(hits);
-                continue;
-            }
-            let total = hits.len() + missed.len();
-            let mut woven = Vec::with_capacity(total);
-            let mut hits = hits.into_iter();
-            let mut missed = missed.into_iter().peekable();
-            for idx in 0..total {
-                if missed.next_if_eq(&idx).is_some() {
-                    woven.push(fetched.next().expect("one fetched item per miss"));
-                } else {
-                    woven.push(hits.next().expect("one probed item per hit"));
-                }
-            }
-            result.push(woven);
-        }
-        Ok(result)
     }
 }
 

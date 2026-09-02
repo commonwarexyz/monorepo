@@ -230,9 +230,7 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
         self.metadata.put(key, Record::Ordinal(Some(bits)));
         debug!(section, "initialized section");
     }
-}
 
-impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
     /// See [crate::archive::Archive::put].
     async fn put(mut self: Box<Self>, index: u64, key: K, data: V) -> Result<Box<Self>, Error> {
         // Ignore duplicates

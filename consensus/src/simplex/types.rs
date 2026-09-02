@@ -288,10 +288,7 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
             finalizes: Phase::new(participants),
         }
     }
-}
 
-#[cfg(not(target_arch = "wasm32"))]
-impl<S: Scheme, D: Digest> VoteTracker<S, D> {
     /// Records monotonic signer facts after a phase releases its full vote map.
     ///
     /// A later matching vote can record that the signer has the authoritative
@@ -518,10 +515,7 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
             |vote: &Finalize<S, D>| &vote.proposal == proposal,
         );
     }
-}
 
-#[cfg(not(target_arch = "wasm32"))]
-impl<S: Scheme, D: Digest> VoteTracker<S, D> {
     fn clear_compacted(&mut self, cleared: u8) {
         for flags in &mut self.compacted {
             *flags &= !cleared;

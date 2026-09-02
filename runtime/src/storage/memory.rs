@@ -91,9 +91,7 @@ impl Storage {
     pub(crate) fn from_snapshot(snapshot: Snapshot, pool: BufferPool) -> Self {
         Self::with_partitions(snapshot.0, pool)
     }
-}
 
-impl Storage {
     /// Compute a SHA-256 digest of all blob contents.
     pub fn audit(&self) -> [u8; 32] {
         let partitions = self.partitions.lock();

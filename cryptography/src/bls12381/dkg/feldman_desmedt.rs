@@ -910,9 +910,7 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
         }
         Ok(DealerLogOutcome::Available)
     }
-}
 
-impl<V: Variant, P: PublicKey> Info<V, P> {
     /// Create a new [`Info`].
     ///
     /// `namespace` must be provided to isolate different applications
