@@ -162,11 +162,7 @@ impl<T: Send + Sync> Sink<T> for Sender<T> {
     }
 
     fn start_send(self: Pin<&mut Self>, item: T) -> Result<(), Self::Error> {
-        if self.send_lossy(item) {
-            Ok(())
-        } else {
-            Err(ChannelClosed)
-        }
+        self.send_lossy(item).then_some(()).ok_or(ChannelClosed)
     }
 
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
