@@ -2787,17 +2787,16 @@ fn lqc_completion_must_match_the_selected_vote_transcript() {
     let job = persist_job(&completed);
     assert!(matches!(
         job.events()[0].change(),
-        Change::ArtifactCreated { .. }
+        Change::ViewCertificateCreated { artifact } if matches!(artifact.as_ref(), Artifact::Lqc(_))
     ));
-    // The corrected transcript is an independently verifiable aggregate with no pending
-    // local signature, so its broadcast releases with the staging step and persistence must
-    // not release it a second time.
+    // The corrected transcript is retained finality evidence rather than a message this node
+    // owes its peers, so neither staging nor persistence releases a publication for it.
     assert!(
-        completed.capabilities().iter().any(
-            |effect| matches!(durable_effect(effect), Some(DurableEffect::Broadcast(artifact))
-                if matches!(artifact.as_ref(), Artifact::Lqc(_)))
-        ),
-        "staging must release the assembled certificate"
+        completed
+            .capabilities()
+            .iter()
+            .all(|effect| { !matches!(durable_effect(effect), Some(DurableEffect::Broadcast(_))) }),
+        "staging must not publish the assembled certificate"
     );
     let persisted = persist(&mut machine, &job);
     assert!(
@@ -2805,7 +2804,7 @@ fn lqc_completion_must_match_the_selected_vote_transcript() {
             .capabilities()
             .iter()
             .all(|effect| { !matches!(durable_effect(effect), Some(DurableEffect::Broadcast(_))) }),
-        "persistence must not release the staged broadcast a second time"
+        "persistence must not publish the assembled certificate"
     );
     assert!(matches!(
         machine.durable.signing_floor.as_deref(),
@@ -5578,6 +5577,300 @@ fn floor_pull_retries_once_per_view_until_lqc_advances_the_floor() {
         Some(Artifact::Lqc(certificate)) if certificate.view() == View::new(2)
     ));
     assert_eq!(machine.inspect().resolution_jobs(), 0);
+}
+
+/// Drives one leader block and a unanimous vote transcript into the local finality pools.
+///
+/// Returns the aggregation jobs the pools reserve for the view certificate and the certificate
+/// of local finality.
+fn drive_unanimous_votes(
+    machine: &mut TestMachine,
+    proposed: &LeaderBlock<MinPk, Digest>,
+) -> (
+    VqcAggregateJob<MinPk, Digest>,
+    LqcAggregateJob<MinPk, Digest>,
+) {
+    let proposal = observe(
+        machine,
+        Artifact::LeaderBlock(SignedLeaderBlock::new(proposed.clone(), attestation(0))),
+    );
+    complete(machine, &proposal, true);
+    let mut vqc_aggregate = None;
+    let mut lqc_aggregate = None;
+    fn collect<'a>(
+        effects: impl IntoIterator<Item = &'a Capability<MinPk, Digest>>,
+        vqc: &mut Option<VqcAggregateJob<MinPk, Digest>>,
+        lqc: &mut Option<LqcAggregateJob<MinPk, Digest>>,
+    ) {
+        for effect in effects {
+            match effect {
+                Capability::Leader(LeaderCapability::AggregateVqc(job)) => {
+                    vqc.get_or_insert_with(|| job.clone());
+                }
+                Capability::Leader(LeaderCapability::AggregateLqc(job)) => {
+                    lqc.get_or_insert_with(|| job.clone());
+                }
+                _ => {}
+            }
+        }
+    }
+    for signer in 0..5 {
+        let vote = observe(machine, Artifact::Vote(view_vote(machine, proposed, signer)));
+        let step = complete_with_step(machine, &vote, true);
+        collect(step.capabilities(), &mut vqc_aggregate, &mut lqc_aggregate);
+        let (effects, _) = drive_poll_and_persist(machine, step);
+        collect(effects.iter(), &mut vqc_aggregate, &mut lqc_aggregate);
+    }
+    (
+        vqc_aggregate.expect("a unanimous transcript reserves a view certificate"),
+        lqc_aggregate.expect("a unanimous transcript reaches local finality"),
+    )
+}
+
+#[test]
+fn aggregated_lqc_is_retained_without_a_publication() {
+    let profile = profile_for(Role::Observer, 6, 2);
+    let (mut machine, _) = start_profile(profile);
+    let proposed = leader(&machine, 1);
+    let (_, aggregate) = drive_unanimous_votes(&mut machine, &proposed);
+
+    let votes = aggregate.votes().cloned().collect::<Vec<_>>();
+    let certificate = lqc(&machine, aggregate.leader().clone(), &votes);
+    let completed = machine
+        .step(Input::LqcAggregated(Box::new(LqcAggregateCompletion::new(
+            aggregate.id(),
+            aggregate.generation(),
+            certificate.clone(),
+        ))))
+        .unwrap();
+    let completed = settle(&mut machine, completed);
+    let job = persist_job(&completed);
+    assert!(
+        job.events().iter().any(|event| matches!(
+            event.change(),
+            Change::ViewCertificateCreated { artifact }
+                if artifact.as_ref() == &Artifact::Lqc(certificate.clone())
+        )),
+        "the aggregate is journaled as a retained certificate"
+    );
+    assert!(
+        job.events()
+            .iter()
+            .all(|event| event.change().queued_effect().is_none()),
+        "retaining an aggregate must not queue a publication"
+    );
+
+    let persisted = persist(&mut machine, &job);
+    for step in [&completed, &persisted] {
+        assert!(
+            step.capabilities().iter().all(|effect| !matches!(
+                durable_effect(effect),
+                Some(DurableEffect::Broadcast(artifact))
+                    if matches!(artifact.as_ref(), Artifact::Lqc(_))
+            )),
+            "no aggregate leaves the process as a publication"
+        );
+    }
+    assert!(
+        machine.durable.outbox.values().all(|effect| !matches!(
+            effect,
+            DurableEffect::Broadcast(artifact) if matches!(artifact.as_ref(), Artifact::Lqc(_))
+        )),
+        "no aggregate occupies a publication slot"
+    );
+    assert!(
+        machine
+            .durable
+            .local
+            .values()
+            .any(|artifact| matches!(artifact.as_ref(), Artifact::Lqc(held) if held == &certificate)),
+        "the aggregate stays durable so local finality and peer requests both read it"
+    );
+}
+
+#[test]
+fn local_finality_suppresses_the_floor_pull() {
+    let profile = profile_for(Role::Observer, 6, 2);
+    let (mut machine, _) = start_profile(profile);
+    let proposed = leader(&machine, 1);
+    let (view_aggregate, aggregate) = drive_unanimous_votes(&mut machine, &proposed);
+
+    // Leave view 1 on its own view certificate while the finality aggregate is still assembling.
+    let messages = view_aggregate.messages().collect::<Vec<_>>();
+    let certificate = vqc(&machine, view_aggregate.leader().clone(), &messages);
+    let exited = machine
+        .step(Input::VqcAggregated(Box::new(VqcAggregateCompletion::new(
+            view_aggregate.id(),
+            view_aggregate.generation(),
+            certificate,
+        ))))
+        .unwrap();
+    let (effects, _) = drive_poll_and_persist(&mut machine, exited);
+    assert_eq!(machine.inspect().view(), View::new(2));
+    assert!(
+        effects
+            .iter()
+            .all(|effect| !matches!(effect, Capability::Resolver(ResolverCapability::Resolve(_)))),
+        "a pool that already reached finality settles the view without a peer request"
+    );
+    assert_eq!(machine.inspect().resolution_jobs(), 0);
+
+    let votes = aggregate.votes().cloned().collect::<Vec<_>>();
+    let finality = lqc(&machine, aggregate.leader().clone(), &votes);
+    let completed = machine
+        .step(Input::LqcAggregated(Box::new(LqcAggregateCompletion::new(
+            aggregate.id(),
+            aggregate.generation(),
+            finality,
+        ))))
+        .unwrap();
+    let completed = settle(&mut machine, completed);
+    let (effects, _) = drive_poll_and_persist(&mut machine, completed);
+    assert!(
+        effects
+            .iter()
+            .all(|effect| !matches!(effect, Capability::Resolver(ResolverCapability::Resolve(_)))),
+        "the local aggregate raises the floor without a peer request"
+    );
+    assert!(matches!(
+        machine.durable.signing_floor.as_deref(),
+        Some(Artifact::Lqc(certificate)) if certificate.view() == View::new(1)
+    ));
+    assert_eq!(machine.inspect().resolution_jobs(), 0);
+}
+
+#[test]
+fn an_exit_above_the_current_view_pulls_a_covering_lqc() {
+    let profile = profile_for(Role::Observer, 6, 2);
+    let (mut machine, _) = start_profile(profile);
+
+    // The committee left views whose exit proofs peers have already retired, so nothing this
+    // node can receive advances it one view at a time.
+    let ahead = symbolic_nullification(&machine, View::new(5), 5);
+    let verification = observe(&mut machine, Artifact::Nullification(ahead));
+    let admitted = complete_with_step(&mut machine, &verification, true);
+    let (effects, _) = drive_poll_and_persist(&mut machine, admitted);
+    assert_eq!(machine.inspect().view(), View::new(1));
+    assert!(machine.durable.nullification_forwarded(View::new(5)));
+    let pulls = effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Capability::Resolver(ResolverCapability::Resolve(job)) => Some(*job),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(pulls.len(), 1, "a stranded view asks for a covering L-QC");
+    assert_eq!(pulls[0].view(), View::new(1));
+
+    let finalized = leader(&machine, 1);
+    let votes = (0..5)
+        .map(|signer| view_vote(&machine, &finalized, signer))
+        .collect::<Vec<_>>();
+    let certificate = lqc(&machine, finalized, &votes);
+    let resolved = machine
+        .step(Input::ResolutionCompleted(ResolutionCompletion::new(
+            pulls[0].id(),
+            pulls[0].generation(),
+            pulls[0].view(),
+            ViewProof::Lqc(Box::new(certificate.clone())),
+        )))
+        .unwrap();
+    let [Capability::Verification(VerificationCapability::Verify(job))] = resolved.capabilities()
+    else {
+        panic!("a resolved certificate is authenticated before admission");
+    };
+    let job = job.clone();
+    let admitted = complete_with_step(&mut machine, &job, true);
+    let (effects, _) = drive_poll_and_persist(&mut machine, admitted);
+    assert!(matches!(
+        machine.durable.signing_floor.as_deref(),
+        Some(Artifact::Lqc(floor)) if floor == &certificate
+    ));
+    assert_eq!(machine.inspect().view(), View::new(2));
+    assert!(
+        effects.iter().any(
+            |effect| matches!(effect, Capability::Resolver(ResolverCapability::Cancel(job)) if *job == pulls[0])
+        ),
+        "the covering certificate retires the request it answered"
+    );
+
+    // Still short of the exit it holds, so the walk continues at the next gap rather than
+    // opening a second request for the view it just settled.
+    let rearmed = effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Capability::Resolver(ResolverCapability::Resolve(job)) => Some(*job),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(rearmed.len(), 1);
+    assert_eq!(rearmed[0].view(), View::new(2));
+    assert_eq!(machine.inspect().resolution_jobs(), 1);
+}
+
+#[test]
+fn floor_pull_accepts_a_resolved_lqc() {
+    let profile = profile_for(Role::Observer, 6, 2);
+    let (mut machine, _) = start_profile(profile);
+
+    // Leaving view 1 on a nullification settles no leader, so the floor stays at zero.
+    let exit = symbolic_nullification(&machine, View::new(1), 1);
+    let verification = observe(&mut machine, Artifact::Nullification(exit));
+    let advanced = complete_with_step(&mut machine, &verification, true);
+    let (effects, _) = drive_poll_and_persist(&mut machine, advanced);
+    assert_eq!(machine.inspect().view(), View::new(2));
+    let pulls = effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Capability::Resolver(ResolverCapability::Resolve(job)) => Some(*job),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(pulls.len(), 1, "entering a later view asks for the L-QC");
+    let pull = pulls[0];
+    assert_eq!(pull.view(), View::new(1));
+    assert_eq!(machine.inspect().resolution_jobs(), 1);
+
+    let finalized = leader(&machine, 1);
+    let votes = (0..5)
+        .map(|signer| view_vote(&machine, &finalized, signer))
+        .collect::<Vec<_>>();
+    let certificate = lqc(&machine, finalized, &votes);
+    let resolved = machine
+        .step(Input::ResolutionCompleted(ResolutionCompletion::new(
+            pull.id(),
+            pull.generation(),
+            pull.view(),
+            ViewProof::Lqc(Box::new(certificate.clone())),
+        )))
+        .unwrap();
+    let [Capability::Verification(VerificationCapability::Verify(job))] = resolved.capabilities()
+    else {
+        panic!("a resolved certificate is authenticated before admission");
+    };
+    let job = job.clone();
+    let admitted = complete_with_step(&mut machine, &job, true);
+    let accepted = admitted
+        .activities()
+        .iter()
+        .any(|activity| matches!(activity, Activity::ProtocolAccepted { artifact, .. }
+            if artifact.as_ref() == &Artifact::Lqc(certificate.clone())));
+    let (effects, _) = drive_poll_and_persist(&mut machine, admitted);
+    assert!(
+        accepted,
+        "a resolved certificate reaches the marshal like a received one"
+    );
+    assert!(
+        effects.iter().any(
+            |effect| matches!(effect, Capability::Resolver(ResolverCapability::Cancel(job)) if *job == pull)
+        ),
+        "the resolved certificate retires its own request"
+    );
+    assert_eq!(machine.inspect().resolution_jobs(), 0);
+    assert!(matches!(
+        machine.durable.signing_floor.as_deref(),
+        Some(Artifact::Lqc(floor)) if floor == &certificate
+    ));
 }
 
 #[test]
@@ -10451,7 +10744,7 @@ fn finality_floor_preserves_an_lqc_aggregation_reservation() {
     let job = persist_job(&completed);
     assert!(matches!(
         job.events()[0].change(),
-        Change::ArtifactCreated { artifact, .. }
+        Change::ViewCertificateCreated { artifact }
             if artifact.as_ref() == &Artifact::Lqc(assembled)
     ));
     let persisted = persist(&mut machine, &job);

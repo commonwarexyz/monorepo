@@ -2255,13 +2255,41 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             .unwrap_or_else(View::zero)
     }
 
+    /// Returns whether this node holds an exit for a view above the one it can act in.
+    ///
+    /// Views advance one durable exit at a time, so a certificate above the current view proves
+    /// the committee left views whose exit proofs every peer has already retired. Ordinary
+    /// advance can never close that gap; only a covering L-QC can.
+    fn stranded(&self) -> bool {
+        let current = self.durable.view;
+        if self.durable.vqc_forwarded(current) || self.durable.nullification_forwarded(current) {
+            return false;
+        }
+        let beyond = |exits: &BTreeMap<View, Arc<Artifact<V, H::Digest>>>| {
+            exits
+                .last_key_value()
+                .is_some_and(|(view, _)| *view > current)
+        };
+        beyond(&self.durable.forwarded_vqcs) || beyond(&self.durable.forwarded_nullifications)
+    }
+
     /// Returns the oldest certificate view that could raise a lagging finality floor.
+    ///
+    /// No peer pushes an L-QC, so this is the only way a node without finality for a leader
+    /// learns the outcome. Two shapes need one. A node that entered a view beyond the one after
+    /// the floor exited that view on an authenticated V-QC or nullification and still holds no
+    /// covering L-QC; it probes once per view because the next view re-arms the probe. A stranded
+    /// node cannot advance at all, so nothing would re-arm it and it probes until the resolution
+    /// lands. A pool that already reached finality is excluded because its own aggregate settles
+    /// the same view without a round trip. One request per view is outstanding at a time because
+    /// the resolution index admits one job per view.
     fn floor_resolution_view(&self) -> Option<View> {
         let floor = self.signing_floor_view();
         let next = floor.get().checked_add(1).map(View::new)?;
-        (self.durable.view > next
-            && self.floor_probe_view < self.durable.view
-            && self.views.signing_floor_candidate(floor).is_none())
+        let lagging = self.durable.view > next && self.floor_probe_view < self.durable.view;
+        ((lagging || self.stranded())
+            && self.views.signing_floor_candidate(floor).is_none()
+            && !self.finality.assembling_above(floor))
         .then_some(next)
     }
 
@@ -2869,20 +2897,9 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             self.finality.finish_lqc(prepared.aggregate);
             return Ok(Step::new(StepStatus::StaleCompletion, Vec::new()));
         }
-        if self.durable_effect_count() >= self.profile.resources().max_outbox_effects() {
-            return Err(StepError::OutboxFull);
-        }
-        let cursor = self
-            .durable
-            .cursor
-            .next()
-            .ok_or(StepError::IdentifierExhausted)?;
-        let publication = EffectId::from_cursor(cursor);
-        let mut step = self.reserve_change(Change::ArtifactCreated {
-            publication,
-            artifact: Arc::clone(&prepared.artifact),
-        })?;
-        self.self_admit_at(
+        // An L-QC is durable local finality evidence, not a message this node owes its peers.
+        // Peers that miss finality for a leader fetch a covering L-QC through resolution.
+        let mut step = self.reserve_view_certificate(
             Arc::clone(&prepared.artifact),
             prepared.artifact_id,
             prepared.observation,
@@ -4929,7 +4946,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                     || !matches!(artifact.as_ref(),
                         Artifact::DaCertificate(certificate)
                             if self.chain.is_producer_header(certificate.header())
-                    ) && !matches!(artifact.as_ref(), Artifact::Lqc(_))
+                    )
                     || artifact.epoch() != self.profile.protocol().epoch()
                     || artifact.encoded_len() > self.profile.resources().max_artifact_bytes()
                     || self
@@ -5051,7 +5068,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                 let artifact_id = artifact.id::<H>();
                 if !matches!(
                     artifact.as_ref(),
-                    Artifact::Nullification(_) | Artifact::Vqc(_)
+                    Artifact::Nullification(_) | Artifact::Vqc(_) | Artifact::Lqc(_)
                 ) || artifact.epoch() != self.profile.protocol().epoch()
                     || artifact.encoded_len() > self.profile.resources().max_artifact_bytes()
                     || self
