@@ -10,13 +10,15 @@
 //! The operator may halt, censor, equivocate, withhold messages, and propose arbitrary closes. It
 //! cannot forge an account's signature. Hashes and signatures are assumed secure, validator
 //! proofs of possession are authenticated before committee construction, and callers of
-//! randomized batch verification must supply fresh cryptographic randomness.
+//! randomized batch verification must supply fresh cryptographic randomness. Accumulator
+//! comparison assumes `LtHash` collision resistance, and both accumulated edge orderings are
+//! strict sets, so multiplicity wrap is inapplicable.
 //!
 //! ## Certified public relation
 //!
 //! A validator does more than compare aggregate debit and credit. Before voting, it authenticates
 //! its exact assigned [`transition::ProofSlice`] values: their coverage and state ranges, every
-//! changed row, terminal payer-signed vector endpoint, outgoing vector, transpose interval,
+//! changed row, terminal payer-signed vector endpoint, outgoing vector, transpose range,
 //! accumulator transition, boundary contribution, prefix transition, state update, the slice's
 //! combined operator countersignature, and every payer signature. The terminal boundary then
 //! binds the exact vector lengths, boundary totals, payment conservation, the multiset equality
@@ -28,6 +30,11 @@
 //! its vote, quorum intersection leaves at least one honest certificate signer retaining every
 //! slice. The honest signer can differ by slice. This proves the selected public corpus satisfies
 //! the encoded relation. It does not prove that the operator never signed another private receipt.
+//! The challenge constructors in this crate ([`transition::ChallengeIndex::new`],
+//! [`challenge::account_lookup`], and [`challenge::higher_entry_lookup`]) require the full posted
+//! corpus and the predecessor state. Slice retention guarantees that the corpus is reconstructible
+//! from honest holders, not that a challenge can be assembled from one slice with this crate's
+//! current API.
 //!
 //! ## Payer sequencing and private evidence
 //!
@@ -45,6 +52,15 @@
 //! response loss, verifies and durably commits its acknowledgment and per-entry openings,
 //! advances its locally owned debit, and only then signs the next endpoint. This serializes one
 //! payer account, not independent payers or recipients.
+//!
+//! Adjudication assumes the operator's acceptance invariants:
+//!
+//! - at most one acknowledged body per `(payer, seq)`, with consecutive sequence numbers within
+//!   an epoch,
+//! - strictly increasing cumulative debit, so no acknowledged endpoint advances by zero,
+//! - entry-wise non-decreasing `(cumulative, count)` per recipient across a payer's batches,
+//! - the close carries each payer's latest acknowledged body, and
+//! - acknowledgments freeze before dealing.
 //!
 //! A later cumulative endpoint authorizes the entire debit delta up to that endpoint, while a
 //! public account row carries only its terminal endpoint. An authorization alone is not an
@@ -186,12 +202,18 @@
 //!
 //! Registration activates an immutable, one-shot payment context. `max_admission_delay` bounds
 //! that context's publication window. It is not a periodic heartbeat while the slot is `OPEN`.
-//! Failed construction, certification, or admission can retry against the same registration through
-//! its inclusive deadline. Afterward the context cannot be rebased because its deadline is part of
-//! the payment anchor, so observing the missed deadline permanently faults the deployment and
-//! retains that exact anchor in the fault reason. Payments from a close that was never admitted do
-//! not enter state. Terminal recovery freezes and settles against the last root reached by the
-//! valid finalized prefix.
+//! Failed construction, certification, or admission can retry against the same registration
+//! through its inclusive deadline. Once a dealing for a registration has been released, the
+//! acknowledged set is frozen: further acknowledgments wait for the successor registration, a
+//! retry re-deals the identical corpus, and an admission retry resubmits the same certified
+//! header. `admit` has no caller identity and anyone holding a genuine certificate may admit, so
+//! a re-dealt larger corpus would expose an honest operator to
+//! [`challenge::Challenge::HigherAckDebit`] or [`challenge::Challenge::HigherAckEntry`] against
+//! the smaller certified close. After the deadline the context cannot be rebased because its
+//! deadline is part of the payment anchor, so observing the missed deadline permanently faults
+//! the deployment and retains that exact anchor in the fault reason. Payments from a close that
+//! was never admitted do not enter state. Terminal recovery freezes and settles against the last
+//! root reached by the valid finalized prefix.
 //!
 //! [`transition::prepare_close_with_strategy`] constructs the five trees but does not make arbitrary
 //! untrusted rows valid. Call [`transition::PreparedClose::validate`] when the application did not
@@ -200,11 +222,11 @@
 //! predecessor [`transition::StateCache`]. Settlement admission sees the registered context, typed
 //! roots, terminal proof, and certificate, not the full corpus or every slice.
 //!
-//! "Deal" produces one [`transition::ProofSlice`] per contiguous span of slice intervals a
-//! validator holds. Every interval is held by an exact quorum, whose members are one
-//! window of the validator ring sliding with the interval index
-//! ([`admission::slice_holders`]), so a validator's intervals form one contiguous span, or
-//! two when the window wraps past the last interval ([`admission::assigned_slice_spans`]).
+//! "Deal" produces one [`transition::ProofSlice`] per contiguous span of slices a
+//! validator holds. Every slice is held by an exact quorum, whose members are one
+//! window of the validator ring sliding with the slice index
+//! ([`admission::slice_holders`]), so a validator's slices form one contiguous span, or
+//! two when the window wraps past the last slice ([`admission::assigned_slice_spans`]).
 //! A validator's "dealing" is one proof slice per assigned span. [`admission::seal`] rejects
 //! any other dealing, authenticates its slices, and returns one [`admission::Vote`] plus the
 //! owned [`admission::SealedDealing`]. The dealing must be durable before the vote is
@@ -214,11 +236,11 @@
 //!
 //! ## Authenticate gap-free proof slices
 //!
-//! For `S` intervals, the coverage tree has exactly `S + 1` boundary leaves. Boundary `B[i]`
+//! For `S` slices, the coverage tree has exactly `S + 1` boundary leaves. Boundary `B[i]`
 //! authenticates positions in the predecessor-state, change, and successor-state vectors together
-//! with a cumulative prefix. A proof slice covering intervals `lo..hi` opens every boundary
+//! with a cumulative prefix. A proof slice covering slices `lo..hi` opens every boundary
 //! `B[lo] ..= B[hi]` under one range opening, and neighboring slices open the same boundary,
-//! making local interval checks compose into one global relation.
+//! making local slice checks compose into one global relation.
 //!
 //! ```text
 //! CoverageRoot
@@ -229,14 +251,14 @@
 //!                     +----------+
 //!                     shared authenticated boundary
 //!
-//! a slice covering intervals lo..hi opens B[lo] ..= B[hi], then authenticates exactly:
+//! a proof slice covering slices lo..hi opens B[lo] ..= B[hi], then authenticates exactly:
 //!
 //!   predecessor StateRoot  [B[lo].predecessor .. B[hi].predecessor)
 //!   ChangeRoot             [B[lo].change   .. B[hi].change)
 //!   successor StateRoot    [B[lo].successor   .. B[hi].successor)
 //!   WithdrawalOutputRoot   [prefix[lo].withdrawal_count .. prefix[hi].withdrawal_count)
 //!
-//! and, at every covered boundary B[j], that the rows and leaves in the intervals before j
+//! and, at every covered boundary B[j], that the rows and leaves in the slices before j
 //! advance each position exactly as committed, and that the running prefix and both
 //! accumulator checksums equal B[j]'s at the row its change position names.
 //!
@@ -246,7 +268,7 @@
 //! ```
 //!
 //! The [`transition::CoverageRange`] openings establish adjacency, while the three content roots
-//! and the withdrawal-output root authenticate the interval contents. `B[0]` pins the empty
+//! and the withdrawal-output root authenticate the slice contents. `B[0]` pins the empty
 //! prefix. `B[S]` pins every vector length, boundary total, conservation total, and successor
 //! liability. This is why local ordered range guards cannot replace the `CoverageRoot`. The
 //! accumulator start states and the range openings ship once per proof slice, however many

@@ -294,6 +294,50 @@ function injectStyles() {
     .clearing-calculator-out.committee { border-top: 1px solid ${GRID}; }
     .clearing-calculator-out b { color: ${INK}; font-weight: 700; }
     .clearing-calculator-out span { color: ${GRAY}; }
+    .clearing-calculator-out .pop { cursor: pointer; position: relative; }
+    .clearing-calculator-out .pop > b { border-bottom: 1px dotted ${GRAY}; }
+    .clearing-calculator-card {
+      background: white;
+      border: 1px solid ${GRID};
+      border-radius: 6px;
+      bottom: calc(100% + 9px);
+      box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
+      cursor: default;
+      display: none;
+      left: 0;
+      max-width: 480px;
+      min-width: 380px;
+      padding: 10px 12px 8px;
+      position: absolute;
+      z-index: 6;
+    }
+    .clearing-calculator-out .pop.open .clearing-calculator-card { display: block; }
+    .clearing-calculator-card .title {
+      border-bottom: 1px solid ${GRID};
+      color: ${INK};
+      display: block;
+      font-weight: 700;
+      margin-bottom: 6px;
+      padding-bottom: 6px;
+    }
+    .clearing-calculator-card .row {
+      display: flex;
+      font-variant-numeric: tabular-nums;
+      gap: 18px;
+      justify-content: space-between;
+      padding: 2px 0;
+    }
+    .clearing-calculator-card .row .term { white-space: normal; }
+    .clearing-calculator-card .row .amount { white-space: nowrap; }
+    .clearing-calculator-card .row .amount { color: ${INK}; font-weight: 700; margin-left: auto; }
+    .clearing-calculator-card .row .share { min-width: 38px; text-align: right; }
+    .clearing-calculator-card .note {
+      color: ${GRAY};
+      display: block;
+      font-size: 12px;
+      padding-top: 5px;
+      white-space: normal;
+    }
     @media (max-width: 640px) {
       .clearing-calculator-row { grid-template-columns: 1fr; gap: 4px; }
       .clearing-calculator-row .value { text-align: left; }
@@ -319,13 +363,33 @@ function slider(panel, id, label, min, max, step, value) {
   return { input, out };
 }
 
-function readout(line, label, id) {
-  const span = el('span');
+function readout(line, label, id, withCard = false) {
+  const span = el('span', withCard ? { class: 'pop', tabindex: '0' } : {});
   span.append(document.createTextNode(`${label} `));
   const value = el('b', { id });
   span.append(value);
+  let card = null;
+  if (withCard) {
+    card = el('span', { class: 'clearing-calculator-card' });
+    span.append(card);
+  }
   line.append(span);
-  return value;
+  return { value, span, card };
+}
+
+// Fills a breakdown card: the total, one row per term with its share, and an optional note.
+// A row may carry its own share text instead of a percentage of the total.
+function fillCard(card, total, rows, note) {
+  card.replaceChildren();
+  card.append(el('span', { class: 'title' }, bytesText(total)));
+  for (const [label, amount, share] of rows) {
+    const row = el('span', { class: 'row' });
+    row.append(el('span', { class: 'term' }, label));
+    row.append(el('span', { class: 'amount' }, typeof amount === 'string' ? amount : bytesText(amount)));
+    row.append(el('span', { class: 'share' }, share === undefined ? `${Math.round((100 * amount) / total)}%` : share));
+    card.append(row);
+  }
+  if (note) card.append(el('span', { class: 'note' }, note));
 }
 
 function mount(root) {
@@ -353,13 +417,14 @@ function mount(root) {
     return out;
   };
   const perClose = line('per close');
-  const oCertified = readout(perClose, 'certified', 'clearing-calc-certified');
-  const oDealt = readout(perClose, 'dealt', 'clearing-calc-dealt');
-  const oE = readout(perClose, 'edges', 'clearing-calc-e');
-  const oRows = readout(perClose, 'rows', 'clearing-calc-rows');
+  const oCertified = readout(perClose, 'certified', 'clearing-calc-certified', true);
+  const oDealt = readout(perClose, 'dealt', 'clearing-calc-dealt', true);
+  const oE = readout(perClose, 'edges', 'clearing-calc-e').value;
+  const oRows = readout(perClose, 'rows', 'clearing-calc-rows').value;
   const perCommittee = line('per committee', 'committee');
-  const oBusiest = readout(perCommittee, 'busiest dealing', 'clearing-calc-busiest');
-  const oEgress = readout(perCommittee, 'operator egress', 'clearing-calc-egress');
+  const oBusiest = readout(perCommittee, 'busiest dealing', 'clearing-calc-busiest', true);
+  const oEgress = readout(perCommittee, 'operator egress', 'clearing-calc-egress', true);
+  const pops = [oCertified, oDealt, oBusiest, oEgress];
 
   const curN = () => sig3(Math.pow(10, parseFloat(sN.input.value)));
   const curK = () => {
@@ -386,12 +451,41 @@ function mount(root) {
     const posted = certified(sc.A, sc.S, sc.E, meanIndexBytes(sc.A), sc.gapBytes, sc.senderSlices);
     const dt = corpus(sc);
     const cm = committee(sc, V.n, V.q);
-    oCertified.textContent = bytesText(posted);
-    oDealt.textContent = bytesText(dt);
+    oCertified.value.textContent = bytesText(posted);
+    oDealt.value.textContent = bytesText(dt);
     oE.textContent = count(sc.E);
     oRows.textContent = count(sc.A);
-    oBusiest.textContent = bytesText(cm.busiest);
-    oEgress.textContent = bytesText(cm.egress);
+    oBusiest.value.textContent = bytesText(cm.busiest);
+    oEgress.value.textContent = bytesText(cm.egress);
+
+    // The byte breakdowns behind each size, in the terms of the certified() and dealtSpan()
+    // formulas above so every card sums to its readout.
+    const idx = meanIndexBytes(sc.A);
+    const perSender = Math.max(1, sc.perSender);
+    fillCard(oCertified.card, posted, [
+      ['header + root bundle', HEADER + ROOTS + varint(sc.A)],
+      ['row references (rank gap + tag)', sc.A * (1 + sc.gapBytes)],
+      ['sending seq + payer signatures', sc.S * (varint(0) + SIG)],
+      ['edge entries (index + amount + count)', sc.S * varint(sc.E / Math.max(sc.S, 1)) + sc.E * (idx + 2)],
+      ['per-slice operator aggregates', varint(SLICES) + SLICES + AGG * sc.senderSlices],
+    ]);
+    const dRows = sc.A * (1 + sc.gapBytes) + sc.S * (varint(0) + SIG);
+    const dVec = sc.S * (varint(perSender) + perSender * (KEY + 2));
+    const dTr = sc.E * (KEY + 2) + sc.R * (KEY + 1);
+    fillCard(oDealt.card, dt, [
+      ['rows (rank gap, seq, signature)', dRows],
+      ['outgoing entries', dVec],
+      ['transpose entries + recipient keys', dTr],
+      ['witness (openings, boundaries, accumulators, guards)', Math.max(0, dt - dRows - dVec - dTr)],
+    ], 'every slice once; states, prefixes, and endpoint bodies are derived from the retained interval');
+    fillCard(oBusiest.card, cm.busiest, [
+      ['dealt corpus', dt, ''],
+      ['busiest validator share', `x ${(cm.busiest / dt).toPrecision(2)}`, ''],
+    ], `q = ${count(V.q)} of n = ${count(V.n)} slices as one or two runs, each with one witness`);
+    fillCard(oEgress.card, cm.egress, [
+      ['mean dealing', cm.egress / V.n, ''],
+      ['one per validator', `x ${count(V.n)}`, ''],
+    ], 'every slice lands on q validators, so the rows ship q times and the witness once per validator');
 
     const w = canvas.clientWidth || 840;
     const h = Math.max(240, Math.round(w * 0.42));
@@ -531,6 +625,36 @@ function mount(root) {
 
   for (const s of [sN, sK, sV]) s.input.addEventListener('input', draw);
   window.addEventListener('resize', draw);
+
+  // Tap a size to open its breakdown. Tap again, elsewhere, or press Escape to close.
+  const closeCards = () => {
+    for (const pop of pops) pop.span.classList.remove('open');
+  };
+  for (const pop of pops) {
+    const open = () => {
+      const wasOpen = pop.span.classList.contains('open');
+      closeCards();
+      if (wasOpen) return;
+      pop.span.classList.add('open');
+      const host = panel.getBoundingClientRect();
+      const box = pop.span.getBoundingClientRect();
+      const rightSide = box.left - host.left > host.width * 0.35;
+      pop.card.style.left = rightSide ? 'auto' : '0';
+      pop.card.style.right = rightSide ? '0' : 'auto';
+    };
+    pop.span.addEventListener('click', (event) => {
+      event.stopPropagation();
+      open();
+    });
+    pop.span.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        open();
+      }
+      if (event.key === 'Escape') closeCards();
+    });
+  }
+  document.addEventListener('click', closeCards);
   draw();
 }
 

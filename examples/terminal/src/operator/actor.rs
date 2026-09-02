@@ -2,8 +2,8 @@
 
 use super::store::{
     AcceptedBatch, CloseRejected, EpochData, ExternalPayoutEvidence, IncomingPayment,
-    MutationFailed, SendVerdict, StagedDeposit, StagedWithdrawal, Staging, Store, StoreStatus,
-    StoredCloseOutcome, WithdrawalEvidence,
+    MutationFailed, RETAINED_EPOCHS, SendVerdict, StagedDeposit, StagedWithdrawal, Staging, Store,
+    StoreStatus, StoredCloseOutcome, WithdrawalEvidence,
 };
 #[cfg(test)]
 use super::store::{AccountView, Endpoint, StoreSnapshot};
@@ -410,14 +410,19 @@ impl Operator {
         self.store.incoming_payments(receiver, after, limit)
     }
 
+    /// Finalized epochs whose closes [`Self::committed_entry`] still reconstructs exactly,
+    /// counted back from the latest finalized epoch: the receiver reconciliation contract.
+    pub(crate) const RETAINED_EPOCHS: u64 = RETAINED_EPOCHS;
+
     /// Reconstructs the committed public terminal entry for one (payer, recipient) edge of
     /// a retained epoch.
     ///
     /// The close is rebuilt from the retained acknowledgment log with the same lookup
     /// constructor the challenge tests use, so the served [`HigherEntryLookup`] opens
-    /// against the reconstructed close's own change root. Retention is honest: once a
-    /// finalized epoch's account-state versions are pruned it may no longer reconstruct,
-    /// which a receiver treats as an availability signal and retries.
+    /// against the reconstructed close's own change root. Retention is bounded: a finalized
+    /// epoch reconstructs exactly until [`Self::RETAINED_EPOCHS`] further epochs finalize and
+    /// may not afterwards, which a receiver reports as unavailability rather than
+    /// withholding.
     pub(crate) fn committed_entry(
         &self,
         payer: &Key,

@@ -41,14 +41,14 @@ claimable as its certified destination and amount plus one opening in the withdr
 
 `seal` authenticates and takes ownership of a validator's dealing before signing the Header. A
 dealing is the complete, canonically ordered set of `ProofSlice` values assigned to one validator:
-each slice interval is held by one quorum window of the validator ring, the window slides with
-the interval index, so a validator's intervals form one contiguous span (two when the window
-wraps) and its dealing is one `ProofSlice` per span. `seal` checks the local row equations and
-the exact state-update, prefix, accumulator, and conservation relations represented by the
-dealing and shared Header, at every covered interval boundary. It verifies each interval's
-combined operator countersignature and every distinct payer authorization in one randomized
-aggregate batch. Proofs of possession are checked when validators
-register. With `n` validators, the BLS MinSig certificate contributes a 48-byte signature and a
+each slice is held by one quorum window of the validator ring, the window slides with the slice
+index, so a validator's slices form one contiguous span (two when the window wraps) and its
+dealing is one `ProofSlice` per span. `seal` checks the local row equations and the exact
+state-update, prefix, accumulator, and conservation relations represented by the dealing and
+shared Header, at every covered slice boundary. It verifies each slice's combined operator
+countersignature and every distinct payer authorization in one randomized aggregate batch. The
+embedding must verify each validator's proof of possession when it registers, and the crate
+assumes it. With `n` validators, the BLS MinSig certificate contributes a 48-byte signature and a
 `ceil(n / 8)`-byte signer bitmap on the external chain. For every slice, its `q = 2f + 1`
 holders and an exact certificate quorum of `q` signers intersect in more than `f` validators, so at
 least one honest certificate signer has authenticated and retains that slice. Across all slices,
@@ -68,16 +68,21 @@ layer, or asset-adapter implementation.
 ## Benchmarks
 
 The benchmark matrix uses one adaptive pool with eight workers and selects one live-account
-profile per fresh process. Run profiles `0` through `4` separately:
+profile per fresh process. The default profile set is a smaller developer matrix with six
+profiles, `0` through `5`. The blog's measured matrix needs `RUSTFLAGS="--cfg full_bench"` and
+has seven profiles: `0` through `3` sweep the live-account count from 1,024 to one million with
+every account sending, and `3` through `6` hold one million live accounts while the sender count
+falls from one million to 1,024. Run one profile per process:
 
 ```bash
+RUSTFLAGS="--cfg full_bench" \
 COMMONWARE_CLEARING_PROFILE=0 \
 COMMONWARE_CLEARING_BENCH=blog-chain \
 cargo bench -p commonware-clearing --bench bajillion
 ```
 
-The `sizes` group prints exact encoded sizes for the same profiles, including the posted delta
-corpus against a reader-held replica and the dealt-slice corpus without unchanged state.
+The `sizes` group prints exact encoded sizes for the same profiles, including the posted corpus
+against a reader-held replica and the dealt-slice corpus without unchanged state.
 
 The harness reports raw encoded sizes and separately times preparing roots, dealing slices, the
 complete validator `seal` path for the byte-largest dealing, repeatable certified-commitment

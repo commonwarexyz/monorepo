@@ -473,14 +473,14 @@ impl<P: PublicKey> Read for TransposeEntry<P> {
     }
 }
 
-/// Writes a transpose interval in recipient-grouped form.
+/// Writes a transpose range in recipient-grouped form.
 ///
-/// The recipient-major sort makes each recipient's entries one contiguous run, so the wire
-/// form carries each recipient key once per run instead of once per entry: a run count,
-/// then per run the recipient, an entry count, and the per-entry (payer, cumulative, count)
-/// remainders with the cumulative and count as varints. Any contiguous interval encodes this
-/// way, including intervals that start or end inside a run. Ordering is not re-validated
-/// here: decoded intervals flow into the existing canonical-sort validation.
+/// The recipient-major sort makes each recipient's entries one contiguous group, so the wire
+/// form carries each recipient key once per group instead of once per entry: a group count,
+/// then per group the recipient, an entry count, and the per-entry (payer, cumulative, count)
+/// remainders with the cumulative and count as varints. Any contiguous range encodes this
+/// way, including ranges that start or end inside a group. Ordering is not re-validated
+/// here: decoded ranges flow into the existing canonical-sort validation.
 pub fn write_transpose<P: PublicKey>(entries: &[TransposeEntry<P>], buf: &mut impl BufMut) {
     let mut runs = 0_usize;
     let mut index = 0;
@@ -509,7 +509,7 @@ pub fn write_transpose<P: PublicKey>(entries: &[TransposeEntry<P>], buf: &mut im
     }
 }
 
-/// Reads a recipient-grouped transpose interval of at most `max` entries.
+/// Reads a recipient-grouped transpose range of at most `max` entries.
 pub fn read_transpose<P: PublicKey>(
     buf: &mut impl Buf,
     max: usize,
@@ -536,7 +536,7 @@ pub fn read_transpose<P: PublicKey>(
     Ok(entries)
 }
 
-/// Returns the exact recipient-grouped encoded size of a transpose interval.
+/// Returns the exact recipient-grouped encoded size of a transpose range.
 pub fn transpose_encode_size<P: PublicKey>(entries: &[TransposeEntry<P>]) -> usize {
     let mut runs = 0_usize;
     let mut size = 0_usize;
@@ -741,7 +741,7 @@ mod tests {
                 });
             }
         }
-        // Full interval and an interval that starts and ends inside runs.
+        // A full range and a range that starts and ends inside groups.
         for interval in [&entries[..], &entries[1..entries.len() - 1]] {
             let mut buf = Vec::new();
             write_transpose(interval, &mut buf);
@@ -766,7 +766,7 @@ mod tests {
         write_transpose(std::slice::from_ref(&entry), &mut buf);
         assert!(read_transpose::<VerifyingKey>(&mut &buf[..], 0).is_err());
 
-        // A run claiming zero entries is rejected by the length range.
+        // A group claiming zero entries is rejected by the length range.
         let mut forged = Vec::new();
         1_usize.write(&mut forged);
         entry.recipient.write(&mut forged);

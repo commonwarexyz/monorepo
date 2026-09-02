@@ -6,8 +6,9 @@ use commonware_clearing::bajillion::{
     admission::{Committee, assigned_slice_spans, bls12381, seal},
     boundary::{DepositBatch, DepositRecord, SignedWithdrawal, WithdrawalAction, WithdrawalBatch},
     challenge::{
-        AccountLookup, AckWitness, Challenge, ChallengeKind, EntryWitness, HigherEntryLookup,
-        Verdict, account_lookup, adjudicate, decode_bounded, higher_entry_lookup,
+        AccountLookup, AckWitness, Challenge, ChallengeError, ChallengeKind, EntryWitness,
+        HigherEntryLookup, Verdict, account_lookup, adjudicate, decode_bounded,
+        higher_entry_lookup,
     },
     commitment::{Builder, MultiOpening, Opening, VectorKind, VectorRoot, empty_root},
     payment::{
@@ -385,6 +386,33 @@ fn invalidate_scope(challenge: &mut TestChallenge) {
     }
 }
 
+// Claims one more unit than the genuine entry opening authenticates. Returns whether the
+// challenge carries an entry to forge.
+fn forge_entry(challenge: &mut TestChallenge) -> bool {
+    match challenge {
+        Challenge::HigherAckEntry { entry, .. } => {
+            entry.cumulative += 1;
+            true
+        }
+        Challenge::HigherAckDebit { .. } | Challenge::AckFork { .. } => false,
+    }
+}
+
+fn assert_forged_entry_rejected(
+    context: &TestCloseContext,
+    header: &Header<Digest>,
+    roots: &RootBundle<Digest>,
+    challenge: &TestChallenge,
+) {
+    let mut forged = challenge.clone();
+    if forge_entry(&mut forged) {
+        assert!(matches!(
+            adjudicate::<Sha256, _, _>(context, header, roots, &forged),
+            Err(ChallengeError::Ack(AckError::InvalidEntryOpening))
+        ));
+    }
+}
+
 fn exercise_challenge(
     context: &TestCloseContext,
     header: &Header<Digest>,
@@ -419,6 +447,7 @@ fn exercise_challenge(
         adjudicate::<Sha256, _, _>(context, header, roots, &unscoped),
         Ok(Verdict::Proven(_))
     ));
+    assert_forged_entry_rejected(context, header, roots, challenge);
 
     let mut mutated = encoded.to_vec();
     let maximum = match mutation % 4 {
@@ -472,6 +501,7 @@ fn exercise_no_contradiction(
         adjudicate::<Sha256, _, _>(context, header, roots, &unscoped),
         Ok(Verdict::Proven(_))
     ));
+    assert_forged_entry_rejected(context, header, roots, challenge);
 }
 
 fn state_of(cache: &StateCache<VerifyingKey, Digest>, account: &VerifyingKey) -> AccountState {

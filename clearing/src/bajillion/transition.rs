@@ -49,7 +49,7 @@ pub const HEADER_ROOT_HASH_NAMESPACE: &[u8] = b"_COMMONWARE_CLEARING_HEADER_ROOT
 pub const EPOCH_ANCHOR_HASH_NAMESPACE: &[u8] = b"_COMMONWARE_CLEARING_EPOCH_ANCHOR";
 /// Maximum number of high-order account-key bits used for deterministic proof slices.
 pub const MAX_SLICE_BITS: u8 = 8;
-/// Maximum number of deterministic slice intervals in one close.
+/// Maximum number of deterministic slices in one close.
 pub const MAX_SLICE_COUNT: u16 = 1 << MAX_SLICE_BITS;
 
 /// Returns whether a span of slices is nonempty and lies within `slice_count` slices.
@@ -57,7 +57,7 @@ pub(crate) const fn valid_span(span: &Range<u16>, slice_count: u16) -> bool {
     span.start < span.end && span.end <= slice_count
 }
 
-/// Returns the deterministic high-order-key interval containing an account.
+/// Returns the deterministic high-order-key slice containing an account.
 pub fn account_slice<P: PublicKey>(account: &P, slice_bits: u8) -> Result<u16, TransitionError> {
     if slice_bits > MAX_SLICE_BITS {
         return Err(TransitionError::SliceBits);
@@ -215,9 +215,9 @@ pub struct RootBundle<D: Digest> {
     /// Exact transpose leaf count.
     ///
     /// Slice range openings prove membership under `transpose` but cannot see past their own
-    /// interval, so without a committed total a closer could seal a transpose tree carrying
-    /// trailing leaves no slice opens, leaving a certified close every full validator
-    /// rejects. Pinning the count restores seal and audit agreement.
+    /// range, so without a committed total a closer could seal a transpose tree carrying
+    /// trailing leaves no slice opens. The terminal boundary must equal this count, so a
+    /// sealed transpose has exactly the leaves the slices open.
     pub transpose_len: u32,
 }
 
@@ -383,17 +383,17 @@ impl Read for SliceBoundary {
 }
 
 /// The adjacent authenticated coverage boundaries around one proof slice: one before each
-/// covered interval and one after the last.
+/// covered slice and one after the last.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CoverageRange<D: Digest> {
-    /// Boundaries `B[span.start] ..= B[span.end]`, one more than the intervals covered.
+    /// Boundaries `B[span.start] ..= B[span.end]`, one more than the slices covered.
     pub boundaries: Vec<SliceBoundary>,
     /// Authentication of the contiguous boundary values.
     pub opening: RangeOpening<D>,
 }
 
 impl<D: Digest> CoverageRange<D> {
-    /// Boundary before the first covered interval.
+    /// Boundary before the first covered slice.
     ///
     /// # Panics
     ///
@@ -405,7 +405,7 @@ impl<D: Digest> CoverageRange<D> {
             .expect("a coverage range holds at least two boundaries")
     }
 
-    /// Boundary after the last covered interval.
+    /// Boundary after the last covered slice.
     ///
     /// # Panics
     ///
@@ -447,20 +447,20 @@ impl<D: Digest> Read for CoverageRange<D> {
     }
 }
 
-/// Exact contiguous changed-row slice for one account-key interval.
+/// Exact contiguous changed rows for one covered span of slices.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ChangeRange<P: PublicKey, D: Digest> {
-    /// Immediate compact guard before this interval, when one exists.
+    /// Immediate compact guard before this span, when one exists.
     pub predecessor: Option<ChangeGuard<P, D>>,
-    /// Every changed row whose account belongs to this interval.
+    /// Every changed row whose account belongs to this span.
     pub rows: Vec<AccountRow<P, D>>,
-    /// Immediate compact guard after this interval, when one exists.
+    /// Immediate compact guard after this span, when one exists.
     pub successor: Option<ChangeGuard<P, D>>,
     /// Authentication of the contiguous guards derived from the disclosed rows and boundaries.
     pub opening: RangeOpening<D>,
 }
 
-/// Authentication of one exact live-state interval.
+/// Authentication of one exact live-state range.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StateRange<P: PublicKey, D: Digest> {
     /// Immediate live-state predecessor, when one exists.
@@ -471,41 +471,41 @@ pub struct StateRange<P: PublicKey, D: Digest> {
     pub opening: RangeOpening<D>,
 }
 
-/// One proof slice for independently authenticating a contiguous run of account intervals.
+/// One proof slice for independently authenticating a contiguous span of account slices.
 ///
-/// The run is validated as one interval: every covered boundary is authenticated and
-/// checked against the disclosed material, so the run's holders verify exactly what
-/// per-interval holders would, while the accumulator start states and the range openings
-/// ship once per run.
+/// The span is validated as one unit: every covered boundary is authenticated and
+/// checked against the disclosed material, so the span's holders verify exactly what
+/// per-slice holders would, while the accumulator start states and the range openings
+/// ship once per span.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProofSlice<P: PublicKey, D: Digest> {
-    /// Deterministic interval indices covered, nonempty and contiguous.
+    /// Deterministic slice indices covered, nonempty and contiguous.
     pub span: Range<u16>,
-    /// Header-bound positions, prefix, and accumulators around every covered interval.
+    /// Header-bound positions, prefix, and accumulators around every covered slice.
     pub coverage: CoverageRange<D>,
-    /// Exact changed rows in the covered intervals.
+    /// Exact changed rows in the covered slices.
     pub changes: ChangeRange<P, D>,
     /// Outgoing vectors aligned one-for-one with [`ChangeRange::rows`].
     pub out_vectors: Vec<OutVector<P>>,
-    /// Transpose entries in the covered intervals' exact positional range.
+    /// Transpose entries in the covered slices' exact positional range.
     pub transpose: Vec<TransposeEntry<P>>,
     /// Full payer-vector accumulator state at the first boundary.
     pub out_start: LtHash,
-    /// Combined operator countersignatures over each covered interval's acknowledged
-    /// bodies, aligned with `span` and present exactly when the interval contains a sending
+    /// Combined operator countersignatures over each covered slice's acknowledged
+    /// bodies, aligned with `span` and present exactly when the slice contains a sending
     /// row.
     pub operator_aggregates: Vec<Option<OperatorAggregate>>,
     /// Full transpose accumulator state at the first boundary.
     pub in_start: LtHash,
     /// Range opening for `transpose`, present exactly when it is nonempty.
     pub transpose_opening: Option<RangeOpening<D>>,
-    /// Range opening for the validator-derived withdrawal outputs in this interval.
+    /// Range opening for the validator-derived withdrawal outputs in the covered slices.
     pub withdrawal_opening: Option<RangeOpening<D>>,
-    /// Live leaves unchanged across both roots in the covered intervals.
+    /// Live leaves unchanged across both roots in the covered slices.
     pub unchanged: Vec<StateLeaf<P>>,
-    /// Exact guarded predecessor-state interval.
+    /// Exact guarded predecessor-state range.
     pub predecessor: StateRange<P, D>,
-    /// Exact guarded successor-state interval.
+    /// Exact guarded successor-state range.
     pub successor: StateRange<P, D>,
 }
 
@@ -548,7 +548,7 @@ pub struct Close<P: PublicKey, D: Digest> {
     pub rows: Vec<AccountRow<P, D>>,
     /// Outgoing vectors aligned one-for-one with `rows`.
     pub out_vectors: Vec<OutVector<P>>,
-    /// Combined operator countersignatures, one per proof slice interval.
+    /// Combined operator countersignatures, one per slice.
     ///
     /// Quorum-attested rather than header-committed: for a fixed key and body multiset
     /// exactly one subgroup element verifies, so the aggregates are self-authenticating and
@@ -561,7 +561,7 @@ impl<P: PublicKey, D: Digest> Close<P, D> {
     ///
     /// The transpose never ships in the posted corpus: it is a pure function of the posted
     /// out vectors (sort the union by recipient, payer), rebuilt by any full validator and
-    /// carried per interval only inside dealt slices.
+    /// carried per span only inside dealt slices.
     pub fn encoded_size(&self) -> usize {
         Header::<D>::SIZE
             + RootBundle::<D>::SIZE
@@ -1510,7 +1510,7 @@ impl<P: PublicKey, D: Digest> PreparedClose<P, D> {
         Ok(())
     }
 
-    /// Deals one proof slice per requested contiguous interval span from the retained
+    /// Deals one proof slice per requested contiguous slice span from the retained
     /// Merkle state.
     ///
     /// A dealing is the validator's assigned spans
@@ -2118,7 +2118,7 @@ where
     R: CryptoRng,
 {
     // Group the transpose by row account once, so rows validate independently in parallel
-    // against their exact contiguous incoming interval.
+    // against their exact contiguous incoming range.
     let groups = transpose_groups(&close.rows, transpose)?;
     strategy.try_map_collect_vec(
         close
@@ -2167,7 +2167,7 @@ where
     Ok(())
 }
 
-/// Verifies every slice interval's combined operator countersignature.
+/// Verifies every slice's combined operator countersignature.
 fn validate_operator_aggregates<P: PublicKey, D: Digest>(
     operator: &OperatorKey,
     close: &Close<P, D>,
@@ -2192,11 +2192,13 @@ fn validate_operator_aggregates<P: PublicKey, D: Digest>(
     Ok(())
 }
 
-/// Verifies one interval's combined operator countersignature over its acknowledged bodies.
+/// Verifies one slice's combined operator countersignature over its acknowledged bodies.
 ///
-/// An interval with no sending rows must carry no aggregate. The operator key is assumed
-/// group-checked with a verified proof of possession, fixed by deployment configuration
-/// exactly like the operator's receipt key.
+/// A slice with no sending rows must carry no aggregate. The operator key is assumed
+/// group-checked with a verified proof of possession. Unlike the operator's receipt key,
+/// which the [`PaymentContext`] commits through the anchor and header and settlement checks,
+/// the aggregate key is out-of-band deployment configuration that every validator must
+/// share.
 fn verify_operator_aggregate<P: PublicKey, D: Digest>(
     operator: &OperatorKey,
     rows: &[AccountRow<P, D>],
@@ -2259,7 +2261,7 @@ fn transpose_groups<P: PublicKey, D: Digest>(
     Ok(groups)
 }
 
-/// Validates one changed row against its outgoing vector and incoming transpose interval.
+/// Validates one changed row against its outgoing vector and incoming transpose range.
 pub(crate) fn validate_row<H, P, D>(
     context: &CloseContext<P, D>,
     deposits: &DepositBatch<P>,
@@ -2356,7 +2358,7 @@ where
         _ => return Err(TransitionError::OutgoingPresence),
     }
 
-    // The incoming side: the row's exact contiguous transpose interval must sum to the credit
+    // The incoming side: the row's exact contiguous transpose range must sum to the credit
     // and receipt-count advances.
     let mut in_credit = 0_u64;
     let mut in_count = 0_u64;
@@ -2891,7 +2893,7 @@ where
     let changes = boundaries(rows, |row| &row.account, slice_bits)?;
     let successor = state_boundaries(successor, slice_bits)?;
 
-    // The accumulator is associative, so fold each slice interval's contribution in parallel
+    // The accumulator is associative, so fold each slice's contribution in parallel
     // and prefix-combine the partials into running boundary values afterward.
     let in_count_at = |change: u32| -> Result<usize, TransitionError> {
         if change == 0 {
@@ -3230,7 +3232,7 @@ where
     )
     .map(drop)?;
 
-    // The transpose interval is positionally pinned by the boundary in-counts and must
+    // The transpose range is positionally pinned by the boundary in-counts and must
     // authenticate under the transpose root.
     let transpose_start =
         u32::try_from(start.prefix.in_count).map_err(|_| TransitionError::SliceRange)?;
@@ -3930,7 +3932,7 @@ impl<D: Digest> CoverageRange<D> {
     }
 }
 
-/// Reads a proof slice's covered interval span: nonempty and within the protocol partition.
+/// Reads a proof slice's covered slice span: nonempty and within the protocol partition.
 pub(crate) fn read_span(
     reader: &mut impl Buf,
     name: &'static str,
@@ -4342,8 +4344,8 @@ pub enum TransitionError {
     /// State leaves are not strictly sorted, live, and positive.
     #[error("state leaves are not canonical")]
     NonCanonicalStateOrder,
-    /// Items are not sorted by their deterministic slice interval.
-    #[error("items are not sorted by slice interval")]
+    /// Items are not sorted by their deterministic slice.
+    #[error("items are not sorted by slice")]
     NonCanonicalSliceOrder,
     /// A public-key representation has no high-order byte for account partitioning.
     #[error("account public key has an empty canonical representation")]
@@ -4408,8 +4410,8 @@ pub enum TransitionError {
     /// Outgoing presence does not match the debit advance.
     #[error("outgoing presence does not match the debit advance")]
     OutgoingPresence,
-    /// A row's credit totals disagree with its transpose interval.
-    #[error("row credit totals disagree with the transpose interval")]
+    /// A row's credit totals disagree with its transpose range.
+    #[error("row credit totals disagree with the transpose range")]
     CreditTotals,
     /// A running prefix does not extend its predecessor exactly.
     #[error("running prefix does not extend its predecessor exactly")]

@@ -63,10 +63,7 @@ pub(crate) fn benches() {
             ));
             corpus.add(&DealtSlice::strip(slice).breakdown());
         }
-        println!(
-            "clearing slice counts: {} {counts:?}",
-            profile_key(profile)
-        );
+        println!("clearing slice counts: {} {counts:?}", profile_key(profile));
         let dealt_corpus = corpus.total();
 
         // Every validator's dealt share under the benchmark committee: the busiest is the
@@ -88,8 +85,14 @@ pub(crate) fn benches() {
             dealt_egress += dealing.total();
         }
         let dealt_assignment = busiest.total();
-        println!("clearing dealt corpus breakdown: {} {corpus:?}", profile_key(profile));
-        println!("clearing busiest dealing breakdown: {} {busiest:?}", profile_key(profile));
+        println!(
+            "clearing dealt corpus breakdown: {} {corpus:?}",
+            profile_key(profile)
+        );
+        println!(
+            "clearing busiest dealing breakdown: {} {busiest:?}",
+            profile_key(profile)
+        );
 
         // A retained per-edge receipt: the dual-signed acknowledgment plus the entry opening a
         // sender DO hands the payer and recipient.

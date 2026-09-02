@@ -25,8 +25,10 @@
 //! and the validator hydrates it against the key interval it retains for
 //! that span at the registered close's predecessor root, seeded from the
 //! deployment's genesis accounts and advanced with every sealed close. The
-//! intervals are retained one record per slice, so a committee rotation that
-//! reshapes this validator's spans recombines the pieces it already holds.
+//! intervals are retained one record per slice, so a later re-grouping of
+//! slices this validator already holds into different spans needs no
+//! re-sync, while a slice it never held or already pruned still needs the
+//! external sync the demo does not implement.
 //! The advanced intervals are made durable together with the sealed dealing
 //! before the vote leaves the validator. Retention is a protocol assumption:
 //! a validator that missed a close no longer holds the interval the next
@@ -668,6 +670,22 @@ where
                 continue;
             }
 
+            // The header is one hash over the registered context and the
+            // dealt roots, a check seal repeats, so garbage is refused here
+            // before any per-slice hydration work.
+            if !dealing
+                .header
+                .verify::<Sha256, Key>(registered.context, &dealing.roots)
+            {
+                warn!(
+                    epoch = dealing.epoch,
+                    "dealing header does not commit the registered context and dealt roots"
+                );
+                lane.store = Some(store);
+                lane.intervals = Some(intervals);
+                continue;
+            }
+
             // The archive satisfies a put below its prune floor without
             // storing, so a dealing whose challenge window already closed at
             // the certified finalized height is refused instead of earning a
@@ -722,6 +740,45 @@ where
                 warn!(
                     epoch = dealing.epoch,
                     "dealing does not match this validator's assignment"
+                );
+                lane.store = Some(store);
+                lane.intervals = Some(intervals);
+                continue;
+            }
+
+            // One close per registered epoch in the interval store too: the
+            // advanced intervals land in the successor epoch's section keyed
+            // by the successor root, and the archive silently ignores a put
+            // at an occupied index. A crash between the interval sync and the
+            // dealing sync leaves that section filled by one close with no
+            // dealing stored, so a differing close for the same epoch is
+            // refused here instead of storing and voting a dealing whose
+            // intervals were dropped. An identical close re-puts idempotently.
+            let next = dealing
+                .epoch
+                .checked_add(1)
+                .expect("the epoch clock is bounded");
+            let mut occupied = None;
+            for slice in assigned.iter().flat_map(|span| span.clone()) {
+                match intervals
+                    .get(Identifier::Index(interval_index(next, slice)))
+                    .await
+                {
+                    Ok(Some(record)) if record.root != dealing.roots.successor => {
+                        occupied = Some(slice);
+                        break;
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        error!(?error, "sealer failed to read the interval store");
+                        return;
+                    }
+                }
+            }
+            if let Some(slice) = occupied {
+                warn!(
+                    epoch = dealing.epoch,
+                    slice, "refusing a second close for a sealed interval section"
                 );
                 lane.store = Some(store);
                 lane.intervals = Some(intervals);
@@ -826,10 +883,6 @@ where
             // Pruning keeps the consumed and produced epochs only.
             let successor_root = dealing.roots.successor;
             let slice_bits = registered.context.assignment().slice_bits();
-            let next = dealing
-                .epoch
-                .checked_add(1)
-                .expect("the epoch clock is bounded");
             for (interval, slice) in retained.iter_mut().zip(sealed.slices()) {
                 interval.advance(slice);
                 let parts = split(interval.leaves(), &slice.span, slice_bits);
@@ -1326,8 +1379,9 @@ mod tests {
             let mine = dealings[usize::from(participant)].clone();
 
             // Another validator's assignment fails seal's exact-assignment
-            // check, and a corrupted slice fails structural validation:
-            // neither earns a vote or a durable record.
+            // check, a corrupted slice fails structural validation, and a
+            // header over tampered roots fails the header check before any
+            // slice is hydrated: none earns a vote or a durable record.
             let foreign = usize::from(participant) ^ 1;
             let wrong = Message::Dealing(Dealing {
                 epoch: 0,
@@ -1352,13 +1406,23 @@ mod tests {
                 roots,
                 slices: corrupt_slices.into_iter().map(DealtSlice::strip).collect(),
             });
+            let mut tampered = roots;
+            tampered.successor = VectorRoot {
+                digest: Sha256::hash(&[b"tampered-successor"]),
+            };
+            let garbage = Message::Dealing(Dealing {
+                epoch: 0,
+                header: Header::new::<Sha256, Key>(prepared.close_context(), &tampered),
+                roots,
+                slices: mine.iter().cloned().map(DealtSlice::strip).collect(),
+            });
             let good = Message::Dealing(Dealing {
                 epoch: 0,
                 header,
                 roots,
                 slices: mine.into_iter().map(DealtSlice::strip).collect(),
             });
-            for message in [&wrong, &corrupt, &good] {
+            for message in [&wrong, &corrupt, &garbage, &good] {
                 let sent = operator_chan.0.send(
                     Recipients::One(validator_key.clone()),
                     message.encode(),
@@ -1390,6 +1454,108 @@ mod tests {
                 .unwrap()
                 .expect("the sealed dealing is durable");
             assert_eq!(sealed.slices, dealings[usize::from(participant)]);
+        });
+    }
+
+    /// A crash between the interval sync and the dealing sync leaves the
+    /// successor section filled by one close with no dealing stored. A
+    /// differing close for the same registered epoch must then be refused
+    /// before sealing: the archive would silently drop its intervals while
+    /// its dealing was stored and voted.
+    #[test]
+    fn sealer_refuses_a_second_close_for_an_occupied_interval_section() {
+        deterministic::Runner::default().start(|context| async move {
+            let protocol = Protocol::new(NonZeroUsize::MIN).unwrap();
+            let (deposit_tx, register_tx, prepared) = fixture(&protocol, 11, 12);
+            let db = open(context.child("db"), "sealer-occupied").await;
+            apply(&db, 1, &[deposit_tx, register_tx]).await;
+
+            let slices = protocol.slices(&prepared).unwrap();
+            let dealings = protocol.dealings(&prepared, &slices).unwrap();
+            let participant = dealt_participant(0).unwrap();
+            let mine = dealings[usize::from(participant)].clone();
+            let header = prepared.close().header;
+            let roots = prepared.close().roots;
+
+            // Another close for epoch 0 already advanced this validator's
+            // first assigned slice into section 1 under its own successor
+            // root, exactly what a crash after the interval sync leaves.
+            let slice = mine[0].span.start;
+            let foreign = VectorRoot {
+                digest: Sha256::hash(&[b"foreign-successor"]),
+            };
+            let configured = deployments().remove(0);
+            let seeded = intervals(
+                context.child("seed"),
+                "sealer-occupied-intervals",
+                &configured,
+            )
+            .await;
+            let seeded = seeded
+                .put_sync(
+                    interval_index(1, slice),
+                    interval_key(&foreign, slice),
+                    RetainedInterval {
+                        root: foreign,
+                        slice,
+                        leaves: Vec::new(),
+                    },
+                )
+                .await
+                .unwrap();
+            drop(seeded);
+
+            let operator_key = PrivateKey::from_seed(9_300).public_key();
+            let validator_key = PrivateKey::from_seed(9_301).public_key();
+            let (mut operator_chan, validator_chan) =
+                network(&context, &operator_key, &validator_key, true, true).await;
+            sealer(
+                &context,
+                0,
+                vec![(operator_key.clone(), configured.clone())],
+                db.clone(),
+                "sealer-occupied",
+            )
+            .start(validator_chan);
+            let dealing = Message::Dealing(Dealing {
+                epoch: 0,
+                header,
+                roots,
+                slices: mine.into_iter().map(DealtSlice::strip).collect(),
+            });
+            let sent = operator_chan.0.send(
+                Recipients::One(validator_key.clone()),
+                dealing.encode(),
+                true,
+            );
+            assert_eq!(sent, vec![validator_key.clone()]);
+            context.sleep(Duration::from_secs(1)).await;
+
+            // The otherwise valid dealing earned neither a durable record nor
+            // the vote that follows it, and the occupied section is untouched.
+            let store = store(context.child("probe"), "sealer-occupied", &deployment()).await;
+            assert_eq!(store.first_index(), None);
+            let batch = header.batch_id::<Sha256>().into_digest();
+            assert_eq!(store.get(Identifier::Key(&batch)).await.unwrap(), None);
+            let probe = intervals(
+                context.child("interval_probe"),
+                "sealer-occupied-intervals",
+                &configured,
+            )
+            .await;
+            let record = probe
+                .get(Identifier::Index(interval_index(1, slice)))
+                .await
+                .unwrap()
+                .expect("the seeded interval is retained");
+            assert_eq!(record.root, foreign);
+            assert_eq!(
+                probe
+                    .get(Identifier::Key(&interval_key(&roots.successor, slice)))
+                    .await
+                    .unwrap(),
+                None
+            );
         });
     }
 

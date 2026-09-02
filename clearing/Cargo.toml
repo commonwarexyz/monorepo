@@ -36,7 +36,6 @@ stateright.workspace = true
 
 [features]
 default = [ "std" ]
-mocks = [ "commonware-cryptography/mocks" ]
 std = [
 	"ahash/std",
 	"bytes/std",

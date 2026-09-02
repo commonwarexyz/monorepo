@@ -31,7 +31,7 @@ use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
 use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
 use std::path::Path;
 
-const SCHEMA_VERSION: i64 = 14;
+const SCHEMA_VERSION: i64 = 15;
 const MAX_PENDING_CLAIM_BYTES: usize = 16 * 1024;
 const MIN_STATE_OPENING_BYTES: usize = Key::SIZE + AccountState::SIZE + u32::SIZE * 2 + 1;
 const MAX_STATE_OPENING_BYTES: usize =
@@ -160,13 +160,16 @@ pub(crate) struct VectorState {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(i64)]
 pub(crate) enum ReconcileOutcome {
-    /// The committed close's credit tip covered every held receipt.
+    /// The committed close's terminal entries covered every held receipt.
     Reconciled = 1,
-    /// A held receipt exceeded the committed tip and a proven challenge was submitted.
+    /// A held entry exceeded the committed terminal entry and a proven challenge was submitted.
     Challenged = 2,
     /// An enforcement dead end: a finalized close understated a held receipt past the
     /// challenge window, or a registered epoch's close never admitted and settlement faulted.
     Unenforceable = 3,
+    /// The committed evidence aged out of the operator's retention window before the held
+    /// receipts were reconciled, so their coverage can no longer be verified or convicted.
+    Unavailable = 4,
 }
 
 #[derive(Clone, Copy)]
@@ -1175,6 +1178,12 @@ impl Store {
         self.record_outcome(epoch, ReconcileOutcome::Unenforceable)
     }
 
+    /// Durably records an epoch whose committed evidence aged out of the operator's retention
+    /// window before its held credits were reconciled.
+    pub(crate) fn record_unavailable(&mut self, epoch: u64) -> Result<()> {
+        self.record_outcome(epoch, ReconcileOutcome::Unavailable)
+    }
+
     fn record_outcome(&mut self, epoch: u64, outcome: ReconcileOutcome) -> Result<()> {
         self.ensure_usable()?;
         let result = record_reconcile_transaction(
@@ -1440,7 +1449,7 @@ fn initialize_schema(
 
          CREATE TABLE agent_reconciled (
              epoch INTEGER PRIMARY KEY CHECK (epoch >= 0),
-             status INTEGER NOT NULL CHECK (status IN (1, 2, 3))
+             status INTEGER NOT NULL CHECK (status IN (1, 2, 3, 4))
          );",
         key_size = Key::SIZE,
         digest_size = Digest::SIZE,

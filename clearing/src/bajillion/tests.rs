@@ -5,7 +5,8 @@ use crate::bajillion::{
         account_lookup, adjudicate, higher_entry_lookup,
     },
     payment::{
-        AckError, SendAuthorization, VECTOR_ACK_AGGREGATE_NAMESPACE, VectorAck, VectorSendBody,
+        AckError, EntryReceipt, SendAuthorization, VECTOR_ACK_AGGREGATE_NAMESPACE, VectorAck,
+        VectorSendBody,
     },
     posted::derive_successor,
     state::{AccountRow, AccountState, Prefix, SettlementOutput, StateLeaf},
@@ -274,7 +275,7 @@ fn fixture_with(
 }
 
 #[test]
-fn close_validates_deals_and_seals() {
+fn close_validates_and_deals() {
     let fixture = fixture(24, 8, 2);
     fixture
         .prepared
@@ -823,6 +824,150 @@ fn ack_debit_arms_convict_same_seq_forks_and_later_batches() {
 }
 
 #[test]
+fn ack_debit_arms_decline_earlier_retries_and_credit_only_rows() {
+    // Recommit one sender's terminal at sequence one so an earlier sequence exists.
+    let fixture = fixture(16, 8, 2);
+    let close = fixture.prepared.close();
+    let position = 3_usize;
+    let (payer_public, payer_private) = fixture
+        .accounts
+        .iter()
+        .find(|(public, _)| *public == close.rows[position].account)
+        .cloned()
+        .unwrap();
+    let committed = fixture.acks[position].body();
+    let terminal = VectorSendBody::new(
+        fixture.context.payment(),
+        payer_public.clone(),
+        1,
+        committed.cumulative_debit(),
+        committed.send_root(),
+    );
+    let mut rows = close.rows.clone();
+    let mut signatures = operator_signatures(&fixture);
+    signatures[position] = Some(bls_ack(&fixture.operator_bls_private, &terminal));
+    rows[position].outgoing = Some(SendAuthorization::sign(terminal, &payer_private));
+    let out_partials = partials(&close.out_vectors);
+    let prepared = prepare_close_with_strategy::<Sha256, _, _>(
+        &fixture.cache,
+        &fixture.context,
+        &fixture.deposits,
+        &fixture.withdrawals,
+        rows,
+        close.out_vectors.clone(),
+        &out_partials,
+        &signatures,
+        close.rebuild_transpose().unwrap(),
+        &Sequential,
+    )
+    .unwrap();
+    prepared
+        .validate::<Sha256, AckBatchVerifier, _>(
+            &fixture.context,
+            &fixture.operator_bls,
+            &fixture.deposits,
+            &fixture.withdrawals,
+            &mut TestRng::new(47),
+            &Sequential,
+        )
+        .unwrap();
+    let close = prepared.close();
+    let index = ChallengeIndex::new::<Sha256>(&fixture.context, close).unwrap();
+    let lookup = account_lookup::<Sha256, _, _>(&index, &fixture.cache, &payer_public).unwrap();
+
+    // A retained earlier batch under a different root never convicts, whether it carries the
+    // terminal debit or less: the committed later batch supersedes it.
+    let mut entries = close.out_vectors[position].entries().to_vec();
+    let moved = entries.remove(0).cumulative;
+    entries[0].cumulative += moved;
+    let rearranged = OutVector::new(EPOCH, payer_public.clone(), entries)
+        .unwrap()
+        .root::<Sha256, ShaDigest>()
+        .unwrap();
+    for debit in [
+        committed.cumulative_debit(),
+        committed.cumulative_debit() - 1,
+    ] {
+        let earlier = VectorAck::sign_by_authorities(
+            VectorSendBody::new(
+                fixture.context.payment(),
+                payer_public.clone(),
+                0,
+                debit,
+                rearranged,
+            ),
+            &payer_private,
+            &fixture.operator,
+        );
+        assert_eq!(
+            adjudicate::<Sha256, _, _>(
+                &fixture.context,
+                &close.header,
+                &close.roots,
+                &Challenge::HigherAckDebit {
+                    ack: Box::new(AckWitness::from_ack(&earlier)),
+                    payer: Box::new(lookup.clone()),
+                }
+            )
+            .unwrap(),
+            Verdict::NoContradiction,
+            "debit {debit}"
+        );
+    }
+
+    // A credit-only row commits no outgoing endpoint, so an acknowledgment at its predecessor
+    // debit is a zero-advance retry at any sequence number, not a contradiction.
+    let fixture = churn_fixture();
+    let close = fixture.prepared.close();
+    let index = ChallengeIndex::new::<Sha256>(&fixture.context, close).unwrap();
+    let row = close
+        .rows
+        .iter()
+        .find(|row| {
+            row.outgoing.is_none()
+                && row.successor.cumulative_credit > row.predecessor.cumulative_credit
+        })
+        .expect("the churn fixture credits an account that never sends");
+    let (account, private) = fixture
+        .accounts
+        .iter()
+        .find(|(public, _)| *public == row.account)
+        .cloned()
+        .unwrap();
+    let lookup = account_lookup::<Sha256, _, _>(&index, &fixture.cache, &account).unwrap();
+    let root = OutVector::empty(EPOCH, account.clone())
+        .root::<Sha256, ShaDigest>()
+        .unwrap();
+    for seq in [0, 1, 7] {
+        let retry = VectorAck::sign_by_authorities(
+            VectorSendBody::new(
+                fixture.context.payment(),
+                account.clone(),
+                seq,
+                row.predecessor.cumulative_debit,
+                root,
+            ),
+            &private,
+            &fixture.operator,
+        );
+        assert_eq!(
+            adjudicate::<Sha256, _, _>(
+                &fixture.context,
+                &close.header,
+                &close.roots,
+                &Challenge::HigherAckDebit {
+                    ack: Box::new(AckWitness::from_ack(&retry)),
+                    payer: Box::new(lookup.clone()),
+                }
+            )
+            .unwrap(),
+            Verdict::NoContradiction,
+            "seq {seq}"
+        );
+    }
+}
+
+#[test]
 fn absent_payer_arms_convict_from_zero() {
     let fixture = fixture(8, 4, 1);
     let close = fixture.prepared.close();
@@ -945,14 +1090,100 @@ fn infeasible_retained_entries_are_rejected() {
     ));
 }
 
+#[test]
+fn forged_entry_openings_are_rejected() {
+    let fixture = fixture(8, 4, 1);
+    let close = fixture.prepared.close();
+    let index = ChallengeIndex::new::<Sha256>(&fixture.context, close).unwrap();
+    let position = 2_usize;
+    let (payer_public, payer_private) = fixture
+        .accounts
+        .iter()
+        .find(|(public, _)| *public == close.rows[position].account)
+        .cloned()
+        .unwrap();
+    let committed = &close.out_vectors[position];
+    let recipient = committed.entries()[0].recipient.clone();
+    let sender =
+        higher_entry_lookup::<Sha256, _, _>(&index, &payer_public, Some(committed), &recipient)
+            .unwrap();
+
+    // A two-unit edge acknowledged off the close, so a bumped count stays feasible and
+    // reaches the opening check.
+    let mut entries = committed.entries().to_vec();
+    entries[0].cumulative = 2;
+    let doubled = OutVector::new(EPOCH, payer_public.clone(), entries).unwrap();
+    let doubled_ack = VectorAck::sign_by_authorities(
+        VectorSendBody::new(
+            fixture.context.payment(),
+            payer_public,
+            1,
+            close.rows[position].successor.cumulative_debit + 1,
+            doubled.root::<Sha256, ShaDigest>().unwrap(),
+        ),
+        &payer_private,
+        &fixture.operator,
+    );
+
+    // A genuine acknowledgment and its genuine opening never authenticate a claimed value the
+    // opening does not commit, on the receipt and the challenge alike.
+    let reject = |ack: &VectorAck<VerifyingKey, ShaDigest>,
+                  vector: &OutVector<VerifyingKey>,
+                  cumulative: u64,
+                  count: u64| {
+        let crate::bajillion::vector::OutTipLookup::Present { opening, .. } =
+            vector.lookup::<Sha256, ShaDigest>(&recipient).unwrap()
+        else {
+            panic!("edge entry is present");
+        };
+        let receipt = EntryReceipt {
+            ack: ack.clone(),
+            recipient: recipient.clone(),
+            cumulative,
+            count,
+            opening: opening.clone(),
+        };
+        assert!(matches!(
+            receipt.verify::<Sha256>(fixture.context.payment()),
+            Err(AckError::InvalidEntryOpening)
+        ));
+        let result = adjudicate::<Sha256, _, _>(
+            &fixture.context,
+            &close.header,
+            &close.roots,
+            &Challenge::HigherAckEntry {
+                entry: Box::new(EntryWitness {
+                    ack: AckWitness::from_ack(ack),
+                    recipient: recipient.clone(),
+                    cumulative,
+                    count,
+                    opening,
+                }),
+                sender: Box::new(sender.clone()),
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(ChallengeError::Ack(AckError::InvalidEntryOpening))
+        ));
+    };
+
+    // The committed edge is (1, 1): claim one more unit.
+    reject(&fixture.acks[position], committed, 2, 1);
+
+    // The doubled edge is (2, 1): claim one more unit, then one more payment.
+    reject(&doubled_ack, &doubled, 3, 1);
+    reject(&doubled_ack, &doubled, 2, 2);
+}
+
 /// Builds a replica from a fixture's opening state vector.
 fn replica_of(fixture: &Fixture) -> crate::bajillion::posted::Replica<VerifyingKey> {
     crate::bajillion::posted::Replica::genesis(fixture.cache.leaves()).unwrap()
 }
 
-/// Encodes, decodes, and validates one close as a delta stream against `replica`, asserting
+/// Encodes, decodes, and validates one close as a posted corpus against `replica`, asserting
 /// exact sizing and parity with the in-memory close, then rolls the replica forward.
-fn stream_round_trip(
+fn posted_round_trip(
     fixture: &Fixture,
     replica: &mut crate::bajillion::posted::Replica<VerifyingKey>,
 ) -> Vec<u8> {
@@ -997,11 +1228,11 @@ fn posted_corpus_round_trips_and_streams_across_closes() {
     let first = fixture_with(EPOCH, 20, 12, 8, 2, None);
     let mut replica = replica_of(&first);
     let posted_live = replica.live();
-    stream_round_trip(&first, &mut replica);
+    posted_round_trip(&first, &mut replica);
     let close = first.prepared.close();
     assert_eq!(replica.live(), posted_live, "no account went inactive");
 
-    // Epoch two: build the next close on the carried states (different senders), and stream
+    // Epoch two: build the next close on the carried states (different senders), and post
     // it against the rolled-forward replica. Predecessors now differ from the opening
     // balance, so this passes only if the replica tracked epoch one exactly.
     let carried: alloc::collections::BTreeMap<_, _> = first
@@ -1017,7 +1248,7 @@ fn posted_corpus_round_trips_and_streams_across_closes() {
         )
         .collect();
     let second = fixture_with(EPOCH + 1, 20, 9, 6, 3, Some(&carried));
-    stream_round_trip(&second, &mut replica);
+    posted_round_trip(&second, &mut replica);
 }
 
 #[test]
@@ -1042,8 +1273,21 @@ fn posted_corpus_rejects_divergent_replicas_and_tampering() {
         1 << 20,
         1 << 20,
     );
-    let rejected = stale.map_or(true, |decoded| decoded != *close);
-    assert!(rejected, "stale replica must not reproduce the close");
+    if let Ok(decoded) = stale {
+        assert!(
+            validate_close_with_strategy::<Sha256, _, _, AckBatchVerifier, _>(
+                &fixture.context,
+                &fixture.operator_bls,
+                &fixture.deposits,
+                &fixture.withdrawals,
+                &decoded,
+                &mut TestRng::new(12),
+                &Sequential,
+            )
+            .is_err(),
+            "stale replica must not decode a valid close"
+        );
+    }
 
     // Bit flips are rejected at decode or by full validation of the decoded close.
     for position in [0_usize, buf.len() / 2, buf.len() - 1] {
@@ -1260,22 +1504,22 @@ fn dealt_slices_hydrate_validate_and_stream() {
     assert_eq!(intervals, successor);
 
     // Epoch two on the carried states, with different senders, dealt as two multi-slice
-    // spans (a wrapped dealing): streaming works only if every interval advanced exactly,
-    // and the run witness must come out smaller than the per-slice one.
+    // spans (a wrapped dealing): hydration succeeds only if every interval advanced exactly,
+    // and the span witness must come out smaller than the per-slice one.
     let second = fixture_with(EPOCH + 1, 20, 9, 6, 3, Some(&carried));
     let split = slice_count / 2 + 1;
-    let runs = [split..slice_count, 0..split];
+    let spans = [split..slice_count, 0..split];
     let mut advanced = intervals.clone();
-    let (run_dealt, _) = dealt_round_trip(&second, &mut advanced, &runs);
+    let (span_dealt, _) = dealt_round_trip(&second, &mut advanced, &spans);
     let mut per_slice = intervals.clone();
     let (single_dealt, _) = dealt_round_trip(&second, &mut per_slice, &single_spans(slice_bits));
     assert!(
-        run_dealt < single_dealt,
-        "runs must amortize the witness: {run_dealt} vs {single_dealt}"
+        span_dealt < single_dealt,
+        "spans must amortize the witness: {span_dealt} vs {single_dealt}"
     );
     assert_eq!(advanced, per_slice);
 
-    // A stale interval (epoch one's predecessor state) hydrates epoch two's whole-close run
+    // A stale interval (epoch one's predecessor state) hydrates epoch two's whole-close span
     // into material that misses the certified roots.
     let second_slices = second
         .prepared
@@ -1316,9 +1560,9 @@ fn dealt_slices_hydrate_validate_and_stream() {
     assert!(rejected, "stale intervals must not validate");
 }
 
-/// A run's holders check every covered boundary, not only the two at its ends: an operator
+/// A span's holders check every covered boundary, not only the two at its ends: an operator
 /// that commits a wrong internal boundary consistently (coverage root and header rebuilt over
-/// it) is rejected by the run's validation, at the internal check rather than the opening.
+/// it) is rejected by the span's validation, at the internal check rather than the opening.
 #[test]
 fn run_rejects_consistently_committed_wrong_internal_boundary() {
     let base = fixture_with(EPOCH, 20, 12, 8, 2, None);
@@ -1375,7 +1619,7 @@ fn run_rejects_consistently_committed_wrong_internal_boundary() {
             .prepared
             .corrupt_boundary::<Sha256>(&fixture.context, index, corrupt);
         let close = fixture.prepared.close();
-        let run = fixture
+        let slice = fixture
             .prepared
             .assemble_slices(&fixture.cache, core::slice::from_ref(&whole), &Sequential)
             .unwrap()
@@ -1387,31 +1631,28 @@ fn run_rejects_consistently_committed_wrong_internal_boundary() {
             &fixture.withdrawals,
             &close.header,
             &close.roots,
-            &run,
+            &slice,
             &mut TestRng::new(23),
         )
         .expect_err(name);
         assert!(expected(&error), "{name}: {error:?}");
     }
 
-    // The per-interval aggregates are pinned to their own intervals: swapping two present
-    // aggregates inside an otherwise valid run fails the operator countersignature check.
-    let mut run = base
+    // The per-slice aggregates are pinned to their own slices: swapping two present
+    // aggregates inside an otherwise valid span fails the operator countersignature check.
+    let mut slice = base
         .prepared
         .assemble_slices(&base.cache, core::slice::from_ref(&whole), &Sequential)
         .unwrap()
         .remove(0);
-    let present = run
+    let present = slice
         .operator_aggregates
         .iter()
         .enumerate()
         .filter_map(|(index, aggregate)| aggregate.as_ref().map(|_| index))
         .collect::<Vec<_>>();
-    assert!(
-        present.len() >= 2,
-        "the fixture sends from several intervals"
-    );
-    run.operator_aggregates.swap(present[0], present[1]);
+    assert!(present.len() >= 2, "the fixture sends from several slices");
+    slice.operator_aggregates.swap(present[0], present[1]);
     let close = base.prepared.close();
     assert!(matches!(
         validate_slice::<Sha256, _, _, AckBatchVerifier, _>(
@@ -1421,7 +1662,7 @@ fn run_rejects_consistently_committed_wrong_internal_boundary() {
             &base.withdrawals,
             &close.header,
             &close.roots,
-            &run,
+            &slice,
             &mut TestRng::new(29),
         ),
         Err(CloseError::Ack(AckError::InvalidOperatorSignature))
@@ -1432,7 +1673,7 @@ fn run_rejects_consistently_committed_wrong_internal_boundary() {
 /// withdrawals close live ones (including a credited one), an amount withdrawal leaves one
 /// live, a deposit lands on an idle account, and a fresh recipient without a deposit is
 /// paid out. Successor positions therefore shift against predecessor positions inside every
-/// run, and hydration must resolve full-key rows next to rank gaps.
+/// span, and hydration must resolve full-key rows next to rank gaps.
 fn churn_fixture() -> Fixture {
     const LIVE: usize = 24;
     const SENDERS: usize = 10;
@@ -1717,7 +1958,7 @@ fn runs_hydrate_and_advance_through_created_and_deleted_state() {
     assert_eq!((created, deleted, paid_out), (3, 3, 1));
 
     // Every span shape reproduces the dealt slices and advances the per-slice intervals to
-    // the successor state: singles, a wrapped pair of runs, and the whole close.
+    // the successor state: singles, a wrapped pair of spans, and the whole close.
     let slice_bits = fixture.context.assignment().slice_bits();
     let slice_count = 1_u16 << slice_bits;
     let split = slice_count / 2 + 1;
@@ -1837,7 +2078,14 @@ fn phantom_credit(
 
 #[test]
 fn byzantine_operator_cannot_certify_invalid_runs() {
-    let cases: [(&str, Tamper); 7] = [
+    // Each rewrite is pinned to the first check that catches it in a whole-close span: a
+    // successor vector whose length disagrees with the disclosed leaves fails the state range
+    // bracket, a rewritten predecessor side fails the predecessor opening, a rewritten
+    // successor balance or a live closed account fails its row balance equation (the
+    // derived withdrawal amount enters that equation before the output is compared), and a
+    // credit without a debit reaches the terminal accumulator equality.
+    type Expected = fn(&CloseError) -> bool;
+    let cases: [(&str, Tamper, Expected); 7] = [
         (
             "minted successor leaf without a row",
             |_, _, _, _, successor, _| {
@@ -1853,6 +2101,7 @@ fn byzantine_operator_cannot_certify_invalid_runs() {
                     },
                 );
             },
+            |error| matches!(error, CloseError::SliceStateRange),
         ),
         (
             "silently deleted unchanged leaf",
@@ -1860,6 +2109,7 @@ fn byzantine_operator_cannot_certify_invalid_runs() {
                 let victim = close.unchanged[0].account.clone();
                 successor.retain(|leaf| leaf.account != victim);
             },
+            |error| matches!(error, CloseError::SliceStateRange),
         ),
         (
             "edited unchanged balance",
@@ -1867,6 +2117,7 @@ fn byzantine_operator_cannot_certify_invalid_runs() {
                 close.unchanged[0].state.balance += 1;
                 upsert_leaf(successor, close.unchanged[0].clone());
             },
+            |error| matches!(error, CloseError::Commitment(_)),
         ),
         (
             "balance moved between two rows",
@@ -1892,6 +2143,7 @@ fn byzantine_operator_cannot_certify_invalid_runs() {
                     );
                 }
             },
+            |error| matches!(error, CloseError::BalanceEquation),
         ),
         (
             "wrong predecessor for a live row",
@@ -1911,6 +2163,7 @@ fn byzantine_operator_cannot_certify_invalid_runs() {
                     },
                 );
             },
+            |error| matches!(error, CloseError::Commitment(_)),
         ),
         (
             "closed account kept alive",
@@ -1941,10 +2194,13 @@ fn byzantine_operator_cannot_certify_invalid_runs() {
                     },
                 );
             },
+            |error| matches!(error, CloseError::BalanceEquation),
         ),
-        ("credit without a debit", phantom_credit),
+        ("credit without a debit", phantom_credit, |error| {
+            matches!(error, CloseError::MultisetMismatch)
+        }),
     ];
-    for (name, tamper) in cases {
+    for (name, tamper, expected) in cases {
         let mut fixture = churn_fixture();
         let Fixture {
             prepared,
@@ -1966,28 +2222,26 @@ fn byzantine_operator_cannot_certify_invalid_runs() {
         let close = prepared.close();
         let slice_count = context.assignment().slice_count();
         let whole = 0..slice_count;
-        let run = prepared
+        let slice = prepared
             .assemble_slices(cache, core::slice::from_ref(&whole), &Sequential)
             .unwrap()
             .remove(0);
-        let verdict = validate_slice::<Sha256, _, _, AckBatchVerifier, _>(
+        let error = validate_slice::<Sha256, _, _, AckBatchVerifier, _>(
             context,
             operator_bls,
             deposits,
             withdrawals,
             &close.header,
             &close.roots,
-            &run,
+            &slice,
             &mut TestRng::new(37),
-        );
-        assert!(
-            verdict.is_err(),
-            "{name}: a consistently committed invalid run was certified"
-        );
+        )
+        .expect_err(name);
+        assert!(expected(&error), "{name}: {error:?}");
 
-        // The dealt form hydrates to the same rejected run, or fails to hydrate at all.
+        // The dealt form hydrates to the same rejected span, or fails to hydrate at all.
         let intervals = intervals_of(cache.leaves(), context.assignment().slice_bits());
-        let dealt = crate::bajillion::retained::DealtSlice::strip(run.clone());
+        let dealt = crate::bajillion::retained::DealtSlice::strip(slice.clone());
         if let Ok(hydrated) = dealt.hydrate::<Sha256>(
             &span_interval(&intervals, &whole),
             context,
@@ -2006,14 +2260,14 @@ fn byzantine_operator_cannot_certify_invalid_runs() {
                     &mut TestRng::new(41),
                 )
                 .is_err(),
-                "{name}: the hydrated run was certified"
+                "{name}: the hydrated span was certified"
             );
         }
     }
 }
 
-/// Conservation is enforced by the holders of the terminal interval: a credit with no debit
-/// keeps every interior interval consistent, and the run ending at the last boundary is the
+/// Conservation is enforced by the holders of the terminal slice: a credit with no debit
+/// keeps every interior slice consistent, and the span ending at the last boundary is the
 /// one that rejects it, which quorum intersection makes sufficient.
 #[test]
 fn credit_without_debit_is_caught_at_the_terminal_boundary() {

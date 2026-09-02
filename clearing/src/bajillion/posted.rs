@@ -30,8 +30,8 @@
 //! writer held, so cold readers bootstrap from a state snapshot checked against a
 //! certified root and stream forward.
 //!
-//! Dealt slices keep full-key vectors and their transpose intervals: a slice validator
-//! holds only its interval and cannot resolve global row indices, so the collation
+//! Dealt slices keep full-key vectors and their transpose ranges: a slice validator
+//! holds only its span and cannot resolve global row indices, so the collation
 //! redundancy belongs in dealings, never in the posted corpus.
 
 use crate::bajillion::{
@@ -130,17 +130,21 @@ pub(crate) fn read_vectors<P: PublicKey, D: Digest>(
     Ok(out_vectors)
 }
 
-/// Reads the per-slice operator aggregates section.
+/// Reads the per-slice operator aggregates section: exactly one per slice.
 pub(crate) fn read_aggregates(
     buf: &mut impl Buf,
+    slice_count: u16,
 ) -> Result<Vec<Option<OperatorAggregate>>, CodecError> {
-    Vec::<Option<OperatorAggregate>>::read_cfg(buf, &(RangeCfg::new(..=u16::MAX as usize + 1), ()))
+    Vec::<Option<OperatorAggregate>>::read_cfg(
+        buf,
+        &(RangeCfg::exact(usize::from(slice_count)), ()),
+    )
 }
 
 /// Derives the full in-memory close from decoded parts, shared by every wire form.
 ///
 /// Forward-derives each row's successor state and output from its predecessor, its vector
-/// totals, and its rebuilt incoming interval, then chains the prefix column. The caller has
+/// totals, and its rebuilt incoming range, then chains the prefix column. The caller has
 /// already established where `unchanged`, the skeleton, and the vectors came from; any
 /// divergence from the sealed close surfaces when the caller validates the result.
 #[allow(clippy::too_many_arguments)]
@@ -233,7 +237,7 @@ fn resolve_entry_targets<P: PublicKey, S>(
 /// committed.
 ///
 /// Shared by posted decoding, which sources credit from the global vectors, and dealt-slice
-/// hydration, which sources it from the transpose interval.
+/// hydration, which sources it from the transpose range.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn derive_row<H, P, D>(
     context: &CloseContext<P, D>,
@@ -593,7 +597,7 @@ fn resolve_references<P: PublicKey, D: Digest>(
     references
 }
 
-/// Returns the exact delta wire size of one close against `replica`.
+/// Returns the exact posted wire size of one close against `replica`.
 pub fn encoded_size<P: PublicKey, D: Digest>(
     close: &Close<P, D>,
     replica: &Replica<P>,
@@ -613,7 +617,7 @@ pub fn encoded_size<P: PublicKey, D: Digest>(
         + close.operator_aggregates.encode_size())
 }
 
-/// Writes the delta wire form of one close against the pre-close `replica`.
+/// Writes the posted wire form of one close against the pre-close `replica`.
 ///
 /// `indices` are the entry row indices from [resolve_indices]. The replica must be
 /// the state the close was built on (the writer applies the close only afterward).
@@ -640,9 +644,9 @@ pub fn write<P: PublicKey, D: Digest>(
     close.operator_aggregates.write(buf);
 }
 
-/// Reads a delta close against the pre-close `replica` back into the exact in-memory close.
+/// Reads a posted close against the pre-close `replica` back into the exact in-memory close.
 ///
-/// Like the posted decoder, this is reconstruction, not validation: predecessor states and
+/// This is reconstruction, not validation: predecessor states and
 /// the unchanged vector come from the replica, and the caller MUST pass the result to
 /// [validate_close_with_strategy](crate::bajillion::transition::validate_close_with_strategy)
 /// before applying it to the replica. A replica that diverges from the sealed close (wrong
@@ -661,7 +665,7 @@ where
     P: PublicKey,
     D: Digest,
 {
-    let invalid = |reason| CodecError::Invalid("DeltaClose", reason);
+    let invalid = |reason| CodecError::Invalid("PostedClose", reason);
     let header = Header::read(buf)?;
     let roots = RootBundle::read(buf)?;
     let row_count = usize::read_cfg(buf, &RangeCfg::new(..=max_rows))?;
@@ -693,9 +697,9 @@ where
         return Err(invalid("rows are not strictly account-sorted"));
     }
     let out_vectors = read_vectors(buf, context, &skeleton, max_entries)?;
-    let operator_aggregates = read_aggregates(buf)?;
+    let operator_aggregates = read_aggregates(buf, context.assignment().slice_count())?;
     if buf.has_remaining() {
-        return Err(invalid("trailing bytes after the delta corpus"));
+        return Err(invalid("trailing bytes after the posted corpus"));
     }
     let unchanged = replica.unchanged(&skeleton);
     assemble::<H, P, D>(

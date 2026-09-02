@@ -186,7 +186,7 @@ impl<P: PublicKey, D: Digest> SealedDealing<P, D> {
         self.slices
     }
 
-    /// Returns the proof slice covering one interval for service through the challenge
+    /// Returns the proof slice covering one slice for service through the challenge
     /// deadline.
     pub fn serve(&self, slice: u16) -> Option<&ProofSlice<P, D>> {
         self.slices
@@ -199,7 +199,7 @@ impl<P: PublicKey, D: Digest> SealedDealing<P, D> {
 ///
 /// A dealing is the complete, canonically ordered set of proof slices assigned to one
 /// validator: one per assigned contiguous span. `seal` verifies every distinct payer
-/// authorization in one randomized aggregate batch and each interval's combined operator
+/// authorization in one randomized aggregate batch and each slice's combined operator
 /// countersignature. Applications must make the returned dealing durable before publishing
 /// the accompanying vote.
 #[allow(clippy::too_many_arguments)]

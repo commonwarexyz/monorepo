@@ -42,7 +42,6 @@ use std::{
     io::Stdout,
     net::SocketAddr,
     num::{NonZeroU64, NonZeroUsize},
-    thread,
     time::Duration,
 };
 
@@ -460,6 +459,11 @@ async fn refresh<E: Env>(
                 "epoch {epoch} ALARM: finalized while the operator withholds the committed evidence for held credits (unverifiable, window closed)"
             ));
         }
+        for epoch in summary.unavailable {
+            state.log(format!(
+                "epoch {epoch} ALARM: held credits went unreconciled past the operator's retention window (the committed evidence is no longer served, so their coverage is unverifiable)"
+            ));
+        }
     }
     Ok(())
 }
@@ -616,7 +620,7 @@ async fn close_epoch<E: Env>(network: &E, operator: SocketAddr, agent: &mut Agen
     println!("epoch {} cut and closing asynchronously", close.epoch);
     loop {
         match agent.poll_close(network, operator, close.epoch).await? {
-            PollCloseResponse::NoEvent => thread::sleep(Duration::from_millis(10)),
+            PollCloseResponse::NoEvent => network.sleep(Duration::from_millis(10)).await,
             PollCloseResponse::Finished(finished) => {
                 println!(
                     "epoch {} finalized {} rows: dealings sealed and voted by the validator committee over the DA channel (prepare={}us deal={}us seal={}us)",
@@ -876,7 +880,7 @@ pub(crate) async fn scripted<E: Env>(
             retired = true;
             break;
         }
-        thread::sleep(Duration::from_millis(100));
+        network.sleep(Duration::from_millis(100)).await;
     }
     ensure!(retired, "a live registration outlived the walkthrough");
     println!("certified read proves no live registration remains: the deployment idles safely");

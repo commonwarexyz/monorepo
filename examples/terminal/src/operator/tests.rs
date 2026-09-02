@@ -642,6 +642,7 @@ fn committed_entry_serves_the_retained_close() {
 
     // The credited edge resolves to its committed terminal entry.
     let evidence = operator.committed_entry(&payer, &receiver, epoch).unwrap();
+    let change_root = evidence.change_root;
     assert_eq!(
         evidence
             .lookup
@@ -670,6 +671,34 @@ fn committed_entry_serves_the_retained_close() {
             .unwrap(),
         (0, 0)
     );
+
+    // The successor's finalization must not take the evidence with it: the payer keeps
+    // moving in every later epoch, yet the close reconstructs exactly until RETAINED_EPOCHS
+    // further epochs have finalized, and only then do the pruned versions refuse it.
+    let close_successor = |operator: &mut Operator| {
+        operator.pay(0, 2, 1).unwrap();
+        start_current_close(operator).unwrap();
+        operator.wait_for_closes().unwrap();
+    };
+    let served = |operator: &Operator| {
+        let evidence = operator.committed_entry(&payer, &receiver, epoch).unwrap();
+        assert_eq!(evidence.change_root, change_root);
+        assert_eq!(
+            evidence
+                .lookup
+                .resolve::<Sha256>(&evidence.change_root, &payer, &receiver)
+                .unwrap(),
+            (7, 1)
+        );
+    };
+    close_successor(&mut operator);
+    served(&operator);
+    for _ in 1..RETAINED_EPOCHS {
+        close_successor(&mut operator);
+        served(&operator);
+    }
+    close_successor(&mut operator);
+    assert!(operator.committed_entry(&payer, &receiver, epoch).is_err());
 }
 
 #[test]
@@ -1406,16 +1435,35 @@ fn finalization_prunes_obsolete_balance_versions() {
     operator
         .finish_prepared(prepared, &mut TestRng::new(41))
         .unwrap();
-    assert_eq!(operator.store.account_version_count().unwrap(), 3);
-    assert!(
+
+    // Inside the retention window nothing is pruned: the drained account is already gone
+    // from the live epoch, while its finalized zero version still reconstructs epoch 1.
+    assert_eq!(operator.store.account_version_count().unwrap(), 7);
+    let drained = operator.wallets[0].name;
+    let gone = |data: EpochData| data.accounts.iter().all(|account| account.name != drained);
+    assert!(gone(operator.store.load_current().unwrap()));
+    assert!(!gone(operator.store.epoch_reader().load(1).unwrap()));
+
+    // Finalizing RETAINED_EPOCHS further epochs retires epoch 1's obsolete versions, the
+    // three epoch-0 versions its payers shadow plus the drained account's epoch-1 zero,
+    // while every epoch still inside the window keeps its versions.
+    for epoch in 2..=RETAINED_EPOCHS + 1 {
+        operator.pay(1, 2, 1).unwrap();
+        let data = operator.store.load_current().unwrap();
+        let prepared =
+            prepare_epoch(&operator.protocol, data, operator.registration.clone()).unwrap();
+        assert_eq!(prepared.epoch(), epoch);
+        rotate_epoch(&mut operator, epoch);
         operator
-            .store
-            .load_current()
-            .unwrap()
-            .accounts
-            .iter()
-            .all(|account| account.name != operator.wallets[0].name)
+            .finish_prepared(prepared, &mut TestRng::new(40 + epoch))
+            .unwrap();
+    }
+    assert_eq!(
+        operator.store.account_version_count().unwrap(),
+        7 + 2 * RETAINED_EPOCHS - 4
     );
+    assert!(gone(operator.store.epoch_reader().load(1).unwrap()));
+    assert!(gone(operator.store.load_current().unwrap()));
 }
 
 #[test]
@@ -1449,7 +1497,9 @@ fn pruning_ignores_unfinalized_successor_versions() {
         .finish_prepared(second, &mut TestRng::new(43))
         .unwrap();
 
-    assert_eq!(operator.store.account_version_count().unwrap(), 4);
+    // Finalizing epoch 1 inside the retention window prunes nothing, and the unfinalized
+    // epoch-2 deposit version stays the live one.
+    assert_eq!(operator.store.account_version_count().unwrap(), 6);
     let recreated = operator
         .store
         .current_account(&operator.wallets[0].public_key())

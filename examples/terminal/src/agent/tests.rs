@@ -4266,6 +4266,14 @@ fn verified_incoming_reconciles_and_survives_restart() {
         let result = operator.complete_close(44).unwrap();
         finalize(&control, &result).await;
 
+        // The successor epoch finalizes before the receiver reconciles. A finalized close
+        // stays reconstructable through the retention window, so the honest operator still
+        // serves the predecessor's evidence instead of tripping the withholding alarm.
+        register(&control, &mut operator).await;
+        operator.pay(0, 2, 1).unwrap();
+        let successor = operator.complete_close(45).unwrap();
+        finalize(&control, &successor).await;
+
         // The reconstructed committed-side evidence matches the finalized roots, so the
         // certified anchor below names the exact close the operator serves lookups for.
         let evidence = operator
@@ -4314,6 +4322,81 @@ fn verified_incoming_reconciles_and_survives_restart() {
         assert_eq!(recovered.incoming().total, 8);
         assert_eq!(recovered.incoming().cursor, cursor);
         assert_eq!(recovered.last_reconciled_epoch(), Some(0));
+        assert!(
+            recovered
+                .store
+                .unreconciled_incoming_epochs()
+                .unwrap()
+                .is_empty()
+        );
+        operator_server.await.unwrap();
+    });
+}
+
+/// A finalized epoch whose committed evidence aged out of the operator's retention window
+/// before the receiver reconciled it is decided as unavailable, never alarmed as withheld: the
+/// honest operator legitimately no longer reconstructs the close, so the epoch is recorded
+/// durably instead of retried.
+#[test]
+fn evidence_past_the_retention_window_is_unavailable_not_withheld() {
+    deterministic::Runner::default().start(|context| async move {
+        let database = TempDatabase::new();
+        let (control, mut chain) = chain(&context).await;
+        let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
+
+        // Bob's credit lands in epoch 0, and its payer keeps moving in every later epoch, so
+        // finalizing the epoch that closes the window shadows and prunes the versions
+        // reconstructing epoch 0 needs.
+        register(&control, &mut operator).await;
+        operator.pay(0, 1, 5).unwrap();
+        let held = operator.complete_close(50).unwrap();
+        finalize(&control, &held).await;
+        for epoch in 1..=Operator::RETAINED_EPOCHS + 1 {
+            register(&control, &mut operator).await;
+            operator.pay(0, 2, 1).unwrap();
+            let result = operator.complete_close(50 + epoch).unwrap();
+            assert_eq!(result.epoch, epoch);
+            finalize(&control, &result).await;
+        }
+        assert_eq!(
+            status(&control).await.last_finalized,
+            Some(Operator::RETAINED_EPOCHS + 1)
+        );
+        assert!(
+            operator
+                .committed_entry(&wallets()[0].public_key(), &wallets()[1].public_key(), 0)
+                .is_err()
+        );
+
+        let mut operator_listener = context
+            .bind(SocketAddr::from(([127, 0, 0, 1], 2)))
+            .await
+            .unwrap();
+        let operator_address = operator_listener.local_addr().unwrap();
+        let operator_server = context.child("operator").spawn(move |_| async move {
+            for _ in 0..2 {
+                relay(&mut operator_listener, &mut operator).await;
+            }
+        });
+
+        // The served receipt still anchors to the epoch-0 registration, but the committed
+        // side is gone: the epoch is decided as unavailable, durably and without a retry.
+        let mut bob = Agent::open(database.path(), 1).unwrap();
+        bob.intake_incoming(&context, &mut chain, operator_address)
+            .await
+            .unwrap();
+        assert_eq!(bob.incoming().total, 5);
+        let summary = bob
+            .reconcile(&context, &mut chain, operator_address)
+            .await
+            .unwrap();
+        assert_eq!(summary.unavailable, [0]);
+        assert!(summary.withheld.is_empty() && summary.unenforceable.is_empty());
+        assert!(summary.reconciled.is_empty() && summary.convicted.is_empty());
+        assert_eq!(bob.last_reconciled_epoch(), None);
+        assert!(bob.store.unreconciled_incoming_epochs().unwrap().is_empty());
+        drop(bob);
+        let recovered = Agent::open(database.path(), 1).unwrap();
         assert!(
             recovered
                 .store

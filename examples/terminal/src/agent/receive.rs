@@ -4,10 +4,10 @@ use super::{Agent, store::IncomingRecord};
 use crate::{
     chain::{
         client::{Chain, Client, EFFECT_ATTEMPTS, Env, POLL},
-        state::{AdmittedRootsResponse, FaultRecord, HardFaultReasonResponse},
+        state::{AdmittedRootsResponse, FaultRecord, HardFaultReasonResponse, StatusRecord},
         tx::{ChallengeRequest, SettlementTx},
     },
-    operator::rpc as operator_rpc,
+    operator::{Operator, rpc as operator_rpc},
     protocol::Key,
 };
 use anyhow::{Context, Result, ensure};
@@ -36,6 +36,10 @@ pub(crate) struct ReconcileSummary {
     /// needed to verify or convict, reported once per stretch of withholding. The epoch keeps
     /// retrying and self-heals if the evidence is later served.
     pub(crate) withheld: Vec<u64>,
+    /// Epochs whose committed-side evidence aged out of the operator's retention window before
+    /// their held credits reconciled, decided as unavailable: the honest operator no longer
+    /// reconstructs the close, so a refusal there is not withholding.
+    pub(crate) unavailable: Vec<u64>,
 }
 
 impl ReconcileSummary {
@@ -45,6 +49,7 @@ impl ReconcileSummary {
             && self.convicted.is_empty()
             && self.unenforceable.is_empty()
             && self.withheld.is_empty()
+            && self.unavailable.is_empty()
     }
 }
 
@@ -195,7 +200,11 @@ impl Agent {
     /// conviction and the understatement alarm both need the operator-served lookup, and an
     /// admitted close has no settlement-clock backstop for serving it. An epoch that finalizes
     /// while that evidence is still withheld is therefore surfaced as withheld and kept
-    /// retrying, the availability dependence the protocol places on its embedding.
+    /// retrying, the availability dependence the protocol places on its embedding. That
+    /// dependence is bounded by the operator's retention contract: the honest operator
+    /// reconstructs a finalized close until [`Operator::RETAINED_EPOCHS`] further epochs
+    /// finalize, so a refusal for an older epoch is unavailability, and the epoch is decided
+    /// as such instead of alarmed or retried.
     ///
     /// The challenge window sits between admission and finalization. On the first held receipt
     /// that exceeds the anchored committed entry while that window is open, the wallet convicts
@@ -238,7 +247,7 @@ impl Agent {
                     chain,
                     operator,
                     epoch,
-                    status.hard_faulted,
+                    &status,
                     &operator_key,
                     &mut summary,
                 )
@@ -263,7 +272,7 @@ impl Agent {
         chain: &mut Client,
         operator: SocketAddr,
         epoch: u64,
-        hard_faulted: bool,
+        status: &StatusRecord,
         operator_key: &Key,
         summary: &mut ReconcileSummary,
     ) -> Result<()> {
@@ -285,7 +294,7 @@ impl Agent {
         let Some(admitted) = admitted else {
             // No close admitted yet. If settlement faulted, this epoch's close never will, so
             // its held credit is enforcement-dead: record it loudly rather than retry forever.
-            if hard_faulted {
+            if status.hard_faulted {
                 self.store
                     .record_unenforceable(epoch)
                     .context("record unenforceable epoch")?;
@@ -315,10 +324,24 @@ impl Agent {
                 // whole epoch next heartbeat. Once the close has finalized, withheld evidence is
                 // an alarm, not a wait: conviction is no longer possible and coverage can no
                 // longer be verified, so surface the dead end (once per stretch of withholding)
-                // while still retrying in case the evidence is eventually served.
+                // while still retrying in case the evidence is eventually served. Past the
+                // operator's retention window the honest operator no longer reconstructs the
+                // close, so the refusal is unavailability rather than withholding, and the
+                // epoch is decided loudly instead of retried.
                 EntryVerdict::Refused => {
-                    if admitted.finalized && self.withheld.insert(epoch) {
-                        summary.withheld.push(epoch);
+                    if !admitted.finalized {
+                        return Ok(());
+                    }
+                    if retained(epoch, status.last_finalized) {
+                        if self.withheld.insert(epoch) {
+                            summary.withheld.push(epoch);
+                        }
+                    } else {
+                        self.store
+                            .record_unavailable(epoch)
+                            .context("record unavailable epoch")?;
+                        self.withheld.remove(&epoch);
+                        summary.unavailable.push(epoch);
                     }
                     return Ok(());
                 }
@@ -445,4 +468,16 @@ impl Agent {
         }
         EntryVerdict::Refused
     }
+}
+
+/// Whether the honest operator still reconstructs `epoch`'s committed close when
+/// `last_finalized` is the certified finalization head: the retention contract behind the
+/// withholding alarm. A status read lagging the admitted record can only understate the head,
+/// which errs toward alarming withholding and retrying.
+fn retained(epoch: u64, last_finalized: Option<u64>) -> bool {
+    last_finalized.is_none_or(|last| {
+        epoch
+            .checked_add(Operator::RETAINED_EPOCHS)
+            .is_none_or(|horizon| last < horizon)
+    })
 }

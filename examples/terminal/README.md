@@ -234,7 +234,11 @@ close: settlement serves the batch identity and change root it admitted for the 
 operator-served committed-side evidence is trusted only when it matches that anchor exactly, so
 the operator can withhold a lookup but can never fabricate coverage. Withholding has no
 settlement-clock backstop once a close is admitted, so an epoch that finalizes while its lookup
-is still withheld is surfaced as an alarm and kept retrying. When a held per-edge entry exceeds
+is still withheld is surfaced as an alarm and kept retrying. That dependence is bounded by the
+operator's retention window: a finalized close stays reconstructable until `RETAINED_EPOCHS`
+(four) further epochs finalize, so a receiver that reconciles within that window always finds an
+honest operator's evidence, and a refusal for an older epoch is recorded durably as unavailable
+rather than alarmed as withholding. When a held per-edge entry exceeds
 the anchored committed terminal entry inside the admission-to-finalization window, the wallet
 convicts the close with one `HigherAckEntry` challenge and stops, because one proven challenge
 invalidates the whole close. The operator is the receipt-delivery channel, and withholding a
@@ -250,14 +254,31 @@ and anchor records persist for the life of the deployment, so a certified anchor
 send's context proves settlement registered exactly that payment context. A receipt whose
 context the chain never registered has no close to adjudicate against and is never recorded.
 
+Each wallet flow draws on three sources: the operator's RPC (never trusted on its own), the
+validators' query servers (certified reads and submit-then-prove effects), and the wallet's own
+SQLite state.
+
+| Flow | Operator RPC | Validator query servers (certified) | Local state |
+| --- | --- | --- | --- |
+| Pay | `accept_send`, and an optional `accepted_batch` receipts fetch once a lost acceptance resolves against the finalized endpoint | `anchor` for the send's epoch, and `status` to resolve a lost acceptance | cached (epoch, anchor), cumulative debit, staged send, held receipts |
+| Balance and head opening | `payment_head` | `status`, whose finalized state root the served opening is verified against | the opening retained by root, the re-cached signing context |
+| Withdraw | `withdrawal_opening` only when no opening for the head root is retained, then `apply_withdrawal` | `recent_status` | retained head opening, the pending signed request |
+| Escalate | none | `deliver` QueueWithdrawal, `withdrawal` record | the pending signed request and its locally retained opening |
+| Claims | `withdrawal_evidence` or `external_payout_evidence`, then `acknowledge_*` | `claim_roots`, `deliver` claim, `withdrawal_release` or `payout_release` record | cached evidence and the claim intent slot |
+| Receipt intake | `incoming_payments` | `anchor` per receipt epoch | held receipts and the durable cursor |
+| Reconcile | `committed_entry` | `status`, `admitted`, `deliver` Challenge, `fault` record | held receipts, the durable per-epoch outcome |
+| Deposit, refund, hard-fault claim | none | `deliver` plus the `deposit`, `refund`, `fault`, and `hard_fault` records | the staged deposit, and for the hard-fault claim an opening retained for the frozen root |
+| Registration and settlement status | none (the operator status panel is the operator's own uncertified report) | `registration`, `status` | none |
+
 ## Close certification and data availability
 
 Distributed certification runs over the settlement DA channel. An operator sends each
 validator exactly its assigned proof slices, one per assigned span (a contiguous range of
 slices) and stripped of their unchanged state: every slice travels as a `DealtSlice`, and the
 validator hydrates it against the key interval it retains for that span at the registered
-close's predecessor root. Intervals are retained one record per slice, so a committee
-rotation that reshapes a validator's spans recombines the pieces it already holds. Genesis
+close's predecessor root. Intervals are retained one record per slice, so a future re-grouping
+of slices a validator already holds into different spans needs no re-sync, while a slice it
+never held or already pruned still needs the external sync the demo does not implement. Genesis
 seeds each deployment's intervals from its configured accounts, every sealed close advances
 them under the successor root, and the advanced intervals are made durable together with the
 sealed dealing before the vote leaves the validator, so dealing bytes scale with the movers
@@ -276,7 +297,9 @@ validator must be able to honor, so a validator killed between seal and vote sti
 dealing on restart. Sections are pruned only when they lie strictly below the certified
 finalized height, where every challenge window they cover is closed, never on wall clock. A
 record is never overwritten: a replayed dealing re-votes from the stored bytes, and a
-conflicting dealing for an occupied slot is refused. Dealings and votes are recoverable
+conflicting dealing for an occupied slot is refused, in the interval store as in the dealing
+archive (a differing close for an epoch whose advanced intervals are already retained is
+refused before sealing, closing the crash window between the two syncs). Dealings and votes are recoverable
 off-chain traffic, resent until quorum, and only the finalized admission is durable protocol
 state. The operator verifies every returned vote, assembles the exact-quorum certificate,
 submits the admission transaction, and completes only once its own certified state finalized
@@ -289,7 +312,8 @@ the exact batch.
 | Consensus threshold share (BLS) | each validator's `node.json` | signs simplex votes and certificates under the genesis threshold identity every certified read verifies against |
 | Clearing committee key (BLS) | each validator's `node.json` | seals dealings and signs close-admission votes |
 | Operator network key (ed25519) | each `operator-<index>/node.json` | authenticates that operator as a registered p2p secondary |
-| Operator clearing key (curve25519) | each `operator-<index>/node.json` (a fixed demo protocol constant) | signs that operator's receipts and epoch registrations, and its digest names the deployment the operator runs |
+| Operator clearing key (curve25519) | each `operator-<index>/node.json` (a fixed demo protocol constant) | signs the curve25519 half of that operator's receipts and its epoch registrations, and its digest names the deployment the operator runs |
+| Operator acknowledgment key (BLS MinSig) | each `operator-<index>/node.json` (a fixed demo protocol constant whose public key `genesis.json` fixes per deployment) | signs the aggregable half of every acknowledgment, combined into one countersignature per proof slice in the close and verified by every sealer against the genesis-fixed key |
 | Wallet key (curve25519) | one per agent | signs sends and withdrawal authorizations, and names the account custody and claims resolve to |
 
 ## Run
@@ -427,7 +451,8 @@ window at the predecessor's admission, while that close's challenge window still
 successor's first payment retries only until the predecessor's close is admitted; the Bajillion
 settlement primitive itself supports a bounded admitted pipeline. Close retries remain
 bound to their original epoch, so a lost response cannot cut the active successor. Finalization
-prunes balance versions that are no longer challengeable.
+prunes only the balance versions that epochs below the retention window still needed, so every
+finalized close inside that window reconstructs exactly for receiver reconciliation.
 
 For a terminal-free walkthrough, start the validators and operators as above, then run (the
 scripted walkthrough stays on operator-0 and deployment 0; pass `--operator 127.0.0.1:7002

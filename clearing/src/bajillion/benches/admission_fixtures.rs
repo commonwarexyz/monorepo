@@ -33,7 +33,7 @@ const VALIDATOR_SEED_START: u64 = 1_000_000;
 /// One validator, its dealing, and the dealing's encoded size.
 pub(crate) type Largest = (Participant, Vec<ProofSlice<VerifyingKey, Digest>>, usize);
 
-/// Every slice as its own span: the per-interval corpus the size accounting reports.
+/// Every slice as its own span: the per-slice corpus the size accounting reports.
 pub(crate) fn single_spans() -> Vec<Range<u16>> {
     (0..SLICES as u16).map(|slice| slice..slice + 1).collect()
 }

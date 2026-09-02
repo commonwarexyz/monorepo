@@ -1,5 +1,5 @@
-//! Change-proof dealing: each proof slice is its key interval's share of the posted close
-//! plus the slice witness, applied to a retained interval.
+//! Change-proof dealing: each proof slice is its span's share of the posted close plus the
+//! slice witness, applied to a retained interval.
 //!
 //! A dealt slice is a subset of the close, not a re-materialized proof. Every assignee
 //! retains its assigned span's live leaves across closes (an [Interval]), so the dealt form
@@ -13,11 +13,11 @@
 //!   boundary, and acknowledgment bodies are rebuilt from context and row material.
 //! - **Outgoing entries** keep full recipient keys: they are the payer-signed leaf bytes,
 //!   fixed before the close is ordered, so no row indexing can apply.
-//! - **The transpose interval** ships: recipient credit is proven by it, and its entries
-//!   originate from payers outside the interval.
+//! - **The transpose range** ships: recipient credit is proven by it, and its entries
+//!   originate from payers outside the span.
 //! - **The witness** ships once per span: the covered coverage boundaries, the accumulator
 //!   start states at the first boundary, the range openings, the change and state guards,
-//!   and each covered interval's combined operator countersignature.
+//!   and each covered slice's combined operator countersignature.
 //!
 //! Sequence numbers, cumulative amounts, and counts ride as varints. The hash preimages
 //! they are checked against stay fixed-width.
@@ -54,7 +54,7 @@ use commonware_codec::{
 use commonware_cryptography::{Digest, Hasher, PublicKey, lthash::LtHash};
 use core::ops::Range;
 
-/// One key interval's live leaves at a certified close, retained across closes.
+/// One assigned span's live leaves at a certified close, retained across closes.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Interval<P: PublicKey> {
     leaves: Vec<StateLeaf<P>>,
@@ -129,7 +129,7 @@ impl<P: PublicKey> Interval<P> {
     }
 }
 
-/// The dealt form of one proof slice: the interval's share of the posted close plus the
+/// The dealt form of one proof slice: the span's share of the posted close plus the
 /// slice witness.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DealtSlice<P: PublicKey, D: Digest> {
@@ -157,7 +157,7 @@ pub struct DealtSlice<P: PublicKey, D: Digest> {
 }
 
 impl<P: PublicKey, D: Digest> DealtSlice<P, D> {
-    /// The deterministic interval indices this slice covers.
+    /// The deterministic slice indices covered, nonempty and contiguous.
     pub const fn span(&self) -> &Range<u16> {
         &self.span
     }
@@ -463,7 +463,7 @@ pub struct DealtBreakdown {
     pub rows: usize,
     /// Outgoing entries with their per-sender counts.
     pub entries: usize,
-    /// The recipient-grouped transpose interval.
+    /// The recipient-grouped transpose range.
     pub transpose: usize,
     /// Per-slice operator aggregates.
     pub aggregates: usize,
@@ -490,7 +490,7 @@ impl DealtBreakdown {
     }
 
     /// Adds another slice's components.
-    pub fn add(&mut self, other: &Self) {
+    pub const fn add(&mut self, other: &Self) {
         self.fixed += other.fixed;
         self.boundaries += other.boundaries;
         self.rows += other.rows;
@@ -705,10 +705,4 @@ pub fn decode_dealt_slice_bounded<P: PublicKey, D: Digest>(
     }
     let max_hashes = max_proof_hashes(D::SIZE, max_bytes)?;
     DealtSlice::decode_cfg(encoded, &SliceCodecConfig::new(limits, max_hashes))
-}
-
-/// Convenience for sizing: the unchanged bytes a full slice deals that its dealt form
-/// does not.
-pub fn unchanged_bytes<P: PublicKey, D: Digest>(slice: &ProofSlice<P, D>) -> usize {
-    slice.unchanged.encode_size()
 }

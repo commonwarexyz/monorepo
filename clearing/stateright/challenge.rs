@@ -257,7 +257,11 @@ fn semantic_contradiction(target: Batch, evidence: Evidence) -> bool {
         Evidence::HigherDebit { ack, .. } => {
             // Every counted value is a terminal opening under a payer-signed root, so only a
             // strictly higher retained endpoint contradicts the close. An equal endpoint is
-            // the committed terminal itself.
+            // the committed terminal itself. This model covers the strictly-higher-debit arm
+            // only. The production adjudicator's sequence arms (a different countersigned
+            // body at the committed sequence, an equal endpoint at a strictly later sequence,
+            // and the earlier-retry and credit-only declines) are pinned by unit tests in
+            // src/bajillion/tests.rs.
             ack.endpoint.cumulative_debit > public_debit(target, ack.endpoint.payer)
         }
         Evidence::HigherEntry { ack, entry, .. } => {

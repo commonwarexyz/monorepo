@@ -217,9 +217,10 @@ impl EpochDeadlinePolicy {
 ///   plus a small constant is only safe when the pipeline is empty at queue time,
 ///   so it is unsafe under ordinary load: a deeper pipeline makes the required
 ///   notice larger, not smaller. The operator-carried path is exempt because it
-///   is declined at registration when the deadline cannot clear the close's own
-///   finalize tick (see `register_close`), but a chain-queued request cannot be
-///   declined, so the notice window is the only lever.
+///   is declined at registration when the deadline cannot clear the earliest
+///   tick at which that close can finalize (see `register_close`), but a
+///   chain-queued request cannot be declined, so the notice window is the only
+///   lever.
 /// - `deposit_inclusion_timeout` must exceed the pipeline turnover time: the
 ///   longest an accepted deposit can wait for a free pipeline slot given
 ///   `max_pending_epochs` and the challenge cadence. A deposit is discharged at
@@ -1137,11 +1138,11 @@ where
             return Err(SettlementError::BoundaryRoot);
         }
         // Every chain-queued request must appear verbatim. Operator-carried
-        // extras run the shared intake battery, and each must outlive the
-        // challenge window so the admitted close can finalize before its
-        // deadline can fault. An extra gains the deadline fault guarantee only
-        // once its close is admitted; until then the signer's recourse is the
-        // queue.
+        // extras run the shared intake battery, and each must outlive every
+        // challenge window ahead of it so the admitted close can finalize
+        // before its deadline can fault. An extra gains the deadline fault
+        // guarantee only once its close is admitted. Until then the signer's
+        // recourse is the queue.
         for (account, pending) in &self.pending_withdrawals {
             if withdrawals.request_for(account) != Some(pending) {
                 return Err(SettlementError::WithdrawalWitness);
@@ -1155,11 +1156,17 @@ where
             self.ensure_withdrawal_epoch_available(request.body().action())?;
             self.ensure_withdrawal_intake(now, request, &destination_is_eligible)?;
             // Finalize is legal only at now > challenge_deadline and runs the
-            // inclusive expiry sweep first, so the earliest finalizing tick is
-            // challenge_deadline + 1. A deadline at that tick would fault
-            // before the pop, so the close needs a strictly later deadline.
-            let earliest_finalize = context
-                .challenge_deadline()
+            // inclusive expiry sweep first. FIFO also holds this close behind
+            // every pending close, and challenge durations vary within the
+            // policy range, so an earlier close's window can end after this
+            // one's. The earliest finalizing tick is therefore one past the
+            // latest of those deadlines, and a deadline at that tick would
+            // fault before the pop, so the close needs a strictly later one.
+            let earliest_finalize = self
+                .pipeline
+                .iter()
+                .map(|entry| entry.admitted.context.challenge_deadline())
+                .fold(context.challenge_deadline(), u64::max)
                 .checked_add(1)
                 .ok_or(SettlementError::EpochOverflow)?;
             if request.body().deadline() <= earliest_finalize {
@@ -5862,6 +5869,310 @@ mod tests {
             .chain
             .register_close(6, valid_context, valid, &[opening], |_| true)
             .unwrap();
+    }
+
+    #[test]
+    fn carried_deadline_must_clear_every_pending_challenge_window() {
+        // Challenge durations vary within [10, 100], so an earlier pending
+        // close can hold the FIFO front past a later close's own window.
+        let policy = SettlementConfig::new(
+            NonZeroUsize::new(3).unwrap(),
+            EpochDeadlinePolicy::new(
+                NonZeroU64::new(1_000).unwrap(),
+                NonZeroU64::new(10).unwrap(),
+                NonZeroU64::new(100).unwrap(),
+            ),
+            NonZeroU64::new(1_000).unwrap(),
+            NonZeroU64::new(2).unwrap(),
+            NonZeroU64::new(1_000).unwrap(),
+            1_024,
+            NonZeroUsize::new(1_024).unwrap(),
+        );
+        let mut fixture = harness_with_config(&[10, 10], policy);
+        let signer = fixture.accounts[0].clone();
+        admit_empty_epoch(&mut fixture, 0, 0, 1_000, 1_100);
+
+        let deposits = DepositBatch::empty();
+        let opening = fixture.cache.opening(&signer.public_key()).unwrap();
+        let register = |fixture: &mut Harness, deadline: u64| {
+            let withdrawals = WithdrawalBatch::new(vec![withdrawal(
+                fixture.deployment,
+                fixture.cache.root(),
+                &signer,
+                b"extra",
+                amount_action(4),
+                deadline,
+            )])
+            .unwrap();
+            let context = context(
+                fixture.deployment,
+                &fixture.operator,
+                fixture.committee,
+                1,
+                &fixture.cache,
+                &deposits,
+                &withdrawals,
+                1_001,
+                1_011,
+            );
+            fixture.chain.register_close(
+                1_001,
+                context,
+                withdrawals,
+                core::slice::from_ref(&opening),
+                |_| true,
+            )
+        };
+
+        // Epoch 1's own window ends at 1011, but epoch 0 holds the front
+        // through 1100, so a deadline at 1050 or at the first finalizing tick
+        // 1101 expires before epoch 1 can finalize.
+        for deadline in [1_050, 1_101] {
+            assert!(matches!(
+                register(&mut fixture, deadline),
+                Err(SettlementError::WithdrawalDeadlineTooSoon)
+            ));
+            assert!(fixture.chain.registered.is_none());
+        }
+        register(&mut fixture, 1_102).unwrap();
+        assert!(fixture.chain.registered.is_some());
+    }
+
+    /// Every ancestry and identity gate in `register_close` rejects a forged
+    /// context with its own error and leaves no registration behind. The
+    /// forged contexts are built from parts, the shape a decoded registration
+    /// transaction arrives in, so each gate is reached on its own instead of
+    /// being shadowed by the binding checks a well-formed constructor runs.
+    #[test]
+    fn registration_rejects_forged_ancestry_and_identity() {
+        let mut fixture = harness(&[10, 10]);
+        let deposits = DepositBatch::empty();
+        let withdrawals = WithdrawalBatch::empty();
+        let valid = context(
+            fixture.deployment,
+            &fixture.operator,
+            fixture.committee,
+            0,
+            &fixture.cache,
+            &deposits,
+            &withdrawals,
+            6,
+            8,
+        );
+        let forged_root = VectorRoot {
+            digest: Sha256::hash(&[b"forged-root"]),
+        };
+        let rebuild = |deployment: ShaDigest,
+                       deposit_root: VectorRoot<ShaDigest>,
+                       withdrawal_root: VectorRoot<ShaDigest>,
+                       liability: u64,
+                       assignment: Assignment<ShaDigest>,
+                       predecessor_root: VectorRoot<ShaDigest>| {
+            CloseContext::from_parts(
+                EpochContext::from_parts(
+                    valid.payment().clone(),
+                    deployment,
+                    deposit_root,
+                    withdrawal_root,
+                    liability,
+                    valid.admission_deadline(),
+                    valid.challenge_deadline(),
+                    *valid.limits(),
+                    assignment,
+                ),
+                predecessor_root,
+            )
+        };
+        let honest = |fixture: &Harness| {
+            (
+                fixture.deployment,
+                *valid.deposit_root(),
+                *valid.withdrawal_root(),
+                fixture.cache.liability(),
+                *valid.assignment(),
+                fixture.cache.root(),
+            )
+        };
+        let (deployment, deposit_root, withdrawal_root, liability, assignment, root) =
+            honest(&fixture);
+        let foreign_committee = Assignment::new(committee(206).commitment::<Sha256>(), 0).unwrap();
+        let forged = [
+            (
+                rebuild(
+                    Sha256::hash(&[b"other-deployment"]),
+                    deposit_root,
+                    withdrawal_root,
+                    liability,
+                    assignment,
+                    root,
+                ),
+                SettlementError::Deployment,
+            ),
+            (
+                rebuild(
+                    deployment,
+                    deposit_root,
+                    withdrawal_root,
+                    liability,
+                    assignment,
+                    forged_root,
+                ),
+                SettlementError::StateAncestry,
+            ),
+            (
+                rebuild(
+                    deployment,
+                    deposit_root,
+                    withdrawal_root,
+                    liability + 1,
+                    assignment,
+                    root,
+                ),
+                SettlementError::LiabilityAncestry,
+            ),
+            (
+                rebuild(
+                    deployment,
+                    deposit_root,
+                    withdrawal_root,
+                    liability,
+                    foreign_committee,
+                    root,
+                ),
+                SettlementError::CommitteeMismatch,
+            ),
+            (
+                rebuild(
+                    deployment,
+                    forged_root,
+                    withdrawal_root,
+                    liability,
+                    assignment,
+                    root,
+                ),
+                SettlementError::BoundaryRoot,
+            ),
+            (
+                rebuild(
+                    deployment,
+                    deposit_root,
+                    forged_root,
+                    liability,
+                    assignment,
+                    root,
+                ),
+                SettlementError::BoundaryRoot,
+            ),
+        ];
+        for (context, expected) in forged {
+            let result =
+                fixture
+                    .chain
+                    .register_close(4, context, WithdrawalBatch::empty(), &[], |_| true);
+            assert_eq!(
+                core::mem::discriminant(&result.unwrap_err()),
+                core::mem::discriminant(&expected)
+            );
+            assert!(fixture.chain.registered.is_none());
+        }
+
+        // The same parts assembled honestly register, so the gates and not the
+        // fixture rejected the forgeries.
+        fixture
+            .chain
+            .register_close(4, valid, WithdrawalBatch::empty(), &[], |_| true)
+            .unwrap();
+        assert!(fixture.chain.registered.is_some());
+    }
+
+    /// A registration must extend the pipeline tail, not the finalized root:
+    /// once a pending close has moved the head, a context bound to the last
+    /// finalized state is stale ancestry even though that root is certified.
+    #[test]
+    fn registration_against_the_finalized_root_behind_a_pending_tail_is_rejected() {
+        let mut fixture = harness(&[7, 11, 13]);
+        let withdrawing = fixture.accounts[0].clone();
+        let request = withdrawal(
+            fixture.deployment,
+            fixture.cache.root(),
+            &withdrawing,
+            b"pending-tail",
+            amount_action(2),
+            10,
+        );
+        fixture
+            .chain
+            .queue_withdrawal(
+                0,
+                request,
+                &[fixture.cache.opening(&withdrawing.public_key()).unwrap()],
+                |_| true,
+            )
+            .unwrap();
+        let deposits = DepositBatch::empty();
+        let withdrawals = fixture.chain.pending_withdrawals();
+        let pending = context(
+            fixture.deployment,
+            &fixture.operator,
+            fixture.committee,
+            0,
+            &fixture.cache,
+            &deposits,
+            &withdrawals,
+            1,
+            5,
+        );
+        let (close, successor) = boundary_close(&fixture.cache, &pending, &deposits, &withdrawals);
+        register_and_admit(
+            &mut fixture.chain,
+            &fixture.signer,
+            &fixture.operator_bls,
+            1,
+            pending,
+            deposits.clone(),
+            withdrawals,
+            &[],
+            &close,
+        );
+        assert_ne!(successor.root(), fixture.cache.root());
+
+        // Epoch 1 bound to the finalized (genesis) state instead of the pending
+        // successor fails ancestry, while the successor-bound context registers.
+        let empty = WithdrawalBatch::empty();
+        let stale = context(
+            fixture.deployment,
+            &fixture.operator,
+            fixture.committee,
+            1,
+            &fixture.cache,
+            &deposits,
+            &empty,
+            6,
+            8,
+        );
+        assert!(matches!(
+            fixture
+                .chain
+                .register_close(2, stale, WithdrawalBatch::empty(), &[], |_| true),
+            Err(SettlementError::StateAncestry)
+        ));
+        assert!(fixture.chain.registered.is_none());
+        let fresh = context(
+            fixture.deployment,
+            &fixture.operator,
+            fixture.committee,
+            1,
+            &successor,
+            &deposits,
+            &empty,
+            6,
+            8,
+        );
+        fixture
+            .chain
+            .register_close(2, fresh, WithdrawalBatch::empty(), &[], |_| true)
+            .unwrap();
+        assert!(fixture.chain.registered.is_some());
     }
 
     #[test]

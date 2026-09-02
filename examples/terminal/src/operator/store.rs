@@ -38,6 +38,16 @@ use std::{
 use thiserror::Error;
 
 const SCHEMA_VERSION: i64 = 10;
+/// Finalized epochs whose closes stay exactly reconstructable, counted back from the latest
+/// finalized epoch.
+///
+/// Finalizing epoch `e` prunes only the account-state versions that reconstructing epochs
+/// below `e - RETAINED_EPOCHS` needed, so `committed_entry` still serves every finalized
+/// epoch above that. This is the receiver reconciliation contract: a receiver that
+/// reconciles a finalized epoch before `RETAINED_EPOCHS` further epochs finalize always
+/// finds the honest operator's committed-side evidence, and treats a refusal for an older
+/// epoch as unavailability rather than withholding.
+pub(crate) const RETAINED_EPOCHS: u64 = 4;
 /// Bounds one page of incoming receipts served to a receiver. Each served row reassembles
 /// one [`Receipt`] from a fixed-size acknowledgment and a bounded entry opening, so this
 /// page stays well under the RPC body limit.
@@ -432,7 +442,7 @@ pub(crate) struct EpochReader {
 impl EpochReader {
     /// Loads a current or still-closing epoch.
     ///
-    /// Finalized historical epochs may have had their balance versions pruned.
+    /// Finalized epochs below the retention window may have had their balance versions pruned.
     pub(crate) fn load(&self, epoch: u64) -> Result<EpochData> {
         let connection = self.source.connect()?;
         connection.execute_batch(
@@ -1456,9 +1466,9 @@ impl Store {
     ///
     /// Each served row reassembles one [`Receipt`] from its batch's stored acknowledgment and
     /// the entry's stored opening. Every retained epoch is served: the operator keeps its
-    /// serving-log rows across finalization (only shadowed and zero-balance account-state
-    /// versions are pruned), so a receiver can fetch the credits of the open epoch and every
-    /// closed epoch this database still holds.
+    /// serving-log rows across finalization (only account-state versions shadowed or zeroed
+    /// below the retention window are pruned), so a receiver can fetch the credits of the
+    /// open epoch and every closed epoch this database still holds.
     pub(crate) fn incoming_payments(
         &self,
         receiver: &Key,
@@ -1508,6 +1518,9 @@ impl Store {
     }
 
     /// Loads a specific retained epoch for committed-side evidence reconstruction.
+    ///
+    /// The load is exact for the current epoch and for every finalized epoch within
+    /// [`RETAINED_EPOCHS`] of the latest finalized one.
     pub(crate) fn load_at(&self, epoch: u64) -> Result<EpochData> {
         Self::load_epoch(&self.connection, epoch)
     }
@@ -2106,9 +2119,17 @@ impl Store {
                 [epoch],
             )?;
 
-            // Only finalized history authorizes deletion. Retire versions shadowed by this epoch and
-            // remove its finalized zero-balance account versions without relying on a successor.
-            transaction.execute(PRUNE_FINALIZED_ACCOUNT_STATES_SQL, [epoch])?;
+            // Only finalized history authorizes deletion, and it is deferred by the retention
+            // window: the epoch pruned here is the oldest one that has fallen out of it. Retire
+            // the versions it shadows and remove its finalized zero-balance account versions
+            // without relying on a successor. Every finalized epoch above it still reconstructs
+            // exactly, since no version they read is older than a version at that epoch.
+            if let Some(pruned) = result.epoch.checked_sub(RETAINED_EPOCHS) {
+                transaction.execute(
+                    PRUNE_FINALIZED_ACCOUNT_STATES_SQL,
+                    [sql_u64(pruned, "pruned epoch")?],
+                )?;
+            }
             Ok(())
         })
     }
