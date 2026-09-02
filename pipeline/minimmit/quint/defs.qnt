@@ -96,4 +96,33 @@ module defs {
             | Finalization(c) => Some(c.proposal)
         }
     }
+
+    // `ghost_sender` records which modelled actor assembled a certificate; it is
+    // not part of the protocol object. Quint's structural equality includes the
+    // field, so use this predicate whenever certificate identity matters.
+    pure def same_certificate(left: Certificate, right: Certificate): bool = all {
+        cert_kind(left) == cert_kind(right),
+        cert_view(left) == cert_view(right),
+        cert_proposal(left) == cert_proposal(right),
+        cert_signatures(left) == cert_signatures(right),
+    }
+
+    pure def contains_certificate(
+        certificates: Set[Certificate],
+        cert: Certificate,
+    ): bool = {
+        certificates.exists(other => same_certificate(other, cert))
+    }
+
+    // Preserve the first assembler attribution while deduplicating the protocol
+    // object represented by the certificate.
+    pure def add_certificate(
+        certificates: Set[Certificate],
+        cert: Certificate,
+    ): Set[Certificate] = {
+        if (contains_certificate(certificates, cert))
+            certificates
+        else
+            certificates.union(Set(cert))
+    }
 }

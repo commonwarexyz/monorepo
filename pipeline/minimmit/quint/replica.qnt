@@ -688,7 +688,7 @@ module replica {
         val certificates = store_certificate.get(id)
 
         all {
-            not(cert.in(store_certificate.get(id))),
+            not(contains_certificate(store_certificate.get(id), cert)),
 
             or {
                 cert_kind(cert) == NullificationKind and
@@ -751,8 +751,8 @@ module replica {
             cert_signatures(cert).size() >= M,
 
             if (is_new_cert) all {
-                store_certificate' = store_certificate.setBy(id, old => old.union(Set(cert))),
-                sent_certificate' = sent_certificate.union(Set(cert)),
+                store_certificate' = store_certificate.setBy(id, old => add_certificate(old, cert)),
+                sent_certificate' = add_certificate(sent_certificate, cert),
             } else all {
                 store_certificate' = store_certificate,
                 sent_certificate' = sent_certificate,
@@ -898,7 +898,7 @@ module replica {
                 } else {
                     notarization(proposal, agg_sig, sig_of(sender))
                 }
-            sent_certificate' = sent_certificate.union(Set(cert))
+            sent_certificate' = add_certificate(sent_certificate, cert)
         },
         // Adversary may inject arbitrary proposal.
         all {

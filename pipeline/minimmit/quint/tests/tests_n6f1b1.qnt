@@ -510,4 +510,120 @@ module tests {
                 all_invariants,
             })
     }
+
+    // Algorithm 1, lines 16-22: a certificate advances a replica only when it is for the
+    // current view, and then by exactly one view. A certificate for a later view is stored
+    // and acts through `on_stored_certificate` once its view becomes current. Before the
+    // fix, `enter_new_view` jumped straight to `cert_view + 1` for any later view.
+    run certificateAdvancesOneViewTest = {
+        val p3 = proposal("n5", VAL_B1, 3, VAL_B0, 0)
+        val notarization3 = mkNotarization("n1", p3, Set("n1", "n2", "n3"))
+        val nullification0 = nullification(0, Set("n1", "n2", "n3"), "n1")
+        val nullification1 = nullification(1, Set("n1", "n2", "n3"), "n1")
+        val nullification2 = nullification(2, Set("n1", "n2", "n3"), "n1")
+
+        initWithLeader(Map(
+            0 -> "n0", 1 -> "n1", 2 -> "n2", 3 -> "n5",
+            4 -> "n3", 5 -> "n4", 6 -> "n0"))
+            // Certificates for later views are stored but leave n0 in view 0.
+            .then(on_certificate("n0", nullification2))
+            .expect(replica_state.get("n0").view == 0)
+            .then(on_certificate("n0", notarization3))
+            .expect(replica_state.get("n0").view == 0)
+            .expect(store_certificate.get("n0") == Set(nullification2, notarization3))
+
+            // A certificate for the current view advances n0 by exactly one view.
+            .then(on_certificate("n0", nullification0))
+            .expect(replica_state.get("n0").view == 1)
+            .then(on_certificate("n0", nullification1))
+            .expect(replica_state.get("n0").view == 2)
+
+            // The stored nullification for view 2 now acts: n0 enters view 3 without voting.
+            .then(on_stored_certificate("n0", nullification2))
+            .expect(replica_state.get("n0").view == 3)
+            .expect(sent_vote == Set())
+
+            // The stored notarization for view 3 now acts: n0 votes along and enters view 4.
+            .then(on_stored_certificate("n0", notarization3))
+            .expect(replica_state.get("n0").view == 4)
+            .expect(sent_vote == Set(notarize(p3, "n0")))
+            .expect(replica_state.get("n0").notarized.get(3) == Some(p3))
+            .expect(all_invariants)
+    }
+
+    // `ghost_sender` is model-only attribution, not part of a certificate's
+    // protocol identity. Two replicas independently collect the same nullify
+    // votes and assemble structurally different certificates. Each keeps the
+    // certificate it assembled, but the shared sent set contains the protocol
+    // object only once.
+    run certificateGhostSenderDeduplicationTest = {
+        val signatures0 = Set("n0", "n1", "n2")
+        val votes0 = signatures0.map(signer => nullify(0, signer))
+        val first0 = nullification(0, signatures0, "n3")
+        val duplicate0 = nullification(0, signatures0, "n4")
+        val signatures1 = Set("n0", "n3", "n4")
+        val votes1 = signatures1.map(signer => nullify(1, signer))
+        val first1 = nullification(1, signatures1, "n3")
+        val duplicate1 = nullification(1, signatures1, "n4")
+
+        initWithLeader(Map(
+            0 -> "n0", 1 -> "n1", 2 -> "n2", 3 -> "n3",
+            4 -> "n4", 5 -> "n5", 6 -> "n0"))
+            // Three replicas time out and broadcast a reachable M-quorum of
+            // nullify votes for view 0.
+            .then(on_timer_expired("n0"))
+            .then(on_timer_expired("n1"))
+            .then(on_timer_expired("n2"))
+            .expect(votes0.subseteq(sent_vote))
+            // Two other replicas independently receive that same quorum and
+            // assemble the same certificate under their own ghost sender id.
+            .then(on_vote_nullify("n3", 0, votes0))
+            .then(on_vote_nullify("n4", 0, votes0))
+            .expect(all {
+                first0 != duplicate0,
+                Set(first0, duplicate0).size() == 2,
+                same_certificate(first0, duplicate0),
+                replica_state.get("n3").view == 1,
+                replica_state.get("n4").view == 1,
+                store_certificate.get("n3") == Set(first0),
+                store_certificate.get("n4") == Set(duplicate0),
+                contains_certificate(sent_certificate, duplicate0),
+                sent_certificate == Set(first0),
+            })
+
+            // n0 receives the broadcast view-0 certificate through the normal
+            // delivery handler and enters view 1.
+            .then(on_certificate("n0", first0))
+            .expect(replica_state.get("n0").view == 1)
+
+            // At view 1, n0, n3 and n4 produce another M-quorum. Again n3 and
+            // n4 independently assemble structurally distinct representations
+            // of the same certificate.
+            .then(on_timer_expired("n0"))
+            .then(on_timer_expired("n3"))
+            .then(on_timer_expired("n4"))
+            .expect(votes1.subseteq(sent_vote))
+            .then(on_vote_nullify("n3", 1, votes1))
+            .then(on_vote_nullify("n4", 1, votes1))
+            .expect(all {
+                first1 != duplicate1,
+                same_certificate(first1, duplicate1),
+                contains_certificate(sent_certificate, duplicate1),
+                sent_certificate == Set(first0, first1),
+            })
+
+            // n1 is still in view 0. It stores the future view-1 certificate
+            // without acting on it, then enters view 1 on the earlier proof and
+            // activates the stored certificate through on_stored_certificate.
+            .then(on_certificate("n1", first1))
+            .expect(replica_state.get("n1").view == 0)
+            .then(on_certificate("n1", first0))
+            .expect(replica_state.get("n1").view == 1)
+            .then(on_stored_certificate("n1", first1))
+            .expect(all {
+                replica_state.get("n1").view == 2,
+                store_certificate.get("n1") == Set(first0, first1),
+                all_invariants,
+            })
+    }
 }
