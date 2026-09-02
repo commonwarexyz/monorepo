@@ -42,6 +42,7 @@ use crate::transcript::{Summary, Transcript, Version};
 use ahash::RandomState;
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
+use bytes::Bytes;
 use commonware_math::algebra::Random;
 use commonware_parallel::Strategy;
 use commonware_utils::union_unique;
@@ -73,7 +74,7 @@ pub struct Verifier {
     /// computation for every signature is deferred to [`Verifier::verify`],
     /// where it runs under the caller's [`Strategy`] instead of serially at
     /// queue time.
-    signatures: Vec<(VerificationKey, Vec<u8>, Signature)>,
+    signatures: Vec<(VerificationKey, Bytes, Signature)>,
 }
 
 impl Verifier {
@@ -97,7 +98,13 @@ impl Verifier {
             || message.to_vec(),
             |namespace| union_unique(namespace, message),
         );
+        self.queue_payload(vk, sig, payload.into());
+    }
 
+    /// Queue a `(key, signature)` pair for verification of an already framed
+    /// `payload`, as produced by [`union_unique`]. Lets callers share one
+    /// payload across many signatures instead of copying it per signature.
+    pub fn queue_payload(&mut self, vk: VerificationKey, sig: Signature, payload: Bytes) {
         self.signatures.push((vk, payload, sig));
     }
 
@@ -167,7 +174,7 @@ impl Verifier {
     /// split evenly across shards, and keys crafted to share a first byte
     /// just forfeit the grouping, costing no more than the unpartitioned
     /// order.
-    fn partition(signatures: &[(VerificationKey, Vec<u8>, Signature)]) -> Vec<usize> {
+    fn partition(signatures: &[(VerificationKey, Bytes, Signature)]) -> Vec<usize> {
         let mut counts = [0; 256];
         for (vk, _, _) in signatures {
             counts[vk.as_bytes()[0] as usize] += 1;
@@ -191,7 +198,7 @@ impl Verifier {
     /// randomizer for each signature from `seed`.
     #[allow(non_snake_case)]
     fn verify_shard<'a>(
-        items: impl Iterator<Item = &'a (VerificationKey, Vec<u8>, Signature)>,
+        items: impl Iterator<Item = &'a (VerificationKey, Bytes, Signature)>,
         n: usize,
         seed: Summary,
     ) -> Result<(), Error> {

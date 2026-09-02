@@ -287,22 +287,20 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
             return false;
         }
 
-        // Collect the public keys.
-        let mut publics = Vec::with_capacity(certificate.signers.count());
+        // Aggregate the public keys.
+        let mut agg_public = aggregate::PublicKey::<V>::zero();
         for signer in certificate.signers.iter() {
             let Some(public_key) = self.participants.value(signer.into()) else {
                 return false;
             };
 
-            publics.push(*public_key);
+            agg_public.add(public_key);
         }
 
         // Verify the aggregate signature.
         let Some(signature) = certificate.signature.get() else {
             return false;
         };
-        let publics = non_empty![@publics.iter()];
-        let agg_public = aggregate::combine_public_keys::<V, _>(publics);
         aggregate::verify_same_message::<V>(
             &agg_public,
             subject.namespace(&self.namespace),

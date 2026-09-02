@@ -13,13 +13,14 @@ use crate::{
 };
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeSet, vec::Vec};
-use bytes::{Buf, BufMut};
+use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{EncodeSize, Error, Read, ReadRangeExt, Write, types::lazy::Lazy};
 use commonware_parallel::Strategy;
 use commonware_utils::{
     Participant,
     iter::NonEmpty,
     ordered::{Quorum, Set},
+    union_unique,
 };
 use rand_core::CryptoRng;
 #[cfg(feature = "std")]
@@ -131,6 +132,7 @@ impl<N: Namespace> Generic<N> {
     {
         let namespace = subject.namespace(&self.namespace);
         let message = subject.message();
+        let payload: Bytes = union_unique(namespace, &message).into();
 
         let attestations = attestations.into_iter();
         let mut invalid = BTreeSet::new();
@@ -147,7 +149,7 @@ impl<N: Namespace> Generic<N> {
                 continue;
             };
 
-            batch.add(namespace, &message, public_key, signature);
+            batch.add_payload(payload.clone(), public_key, signature);
             candidates.push((attestation, public_key));
         }
 
@@ -240,8 +242,8 @@ impl<N: Namespace> Generic<N> {
         }
 
         // Add the certificate to the batch.
-        let namespace = subject.namespace(&self.namespace);
-        let message = subject.message();
+        let payload: Bytes =
+            union_unique(subject.namespace(&self.namespace), &subject.message()).into();
         for (signer, signature) in certificate.signers.iter().zip(&certificate.signatures) {
             let Some(public_key) = self.participants.key(signer) else {
                 return false;
@@ -250,7 +252,7 @@ impl<N: Namespace> Generic<N> {
                 return false;
             };
 
-            batch.add(namespace, &message, public_key, signature);
+            batch.add_payload(payload.clone(), public_key, signature);
         }
 
         true
