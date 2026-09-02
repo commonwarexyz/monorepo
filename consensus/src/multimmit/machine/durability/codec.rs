@@ -1559,8 +1559,8 @@ mod tests {
             config::Config,
             machine::{Machine, ResourceLimits, Tuning},
             types::{
-                Anchor, Attestation, CertificateId, ChainProposal, EpochGenesis, Extension,
-                Position, Tally, ThresholdShare,
+                Anchor, CertificateId, ChainProposal, EpochGenesis, Extension, Position, Tally,
+                ThresholdShare,
             },
         },
         types::ViewDelta,
