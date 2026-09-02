@@ -486,7 +486,11 @@ jobs:
       - name: Print Rust version
         run: rustc --version
       - name: Check feature powerset
-        run: RUSTFLAGS="-D warnings" just hack ${{ matrix.partition.args }} check
+        env:
+          RUSTFLAGS: >-
+            -D warnings
+            ${{ matrix.toolchain == 'nightly' && '-Z min-recursion-limit=256' || '' }}
+        run: just hack ${{ matrix.partition.args }} check
 
   Build-Gate:
     name: "Builds"
