@@ -531,6 +531,18 @@ fn threshold_share(signer: u32) -> ThresholdShare<MinPk> {
     )
 }
 
+fn distinct_threshold_share(signer: u32, marker: u64) -> ThresholdShare<MinPk> {
+    let private = Private::new(Scalar::from_u64(marker + 1));
+    ThresholdShare::new(
+        Participant::new(signer),
+        Lazy::from(sign_message::<MinPk>(
+            &private,
+            b"_COMMONWARE_CONSENSUS_MULTIMMIT_TEST_SHARE",
+            b"distinct share",
+        )),
+    )
+}
+
 fn symbolic_threshold_certificate(marker: u64) -> ThresholdCertificate<MinPk> {
     let private = Private::new(Scalar::from_u64(marker + 1));
     ThresholdCertificate::new(sign_message::<MinPk>(
@@ -10239,6 +10251,89 @@ fn inspection_reports_known_unfinalized_chain_tips() {
     assert_eq!(progress.finalized(), Height::zero());
     assert_eq!(progress.certified(), Height::new(1));
     assert_eq!(progress.known(), Height::new(1));
+}
+
+/// A rejected recovery must drop exactly the attributed shares and re-arm a different quorum.
+///
+/// Shares reach the pool on structural checks alone, so recovery is where an invalid one is
+/// found. One adversarial share therefore costs one extra attempt, and the signer it names can
+/// never re-enter the pool for that header no matter how many shares it resends.
+#[test]
+fn rejected_da_shares_re_arm_a_quorum_that_excludes_them() {
+    let mut machine = Machine::new(profile_for(Role::Validator(Participant::new(0)), 6, 2));
+    let start = machine.step(Input::Start).unwrap();
+    persist(&mut machine, &persist_job(&start));
+    let (header, recovery) = produce_and_collect_da(&mut machine);
+    let culprit = recovery.votes()[1].signer();
+    assert_eq!(culprit, Participant::new(1));
+
+    // Pool the shares the first quorum did not select, so a retry has something to choose.
+    for signer in 4..6 {
+        let job = observe(
+            &mut machine,
+            Artifact::DaVote(DaVote::new(header.clone(), threshold_share(signer))),
+        );
+        complete(&mut machine, &job, true);
+    }
+
+    let rejection = machine
+        .step(Input::DaRejected(DaRecoveryRejection::new(
+            recovery.id(),
+            recovery.generation(),
+            vec![culprit],
+        )))
+        .unwrap();
+    assert_eq!(rejection.status(), &StepStatus::CompletionDeferred);
+    let rejection = settle(&mut machine, rejection);
+    let retry = rejection
+        .capabilities()
+        .iter()
+        .find_map(|effect| match effect {
+            Capability::Producer(ProducerCapability::RecoverDa(job)) => Some(job.clone()),
+            _ => None,
+        })
+        .expect("the surviving pool re-arms recovery");
+    let signers = retry
+        .votes()
+        .iter()
+        .map(|vote| vote.signer())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        signers.len(),
+        machine.profile.protocol().codec_config().da_quorum()
+    );
+    assert!(!signers.contains(&culprit), "retried quorum: {signers:?}");
+
+    // A rejected signer's later share for the same header is refused, so a flood of invalid
+    // shares cannot re-enter the pool or force another attempt.
+    let resent = observe(
+        &mut machine,
+        Artifact::DaVote(DaVote::new(header, distinct_threshold_share(1, 77))),
+    );
+    complete(&mut machine, &resent, true);
+    let further = machine
+        .step(Input::DaRejected(DaRecoveryRejection::new(
+            retry.id(),
+            retry.generation(),
+            Vec::new(),
+        )))
+        .unwrap();
+    let further = settle(&mut machine, further);
+    let next = further
+        .capabilities()
+        .iter()
+        .find_map(|effect| match effect {
+            Capability::Producer(ProducerCapability::RecoverDa(job)) => Some(job.clone()),
+            _ => None,
+        })
+        .expect("an unattributed rejection re-arms the same pool");
+    assert!(
+        !next
+            .votes()
+            .iter()
+            .any(|vote| vote.signer() == culprit),
+        "a rejected signer re-entered the pool"
+    );
 }
 
 #[test]

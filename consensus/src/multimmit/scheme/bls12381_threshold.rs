@@ -76,6 +76,22 @@ pub enum Error {
     Context,
 }
 
+/// The outcome of an optimistic data-availability recovery that did not produce a certificate.
+///
+/// A quorum of shares interpolates to the group signature exactly when every share is the
+/// correct evaluation of the group polynomial, so a failed recovery is proof that at least one
+/// share is invalid without saying which. [`Self::InvalidShares`] carries the attribution pass's
+/// answer, and every named signer supplied a share that fails on its own partial public key.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum DaRecoveryError {
+    /// The recovery could not be attempted against these shares at all.
+    #[error(transparent)]
+    Scheme(#[from] Error),
+    /// The recovered signature is invalid, and exactly these signers supplied invalid shares.
+    #[error("invalid data-availability shares")]
+    InvalidShares(Vec<Participant>),
+}
+
 #[derive(Clone)]
 struct Signer {
     participant: Participant,
@@ -558,6 +574,82 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         self.assemble_da_certificate_with(votes, SignatureVerification::Preverified, strategy)
     }
 
+    /// Recovers a DA certificate from shares that passed only [`Self::precheck_da_vote`].
+    ///
+    /// Interpolation is checked once against the group identity, which is a complete authority
+    /// over the shares it consumed: a quorum recovers the group signature exactly when every
+    /// share is the correct evaluation of the group polynomial. The honest case therefore costs
+    /// one pairing check for the whole quorum. A failed check proves some share is invalid, and
+    /// only then does the attribution pass verify the shares against their partial public keys
+    /// to name the signers responsible.
+    pub(crate) fn assemble_da_certificate_optimistic<D: Digest>(
+        &self,
+        votes: &[DaVote<V, D>],
+        strategy: &impl Strategy,
+    ) -> Result<DaCertificate<V, D>, DaRecoveryError> {
+        let error = match self.assemble_da_certificate_preverified(votes, strategy) {
+            Ok(certificate) => return Ok(certificate),
+            Err(error) => error,
+        };
+        if error != Error::Signature {
+            return Err(error.into());
+        }
+        // An empty attribution means every share verifies alone while the quorum does not, which
+        // no share can cause. Report the recovery failure instead of blaming an honest signer.
+        match self.invalid_da_shares(votes, strategy)? {
+            invalid if invalid.is_empty() => Err(Error::Signature.into()),
+            invalid => Err(DaRecoveryError::InvalidShares(invalid)),
+        }
+    }
+
+    /// Names the signers whose data-availability shares fail against their partial public keys.
+    ///
+    /// Checking each share separately keeps the answer independent of any random weights, so the
+    /// same quorum always attributes the same signers. The pass is bounded by the quorum and only
+    /// runs behind a failed group check, which already proves a share is invalid.
+    fn invalid_da_shares<D: Digest>(
+        &self,
+        votes: &[DaVote<V, D>],
+        strategy: &impl Strategy,
+    ) -> Result<Vec<Participant>, Error> {
+        let sharing = self.da.as_ref().ok_or(Error::SharingUnavailable)?;
+        let header = votes.first().ok_or(Error::Quorum)?.header();
+        let subject = Subject::da_vote(header);
+        let namespace = subject.namespace(&self.namespace);
+        let message = subject.message();
+        let partials = votes
+            .iter()
+            .map(|vote| partial(vote.share()))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(strategy
+            .map_collect_vec(&partials, |partial| {
+                threshold::verify_message(sharing, namespace, &message, partial)
+                    .is_err()
+                    .then_some(partial.index)
+            })
+            .into_iter()
+            .flatten()
+            .collect())
+    }
+
+    /// Runs every non-cryptographic check on one data-availability share.
+    ///
+    /// The share's own pairing is deliberately left unchecked: its only use is threshold
+    /// recovery, and [`Self::assemble_da_certificate_optimistic`] checks the whole quorum with
+    /// one pairing and attributes the shares individually only when that check fails.
+    pub(crate) fn precheck_da_vote<D: Digest>(&self, vote: &DaVote<V, D>) -> bool {
+        self.da_vote_claim(vote).is_some()
+    }
+
+    /// Builds the pairing claim for one data-availability share, running its structural checks.
+    fn da_vote_claim<D: Digest>(&self, vote: &DaVote<V, D>) -> Option<Claim<'_, V>> {
+        if (vote.header().chain().get() as usize) >= self.codec.chains() {
+            return None;
+        }
+        let sharing = self.da.as_ref()?;
+        self.share_claim(sharing, Subject::da_vote(vote.header()), vote.share())
+    }
+
     fn assemble_da_certificate_with<D: Digest>(
         &self,
         votes: &[DaVote<V, D>],
@@ -977,14 +1069,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
                     )
                 })?
                 .map(|claim| vec![claim]),
-            Unverified::DaVote(vote) => {
-                if (vote.header().chain().get() as usize) >= self.codec.chains() {
-                    return None;
-                }
-                let sharing = self.da.as_ref()?;
-                self.share_claim(sharing, Subject::da_vote(vote.header()), vote.share())
-                    .map(|claim| vec![claim])
-            }
+            Unverified::DaVote(vote) => self.da_vote_claim(vote).map(|claim| vec![claim]),
             Unverified::DaCertificate(certificate) => self
                 .da_certificate_claim(certificate)
                 .map(|claim| vec![claim]),
@@ -3199,4 +3284,158 @@ mod tests {
         assert_eq!(baseline, verdicts);
     }
 
+    /// An honest quorum must certify from shares no pairing ever touched individually.
+    ///
+    /// Ingress admits a share on [`Scheme::precheck_da_vote`] alone, so this is the only
+    /// signature check the whole quorum pays for.
+    fn optimistic_recovery_certifies_an_unverified_quorum<V: Variant>() {
+        let fixture = Fixture::<V>::new();
+        let header = fixture.header(1, 300);
+        let votes = fixture
+            .signers
+            .iter()
+            .map(|signer| signer.sign_da_vote(header.clone()).unwrap())
+            .collect::<Vec<_>>();
+        let quorum = &votes[..fixture.codec.da_quorum()];
+        for vote in quorum {
+            assert!(
+                fixture.verifier.precheck_da_vote(vote),
+                "an honest share passes admission without its pairing"
+            );
+        }
+        let certificate = fixture
+            .verifier
+            .assemble_da_certificate_optimistic(quorum, &Sequential)
+            .expect("an honest quorum interpolates the group signature");
+        assert_eq!(certificate.header(), &header);
+        assert!(fixture.verifier.verify_da_certificate(&certificate));
+        assert!(
+            fixture
+                .verifier
+                .invalid_da_shares(quorum, &Sequential)
+                .unwrap()
+                .is_empty(),
+            "the attribution pass has nothing to report for an honest quorum"
+        );
+    }
+
+    /// Admission must accept a share whose signature is invalid, leaving recovery to catch it.
+    ///
+    /// This is what makes the quorum cost one pairing instead of one per signer, so it is also
+    /// what the recovery fallback exists to backstop.
+    fn da_share_admission_ignores_its_signature<V: Variant>() {
+        let fixture = Fixture::<V>::new();
+        let header = fixture.header(1, 301);
+        let elsewhere = fixture.signers[1]
+            .sign_da_vote(fixture.header(1, 302))
+            .unwrap();
+        // A share signed over another header is structurally perfect and cryptographically wrong.
+        let forged = DaVote::new(header, elsewhere.share().clone());
+        assert!(fixture.verifier.precheck_da_vote(&forged));
+        assert_eq!(
+            fixture.verifier.verify_artifacts::<_, Sha256, Digest>(
+                &mut test_rng(),
+                &[Unverified::DaVote(&forged)],
+                &Sequential,
+            ),
+            [false],
+            "the share itself is invalid, so only recovery may accept it"
+        );
+        // A share with no usable signature still fails admission outright.
+        let empty = DaVote::new(
+            fixture.header(1, 303),
+            ThresholdShare::new(Participant::new(1), Lazy::from(V::Signature::zero())),
+        );
+        assert!(!fixture.verifier.precheck_da_vote(&empty));
+    }
+
+    /// One invalid share must fail the quorum once and name exactly its signer.
+    fn optimistic_recovery_attributes_one_invalid_share<V: Variant>() {
+        let fixture = Fixture::<V>::new();
+        let header = fixture.header(1, 304);
+        let mut quorum = fixture.signers[..fixture.codec.da_quorum()]
+            .iter()
+            .map(|signer| signer.sign_da_vote(header.clone()).unwrap())
+            .collect::<Vec<_>>();
+        let culprit = Participant::new(1);
+        let elsewhere = fixture.signers[1]
+            .sign_da_vote(fixture.header(1, 305))
+            .unwrap();
+        quorum[1] = DaVote::new(header.clone(), elsewhere.share().clone());
+        assert_eq!(
+            fixture
+                .verifier
+                .assemble_da_certificate_optimistic(&quorum, &Sequential),
+            Err(DaRecoveryError::InvalidShares(vec![culprit])),
+        );
+        // Dropping the named signer and re-selecting from the surviving shares certifies on the
+        // next attempt, so one adversarial share costs exactly one extra recovery.
+        let survivors = fixture
+            .signers
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != 1)
+            .map(|(_, signer)| signer.sign_da_vote(header.clone()).unwrap())
+            .take(fixture.codec.da_quorum())
+            .collect::<Vec<_>>();
+        let certificate = fixture
+            .verifier
+            .assemble_da_certificate_optimistic(&survivors, &Sequential)
+            .expect("the surviving shares still form a quorum");
+        assert!(fixture.verifier.verify_da_certificate(&certificate));
+    }
+
+    /// Every invalid share in one quorum must be named by a single attribution pass.
+    ///
+    /// A flood therefore costs one bounded pass, not one recovery attempt per bad share.
+    fn optimistic_recovery_attributes_every_invalid_share<V: Variant>() {
+        let fixture = Fixture::<V>::new();
+        let header = fixture.header(1, 306);
+        let quorum = fixture.signers[..fixture.codec.da_quorum()]
+            .iter()
+            .enumerate()
+            .map(|(index, signer)| {
+                if index == 0 {
+                    return signer.sign_da_vote(header.clone()).unwrap();
+                }
+                let elsewhere = signer
+                    .sign_da_vote(fixture.header(1, 307 + index as u64))
+                    .unwrap();
+                DaVote::new(header.clone(), elsewhere.share().clone())
+            })
+            .collect::<Vec<_>>();
+        let expected = (1..fixture.codec.da_quorum() as u32)
+            .map(Participant::new)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            fixture
+                .verifier
+                .assemble_da_certificate_optimistic(&quorum, &Sequential),
+            Err(DaRecoveryError::InvalidShares(expected)),
+        );
+    }
+
+    #[test]
+    fn optimistic_da_recovery_certifies_honest_quorums_for_both_variants() {
+        optimistic_recovery_certifies_an_unverified_quorum::<MinPk>();
+        optimistic_recovery_certifies_an_unverified_quorum::<MinSig>();
+    }
+
+    #[test]
+    fn da_share_admission_ignores_signatures_for_both_variants() {
+        da_share_admission_ignores_its_signature::<MinPk>();
+        da_share_admission_ignores_its_signature::<MinSig>();
+    }
+
+    #[test]
+    fn optimistic_da_recovery_attributes_one_invalid_share_for_both_variants() {
+        optimistic_recovery_attributes_one_invalid_share::<MinPk>();
+        optimistic_recovery_attributes_one_invalid_share::<MinSig>();
+    }
+
+    #[test]
+    fn optimistic_da_recovery_attributes_every_invalid_share_for_both_variants() {
+        optimistic_recovery_attributes_every_invalid_share::<MinPk>();
+        optimistic_recovery_attributes_every_invalid_share::<MinSig>();
+    }
 }

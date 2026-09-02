@@ -322,13 +322,22 @@ where
                 let scheme = Arc::clone(&self.scheme);
                 let started_at = self.context.current();
                 let (id, generation) = (job.id(), job.generation());
+                // Shares are admitted on structural checks alone, so this recovery's group
+                // check is where an invalid one surfaces.
                 let operation = move |strategy: T| {
-                    scheme
-                        .assemble_da_certificate_preverified(job.votes(), &strategy)
-                        .map(|certificate| CryptoOutcome::DaRecovered {
+                    match scheme.assemble_da_certificate_optimistic(job.votes(), &strategy) {
+                        Ok(certificate) => Ok(CryptoOutcome::DaRecovered {
                             started_at,
                             completion: DaRecoveryCompletion::new(id, generation, certificate),
-                        })
+                        }),
+                        Err(DaRecoveryError::InvalidShares(invalid)) => {
+                            Ok(CryptoOutcome::DaRejected {
+                                started_at,
+                                rejection: DaRecoveryRejection::new(id, generation, invalid),
+                            })
+                        }
+                        Err(DaRecoveryError::Scheme(error)) => Err(error),
+                    }
                 };
                 self.spawn_crypto(TaskClass::CriticalAggregation, span, operation)?;
             }
@@ -483,6 +492,29 @@ where
                 };
                 self.spawn_crypto(TaskClass::CriticalAggregation, span, operation)?;
             }
+        }
+        Ok(())
+    }
+
+    /// Blocks the peers a failed recovery attributed invalid data-availability shares to.
+    ///
+    /// Ingress rejects a share whose signer is not the peer that sent it, so a share's signer
+    /// index names its authenticated source. The batcher owns peer blocking, so the attribution
+    /// is routed there rather than duplicating that authority in the voter.
+    fn block_da_signers(&mut self, invalid: &[Participant]) -> Result<(), Fatal> {
+        let peers = invalid
+            .iter()
+            .filter_map(|signer| self.scheme.participants().get((*signer).into()).cloned())
+            .collect::<Vec<_>>();
+        if peers.is_empty() {
+            return Ok(());
+        }
+        if !self
+            .batcher
+            .enqueue(batcher::Message::Block { peers })
+            .accepted()
+        {
+            return Err(Fatal::Closed);
         }
         Ok(())
     }
@@ -1058,6 +1090,18 @@ where
                     .da_recovery_latency
                     .observe_between(started_at, self.context.current());
                 self.track_transition(|core| core.producer_da_recovered(completion))?;
+                Ok(())
+            }
+            CryptoOutcome::DaRejected {
+                started_at,
+                rejection,
+            } => {
+                self.metrics
+                    .da_recovery_latency
+                    .observe_between(started_at, self.context.current());
+                self.metrics.da_recovery_fallbacks.inc();
+                self.block_da_signers(rejection.invalid())?;
+                self.track_transition(|core| core.producer_da_rejected(rejection))?;
                 Ok(())
             }
             CryptoOutcome::NullificationRecovered {

@@ -176,6 +176,8 @@ pub(super) struct Metrics {
     pub da_vote_latency: Histogram,
     /// CPU latency of DA certificate recovery. The dominant BLS cost at scale.
     pub da_recovery_latency: Histogram,
+    /// Recoveries whose single group check failed and fell back to attributing shares.
+    pub da_recovery_fallbacks: Counter,
     /// CPU latency of nullification certificate recovery.
     pub nullification_recovery_latency: Histogram,
     /// Leader-chain round latency. The consensus service objective.
@@ -398,6 +400,10 @@ impl Metrics {
             "CPU latency of DA certificate recovery",
             histogram::Buckets::CRYPTOGRAPHY,
         );
+        let da_recovery_fallbacks = context.counter(
+            "da_recovery_fallbacks",
+            "DA recoveries that failed their group check and verified shares individually",
+        );
         let nullification_recovery_latency = context.histogram(
             "nullification_recovery_latency",
             "CPU latency of nullification certificate recovery",
@@ -504,6 +510,7 @@ impl Metrics {
             retransmitted_bytes,
             da_vote_latency,
             da_recovery_latency,
+            da_recovery_fallbacks,
             nullification_recovery_latency,
             round_latency,
             vqc_latency,

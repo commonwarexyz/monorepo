@@ -96,7 +96,8 @@
 use super::contracts::CORE_BUDGET;
 use super::{
     Artifact, BarrierAck, BuildCompletion, Capabilities, ChainProgress, CheckpointCut,
-    CustodyCancellation, CustodyCompletion, DaRecoveryCompletion, DomainEvent, EffectCompletion,
+    CustodyCancellation, CustodyCompletion, DaRecoveryCompletion, DaRecoveryRejection, DomainEvent,
+    EffectCompletion,
     EffectId, IdentifiedArtifact, Input, Inspection, LqcAggregateCompletion, Machine,
     NullificationRecoveryCompletion, PollResult, ProductionTimer, Profile, Progress, ReplayError,
     ResolutionCompletion, SigningBatchPass, Snapshot, Step, StepError, StepStatus, Timer,
@@ -600,6 +601,13 @@ impl<H: Hasher, V: Variant> CoreState<H, V> {
         completion: DaRecoveryCompletion<V, H::Digest>,
     ) -> Result<InputTicket, CoreError> {
         self.enqueue(Input::DaRecovered(completion), 1)
+    }
+
+    pub(crate) fn producer_da_rejected(
+        &mut self,
+        rejection: DaRecoveryRejection,
+    ) -> Result<InputTicket, CoreError> {
+        self.enqueue(Input::DaRejected(rejection), 1)
     }
 
     pub(crate) fn leader_resolution_completed(
@@ -1222,6 +1230,7 @@ const fn input_lane<V: Variant, D: Digest>(input: &Input<V, D>) -> Lane {
         | Input::CustodyCancelled(_)
         | Input::BlockValidated(_)
         | Input::DaRecovered(_)
+        | Input::DaRejected(_)
         | Input::NullificationRecovered(_)
         | Input::VqcAggregated(_)
         | Input::LqcAggregated(_) => Lane::LocalCompletion,
@@ -1241,6 +1250,7 @@ fn input_cost<V: Variant, D: Digest>(input: &Input<V, D>) -> TransitionCost {
         // Recovery and aggregate completions only enter the machine-owned completion FIFO here.
         // Their committee work is charged by the component scheduler when that FIFO is serviced.
         Input::DaRecovered(_)
+        | Input::DaRejected(_)
         | Input::NullificationRecovered(_)
         | Input::VqcAggregated(_)
         | Input::LqcAggregated(_) => TransitionCost::Constant,
@@ -1283,6 +1293,7 @@ fn input_bytes<V: Variant, D: Digest>(
             .ok_or(CoreError::CapacityOverflow)?,
         Input::ResolutionCompleted(_)
         | Input::DaRecovered(_)
+        | Input::DaRejected(_)
         | Input::NullificationRecovered(_)
         | Input::VqcAggregated(_)
         | Input::LqcAggregated(_) => per_item_limit,
