@@ -53,14 +53,7 @@ impl<F: Family, E: Context, K: Array, V: FixedValue, H: Hasher, T: Translator, S
             ROOT_BAGGING,
         )
         .await?;
-        Self::init_from_journal(
-            journal,
-            context,
-            cfg.translator,
-            cfg.init_buffer,
-            cfg.init_cache_size,
-        )
-        .await
+        Self::init_from_journal(journal, context, cfg.translator, cfg.init_buffer).await
     }
 }
 
@@ -120,7 +113,6 @@ mod tests {
                 replay_buffer: NZUsize!(1024),
             },
             translator: TwoCap,
-            init_cache_size: Some(NZUsize!(1024)),
             init_buffer: NZUsize!(1 << 21),
         }
     }
@@ -577,6 +569,8 @@ mod tests {
         test_fixed_dropped_ancestor_reads => run_dropped_ancestor_reads, open;
         test_fixed_merkleize_across_prune => run_merkleize_across_prune, open;
         test_fixed_stale_fork_refuses => run_stale_fork_refuses, open;
+        test_fixed_rewind_repeated_key_live => run_rewind_repeated_key_live, open;
+        test_fixed_rewind_after_reopen_repeated_key_retained => run_rewind_after_reopen_repeated_key_retained, open;
     }
 
     #[boxed]

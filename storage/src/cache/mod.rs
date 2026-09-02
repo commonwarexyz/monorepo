@@ -79,23 +79,11 @@
 
 use commonware_runtime::buffer::paged::CacheRef;
 use std::num::{NonZeroU64, NonZeroUsize};
-use thiserror::Error;
 
 #[cfg(all(test, feature = "arbitrary"))]
 mod conformance;
 mod storage;
 pub use storage::Cache;
-
-/// Errors that can occur when interacting with the cache.
-#[derive(Debug, Error)]
-pub enum Error {
-    #[error("journal error: {0}")]
-    Journal(#[from] crate::journal::Error),
-    #[error("record corrupted")]
-    RecordCorrupted,
-    #[error("record too large")]
-    RecordTooLarge,
-}
 
 /// Configuration for [Cache] storage.
 #[derive(Clone)]
@@ -180,10 +168,7 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let result = Cache::<_, i32>::init(context.child("second"), cfg.clone()).await;
-            assert!(matches!(
-                result,
-                Err(Error::Journal(JournalError::Codec(_)))
-            ));
+            assert!(matches!(result, Err(JournalError::Codec(_))));
         });
     }
 

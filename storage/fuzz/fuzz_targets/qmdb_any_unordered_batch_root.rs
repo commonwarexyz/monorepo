@@ -37,6 +37,8 @@ const MAX_GRANDCHILD_MUTATIONS: usize = 16;
 enum Schedule {
     PendingParent,
     DroppedCommittedPrefix,
+    PendingChain,
+    DroppedPrefixChain,
 }
 
 #[derive(Arbitrary, Debug, Clone, Copy)]
@@ -210,7 +212,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                 let batch = apply_mutations(a.new_batch::<Sha256>(), &input.child);
                 let b = batch.merkleize(&db, None).await.unwrap();
 
-                // Applying A consumes its last strong reference; B retains only a Weak parent.
+                // Applying A consumes its last strong reference. B retains only a Weak parent.
                 let (db, _) = db.apply_batch(a).await.unwrap();
                 let db = db.commit().await.unwrap();
 
@@ -237,6 +239,81 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                 );
                 db
             }
+            Schedule::PendingChain => {
+                // Build parent -> child -> grandchild with parent and child both still
+                // pending, so the grandchild merkleizes with two live ancestor diffs and
+                // resolves between them closest first. This is the only schedule that
+                // checks a multi-diff ancestor walk against a committed-only reference.
+                let batch = apply_mutations(db.new_batch(), &input.parent);
+                let parent = batch.merkleize(&db, None).await.unwrap();
+                let batch = apply_mutations(parent.new_batch::<Sha256>(), &input.child);
+                let child = batch.merkleize(&db, None).await.unwrap();
+                let batch = apply_mutations(child.new_batch::<Sha256>(), &input.grandchild);
+                let pending_grandchild = batch.merkleize(&db, None).await.unwrap();
+
+                // Commit the chain prefix, then rebuild the same grandchild from the
+                // committed DB state. The speculative root must be independent of the
+                // chain's pendency.
+                let (db, _) = db.apply_batch(parent).await.unwrap();
+                let db = db.commit().await.unwrap();
+                let (db, _) = db.apply_batch(child).await.unwrap();
+                let db = db.commit().await.unwrap();
+
+                let batch = apply_mutations(db.new_batch(), &input.grandchild);
+                let committed_grandchild = batch.merkleize(&db, None).await.unwrap();
+
+                assert_eq!(
+                    pending_grandchild.root(),
+                    committed_grandchild.root(),
+                    "grandchild root depended on pending-vs-committed ancestor chain"
+                );
+
+                let (db, _) = db.apply_batch(pending_grandchild).await.unwrap();
+                assert_eq!(
+                    db.root(),
+                    committed_grandchild.root(),
+                    "pending grandchild root diverged"
+                );
+                db
+            }
+            Schedule::DroppedPrefixChain => {
+                // Build A -> B -> C, commit and drop A, then merkleize D on C: D's two
+                // live ancestors resolve closest-first between themselves while base
+                // locations for keys they touch trace across the dropped committed
+                // prefix. C reuses the parent mutations so the chain re-deletes and
+                // re-creates the same colliding keys.
+                let batch = apply_mutations(db.new_batch(), &input.parent);
+                let a = batch.merkleize(&db, None).await.unwrap();
+                let batch = apply_mutations(a.new_batch::<Sha256>(), &input.child);
+                let b = batch.merkleize(&db, None).await.unwrap();
+                let batch = apply_mutations(b.new_batch::<Sha256>(), &input.parent);
+                let c = batch.merkleize(&db, None).await.unwrap();
+
+                // Applying A consumes its last strong reference. B retains only a Weak parent.
+                let (db, _) = db.apply_batch(a).await.unwrap();
+                let db = db.commit().await.unwrap();
+
+                let batch = apply_mutations(c.new_batch::<Sha256>(), &input.grandchild);
+                let retained_d = batch.merkleize(&db, None).await.unwrap();
+
+                // Rebuild B -> C -> D from the committed A state as a reference.
+                let batch = apply_mutations(db.new_batch(), &input.child);
+                let rebuilt_b = batch.merkleize(&db, None).await.unwrap();
+                let batch = apply_mutations(rebuilt_b.new_batch::<Sha256>(), &input.parent);
+                let rebuilt_c = batch.merkleize(&db, None).await.unwrap();
+                let batch = apply_mutations(rebuilt_c.new_batch::<Sha256>(), &input.grandchild);
+                let rebuilt_d = batch.merkleize(&db, None).await.unwrap();
+
+                assert_eq!(
+                    retained_d.root(),
+                    rebuilt_d.root(),
+                    "chain root depended on a committed-and-dropped prefix"
+                );
+
+                let (db, _) = db.apply_batch(retained_d).await.unwrap();
+                assert_eq!(db.root(), rebuilt_d.root(), "retained-chain root diverged");
+                db
+            }
         };
 
         db.destroy().await.unwrap();
@@ -250,7 +327,16 @@ fuzz_target!(|input: FuzzInput| {
             fuzz_family::<mmb::Family>(&input, "fuzz-mmb-qmdb-unordered-batch-root");
         }
         Schedule::DroppedCommittedPrefix => {
+            fuzz_family::<mmr::Family>(&input, "fuzz-mmr-qmdb-unordered-dropped-prefix");
             fuzz_family::<mmb::Family>(&input, "fuzz-mmb-qmdb-unordered-dropped-prefix");
+        }
+        Schedule::PendingChain => {
+            fuzz_family::<mmr::Family>(&input, "fuzz-mmr-qmdb-unordered-pending-chain");
+            fuzz_family::<mmb::Family>(&input, "fuzz-mmb-qmdb-unordered-pending-chain");
+        }
+        Schedule::DroppedPrefixChain => {
+            fuzz_family::<mmr::Family>(&input, "fuzz-mmr-qmdb-unordered-dropped-chain");
+            fuzz_family::<mmb::Family>(&input, "fuzz-mmb-qmdb-unordered-dropped-chain");
         }
     }
 });
