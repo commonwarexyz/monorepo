@@ -30,7 +30,7 @@ use commonware_runtime::{
         traces::TracedExt as _,
     },
 };
-use commonware_utils::{SystemTimeExt as _, futures::Pool, sync::Mutex};
+use commonware_utils::{futures::Pool, sync::Mutex};
 use futures::FutureExt as _;
 use rand_core::CryptoRng;
 use std::{
@@ -39,7 +39,6 @@ use std::{
     marker::PhantomData,
     panic::AssertUnwindSafe,
     sync::Arc,
-    time::SystemTime,
 };
 use tracing::{Instrument as _, Span, debug, debug_span, error, info_span};
 
@@ -373,7 +372,6 @@ where
         let ingress_capacity = self.strategy.manual().parallelism();
         let mut accept_ingress;
         let mut jobs: VerifyResults<P, H::Digest> = Pool::default();
-        let mut flush_deadline: Option<SystemTime> = None;
         let mut observations_inflight = 0usize;
         let mut next_network = NetworkPlane::Consensus;
 
@@ -381,16 +379,6 @@ where
             self.context,
             on_start => {
                 accept_ingress = ingress.len() < ingress_capacity;
-                if observations_inflight < self.observation_capacity
-                    && flush_deadline.is_some_and(|deadline| self.context.current() >= deadline)
-                {
-                    if !self.flush_pending(&mut lanes, &observations, &mut observations_inflight) {
-                        error!("voter observation path failed");
-                        return;
-                    }
-                    flush_deadline = None;
-                    continue;
-                }
             },
             on_stopped => {
                 debug!("context shutdown, stopping batcher");
@@ -513,18 +501,6 @@ where
                 };
                 self.apply_prepared(&mut lanes, peer, identified);
             },
-            () = Self::wait(
-                self.context.as_ref(),
-                (observations_inflight < self.observation_capacity)
-                    .then_some(flush_deadline)
-                    .flatten(),
-            ) => {
-                if !self.flush_pending(&mut lanes, &observations, &mut observations_inflight) {
-                    error!("voter observation path failed");
-                    break;
-                }
-                flush_deadline = None;
-            },
             Some(message) = Self::recv_network(
                 accept_ingress,
                 next_network,
@@ -574,25 +550,12 @@ where
                 }
             },
             on_end => {
-                // Flush immediately at the cohort budget; otherwise wait out the coalesce window.
-                while observations_inflight < self.observation_capacity
-                    && lanes.items() >= self.limits.cohort_items.get()
-                {
-                    if !self.flush(&mut lanes, &observations, &mut observations_inflight) {
-                        error!("voter observation path failed");
-                        return;
-                    }
-                }
-                if lanes.items() == 0 {
-                    flush_deadline = None;
-                } else if observations_inflight < self.observation_capacity
-                    && flush_deadline.is_none()
-                {
-                    flush_deadline = Some(
-                        self.context
-                            .current()
-                            .saturating_add_ext(self.limits.coalesce),
-                    );
+                // Forward buffered artifacts while the voter has observation credit. Ingress only
+                // accumulates in the lanes while every credit is in flight, so batching follows
+                // voter backpressure instead of a timer.
+                if !self.flush_pending(&mut lanes, &observations, &mut observations_inflight) {
+                    error!("voter observation path failed");
+                    return;
                 }
             },
         }
@@ -758,16 +721,6 @@ where
         commonware_p2p::block!(self.blocker, peer, "{reason}");
     }
 
-    /// Waits until `deadline`, or forever when none is armed.
-    async fn wait(context: &E, deadline: Option<SystemTime>) {
-        match deadline {
-            Some(at) => {
-                context.sleep_until(at).await;
-            }
-            None => pending().await,
-        }
-    }
-
     /// Forwards one exact verification completion to the voter's accounted control path.
     ///
     /// Returns `false` when the worker failed or the voter is gone; both are fatal for the epoch.
@@ -849,8 +802,8 @@ where
 
     /// Flushes every buffered plane cohort permitted by the observation capacity.
     ///
-    /// Cohorts are plane-pure, so a coalesce expiry must emit one cohort per buffered plane
-    /// to keep the flush instant shared across planes.
+    /// Cohorts are plane-pure, so one flush emits one cohort per buffered plane while credit
+    /// remains.
     fn flush_pending(
         &self,
         lanes: &mut Lanes<P, V, H::Digest>,

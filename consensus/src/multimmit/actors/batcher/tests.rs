@@ -1,6 +1,8 @@
 //! Deterministic batcher tests over the simulated network.
 
-use super::{Actor, Completed, Config, IngressLimits, Message, Observed};
+use super::{
+    Actor, Completed, Config, IngressLimits, Message, Observed, lanes::VIEW_COHORT_ITEMS,
+};
 use crate::{
     multimmit::{
         actors::wire::{CertificateMessage, ConsensusMessage, DataMessage, Envelope},
@@ -518,7 +520,6 @@ fn limits() -> IngressLimits {
         lane_items: NonZeroUsize::new(16).unwrap(),
         lane_bytes: NonZeroUsize::new(64 * 1024).unwrap(),
         inflight_jobs: NonZeroUsize::new(2).unwrap(),
-        coalesce: Duration::ZERO,
     }
 }
 
@@ -788,7 +789,7 @@ fn continuously_ready_consensus_does_not_starve_other_planes() {
 }
 
 #[test_traced]
-fn due_partial_cohort_flushes_during_continuous_ingress() {
+fn partial_cohorts_flush_as_soon_as_credit_allows() {
     const CONSENSUS_BACKLOG: u64 = 32;
     const MAX_ITEMS_BEFORE_FLUSH: usize = 1;
 
@@ -797,7 +798,6 @@ fn due_partial_cohort_flushes_during_continuous_ingress() {
         let mut ingress_limits = limits();
         ingress_limits.cohort_items = NonZeroUsize::new(64).unwrap();
         ingress_limits.lane_items = NonZeroUsize::new(64).unwrap();
-        ingress_limits.coalesce = Duration::from_millis(5);
         let committee = Committee::<MinPk>::new(40, 6, Limits::new(2, 1).unwrap());
         let epoch = committee.config.epoch();
         let consensus = (1..=CONSENSUS_BACKLOG)
@@ -812,7 +812,7 @@ fn due_partial_cohort_flushes_during_continuous_ingress() {
             .collect::<Vec<_>>();
         let consensus = ReadyReceiver::staged(
             context.child("staged_consensus"),
-            ingress_limits.coalesce,
+            Duration::from_millis(5),
             consensus[..1].to_vec(),
             consensus[1..].to_vec(),
         );
@@ -832,27 +832,25 @@ fn due_partial_cohort_flushes_during_continuous_ingress() {
             .expect("batcher stays running");
         assert!(
             cohort.artifacts.len() <= MAX_ITEMS_BEFORE_FLUSH,
-            "an actually due partial cohort admitted {} items while consensus remained ready",
+            "a partial cohort waited for later ingress and admitted {} items",
             cohort.artifacts.len(),
         );
     });
 }
 
 #[test_traced]
-fn data_ingress_waits_out_the_coalesce_window() {
+fn a_lone_data_artifact_is_forwarded_without_further_ingress() {
     let executor = DeterministicRunner::default();
     executor.start(|context| async move {
         let mut ingress_limits = limits();
         ingress_limits.cohort_items = NonZeroUsize::new(64).unwrap();
-        ingress_limits.coalesce = Duration::from_secs(5);
         let committee = Committee::<MinPk>::new(40, 6, Limits::new(2, 1).unwrap());
         let epoch = committee.config.epoch();
-        let block = committee.signed_block(3, Sha256::hash(&[b"coalesced data"]));
+        let block = committee.signed_block(3, Sha256::hash(&[b"lone data"]));
         let data = vec![(
             committee.identities[3].clone(),
             Envelope::new(epoch, DataMessage::Block(block)).encode(),
         )];
-        let started = context.current();
         let mut harness = ReadyHarness::start(
             &context,
             &committee,
@@ -862,19 +860,76 @@ fn data_ingress_waits_out_the_coalesce_window() {
             ReadyReceiver::new(Vec::new()),
         );
 
+        // Nothing else ever arrives, so the runtime would deadlock if the lone artifact waited
+        // for the cohort budget or a timer.
         let cohort = harness
             .observations
             .recv()
             .await
             .expect("batcher stays running");
         assert_eq!(cohort.artifacts.len(), 1);
-        let elapsed = context
-            .current()
-            .duration_since(started)
-            .expect("time advances monotonically");
+    });
+}
+
+#[test_traced]
+fn ingress_batches_into_full_cohorts_while_credit_is_held() {
+    const CONSENSUS_BACKLOG: u64 = 32;
+
+    let executor = DeterministicRunner::default();
+    executor.start(|context| async move {
+        let mut ingress_limits = limits();
+        ingress_limits.cohort_items = NonZeroUsize::new(64).unwrap();
+        ingress_limits.lane_items = NonZeroUsize::new(64).unwrap();
+        let committee = Committee::<MinPk>::new(40, 6, Limits::new(2, 1).unwrap());
+        let epoch = committee.config.epoch();
+        let consensus = (1..=CONSENSUS_BACKLOG)
+            .map(|view| {
+                let message =
+                    ConsensusMessage::<MinPk, Sha256Digest>::NoVote(committee.novote(1, view));
+                (
+                    committee.identities[1].clone(),
+                    Envelope::new(epoch, message).encode(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut harness = ReadyHarness::start_with_observation_capacity(
+            &context,
+            &committee,
+            ingress_limits,
+            ReadyReceiver::new(Vec::new()),
+            ReadyReceiver::new(consensus),
+            ReadyReceiver::new(Vec::new()),
+            NonZeroUsize::new(1).unwrap(),
+        );
+
+        let first = harness
+            .observations
+            .recv()
+            .await
+            .expect("batcher stays running");
+        assert_eq!(first.artifacts.len(), 1, "the first arrival flushed alone");
+
+        // Every later arrival lands while the single credit is held, so it batches in the lanes.
+        context.sleep(Duration::from_secs(1)).await;
         assert!(
-            elapsed >= ingress_limits.coalesce,
-            "a lone data artifact flushed before the coalesce window: {elapsed:?}",
+            harness.observations.try_recv().is_err(),
+            "a cohort was forwarded without credit"
+        );
+        assert!(
+            harness
+                .mailbox
+                .enqueue(Message::ObservationConsumed)
+                .accepted()
+        );
+        let batched = harness
+            .observations
+            .recv()
+            .await
+            .expect("batcher stays running");
+        assert_eq!(
+            batched.artifacts.len(),
+            VIEW_COHORT_ITEMS,
+            "the held backlog did not leave as a full view cohort",
         );
     });
 }

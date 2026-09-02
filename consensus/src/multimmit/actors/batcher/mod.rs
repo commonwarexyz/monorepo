@@ -34,7 +34,7 @@ use commonware_actor::mailbox::{Policy, UnreliablePolicy};
 use commonware_cryptography::{Digest, PublicKey, bls12381::primitives::variant::Variant};
 #[cfg(any(test, feature = "test-utils"))]
 pub use fuzz::exercise_lanes;
-use std::{collections::VecDeque, num::NonZeroUsize, time::Duration};
+use std::{collections::VecDeque, num::NonZeroUsize};
 use tracing::Span;
 
 /// Explicit ingress and verification resource bounds.
@@ -53,8 +53,6 @@ pub struct IngressLimits {
     pub lane_bytes: NonZeroUsize,
     /// Maximum concurrently executing verification jobs.
     pub inflight_jobs: NonZeroUsize,
-    /// How long a partial cohort may wait for more ingress before it is flushed.
-    pub coalesce: Duration,
 }
 
 /// Configuration for the batcher actor.
@@ -72,6 +70,10 @@ pub struct Config<P: PublicKey, V: Variant, B, T> {
     /// Control mailbox capacity.
     pub mailbox_size: NonZeroUsize,
     /// Maximum observation cohorts awaiting voter consumption.
+    ///
+    /// Buffered artifacts are forwarded as soon as a cohort credit is free, so this depth is the
+    /// only source of batching: while every credit is in flight, ingress accumulates in the fair
+    /// lanes and leaves as full cohorts.
     pub observation_capacity: NonZeroUsize,
 }
 

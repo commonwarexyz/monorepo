@@ -19,7 +19,7 @@ use commonware_cryptography::{
 };
 use commonware_math::algebra::Additive as _;
 use commonware_utils::Participant;
-use std::{num::NonZeroUsize, time::Duration};
+use std::num::NonZeroUsize;
 
 const CHAINS: usize = 4;
 const PEERS: usize = 4;
@@ -30,7 +30,6 @@ const fn limits() -> IngressLimits {
         lane_items: NonZeroUsize::new(3).unwrap(),
         lane_bytes: NonZeroUsize::new(4096).unwrap(),
         inflight_jobs: NonZeroUsize::new(1).unwrap(),
-        coalesce: Duration::ZERO,
     }
 }
 

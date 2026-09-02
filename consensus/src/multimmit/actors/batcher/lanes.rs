@@ -41,7 +41,7 @@ impl Plane {
 /// A cohort becomes one verification job, so consensus and certificate cohorts stay small
 /// enough that a view-critical verdict never waits out a large batch's cryptography; data
 /// cohorts use the configured cohort budget to keep the job count bounded.
-const VIEW_COHORT_ITEMS: usize = 4;
+pub(super) const VIEW_COHORT_ITEMS: usize = 4;
 
 pub(super) struct Group<V: Variant, D: Digest> {
     first: IdentifiedArtifact<V, D>,
@@ -327,7 +327,7 @@ mod tests {
         ed25519::{PrivateKey as Ed25519PrivateKey, PublicKey as Ed25519PublicKey},
         sha256::Digest as Sha256Digest,
     };
-    use std::{num::NonZeroUsize, time::Duration};
+    use std::num::NonZeroUsize;
 
     fn limits() -> IngressLimits {
         IngressLimits {
@@ -335,7 +335,6 @@ mod tests {
             lane_items: NonZeroUsize::new(4).unwrap(),
             lane_bytes: NonZeroUsize::new(64 * 1024).unwrap(),
             inflight_jobs: NonZeroUsize::new(2).unwrap(),
-            coalesce: Duration::ZERO,
         }
     }
 
