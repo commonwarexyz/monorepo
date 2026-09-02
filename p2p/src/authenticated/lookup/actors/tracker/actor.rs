@@ -391,7 +391,7 @@ mod tests {
             let mut blocked = crate::Blocker::blocked(&mut oracle);
             assert!(blocked.next().await.unwrap().iter().next().is_none());
 
-            // Blocking publishes the peer, and expiry removes it again.
+            // Blocking publishes the peer.
             crate::block_peer(&mut oracle, pk.clone());
             assert_eq!(
                 blocked
@@ -401,12 +401,31 @@ mod tests {
                     .iter()
                     .cloned()
                     .collect::<Vec<_>>(),
+                vec![pk.clone()]
+            );
+
+            // Blocking an already blocked peer changes nothing, so nothing is published,
+            // while a subscriber that joins now starts from the current set.
+            crate::block_peer(&mut oracle, pk.clone());
+            context.sleep(Duration::from_millis(10)).await;
+            assert!(blocked.try_recv().is_err());
+            let mut late = crate::Blocker::blocked(&mut oracle);
+            assert_eq!(
+                late.next()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>(),
                 vec![pk]
             );
+
+            // Expiry removes the peer for every subscriber.
             context
                 .sleep(block_duration + Duration::from_millis(10))
                 .await;
             assert!(blocked.next().await.unwrap().iter().next().is_none());
+            assert!(late.next().await.unwrap().iter().next().is_none());
         });
     }
 

@@ -3240,7 +3240,9 @@ mod tests {
             let mut control2 = oracle.control(pk2.clone());
             crate::block_peer(&mut control2, pk1.clone());
 
-            // The other peer's block is processed but does not reach pk1's subscription.
+            // Neither the other peer's block nor a repeated block reaches pk1's
+            // subscription, since pk1's set is unchanged.
+            crate::block_peer(&mut control1, pk2.clone());
             assert_eq!(oracle.blocked().await.unwrap().len(), 2);
             assert!(blocked.try_recv().is_err());
 
