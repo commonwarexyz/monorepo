@@ -13,7 +13,7 @@ use super::{
     ValidationCompletion, ValidationJob, Verdict, VerificationCompletion, VerificationItem,
     VerificationTicket, VerifyJob, VqcAggregateCompletion, VqcAggregateJob, WorkKey,
     algebra::ValidatedVqc,
-    contracts::{Lane, ServiceCycle, ServiceError, TransitionCost},
+    contracts::{DA_VOTE_RUN, Lane, ServiceCycle, ServiceError, TransitionCost},
     emission::ViewProof,
     finality::{FinalityEffect, FinalityError, FinalityOutput, FinalityUpdate, PreparedLqc},
     state::PendingVoteDa,
@@ -46,13 +46,6 @@ use std::{
 /// dominated view latency once deep pipelines ran many entries per view.
 const SIGN_PASS_ENTRIES_PER_CREDIT: usize = 16;
 
-/// Consecutive DA votes reserved per chain in one background pass.
-///
-/// One reservation per chain per effect round trip caps a chain's DA throughput at the
-/// reciprocal of that round trip, which starved fast producer chains. Runs raise the ceiling
-/// while the per-pass bound keeps reservation work off the ordinary-vote path and inside the
-/// cycle's resource slots.
-const DA_VOTE_RUN: usize = 16;
 
 /// A serialized input to the local state machine.
 #[derive(Clone, Debug)]

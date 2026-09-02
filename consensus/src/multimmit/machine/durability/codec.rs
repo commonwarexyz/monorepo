@@ -14,7 +14,7 @@ use super::{
 use crate::{
     multimmit::{
         config::CodecConfig,
-        machine::{Artifact, ArtifactBatch, ArtifactId, Profile},
+        machine::{Artifact, ArtifactBatch, ArtifactId, Profile, contracts::DA_VOTE_RUN},
         types::{
             DaCertificate, DaVote, LeaderBlock, Lqc, NoVote, Nullification, Nullify,
             ProposalParent, SignedLeaderBlock, SignedTransactionBlock, TransactionBlockHeader,
@@ -102,12 +102,16 @@ impl DomainEventCodecConfig {
         Self {
             protocol: profile.protocol().codec_config(),
             max_artifact_bytes: resources.max_artifact_bytes(),
-            // A durable batch is either one item per producer chain or the two timeout
-            // messages. The cache bound describes total live residency, not one event.
-            max_artifacts: if profile.protocol().codec_config().chains() < 2 {
-                2
-            } else {
-                profile.protocol().codec_config().chains()
+            // A durable batch is either the two timeout messages or a DA-vote run of up to
+            // DA_VOTE_RUN consecutive blocks per producer chain. The cache bound describes total
+            // live residency, not one event.
+            max_artifacts: {
+                let run = profile
+                    .protocol()
+                    .codec_config()
+                    .chains()
+                    .saturating_mul(DA_VOTE_RUN);
+                if run < 2 { 2 } else { run }
             },
             max_retired_effects: resources.max_outbox_effects(),
         }
@@ -1719,6 +1723,53 @@ mod tests {
             Event::decode_cfg(event.encode(), &config(4)).unwrap(),
             event
         );
+    }
+
+    #[test]
+    fn profile_bounds_admit_a_full_da_vote_run_batch() {
+        use crate::multimmit::{
+            machine::{Role, Tuning},
+            mocks::Committee,
+        };
+        let committee = Committee::<MinSig>::new(7, 1, Limits::new(2, 1).unwrap());
+        let profile: Profile<Sha256, MinSig> =
+            Profile::new(committee.config, Role::Observer, Tuning::default()).unwrap();
+        let chains = profile.protocol().codec_config().chains();
+        let config = DomainEventCodecConfig::from_profile(&profile);
+        assert_eq!(config.max_artifacts, chains * DA_VOTE_RUN);
+
+        // Every chain contributes a full run: the largest batch the reducer can reserve.
+        let requests = (0..chains * DA_VOTE_RUN)
+            .map(|seed: usize| {
+                let header = TransactionBlockHeader::new(
+                    profile.protocol().epoch(),
+                    ChainId::new((seed % chains) as u32),
+                    Height::new((seed / chains) as u64 + 1),
+                    digest(b"run parent"),
+                    digest(&seed.to_be_bytes()),
+                )
+                .unwrap();
+                let private = Private::new(Scalar::from_u64(seed as u64 + 1));
+                let signature = sign_message::<MinSig>(
+                    &private,
+                    b"_COMMONWARE_CONSENSUS_MULTIMMIT_DURABILITY_CODEC_TEST_ATTESTATION",
+                    &seed.to_be_bytes(),
+                );
+                SignRequest::DaVote(DaVoteRequest::new(Arc::new(SignedTransactionBlock::new(
+                    header,
+                    Attestation::new(Participant::new((seed % chains) as u32), signature.into()),
+                ))))
+            })
+            .collect::<Vec<_>>();
+        let event = Event::new(
+            profile.protocol().epoch(),
+            Cursor(3),
+            Change::OutboxQueued {
+                id: EffectId(5),
+                effect: Box::new(DurableEffect::SignBatch(requests.into())),
+            },
+        );
+        assert_eq!(Event::decode_cfg(event.encode(), &config).unwrap(), event);
     }
 
     #[test]
