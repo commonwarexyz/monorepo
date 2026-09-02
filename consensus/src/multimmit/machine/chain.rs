@@ -498,6 +498,9 @@ struct Certified<V: Variant, D: Digest> {
     certificate: Option<DaCertificate<V, D>>,
 }
 
+/// One chain's lowest eligible data-availability vote and the certificate anchor it extends.
+type DaHead<'a, V, D> = (Height, &'a BlockRecord<V, D>);
+
 #[derive(Clone, Debug)]
 struct CertificateCandidate<V: Variant, D: Digest> {
     artifact: ArtifactId<D>,
@@ -541,6 +544,13 @@ pub(crate) struct ChainState<V: Variant, D: Digest> {
     produced: Option<BlockRef<D>>,
     producer_headers: BTreeMap<Height, TransactionBlockHeader<D>>,
     local_da_votes: Vec<BTreeMap<Height, DaChoice<D>>>,
+    /// Per chain, a height through which every integer height above `data_retired_through` is
+    /// already a local DA choice.
+    ///
+    /// Eligibility scans resume above this height instead of rediscovering the voted prefix on
+    /// every pass. The value is a lower bound: an entry below the true contiguous run only costs
+    /// a longer scan, so a missed extension can never hide an eligible block.
+    da_voted_run: Vec<Height>,
     da_safe_through: Vec<Height>,
     data_retired_through: Vec<Height>,
     /// Reserved DA votes whose signing is in flight, per chain, in ascending height order.
@@ -598,6 +608,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         let blocks = (0..chains).map(|_| BTreeMap::new()).collect();
         let pipeline_depth = profile.protocol().codec_config().pipeline_depth() as u64;
         let local_da_votes = (0..genesis.len()).map(|_| BTreeMap::new()).collect();
+        let da_voted_run = genesis.iter().map(BlockRef::height).collect();
         let da_safe_through = genesis.iter().map(BlockRef::height).collect();
         let data_retired_through = genesis.iter().map(BlockRef::height).collect();
         let resources = profile.resources();
@@ -625,6 +636,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             produced,
             producer_headers: BTreeMap::new(),
             local_da_votes,
+            da_voted_run,
             da_safe_through,
             data_retired_through,
             pending_da_votes: vec![VecDeque::new(); chains],
@@ -790,6 +802,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             }
             self.da_safe_through[index] = safe[index];
             self.data_retired_through[index] = tip.height();
+            self.da_voted_run[index] = self.da_voted_run[index].max(tip.height());
             if tip != applied {
                 self.certified[index].insert(
                     tip.height(),
@@ -856,6 +869,9 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             self.processed.remove(&artifact);
         }
         self.local_da_votes[index].retain(|height, _| *height > retired);
+        // Retirement only drops choices at or below the new floor, so the surviving prefix stays
+        // contiguous; raising the cursor to the floor keeps it a valid lower bound.
+        self.da_voted_run[index] = self.da_voted_run[index].max(retired);
         self.vote_pools.retain(|_, pool| {
             let candidate = pool.header.block_ref::<H>();
             candidate.chain() != block.chain() || candidate.height() > block.height()
@@ -997,6 +1013,11 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             .flatten()
     }
 
+    /// Returns whether any chain holds a certificate above its durable floor.
+    pub(crate) fn has_certificate_above(&self, floors: &[BlockRef<D>]) -> bool {
+        (0..self.certified.len()).any(|chain| self.certificate_above(floors, chain).is_some())
+    }
+
     pub(crate) fn next_certificate_above(
         &self,
         floors: &[BlockRef<D>],
@@ -1006,15 +1027,18 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         preferred
             .into_iter()
             .chain(0..self.certified.len())
-            .find_map(|chain| {
-                let certificates = self.certified.get(chain)?;
-                let floor = floors.get(chain)?;
-                certificates.iter().rev().find_map(|(height, certified)| {
-                    (*height > floor.height())
-                        .then(|| certified.certificate.clone())
-                        .flatten()
-                })
-            })
+            .find_map(|chain| self.certificate_above(floors, chain))
+            .cloned()
+    }
+
+    /// Returns one chain's highest held certificate above its durable floor.
+    fn certificate_above(&self, floors: &[BlockRef<D>], chain: usize) -> Option<&DaCertificate<V, D>> {
+        let certificates = self.certified.get(chain)?;
+        let floor = floors.get(chain)?;
+        certificates
+            .range((Bound::Excluded(floor.height()), Bound::Unbounded))
+            .rev()
+            .find_map(|(_, certified)| certified.certificate.as_ref())
     }
 
     pub(crate) fn observe<H: Hasher<Digest = D>>(
@@ -1844,6 +1868,12 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         for header in headers {
             self.insert_da_choice::<H>(header)?;
         }
+        // Recovered choices arrive in no particular order, so rebuild every prefix once the set
+        // is complete rather than relying on insertion to close each gap in turn.
+        for chain in 0..self.da_voted_run.len() {
+            self.da_voted_run[chain] = self.data_retired_through[chain];
+            self.chase_da_voted_run(chain);
+        }
         for chain in 0..self.local_da_votes.len() {
             let mut height = self.data_retired_through[chain]
                 .get()
@@ -1941,9 +1971,57 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             None => {
                 let block_ref = header.block_ref::<H>();
                 votes.insert(header.height(), DaChoice { header, block_ref });
+                self.chase_da_voted_run(chain);
                 Ok(())
             }
         }
+    }
+
+    /// Lowers every DA-choice prefix cursor to its retirement floor.
+    #[cfg(test)]
+    pub(crate) fn clear_da_voted_run(&mut self) {
+        for chain in 0..self.da_voted_run.len() {
+            self.da_voted_run[chain] = self.data_retired_through[chain];
+        }
+    }
+
+    /// Rebuilds every DA-choice prefix cursor from the retained choices alone.
+    #[cfg(test)]
+    pub(crate) fn rebuilt_da_voted_run(&self) -> Vec<Height> {
+        let mut rebuilt = self.data_retired_through.clone();
+        for (chain, run) in rebuilt.iter_mut().enumerate() {
+            while let Some(next) = run.get().checked_add(1).map(Height::new) {
+                if !self.local_da_votes[chain].contains_key(&next) {
+                    break;
+                }
+                *run = next;
+            }
+        }
+        rebuilt
+    }
+
+    #[cfg(test)]
+    pub(crate) fn da_voted_run(&self) -> &[Height] {
+        &self.da_voted_run
+    }
+
+    #[cfg(test)]
+    pub(crate) fn chase_da_voted_run_for_test(&mut self, chain: usize) {
+        self.chase_da_voted_run(chain);
+    }
+
+    /// Extends a chain's contiguous DA-choice prefix over every height it now covers.
+    fn chase_da_voted_run(&mut self, chain: usize) {
+        let votes = &self.local_da_votes[chain];
+        let run = &mut self.da_voted_run[chain];
+        let mut extended = *run;
+        while let Some(next) = extended.get().checked_add(1).map(Height::new) {
+            if !votes.contains_key(&next) {
+                break;
+            }
+            extended = next;
+        }
+        *run = extended;
     }
 
     /// Returns an eligible data-availability frontier in round-robin chain order.
@@ -1984,6 +2062,35 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         Ok(self.ready_da_votes(profile, 1, 1)?.pop())
     }
 
+    /// Returns the chain of the first eligible data-availability vote `select` accepts, in
+    /// round-robin chain order.
+    ///
+    /// This answers the same question as scanning [`Self::ready_da_votes`] for a matching entry,
+    /// without materializing the frontier or scanning past the first match.
+    pub(crate) fn selected_da_chain<H: Hasher<Digest = D>>(
+        &self,
+        profile: &Profile<H, V>,
+        mut select: impl FnMut(ChainId, Height) -> bool,
+    ) -> Result<Option<ChainId>, ChainError> {
+        if !matches!(profile.role(), Role::Validator(_)) {
+            return Ok(None);
+        }
+        for offset in 0..self.blocks.len() {
+            let index = (self.next_da_chain + offset) % self.blocks.len();
+            if !self.pending_da_votes[index].is_empty() {
+                continue;
+            }
+            let Some((_, record)) = self.eligible_da_head::<H>(profile, index)? else {
+                continue;
+            };
+            let header = record.block.header();
+            if select(header.chain(), header.height()) {
+                return Ok(Some(header.chain()));
+            }
+        }
+        Ok(None)
+    }
+
     /// Returns up to `cap` consecutive eligible data-availability votes on one chain, starting
     /// at its lowest unvoted eligible height.
     fn eligible_da_run<H: Hasher<Digest = D>>(
@@ -1992,6 +2099,45 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         chain: usize,
         cap: usize,
     ) -> Result<Vec<Arc<SignedTransactionBlock<V, D>>>, ChainError> {
+        let Some((certified_height, record)) = self.eligible_da_head::<H>(profile, chain)? else {
+            return Ok(Vec::new());
+        };
+
+        // Extend the run with consecutive valid children while they stay within the pipeline
+        // distance of the run's certificate anchor: every earlier run entry counts as sent for
+        // the next one's eligibility.
+        let mut run = vec![Arc::clone(&record.block)];
+        let mut parent = record.block_ref;
+        while run.len() < cap {
+            let Some(next) = parent.height().get().checked_add(1).map(Height::new) else {
+                break;
+            };
+            if next.get().saturating_sub(certified_height.get())
+                > profile.protocol().codec_config().pipeline_depth() as u64
+            {
+                break;
+            }
+            let Some(records) = self.blocks[chain].get(&next) else {
+                break;
+            };
+            let Some(record) = records.iter().find(|record| {
+                record.state == ValidationState::Valid
+                    && record.block.header().parent() == parent.digest()
+            }) else {
+                break;
+            };
+            run.push(Arc::clone(&record.block));
+            parent = record.block_ref;
+        }
+        Ok(run)
+    }
+
+    /// Returns one chain's lowest eligible data-availability vote and its certificate anchor.
+    fn eligible_da_head<H: Hasher<Digest = D>>(
+        &self,
+        profile: &Profile<H, V>,
+        chain: usize,
+    ) -> Result<Option<DaHead<'_, V, D>>, ChainError> {
         // Candidates derive from the retained block records on every pass rather than from an
         // event-maintained set. A valid block observed while the local certified floor lags the
         // cluster becomes votable the moment the floor catches up; there is no insertion event
@@ -2000,8 +2146,16 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             .last_key_value()
             .ok_or(ChainError::Context)?;
         let start = (*floor).max(self.data_retired_through[chain]);
+        // Every height in `(data_retired_through, da_voted_run]` is already a local choice, so
+        // resuming above the cursor skips the voted prefix without probing it height by height.
+        let scanned = start.max(self.da_voted_run[chain]);
+        debug_assert!(
+            (start.get()..scanned.get())
+                .all(|height| self.local_da_votes[chain].contains_key(&Height::new(height + 1))),
+            "the skipped prefix is fully voted"
+        );
         for height in self.blocks[chain]
-            .range((Bound::Excluded(start), Bound::Unbounded))
+            .range((Bound::Excluded(scanned), Bound::Unbounded))
             .map(|(height, _)| height)
         {
             if self.local_da_votes[chain].contains_key(height) {
@@ -2051,36 +2205,9 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             if record.state != ValidationState::Valid {
                 continue;
             }
-
-            // Extend the run with consecutive valid children while they stay within the
-            // pipeline distance of the run's certificate anchor: every earlier run entry counts
-            // as sent for the next one's eligibility.
-            let mut run = vec![Arc::clone(&record.block)];
-            let mut parent = record.block_ref;
-            while run.len() < cap {
-                let Some(next) = parent.height().get().checked_add(1).map(Height::new) else {
-                    break;
-                };
-                if next.get().saturating_sub(certified_height.get())
-                    > profile.protocol().codec_config().pipeline_depth() as u64
-                {
-                    break;
-                }
-                let Some(records) = self.blocks[chain].get(&next) else {
-                    break;
-                };
-                let Some(record) = records.iter().find(|record| {
-                    record.state == ValidationState::Valid
-                        && record.block.header().parent() == parent.digest()
-                }) else {
-                    break;
-                };
-                run.push(Arc::clone(&record.block));
-                parent = record.block_ref;
-            }
-            return Ok(run);
+            return Ok(Some((*certified_height, record)));
         }
-        Ok(Vec::new())
+        Ok(None)
     }
 
     pub(crate) fn mark_da_vote_reserved(&mut self, header: TransactionBlockHeader<D>) {
