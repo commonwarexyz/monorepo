@@ -214,7 +214,6 @@ fn ingress_limits() -> IngressLimits {
         lane_items: NonZeroUsize::new(32).unwrap(),
         lane_bytes: NonZeroUsize::new(256 * 1024).unwrap(),
         inflight_jobs: NonZeroUsize::new(4).unwrap(),
-        coalesce: Duration::ZERO,
     }
 }
 
@@ -1632,19 +1631,7 @@ fn live_admission_preserves_core_local_priority_under_peer_flood() {
 fn invalid_verification_blocks_only_its_authenticated_source() {
     let executor = DeterministicRunner::default();
     executor.start(|context| async move {
-        let mut ingress = ingress_limits();
-        ingress.coalesce = Duration::from_millis(5);
-        let node = Node::start_with_attachments(
-            &context,
-            76,
-            Role::Observer,
-            "primary",
-            Attachments {
-                ingress: Some(ingress),
-                ..Attachments::default()
-            },
-        )
-        .await;
+        let node = Node::start(&context, 76, Role::Observer, "primary").await;
         let (mut peer_a, _) = node.peer(1, 0).await;
         let (mut peer_b, _) = node.peer(2, 0).await;
 
@@ -1683,9 +1670,13 @@ fn invalid_verification_blocks_only_its_authenticated_source() {
         );
 
         context.sleep(Duration::from_millis(50)).await;
-        assert_eq!(
-            node.blocker.blocked(),
-            vec![node.committee.identities[1].clone()]
+        let blocked = node.blocker.blocked();
+        assert!(
+            !blocked.is_empty()
+                && blocked
+                    .iter()
+                    .all(|peer| peer == &node.committee.identities[1]),
+            "blocked peers {blocked:?}"
         );
     });
 }
@@ -4715,10 +4706,6 @@ fn updated_broadcast_parent_is_attached_to_a_live_proposal() {
         let role = Role::Validator(Participant::new(3));
         let application = MockApplication::new();
         application.pause_building();
-        let ingress = IngressLimits {
-            coalesce: Duration::from_millis(20),
-            ..ingress_limits()
-        };
         let mut node = Node::attach(
             &context,
             Committee::<MinPk>::new(seed, 6, Limits::new(2, 1).unwrap()),
@@ -4731,7 +4718,6 @@ fn updated_broadcast_parent_is_attached_to_a_live_proposal() {
             false,
             Attachments {
                 application,
-                ingress: Some(ingress),
                 ..Attachments::default()
             },
             voter_limits(),
@@ -4740,7 +4726,6 @@ fn updated_broadcast_parent_is_attached_to_a_live_proposal() {
         let (mut consensus_tx, mut consensus_rx) = node.peer(1, 1).await;
         let (mut certificate_tx, mut certificate_rx) = node.peer(1, 2).await;
         let block = committee.leader_block(1);
-        let unsigned = block.block().clone();
         consensus_tx.send(
             Recipients::One(node.me.clone()),
             node.envelope(ConsensusMessage::Proposal {
@@ -4754,22 +4739,21 @@ fn updated_broadcast_parent_is_attached_to_a_live_proposal() {
         let messages = (0..6)
             .map(|signer| ViewMessage::Vote(committee.vote(signer, &block)))
             .collect::<Vec<_>>();
-        for message in &messages {
-            let ViewMessage::Vote(vote) = message else {
-                unreachable!("the test uses only votes");
-            };
-            consensus_tx.send(
-                Recipients::One(node.me.clone()),
-                node.envelope(ConsensusMessage::Vote(vote.clone())).encode(),
-                true,
-            );
+        let votes = messages
+            .iter()
+            .map(|message| {
+                let ViewMessage::Vote(vote) = message else {
+                    unreachable!("the test uses only votes");
+                };
+                node.envelope(ConsensusMessage::Vote(vote.clone())).encode()
+            })
+            .collect::<Vec<_>>();
+        for vote in &votes {
+            consensus_tx.send(Recipients::One(node.me.clone()), vote.clone(), true);
         }
-        let first = committee
-            .verifier
-            .assemble_vqc::<Sha256, _>(unsigned.clone(), &messages[..5], &Sequential)
-            .expect("the first quorum aggregates");
         let deadline = context.current() + Duration::from_secs(2);
-        loop {
+        let mut published = None;
+        while published.is_none() {
             let (_, bytes) = select! {
                 result = certificate_rx.recv() => result.expect("network stays up"),
                 () = context.sleep_until(deadline) => panic!("the first V-QC was not published"),
@@ -4780,15 +4764,9 @@ fn updated_broadcast_parent_is_attached_to_a_live_proposal() {
             )
             .expect("canonical certificate envelope");
             if let CertificateMessage::Vqc(certificate) = envelope.into_payload() {
-                assert_eq!(certificate.id::<Sha256>(), first.id::<Sha256>());
-                break;
+                published = Some(certificate);
             }
         }
-
-        let improved = committee
-            .verifier
-            .assemble_vqc::<Sha256, _>(unsigned, &messages, &Sequential)
-            .expect("the full sticky transcript aggregates");
         context.sleep(Duration::from_millis(100)).await;
         assert_eq!(node.inspect().await.view(), View::new(2));
 
@@ -4800,11 +4778,28 @@ fn updated_broadcast_parent_is_attached_to_a_live_proposal() {
             .encode(),
             true,
         );
+        // The view-3 proposal must carry exactly the newest V-QC the node broadcast for view 1,
+        // whichever vote cohorts the batcher formed.
         let deadline = context.current() + Duration::from_secs(2);
         loop {
             let (_, bytes) = select! {
                 result = consensus_rx.recv() => result.expect("network stays up"),
-                () = context.sleep_until(deadline) => panic!("view-three proposal was not published"),
+                result = certificate_rx.recv() => {
+                    let (_, bytes) = result.expect("network stays up");
+                    let envelope =
+                        Envelope::<CertificateMessage<MinPk, Sha256Digest>>::decode_cfg(
+                            bytes,
+                            &node.envelope_cfg(node.committee.codec()),
+                        )
+                        .expect("canonical certificate envelope");
+                    if let CertificateMessage::Vqc(certificate) = envelope.into_payload()
+                        && certificate.view() == View::new(1)
+                    {
+                        published = Some(certificate);
+                    }
+                    continue;
+                },
+                () = context.sleep_until(deadline) => panic!("the view-3 proposal never arrived"),
             };
             let envelope = Envelope::<ConsensusMessage<MinPk, Sha256Digest>>::decode_cfg(
                 bytes,
@@ -4821,8 +4816,9 @@ fn updated_broadcast_parent_is_attached_to_a_live_proposal() {
             if block.view() != View::new(3) {
                 continue;
             }
-            assert_eq!(block.block().parent(), improved.id::<Sha256>());
-            assert_eq!(*parent, improved);
+            let published = published.expect("a view-1 V-QC was published");
+            assert_eq!(block.block().parent(), published.id::<Sha256>());
+            assert_eq!(*parent, published);
             break;
         }
     });
