@@ -141,6 +141,11 @@ pub struct Observed<P: PublicKey, V: Variant, D: Digest> {
     /// Identifiers hash the full encoding. The batcher owns that cost so the voter loop never
     /// re-hashes a multi-kilobyte certificate to deduplicate replayed ingress.
     pub artifacts: Vec<(P, IdentifiedArtifact<V, D>)>,
+    /// The total canonical encoded length of the cohort's artifacts.
+    ///
+    /// Admission already measured every artifact, so the voter accounts for the cohort's residency
+    /// from this total instead of re-walking each decoded value.
+    pub bytes: usize,
     /// The ingress tracing span for this cohort.
     pub span: Span,
     /// When the batcher handed the cohort to the voter.

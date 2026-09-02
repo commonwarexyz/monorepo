@@ -47,8 +47,8 @@ pub(super) const VIEW_COHORT_ITEMS: usize = 4;
 
 pub(super) struct Group<V: Variant, D: Digest> {
     first: IdentifiedArtifact<V, D>,
-    second: Option<Box<IdentifiedArtifact<V, D>>>,
-    bytes: usize,
+    first_bytes: usize,
+    second: Option<(Box<IdentifiedArtifact<V, D>>, usize)>,
     /// When the network message carrying the group arrived at the batcher.
     received_at: SystemTime,
 }
@@ -58,8 +58,8 @@ impl<V: Variant, D: Digest> Group<V, D> {
         let bytes = artifact.1.encoded_len();
         Self {
             first: artifact,
+            first_bytes: bytes,
             second: None,
-            bytes,
             received_at,
         }
     }
@@ -68,11 +68,12 @@ impl<V: Variant, D: Digest> Group<V, D> {
         [first, second]: [IdentifiedArtifact<V, D>; 2],
         received_at: SystemTime,
     ) -> Self {
-        let bytes = first.1.encoded_len().saturating_add(second.1.encoded_len());
+        let first_bytes = first.1.encoded_len();
+        let second_bytes = second.1.encoded_len();
         Self {
             first,
-            second: Some(Box::new(second)),
-            bytes,
+            first_bytes,
+            second: Some((Box::new(second), second_bytes)),
             received_at,
         }
     }
@@ -82,7 +83,10 @@ impl<V: Variant, D: Digest> Group<V, D> {
     }
 
     const fn bytes(&self) -> usize {
-        self.bytes
+        match &self.second {
+            Some((_, second)) => self.first_bytes.saturating_add(*second),
+            None => self.first_bytes,
+        }
     }
 }
 
@@ -91,9 +95,12 @@ impl<V: Variant, D: Digest> Group<V, D> {
 pub(super) struct Selected<P: PublicKey, V: Variant, D: Digest> {
     pub(super) artifact: IdentifiedArtifact<V, D>,
     pub(super) peer: P,
+    /// The artifact's canonical encoded length, measured once at admission.
+    pub(super) bytes: usize,
     /// When the network message carrying the artifact arrived at the batcher.
     pub(super) received_at: SystemTime,
 }
+
 
 #[cfg(test)]
 impl<P: PublicKey, V: Variant, D: Digest> PartialEq<Artifact<V, D>> for Selected<P, V, D> {
@@ -309,21 +316,24 @@ impl<P: PublicKey, V: Variant, D: Digest> Lanes<P, V, D> {
             };
             let received_at = group.received_at;
             match group.second {
-                Some(second) => {
+                Some((second, second_bytes)) => {
                     cohort.push(Selected {
                         artifact: group.first,
                         peer: peer.clone(),
+                        bytes: group.first_bytes,
                         received_at,
                     });
                     cohort.push(Selected {
                         artifact: *second,
                         peer,
+                        bytes: second_bytes,
                         received_at,
                     });
                 }
                 None => cohort.push(Selected {
                     artifact: group.first,
                     peer,
+                    bytes: group.first_bytes,
                     received_at,
                 }),
             }
