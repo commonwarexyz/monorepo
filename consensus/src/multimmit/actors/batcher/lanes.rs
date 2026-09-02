@@ -5,7 +5,6 @@ use super::{Drop, IngressLimits};
 use crate::multimmit::machine::Artifact;
 use crate::multimmit::machine::IdentifiedArtifact;
 use commonware_cryptography::{Digest, PublicKey, bls12381::primitives::variant::Variant};
-use commonware_utils::N5f1;
 use std::collections::{HashMap, VecDeque};
 
 /// The destination lane for one decoded artifact.
@@ -140,7 +139,7 @@ pub(super) struct Lanes<P: PublicKey, V: Variant, D: Digest> {
 
 impl<P: PublicKey, V: Variant, D: Digest> Lanes<P, V, D> {
     pub(super) fn new(chains: usize, participants: usize, limits: IngressLimits) -> Self {
-        let fault_domains = N5f1::f_plus_one(participants) as usize;
+        let (peer_items, peer_bytes) = limits.peer_share(participants);
         Self {
             consensus: Lane::new(),
             certificates: Lane::new(),
@@ -148,8 +147,8 @@ impl<P: PublicKey, V: Variant, D: Digest> Lanes<P, V, D> {
             items: 0,
             next_plane: Plane::Consensus,
             next_chain: 0,
-            peer_items: limits.lane_items.get() / fault_domains,
-            peer_bytes: limits.lane_bytes.get() / fault_domains,
+            peer_items,
+            peer_bytes,
             limits,
         }
     }

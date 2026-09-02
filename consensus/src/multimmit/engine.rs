@@ -130,8 +130,14 @@ fn ingress_limits<H: Hasher, V: Variant>(profile: &Profile<H, V>) -> IngressLimi
     IngressLimits {
         cohort_items: NonZeroUsize::new(resources.max_verification_batch()).expect("non-zero"),
         lane_items: NonZeroUsize::new(resources.max_cached_artifacts()).expect("non-zero"),
+        // The lane is split into one share per fault domain, so a share is only useful if it
+        // holds more than one maximum-size group. A correct peer sends a proposal carrying its
+        // parent certificate, which is one whole group, and the next arrives before the voter has
+        // drained the first. Reserving two groups per domain keeps that true at every committee
+        // size; the floor covers the small shapes where a group is a few kilobytes.
         lane_bytes: NonZeroUsize::new(
             max_ingress_group_bytes
+                .saturating_mul(2)
                 .saturating_mul(fault_domains)
                 .max(16 * 1024 * 1024),
         )
@@ -866,7 +872,7 @@ mod tests {
     use crate::{
         multimmit::{
             actors::wire::{CertificateMessage, DataMessage, Envelope, EnvelopeConfig},
-            config::Limits,
+            config::{Config as ProtocolConfig, Limits},
             machine::{
                 CoreState, DomainEventCodecConfig, Inspection, Profile, PublicationDischarge, Role,
                 Tuning, ViewProof,
@@ -875,7 +881,10 @@ mod tests {
                 Committee, MockApplication, NoopBlocker, NoopReporter,
                 cluster::{QUOTA, link_all, start_network},
             },
-            types::{ChainId, Context, Height, SignedTransactionBlock},
+            types::{
+                BlockRef, CertificateId, ChainId, Context, EpochGenesis, Height,
+                SignedTransactionBlock,
+            },
         },
         types::{Epoch, Participant, View},
     };
@@ -897,6 +906,37 @@ mod tests {
         num::{NonZeroU64, NonZeroUsize},
         time::Duration,
     };
+
+    /// Builds an epoch configuration of `participants` producers without generating keys.
+    fn ingress_protocol(participants: u32, limits: Limits) -> ProtocolConfig<Sha256Digest> {
+        let epoch = Epoch::new(1);
+        let tips = (0..participants)
+            .map(|chain| {
+                BlockRef::new(
+                    ChainId::new(chain),
+                    Height::zero(),
+                    Sha256::hash(&[&chain.to_be_bytes()]),
+                )
+            })
+            .collect();
+        let genesis = EpochGenesis::new(
+            epoch,
+            Sha256::hash(&[b"ingress leader genesis"]),
+            CertificateId::new(Sha256::hash(&[b"ingress vqc genesis"])),
+            CertificateId::new(Sha256::hash(&[b"ingress lqc genesis"])),
+            tips,
+        )
+        .unwrap();
+        ProtocolConfig::new(
+            epoch,
+            b"_COMMONWARE_CONSENSUS_MULTIMMIT_INGRESS_SHAPE_TEST",
+            participants as usize,
+            (0..participants).map(Participant::new).collect(),
+            limits,
+            genesis,
+        )
+        .unwrap()
+    }
 
     fn profile(committee: &Committee<MinPk>, role: Role) -> Profile<Sha256, MinPk> {
         Profile::new(
@@ -1095,7 +1135,7 @@ mod tests {
     }
 
     #[test]
-    fn ingress_limits_reserve_one_codec_group_per_fault_domain() {
+    fn ingress_limits_reserve_two_codec_groups_per_fault_domain() {
         let committee = Committee::<MinPk>::new(81, 6, Limits::new(25_000, 0).unwrap());
         let bounds = committee
             .codec()
@@ -1117,7 +1157,7 @@ mod tests {
 
         assert_eq!(
             limits.lane_bytes.get(),
-            required.saturating_mul(2).max(16 * 1024 * 1024),
+            required.saturating_mul(4).max(16 * 1024 * 1024),
         );
     }
 
@@ -1141,7 +1181,49 @@ mod tests {
         let limits = ingress_limits(&profile);
 
         assert!(required > 16 * 1024 * 1024);
-        assert_eq!(limits.lane_bytes.get(), required.saturating_mul(2));
+        assert_eq!(limits.lane_bytes.get(), required.saturating_mul(4));
+    }
+
+    #[test]
+    fn ingress_peer_share_holds_two_maximum_groups_at_every_shape() {
+        // The deployed shape first, then the shapes the behavioural tests run at.
+        for (participants, pipeline_depth, extension_bound) in
+            [(50u32, 32u32, 16u32), (11, 3, 2), (7, 2, 1), (6, 2, 1), (1, 1, 0)]
+        {
+            let protocol = ingress_protocol(
+                participants,
+                Limits::new(pipeline_depth, extension_bound).unwrap(),
+            );
+            let bounds = protocol
+                .codec_config()
+                .encoded_bounds::<MinPk, Sha256Digest>()
+                .unwrap();
+            let group = bounds.max_ingress_group_bytes();
+            let profile: Profile<Sha256, MinPk> = Profile::new(
+                protocol,
+                Role::Observer,
+                Tuning {
+                    max_artifact_bytes: NonZeroUsize::new(bounds.max_artifact_bytes()).unwrap(),
+                    ..Tuning::default()
+                },
+            )
+            .unwrap();
+            let limits = ingress_limits(&profile);
+            let (peer_items, peer_bytes) = limits.peer_share(participants as usize);
+
+            assert!(
+                peer_bytes >= group.saturating_mul(2),
+                "a correct peer holds fewer than two maximum groups \
+                 (participants={participants}, d={pipeline_depth}, e={extension_bound}): \
+                 {peer_bytes} against {group}"
+            );
+            assert!(
+                peer_items >= 2,
+                "a correct peer holds fewer than two artifacts \
+                 (participants={participants})"
+            );
+            assert!(limits.lane_bytes.get() >= peer_bytes);
+        }
     }
 
     #[test]

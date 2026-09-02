@@ -32,6 +32,7 @@ use crate::{
 pub use actor::Actor;
 use commonware_actor::mailbox::{Policy, UnreliablePolicy};
 use commonware_cryptography::{Digest, PublicKey, bls12381::primitives::variant::Variant};
+use commonware_utils::N5f1;
 #[cfg(any(test, feature = "test-utils"))]
 pub use fuzz::exercise_lanes;
 use std::{collections::VecDeque, num::NonZeroUsize};
@@ -53,6 +54,21 @@ pub struct IngressLimits {
     pub lane_bytes: NonZeroUsize,
     /// Maximum concurrently executing verification jobs.
     pub inflight_jobs: NonZeroUsize,
+}
+
+impl IngressLimits {
+    /// Returns one peer's item and byte share of a lane in a committee of `participants`.
+    ///
+    /// Splitting a lane across `f + 1` fault domains leaves a whole share for a correct peer no
+    /// matter how the faulty ones fill theirs. The share is only useful if it holds more than one
+    /// maximum-size group, which is what `lane_bytes` is sized for.
+    pub(crate) fn peer_share(self, participants: usize) -> (usize, usize) {
+        let fault_domains = N5f1::f_plus_one(participants) as usize;
+        (
+            self.lane_items.get() / fault_domains,
+            self.lane_bytes.get() / fault_domains,
+        )
+    }
 }
 
 /// Configuration for the batcher actor.
