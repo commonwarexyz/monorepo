@@ -125,7 +125,6 @@ impl crate::Storage for Storage {
                 .truncate(false)
                 .open(&path)
                 .map_err(|e| Error::BlobOpenFailed(partition.clone(), hex(&name), e.into()))?;
-
             let raw_len = file.metadata().map_err(|_| Error::ReadFailed)?.len();
 
             // Handle the header. Existing blobs have their header read. New blobs and blobs
