@@ -1669,7 +1669,6 @@ where
         (self.mutations, m)
     }
 
-    // Generic get() for both ordered and unordered UnmerkleizedBatch.
     /// Return true when reads can bypass uncommitted overlay resolution and go directly to the DB.
     fn reads_committed_only(&self) -> bool {
         self.mutations.is_empty() && self.base.parent().is_none()
