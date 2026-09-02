@@ -2897,6 +2897,136 @@ fn canceled_lqc_completion_is_not_committed_after_forwarding() {
     assert!(machine.prepared_lqc.is_none());
 }
 
+/// Machine work quanta and journal barrier acknowledgements spent leaving one view.
+struct ExitDrive {
+    quanta: usize,
+    barriers: usize,
+    /// Ordered event kinds of the persistence range that carries the exit.
+    exit: Vec<&'static str>,
+}
+
+/// Drives machine-owned work until the machine leaves `from`, acknowledging a barrier only
+/// when the machine reports no remaining work.
+fn drive_to_exit(machine: &mut TestMachine, staged: Step<MinPk, Digest>, from: View) -> ExitDrive {
+    const MAX_QUANTA: usize = 64;
+
+    let mut effects = staged.into_capabilities();
+    let mut quanta = 0;
+    let mut barriers = 0;
+    let mut work = true;
+    while machine.durable.view == from {
+        if work {
+            assert!(
+                quanta < MAX_QUANTA,
+                "the machine held {from:?} for {MAX_QUANTA} work quanta"
+            );
+            let result = machine.poll(NonZeroUsize::MIN).unwrap();
+            quanta += 1;
+            work = result.work_remaining();
+            effects.extend(result.into_capabilities());
+            continue;
+        }
+        let index = effects
+            .iter()
+            .position(|effect| {
+                matches!(
+                    effect,
+                    Capability::Durability(DurabilityCapability::Persist(_))
+                )
+            })
+            .unwrap_or_else(|| panic!("the machine quiesced in {from:?}"));
+        let Capability::Durability(DurabilityCapability::Persist(directive)) =
+            effects.remove(index)
+        else {
+            unreachable!("the selected effect is a persistence job")
+        };
+        let (job, ..) = directive.into_parts();
+        barriers += 1;
+        effects.extend(persist_raw(machine, &job).into_capabilities());
+        work = true;
+    }
+    // Group commit holds the exit's range while the certificate's barrier is in flight, so
+    // drain what remains to observe how the exit was journalled.
+    let mut ranges = Vec::new();
+    while let Some(index) = effects.iter().position(|effect| {
+        matches!(
+            effect,
+            Capability::Durability(DurabilityCapability::Persist(_))
+        )
+    }) {
+        let Capability::Durability(DurabilityCapability::Persist(directive)) =
+            effects.remove(index)
+        else {
+            unreachable!("the selected effect is a persistence job")
+        };
+        let (job, ..) = directive.into_parts();
+        ranges.push(
+            job.events()
+                .iter()
+                .map(|event| event.change().kind())
+                .collect::<Vec<_>>(),
+        );
+        effects.extend(persist_raw(machine, &job).into_capabilities());
+    }
+    let exit = ranges
+        .into_iter()
+        .find(|kinds| kinds.contains(&"view advanced"))
+        .unwrap_or_default();
+    ExitDrive {
+        quanta,
+        barriers,
+        exit,
+    }
+}
+
+#[test]
+fn locally_assembled_vqc_forwards_and_exits_in_one_work_quantum() {
+    let profile = profile_for(Role::Observer, 6, 2);
+    let (mut machine, _) = start_profile(profile);
+    assert_eq!(machine.durable.view, View::new(1));
+    let proposed = leader(&machine, 1);
+    let proposal = observe(
+        &mut machine,
+        Artifact::LeaderBlock(SignedLeaderBlock::new(proposed.clone(), attestation(0))),
+    );
+    complete(&mut machine, &proposal, true);
+
+    let vqc_job = |effect: &Capability<MinPk, Digest>| match effect {
+        Capability::Leader(LeaderCapability::AggregateVqc(job)) => Some(job.clone()),
+        _ => None,
+    };
+    let mut aggregate = None;
+    for signer in 0..5 {
+        let artifact = Artifact::Vote(view_vote(&machine, &proposed, signer));
+        let vote = observe(&mut machine, artifact);
+        let step = complete_with_step(&mut machine, &vote, true);
+        aggregate = aggregate.or_else(|| step.capabilities().iter().find_map(vqc_job));
+        let (effects, _) = drive_poll_and_persist(&mut machine, step);
+        aggregate = aggregate.or_else(|| effects.iter().find_map(vqc_job));
+    }
+    let aggregate = aggregate.expect("a view quorum assembles the current view's V-QC");
+    assert_eq!(aggregate.leader().view(), View::new(1));
+
+    let messages = aggregate.messages().collect::<Vec<_>>();
+    let certificate = vqc(&machine, aggregate.leader().clone(), &messages);
+    let staged = machine
+        .step(Input::VqcAggregated(Box::new(VqcAggregateCompletion::new(
+            aggregate.id(),
+            aggregate.generation(),
+            certificate,
+        ))))
+        .unwrap();
+    assert_eq!(staged.status(), &StepStatus::CompletionDeferred);
+
+    // The forwarding fact the exit reads applies as soon as it is staged, so the view drive
+    // does not requeue between them and one persistence range carries both events.
+    let drive = drive_to_exit(&mut machine, staged, View::new(1));
+    assert_eq!(machine.durable.view, View::new(2));
+    assert_eq!(drive.quanta, 3);
+    assert_eq!(drive.barriers, 1);
+    assert_eq!(drive.exit, ["artifact forwarded", "view advanced"]);
+}
+
 fn build_job(step: &Step<MinPk, Digest>) -> BuildJob<Digest> {
     step.capabilities()
         .iter()
@@ -5029,8 +5159,7 @@ fn proposal_anchor_prefers_more_accounted_messages() {
         )))
         .unwrap();
     let forwarding = settle(&mut machine, forwarding);
-    let forwarded = persist(&mut machine, &persist_job(&forwarding));
-    let entered = persist(&mut machine, &persist_job(&forwarded));
+    let entered = persist(&mut machine, &persist_job(&forwarding));
     let sign = sign_job(&entered);
     let SignRequest::LeaderBlock(request) = sign_request(&sign) else {
         panic!("the view-two leader must reserve a proposal");
@@ -7197,8 +7326,7 @@ fn successor_forwarding_reuses_retired_artifact_capacity() {
     let first = symbolic_nullification(&machine, View::new(1), 0);
     let first = observe(&mut machine, Artifact::Nullification(first));
     let forwarding = complete_with_step(&mut machine, &first, true);
-    let advanced = persist(&mut machine, &persist_job(&forwarding));
-    persist(&mut machine, &persist_job(&advanced));
+    persist(&mut machine, &persist_job(&forwarding));
     assert_eq!(machine.inspect().view(), View::new(2));
 
     let previous_vqc = Arc::new(Artifact::Vqc(view_one_vqc(&machine)));
@@ -7234,12 +7362,21 @@ fn successor_forwarding_reuses_retired_artifact_capacity() {
     let acknowledged = machine.live_snapshot_for_test();
     let forwarded = complete_with_step(&mut machine, &successor, true);
     let forwarding = persist_job(&forwarded);
-    assert_eq!(machine.artifacts.len(), 2);
+    // The exit derives beside the forwarding it reads, so one range retires the two exit
+    // publications above, admits the successor's certificate, and retires what the new view
+    // floor releases.
+    assert_eq!(
+        forwarding
+            .events()
+            .iter()
+            .map(|event| event.change().kind())
+            .collect::<Vec<_>>(),
+        ["artifact forwarded", "view advanced"]
+    );
+    assert_eq!(machine.artifacts.len(), 1);
     assert!(machine.durable.nullification_forwarded(View::new(2)));
-    // Two publications retired and one replaced them. Forwarding history keeps the successor's
-    // certificate referenced at the exact artifact ceiling.
     assert_eq!(machine.durable.outbox.len(), 8);
-    assert_eq!(machine.durable_artifact_references.len(), 9);
+    assert_eq!(machine.durable_artifact_references.len(), 8);
 
     let mut restored = Machine::restore(profile.clone(), acknowledged).unwrap();
     for event in forwarding.events().iter().cloned() {
@@ -7247,7 +7384,7 @@ fn successor_forwarding_reuses_retired_artifact_capacity() {
     }
     assert!(restored.durable.nullification_forwarded(View::new(2)));
     assert_eq!(restored.durable.outbox.len(), 8);
-    assert_eq!(restored.durable_artifact_references.len(), 9);
+    assert_eq!(restored.durable_artifact_references.len(), 8);
     Machine::restore(profile, restored.live_snapshot_for_test()).unwrap();
 }
 
@@ -13292,7 +13429,14 @@ fn nullification_recovery_uses_the_canonical_subset_and_exits() {
             .any(|job| matches!(job.request(), DurableEffect::Broadcast(_))),
         "the forwarding staging must release the recovered certificate"
     );
-    let published = persist(&mut machine, &persist_job(&retained));
+    // The exit derives in the drive that stages the forwarding it reads, so one barrier
+    // carries the forwarded certificate and the transition it proves.
+    let exit = persist_job(&retained);
+    assert!(matches!(
+        exit.events()[1].change(),
+        Change::ViewAdvanced { proof: actual, .. } if *actual == proof
+    ));
+    let published = persist(&mut machine, &exit);
     assert!(
         published
             .capabilities()
@@ -13300,12 +13444,6 @@ fn nullification_recovery_uses_the_canonical_subset_and_exits() {
             .all(|effect| { !matches!(durable_effect(effect), Some(DurableEffect::Broadcast(_))) }),
         "persistence must not release the staged broadcast a second time"
     );
-    let advance = persist_job(&published);
-    assert!(matches!(
-        advance.events()[0].change(),
-        Change::ViewAdvanced { proof: actual, .. } if *actual == proof
-    ));
-    persist(&mut machine, &advance);
     assert_eq!(machine.inspect().view(), View::new(2));
 }
 
@@ -13384,13 +13522,19 @@ fn vqc_aggregation_retains_exact_messages_and_exits_observer() {
     let completed = settle(&mut machine, completed);
     let retained = persist(&mut machine, &persist_job(&completed));
     Machine::restore(profile, machine.live_snapshot_for_test()).unwrap();
-    let published = persist(&mut machine, &persist_job(&retained));
-    let advance = persist_job(&published);
+    // The exit derives in the drive that stages the forwarding it reads, so one barrier
+    // carries the forwarded certificate and the transition it proves.
+    let exit = persist_job(&retained);
     assert!(matches!(
-        advance.events()[0].change(),
+        exit.events()[0].change(),
+        Change::ArtifactForwarded { artifact, .. }
+            if matches!(artifact.as_ref(), Artifact::Vqc(_))
+    ));
+    assert!(matches!(
+        exit.events()[1].change(),
         Change::ViewAdvanced { proof: actual, .. } if *actual == proof
     ));
-    persist(&mut machine, &advance);
+    persist(&mut machine, &exit);
     assert_eq!(machine.inspect().view(), View::new(2));
 }
 
@@ -13977,8 +14121,7 @@ fn late_past_nullification_is_recovered_and_forwarded() {
     let certificate = vqc(&machine, proposed, &messages);
     let verification = observe(&mut machine, Artifact::Vqc(certificate));
     let forwarding = complete_with_step(&mut machine, &verification, true);
-    let forwarded = persist(&mut machine, &persist_job(&forwarding));
-    persist(&mut machine, &persist_job(&forwarded));
+    persist(&mut machine, &persist_job(&forwarding));
     assert_eq!(machine.inspect().view(), View::new(2));
 
     let shares = machine
@@ -14438,20 +14581,25 @@ fn inbound_vqc_requires_rescue_vote_before_view_advance() {
     let proof = Artifact::Vqc(certificate.clone()).id::<Sha256>();
     let verification = observe(&mut machine, Artifact::Vqc(certificate));
     let forwarding = complete_with_step(&mut machine, &verification, true);
-    let forwarded = persist(&mut machine, &persist_job(&forwarding));
-    let rescue = persist_job(&forwarded);
+    let staged = persist_job(&forwarding);
+    // Forwarding and the rescue choice derive in one drive, so one range carries both.
     assert!(matches!(
-        rescue.events()[0].change(),
+        staged.events()[0].change(),
+        Change::ArtifactForwarded { .. }
+    ));
+    assert!(matches!(
+        staged.events()[1].change(),
         Change::OutboxQueued { effect, .. }
             if matches!(effect.as_ref(), DurableEffect::Sign(SignRequest::Vote(request))
                 if request.body().leader() == proposed.digest::<Sha256>())
     ));
-    // The exit is staged only behind the rescue vote, so the view is still 1 while the rescue
-    // barrier is the only staged work.
+    assert_eq!(staged.events().len(), 2);
+    // The exit is staged only behind the rescue vote, so the view is still 1 while that range
+    // is the only staged work.
     assert_eq!(machine.inspect().view(), View::new(1));
-    let released = persist(&mut machine, &rescue);
     // The signing request released with the step that staged the rescue choice.
-    let sign = sign_job(&forwarded);
+    let sign = sign_job(&forwarding);
+    let released = persist(&mut machine, &staged);
     let advance = persist_job(&released);
     assert!(matches!(
         advance.events()[0].change(),
@@ -14643,17 +14791,17 @@ fn pending_proposal_parent_survives_recovery() {
     let parent = vqc(&machine, proposed, &messages);
     let parent_id = Artifact::Vqc(parent.clone()).id::<Sha256>();
     let parent_verification = observe(&mut machine, Artifact::Vqc(parent.clone()));
-    complete(&mut machine, &parent_verification, true);
+    let proposal = complete_with_step(&mut machine, &parent_verification, true);
 
-    let forwarded = persist(&mut machine, &persist_job(&forwarding));
-    let entered = persist(&mut machine, &persist_job(&forwarded));
+    let entered = persist(&mut machine, &persist_job(&forwarding));
     assert_eq!(machine.inspect().view(), View::new(2));
     // Acknowledge the proposal barrier without letting the scheduler stage anything on top of
     // it, so the crash snapshot holds the reserved proposal and nothing later.
     persist_raw(&mut machine, &persist_job(&entered));
     let crashed = machine.live_snapshot_for_test();
-    // The signing request released with the step that staged the proposal choice.
-    let sign = sign_job(&entered);
+    // The signing request released with the step that staged the proposal choice. The exit
+    // derives beside the forwarding it reads, so that step is the parent's completion.
+    let sign = sign_job(&proposal);
     let SignRequest::LeaderBlock(request) = sign_request(&sign) else {
         panic!("the view-two leader must reserve a proposal");
     };
@@ -14934,7 +15082,13 @@ fn consecutive_exit_certificates_advance_exactly_one_view_at_a_time() {
     }) {
         // Staging applies the transition, so the staged view is already the new one: two
         // separate barriers stepping to view 2 then view 3 is exactly one exit per proof.
-        if matches!(job.events()[0].change(), Change::ViewAdvanced { .. }) {
+        let advances = job
+            .events()
+            .iter()
+            .filter(|event| matches!(event.change(), Change::ViewAdvanced { .. }))
+            .count();
+        assert!(advances <= 1, "one barrier carries at most one exit");
+        if advances == 1 {
             advanced.push(machine.inspect().view());
         }
         step = persist(&mut machine, &job);
@@ -15409,13 +15563,11 @@ fn vqc_forwarding_waits_for_the_earliest_observation_cohort() {
     };
     assert!(matches!(artifact.as_ref(), Artifact::Vqc(certificate) if certificate == &early));
 
-    let [Capability::Durability(DurabilityCapability::Persist(directive))] =
-        selected.capabilities()
-    else {
-        panic!("forwarding must be one structurally fenced persistence command");
-    };
+    // Forwarding remains one structurally fenced persistence command even though the exit it
+    // proves is staged into the same range.
+    let directive = persist_directive(&selected);
     assert_eq!(directive.id(), forwarding.id());
-    let (_, _, release_after_enqueue, _) = directive.clone().into_parts();
+    let (_, _, release_after_enqueue, _) = directive.into_parts();
     let [released] = release_after_enqueue.as_slice() else {
         panic!("the persistence command must carry its one post-enqueue publication");
     };
@@ -15468,21 +15620,27 @@ fn cross_class_exit_selection_is_completion_order_independent() {
             Change::ArtifactForwarded { artifact, .. }
                 if matches!(artifact.as_ref(), Artifact::Vqc(_))
         ));
-        // Snapshot the instant the forwarding barrier lands, before any follow-up staging, so
-        // recovery has to re-derive the rescued vote rather than replay it.
+        // The exit derivation reads the forwarding fact staged beside it, so one barrier
+        // carries the forwarded certificate and the vote it rescues.
+        assert!(matches!(
+            forwarding.events()[1].change(),
+            Change::OutboxQueued { effect, .. }
+                if matches!(effect.as_ref(), DurableEffect::Sign(SignRequest::Vote(request))
+                    if request.body().leader() == proposed.digest::<Sha256>())
+        ));
+        // Snapshot the instant that barrier lands so recovery has to reissue the rescued vote
+        // from its recovered reservation.
         persist_raw(&mut machine, &forwarding);
         let crashed = machine.live_snapshot_for_test();
 
         let mut restored = Machine::restore(profile, crashed).unwrap();
         let recovery = restored.step(Input::RecoveryComplete).unwrap();
         let recovered = persist(&mut restored, &persist_job(&recovery));
-        let rescue = persist_job(&recovered);
-        assert!(matches!(
-            rescue.events()[0].change(),
-            Change::OutboxQueued { effect, .. }
-                if matches!(effect.as_ref(), DurableEffect::Sign(SignRequest::Vote(request))
-                    if request.body().leader() == proposed.digest::<Sha256>())
-        ));
+        assert!(recovered.capabilities().iter().any(|effect| matches!(
+            durable_effect(effect),
+            Some(DurableEffect::Sign(SignRequest::Vote(request)))
+                if request.body().leader() == proposed.digest::<Sha256>()
+        )));
     }
 }
 
@@ -16075,14 +16233,14 @@ fn proposal_parent_suppresses_identical_local_assembly() {
     // A peer assembled the same V-QC from the same messages and it verifies first.
     let parent = vqc(&machine, proposed, &messages);
     let certificate = observe(&mut machine, Artifact::Vqc(parent.clone()));
-    complete(&mut machine, &certificate, true);
-
-    // Exit view one on the nullification and propose view two anchored on the inbound V-QC.
-    let forwarded = persist(&mut machine, &persist_job(&forwarding));
-    let entered = persist(&mut machine, &persist_job(&forwarded));
+    // The exit derives beside the forwarding it reads, so view two is already current here and
+    // the proposal choice stages with the parent's completion.
+    let proposal = complete_with_step(&mut machine, &certificate, true);
     assert_eq!(machine.inspect().view(), View::new(2));
     // The signing request releases with the step that stages the proposal choice.
-    let sign = sign_job(&entered);
+    let sign = sign_job(&proposal);
+
+    let entered = persist(&mut machine, &persist_job(&forwarding));
     persist(&mut machine, &persist_job(&entered));
     let SignRequest::LeaderBlock(request) = sign_request(&sign) else {
         panic!("the view-two leader must reserve a proposal");
@@ -16411,7 +16569,13 @@ proptest! {
             _ => None,
         }) {
             // Staging applies the transition, so each staged exit reports the view it entered.
-            if matches!(job.events()[0].change(), Change::ViewAdvanced { .. }) {
+            let advances = job
+                .events()
+                .iter()
+                .filter(|event| matches!(event.change(), Change::ViewAdvanced { .. }))
+                .count();
+            prop_assert!(advances <= 1, "one barrier carries at most one exit");
+            if advances == 1 {
                 advanced.push(machine.inspect().view());
             }
             step = persist(&mut machine, &job);

@@ -2759,6 +2759,39 @@ mod successor_matrix {
         jobs.into_iter().next().unwrap()
     }
 
+    /// Returns the publication reserved by the barrier's forwarding event.
+    fn forwarded_publication(job: &PersistJob<MinPk, Digest>) -> EffectId {
+        job.events()
+            .iter()
+            .find_map(|event| match event.change() {
+                Change::ArtifactForwarded { publication, .. } => Some(*publication),
+                _ => None,
+            })
+            .expect("the barrier must stage one forwarding")
+    }
+
+    /// Acknowledges each staged barrier in order until the machine stages no more.
+    fn drain_barriers(
+        runner: &mut Runner<Sha256, MinPk>,
+        step: Step<MinPk, Digest>,
+    ) -> Step<MinPk, Digest> {
+        let mut step = step;
+        for _ in 0..8 {
+            if !step.capabilities().iter().any(|effect| {
+                matches!(
+                    effect,
+                    Capability::Durability(DurabilityCapability::Persist(_))
+                )
+            }) {
+                return step;
+            }
+            let job = only_persist(&step);
+            let acknowledged = runner.persist(&job).unwrap();
+            step = runner.settle(acknowledged).unwrap();
+        }
+        panic!("the staged barriers did not drain")
+    }
+
     fn publication_witness(
         effects: &[Capability<MinPk, Digest>],
         id: EffectId,
@@ -2849,15 +2882,11 @@ mod successor_matrix {
             ))
             .unwrap();
         let forwarding = runner.settle(completed).unwrap();
-        let forwarded = runner.persist(&only_persist(&forwarding)).unwrap();
-        let advanced = runner.settle(forwarded).unwrap();
-        let advanced = runner.persist(&only_persist(&advanced)).unwrap();
-        let drained = runner.settle(advanced).unwrap();
+        let drained = drain_barriers(runner, forwarding);
         assert!(drained.capabilities().iter().all(|effect| {
             !matches!(
                 effect,
-                Capability::Durability(DurabilityCapability::Persist(_))
-                    | Capability::Verification(VerificationCapability::Verify(_))
+                Capability::Verification(VerificationCapability::Verify(_))
                     | Capability::Resolver(ResolverCapability::Resolve(_))
             )
         }));
@@ -2915,22 +2944,14 @@ mod successor_matrix {
                 &mut runner,
                 Artifact::Nullification(symbolic_nullification(epoch, View::new(1))),
             );
-            let forwarding_job = only_persist(&forwarding);
+            // The exit derives beside the forwarding it reads, so the publication belongs to
+            // the forwarding event rather than to the barrier's last cursor.
             let publication = publication_witness(
                 forwarding.capabilities(),
-                EffectId::from_cursor(forwarding_job.last_cursor()),
+                forwarded_publication(&only_persist(&forwarding)),
             );
             assert_eq!(publication.effect, effect);
-            let forwarded = runner.persist(&forwarding_job).unwrap();
-            let advanced = runner.settle(forwarded).unwrap();
-            let advanced = runner.persist(&only_persist(&advanced)).unwrap();
-            let drained = runner.settle(advanced).unwrap();
-            assert!(drained.capabilities().iter().all(|effect| {
-                !matches!(
-                    effect,
-                    Capability::Durability(DurabilityCapability::Persist(_))
-                )
-            }));
+            drain_barriers(&mut runner, forwarding);
             publication
         } else {
             let reserved = runner.reserve(effect.clone()).unwrap();
@@ -3019,17 +3040,29 @@ mod successor_matrix {
             SuccessorFamily::ViewRetention => {
                 let first = Artifact::Nullification(symbolic_nullification(epoch, View::new(2)));
                 let forwarded = authenticate_one(runner, first);
-                let advanced = runner.persist(&only_persist(&forwarded)).unwrap();
-                let transition = runner.settle(advanced).unwrap();
-                let advanced = runner.persist(&only_persist(&transition)).unwrap();
-                let drained = runner.settle(advanced).unwrap();
-                assert!(drained.capabilities().is_empty());
+                let drained = drain_barriers(runner, forwarded);
+                // Only acknowledgement bookkeeping remains: the first exit stages nothing
+                // further and owes no publication.
+                assert!(!drained.capabilities().iter().any(|effect| matches!(
+                    effect,
+                    Capability::Durability(
+                        DurabilityCapability::Persist(_) | DurabilityCapability::Released(_)
+                    )
+                )));
 
                 let second = Artifact::Nullification(symbolic_nullification(epoch, View::new(3)));
-                let forwarded = authenticate_one(runner, second);
-                let advanced = runner.persist(&only_persist(&forwarded)).unwrap();
-                let target = runner.settle(advanced).unwrap();
+                let target = authenticate_one(runner, second);
                 let barrier = only_persist(&target);
+                // The exit that retires the aged publication stages beside the forwarding fact
+                // it reads.
+                assert_eq!(
+                    barrier
+                        .events()
+                        .iter()
+                        .map(|event| event.change().kind())
+                        .collect::<Vec<_>>(),
+                    ["artifact forwarded", "view advanced"]
+                );
                 assert!(target.capabilities().iter().all(|effect| {
                     !matches!(effect, Capability::Durability(DurabilityCapability::Released(job))
                     if job.id() == EffectId::from_cursor(barrier.last_cursor()))
@@ -3233,7 +3266,10 @@ mod successor_matrix {
     fn run_successor_case(fixture: &Fixture, family: SuccessorFamily, cut: SuccessorCut) {
         let (mut runner, predecessor) = prepare_publication_case(fixture, family);
         let (target, replacement) = successor_barrier(fixture, &mut runner, family);
-        assert_eq!(target.last_cursor(), target.previous().next().unwrap());
+        if replacement.is_some() {
+            // A replacement publication is identified by the barrier's only event.
+            assert_eq!(target.last_cursor(), target.previous().next().unwrap());
+        }
 
         let replacement_id = EffectId::from_cursor(target.last_cursor());
         match cut {
