@@ -15,7 +15,7 @@ use crate::{
         scheme::bls12381_threshold::Scheme,
         types::CertificateId,
     },
-    types::{Round, View},
+    types::{Attributable as _, Round, View},
 };
 use commonware_actor::{Feedback, Unreliable, mailbox};
 use commonware_codec::{Codec, EncodeSize as _, Write as _};
@@ -175,6 +175,7 @@ type PreparedIngress<V, D> = (LaneId, Group<V, D>);
 enum InvalidIngress {
     ProposalParent,
     Chain,
+    DaVoteSigner,
 }
 
 impl InvalidIngress {
@@ -182,6 +183,7 @@ impl InvalidIngress {
         match self {
             Self::ProposalParent => "proposal exact parent mismatch",
             Self::Chain => "invalid chain",
+            Self::DaVoteSigner => "data-availability vote from a peer that did not sign it",
         }
     }
 }
@@ -474,6 +476,11 @@ where
                             operation,
                         ));
                     }
+                    Message::Block { peers } => {
+                        for peer in peers {
+                            self.block(peer, "invalid data-availability share");
+                        }
+                    }
                     Message::ObservationConsumed => {
                         let Some(remaining) = observations_inflight.checked_sub(1) else {
                             error!("received an observation credit with no cohort in flight");
@@ -516,8 +523,9 @@ where
                         self.metrics.decoded.get_or_create(&Traffic::CONSENSUS).inc();
                         let message = NetworkMessage::Consensus((peer, Ok(message)));
                         let chains = self.codec.chains();
+                        let scheme = Arc::clone(&self.scheme);
                         ingress.push(run_ingress_operation(self.strategy.clone(), move || {
-                            Self::prepare(message, chains)
+                            Self::prepare(message, chains, &scheme)
                         }));
                     }
                     NetworkMessage::Certificate((peer, message)) => {
@@ -528,8 +536,9 @@ where
                         self.metrics.decoded.get_or_create(&Traffic::CERTIFICATE).inc();
                         let message = NetworkMessage::Certificate((peer, Ok(message)));
                         let chains = self.codec.chains();
+                        let scheme = Arc::clone(&self.scheme);
                         ingress.push(run_ingress_operation(self.strategy.clone(), move || {
-                            Self::prepare(message, chains)
+                            Self::prepare(message, chains, &scheme)
                         }));
                     }
                     NetworkMessage::Data((peer, message)) => {
@@ -540,8 +549,9 @@ where
                         self.metrics.decoded.get_or_create(&Traffic::DATA).inc();
                         let message = NetworkMessage::Data((peer, Ok(message)));
                         let chains = self.codec.chains();
+                        let scheme = Arc::clone(&self.scheme);
                         ingress.push(run_ingress_operation(self.strategy.clone(), move || {
-                            Self::prepare(message, chains)
+                            Self::prepare(message, chains, &scheme)
                         }));
                     }
                 }
@@ -570,6 +580,7 @@ where
     fn prepare(
         message: NetworkMessage<P, V, H::Digest>,
         chains: usize,
+        scheme: &Scheme<P, V>,
     ) -> IngressResult<P, V, H::Digest> {
         let mut scratch = Vec::new();
         let (peer, prepared) = match message {
@@ -636,8 +647,19 @@ where
                     .expect("only decoded messages enter identification")
                     .into_payload();
                 let chain = message.chain().get() as usize;
+                // A share is only ever sent by its own signer to the block's producer, and a
+                // failed recovery attributes an invalid share to that signer index. Binding the
+                // two here stops another peer from forging an index and having an honest
+                // participant blocked for it.
+                let forged = matches!(
+                    &message,
+                    DataMessage::DaVote(vote)
+                        if scheme.participants().get(vote.signer().into()) != Some(&peer)
+                );
                 if chain >= chains {
                     (peer, Err(InvalidIngress::Chain))
+                } else if forged {
+                    (peer, Err(InvalidIngress::DaVoteSigner))
                 } else {
                     let artifact = message.into_artifact();
                     (

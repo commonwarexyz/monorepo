@@ -348,6 +348,30 @@ impl<V: Variant, D: Digest> DaRecoveryCompletion<V, D> {
     }
 }
 
+/// The signers a failed data-availability recovery attributed its invalid shares to.
+#[derive(Clone, Debug)]
+pub(crate) struct DaRecoveryRejection {
+    id: DaRecoveryId,
+    generation: u64,
+    invalid: Vec<Participant>,
+}
+
+impl DaRecoveryRejection {
+    /// Creates a matched recovery rejection.
+    pub const fn new(id: DaRecoveryId, generation: u64, invalid: Vec<Participant>) -> Self {
+        Self {
+            id,
+            generation,
+            invalid,
+        }
+    }
+
+    /// Returns the signers whose shares failed against their partial public keys.
+    pub fn invalid(&self) -> &[Participant] {
+        &self.invalid
+    }
+}
+
 /// A production deadline bound to one exact local parent.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ProductionTimer<D: Digest> {
@@ -460,6 +484,12 @@ enum PreparedState {
 struct VotePool<V: Variant, D: Digest> {
     header: TransactionBlockHeader<D>,
     shares: BTreeMap<Participant, Arc<DaVote<V, D>>>,
+    /// Signers a failed recovery attributed an invalid share for this header to.
+    ///
+    /// Shares enter the pool on structural checks alone, so recovery is where an invalid one is
+    /// discovered. Remembering the signer keeps a rejected share out of every later selection,
+    /// including one a re-observation would otherwise pool again. Bounded by the committee.
+    rejected: BTreeSet<Participant>,
 }
 
 #[derive(Clone, Debug)]
@@ -1180,11 +1210,14 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         let pool = self.vote_pools.entry(header).or_insert_with(|| VotePool {
             header: vote.header().clone(),
             shares: BTreeMap::new(),
+            rejected: BTreeSet::new(),
         });
         debug_assert_eq!(pool.header, *vote.header());
-        pool.shares
-            .entry(vote.signer())
-            .or_insert_with(|| Arc::new(vote.clone()));
+        if !pool.rejected.contains(&vote.signer()) {
+            pool.shares
+                .entry(vote.signer())
+                .or_insert_with(|| Arc::new(vote.clone()));
+        }
         self.refresh_recovery::<H>(block);
         Ok(())
     }
@@ -2088,6 +2121,51 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             return Err(ChainError::CompletionMismatch);
         }
         Ok(Some(Arc::new(Artifact::DaCertificate(certificate.clone()))))
+    }
+
+    /// Drops the attributed shares of a failed recovery and releases its reservation.
+    ///
+    /// Returns whether the rejection was applied; a stale dispatch generation is consumed the
+    /// same way [`Self::prepare_recovery`] consumes a stale completion, so a rejection that
+    /// cannot commit never strands its job.
+    ///
+    /// Every rejected signer is remembered, so the block re-readies against a strictly smaller
+    /// pool and the same invalid share can never be selected again. Recovery therefore makes
+    /// progress on every attempt: one adversarial share costs one extra attempt, and a pool that
+    /// keeps a quorum of unrejected shares certifies on that attempt.
+    pub(crate) fn reject_recovery<H: Hasher<Digest = D>>(
+        &mut self,
+        rejection: &DaRecoveryRejection,
+        generation: u64,
+    ) -> Result<bool, ChainError> {
+        if self
+            .recovery_jobs
+            .get(&rejection.id)
+            .is_some_and(|job| job.generation != generation)
+        {
+            self.abandon_recovery::<H>(rejection.id);
+            return Ok(false);
+        }
+        if rejection.generation != generation {
+            return Ok(false);
+        }
+        let Some(job) = self.recovery_jobs.get(&rejection.id) else {
+            return Ok(false);
+        };
+        let header = job
+            .votes
+            .first()
+            .ok_or(ChainError::CompletionMismatch)?
+            .header()
+            .digest::<H>();
+        if let Some(pool) = self.vote_pools.get_mut(&header) {
+            for signer in &rejection.invalid {
+                pool.shares.remove(signer);
+                pool.rejected.insert(*signer);
+            }
+        }
+        self.abandon_recovery::<H>(rejection.id);
+        Ok(true)
     }
 
     /// Releases a recovery reservation without a certificate and re-derives readiness.

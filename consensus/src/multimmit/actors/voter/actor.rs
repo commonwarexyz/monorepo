@@ -23,7 +23,8 @@ use crate::{
         machine::{
             Artifact, BlockValidity, BuildCompletion, BuildId, BuildJob, Capabilities, Capability,
             CoreError, CoreState, CoreTransition, CoreTurn, CoreWork, Cursor, CustodyCancellation,
-            CustodyCompletion, CustodyJob, DaRecoveryCompletion, DurabilityCapability,
+            CustodyCompletion, CustodyJob, DaRecoveryCompletion, DaRecoveryRejection,
+            DurabilityCapability,
             DurableEffect, EffectId, IdentifiedArtifact, InputTicket, JobId, LeaderCapability,
             LqcAggregateCompletion, NullificationRecoveryCompletion, Observation,
             ObservationStatus, PersistDirective, ProducerCapability, ProducerProgress,
@@ -32,7 +33,7 @@ use crate::{
             ValidationCompletion, ValidationId, ValidationJob, VerificationCapability, ViewProof,
             VqcAggregateCompletion, contracts::Lane,
         },
-        scheme::bls12381_threshold::{Error as SchemeError, Scheme},
+        scheme::bls12381_threshold::{DaRecoveryError, Error as SchemeError, Scheme},
         storage::{CheckpointError, CheckpointStore},
         types::{
             Activity, BlockRef, ChainId, Context, SignedTransactionBlock, TransactionBlockHeader,
@@ -350,6 +351,10 @@ enum CryptoOutcome<V: Variant, D: Digest> {
     DaRecovered {
         started_at: SystemTime,
         completion: DaRecoveryCompletion<V, D>,
+    },
+    DaRejected {
+        started_at: SystemTime,
+        rejection: DaRecoveryRejection,
     },
     NullificationRecovered {
         started_at: SystemTime,

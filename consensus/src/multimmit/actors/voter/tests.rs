@@ -1507,6 +1507,83 @@ fn live_admission_preserves_core_local_priority_under_peer_flood() {
 }
 
 #[test_traced]
+fn an_invalid_da_share_blocks_its_signer_and_the_quorum_still_certifies() {
+    let executor = DeterministicRunner::default();
+    executor.start(|context| async move {
+        let node = Node::start(
+            &context,
+            81,
+            Role::Validator(Participant::new(0)),
+            "primary",
+        )
+        .await;
+        // One registration per peer: re-registering the same channel drops the first receiver.
+        let (mut culprit, mut data_rx) = node.peer(1, 0).await;
+        let header = next_block(&node, &mut data_rx).await;
+
+        // Participant one signs over a different header and sends the result for this one. The
+        // share is structurally perfect, so admission accepts it and the quorum's single group
+        // check is what discovers it.
+        let elsewhere = node
+            .committee
+            .transaction_header(0, Sha256::hash(&[b"another subject"]));
+        let invalid = DaVote::new(
+            header.clone(),
+            node.committee.da_vote(1, elsewhere).share().clone(),
+        );
+        culprit.send(
+            Recipients::One(node.me.clone()),
+            node.envelope(DataMessage::DaVote(invalid)).encode(),
+            false,
+        );
+        for signer in 2..6 {
+            let (mut peer, _) = node.peer(signer, 0).await;
+            peer.send(
+                Recipients::One(node.me.clone()),
+                node.envelope(DataMessage::DaVote(
+                    node.committee.da_vote(signer, header.clone()),
+                ))
+                .encode(),
+                false,
+            );
+        }
+
+        // The honest remainder still forms a quorum, so the block certifies one attempt later.
+        let deadline = context.current() + Duration::from_secs(5);
+        loop {
+            let (_, bytes) = select! {
+                result = data_rx.recv() => result.expect("network stays up"),
+                () = context.sleep_until(deadline) => {
+                    panic!("an invalid share stalled the honest quorum: {:?}", node.blocker.blocked())
+                },
+            };
+            let envelope = Envelope::<DataMessage<MinPk, Sha256Digest>>::decode_cfg(
+                bytes,
+                &node.envelope_cfg(()),
+            )
+            .expect("canonical envelope");
+            if let DataMessage::DaCertificate(certificate) = envelope.into_payload()
+                && certificate.header() == &header
+            {
+                assert!(node.committee.verifier.verify_da_certificate(&certificate));
+                break;
+            }
+        }
+
+        assert_eq!(
+            node.blocker.blocked(),
+            vec![node.committee.identities[1].clone()],
+            "the recovery must blame exactly the signer of the invalid share"
+        );
+        assert_eq!(
+            metric_sample(&context.encode(), "primary_voter_da_recovery_fallbacks_total"),
+            1.0,
+            "one adversarial share costs exactly one attribution pass"
+        );
+    });
+}
+
+#[test_traced]
 fn invalid_verification_blocks_only_its_authenticated_source() {
     let executor = DeterministicRunner::default();
     executor.start(|context| async move {

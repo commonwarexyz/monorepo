@@ -15,7 +15,7 @@ use crate::{
             Committee, RecordingBlocker,
             cluster::{QUOTA, start_network},
         },
-        types::SignedTransactionBlock,
+        types::{DaVote, SignedTransactionBlock},
     },
     types::{Attributable as _, Epoch, Round, View},
 };
@@ -1085,6 +1085,74 @@ fn exact_proposal_capacity_rejection_forwards_neither_artifact() {
     });
 }
 
+/// Drives the production Core until it issues the verification jobs for `artifacts`.
+fn machine_issued_jobs(
+    committee: &Committee<MinPk>,
+    artifacts: Vec<Artifact<MinPk, Sha256Digest>>,
+) -> Vec<VerifyJob<MinPk, Sha256Digest>> {
+    let identified = artifacts
+        .into_iter()
+        .map(|artifact| {
+            let id = artifact.id::<Sha256>();
+            (id, artifact)
+        })
+        .collect::<Vec<_>>();
+    let resident_bytes = identified
+        .iter()
+        .map(|(id, artifact)| id.encode_size() + artifact.encode_size())
+        .sum();
+    machine_issued_jobs_for(committee, identified, resident_bytes).1
+}
+
+fn machine_issued_jobs_for(
+    committee: &Committee<MinPk>,
+    identified: Vec<(crate::multimmit::machine::ArtifactId<Sha256Digest>, Artifact<MinPk, Sha256Digest>)>,
+    resident_bytes: usize,
+) -> (
+    CoreState<Sha256, MinPk>,
+    Vec<VerifyJob<MinPk, Sha256Digest>>,
+) {
+    let mut core = CoreState::fresh(observer_profile(committee), NonZeroUsize::MIN).unwrap();
+    core.start_fresh().unwrap();
+    let mut observed = Some((identified, resident_bytes));
+    let mut jobs: Vec<VerifyJob<MinPk, Sha256Digest>> = Vec::new();
+    loop {
+        let capabilities = match core.next_action(NonZeroUsize::MIN).unwrap() {
+            CoreTurn::Input(serviced) => serviced.transition.into_parts().0,
+            CoreTurn::Work(work) => work.into_parts().0,
+            CoreTurn::YieldRequired => {
+                core.resume_after_yield().unwrap();
+                continue;
+            }
+            CoreTurn::Idle if !jobs.is_empty() => break,
+            CoreTurn::Idle => panic!("Core idled before issuing verification"),
+        };
+        for effect in capabilities {
+            match effect {
+                Capability::Durability(DurabilityCapability::Persist(job)) => {
+                    core.persistence_completed(BarrierAck::new(
+                        job.id(),
+                        job.generation(),
+                        job.last_cursor(),
+                    ))
+                    .unwrap();
+                }
+                Capability::Verification(VerificationCapability::Verify(job)) => {
+                    jobs.push(job);
+                }
+                _ => {}
+            }
+        }
+        if core.inspection().is_live()
+            && let Some((identified, resident_bytes)) = observed.take()
+        {
+            core.observe(identified, resident_bytes).unwrap();
+        }
+    }
+    assert!(!jobs.is_empty(), "observation schedules verification");
+    (core, jobs)
+}
+
 #[test_traced]
 fn executes_machine_issued_jobs_with_exact_tickets() {
     let executor = DeterministicRunner::default();
@@ -1117,44 +1185,7 @@ fn executes_machine_issued_jobs_with_exact_tickets() {
             .sum();
 
         // Drive the production Core boundary until it issues the exact verification job.
-        let mut core = CoreState::fresh(observer_profile(committee), NonZeroUsize::MIN).unwrap();
-        core.start_fresh().unwrap();
-        let mut observed = Some((identified, resident_bytes));
-        let mut jobs: Vec<VerifyJob<MinPk, Sha256Digest>> = Vec::new();
-        loop {
-            let capabilities = match core.next_action(NonZeroUsize::MIN).unwrap() {
-                CoreTurn::Input(serviced) => serviced.transition.into_parts().0,
-                CoreTurn::Work(work) => work.into_parts().0,
-                CoreTurn::YieldRequired => {
-                    core.resume_after_yield().unwrap();
-                    continue;
-                }
-                CoreTurn::Idle if !jobs.is_empty() => break,
-                CoreTurn::Idle => panic!("Core idled before issuing verification"),
-            };
-            for effect in capabilities {
-                match effect {
-                    Capability::Durability(DurabilityCapability::Persist(job)) => {
-                        core.persistence_completed(BarrierAck::new(
-                            job.id(),
-                            job.generation(),
-                            job.last_cursor(),
-                        ))
-                        .unwrap();
-                    }
-                    Capability::Verification(VerificationCapability::Verify(job)) => {
-                        jobs.push(job);
-                    }
-                    _ => {}
-                }
-            }
-            if core.inspection().is_live()
-                && let Some((identified, resident_bytes)) = observed.take()
-            {
-                core.observe(identified, resident_bytes).unwrap();
-            }
-        }
-        assert!(!jobs.is_empty(), "observation schedules verification");
+        let (mut core, jobs) = machine_issued_jobs_for(committee, identified, resident_bytes);
 
         let expected = jobs.iter().map(|job| job.items().len()).sum::<usize>();
         for job in jobs {
@@ -1216,6 +1247,93 @@ fn executes_machine_issued_jobs_with_exact_tickets() {
         assert!(
             !encoded.contains("batcher_latest_verified_vote"),
             "the per-participant vote gauge family is still registered: {encoded}"
+        );
+    });
+}
+
+#[test_traced]
+fn a_relayed_da_vote_blocks_its_sender_and_never_reaches_the_pool() {
+    let executor = DeterministicRunner::default();
+    executor.start(|context| async move {
+        let mut harness = Harness::new(&context, 51).await;
+        let header = harness
+            .committee
+            .transaction_header(0, Sha256::hash(&[b"relayed share"]));
+
+        // Peer two forwards a share participant three signed. Nothing in the protocol relays a
+        // share, and admitting it would let peer two have participant three blocked once the
+        // quorum attributed a forged index.
+        let mut relay = harness.sender(2, 0).await;
+        relay.send(
+            Recipients::One(harness.me.clone()),
+            harness
+                .envelope(DataMessage::DaVote(
+                    harness.committee.da_vote(3, header.clone()),
+                ))
+                .encode(),
+            false,
+        );
+
+        // The signer's own share still flows, so the check costs the honest path nothing.
+        let mut owner = harness.sender(3, 0).await;
+        owner.send(
+            Recipients::One(harness.me.clone()),
+            harness
+                .envelope(DataMessage::DaVote(harness.committee.da_vote(3, header)))
+                .encode(),
+            false,
+        );
+
+        let artifacts = harness.observed(1).await;
+        assert!(matches!(&artifacts[0], Artifact::DaVote(vote) if vote.signer().get() == 3));
+        assert_eq!(harness.blocker.blocked(), vec![harness.peers[2].clone()]);
+    });
+}
+
+#[test_traced]
+fn an_invalid_da_share_is_admitted_and_keeps_its_sender() {
+    let executor = DeterministicRunner::default();
+    executor.start(|context| async move {
+        let mut harness = Harness::new(&context, 52).await;
+        let committee = &harness.committee;
+
+        // A share signed over a different header is structurally perfect and cryptographically
+        // wrong. Admission must not pay a pairing to discover that: threshold recovery checks
+        // the whole quorum with one, and only then attributes the shares.
+        let elsewhere = committee.da_vote(1, committee.transaction_header(0, Sha256::hash(&[b"elsewhere"])));
+        let invalid = DaVote::new(
+            committee.transaction_header(0, Sha256::hash(&[b"subject"])),
+            elsewhere.share().clone(),
+        );
+        let jobs = machine_issued_jobs(committee, vec![Artifact::DaVote(invalid)]);
+        let expected = jobs.iter().map(|job| job.items().len()).sum::<usize>();
+        assert_eq!(expected, 1, "the cohort holds exactly the one share");
+        for job in jobs {
+            assert!(
+                harness
+                    .mailbox
+                    .enqueue(Message::Verify {
+                        span: Span::none(),
+                        round: Round::new(Epoch::new(52), View::new(1)),
+                        job,
+                        sources: vec![Some(harness.peers[1].clone())],
+                    })
+                    .accepted()
+            );
+        }
+        let Completed { completion, .. } =
+            harness.completions.recv().await.expect("batcher running");
+        assert_eq!(
+            completion
+                .verdicts()
+                .iter()
+                .map(|verdict| verdict.valid())
+                .collect::<Vec<_>>(),
+            vec![true],
+        );
+        assert!(
+            harness.blocker.blocked().is_empty(),
+            "an unverified share is not evidence against its sender"
         );
     });
 }

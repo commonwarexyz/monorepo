@@ -110,6 +110,15 @@ pub enum Message<P: PublicKey, V: Variant, D: Digest> {
     },
     /// Release one observation slot after the voter consumed a cohort.
     ObservationConsumed,
+    /// Block the authenticated senders of artifacts a later stage proved invalid.
+    ///
+    /// Data-availability shares are admitted on structural checks and only attributed when
+    /// their quorum fails to recover, so their sources are named after the batcher has already
+    /// returned a verdict. Blocking stays the batcher's authority.
+    Block {
+        /// Peers that supplied an invalid artifact.
+        peers: Vec<P>,
+    },
 }
 
 impl<P: PublicKey, V: Variant, D: Digest> Policy for Message<P, V, D> {

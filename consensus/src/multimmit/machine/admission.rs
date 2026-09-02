@@ -613,15 +613,23 @@ impl<V: Variant, D: Digest> VerifyJob<V, D> {
         P: PublicKey,
         H: Hasher<Digest = D>,
     {
-        let artifacts = self
-            .items
-            .iter()
-            .map(|item| item.artifact().unverified())
-            .collect::<Vec<_>>();
-        let known = self
-            .items
-            .iter()
-            .map(|item| {
+        // A data-availability share is only ever consumed by threshold recovery, which checks
+        // the whole quorum with one pairing against the group identity. Paying a pairing per
+        // share here would establish the same fact once per signer, so shares are admitted on
+        // their structural checks alone and recovery attributes them if that check ever fails.
+        let mut valid = Vec::with_capacity(self.items.len());
+        let mut batched = Vec::with_capacity(self.items.len());
+        let mut artifacts = Vec::with_capacity(self.items.len());
+        let mut known = Vec::with_capacity(self.items.len());
+        for (index, item) in self.items.iter().enumerate() {
+            if let Artifact::DaVote(vote) = item.artifact() {
+                valid.push(scheme.precheck_da_vote(vote));
+                continue;
+            }
+            valid.push(false);
+            batched.push(index);
+            artifacts.push(item.artifact().unverified());
+            known.push(
                 item.known()
                     .iter()
                     .filter_map(|artifact| match artifact.as_ref() {
@@ -632,14 +640,22 @@ impl<V: Variant, D: Digest> VerifyJob<V, D> {
                         }
                         _ => None,
                     })
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>();
+                    .collect::<Vec<_>>(),
+            );
+        }
         let known = known.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        if !artifacts.is_empty() {
+            for (position, verdict) in scheme
+                .verify_artifacts_with_known::<R, H, D>(rng, &artifacts, &known, strategy)
+                .into_iter()
+                .enumerate()
+            {
+                valid[batched[position]] = verdict;
+            }
+        }
         let mut validated_vqcs = Vec::new();
         let mut validated_lqcs = Vec::new();
-        let verdicts = scheme
-            .verify_artifacts_with_known::<R, H, D>(rng, &artifacts, &known, strategy)
+        let verdicts = valid
             .into_iter()
             .zip(&self.items)
             .enumerate()

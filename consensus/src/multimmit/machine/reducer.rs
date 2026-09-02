@@ -4,6 +4,7 @@ use super::{
     Artifact, ArtifactEntry, ArtifactId, ArtifactState, BarrierAck, BarrierId,
     BlockValidationOutcome, BuildCompletion, BuildJob, BuildOutcome, ChainEffect, ChainError,
     Change, CustodyCancellation, CustodyCompletion, CustodyJob, DaRecoveryCompletion,
+    DaRecoveryRejection,
     DaRecoveryJob, DaVoteRequest, Dependency, DomainEvent, DurableEffect, DurableJob, DurableState,
     EffectCompletion, EffectId, FrozenAcknowledgement, IdentifiedArtifact, JobId, Lifecycle,
     LqcAggregateCompletion, LqcAggregateJob, Machine, NullificationRecoveryCompletion,
@@ -88,6 +89,8 @@ pub(super) enum Input<V: Variant, D: Digest> {
     ProductionTimerFired(ProductionTimer<D>),
     /// Complete one exact data-availability recovery request.
     DaRecovered(DaRecoveryCompletion<V, D>),
+    /// Reject one exact data-availability recovery request whose shares did not interpolate.
+    DaRejected(DaRecoveryRejection),
     /// Complete one exact nullification recovery request.
     NullificationRecovered(NullificationRecoveryCompletion<V>),
     /// Complete one exact V-QC aggregation request.
@@ -685,6 +688,8 @@ pub enum StepStatus<D: Digest> {
         /// The constructed certificate admitted through the canonical artifact store.
         admission: SelfAdmission<D>,
     },
+    /// A matched data-availability recovery rejected its shares without a certificate.
+    DaRejected,
     /// A matched nullification recovery completion was accepted.
     NullificationRecovered {
         /// The constructed certificate admitted through the canonical artifact store.
@@ -936,6 +941,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         if matches!(
             input,
             Input::DaRecovered(_)
+                | Input::DaRejected(_)
                 | Input::NullificationRecovered(_)
                 | Input::VqcAggregated(_)
                 | Input::LqcAggregated(_)
@@ -1009,6 +1015,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                 self.fire_production_timer(timer)
             }
             Input::DaRecovered(_)
+            | Input::DaRejected(_)
             | Input::NullificationRecovered(_)
             | Input::VqcAggregated(_)
             | Input::LqcAggregated(_) => {
@@ -2767,6 +2774,27 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                 }
             })
             .collect()
+    }
+
+    /// Drops the shares a failed recovery attributed and re-arms the block's recovery.
+    ///
+    /// A rejection stages no durable change: the certificate was never constructed. The pool
+    /// loses exactly the attributed signers, so the next attempt selects a different quorum and
+    /// the block certifies as soon as enough unrejected shares remain.
+    fn complete_da_rejection(
+        &mut self,
+        rejection: &DaRecoveryRejection,
+    ) -> Result<Step<V, H::Digest>, StepError> {
+        if !self
+            .chain
+            .reject_recovery::<H>(rejection, self.durable.generation)?
+        {
+            return Ok(Step::new(StepStatus::StaleCompletion, Vec::new()));
+        }
+        self.scheduler
+            .enqueue(WorkKey::Drive(ProtocolComponent::Da));
+        let capabilities = self.take_chain_capabilities()?;
+        Ok(Step::new(StepStatus::DaRejected, capabilities))
     }
 
     fn complete_da_recovery(
@@ -5507,6 +5535,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         };
         let step = match &input {
             Input::DaRecovered(completion) => self.complete_da_recovery(completion),
+            Input::DaRejected(rejection) => self.complete_da_rejection(rejection),
             Input::NullificationRecovered(completion) => {
                 self.complete_nullification_recovery(completion)
             }
