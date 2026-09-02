@@ -24,7 +24,7 @@ use crate::{
     varint::UInt,
 };
 #[cfg(not(feature = "std"))]
-use alloc::{vec, vec::Vec};
+use alloc::vec::Vec;
 use bytes::{Buf, BufMut};
 use core::num::{NonZeroU16, NonZeroU32, NonZeroU64};
 #[cfg(feature = "std")]
@@ -32,7 +32,7 @@ use std::vec::Vec;
 
 // Numeric types implementation
 macro_rules! impl_numeric {
-    ($type:ty, $read_method:ident, $write_method:ident) => {
+    ($type:ty, $try_read_method:ident, $read_method:ident, $write_method:ident) => {
         impl Write for $type {
             #[inline]
             fn write(&self, buf: &mut impl BufMut) {
@@ -44,8 +44,7 @@ macro_rules! impl_numeric {
             type Cfg = ();
             #[inline]
             fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-                at_least(buf, core::mem::size_of::<$type>())?;
-                Ok(buf.$read_method())
+                buf.$try_read_method().map_err(|_| Error::EndOfBuffer)
             }
 
             // Since the upfront size check guarantees the buffer contains every requested
@@ -73,17 +72,17 @@ macro_rules! impl_numeric {
     };
 }
 
-impl_numeric!(u16, get_u16, put_u16);
-impl_numeric!(u32, get_u32, put_u32);
-impl_numeric!(u64, get_u64, put_u64);
-impl_numeric!(u128, get_u128, put_u128);
-impl_numeric!(i8, get_i8, put_i8);
-impl_numeric!(i16, get_i16, put_i16);
-impl_numeric!(i32, get_i32, put_i32);
-impl_numeric!(i64, get_i64, put_i64);
-impl_numeric!(i128, get_i128, put_i128);
-impl_numeric!(f32, get_f32, put_f32);
-impl_numeric!(f64, get_f64, put_f64);
+impl_numeric!(u16, try_get_u16, get_u16, put_u16);
+impl_numeric!(u32, try_get_u32, get_u32, put_u32);
+impl_numeric!(u64, try_get_u64, get_u64, put_u64);
+impl_numeric!(u128, try_get_u128, get_u128, put_u128);
+impl_numeric!(i8, try_get_i8, get_i8, put_i8);
+impl_numeric!(i16, try_get_i16, get_i16, put_i16);
+impl_numeric!(i32, try_get_i32, get_i32, put_i32);
+impl_numeric!(i64, try_get_i64, get_i64, put_i64);
+impl_numeric!(i128, try_get_i128, get_i128, put_i128);
+impl_numeric!(f32, try_get_f32, get_f32, put_f32);
+impl_numeric!(f64, try_get_f64, get_f64, put_f64);
 
 impl Write for u8 {
     #[inline]
@@ -107,23 +106,29 @@ impl Read for u8 {
 
     #[inline]
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        at_least(buf, 1)?;
-        Ok(buf.get_u8())
+        buf.try_get_u8().map_err(|_| Error::EndOfBuffer)
     }
 
     #[inline]
     fn read_vec(buf: &mut impl Buf, len: usize, _: &()) -> Result<Vec<Self>, Error> {
         at_least(buf, len)?;
-        let mut values = vec![0; len];
-        buf.copy_to_slice(&mut values);
+        let mut values = Vec::with_capacity(len);
+        let mut remaining = len;
+        while remaining > 0 {
+            let chunk = buf.chunk();
+            let n = chunk.len().min(remaining);
+            values.extend_from_slice(&chunk[..n]);
+            buf.advance(n);
+            remaining -= n;
+        }
         Ok(values)
     }
 
     #[inline]
     fn read_array<const N: usize>(buf: &mut impl Buf, _: &()) -> Result<[Self; N], Error> {
-        at_least(buf, N)?;
         let mut values = [0; N];
-        buf.copy_to_slice(&mut values);
+        buf.try_copy_to_slice(&mut values)
+            .map_err(|_| Error::EndOfBuffer)?;
         Ok(values)
     }
 }
