@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_storage::rmap::RMap;
 use libfuzzer_sys::fuzz_target;
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, num::NonZeroU8};
 
 #[derive(Arbitrary, Debug, Clone)]
 enum RMapOperation {
@@ -11,6 +11,7 @@ enum RMapOperation {
     Remove { start: u64, end: u64 },
     Get(u64),
     NextGap(u64),
+    MissingItems { start: u64, max: NonZeroU8 },
     Iter,
 }
 
@@ -114,6 +115,25 @@ fn fuzz(data: FuzzInput) {
                         "Value {after_start} should exist as it's the start of the next range",
                     );
                 }
+            }
+
+            RMapOperation::MissingItems { start, max } => {
+                let max = usize::from(max.get());
+                let missing = rmap.missing_items(*start, max);
+
+                // Every absent value from `start` up to the last present value is missing.
+                // Nothing past the last range is ever reported.
+                let expected: Vec<u64> = match expected_state.last() {
+                    Some(&last) => (*start..last)
+                        .filter(|value| !expected_state.contains(value))
+                        .take(max)
+                        .collect(),
+                    None => Vec::new(),
+                };
+                assert_eq!(
+                    missing, expected,
+                    "missing_items({start}, {max}) disagrees with reference set",
+                );
             }
 
             RMapOperation::Iter => {

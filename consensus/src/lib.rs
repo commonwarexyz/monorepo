@@ -55,7 +55,9 @@ stability_scope!(BETA {
 
     /// Block is the interface for a block in the blockchain.
     ///
-    /// Blocks are used to track the progress of the consensus engine.
+    /// Blocks must use a canonical encoding: every byte sequence `bytes` accepted by the decoder
+    /// must satisfy `encode(decode(bytes)) == bytes`. Decoders must reject alternate encodings of
+    /// the same block.
     pub trait Block: Heightable + Codec + Digestible + Send + Sync + 'static {
         /// Get the parent block's digest.
         fn parent(&self) -> Self::Digest;
