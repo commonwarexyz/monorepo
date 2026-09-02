@@ -473,6 +473,22 @@ impl<H: Hasher, V: Variant> Profile<H, V> {
         self.frontier_proposals
     }
 
+    /// Returns the thread count a view-critical execution pool needs for this committee.
+    ///
+    /// One view's view-critical cryptography is bounded by the committee: one leader block, at
+    /// most one vote or novote per participant, this replica's own signing, and the V-QC and
+    /// L-QC assembly a quorum authorizes. Verification fans out inside one job, so this width
+    /// sets how long a committee-sized batch occupies the pool.
+    ///
+    /// One thread per eight participants sizes that share: a 50-validator deployment measured
+    /// about seven cores of BLS verification, most of it view-critical, on one shared 24-thread
+    /// pool. The floor of two keeps the two crypto classes the machine reserves structurally, one
+    /// signing job and one assembly, from waiting on each other.
+    pub fn critical_threads(&self) -> NonZeroUsize {
+        let participants = self.protocol.codec_config().participants();
+        NonZeroUsize::new((participants / 8).max(2)).expect("the floor is non-zero")
+    }
+
     /// Returns the application-validation width available to each producer chain.
     pub(crate) fn validation_parallelism(&self) -> usize {
         self.protocol

@@ -1,6 +1,6 @@
 use super::*;
 
-impl<E, H, P, V, A, R, F, T, S1, S2, S3> Driver<E, H, P, V, A, R, F, T, S1, S2, S3>
+impl<E, H, P, V, A, R, F, T, C, S1, S2, S3> Driver<E, H, P, V, A, R, F, T, C, S1, S2, S3>
 where
     E: Clock + Spawner + Storage + Metrics + BufferPooler + StorageContext,
     H: Hasher,
@@ -10,6 +10,7 @@ where
     R: Relay<Digest = H::Digest, PublicKey = P, Plan = ()>,
     F: Reporter<Activity = Activity<V, H::Digest>>,
     T: Strategy,
+    C: Strategy,
     S1: Sender<PublicKey = P>,
     S2: Sender<PublicKey = P>,
     S3: Sender<PublicKey = P>,
@@ -149,7 +150,7 @@ where
                 match effect {
                     DurableEffect::Sign(request) => {
                         // Signing detaches like assembly and recovery below: the loop keeps
-                        // draining ingress while the compute pool signs, and the completion
+                        // draining ingress while the critical pool signs, and the completion
                         // re-enters through the crypto pool arm.
                         let span = info_span!(
                             "multimmit.voter.sign",
@@ -190,6 +191,7 @@ where
                             _ => {}
                         }
                         let scheme = Arc::clone(&self.scheme);
+                        let critical = self.critical_strategy.clone();
                         let operation = move |_| {
                             sign_request(&scheme, &request).map(|artifact| CryptoOutcome::Signed {
                                 id,
@@ -197,7 +199,7 @@ where
                                 artifact: Arc::new(artifact),
                             })
                         };
-                        self.spawn_crypto(TaskClass::LocalSigning, span, operation)?;
+                        self.spawn_crypto(critical, TaskClass::LocalSigning, span, operation)?;
                     }
                     DurableEffect::SignBatch(requests) => {
                         let workers = requests.len().max(1);
@@ -220,9 +222,10 @@ where
                         }
                         // The batch is all-or-nothing and order preserving; any failure is fatal
                         // before a completion is constructed. Signatures are independent, so the
-                        // batch fans out across the compute pool.
+                        // batch fans out across the critical pool.
                         let scheme = Arc::clone(&self.scheme);
-                        let operation = move |strategy: T| {
+                        let critical = self.critical_strategy.clone();
+                        let operation = move |strategy: C| {
                             strategy
                                 .try_map_collect_vec(requests.iter(), |request| {
                                     sign_request(&scheme, request)
@@ -233,7 +236,13 @@ where
                                     artifacts,
                                 })
                         };
-                        self.spawn_crypto_units(TaskClass::LocalSigning, workers, span, operation)?;
+                        self.spawn_crypto_units(
+                            critical,
+                            TaskClass::LocalSigning,
+                            workers,
+                            span,
+                            operation,
+                        )?;
                     }
                     DurableEffect::Broadcast(artifact) => {
                         let transmission = self.frame(&artifact, None)?;
@@ -304,7 +313,7 @@ where
             ProducerCapability::CancelValidations { chain, through } => {
                 self.cancel_validations(chain, through);
             }
-            // DA assembly runs on the compute pool and returns through a reserved completion.
+            // DA assembly runs on the bulk pool and returns through a reserved completion.
             ProducerCapability::RecoverDa(job) => {
                 let header = job
                     .votes()
@@ -320,6 +329,10 @@ where
                     generation = job.generation().traced()
                 );
                 let scheme = Arc::clone(&self.scheme);
+                // A data-availability certificate is paced by block production rather than by the
+                // view, and its shares were admitted by the same bulk lane, so recovery runs with
+                // that work instead of ahead of the round.
+                let bulk = self.strategy.clone();
                 let started_at = self.context.current();
                 let (id, generation) = (job.id(), job.generation());
                 // Shares are admitted on structural checks alone, so this recovery's group
@@ -337,7 +350,7 @@ where
                     }),
                     Err(DaRecoveryError::Scheme(error)) => Err(error),
                 };
-                self.spawn_crypto(TaskClass::CriticalAggregation, span, operation)?;
+                self.spawn_crypto(bulk, TaskClass::CriticalAggregation, span, operation)?;
             }
         }
         Ok(())
@@ -418,9 +431,10 @@ where
                     generation = job.generation().traced()
                 );
                 let scheme = Arc::clone(&self.scheme);
+                let critical = self.critical_strategy.clone();
                 let started_at = self.context.current();
                 let (id, generation) = (job.id(), job.generation());
-                let operation = move |strategy: T| {
+                let operation = move |strategy: C| {
                     scheme
                         .assemble_nullification_preverified(job.shares(), &strategy)
                         .map(|certificate| CryptoOutcome::NullificationRecovered {
@@ -432,7 +446,7 @@ where
                             ),
                         })
                 };
-                self.spawn_crypto(TaskClass::CriticalAggregation, span, operation)?;
+                self.spawn_crypto(critical, TaskClass::CriticalAggregation, span, operation)?;
             }
             LeaderCapability::AggregateVqc(job) => {
                 let span = info_span!(
@@ -443,9 +457,10 @@ where
                     generation = job.generation().traced()
                 );
                 let scheme = Arc::clone(&self.scheme);
+                let critical = self.critical_strategy.clone();
                 let view = job.leader().view();
                 let (id, generation) = (job.id(), job.generation());
-                let operation = move |strategy: T| {
+                let operation = move |strategy: C| {
                     let messages = job.messages().collect::<Vec<_>>();
                     scheme
                         .assemble_vqc_preverified::<H, _>(
@@ -462,7 +477,7 @@ where
                             )),
                         })
                 };
-                self.spawn_crypto(TaskClass::CriticalAggregation, span, operation)?;
+                self.spawn_crypto(critical, TaskClass::CriticalAggregation, span, operation)?;
             }
             LeaderCapability::AggregateLqc(job) => {
                 let span = info_span!(
@@ -473,9 +488,10 @@ where
                     generation = job.generation().traced()
                 );
                 let scheme = Arc::clone(&self.scheme);
+                let critical = self.critical_strategy.clone();
                 let view = job.leader().view();
                 let (id, generation) = (job.id(), job.generation());
-                let operation = move |strategy: T| {
+                let operation = move |strategy: C| {
                     let votes = job.votes().cloned().collect::<Vec<_>>();
                     scheme
                         .assemble_lqc_preverified::<H, _>(job.leader().clone(), &votes, &strategy)
@@ -488,7 +504,7 @@ where
                             )),
                         })
                 };
-                self.spawn_crypto(TaskClass::CriticalAggregation, span, operation)?;
+                self.spawn_crypto(critical, TaskClass::CriticalAggregation, span, operation)?;
             }
         }
         Ok(())
@@ -517,22 +533,30 @@ where
         Ok(())
     }
 
-    /// Runs one cryptographic operation and returns its originating span with the result.
-    fn spawn_crypto(
+    /// Runs one cryptographic operation on `strategy` and returns its originating span with the
+    /// result.
+    ///
+    /// The pool is the caller's choice rather than the class's: view-critical assembly and signing
+    /// run on the critical pool, while data-availability recovery runs with the bulk verification
+    /// it is paced by. A job's closure takes the pool it was submitted to, so a job cannot use one
+    /// pool's threads while occupying the other's queue.
+    fn spawn_crypto<S: Strategy>(
         &mut self,
+        strategy: S,
         class: TaskClass,
         span: Span,
-        operation: impl FnOnce(T) -> Result<CryptoOutcome<V, H::Digest>, SchemeError> + Send + 'static,
+        operation: impl FnOnce(S) -> Result<CryptoOutcome<V, H::Digest>, SchemeError> + Send + 'static,
     ) -> Result<(), Fatal> {
-        self.spawn_crypto_units(class, 1, span, operation)
+        self.spawn_crypto_units(strategy, class, 1, span, operation)
     }
 
-    fn spawn_crypto_units(
+    fn spawn_crypto_units<S: Strategy>(
         &mut self,
+        strategy: S,
         class: TaskClass,
         units: usize,
         span: Span,
-        operation: impl FnOnce(T) -> Result<CryptoOutcome<V, H::Digest>, SchemeError> + Send + 'static,
+        operation: impl FnOnce(S) -> Result<CryptoOutcome<V, H::Digest>, SchemeError> + Send + 'static,
     ) -> Result<(), Fatal> {
         let permit = self.core_mut().reserve_task(class, units)?;
         debug!(
@@ -541,7 +565,7 @@ where
             ?class,
             "reserved crypto task and completion"
         );
-        let operation = run_crypto_operation(self.strategy.clone(), span, operation);
+        let operation = run_crypto_operation(strategy, span, operation);
         self.crypto.push(async move { (permit, operation.await) });
         Ok(())
     }

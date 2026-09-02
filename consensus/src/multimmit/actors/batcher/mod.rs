@@ -3,7 +3,9 @@
 //! The batcher owns the data, consensus, and certificate network planes. It decodes canonical
 //! envelopes, enforces explicit item and byte bounds with per-peer and per-chain fairness, and
 //! forwards bounded untrusted observation cohorts to the voter. It also executes machine-issued
-//! verification jobs on shared runtime CPU tasks using the production scheme batch APIs.
+//! verification jobs on shared runtime CPU tasks using the production scheme batch APIs. A job
+//! carrying view progress runs on the view-critical execution pool, so a vote or certificate
+//! verdict never queues behind bulk header and availability verification.
 //!
 //! The batcher never chooses a quorum, admits an artifact, constructs a certificate, or forwards
 //! protocol traffic on its own authority. Authoritative admission happens only when the machine
@@ -72,13 +74,21 @@ impl IngressLimits {
 }
 
 /// Configuration for the batcher actor.
-pub struct Config<P: PublicKey, V: Variant, B, T> {
+pub struct Config<P: PublicKey, V: Variant, B, T, C> {
     /// Verification scheme for the epoch committee.
     pub scheme: Scheme<P, V>,
     /// Peer blocker for malformed or contextually invalid traffic.
     pub blocker: B,
-    /// Execution strategy for CPU-heavy verification.
+    /// Execution strategy for bulk CPU-heavy verification.
+    ///
+    /// Carries plane decoding, ingress identification, and every verdict the round does not wait
+    /// on: transaction-block headers and data-availability votes and certificates.
     pub strategy: T,
+    /// Execution strategy for view-critical CPU-heavy verification.
+    ///
+    /// Carries the verdicts on the vote-to-finality path: leader blocks, votes, novotes,
+    /// nullifies, nullifications, V-QCs, and L-QCs.
+    pub critical_strategy: C,
     /// Bounded decode configuration for the epoch.
     pub codec: CodecConfig,
     /// Hard ingress and verification bounds.

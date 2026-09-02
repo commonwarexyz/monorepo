@@ -278,6 +278,7 @@ impl<V: Variant> Harness<V> {
                 relay: application,
                 reporter: self.reporters[node].clone(),
                 strategy: Sequential,
+                critical_strategy: Sequential,
                 blocker: NoopBlocker,
                 partition_prefix: format!("multimmit-engine-fuzz-{}-{node}", self.seed),
                 mailbox_size: NZUsize!(128),

@@ -72,6 +72,7 @@ type MockEngineConfig<V> = EngineConfig<
     MockApplication,
     ClusterReporter<V>,
     Sequential,
+    Sequential,
     Control<ed25519::PublicKey, deterministic::Context>,
 >;
 
@@ -693,6 +694,7 @@ impl<V: Variant> Cluster<V> {
             relay: application.clone(),
             reporter: reporter.clone(),
             strategy: Sequential,
+            critical_strategy: Sequential,
             blocker: self.oracle.control(me.clone()),
             profile: profile.clone(),
             partition_prefix: format!("cluster-{}-{index}", self.options.seed),

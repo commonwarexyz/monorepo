@@ -625,6 +625,16 @@ impl<V: Variant, D: Digest> VerifyJob<V, D> {
         &self.items
     }
 
+    /// Returns whether any item carries view progress.
+    ///
+    /// The round waits on these verdicts, so a job holding one is scheduled ahead of bulk header
+    /// and availability work and runs on the view-critical execution pool.
+    pub(crate) fn view_critical(&self) -> bool {
+        self.items
+            .iter()
+            .any(|item| item.artifact().view_critical())
+    }
+
     /// Executes this exact job with the concrete Multimmit scheme.
     ///
     /// V-QC and L-QC verdicts also require a coherent application-block ancestry transcript.

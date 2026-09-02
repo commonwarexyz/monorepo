@@ -35,7 +35,7 @@ use futures::FutureExt as _;
 use rand_core::CryptoRng;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    future::pending,
+    future::{Future, pending},
     marker::PhantomData,
     panic::AssertUnwindSafe,
     sync::Arc,
@@ -150,6 +150,11 @@ where
     (completion_span, outcome)
 }
 
+/// Span label for a job that ran on the view-critical pool.
+const CRITICAL_POOL: &str = "critical";
+/// Span label for a job that ran on the bulk pool.
+const BULK_POOL: &str = "bulk";
+
 #[derive(Copy, Clone)]
 enum NetworkPlane {
     Consensus,
@@ -262,7 +267,7 @@ impl<V: Variant, D: Digest> VerifiedVotes<V, D> {
 }
 
 /// Bounded ingress and verification executor for one fixed epoch.
-pub struct Actor<E, H, P, V, B, T>
+pub struct Actor<E, H, P, V, B, T, C>
 where
     E: Clock + CryptoRng + Metrics + Spawner,
     H: Hasher,
@@ -270,6 +275,7 @@ where
     V: Variant,
     B: Blocker<PublicKey = P>,
     T: Strategy,
+    C: Strategy,
 {
     context: ContextCell<E>,
 
@@ -277,6 +283,7 @@ where
     verified_votes: Arc<Mutex<VerifiedVotes<V, H::Digest>>>,
     blocker: B,
     strategy: T,
+    critical_strategy: C,
     codec: CodecConfig,
     limits: IngressLimits,
     observation_capacity: usize,
@@ -288,7 +295,7 @@ where
     _hasher: PhantomData<H>,
 }
 
-impl<E, H, P, V, B, T> Actor<E, H, P, V, B, T>
+impl<E, H, P, V, B, T, C> Actor<E, H, P, V, B, T, C>
 where
     E: Clock + CryptoRng + Metrics + Spawner,
     H: Hasher,
@@ -296,11 +303,12 @@ where
     V: Variant,
     B: Blocker<PublicKey = P>,
     T: Strategy,
+    C: Strategy,
 {
     /// Creates the batcher and its control mailbox.
     pub fn new(
         context: E,
-        config: Config<P, V, B, T>,
+        config: Config<P, V, B, T, C>,
     ) -> (Self, mailbox::Sender<Message<P, V, H::Digest>>) {
         let metrics = ActorMetrics::new(&context);
         let (sender, receiver) = mailbox::new(context.child("mailbox"), config.mailbox_size);
@@ -313,6 +321,7 @@ where
                 scheme: Arc::new(config.scheme),
                 blocker: config.blocker,
                 strategy: config.strategy,
+                critical_strategy: config.critical_strategy,
                 codec: config.codec,
                 limits: config.limits,
                 observation_capacity: config.observation_capacity.get(),
@@ -337,6 +346,77 @@ where
             self.context,
             self.run(observations, completions, data, consensus, certificates)
         )
+    }
+
+    /// Prepares one verification job for the execution pool its items belong to.
+    ///
+    /// The completion carries the caller's span and the authenticated sources of every item the
+    /// verdict rejected, so attribution stays with the job that produced it.
+    fn verification<S: Strategy>(
+        &self,
+        strategy: S,
+        pool: &'static str,
+        span: Span,
+        round: Round,
+        job: VerifyJob<V, H::Digest>,
+        sources: Vec<Option<P>>,
+    ) -> impl Future<Output = VerifyResult<P, H::Digest>> + Send + 'static {
+        let scheme = Arc::clone(&self.scheme);
+        let latency = self.metrics.verify_latency.clone();
+        let verified_vote_lag = self.metrics.verified_vote_lag.clone();
+        let verified_votes = Arc::clone(&self.verified_votes);
+        let transcript_messages = self.metrics.certificate_transcript_messages.clone();
+        let known_messages = self.metrics.certificate_known_messages.clone();
+        let worker = info_span!(
+            parent: &span,
+            "multimmit.batcher.verify",
+            epoch = round.epoch().get().traced(),
+            view = round.view().get().traced(),
+            job = job.id().get().traced(),
+            items = job.items().len().traced(),
+            pool,
+        );
+        let context = self.context.child("verify");
+        let operation = move |mut context: E, strategy: S| {
+            let timer = latency.timer(&context);
+            let mut job = job;
+            {
+                let cache = verified_votes.lock();
+                job.extend_known(|view| cache.known(view));
+            }
+            for item in job.items() {
+                let signers = match item.artifact() {
+                    Artifact::Vqc(certificate) => certificate.tally().signers().count(),
+                    Artifact::Lqc(certificate) => certificate.tally().signers().count(),
+                    _ => continue,
+                };
+                transcript_messages.observe(signers as f64);
+                known_messages.observe(item.known().len() as f64);
+            }
+            let completion = job.verify::<_, P, H>(&mut context, &scheme, &strategy);
+            {
+                let mut cache = verified_votes.lock();
+                for (item, verdict) in job.items().iter().zip(completion.verdicts()) {
+                    if verdict.valid()
+                        && matches!(item.artifact(), Artifact::Vote(_) | Artifact::NoVote(_))
+                    {
+                        cache.record(item.shared_artifact());
+                    }
+                }
+            }
+            Self::record_verified_votes(&job, &completion, round, &verified_vote_lag);
+            let invalid_sources = completion
+                .verdicts()
+                .iter()
+                .zip(sources)
+                .filter_map(|(verdict, source)| (!verdict.valid()).then_some(source).flatten())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            timer.observe(&context);
+            (completion, invalid_sources)
+        };
+        run_verification_operation(context, strategy, span, worker, operation)
     }
 
     async fn run(
@@ -399,86 +479,20 @@ where
                             return;
                         }
                         self.metrics.batch_size.observe(job.items().len() as f64);
-                        let scheme = Arc::clone(&self.scheme);
-                        let strategy = self.strategy.clone();
-                        let latency = self.metrics.verify_latency.clone();
-                        let verified_vote_lag = self.metrics.verified_vote_lag.clone();
-                        let verified_votes = Arc::clone(&self.verified_votes);
-                        let transcript_messages =
-                            self.metrics.certificate_transcript_messages.clone();
-                        let known_messages = self.metrics.certificate_known_messages.clone();
-                        let worker = info_span!(
-                            parent: &span,
-                            "multimmit.batcher.verify",
-                            epoch = round.epoch().get().traced(),
-                            view = round.view().get().traced(),
-                            job = job.id().get().traced(),
-                            items = job.items().len().traced(),
-                        );
-                        let context = self.context.child("verify");
-                        let operation = move |mut context: E, strategy: T| {
-                            let timer = latency.timer(&context);
-                            let mut job = job;
-                            {
-                                let cache = verified_votes.lock();
-                                job.extend_known(|view| cache.known(view));
-                            }
-                            for item in job.items() {
-                                let signers = match item.artifact() {
-                                    Artifact::Vqc(certificate) => {
-                                        certificate.tally().signers().count()
-                                    }
-                                    Artifact::Lqc(certificate) => {
-                                        certificate.tally().signers().count()
-                                    }
-                                    _ => continue,
-                                };
-                                transcript_messages.observe(signers as f64);
-                                known_messages.observe(item.known().len() as f64);
-                            }
-                            let completion =
-                                job.verify::<_, P, H>(&mut context, &scheme, &strategy);
-                            {
-                                let mut cache = verified_votes.lock();
-                                for (item, verdict) in
-                                    job.items().iter().zip(completion.verdicts())
-                                {
-                                    if verdict.valid()
-                                        && matches!(
-                                            item.artifact(),
-                                            Artifact::Vote(_) | Artifact::NoVote(_)
-                                        )
-                                    {
-                                        cache.record(item.shared_artifact());
-                                    }
-                                }
-                            }
-                            Self::record_verified_votes(
-                                &job,
-                                &completion,
-                                round,
-                                &verified_vote_lag,
+                        // The round waits on a view-critical verdict, so it executes on the pool
+                        // reserved for view work instead of queueing behind bulk header and
+                        // availability jobs.
+                        if job.view_critical() {
+                            let strategy = self.critical_strategy.clone();
+                            jobs.push(self.verification(
+                                strategy, CRITICAL_POOL, span, round, job, sources,
+                            ));
+                        } else {
+                            let strategy = self.strategy.clone();
+                            jobs.push(
+                                self.verification(strategy, BULK_POOL, span, round, job, sources),
                             );
-                            let invalid_sources = completion
-                                .verdicts()
-                                .iter()
-                                .zip(sources)
-                                .filter_map(|(verdict, source)| {
-                                    (!verdict.valid()).then_some(source).flatten()
-                                })
-                                .collect::<BTreeSet<_>>()
-                                .into_iter()
-                                .collect();
-                            timer.observe(&context);
-                            (completion, invalid_sources)
-                        };
-                        jobs.push(run_verification_operation(
-                            context,
-                            strategy,
-                            span,
-                            worker,
-                            operation,
-                        ));
+                        }
                     }
                     Message::Block { peers } => {
                         for peer in peers {
@@ -737,7 +751,11 @@ where
     }
 
     /// Returns the envelope decode configuration for one plane.
-    fn plane_config<C>(&self, max_frame_bytes: usize, payload: C) -> EnvelopeConfig<C> {
+    fn plane_config<Payload>(
+        &self,
+        max_frame_bytes: usize,
+        payload: Payload,
+    ) -> EnvelopeConfig<Payload> {
         EnvelopeConfig {
             max_frame_bytes,
             epoch: self.scheme.epoch(),

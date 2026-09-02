@@ -267,6 +267,13 @@ struct Cli {
     #[arg(long, default_value_t = 2)]
     compute_threads: usize,
 
+    /// View-critical cryptography threads for local runs.
+    ///
+    /// Defaults to the committee-derived width, so a local run only needs this to reproduce a
+    /// specific deployment's pool.
+    #[arg(long)]
+    critical_threads: Option<usize>,
+
     /// Bytes of junk data placed in every producer block body.
     #[arg(long, default_value_t = 1_024)]
     body_size: usize,
@@ -323,6 +330,7 @@ struct RunConfig {
     storage_dir: PathBuf,
     worker_threads: usize,
     compute_threads: usize,
+    critical_threads: Option<usize>,
     body_size: usize,
     pipeline_depth: u32,
     extension_bound: u32,
@@ -837,6 +845,14 @@ fn main() {
             application_metrics,
         );
 
+        // View-critical cryptography gets its own pool: signing, certificate assembly, and the
+        // verdicts the round waits on never queue behind the data plane's bulk verification.
+        let critical_threads = config.critical_threads.map_or_else(
+            || profile.critical_threads(),
+            |threads| NonZeroUsize::new(threads).expect("critical threads must be non-zero"),
+        );
+        let critical_strategy = Rayon::new(critical_threads).expect("critical pool starts");
+
         // Initialize consensus
         let engine = Engine::new(
             context.child("engine"),
@@ -846,6 +862,7 @@ fn main() {
                 relay: application.clone(),
                 reporter: application,
                 strategy,
+                critical_strategy,
                 blocker,
                 profile,
                 partition_prefix: String::from("log-multimmit"),
@@ -991,6 +1008,7 @@ fn load_run_config(cli: Cli) -> RunConfig {
             .expect("--storage-dir is required when --config is not provided"),
         worker_threads: cli.worker_threads,
         compute_threads: cli.compute_threads,
+        critical_threads: cli.critical_threads,
         body_size: cli.body_size,
         pipeline_depth: cli.pipeline_depth,
         extension_bound: cli.extension_bound,
@@ -1054,6 +1072,7 @@ fn load_remote_config(config_path: PathBuf, hosts_path: PathBuf) -> RunConfig {
         storage_dir: config.storage_dir,
         worker_threads: config.worker_threads,
         compute_threads: config.compute_threads,
+        critical_threads: config.critical_threads,
         body_size: config.body_size,
         pipeline_depth: config.pipeline_depth,
         extension_bound: config.extension_bound,

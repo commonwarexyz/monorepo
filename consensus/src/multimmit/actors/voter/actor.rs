@@ -208,10 +208,10 @@ impl<V: Variant, D: Digest> TestHooks<V, D> {
     }
 }
 
-type PendingConfig<E, H, P, V, A, R, F, T> = Option<Config<E, H, P, V, A, R, F, T>>;
+type PendingConfig<E, H, P, V, A, R, F, T, C> = Option<Config<E, H, P, V, A, R, F, T, C>>;
 
 /// Configuration for the voter.
-pub struct Config<E, H, P, V, A, R, F, T>
+pub struct Config<E, H, P, V, A, R, F, T, C>
 where
     E: Storage + Metrics + BufferPooler + StorageContext,
     H: Hasher,
@@ -221,11 +221,20 @@ where
     R: Relay<Digest = H::Digest, PublicKey = P, Plan = ()>,
     F: Reporter<Activity = Activity<V, H::Digest>>,
     T: Strategy,
+    C: Strategy,
 {
     /// Scheme holding this replica's exact key material (or verifier-only material).
     pub scheme: Scheme<P, V>,
-    /// Execution strategy for CPU-heavy cryptography.
+    /// Execution strategy for bulk CPU-heavy cryptography.
+    ///
+    /// Carries data-availability certificate recovery, the one class of assembly the round does
+    /// not wait on.
     pub strategy: T,
+    /// Execution strategy for view-critical CPU-heavy cryptography.
+    ///
+    /// Carries local signing and V-QC, L-QC, and nullification assembly: the work between a
+    /// quorum arriving and the artifact it authorizes leaving this replica.
+    pub critical_strategy: C,
     /// The attached application automaton.
     pub automaton: A,
     /// The application payload relay.
@@ -380,10 +389,7 @@ struct PendingVerification<P: PublicKey, V: Variant, D: Digest> {
 impl<P: PublicKey, V: Variant, D: Digest> PendingVerification<P, V, D> {
     /// Returns whether any item carries view progress, scheduling the job ahead of bulk work.
     fn view_critical(&self) -> bool {
-        self.job
-            .items()
-            .iter()
-            .any(|item| item.artifact().view_critical())
+        self.job.view_critical()
     }
 }
 
@@ -692,7 +698,7 @@ const fn max_unsynced_journal_bytes<H: Hasher, V: Variant>(
 }
 
 /// The serial machine driver and effect executor for one fixed epoch.
-pub struct Actor<E, H, P, V, A, R, F, T>
+pub struct Actor<E, H, P, V, A, R, F, T, C>
 where
     E: Clock + Spawner + Storage + Metrics + BufferPooler + StorageContext,
     H: Hasher,
@@ -702,9 +708,10 @@ where
     R: Relay<Digest = H::Digest, PublicKey = P, Plan = ()>,
     F: Reporter<Activity = Activity<V, H::Digest>>,
     T: Strategy,
+    C: Strategy,
 {
     context: ContextCell<E>,
-    config: PendingConfig<E, H, P, V, A, R, F, T>,
+    config: PendingConfig<E, H, P, V, A, R, F, T, C>,
     mailbox: mailbox::Receiver<Message<V, H::Digest>>,
     queries: mailbox::UnreliableReceiver<Query<H::Digest>>,
 
@@ -715,7 +722,7 @@ where
     test_hooks: TestHooks<V, H::Digest>,
 }
 
-impl<E, H, P, V, A, R, F, T> Actor<E, H, P, V, A, R, F, T>
+impl<E, H, P, V, A, R, F, T, C> Actor<E, H, P, V, A, R, F, T, C>
 where
     E: Clock + Spawner + Storage + Metrics + BufferPooler + StorageContext,
     H: Hasher,
@@ -725,11 +732,12 @@ where
     R: Relay<Digest = H::Digest, PublicKey = P, Plan = ()>,
     F: Reporter<Activity = Activity<V, H::Digest>>,
     T: Strategy,
+    C: Strategy,
 {
     /// Creates the voter and its control mailbox.
     pub fn new(
         context: E,
-        config: Config<E, H, P, V, A, R, F, T>,
+        config: Config<E, H, P, V, A, R, F, T, C>,
     ) -> (Self, Mailbox<V, H::Digest>) {
         let chain_count = match &config.startup {
             Startup::Fresh { core, .. } => core.profile().protocol().codec_config().chains(),
@@ -763,7 +771,7 @@ where
     #[cfg(test)]
     pub(super) fn new_with_test_hooks(
         context: E,
-        config: Config<E, H, P, V, A, R, F, T>,
+        config: Config<E, H, P, V, A, R, F, T, C>,
         journal_gates: super::journal::TestGates,
         test_hooks: TestHooks<V, H::Digest>,
     ) -> (Self, Mailbox<V, H::Digest>) {
@@ -879,6 +887,7 @@ where
             participant,
             scheme: Arc::new(config.scheme),
             strategy: config.strategy,
+            critical_strategy: config.critical_strategy,
             automaton: config.automaton,
             relay: config.relay,
             reporter: config.reporter,
@@ -1206,7 +1215,7 @@ impl ReadinessCursor {
 }
 
 /// All state owned by one running voter.
-struct Driver<E, H, P, V, A, R, F, T, S1, S2, S3>
+struct Driver<E, H, P, V, A, R, F, T, C, S1, S2, S3>
 where
     E: Clock + Spawner + Storage + Metrics + BufferPooler + StorageContext,
     H: Hasher,
@@ -1216,6 +1225,7 @@ where
     R: Relay<Digest = H::Digest, PublicKey = P, Plan = ()>,
     F: Reporter<Activity = Activity<V, H::Digest>>,
     T: Strategy,
+    C: Strategy,
     S1: Sender<PublicKey = P>,
     S2: Sender<PublicKey = P>,
     S3: Sender<PublicKey = P>,
@@ -1226,6 +1236,7 @@ where
     participant: Option<Participant>,
     scheme: Arc<Scheme<P, V>>,
     strategy: T,
+    critical_strategy: C,
     automaton: A,
     relay: R,
     reporter: F,
@@ -1289,7 +1300,7 @@ where
     test_hooks: TestHooks<V, H::Digest>,
 }
 
-impl<E, H, P, V, A, R, F, T, S1, S2, S3> Driver<E, H, P, V, A, R, F, T, S1, S2, S3>
+impl<E, H, P, V, A, R, F, T, C, S1, S2, S3> Driver<E, H, P, V, A, R, F, T, C, S1, S2, S3>
 where
     E: Clock + Spawner + Storage + Metrics + BufferPooler + StorageContext,
     H: Hasher,
@@ -1299,6 +1310,7 @@ where
     R: Relay<Digest = H::Digest, PublicKey = P, Plan = ()>,
     F: Reporter<Activity = Activity<V, H::Digest>>,
     T: Strategy,
+    C: Strategy,
     S1: Sender<PublicKey = P>,
     S2: Sender<PublicKey = P>,
     S3: Sender<PublicKey = P>,

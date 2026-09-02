@@ -89,6 +89,12 @@ pub struct Deploy {
     #[arg(long, default_value_t = 2)]
     compute_threads: usize,
 
+    /// View-critical cryptography threads per validator.
+    ///
+    /// Defaults to the committee-derived width, which scales with the validator count.
+    #[arg(long)]
+    critical_threads: Option<usize>,
+
     /// Bytes of junk data placed in every producer block body.
     #[arg(long, default_value_t = 1_024)]
     body_size: usize,
@@ -164,6 +170,8 @@ pub struct NodeConfig {
     pub bootstrappers: Vec<u64>,
     pub worker_threads: usize,
     pub compute_threads: usize,
+    #[serde(default)]
+    pub critical_threads: Option<usize>,
     pub body_size: usize,
     #[serde(default = "default_pipeline_depth")]
     pub pipeline_depth: u32,
@@ -261,6 +269,10 @@ impl Deploy {
         assert!(self.worker_threads > 0, "worker threads must be non-zero");
         assert!(self.compute_threads > 0, "compute threads must be non-zero");
         assert!(
+            self.critical_threads.is_none_or(|threads| threads > 0),
+            "critical threads must be non-zero"
+        );
+        assert!(
             self.marshal_live_cache_bytes > 0,
             "marshal live cache must be non-zero"
         );
@@ -306,6 +318,7 @@ impl Deploy {
                 bootstrappers: bootstrappers.clone(),
                 worker_threads: self.worker_threads,
                 compute_threads: self.compute_threads,
+                critical_threads: self.critical_threads,
                 body_size: self.body_size,
                 pipeline_depth: self.pipeline_depth,
                 extension_bound: self.extension_bound,
