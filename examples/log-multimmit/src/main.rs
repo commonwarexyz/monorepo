@@ -257,6 +257,10 @@ struct Cli {
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     frontier_proposals: bool,
 
+    /// Minimum milliseconds between two blocks built by this producer; zero is unpaced.
+    #[arg(long, default_value_t = 0)]
+    production_interval_ms: u64,
+
     /// Bytes reserved for live producer blocks awaiting ordered delivery.
     #[arg(long, default_value_t = deploy::DEFAULT_MARSHAL_LIVE_CACHE_BYTES)]
     marshal_live_cache_bytes: usize,
@@ -296,6 +300,7 @@ struct RunConfig {
     pipeline_depth: u32,
     extension_bound: u32,
     frontier_proposals: bool,
+    production_interval: Duration,
     marshal_live_cache_bytes: usize,
     marshal_materialized_cache_bytes: usize,
     headless: bool,
@@ -709,7 +714,10 @@ fn main() {
         let application = application::Application::new(
             application_context,
             key,
-            config.body_size,
+            application::Production {
+                body_size: config.body_size,
+                interval: config.production_interval,
+            },
             publication_retention,
             producer_chain,
             marshal.clone(),
@@ -867,6 +875,7 @@ fn load_run_config(cli: Cli) -> RunConfig {
         pipeline_depth: cli.pipeline_depth,
         extension_bound: cli.extension_bound,
         frontier_proposals: cli.frontier_proposals,
+        production_interval: Duration::from_millis(cli.production_interval_ms),
         marshal_live_cache_bytes: cli.marshal_live_cache_bytes,
         marshal_materialized_cache_bytes: cli.marshal_materialized_cache_bytes,
         headless: cli.headless,
@@ -928,6 +937,7 @@ fn load_remote_config(config_path: PathBuf, hosts_path: PathBuf) -> RunConfig {
         pipeline_depth: config.pipeline_depth,
         extension_bound: config.extension_bound,
         frontier_proposals: config.frontier_proposals,
+        production_interval: Duration::from_millis(config.production_interval_ms),
         marshal_live_cache_bytes: config.marshal_live_cache_bytes,
         marshal_materialized_cache_bytes: config.marshal_materialized_cache_bytes,
         headless: true,
