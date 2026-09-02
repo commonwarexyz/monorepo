@@ -111,14 +111,19 @@ O’Grady</a></div>
         <p><em>Update (9/1/26): Bajillion’s close is now a sender
         vector. Each sending row carries one payer-signed cumulative
         vector endpoint instead of per-edge receipts, the operator’s
-        acceptance is aggregated into one countersignature per proof
-        slice, and three acknowledgment challenges replace the four
+        acceptance is aggregated into one countersignature per slice
+        interval, and three acknowledgment challenges replace the four
         receipt challenges. The posted close ships movers and edges only
         against reader-held state, and validators retain their key
-        intervals so dealings travel without unchanged leaves. The
-        walkthrough below describes this design, and the benchmarks are
-        re-measured on it, including a new matrix that varies the active
-        accounts under a fixed account set.</em></p>
+        intervals so dealings travel without unchanged leaves. Each
+        validator’s intervals are contiguous and dealt as one proof
+        slice per run, so the accumulator start states and range
+        openings ship once per validator, and sequence numbers, amounts,
+        and counts ride as varints. The walkthrough below describes this
+        design. Sizes are re-measured on it, including a new matrix that
+        varies the active accounts under a fixed account set; the
+        timings predate the contiguous dealing and varint changes and
+        are re-measured next.</em></p>
         <p><em>Update (8/20/26): Bajillion now uses a 32-byte commitment
         and BLS12-381 multisignatures for the commitment
         certificate.</em></p>
@@ -257,6 +262,13 @@ O’Grady</a></div>
           .clearing-benchmark-table table {
             min-width: 760px;
           }
+          .clearing-calculator {
+            border: 1px solid #d6d6d6;
+            border-radius: 6px;
+            margin: 28px 0 6px;
+            min-height: 560px;
+            padding: 18px 20px 10px;
+          }
         </style>
         <noscript>
           <style>
@@ -266,6 +278,14 @@ O’Grady</a></div>
               color: gray;
               margin: 28px 0 6px;
               padding-left: 12px;
+            }
+            .clearing-calculator {
+              border: 0;
+              border-left: 2px solid #d9251c;
+              border-radius: 0;
+              color: gray;
+              min-height: auto;
+              padding: 0 0 0 12px;
             }
           </style>
         </noscript>
@@ -515,10 +535,14 @@ O’Grady</a></div>
         promised credit is backed by exactly one payer-signed debit
         entry: double-entry bookkeeping as a multiset equation, verified
         without any validator seeing both sides of an edge.</p>
-        <p>Each slice opens two adjacent boundaries, making its
-        intervals gap-free across neighboring dealings. The
+        <p>A proof slice covers a contiguous run of these intervals and
+        opens every boundary in the run under one range opening, so its
+        intervals are gap-free across neighboring dealings and each
+        internal boundary is checked in full by every holder of the run:
+        the rows and leaves before it advance the committed positions
+        exactly, and the running prefix and checksums land on it. The
         withdrawal-count, vector-entry, and transpose-entry positions in
-        the same prefixes select that slice’s exact contiguous intervals
+        the same prefixes select the run’s exact contiguous intervals
         under <span
         class="math inline">\mathsf{WithdrawalOutputRoot}_e</span> and
         <span class="math inline">\mathsf{TransposeRoot}_e</span>. A
@@ -569,14 +593,36 @@ O’Grady</a></div>
         <h2 id="seal-every-dealing-up-front">Seal Every Dealing Up
         Front</h2>
         <p>Before the chain queues a close for finalization, the
-        operator disseminates each validator’s dealing. A validator
-        authenticates every assigned slice, checks every local row,
-        prefix transition, and accumulator transition, verifies each
-        slice’s combined operator countersignature and every distinct
-        payer authorization across the dealing in one randomized batch,
-        retains the evidence through the challenge deadline, and only
-        then seals the shared commitment. No validator needs the
-        complete corpus, but the assignments cover it exactly.</p>
+        operator disseminates each validator’s dealing. Each interval is
+        held by one quorum window of the validator ring, and the window
+        slides with the interval index, so a validator’s intervals form
+        one contiguous run (two when the window wraps past the last
+        interval) and its dealing is one proof slice per run: the
+        accumulator start states and the range openings travel once per
+        run rather than once per interval. A validator authenticates
+        every assigned run, checks every local row, prefix transition,
+        and accumulator transition at every covered boundary, verifies
+        each interval’s combined operator countersignature and every
+        distinct payer authorization across the dealing in one
+        randomized batch, retains the evidence through the challenge
+        deadline, and only then seals the shared commitment. No
+        validator needs the complete corpus, but the assignments cover
+        it exactly.</p>
+        <img class="clearing-benchmark-plot" src="/imgs/clearing-ring-assignment.svg" alt="Left: sixteen validators on a ring with three quorum windows of eleven drawn as arcs for slices 0, 5, and 10; each window starts one validator later than the previous slice's. Right: a grid of slices against validators in which every column has eleven holders and every row is one contiguous run, or two when the window wraps past the last slice.">
+        <div class="image-caption">
+        <p>Figure 4: Slice holders slide around the validator ring. With
+        <span class="math inline">n=16</span> validators and a quorum of
+        <span class="math inline">q=11</span>, slice <span
+        class="math inline">s</span> is held by the eleven validators
+        starting at <span class="math inline">\lfloor 16s/16\rfloor =
+        s</span>, so consecutive slices share most of their holders
+        (left). Seen per validator (right), every row is one contiguous
+        run of slices, or two when the window wraps past the last slice,
+        and every column still has exactly eleven holders. A validator’s
+        dealing is one proof slice per run, so the accumulator start
+        states and range openings travel once per run instead of once
+        per slice.</p>
+        </div>
         <p>Prefix continuity ties the epoch totals to the rows beneath
         them. The deposit total and withdrawal record count must
         reproduce the chain-sealed boundary. Every ordinary withdrawal
@@ -976,18 +1022,18 @@ O’Grady</a></div>
         proof cache before measurement. Prepare builds the compact
         change, withdrawal-output, successor-state, coverage, and
         transpose roots from the owned close inputs while reusing that
-        cache; deal derives all proof slices from the prepared close;
-        seal checks and retains the busiest validator’s dealing,
-        verifies each slice’s combined operator countersignature and
-        every distinct payer authorization in one randomized batch, and
-        signs the commitment. The posted close is the corpus a reader
-        holding the previous certified state needs: live accounts ride
-        as one-or-two-byte rank gaps and the transpose, predecessor
-        states, successor states, and prefixes are all derived rather
-        than shipped. Withdrawal claims are measured from separately
-        constructed fixtures, and the claims table after the matrix
-        scales their own variable, the close’s withdrawal count, on its
-        own axis.</p>
+        cache; deal assembles one proof slice per distinct span the
+        committee is assigned; seal checks and retains the busiest
+        validator’s dealing, verifies each interval’s combined operator
+        countersignature and every distinct payer authorization in one
+        randomized batch, and signs the commitment. The posted close is
+        the corpus a reader holding the previous certified state needs:
+        live accounts ride as one-or-two-byte rank gaps and the
+        transpose, predecessor states, successor states, and prefixes
+        are all derived rather than shipped. Withdrawal claims are
+        measured from separately constructed fixtures, and the claims
+        table after the matrix scales their own variable, the close’s
+        withdrawal count, on its own axis.</p>
         <div class="clearing-benchmark-table">
         <table>
           <thead>
@@ -1006,17 +1052,17 @@ O’Grady</a></div>
             <tr><th colspan="5" style="text-align:left;">Construction</th></tr>
             <tr>
               <td style="padding-left:20px;">posted close</td>
-              <td style="text-align:right;">107 KB</td>
-              <td style="text-align:right;">0.94 MB</td>
-              <td style="text-align:right;">9.29 MB</td>
-              <td style="text-align:right;">92.8 MB</td>
+              <td style="text-align:right;">85.8 KB</td>
+              <td style="text-align:right;">730 KB</td>
+              <td style="text-align:right;">7.19 MB</td>
+              <td style="text-align:right;">71.8 MB</td>
             </tr>
             <tr>
               <td style="padding-left:20px;">proof-slice corpus</td>
-              <td style="text-align:right;">2.11 MB</td>
-              <td style="text-align:right;">6.52 MB</td>
-              <td style="text-align:right;">50.3 MB</td>
-              <td style="text-align:right;">487 MB</td>
+              <td style="text-align:right;">2.10 MB</td>
+              <td style="text-align:right;">6.38 MB</td>
+              <td style="text-align:right;">48.9 MB</td>
+              <td style="text-align:right;">473 MB</td>
             </tr>
             <tr>
               <td style="padding-left:20px;">prepare</td>
@@ -1035,10 +1081,10 @@ O’Grady</a></div>
             <tr><th colspan="5" style="text-align:left;">Certification</th></tr>
             <tr>
               <td style="padding-left:20px;">largest dealing</td>
-              <td style="text-align:right;">1.43 MB <span style="color:#666;">(-32.2%)</span></td>
-              <td style="text-align:right;">4.43 MB <span style="color:#666;">(-32.0%)</span></td>
-              <td style="text-align:right;">35.4 MB <span style="color:#666;">(-29.5%)</span></td>
-              <td style="text-align:right;">343 MB <span style="color:#666;">(-29.5%)</span></td>
+              <td style="text-align:right;">165 KB <span style="color:#666;">(-92.1%)</span></td>
+              <td style="text-align:right;">1.09 MB <span style="color:#666;">(-82.9%)</span></td>
+              <td style="text-align:right;">10.3 MB <span style="color:#666;">(-78.8%)</span></td>
+              <td style="text-align:right;">103 MB <span style="color:#666;">(-78.3%)</span></td>
             </tr>
             <tr>
               <td style="padding-left:20px;">seal</td>
@@ -1155,7 +1201,7 @@ O’Grady</a></div>
         </table>
         </div>
         <div class="image-caption">
-        <p>Figure 4: The operator prepares the roots, then deals the
+        <p>Figure 5: The operator prepares the roots, then deals the
         evidence into slices. Each validator seals its dealing by
         checking and retaining its assigned slices before signing the
         commitment. An acknowledgment holder with evidence of fraud can
@@ -1164,23 +1210,25 @@ O’Grady</a></div>
         </div>
         <img class="clearing-benchmark-plot" src="/imgs/clearing-benchmark-matrix.svg" alt="Three log-scale plots show measured latency for preparing roots, dealing all evidence slices, and sealing the busiest validator dealing as live accounts increase from 1,024 to one million.">
         <div class="image-caption">
-        <p>Figure 5: These are four measured profiles, not an
+        <p>Figure 6: These are four measured profiles, not an
         interpolation. Both axes are logarithmic, and each point is
         labeled with its measured latency. Construction and sealing
         scale approximately linearly once the fixed costs are
         amortized.</p>
         </div>
-        <p>Even the largest validator dealing is 29.5–32.2% smaller than
-        the complete proof-slice corpus because it contains only that
-        validator’s assigned slices. At one million live accounts it
-        checks 343 MB rather than the complete 487 MB corpus. That is
-        the every-account-sends worst case, and it hides the design’s
-        real lever: dealings travel without unchanged state, because
-        every slice assignee retains its key interval across closes and
-        hydrates each dealing against it. When every account changes
-        there is nothing to strip. When the movers are a fraction of the
-        account set, the posted close and the dealt wire follow the
-        movers:</p>
+        <p>The busiest validator’s dealing is 78–92% smaller than the
+        complete proof-slice corpus. It holds two thirds of the
+        intervals, but they form one or two contiguous runs, so the
+        accumulator start states and range openings travel once per run
+        instead of once per interval, and no unchanged leaves travel at
+        all. At one million live accounts it checks 103 MB rather than
+        the complete 473 MB corpus. That is the every-account-sends
+        worst case, and it hides the design’s real lever: dealings
+        travel without unchanged state, because every assignee retains
+        its key interval across closes and hydrates each dealing against
+        it. When every account changes there is nothing to strip. When
+        the movers are a fraction of the account set, the posted close
+        and the dealt wire follow the movers:</p>
         <div class="clearing-benchmark-table">
         <table>
           <thead>
@@ -1198,17 +1246,17 @@ O’Grady</a></div>
           <tbody>
             <tr>
               <td style="padding-left:20px;">posted close</td>
-              <td style="text-align:right;"><strong>95.5 KB</strong></td>
-              <td style="text-align:right;"><strong>0.93 MB</strong></td>
-              <td style="text-align:right;"><strong>9.28 MB</strong></td>
-              <td style="text-align:right;">92.8 MB</td>
+              <td style="text-align:right;"><strong>74.0 KB</strong></td>
+              <td style="text-align:right;"><strong>718 KB</strong></td>
+              <td style="text-align:right;"><strong>7.18 MB</strong></td>
+              <td style="text-align:right;">71.8 MB</td>
             </tr>
             <tr>
               <td style="padding-left:20px;">largest dealing</td>
-              <td style="text-align:right;"><strong>1.65 MB</strong></td>
-              <td style="text-align:right;"><strong>6.00 MB</strong></td>
-              <td style="text-align:right;"><strong>36.1 MB</strong></td>
-              <td style="text-align:right;">343 MB</td>
+              <td style="text-align:right;"><strong>192 KB</strong></td>
+              <td style="text-align:right;"><strong>1.41 MB</strong></td>
+              <td style="text-align:right;"><strong>13.7 MB</strong></td>
+              <td style="text-align:right;">103 MB</td>
             </tr>
             <tr>
               <td style="padding-left:20px;">prepare</td>
@@ -1227,21 +1275,21 @@ O’Grady</a></div>
           </tbody>
         </table>
         </div>
-        <p>The posted close is about 93 bytes per active account plus
+        <p>The posted close is about 72 bytes per active account plus
         its edges, whatever the account set holds: at 1,024 movers among
-        one million accounts it is 95.5 KB, a thousandth of the
-        every-account column. The dealt wire keeps the slice openings
-        and its interval’s row evidence but none of the unchanged
-        leaves, so it falls from 343 MB to 1.65 MB across the same
+        one million accounts it is 74.0 KB, a thousandth of the
+        every-account column. The dealt wire keeps one run witness and
+        its intervals’ row evidence but none of the unchanged leaves, so
+        the busiest dealing falls from 103 MB to 192 KB across the same
         sweep. Prepare and deal retain a fixed cost in <span
         class="math inline">N</span> (the fresh state BMTs are rebuilt
         over all live leaves), while seal follows the movers because
         signature and countersignature verification dominate it.</p>
         <p>The proof-slice corpus is constant for a profile, so accepted
         payments only divide it. Ten million payments spread the
-        one-million-account profile’s 486,822,246 bytes to 48.7 offchain
-        bytes per payment, and its 92,762,697-byte posted close to 9.3;
-        a billion payments spread them to 0.487 and 0.093. The
+        one-million-account profile’s 472,823,270 bytes to 47.3 offchain
+        bytes per payment, and its 71,762,697-byte posted close to 7.2;
+        a billion payments spread them to 0.473 and 0.072. The
         certificate is one 48-byte aggregate signature plus a <span
         class="math inline">\lceil n/8\rceil</span>-byte signer bitmap;
         proofs of possession were checked when the committee registered.
@@ -1290,7 +1338,7 @@ O’Grady</a></div>
         certificate again.</p>
         <img class="clearing-benchmark-plot" src="/imgs/clearing-bytes-per-payment.svg" alt="Two side-by-side log-log plots divide fixed per-epoch bytes by accepted payments from one million to one billion. The left shows proof-slice corpus bytes per payment for four live-account counts; the right shows the 101-byte external certified package. Every line falls as one over T.">
         <div class="image-caption">
-        <p>Figure 6: Each panel divides fixed per-profile bytes from the
+        <p>Figure 7: Each panel divides fixed per-profile bytes from the
         table by <span class="math inline">T</span>, so every line falls
         exactly as <span class="math inline">1/T</span>. The proof-slice
         corpus (left) grows with the live-account count <span
@@ -1332,6 +1380,33 @@ O’Grady</a></div>
         additional payments between them add nothing. No traffic pattern
         adds a per-payment term to the close either, because acceptance
         reserves room per account and per edge, never per payment.</p>
+        <p>Figure 8 prices these terms live. It is the codec, not a fit:
+        every byte follows the encodings above at one varint byte per
+        amount and count, including the Merkle range openings, and fed
+        the benchmark’s per-slice counts it reproduces the measured
+        matrix to the byte. The calculator spreads accounts, senders,
+        and edges evenly over the 256 slices and assumes every edge
+        credits a distinct account.</p>
+        <div id="clearing-fig-calculator" class="clearing-calculator" role="region" aria-label="Interactive wire-size calculator. Sliders set the account count, the mean out-degree, and the committee size. Readouts give the certified close, the dealt corpus, the busiest validator's dealing, and the operator's egress per close.">
+          <noscript>With JavaScript enabled this figure is a live calculator over the encodings above. At one million accounts each sending one entry to a distinct account, the certified close is 73 MB, the dealt corpus 171 MB, the busiest validator's dealing 114 MB, and the operator's egress 11.3 GB across 100 validators.</noscript>
+        </div>
+        <script type="module" src="clearing.calculator.js"></script>
+        <div class="image-caption">
+        <p>Figure 8: The encodings, live. Below mean out-degree one,
+        only <span class="math inline">E</span> accounts send
+        (out-degree one each) to <span class="math inline">E</span>
+        distinct recipients, so <span class="math inline">2E</span>
+        accounts change; at one and above every account sends and
+        receives. The certified close carries no account-count term, so
+        it keeps falling with activity and pays about 5 bytes per edge
+        regardless of skew. The dealt corpus is every slice once, the
+        busiest dealing is the largest validator’s share (two contiguous
+        runs at <span class="math inline">n=3f+1</span>, about two
+        thirds of the slices, with the accumulator start states and
+        range openings once per run), and operator egress ships one
+        dealing to each validator. Committee sizes snap to <span
+        class="math inline">n=3f+1</span>.</p>
+        </div>
         <p>The fresh tree is intentionally conventional. Root-only
         construction can stream an existing ordered account database
         through bounded subtree builders; proof-producing close assembly

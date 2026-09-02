@@ -53,7 +53,7 @@ pub const MAX_SLICE_BITS: u8 = 8;
 pub const MAX_SLICE_COUNT: u16 = 1 << MAX_SLICE_BITS;
 
 /// Returns whether a span of slices is nonempty and lies within `slice_count` slices.
-pub(crate) fn valid_span(span: &Range<u16>, slice_count: u16) -> bool {
+pub(crate) const fn valid_span(span: &Range<u16>, slice_count: u16) -> bool {
     span.start < span.end && span.end <= slice_count
 }
 
@@ -3276,18 +3276,15 @@ where
     let mut in_acc = slice.in_start.clone();
     let mut withdrawal_outputs = Vec::new();
     for (window, boundary) in offsets.windows(2).zip(&slice.coverage.boundaries[1..]) {
-        for position in window[0]..window[1] {
-            let row = &slice.changes.rows[position];
-            let out_vector = &slice.out_vectors[position];
-            let incoming = &slice.transpose[groups[position].0..groups[position].1];
-            let delta = validate_row::<H, P, D>(
-                context,
-                deposits,
-                withdrawals,
-                row,
-                out_vector,
-                incoming,
-            )?;
+        let (from, to) = (window[0], window[1]);
+        for ((row, out_vector), group) in slice.changes.rows[from..to]
+            .iter()
+            .zip(&slice.out_vectors[from..to])
+            .zip(&groups[from..to])
+        {
+            let incoming = &slice.transpose[group.0..group.1];
+            let delta =
+                validate_row::<H, P, D>(context, deposits, withdrawals, row, out_vector, incoming)?;
             prefix = prefix
                 .checked_extend(delta)
                 .ok_or(TransitionError::PrefixOverflow)?;

@@ -3,7 +3,9 @@
 use anyhow::{Context, Result, ensure};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use commonware_clearing::bajillion::{
-    admission::{Committee, SealedDealing, Vote, assigned_slice_spans, bls12381, seal},
+    admission::{
+        Committee, SealedDealing, Vote, assigned_slice_spans, bls12381, committee_spans, seal,
+    },
     boundary::{DepositBatch, DepositRecord, WithdrawalAction, WithdrawalBatch},
     challenge::{HigherEntryLookup, higher_entry_lookup},
     commitment::{Opening, VectorRoot},
@@ -1079,12 +1081,9 @@ impl Protocol {
     /// The distributed close worker disseminates these per-validator over the
     /// settlement DA channel. The harness seals them in process instead.
     pub(crate) fn slices(&self, epoch: &PreparedEpoch) -> Result<Vec<ProofSlice<Key, Digest>>> {
-        let mut spans = Vec::new();
-        for index in 0..self.validators.committee.members().len() {
-            spans.extend(self.spans(epoch, Participant::from_usize(index))?);
-        }
-        spans.sort_unstable_by_key(|span| (span.start, span.end));
-        spans.dedup();
+        let spans =
+            committee_spans::<Sha256, _>(&self.validators.committee, epoch.context.assignment())
+                .context("derive committee spans")?;
         epoch
             .prepared
             .assemble_slices(&epoch.predecessor, &spans, &self.strategy)
@@ -1093,7 +1092,8 @@ impl Protocol {
 
     /// Splits assembled slices into each committee member's exact dealing, in
     /// committee participant order: one slice per assigned span, in span
-    /// order.
+    /// order. A dealing is at most two spans, so each is found by a linear
+    /// scan of the assembled set.
     pub(crate) fn dealings(
         &self,
         epoch: &PreparedEpoch,

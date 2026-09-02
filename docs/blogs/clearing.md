@@ -68,6 +68,13 @@ Figure 1 begins with $a$ at 100, $b$ at 40, and the payment $a\xrightarrow{20}b$
   .clearing-benchmark-table table {
     min-width: 760px;
   }
+  .clearing-calculator {
+    border: 1px solid #d6d6d6;
+    border-radius: 6px;
+    margin: 28px 0 6px;
+    min-height: 560px;
+    padding: 18px 20px 10px;
+  }
 </style>
 <noscript>
   <style>
@@ -77,6 +84,14 @@ Figure 1 begins with $a$ at 100, $b$ at 40, and the payment $a\xrightarrow{20}b$
       color: gray;
       margin: 28px 0 6px;
       padding-left: 12px;
+    }
+    .clearing-calculator {
+      border: 0;
+      border-left: 2px solid #d9251c;
+      border-radius: 0;
+      color: gray;
+      min-height: auto;
+      padding: 0 0 0 12px;
     }
   </style>
 </noscript>
@@ -226,6 +241,14 @@ The committed transpose length $\ell_e$ closes a wedge: slice openings prove mem
 ## Seal Every Dealing Up Front
 
 Before the chain queues a close for finalization, the operator disseminates each validator's dealing. Each interval is held by one quorum window of the validator ring, and the window slides with the interval index, so a validator's intervals form one contiguous run (two when the window wraps past the last interval) and its dealing is one proof slice per run: the accumulator start states and the range openings travel once per run rather than once per interval. A validator authenticates every assigned run, checks every local row, prefix transition, and accumulator transition at every covered boundary, verifies each interval's combined operator countersignature and every distinct payer authorization across the dealing in one randomized batch, retains the evidence through the challenge deadline, and only then seals the shared commitment. No validator needs the complete corpus, but the assignments cover it exactly.
+
+```{=html}
+<img class="clearing-benchmark-plot" src="/imgs/clearing-ring-assignment.svg" alt="Left: sixteen validators on a ring with three quorum windows of eleven drawn as arcs for slices 0, 5, and 10; each window starts one validator later than the previous slice's. Right: a grid of slices against validators in which every column has eleven holders and every row is one contiguous run, or two when the window wraps past the last slice.">
+```
+
+::: {.image-caption}
+Figure 4: Slice holders slide around the validator ring. With $n=16$ validators and a quorum of $q=11$, slice $s$ is held by the eleven validators starting at $\lfloor 16s/16\rfloor = s$, so consecutive slices share most of their holders (left). Seen per validator (right), every row is one contiguous run of slices, or two when the window wraps past the last slice, and every column still has exactly eleven holders. A validator's dealing is one proof slice per run, so the accumulator start states and range openings travel once per run instead of once per slice.
+:::
 
 Prefix continuity ties the epoch totals to the rows beneath them. The deposit total and withdrawal record count must reproduce the chain-sealed boundary. Every ordinary withdrawal releases its authorized positive amount exactly when the row tail covers it and nothing otherwise, while every close sweeps its authenticated epoch tail. The totals must respect the close caps and conserve payments:
 
@@ -522,7 +545,7 @@ Withdrawal and external-payout claims scale with a different variable: the claim
 ```
 
 ::: {.image-caption}
-Figure 4: The operator prepares the roots, then deals the evidence into slices. Each validator seals its dealing by checking and retaining its assigned slices before signing the commitment. An acknowledgment holder with evidence of fraud can dispute the certified commitment with a challenge that the chain checks.
+Figure 5: The operator prepares the roots, then deals the evidence into slices. Each validator seals its dealing by checking and retaining its assigned slices before signing the commitment. An acknowledgment holder with evidence of fraud can dispute the certified commitment with a challenge that the chain checks.
 :::
 
 ```{=html}
@@ -530,7 +553,7 @@ Figure 4: The operator prepares the roots, then deals the evidence into slices. 
 ```
 
 ::: {.image-caption}
-Figure 5: These are four measured profiles, not an interpolation. Both axes are logarithmic, and each point is labeled with its measured latency. Construction and sealing scale approximately linearly once the fixed costs are amortized.
+Figure 6: These are four measured profiles, not an interpolation. Both axes are logarithmic, and each point is labeled with its measured latency. Construction and sealing scale approximately linearly once the fixed costs are amortized.
 :::
 
 The busiest validator's dealing is 78–92% smaller than the complete proof-slice corpus. It holds two thirds of the intervals, but they form one or two contiguous runs, so the accumulator start states and range openings travel once per run instead of once per interval, and no unchanged leaves travel at all. At one million live accounts it checks 103 MB rather than the complete 473 MB corpus. That is the every-account-sends worst case, and it hides the design's real lever: dealings travel without unchanged state, because every assignee retains its key interval across closes and hydrates each dealing against it. When every account changes there is nothing to strip. When the movers are a fraction of the account set, the posted close and the dealt wire follow the movers:
@@ -595,7 +618,7 @@ The certified close itself queues no withdrawals. Separate fixtures use a 21-byt
 ```
 
 ::: {.image-caption}
-Figure 6: Each panel divides fixed per-profile bytes from the table by $T$, so every line falls exactly as $1/T$. The proof-slice corpus (left) grows with the live-account count $N$. The external certified package (right) stays 101 bytes across profiles.
+Figure 7: Each panel divides fixed per-profile bytes from the table by $T$, so every line falls exactly as $1/T$. The proof-slice corpus (left) grows with the live-account count $N$. The external certified package (right) stays 101 bytes across profiles.
 :::
 
 ## A Bajillion Payments, One Settlement
@@ -610,6 +633,19 @@ U\text{ state leaves}+A\text{ rows}+E\text{ vector entries}+E\text{ transpose en
 $$
 
 and the posted close omits $U$, the transpose, and every derivable column outright. For the benchmark's fixed live set, $U=N-A$; account creation, deletion, and external-payout rows need not preserve that identity in general. For repeated activity over a fixed set of accounts and edges, this fixed corpus divided by $T$ tends to zero. Account-level clearing compresses repetition, not state: every unchanged live account contributes a leaf to the dealt evidence and nothing to the posted close, every changed account contributes a row, and every edge contributes one cumulative entry on each side, but additional payments between them add nothing. No traffic pattern adds a per-payment term to the close either, because acceptance reserves room per account and per edge, never per payment.
+
+Figure 8 prices these terms live. It is the codec, not a fit: every byte follows the encodings above at one varint byte per amount and count, including the Merkle range openings, and fed the benchmark's per-slice counts it reproduces the measured matrix to the byte. The calculator spreads accounts, senders, and edges evenly over the 256 slices and assumes every edge credits a distinct account.
+
+```{=html}
+<div id="clearing-fig-calculator" class="clearing-calculator" role="region" aria-label="Interactive wire-size calculator. Sliders set the account count, the mean out-degree, and the committee size. Readouts give the certified close, the dealt corpus, the busiest validator's dealing, and the operator's egress per close.">
+  <noscript>With JavaScript enabled this figure is a live calculator over the encodings above. At one million accounts each sending one entry to a distinct account, the certified close is 73 MB, the dealt corpus 171 MB, the busiest validator's dealing 114 MB, and the operator's egress 11.3 GB across 100 validators.</noscript>
+</div>
+<script type="module" src="clearing.calculator.js"></script>
+```
+
+::: {.image-caption}
+Figure 8: The encodings, live. Below mean out-degree one, only $E$ accounts send (out-degree one each) to $E$ distinct recipients, so $2E$ accounts change; at one and above every account sends and receives. The certified close carries no account-count term, so it keeps falling with activity and pays about 5 bytes per edge regardless of skew. The dealt corpus is every slice once, the busiest dealing is the largest validator's share (two contiguous runs at $n=3f+1$, about two thirds of the slices, with the accumulator start states and range openings once per run), and operator egress ships one dealing to each validator. Committee sizes snap to $n=3f+1$.
+:::
 
 The fresh tree is intentionally conventional. Root-only construction can stream an existing ordered account database through bounded subtree builders; proof-producing close assembly retains the Merkle levels needed for slice openings. Neither requires maintaining durable authenticated paths for every pending root. In exchange, validators receive evidence for the complete live state rather than only a sparse update. A preconfirmation still cannot arrive in less than one round trip to the operator that serializes spending, and a close cannot quietly drop a payment: it must agree with every acknowledgment a holder retains, or a single retained entry receipt proves the fault.
 

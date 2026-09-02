@@ -70,10 +70,10 @@
   <text class="axis-strong" x="600" y="402" text-anchor="middle">1B</text>
   <text class="axis" x="360" y="428" text-anchor="middle">payments accepted (T)</text>
 
-  <path class="blue series" d="M150 248.1 L300 284.8 L450 321.4 L600 358.1"/>
-  <path class="purple series" d="M150 230.1 L300 266.8 L450 303.5 L600 340.1"/>
-  <path class="orange series" d="M150 197.6 L300 234.3 L450 271.0 L600 307.6"/>
-  <path class="green series" d="M150 161.5 L300 198.1 L450 234.8 L600 271.5"/>
+  <path class="blue series" d="M150 248.2 L300 284.9 L450 321.5 L600 358.2"/>
+  <path class="purple series" d="M150 230.5 L300 267.1 L450 303.8 L600 340.5"/>
+  <path class="orange series" d="M150 198.1 L300 234.7 L450 271.4 L600 308.1"/>
+  <path class="green series" d="M150 161.9 L300 198.6 L450 235.3 L600 271.9"/>
   <circle cx="150" cy="248.1" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
   <circle cx="300" cy="284.8" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
   <circle cx="450" cy="321.4" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
@@ -90,14 +90,14 @@
   <circle cx="300" cy="198.1" r="5" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
   <circle cx="450" cy="234.8" r="5" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
   <circle cx="600" cy="271.5" r="5" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
-  <text class="value blue-text" x="162" y="237">2.11</text>
-  <text class="value blue-text" x="588" y="347" text-anchor="end">0.00211</text>
-  <text class="value purple-text" x="162" y="219">6.52</text>
-  <text class="value purple-text" x="588" y="329" text-anchor="end">0.00652</text>
-  <text class="value orange-text" x="162" y="186">50.3</text>
-  <text class="value orange-text" x="588" y="296" text-anchor="end">0.0503</text>
-  <text class="value green-text" x="162" y="150">487</text>
-  <text class="value green-text" x="588" y="260" text-anchor="end">0.487</text>
+  <text class="value blue-text" x="162" y="237">2.10</text>
+  <text class="value blue-text" x="588" y="347" text-anchor="end">0.00210</text>
+  <text class="value purple-text" x="162" y="219">6.38</text>
+  <text class="value purple-text" x="588" y="329" text-anchor="end">0.00638</text>
+  <text class="value orange-text" x="162" y="187">48.9</text>
+  <text class="value orange-text" x="588" y="297" text-anchor="end">0.0489</text>
+  <text class="value green-text" x="162" y="151">473</text>
+  <text class="value green-text" x="588" y="261" text-anchor="end">0.473</text>
 
   <rect class="frame" x="670" y="90" width="620" height="360" rx="3"/>
   <text class="panel-title" x="980" y="122">External Certified Package (Onchain)</text>

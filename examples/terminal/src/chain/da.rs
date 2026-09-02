@@ -20,19 +20,18 @@
 //! is already deployment-unique by construction: the close header commits
 //! the payment anchor, which folds the deployment digest.
 //!
-//! Dealings travel without their unchanged state: every slice covers one
-//! contiguous span of slice intervals and arrives as a [`DealtSlice`], and
-//! the validator hydrates it against the key interval it retains for that
-//! span at the registered close's predecessor root, seeded from the
+//! Dealings travel without their unchanged state: every proof slice covers
+//! one span (a contiguous range of slices) and arrives as a [`DealtSlice`],
+//! and the validator hydrates it against the key interval it retains for
+//! that span at the registered close's predecessor root, seeded from the
 //! deployment's genesis accounts and advanced with every sealed close. The
-//! intervals are retained one record per slice interval, so a committee
-//! rotation that reshapes this validator's spans recombines the pieces it
-//! already holds. The advanced intervals are made durable together with the
-//! sealed dealing before the vote leaves the validator. Retention is a
-//! protocol assumption: a validator that missed a close no longer holds the
-//! interval the next dealing hydrates against and must sync it externally
-//! before sealing again, which the demo surfaces as a warning rather than
-//! implementing.
+//! intervals are retained one record per slice, so a committee rotation that
+//! reshapes this validator's spans recombines the pieces it already holds.
+//! The advanced intervals are made durable together with the sealed dealing
+//! before the vote leaves the validator. Retention is a protocol assumption:
+//! a validator that missed a close no longer holds the interval the next
+//! dealing hydrates against and must sync it externally before sealing
+//! again, which the demo surfaces as a warning rather than implementing.
 
 use crate::{
     chain::{
@@ -44,7 +43,7 @@ use crate::{
 };
 use bytes::{Buf, BufMut};
 use commonware_clearing::bajillion::{
-    admission::{Vote, bls12381, seal},
+    admission::{Vote, assigned_slice_spans, bls12381, seal},
     commitment::VectorRoot,
     retained::{DealtSlice, Interval},
     state::StateLeaf,
@@ -68,6 +67,7 @@ use commonware_storage::{
 };
 use commonware_utils::NZU64;
 use rand_core::CryptoRng;
+use std::ops::Range;
 use tracing::{debug, error, info, warn};
 
 /// Maximum Merkle proof hashes accepted per decoded slice frontier.
@@ -304,7 +304,7 @@ pub(crate) async fn store<E: StorageContext>(
     .expect("failed to initialize the sealed dealing store")
 }
 
-/// One slice interval's retained live leaves at one certified state root.
+/// One slice's retained live leaves at one certified state root.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RetainedInterval {
     pub(crate) root: VectorRoot<Digest>,
@@ -340,9 +340,9 @@ impl Read for RetainedInterval {
 
 /// Durable store of retained slice intervals: a prunable archive sectioned
 /// by the epoch whose dealing the interval hydrates and keyed by the digest
-/// of the state root and slice index.
+/// of the state root and slice.
 ///
-/// Records stay per slice index even though a dealt slice covers a span:
+/// Records stay per slice even though a dealt slice covers a span:
 /// hydration concatenates the span's records in slice order, and the
 /// advanced interval is split back into per-slice records, so the store is
 /// independent of how the committee assignment groups slices into spans.
@@ -354,7 +354,7 @@ impl Read for RetainedInterval {
 /// while the next registration always finds its predecessor interval.
 pub(crate) type IntervalStore<E> = prunable::Archive<TwoCap, E, Digest, RetainedInterval>;
 
-/// The interval record key: one state root and slice interval.
+/// The interval record key: one state root and slice.
 fn interval_key(root: &VectorRoot<Digest>, slice: u16) -> Digest {
     Sha256::hash(&[root.digest.as_ref(), &slice.to_be_bytes()])
 }
@@ -367,15 +367,24 @@ fn interval_index(epoch: u64, slice: u16) -> u64 {
         .expect("the interval index fits the epoch clock")
 }
 
-/// The key-sorted leaves of `leaves` whose account falls in `slice`.
-fn members(leaves: &[StateLeaf<Key>], slice: u16, slice_bits: u8) -> Vec<StateLeaf<Key>> {
-    leaves
-        .iter()
-        .filter(|leaf| {
-            account_slice(&leaf.account, slice_bits).expect("account keys partition") == slice
-        })
-        .cloned()
-        .collect()
+/// Splits the key-sorted `leaves` of one interval covering `span` into one
+/// key-sorted vector per slice of the span, in slice order and empty for a
+/// slice with no live leaves.
+///
+/// Every leaf lies in the span: genesis splits the whole account set over
+/// every slice, and advancing an interval never moves a leaf out of its
+/// slice.
+fn split(leaves: &[StateLeaf<Key>], span: &Range<u16>, slice_bits: u8) -> Vec<Vec<StateLeaf<Key>>> {
+    let mut slices: Vec<Vec<StateLeaf<Key>>> = span.clone().map(|_| Vec::new()).collect();
+    for leaf in leaves {
+        let slice = account_slice(&leaf.account, slice_bits).expect("account keys partition");
+        assert!(
+            span.contains(&slice),
+            "retained leaf in slice {slice} falls outside the span {span:?}"
+        );
+        slices[usize::from(slice - span.start)].push(leaf.clone());
+    }
+    slices
 }
 
 /// Opens one deployment's durable interval store under the `partition`
@@ -424,7 +433,9 @@ async fn intervals<E: StorageContext>(
     let root = StateCache::new::<Sha256>(leaves.clone())
         .expect("the genesis deployment state is canonical")
         .root();
-    for slice in 0..MAX_SLICES as u16 {
+    let span = 0..MAX_SLICES as u16;
+    let parts = split(&leaves, &span, crate::protocol::SLICE_BITS);
+    for (slice, leaves) in span.zip(parts) {
         let key = interval_key(&root, slice);
         match store.get(Identifier::Key(&key)).await {
             Ok(Some(_)) => continue,
@@ -438,7 +449,7 @@ async fn intervals<E: StorageContext>(
                 RetainedInterval {
                     root,
                     slice,
-                    leaves: members(&leaves, slice, crate::protocol::SLICE_BITS),
+                    leaves,
                 },
             )
             .await
@@ -477,6 +488,15 @@ where
     /// The retained slice intervals dealings hydrate against, taken and
     /// restored like the dealing store.
     intervals: Option<IntervalStore<E>>,
+}
+
+/// Why a dealing addressed to the registered close is skipped before sealing.
+enum Skip {
+    /// No retained interval record for this slice at the predecessor root.
+    Missing(u16),
+    /// The dealt slice covering this span does not hydrate against the
+    /// retained interval.
+    Malformed(Range<u16>, CodecError),
 }
 
 /// The validator's sealing actor on the settlement DA channel.
@@ -684,71 +704,92 @@ where
                 }
             }
 
+            // Seal enforces this validator's exact assignment over the
+            // hydrated slices. Comparing the dealt spans against it first
+            // spares a foreign dealing the hydration work.
+            let assigned = assigned_slice_spans::<Sha256, _>(
+                self.scheme.committee(),
+                registered.context.assignment(),
+                self.scheme.me().expect("signing scheme"),
+            )
+            .expect("the sealer scheme is dealt from the chain's static committee");
+            if dealing
+                .slices
+                .iter()
+                .map(|slice| slice.span())
+                .ne(assigned.iter())
+            {
+                warn!(
+                    epoch = dealing.epoch,
+                    "dealing does not match this validator's assignment"
+                );
+                lane.store = Some(store);
+                lane.intervals = Some(intervals);
+                continue;
+            }
+
             // Hydrate each dealt slice against the retained interval covering
             // its span at the registered close's predecessor root: the
             // per-slice records concatenated in slice order, which is key
-            // order because slices are key intervals. A missing record means
-            // this validator never advanced past the predecessor close and
-            // must sync the interval externally before it can seal again.
+            // order because slices partition the key space by prefix. A
+            // missing record means this validator never advanced past the
+            // predecessor close and must sync the interval externally before
+            // it can seal again. A store read failure is fatal. Anything else
+            // that stops hydration is a `Skip`, answered once below.
             let predecessor_root = *registered.context.predecessor_root();
-            let mut hydrated = Vec::with_capacity(dealing.slices.len());
-            let mut retained = Vec::with_capacity(dealing.slices.len());
-            let mut missing = None;
-            let mut malformed = None;
-            'slices: for slice in std::mem::take(&mut dealing.slices) {
-                let span = slice.span().clone();
-                let mut leaves = Vec::new();
-                for index in span.clone() {
-                    let key = interval_key(&predecessor_root, index);
-                    let record = match intervals.get(Identifier::Key(&key)).await {
-                        Ok(record) => record,
-                        Err(error) => {
-                            error!(?error, "sealer failed to read the interval store");
-                            return;
+            let hydration = 'hydrate: {
+                let mut hydrated = Vec::with_capacity(dealing.slices.len());
+                let mut retained = Vec::with_capacity(dealing.slices.len());
+                for slice in std::mem::take(&mut dealing.slices) {
+                    let span = slice.span().clone();
+                    let mut leaves = Vec::new();
+                    for index in span.clone() {
+                        let key = interval_key(&predecessor_root, index);
+                        match intervals.get(Identifier::Key(&key)).await {
+                            Ok(Some(record)) => leaves.extend(record.leaves),
+                            Ok(None) => break 'hydrate Err(Skip::Missing(index)),
+                            Err(error) => {
+                                error!(?error, "sealer failed to read the interval store");
+                                return;
+                            }
                         }
-                    };
-                    let Some(record) = record else {
-                        missing = Some(index);
-                        break 'slices;
-                    };
-                    leaves.extend(record.leaves);
-                }
-                let interval =
-                    Interval::new(leaves).expect("durably retained intervals are canonical");
-                match slice.hydrate::<Sha256>(
-                    &interval,
-                    registered.context,
-                    registered.deposits,
-                    registered.withdrawals,
-                ) {
-                    Ok(slice) => hydrated.push(slice),
-                    Err(error) => {
-                        malformed = Some((span, error));
-                        break;
                     }
+                    let interval =
+                        Interval::new(leaves).expect("durably retained intervals are canonical");
+                    match slice.hydrate::<Sha256>(
+                        &interval,
+                        registered.context,
+                        registered.deposits,
+                        registered.withdrawals,
+                    ) {
+                        Ok(slice) => hydrated.push(slice),
+                        Err(error) => break 'hydrate Err(Skip::Malformed(span, error)),
+                    }
+                    retained.push(interval);
                 }
-                retained.push(interval);
-            }
-            if let Some(slice) = missing {
-                warn!(
-                    epoch = dealing.epoch,
-                    slice, "retained interval is missing; sync it externally before sealing"
-                );
-                lane.store = Some(store);
-                lane.intervals = Some(intervals);
-                continue;
-            }
-            if let Some((span, error)) = malformed {
-                warn!(
-                    epoch = dealing.epoch,
-                    ?span,
-                    ?error,
-                    "dealt slice does not hydrate against the retained interval"
-                );
-                lane.store = Some(store);
-                lane.intervals = Some(intervals);
-                continue;
-            }
+                Ok((hydrated, retained))
+            };
+            let (hydrated, mut retained) = match hydration {
+                Ok(hydrated) => hydrated,
+                Err(skip) => {
+                    match skip {
+                        Skip::Missing(slice) => warn!(
+                            epoch = dealing.epoch,
+                            slice,
+                            "retained interval is missing; sync it externally before sealing"
+                        ),
+                        Skip::Malformed(span, error) => warn!(
+                            epoch = dealing.epoch,
+                            ?span,
+                            ?error,
+                            "dealt slice does not hydrate against the retained interval"
+                        ),
+                    }
+                    lane.store = Some(store);
+                    lane.intervals = Some(intervals);
+                    continue;
+                }
+            };
 
             // Clearing seal re-derives and enforces this validator's exact
             // assignment, validates every hydrated slice against the
@@ -780,9 +821,9 @@ where
             // close's successor root before anything else becomes durable: a
             // crash after this point re-seals or re-votes from the stores,
             // and an identical advanced record is idempotently ignored. Each
-            // advanced span is split back into one record per slice index,
-            // empty for a slice with no live leaves exactly as genesis seeds
-            // it. Pruning keeps the consumed and produced epochs only.
+            // advanced span is split back into one record per slice, empty
+            // for a slice with no live leaves exactly as genesis seeds it.
+            // Pruning keeps the consumed and produced epochs only.
             let successor_root = dealing.roots.successor;
             let slice_bits = registered.context.assignment().slice_bits();
             let next = dealing
@@ -791,7 +832,8 @@ where
                 .expect("the epoch clock is bounded");
             for (interval, slice) in retained.iter_mut().zip(sealed.slices()) {
                 interval.advance(slice);
-                for index in slice.span.clone() {
+                let parts = split(interval.leaves(), &slice.span, slice_bits);
+                for (index, leaves) in slice.span.clone().zip(parts) {
                     intervals = match intervals
                         .put_sync(
                             interval_index(next, index),
@@ -799,7 +841,7 @@ where
                             RetainedInterval {
                                 root: successor_root,
                                 slice: index,
-                                leaves: members(interval.leaves(), index, slice_bits),
+                                leaves,
                             },
                         )
                         .await

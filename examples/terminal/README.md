@@ -253,10 +253,10 @@ context the chain never registered has no close to adjudicate against and is nev
 ## Close certification and data availability
 
 Distributed certification runs over the settlement DA channel. An operator sends each
-validator exactly its assigned proof slices, one per contiguous span of slice intervals and
-stripped of their unchanged state: every slice travels as a `DealtSlice`, and the validator
-hydrates it against the key interval it retains for that span at the registered close's
-predecessor root. Intervals are retained one record per slice interval, so a committee
+validator exactly its assigned proof slices, one per assigned span (a contiguous range of
+slices) and stripped of their unchanged state: every slice travels as a `DealtSlice`, and the
+validator hydrates it against the key interval it retains for that span at the registered
+close's predecessor root. Intervals are retained one record per slice, so a committee
 rotation that reshapes a validator's spans recombines the pieces it already holds. Genesis
 seeds each deployment's intervals from its configured accounts, every sealed close advances
 them under the successor root, and the advanced intervals are made durable together with the

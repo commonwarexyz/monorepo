@@ -187,42 +187,17 @@ where
         skeleton.into_iter().zip(&out_vectors).enumerate()
     {
         let (credit, receipts) = in_credit[index];
-        let (successor, output) = derive_successor(
-            &account,
-            &predecessor,
+        rows.push(derive_row::<H, P, D>(
+            context,
             deposits,
             withdrawals,
+            account,
+            predecessor,
+            outgoing,
             vector,
             credit,
             receipts,
-        )
-        .map_err(|_| invalid("successor state is not derivable"))?;
-        let outgoing = match outgoing {
-            Some((seq, payer_signature)) => {
-                let send_root: VectorRoot<D> = vector
-                    .root::<H, D>()
-                    .map_err(|_| invalid("outgoing vector root is not derivable"))?;
-                Some(SendAuthorization::from_raw_unchecked(
-                    VectorSendBody::new(
-                        context.payment(),
-                        account.clone(),
-                        seq,
-                        successor.cumulative_debit,
-                        send_root,
-                    ),
-                    payer_signature,
-                ))
-            }
-            None => None,
-        };
-        rows.push(AccountRow {
-            account,
-            predecessor,
-            successor,
-            outgoing,
-            output,
-            prefix: Prefix::default(),
-        });
+        )?);
     }
     let close = Close {
         header,
@@ -252,12 +227,74 @@ fn resolve_entry_targets<P: PublicKey, S>(
         .collect()
 }
 
+/// Derives one row from its wire material, with an unset prefix: the successor state and
+/// settlement output from the row equations, and the acknowledgment body from context and
+/// the sequence number, so the payer signature is checked against exactly what the operator
+/// committed.
+///
+/// Shared by posted decoding, which sources credit from the global vectors, and dealt-slice
+/// hydration, which sources it from the transpose interval.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn derive_row<H, P, D>(
+    context: &CloseContext<P, D>,
+    deposits: &DepositBatch<P>,
+    withdrawals: &WithdrawalBatch<P, D>,
+    account: P,
+    predecessor: AccountState,
+    outgoing: Option<(u64, <P as Verifier>::Signature)>,
+    vector: &OutVector<P>,
+    credit: u64,
+    receipts: u64,
+) -> Result<AccountRow<P, D>, CodecError>
+where
+    H: Hasher<Digest = D>,
+    P: PublicKey,
+    D: Digest,
+{
+    let invalid = |reason| CodecError::Invalid("PostedClose", reason);
+    let (successor, output) = derive_successor(
+        &account,
+        &predecessor,
+        deposits,
+        withdrawals,
+        vector,
+        credit,
+        receipts,
+    )
+    .map_err(|_| invalid("successor state is not derivable"))?;
+    let outgoing = match outgoing {
+        Some((seq, payer_signature)) => {
+            let send_root: VectorRoot<D> = vector
+                .root::<H, D>()
+                .map_err(|_| invalid("outgoing vector root is not derivable"))?;
+            Some(SendAuthorization::from_raw_unchecked(
+                VectorSendBody::new(
+                    context.payment(),
+                    account.clone(),
+                    seq,
+                    successor.cumulative_debit,
+                    send_root,
+                ),
+                payer_signature,
+            ))
+        }
+        None => None,
+    };
+    Ok(AccountRow {
+        account,
+        predecessor,
+        successor,
+        outgoing,
+        output,
+        prefix: Prefix::default(),
+    })
+}
+
 /// Forward-derives one row's successor state and settlement output.
 ///
 /// Every derived field is equation-pinned by row validation, and decode's final pass runs
 /// [validate_row] over the derived rows, so any divergence here fails decode instead of
-/// producing a close validation would reject. Dealt-slice hydration shares this
-/// derivation, sourcing credit from its transpose interval instead of the global vectors.
+/// producing a close validation would reject.
 pub(crate) fn derive_successor<P: PublicKey, D: Digest>(
     account: &P,
     predecessor: &AccountState,
@@ -448,9 +485,88 @@ const OUTGOING: u8 = 0b01;
 const FRESH: u8 = 0b10;
 
 /// Per-row wire material: a rank gap for live accounts, a full key otherwise.
-enum Reference<P> {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum Reference<P> {
     Live(usize),
     Fresh(P),
+}
+
+/// One row as it travels on the posted and dealt wires: its reference and, for senders,
+/// the sequence number and payer signature, the only signed material the acknowledgment
+/// body does not derive.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RowWire<P: PublicKey> {
+    pub(crate) reference: Reference<P>,
+    pub(crate) outgoing: Option<(u64, <P as Verifier>::Signature)>,
+}
+
+impl<P: PublicKey> RowWire<P> {
+    pub(crate) fn write(&self, buf: &mut impl BufMut) {
+        let mut tag = 0_u8;
+        if self.outgoing.is_some() {
+            tag |= OUTGOING;
+        }
+        if matches!(self.reference, Reference::Fresh(_)) {
+            tag |= FRESH;
+        }
+        tag.write(buf);
+        match &self.reference {
+            Reference::Live(gap) => gap.write(buf),
+            Reference::Fresh(account) => account.write(buf),
+        }
+        if let Some((seq, payer_signature)) = &self.outgoing {
+            UInt(*seq).write(buf);
+            payer_signature.write(buf);
+        }
+    }
+
+    /// Reads one row whose rank gap, if any, must fall short of `live` retained accounts.
+    pub(crate) fn read(buf: &mut impl Buf, live: usize) -> Result<Self, CodecError> {
+        let tag = u8::read(buf)?;
+        if tag & !(OUTGOING | FRESH) != 0 {
+            return Err(CodecError::InvalidEnum(tag));
+        }
+        let reference = if tag & FRESH != 0 {
+            Reference::Fresh(P::read(buf)?)
+        } else {
+            Reference::Live(usize::read_cfg(buf, &RangeCfg::new(..live))?)
+        };
+        let outgoing = if tag & OUTGOING != 0 {
+            Some((
+                UInt::read(buf)?.into(),
+                <P as Verifier>::Signature::read(buf)?,
+            ))
+        } else {
+            None
+        };
+        Ok(Self {
+            reference,
+            outgoing,
+        })
+    }
+
+    pub(crate) fn encode_size(&self) -> usize {
+        1 + match &self.reference {
+            Reference::Live(gap) => gap.encode_size(),
+            Reference::Fresh(_) => P::SIZE,
+        } + self.outgoing.as_ref().map_or(0, |(seq, _)| {
+            UInt(*seq).encode_size() + <P as Verifier>::Signature::SIZE
+        })
+    }
+}
+
+/// The wire form of one close row against its resolved reference.
+fn row_wire<P: PublicKey, D: Digest>(
+    row: &AccountRow<P, D>,
+    reference: Reference<P>,
+) -> RowWire<P> {
+    RowWire {
+        reference,
+        outgoing: row
+            .outgoing
+            .as_ref()
+            .map(|send| (send.body().seq(), send.payer_signature().clone())),
+    }
 }
 
 /// Resolves each row to its wire reference against the pre-close replica: live accounts
@@ -487,14 +603,7 @@ pub fn encoded_size<P: PublicKey, D: Digest>(
         .rows
         .iter()
         .zip(resolve_references(close, replica))
-        .map(|(row, reference)| {
-            1 + match reference {
-                Reference::Live(gap) => gap.encode_size(),
-                Reference::Fresh(_) => P::SIZE,
-            } + row.outgoing.as_ref().map_or(0, |send| {
-                UInt(send.body().seq()).encode_size() + <P as Verifier>::Signature::SIZE
-            })
-        })
+        .map(|(row, reference)| row_wire(row, reference).encode_size())
         .sum::<usize>();
     Ok(Header::<D>::SIZE
         + RootBundle::<D>::SIZE
@@ -518,22 +627,7 @@ pub fn write<P: PublicKey, D: Digest>(
     close.roots.write(buf);
     close.rows.len().write(buf);
     for (row, reference) in close.rows.iter().zip(resolve_references(close, replica)) {
-        let mut tag = 0_u8;
-        if row.outgoing.is_some() {
-            tag |= OUTGOING;
-        }
-        if matches!(reference, Reference::Fresh(_)) {
-            tag |= FRESH;
-        }
-        tag.write(buf);
-        match reference {
-            Reference::Live(gap) => gap.write(buf),
-            Reference::Fresh(account) => account.write(buf),
-        }
-        if let Some(send) = &row.outgoing {
-            UInt(send.body().seq()).write(buf);
-            send.payer_signature().write(buf);
-        }
+        row_wire(row, reference).write(buf);
     }
     for (vector, resolved) in close.out_vectors.iter().zip(indices) {
         resolved.len().write(buf);
@@ -574,36 +668,26 @@ where
     let mut live = replica.states.iter().peekable();
     let mut skeleton: Vec<SkeletonRow<P>> = Vec::with_capacity(row_count);
     for _ in 0..row_count {
-        let tag = u8::read(buf)?;
-        if tag & !(OUTGOING | FRESH) != 0 {
-            return Err(CodecError::InvalidEnum(tag));
-        }
-        let (account, predecessor) = if tag & FRESH != 0 {
-            let account = P::read(buf)?;
-            if replica.states.contains_key(&account) {
-                return Err(invalid("live account carried as a full key"));
+        let wire = RowWire::<P>::read(buf, replica.live())?;
+        let (account, predecessor) = match wire.reference {
+            Reference::Fresh(account) => {
+                if replica.states.contains_key(&account) {
+                    return Err(invalid("live account carried as a full key"));
+                }
+                (account, AccountState::default())
             }
-            (account, AccountState::default())
-        } else {
-            let gap = usize::read_cfg(buf, &RangeCfg::new(..replica.live()))?;
-            for _ in 0..gap {
-                live.next()
+            Reference::Live(gap) => {
+                for _ in 0..gap {
+                    live.next()
+                        .ok_or_else(|| invalid("rank gap beyond state"))?;
+                }
+                let (account, state) = live
+                    .next()
                     .ok_or_else(|| invalid("rank gap beyond state"))?;
+                (account.clone(), *state)
             }
-            let (account, state) = live
-                .next()
-                .ok_or_else(|| invalid("rank gap beyond state"))?;
-            (account.clone(), *state)
         };
-        let outgoing = if tag & OUTGOING != 0 {
-            Some((
-                UInt::read(buf)?.into(),
-                <P as Verifier>::Signature::read(buf)?,
-            ))
-        } else {
-            None
-        };
-        skeleton.push((account, predecessor, outgoing));
+        skeleton.push((account, predecessor, wire.outgoing));
     }
     if skeleton.windows(2).any(|pair| pair[0].0 >= pair[1].0) {
         return Err(invalid("rows are not strictly account-sorted"));

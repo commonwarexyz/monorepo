@@ -7,7 +7,7 @@ use super::{
 use commonware_clearing::bajillion::{
     payment::EntryReceipt,
     posted,
-    retained::DealtSlice,
+    retained::{DealtBreakdown, DealtSlice},
     transition::SliceBoundary,
     vector::{OutTipLookup, transpose_encode_size},
 };
@@ -28,26 +28,68 @@ pub(crate) fn benches() {
             .iter()
             .map(|slice| slice.encoded_size())
             .sum::<usize>();
-        let dealt_corpus = slices
-            .into_iter()
-            .map(|slice| DealtSlice::strip(slice).encode_size())
-            .sum::<usize>();
+        let mut corpus = DealtBreakdown::default();
+        let mut counts = Vec::with_capacity(slices.len());
+        for slice in slices {
+            // Per-slice shape for the closed-form check: predecessor leaves, rows, successor
+            // leaves, transpose entries, senders, and recipient groups, plus the opening
+            // positions the range proofs depend on.
+            let (start, end) = (slice.coverage.start(), slice.coverage.end());
+            let senders = slice
+                .changes
+                .rows
+                .iter()
+                .filter(|row| row.outgoing.is_some())
+                .count();
+            let mut groups = 0_usize;
+            let mut previous = None;
+            for entry in &slice.transpose {
+                if previous != Some(&entry.recipient) {
+                    groups += 1;
+                    previous = Some(&entry.recipient);
+                }
+            }
+            counts.push((
+                start.predecessor,
+                end.predecessor,
+                start.change,
+                end.change,
+                start.successor,
+                end.successor,
+                start.prefix.in_count,
+                end.prefix.in_count,
+                senders,
+                groups,
+            ));
+            corpus.add(&DealtSlice::strip(slice).breakdown());
+        }
+        println!(
+            "clearing slice counts: {} {counts:?}",
+            profile_key(profile)
+        );
+        let dealt_corpus = corpus.total();
 
         // Every validator's dealt share under the benchmark committee: the busiest is the
         // per-validator ingress, the sum is the operator's egress per close.
-        let mut dealt_assignment = 0_usize;
+        let mut busiest = DealtBreakdown::default();
         let mut dealt_egress = 0_usize;
         for spans in validators.spans(fixture.context.assignment()) {
-            let bytes = fixture
+            let mut dealing = DealtBreakdown::default();
+            for slice in fixture
                 .prepared
                 .assemble_slices(&fixture.cache, &spans, strategy())
                 .expect("benchmark dealing is valid")
-                .into_iter()
-                .map(|slice| DealtSlice::strip(slice).encode_size())
-                .sum::<usize>();
-            dealt_assignment = dealt_assignment.max(bytes);
-            dealt_egress += bytes;
+            {
+                dealing.add(&DealtSlice::strip(slice).breakdown());
+            }
+            if dealing.total() > busiest.total() {
+                busiest = dealing;
+            }
+            dealt_egress += dealing.total();
         }
+        let dealt_assignment = busiest.total();
+        println!("clearing dealt corpus breakdown: {} {corpus:?}", profile_key(profile));
+        println!("clearing busiest dealing breakdown: {} {busiest:?}", profile_key(profile));
 
         // A retained per-edge receipt: the dual-signed acknowledgment plus the entry opening a
         // sender DO hands the payer and recipient.

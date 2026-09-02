@@ -37,9 +37,8 @@
 use crate::bajillion::{
     boundary::{DepositBatch, WithdrawalBatch},
     commitment::{self, RangeOpening},
-    payment::{SendAuthorization, VectorSendBody},
-    posted::derive_successor,
-    state::{AccountRow, AccountState, ChangeGuard, Prefix, StateLeaf},
+    posted::{Reference, RowWire, derive_row},
+    state::{AccountState, ChangeGuard, StateLeaf},
     transition::{
         ChangeRange, CloseContext, CoverageRange, OperatorAggregate, ProofSlice, SliceCodecConfig,
         StateRange, TransitionError, codec_invalid, max_proof_hashes, read_span, validate_row,
@@ -52,7 +51,7 @@ use commonware_codec::{
     Decode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write,
     varint::UInt,
 };
-use commonware_cryptography::{Digest, Hasher, PublicKey, Verifier, lthash::LtHash};
+use commonware_cryptography::{Digest, Hasher, PublicKey, lthash::LtHash};
 use core::ops::Range;
 
 /// One key interval's live leaves at a certified close, retained across closes.
@@ -130,26 +129,6 @@ impl<P: PublicKey> Interval<P> {
     }
 }
 
-/// Row tags: bit 0 carries the outgoing flag, bit 1 marks a full-key (not-live) account.
-const OUTGOING: u8 = 0b01;
-const FRESH: u8 = 0b10;
-
-/// Per-row wire material: a rank gap into the retained interval for live accounts, a
-/// full key otherwise.
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum Reference<P> {
-    Live(usize),
-    Fresh(P),
-}
-
-/// One dealt row: its interval reference and, for senders, the only signed material the
-/// acknowledgment body does not derive.
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct DealtRow<P: PublicKey> {
-    reference: Reference<P>,
-    outgoing: Option<(u64, <P as Verifier>::Signature)>,
-}
-
 /// The dealt form of one proof slice: the interval's share of the posted close plus the
 /// slice witness.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -161,7 +140,7 @@ pub struct DealtSlice<P: PublicKey, D: Digest> {
     retained: u32,
     span: Range<u16>,
     coverage: CoverageRange<D>,
-    rows: Vec<DealtRow<P>>,
+    rows: Vec<RowWire<P>>,
     /// Outgoing entries aligned one-for-one with `rows`, empty for credit-only rows.
     entries: Vec<Vec<OutEntry<P>>>,
     operator_aggregates: Vec<Option<OperatorAggregate>>,
@@ -228,7 +207,7 @@ impl<P: PublicKey, D: Digest> DealtSlice<P, D> {
                     .outgoing
                     .as_ref()
                     .map(|send| (send.body().seq(), send.payer_signature().clone()));
-                DealtRow {
+                RowWire {
                     reference,
                     outgoing,
                 }
@@ -337,42 +316,17 @@ impl<P: PublicKey, D: Digest> DealtSlice<P, D> {
                     .ok_or_else(|| invalid("credit totals overflow"))?;
                 cursor += 1;
             }
-            let (successor, output) = derive_successor(
-                &account,
-                &predecessor,
+            let mut row = derive_row::<H, P, D>(
+                context,
                 deposits,
                 withdrawals,
+                account,
+                predecessor,
+                outgoing,
                 &vector,
                 credit,
                 receipts,
-            )
-            .map_err(|_| invalid("successor state is not derivable"))?;
-            let outgoing = match outgoing {
-                Some((seq, payer_signature)) => {
-                    let send_root = vector
-                        .root::<H, D>()
-                        .map_err(|_| invalid("outgoing vector root is not derivable"))?;
-                    Some(SendAuthorization::from_raw_unchecked(
-                        VectorSendBody::new(
-                            context.payment(),
-                            account.clone(),
-                            seq,
-                            successor.cumulative_debit,
-                            send_root,
-                        ),
-                        payer_signature,
-                    ))
-                }
-                None => None,
-            };
-            let mut row = AccountRow {
-                account,
-                predecessor,
-                successor,
-                outgoing,
-                output,
-                prefix: Prefix::default(),
-            };
+            )?;
             let delta = validate_row::<H, P, D>(
                 context,
                 deposits,
@@ -445,7 +399,7 @@ fn read_entries<P: PublicKey>(
     max: usize,
 ) -> Result<Vec<OutEntry<P>>, CodecError> {
     let len = usize::read_cfg(reader, &RangeCfg::new(..=max))?;
-    let mut entries = Vec::with_capacity(len);
+    let mut entries = Vec::with_capacity(len.min(reader.remaining()));
     for _ in 0..len {
         entries.push(OutEntry {
             recipient: P::read(reader)?,
@@ -473,28 +427,11 @@ impl<P: PublicKey, D: Digest> Write for DealtSlice<P, D> {
         self.span.end.write(writer);
         self.coverage.write(writer);
         for row in &self.rows {
-            let mut tag = 0_u8;
-            if row.outgoing.is_some() {
-                tag |= OUTGOING;
-            }
-            if matches!(row.reference, Reference::Fresh(_)) {
-                tag |= FRESH;
-            }
-            tag.write(writer);
-            match &row.reference {
-                Reference::Live(gap) => gap.write(writer),
-                Reference::Fresh(account) => account.write(writer),
-            }
-            if let Some((seq, payer_signature)) = &row.outgoing {
-                UInt(*seq).write(writer);
-                payer_signature.write(writer);
-            }
+            row.write(writer);
         }
         for (row, entries) in self.rows.iter().zip(&self.entries) {
             if row.outgoing.is_some() {
                 write_entries(entries, writer);
-            } else {
-                debug_assert!(entries.is_empty());
             }
         }
         self.operator_aggregates.write(writer);
@@ -515,47 +452,93 @@ impl<P: PublicKey, D: Digest> Write for DealtSlice<P, D> {
     }
 }
 
+/// The dealt wire by component, for byte accounting.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct DealtBreakdown {
+    /// Retained count and span.
+    pub fixed: usize,
+    /// Covered coverage boundaries.
+    pub boundaries: usize,
+    /// Row tags, references, sequence numbers, and payer signatures.
+    pub rows: usize,
+    /// Outgoing entries with their per-sender counts.
+    pub entries: usize,
+    /// The recipient-grouped transpose interval.
+    pub transpose: usize,
+    /// Per-slice operator aggregates.
+    pub aggregates: usize,
+    /// Both accumulator start states.
+    pub starts: usize,
+    /// Coverage, change, state, transpose, and withdrawal range openings.
+    pub openings: usize,
+    /// Change and state guards.
+    pub guards: usize,
+}
+
+impl DealtBreakdown {
+    /// Total dealt bytes.
+    pub const fn total(&self) -> usize {
+        self.fixed
+            + self.boundaries
+            + self.rows
+            + self.entries
+            + self.transpose
+            + self.aggregates
+            + self.starts
+            + self.openings
+            + self.guards
+    }
+
+    /// Adds another slice's components.
+    pub fn add(&mut self, other: &Self) {
+        self.fixed += other.fixed;
+        self.boundaries += other.boundaries;
+        self.rows += other.rows;
+        self.entries += other.entries;
+        self.transpose += other.transpose;
+        self.aggregates += other.aggregates;
+        self.starts += other.starts;
+        self.openings += other.openings;
+        self.guards += other.guards;
+    }
+}
+
+impl<P: PublicKey, D: Digest> DealtSlice<P, D> {
+    /// The encoded size of this slice by component.
+    pub fn breakdown(&self) -> DealtBreakdown {
+        DealtBreakdown {
+            fixed: u32::SIZE + self.span.start.encode_size() + self.span.end.encode_size(),
+            boundaries: self.coverage.boundaries.encode_size(),
+            rows: self.rows.iter().map(RowWire::encode_size).sum(),
+            entries: self
+                .rows
+                .iter()
+                .zip(&self.entries)
+                .filter(|(row, _)| row.outgoing.is_some())
+                .map(|(_, entries)| entries_size(entries))
+                .sum(),
+            transpose: crate::bajillion::vector::transpose_encode_size(&self.transpose),
+            aggregates: self.operator_aggregates.encode_size(),
+            starts: LtHash::SIZE * 2,
+            openings: self.coverage.opening.encode_size()
+                + self.change_opening.encode_size()
+                + self.predecessor.opening.encode_size()
+                + self.successor.opening.encode_size()
+                + self.transpose_opening.encode_size()
+                + self.withdrawal_opening.encode_size(),
+            guards: self.change_predecessor.encode_size()
+                + self.change_successor.encode_size()
+                + self.predecessor.predecessor.encode_size()
+                + self.predecessor.successor.encode_size()
+                + self.successor.predecessor.encode_size()
+                + self.successor.successor.encode_size(),
+        }
+    }
+}
+
 impl<P: PublicKey, D: Digest> EncodeSize for DealtSlice<P, D> {
     fn encode_size(&self) -> usize {
-        let rows = self
-            .rows
-            .iter()
-            .map(|row| {
-                1 + match &row.reference {
-                    Reference::Live(gap) => gap.encode_size(),
-                    Reference::Fresh(_) => P::SIZE,
-                } + row.outgoing.as_ref().map_or(0, |(seq, _)| {
-                    UInt(*seq).encode_size() + <P as Verifier>::Signature::SIZE
-                })
-            })
-            .sum::<usize>();
-        let entries = self
-            .rows
-            .iter()
-            .zip(&self.entries)
-            .filter(|(row, _)| row.outgoing.is_some())
-            .map(|(_, entries)| entries_size(entries))
-            .sum::<usize>();
-        u32::SIZE
-            + self.span.start.encode_size()
-            + self.span.end.encode_size()
-            + self.coverage.encode_size()
-            + rows
-            + entries
-            + self.operator_aggregates.encode_size()
-            + crate::bajillion::vector::transpose_encode_size(&self.transpose)
-            + LtHash::SIZE * 2
-            + self.transpose_opening.encode_size()
-            + self.withdrawal_opening.encode_size()
-            + self.change_predecessor.encode_size()
-            + self.change_successor.encode_size()
-            + self.change_opening.encode_size()
-            + self.predecessor.predecessor.encode_size()
-            + self.predecessor.successor.encode_size()
-            + self.predecessor.opening.encode_size()
-            + self.successor.predecessor.encode_size()
-            + self.successor.successor.encode_size()
-            + self.successor.opening.encode_size()
+        self.breakdown().total()
     }
 }
 
@@ -587,29 +570,11 @@ impl<P: PublicKey, D: Digest> Read for DealtSlice<P, D> {
             .ok_or_else(|| invalid("row count is not canonical"))?;
         let retained_bound = usize::try_from(retained)
             .map_err(|_| invalid("retained bound is not representable"))?;
-        let mut rows = Vec::with_capacity(row_count);
+        // Counts are untrusted until the bytes arrive, so preallocation is capped by what the
+        // buffer can still hold.
+        let mut rows = Vec::with_capacity(row_count.min(reader.remaining()));
         for _ in 0..row_count {
-            let tag = u8::read(reader)?;
-            if tag & !(OUTGOING | FRESH) != 0 {
-                return Err(CodecError::InvalidEnum(tag));
-            }
-            let reference = if tag & FRESH != 0 {
-                Reference::Fresh(P::read(reader)?)
-            } else {
-                Reference::Live(usize::read_cfg(reader, &RangeCfg::new(..=retained_bound))?)
-            };
-            let outgoing = if tag & OUTGOING != 0 {
-                Some((
-                    UInt::read(reader)?.into(),
-                    <P as Verifier>::Signature::read(reader)?,
-                ))
-            } else {
-                None
-            };
-            rows.push(DealtRow {
-                reference,
-                outgoing,
-            });
+            rows.push(RowWire::read(reader, retained_bound)?);
         }
         let entry_total = end
             .prefix
@@ -626,7 +591,7 @@ impl<P: PublicKey, D: Digest> Read for DealtSlice<P, D> {
                 .min(u64::from(commitment::MAX_VECTOR_LENGTH)),
         )
         .map_err(|_| invalid("outgoing entry bound is not representable"))?;
-        let mut entries = Vec::with_capacity(row_count);
+        let mut entries = Vec::with_capacity(row_count.min(reader.remaining()));
         for row in &rows {
             if row.outgoing.is_none() {
                 entries.push(Vec::new());
@@ -699,7 +664,7 @@ impl<P: PublicKey, D: Digest> Read for DealtSlice<P, D> {
 
         // State-range member bounds: the retained interval plus every row covers each
         // side's possible members. The claimed retained count is untrusted decode-bound
-        // input; hydration against a diverging interval fails slice validation.
+        // input. Hydration against a diverging interval fails slice validation.
         let members = retained_bound
             .checked_add(row_count)
             .ok_or_else(|| invalid("state member count overflows"))?;
