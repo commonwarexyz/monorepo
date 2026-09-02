@@ -2625,11 +2625,19 @@ where
 
     /// Inclusion proof for the operations returned by [`Self::operations`], anchored at
     /// this batch's tip. The pair verifies against [`Self::root`] via
-    /// [`crate::qmdb::verify_proof`].
+    /// [`crate::qmdb::verify_proof`]. Together with [`Self::pinned_nodes`] they verify via
+    /// [`crate::qmdb::verify_proof_and_pinned_nodes`].
     ///
-    /// Nodes below this batch chain are read from `db`'s
+    /// Nodes of unapplied ancestors are read through the chain, so those ancestors must still be
+    /// alive. Nodes below the chain are read from `db`'s
     /// [Merkle store][crate::merkle::mem::Mem], which retains them at least until
     /// this batch's changes are flushed (by a commit or sync after apply).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or
+    /// belongs to a dropped unapplied ancestor, and [`crate::merkle::Error::Empty`] if the batch
+    /// has no operations (a [`Db::to_batch`] snapshot).
     pub fn proof<E, C, I, H, const N: usize>(
         &self,
         db: &Db<F, E, C, I, H, U, N, S>,
@@ -2643,6 +2651,35 @@ where
         let inactive_peaks = F::inactive_peaks(self.bounds.tip.size, self.bounds.inactivity_floor);
         db.log
             .speculative_proof(&self.journal_batch, inactive_peaks)
+            .map_err(Into::into)
+    }
+
+    /// The Merkle frontier at the first operation returned by [`Self::operations`]
+    /// ([`Family::nodes_to_pin`]), which lets a consumer holding only this batch's base rebuild
+    /// compact state and replay the operations. The operations, [`Self::proof`], and pinned
+    /// nodes verify against [`Self::root`] via [`crate::qmdb::verify_proof_and_pinned_nodes`].
+    ///
+    /// Nodes of unapplied ancestors are read through the chain, so those ancestors must still be
+    /// alive. Nodes below the chain are read from `db`'s
+    /// [Merkle store][crate::merkle::mem::Mem], which retains them at least until
+    /// this batch's changes are flushed (by a commit or sync after apply).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or
+    /// belongs to a dropped unapplied ancestor.
+    pub fn pinned_nodes<E, C, I, H, const N: usize>(
+        &self,
+        db: &Db<F, E, C, I, H, U, N, S>,
+    ) -> Result<Vec<D>, crate::qmdb::Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = Location<F>>,
+        H: Hasher<Digest = D>,
+    {
+        db.log
+            .speculative_pinned_nodes(&self.journal_batch)
             .map_err(Into::into)
     }
 
@@ -3670,6 +3707,7 @@ mod tests {
             let (seed_start, seed_ops) = seed.operations();
             let seed_root = seed.root();
             let seed_proof = seed.proof(&db).unwrap();
+            let seed_pins = seed.pinned_nodes(&db).unwrap();
             let (db, seed_range) = db.apply_batch(seed).await.unwrap();
             assert_eq!(seed_start, seed_range.start);
             assert_eq!(*seed_start + seed_ops.len() as u64, *seed_range.end);
@@ -3693,6 +3731,10 @@ mod tests {
             let (parent_root, child_root) = (parent.root(), child.root());
             let (parent_proof, child_proof) =
                 (parent.proof(&db).unwrap(), child.proof(&db).unwrap());
+            let (parent_pins, child_pins) = (
+                parent.pinned_nodes(&db).unwrap(),
+                child.pinned_nodes(&db).unwrap(),
+            );
             let (db, parent_range) = db.apply_batch(parent).await.unwrap();
             let (db, child_range) = db.apply_batch(child).await.unwrap();
             assert_eq!(parent_start, parent_range.start);
@@ -3704,17 +3746,24 @@ mod tests {
             let empty = db.new_batch().merkleize(&db, None).await.unwrap();
             let (empty_start, empty_ops) = empty.operations();
             let (empty_root, empty_proof) = (empty.root(), empty.proof(&db).unwrap());
+            let empty_pins = empty.pinned_nodes(&db).unwrap();
             let (db, empty_range) = db.apply_batch(empty).await.unwrap();
             assert_eq!(empty_start, empty_range.start);
             assert_eq!(*empty_start + empty_ops.len() as u64, *empty_range.end);
 
             // Every captured delta and proof must match what the log recovers for its
-            // range, and verify against the batch's own root.
-            for (start, ops, proof, root) in [
-                (seed_start, seed_ops, seed_proof, seed_root),
-                (parent_start, parent_ops, parent_proof, parent_root),
-                (child_start, child_ops, child_proof, child_root),
-                (empty_start, empty_ops, empty_proof, empty_root),
+            // range, and verify against the batch's own root with and without the pins.
+            for (start, ops, proof, pins, root) in [
+                (seed_start, seed_ops, seed_proof, seed_pins, seed_root),
+                (
+                    parent_start,
+                    parent_ops,
+                    parent_proof,
+                    parent_pins,
+                    parent_root,
+                ),
+                (child_start, child_ops, child_proof, child_pins, child_root),
+                (empty_start, empty_ops, empty_proof, empty_pins, empty_root),
             ] {
                 let len = core::num::NonZeroU64::new(ops.len() as u64).unwrap();
                 let end = Location::new(*start + ops.len() as u64);
@@ -3724,25 +3773,58 @@ mod tests {
                 assert!(crate::qmdb::verify_proof::<Sha256, _, _>(
                     &proof, start, &ops, &root
                 ));
+                assert!(crate::qmdb::verify_proof_and_pinned_nodes::<Sha256, _, _>(
+                    &proof, start, &ops, &pins, &root
+                ));
             }
 
-            // After the batch's changes are flushed, proof is a verifying proof or an
-            // error, never a wrong proof.
+            // Flushing the applied batch prunes the store to its peaks. The late batch's base is
+            // mid-mountain, so its artifacts are refused rather than returned unverifiable.
             let late = db
                 .new_batch()
                 .write(key_a, Some(Sha256::hash(&[b"late-a"])))
                 .merkleize(&db, None)
                 .await
                 .unwrap();
-            let (late_start, late_ops) = late.operations();
-            let late_root = late.root();
             let (db, _) = db.apply_batch(Arc::clone(&late)).await.unwrap();
             let db = db.commit().await.unwrap();
-            if let Ok(proof) = late.proof(&db) {
-                assert!(crate::qmdb::verify_proof::<Sha256, _, _>(
-                    &proof, late_start, &late_ops, &late_root
-                ));
-            }
+            assert!(matches!(
+                late.proof(&db),
+                Err(crate::qmdb::Error::Merkle(
+                    crate::merkle::Error::ElementPruned(_)
+                ))
+            ));
+            assert!(matches!(
+                late.pinned_nodes(&db),
+                Err(crate::qmdb::Error::Merkle(
+                    crate::merkle::Error::ElementPruned(_)
+                ))
+            ));
+
+            // A batch built on the flushed store reads every node below it from the pinned peaks.
+            let flushed = db
+                .new_batch()
+                .write(key_b, Some(Sha256::hash(&[b"flushed-b"])))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (flushed_start, flushed_ops) = flushed.operations();
+            let flushed_root = flushed.root();
+            let flushed_proof = flushed.proof(&db).unwrap();
+            let flushed_pins = flushed.pinned_nodes(&db).unwrap();
+            assert!(crate::qmdb::verify_proof_and_pinned_nodes::<Sha256, _, _>(
+                &flushed_proof,
+                flushed_start,
+                &flushed_ops,
+                &flushed_pins,
+                &flushed_root
+            ));
+            let (db, flushed_range) = db.apply_batch(flushed).await.unwrap();
+            assert_eq!(flushed_start, flushed_range.start);
+            assert_eq!(
+                *flushed_start + flushed_ops.len() as u64,
+                *flushed_range.end
+            );
 
             db.destroy().await.unwrap();
         });
