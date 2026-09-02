@@ -25,6 +25,7 @@
 //!         log: JournalConfig {
 //!             partition: "test-partition".into(),
 //!             write_buffer: NZUsize!(64 * 1024),
+//!             replay_buffer: NZUsize!(64 * 1024),
 //!             compression: None,
 //!             codec_config: ((), ()),
 //!             items_per_section: NZU64!(4),
@@ -588,6 +589,7 @@ mod test {
             log: JournalConfig {
                 partition: "journal".into(),
                 write_buffer: NZUsize!(64 * 1024),
+                replay_buffer: NZUsize!(64 * 1024),
                 compression: None,
                 codec_config: ((), ((0..=10000).into(), ())),
                 items_per_section: NZU64!(7),
@@ -626,6 +628,7 @@ mod test {
             log: JournalConfig {
                 partition: format!("journal-{suffix}"),
                 write_buffer: NZUsize!(64 * 1024),
+                replay_buffer: NZUsize!(64 * 1024),
                 compression: None,
                 codec_config: ((), ((0..=10000).into(), ())),
                 items_per_section: NZU64!(1000),

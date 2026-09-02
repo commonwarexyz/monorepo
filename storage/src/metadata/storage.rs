@@ -86,6 +86,14 @@ struct Inner<E: Context, K: Span, V: Codec> {
     keys: Gauge,
 }
 
+/// One copy of the store, as loaded at startup.
+enum Loaded<B: Blob, K: Span, V> {
+    /// The copy decoded cleanly (an empty blob decodes to an empty map).
+    Valid(BTreeMap<K, V>, Wrapper<B, K>),
+    /// The copy holds bytes that fail validation.
+    Invalid(B),
+}
+
 impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
     /// See [Metadata::init].
     async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
@@ -93,11 +101,18 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
         let (left_blob, left_len) = context.open(&cfg.partition, BLOB_NAMES[0]).await?;
         let (right_blob, right_len) = context.open(&cfg.partition, BLOB_NAMES[1]).await?;
 
-        // Find latest blob (check which includes a hash of the other)
-        let (left_map, left_wrapper) =
-            Self::load(&context, &cfg.codec_config, 0, left_blob, left_len).await?;
-        let (right_map, right_wrapper) =
-            Self::load(&context, &cfg.codec_config, 1, right_blob, right_len).await?;
+        // Find latest blob (check which includes a hash of the other). Syncs alternate copies
+        // and drain the previous sync first, so at most one copy is ever mid-write: both copies
+        // failing validation is corruption, and adopting a fresh store would mask it.
+        let left = Self::load(&context, &cfg.codec_config, 0, left_blob, left_len).await?;
+        let right = Self::load(&context, &cfg.codec_config, 1, right_blob, right_len).await?;
+        if matches!((&left, &right), (Loaded::Invalid(_), Loaded::Invalid(_))) {
+            return Err(Error::Corruption(
+                "both metadata copies failed validation".into(),
+            ));
+        }
+        let (left_map, left_wrapper) = Self::normalize(left).await?;
+        let (right_map, right_wrapper) = Self::normalize(right).await?;
 
         // Choose latest blob
         let mut map = left_map;
@@ -146,11 +161,11 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
         index: usize,
         blob: E::Blob,
         len: u64,
-    ) -> Result<(BTreeMap<K, V>, Wrapper<E::Blob, K>), Error> {
+    ) -> Result<Loaded<E::Blob, K, V>, Error> {
         // Get blob length
         if len == 0 {
             // Empty blob
-            return Ok((BTreeMap::new(), Wrapper::empty(blob)));
+            return Ok(Loaded::Valid(BTreeMap::new(), Wrapper::empty(blob)));
         }
 
         // The full encoded blob remains in the in-memory mirror after decoding, so request that
@@ -165,15 +180,8 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
         //
         // 8 bytes for version + 4 bytes for checksum.
         if buf.len() < 8 + crc32::Digest::SIZE {
-            // Truncate and return none
-            warn!(
-                blob = index,
-                len = buf.len(),
-                "blob is too short: truncating"
-            );
-            blob.resize(0).await?;
-            blob.sync().await?;
-            return Ok((BTreeMap::new(), Wrapper::empty(blob)));
+            warn!(blob = index, len = buf.len(), "blob is too short");
+            return Ok(Loaded::Invalid(blob));
         }
 
         // Extract checksum
@@ -182,16 +190,13 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
             u32::from_be_bytes(buf.as_ref()[checksum_index..].try_into().unwrap());
         let computed_checksum = Crc32::checksum(&buf.as_ref()[..checksum_index]);
         if stored_checksum != computed_checksum {
-            // Truncate and return none
             warn!(
                 blob = index,
                 stored = stored_checksum,
                 computed = computed_checksum,
-                "checksum mismatch: truncating"
+                "checksum mismatch"
             );
-            blob.resize(0).await?;
-            blob.sync().await?;
-            return Ok((BTreeMap::new(), Wrapper::empty(blob)));
+            return Ok(Loaded::Invalid(blob));
         }
 
         // Get parent
@@ -219,7 +224,24 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
         }
 
         // Return info
-        Ok((data, Wrapper::new(blob, version, lengths, buf)))
+        Ok(Loaded::Valid(
+            data,
+            Wrapper::new(blob, version, lengths, buf),
+        ))
+    }
+
+    /// Adopt a valid copy, or durably reset the one copy a crash left mid-write.
+    async fn normalize(
+        copy: Loaded<E::Blob, K, V>,
+    ) -> Result<(BTreeMap<K, V>, Wrapper<E::Blob, K>), Error> {
+        match copy {
+            Loaded::Valid(map, wrapper) => Ok((map, wrapper)),
+            Loaded::Invalid(blob) => {
+                blob.resize(0).await?;
+                blob.sync().await?;
+                Ok((BTreeMap::new(), Wrapper::empty(blob)))
+            }
+        }
     }
 
     /// See [Metadata::get].

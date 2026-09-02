@@ -771,7 +771,7 @@ mod tests {
                 >(
                     context.child("mailbox"), NZUsize!(1)
                 );
-                let mut app = Application::new(inner.clone(), Mailbox::new(sender), NZU64!(1));
+                let mut app = Application::new(inner.clone(), Mailbox::new(sender), NZU64!(2));
                 let mut verify = Box::pin(app.verify(
                     (context.child("app"), block_context(&parent, 1)),
                     ancestry::from_iter([tip, parent]),

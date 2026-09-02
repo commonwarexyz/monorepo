@@ -20,7 +20,10 @@ use commonware_runtime::{
     telemetry::metrics::{GaugeExt, histogram, status::Status},
 };
 use commonware_utils::{Span, channel::oneshot, futures::Pool as FuturesPool};
-use futures::future::{self, Either};
+use futures::{
+    StreamExt,
+    future::{self, Either},
+};
 use rand_core::Rng;
 use std::marker::PhantomData;
 use tracing::{debug, error, trace, warn};
@@ -117,7 +120,6 @@ where
             context.child("fetcher"),
             FetcherConfig {
                 me: cfg.me,
-                initial: cfg.initial,
                 timeout: cfg.timeout,
                 retry_timeout: cfg.fetch_retry_timeout,
                 priority_requests: cfg.priority_requests,
@@ -162,20 +164,24 @@ where
             network.1,
         );
         let mut peer_set_subscription = self.peer_provider.subscribe().await;
+        let mut blocked_subscription = Some(self.blocker.blocked());
 
         select_loop! {
             self.context,
             on_start => {
+                // Wait for the next blocked-set update, or forever once the
+                // network stops publishing them.
+                let blocked_update = blocked_subscription.as_mut().map_or_else(
+                    || Either::Right(future::pending()),
+                    |subscription| Either::Left(subscription.next()),
+                );
+
                 // Update metrics
                 let _ = self
                     .metrics
                     .fetch_pending
                     .try_set(self.fetcher.len_pending());
                 let _ = self.metrics.fetch_active.try_set(self.fetcher.len_active());
-                let _ = self
-                    .metrics
-                    .peers_blocked
-                    .try_set(self.fetcher.len_blocked());
                 let _ = self.metrics.serve_processing.try_set(self.serves.len());
 
                 // Get retry timeout (if any)
@@ -206,6 +212,16 @@ where
                     self.fetcher.reconcile(update.latest.primary.as_ref());
                 }
             },
+            // Handle blocked-set updates
+            blocked = blocked_update => {
+                match blocked {
+                    Some(blocked) => self.fetcher.set_blocked(blocked),
+                    None => {
+                        debug!("blocked subscription closed");
+                        blocked_subscription = None;
+                    }
+                }
+            },
             // Handle active deadline
             _ = deadline_active => {
                 if let Some(key) = self.fetcher.pop_active() {
@@ -221,8 +237,8 @@ where
             delivery = self.inflight.next_delivery() => {
                 // If the delivery was aborted, its inflight entry was dropped (via
                 // Retain or shutdown) before the consumer finished validating.
-                if let Ok((peer, elapsed, delivery, result)) = delivery {
-                    self.handle_delivery(peer, elapsed, delivery, result);
+                if let Ok((peer, elapsed, bytes, delivery, result)) = delivery {
+                    self.handle_delivery(peer, elapsed, bytes, delivery, result);
                 }
             },
             // Handle mailbox messages
@@ -428,18 +444,38 @@ where
         &mut self,
         peer: P,
         elapsed: std::time::Duration,
+        bytes: usize,
         delivery: Delivery<Key, Con::Subscriber>,
-        outcome: Outcome,
+        outcome: Option<Outcome>,
     ) {
         let Delivery {
             key,
             subscribers: delivered,
             ..
         } = delivery;
-
         let already_accepted = self.inflight.response_accepted(&key);
+
+        // A dropped verdict says nothing about the response, only that the consumer
+        // did not judge it for these subscribers. Hand the response to the
+        // remaining subscribers, or retire the key when none remain.
+        let Some(outcome) = outcome else {
+            let remaining = self
+                .subscribers
+                .remove_delivered(&key, delivered.map_into(|(subscriber, _)| subscriber));
+            if let Some(subscribers) = remaining {
+                self.inflight.redeliver(Delivery { key, subscribers });
+                return;
+            }
+            if !already_accepted {
+                self.metrics.fetch.inc(Status::Dropped);
+            }
+            self.inflight.cancel(&key);
+            self.fetcher.clear_targets(&key);
+            return;
+        };
+
         if !already_accepted && outcome != Outcome::Ignored {
-            self.fetcher.record_response(&peer, elapsed);
+            self.fetcher.record_response(&peer, elapsed, bytes);
         }
 
         match outcome {
@@ -492,10 +528,10 @@ where
                     return;
                 }
 
-                // If the data is invalid, block the peer and try again. Blocking the
-                // peer also removes any targets associated with it.
-                commonware_p2p::block!(self.blocker, peer.clone(), "invalid data received");
-                self.fetcher.block(peer);
+                // If the data is invalid, block the peer and try again. The network
+                // reports the block through the blocked subscription, which is what
+                // makes the peer ineligible until it is unblocked.
+                commonware_p2p::block!(self.blocker, peer, "invalid data received");
                 self.metrics.fetch.inc(Status::Failure);
                 self.inflight.discard_response(&key);
                 self.fetcher.add_retry(key);

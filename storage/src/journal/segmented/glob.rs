@@ -30,9 +30,14 @@ use super::manager::{Config as ManagerConfig, Manager, WriteFactory};
 use crate::{Context, journal::Error};
 use commonware_codec::{Codec, CodecShared, FixedSize};
 use commonware_cryptography::{Crc32, crc32};
+#[cfg(any(test, feature = "test-utils"))]
+use commonware_runtime::{Blob as _, ReadOptions, Storage, WriteOptions};
 use commonware_runtime::{BufMut, Error as RError, Handle};
 use std::{io::Cursor, num::NonZeroUsize};
 use zstd::{bulk::compress, decode_all};
+
+/// Physical overhead appended to every frame: the CRC32 of the frame's data.
+pub(crate) const CHECKSUM_SIZE: usize = crc32::Digest::SIZE;
 
 /// Configuration for blob storage.
 #[derive(Clone)]
@@ -93,7 +98,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             compressed
         } else {
             // Uncompressed: pre-allocate exact size to avoid copying
-            let entry_size = value.encode_size() + crc32::Digest::SIZE;
+            let entry_size = value.encode_size() + CHECKSUM_SIZE;
             let mut buf = Vec::with_capacity(entry_size);
             value.write(&mut buf);
             let checksum = Crc32::checksum(&buf);
@@ -121,11 +126,11 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         let buf = writer.read_at(offset, size as usize).await?.coalesce();
 
         // Entry format: [compressed_data] [crc32 (4 bytes)]
-        if buf.len() < crc32::Digest::SIZE {
+        if buf.len() < CHECKSUM_SIZE {
             return Err(Error::Runtime(RError::BlobInsufficientLength));
         }
 
-        let data_len = buf.len() - crc32::Digest::SIZE;
+        let data_len = buf.len() - CHECKSUM_SIZE;
         let compressed_data = &buf.as_ref()[..data_len];
         let stored_checksum = u32::from_be_bytes(
             buf.as_ref()[data_len..]
@@ -154,7 +159,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
     /// See [Glob::verify].
     async fn verify(&self, section: u64, offset: u64, size: u32) -> Result<bool, Error> {
         // A frame is at least its checksum trailer.
-        if (size as usize) < crc32::Digest::SIZE {
+        if (size as usize) < CHECKSUM_SIZE {
             return Ok(false);
         }
         let Some(writer) = self.manager.get(section)? else {
@@ -166,7 +171,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             Err(RError::BlobInsufficientLength | RError::OffsetOverflow) => return Ok(false),
             Err(err) => return Err(Error::Runtime(err)),
         };
-        let data_len = buf.len() - crc32::Digest::SIZE;
+        let data_len = buf.len() - CHECKSUM_SIZE;
         let stored_checksum = u32::from_be_bytes(
             buf.as_ref()[data_len..]
                 .try_into()
@@ -397,6 +402,31 @@ impl<E: Context, V: CodecShared> Glob<E, V> {
     pub async fn destroy(self) -> Result<(), Error> {
         self.0.destroy().await
     }
+}
+
+/// Flip one byte inside value frame `frame` of the blob at `name`, breaking that frame's CRC
+/// while leaving every other frame valid. Models a value torn by a crash after its index entry
+/// became durable. Addresses uncompressed fixed-size frames: `frame_size` is the encoded value
+/// size plus its CRC32.
+#[cfg(any(test, feature = "test-utils"))]
+pub async fn corrupt_frame(
+    storage: &impl Storage,
+    partition: &str,
+    name: &[u8],
+    frame: u64,
+    frame_size: u64,
+) {
+    let offset = frame * frame_size;
+    let (blob, size) = storage.open(partition, name).await.unwrap();
+    assert!(offset < size, "corruption target must be inside the blob");
+    let byte = blob
+        .read_at(offset, 1, ReadOptions::default())
+        .await
+        .unwrap()
+        .coalesce();
+    blob.write_at(offset, vec![byte.as_ref()[0] ^ 0xFF], WriteOptions::SYNC)
+        .await
+        .unwrap();
 }
 
 #[cfg(test)]

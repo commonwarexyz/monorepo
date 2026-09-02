@@ -2,7 +2,7 @@
 //!
 //! Resolvers often need the same delivery lifecycle: keep a fetch alive while
 //! `Consumer::deliver` validates a response, abort that validation if the fetch
-//! is pruned, and reuse an accepted response for subscribers that were added
+//! is pruned, and reuse a cached response for subscribers that were added
 //! while validation was in progress. This module owns that lifecycle without
 //! making assumptions about how data is fetched.
 
@@ -10,6 +10,7 @@ use crate::{Consumer, Delivery, Outcome};
 use commonware_utils::futures::{AbortablePool, Aborter};
 use futures::future::Aborted;
 use std::collections::{HashMap, hash_map::Entry as HashMapEntry};
+use tracing::debug;
 
 /// Completed consumer validation for a delivery.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -20,11 +21,12 @@ pub struct Completion<K, S, Context = ()> {
     /// Key and subscribers that were passed to the consumer.
     pub delivery: Delivery<K, S>,
 
-    /// Consumer disposition for the delivered response.
-    pub outcome: Outcome,
+    /// Consumer disposition for the delivered response, or `None` if the
+    /// consumer dropped the sender without reporting one.
+    pub outcome: Option<Outcome>,
 }
 
-// Cached response that can be redelivered after the consumer accepts it.
+// Cached response that can be redelivered while it is accepted or still unjudged.
 struct Response<Context, V> {
     context: Context,
     value: V,
@@ -158,9 +160,9 @@ where
 
     /// Deliver a newly received response to the consumer.
     ///
-    /// The response is cached so that, after the consumer accepts it, later
-    /// retained subscribers can be redelivered the same bytes with
-    /// [`redeliver`](Self::redeliver). Panics if the key is not tracked.
+    /// The response is cached so that later retained subscribers can be
+    /// redelivered the same bytes with [`redeliver`](Self::redeliver) once the
+    /// consumer accepts it or drops its verdict. Panics if the key is not tracked.
     pub fn deliver(
         &mut self,
         delivery: Delivery<Con::Key, Con::Subscriber>,
@@ -179,15 +181,15 @@ where
 
     /// Deliver the cached response to another set of subscribers.
     ///
-    /// This is intended for subscribers added while the first validation was still
-    /// pending. Panics if the key is not tracked, no response is cached, or the
-    /// cached response has not yet been accepted.
+    /// This is intended for subscribers added while an earlier validation was
+    /// still pending. The cached response is either accepted or still unjudged
+    /// because the consumer dropped the earlier verdict. Panics if the key is not
+    /// tracked or no response is cached.
     pub fn redeliver(&mut self, delivery: Delivery<Con::Key, Con::Subscriber>) {
         let key = delivery.key.clone();
         let (context, value) = {
             let entry = self.entries.get(&key).expect("delivery entry");
             let response = entry.response.as_ref().expect("response");
-            assert!(response.accepted, "accepted response");
             (response.context.clone(), response.value.clone())
         };
         self.push_delivery(delivery, context, value);
@@ -222,7 +224,8 @@ where
 
     /// Wait for the next consumer validation result.
     ///
-    /// Returns [`Aborted`] when the delivery was canceled before completion.
+    /// Returns [`Aborted`] when the delivery was canceled before completion. A
+    /// verdict sender dropped by the consumer completes with no outcome.
     /// Successful completions clear the active delivery slot for that key so it
     /// can be retried or redelivered. Completions for an older same-key delivery
     /// are treated as aborted.
@@ -261,12 +264,19 @@ where
         let mut consumer = self.consumer.clone();
         let receiver = consumer.deliver(delivery, value);
         let aborter = self.deliveries.push(async move {
+            let outcome = match receiver.await {
+                Ok(outcome) => Some(outcome.into()),
+                Err(_) => {
+                    debug!(key = ?completed.key, "consumer dropped delivery without a verdict");
+                    None
+                }
+            };
             PooledCompletion {
                 generation,
                 completion: Completion {
                     context,
                     delivery: completed,
-                    outcome: receiver.await.map(Into::into).unwrap_or(Outcome::Invalid),
+                    outcome,
                 },
             }
         });
@@ -382,7 +392,7 @@ mod tests {
                 .expect("delivery should complete");
             assert_eq!(completed.context, 9);
             assert_eq!(completed.delivery.key, key);
-            assert_eq!(completed.outcome, Outcome::Complete);
+            assert_eq!(completed.outcome, Some(Outcome::Complete));
 
             let (delivered_key, delivered_value) = events.recv().await.unwrap();
             assert_eq!(delivered_key, key);
@@ -435,7 +445,40 @@ mod tests {
                 .expect("new delivery should complete");
             assert_eq!(completed.context, 2);
             assert_eq!(completed.delivery.key, key);
-            assert_eq!(completed.outcome, Outcome::Complete);
+            assert_eq!(completed.outcome, Some(Outcome::Complete));
+        });
+    }
+
+    #[test]
+    fn test_dropped_verdict_completes_without_outcome_and_redelivers() {
+        let runner = Runner::default();
+        runner.start(|_| async move {
+            let (consumer, mut senders) = PendingConsumer::new();
+            let mut tracker = Tracker::<PendingConsumer, u8>::new(consumer);
+            let key = MockKey(3);
+
+            tracker.insert(key.clone());
+            tracker.deliver(delivery(key.clone()), 4, Bytes::from("unjudged"));
+            drop(senders.recv().await.unwrap());
+
+            let completed = tracker
+                .next_completion()
+                .await
+                .expect("dropped verdict should complete");
+            assert_eq!(completed.context, 4);
+            assert_eq!(completed.delivery.key, key);
+            assert_eq!(completed.outcome, None);
+            assert!(!tracker.response_accepted(&key));
+
+            // The unjudged response can still be handed to other subscribers.
+            tracker.redeliver(delivery(key.clone()));
+            senders.recv().await.unwrap().send(true).unwrap();
+            let judged = tracker
+                .next_completion()
+                .await
+                .expect("redelivery should complete");
+            assert_eq!(judged.context, 4);
+            assert_eq!(judged.outcome, Some(Outcome::Complete));
         });
     }
 
@@ -455,7 +498,7 @@ mod tests {
                 .next_completion()
                 .await
                 .expect("first delivery should complete");
-            assert_eq!(completed.outcome, Outcome::Complete);
+            assert_eq!(completed.outcome, Some(Outcome::Complete));
             tracker.accept_response(&key);
             assert!(tracker.response_accepted(&key));
 
@@ -466,7 +509,7 @@ mod tests {
                 .expect("redelivery should complete");
             assert_eq!(redelivered.context, 3);
             assert_eq!(redelivered.delivery.key, key);
-            assert_eq!(redelivered.outcome, Outcome::Complete);
+            assert_eq!(redelivered.outcome, Some(Outcome::Complete));
 
             let first = events.recv().await.unwrap();
             let second = events.recv().await.unwrap();
@@ -476,8 +519,8 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "accepted response")]
-    fn test_redeliver_requires_accepted_response() {
+    #[should_panic(expected = "response")]
+    fn test_redeliver_requires_cached_response() {
         let runner = Runner::default();
         runner.start(|_| async move {
             let (consumer, _events) = MockConsumer::<MockKey, Bytes>::new();
@@ -490,8 +533,9 @@ mod tests {
                 .next_completion()
                 .await
                 .expect("first delivery should complete");
-            assert_eq!(completed.outcome, Outcome::Complete);
+            assert_eq!(completed.outcome, Some(Outcome::Complete));
 
+            tracker.discard_response(&key);
             tracker.redeliver(delivery(key));
         });
     }
@@ -511,7 +555,7 @@ mod tests {
                 .next_completion()
                 .await
                 .expect("rejected delivery should complete");
-            assert_eq!(rejected.outcome, Outcome::Invalid);
+            assert_eq!(rejected.outcome, Some(Outcome::Invalid));
 
             tracker.discard_response(&key);
             assert!(!tracker.response_accepted(&key));
@@ -522,7 +566,7 @@ mod tests {
                 .await
                 .expect("accepted delivery should complete");
             assert_eq!(accepted.context, 2);
-            assert_eq!(accepted.outcome, Outcome::Complete);
+            assert_eq!(accepted.outcome, Some(Outcome::Complete));
         });
     }
 }

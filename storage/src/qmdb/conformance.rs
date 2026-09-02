@@ -129,6 +129,7 @@ fn merkle_config(suffix: &str, page_cache: &CacheRef) -> MerkleConfig<Sequential
         metadata_partition: format!("{suffix}-mm"),
         items_per_blob: NZU64!(11),
         write_buffer: NZUsize!(1024),
+        replay_buffer: NZUsize!(1024),
         strategy: Sequential,
         page_cache: page_cache.clone(),
     }
@@ -140,6 +141,7 @@ fn fixed_log_config(suffix: &str, page_cache: CacheRef) -> FConfig {
         items_per_blob: NZU64!(7),
         page_cache,
         write_buffer: NZUsize!(1024),
+        replay_buffer: NZUsize!(1024),
     }
 }
 
@@ -151,6 +153,7 @@ fn variable_log_config<C>(suffix: &str, page_cache: CacheRef, codec_config: C) -
         codec_config,
         page_cache,
         write_buffer: NZUsize!(1024),
+        replay_buffer: NZUsize!(1024),
     }
 }
 
@@ -225,7 +228,6 @@ fn immutable_fixed_config(
         merkle_config: merkle_config(suffix, &pc),
         log: fixed_log_config(suffix, pc),
         translator: TwoCap,
-        init_cache_size: Some(NZUsize!(1024)),
         init_buffer: NZUsize!(1 << 21),
     }
 }
@@ -239,7 +241,6 @@ fn immutable_variable_config(
         merkle_config: merkle_config(suffix, &pc),
         log: variable_log_config(suffix, pc, ((), ())),
         translator: TwoCap,
-        init_cache_size: Some(NZUsize!(1024)),
         init_buffer: NZUsize!(1 << 21),
     }
 }
@@ -255,6 +256,7 @@ fn compact_witness_config(
         codec_config: (),
         page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         write_buffer: NZUsize!(1024),
+        replay_buffer: NZUsize!(1024),
     }
 }
 

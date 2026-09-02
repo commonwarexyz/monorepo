@@ -7,7 +7,7 @@ use crate::{
         authenticated,
         contiguous::{Contiguous, Mutable},
     },
-    merkle::{Family, Location},
+    merkle::{Family, Location, Proof},
     qmdb::{
         any::{
             ValueEncoding,
@@ -2198,12 +2198,25 @@ where
                 Operation::Update(data) => data,
                 _ => unreachable!("snapshot should only reference Update operations"),
             };
-            next_candidates.push(next_key);
 
-            let mutation = mutations.remove(&key);
+            // A key resolved via the ancestor diff must only match at its ancestor-diff
+            // location. A stale snapshot collision (the pre-parent DB snapshot still
+            // containing the key's old location) must contribute nothing: consuming its
+            // mutation would misclassify a parent-deleted key's re-creation as an update
+            // (or its redundant delete as a live delete) before extract_parent_deleted_creates
+            // runs, and feeding its next_key or (key, old_loc) into the candidate sets would
+            // steer the predecessor rewrites only on the pending-ancestor path (the
+            // applied-ancestor path never reads the superseded op).
+            if let Some(entry) = resolve_in_ancestors(&m.ancestors, &key)
+                && entry.loc() != Some(old_loc)
+            {
+                continue;
+            }
+
+            next_candidates.push(next_key);
             prev_candidates.push((key.clone(), (Some(value), old_loc)));
 
-            let Some(mutation) = mutation else {
+            let Some(mutation) = mutations.remove(&key) else {
                 // Snapshot index collision: this operation's key does not match
                 // the mutation key (the snapshot uses a compressed translated key
                 // that can collide). The mutation will be handled as a create below.
@@ -2281,6 +2294,16 @@ where
                 Operation::Update(data) => data,
                 _ => unreachable!("expected update operation"),
             };
+
+            // Same stale-location guard as the mutation classifier above: the snapshot scan
+            // sees only applied state, so a key the ancestor diff supersedes at another
+            // location (or deletes) is stale here and must not steer the predecessor search.
+            // The ancestor-diff walk below contributes the live version of such keys.
+            if let Some(entry) = resolve_in_ancestors(&m.ancestors, &data.key)
+                && entry.loc() != Some(old_loc)
+            {
+                continue;
+            }
             next_candidates.push(data.next_key);
             prev_candidates.push((data.key, (Some(data.value), old_loc)));
         }
@@ -2548,6 +2571,16 @@ impl<F: Family, D: Digest, U: update::Update, S: Strategy> MerkleizedBatch<F, D,
         &self.bounds
     }
 
+    /// Return the operations this batch appends to the log and the location of the first.
+    ///
+    /// Includes floor-raise moves and the trailing commit.
+    pub fn operations(&self) -> (Location<F>, Arc<Vec<Operation<F, U>>>) {
+        (
+            self.bounds.base.size,
+            Arc::clone(self.journal_batch.items()),
+        )
+    }
+
     /// Iterate over ancestor batches (parent first, then grandparent, etc.). Stops when a
     /// Weak ref fails to upgrade (ancestor was freed).
     pub(crate) fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> + use<F, D, U, S> {
@@ -2588,6 +2621,66 @@ where
             mutations: BTreeMap::new(),
             base: Base::Child(Arc::clone(self)),
         }
+    }
+
+    /// Inclusion proof for the operations returned by [`Self::operations`], anchored at
+    /// this batch's tip. The pair verifies against [`Self::root`] via
+    /// [`crate::qmdb::verify_proof`]. Together with [`Self::pinned_nodes`] they verify via
+    /// [`crate::qmdb::verify_proof_and_pinned_nodes`].
+    ///
+    /// Nodes of unapplied ancestors are read through the chain, so those ancestors must still be
+    /// alive. Nodes below the chain are read from `db`'s
+    /// [Merkle store][crate::merkle::mem::Mem], which retains them at least until
+    /// this batch's changes are flushed (by a commit or sync after apply).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or
+    /// belongs to a dropped unapplied ancestor, and [`crate::merkle::Error::Empty`] if the batch
+    /// has no operations (a [`Db::to_batch`] snapshot).
+    pub fn proof<E, C, I, H, const N: usize>(
+        &self,
+        db: &Db<F, E, C, I, H, U, N, S>,
+    ) -> Result<Proof<F, D>, crate::qmdb::Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = Location<F>>,
+        H: Hasher<Digest = D>,
+    {
+        let inactive_peaks = F::inactive_peaks(self.bounds.tip.size, self.bounds.inactivity_floor);
+        db.log
+            .speculative_proof(&self.journal_batch, inactive_peaks)
+            .map_err(Into::into)
+    }
+
+    /// The Merkle frontier at the first operation returned by [`Self::operations`]
+    /// ([`Family::nodes_to_pin`]), which lets a consumer holding only this batch's base rebuild
+    /// compact state and replay the operations. The operations, [`Self::proof`], and pinned
+    /// nodes verify against [`Self::root`] via [`crate::qmdb::verify_proof_and_pinned_nodes`].
+    ///
+    /// Nodes of unapplied ancestors are read through the chain, so those ancestors must still be
+    /// alive. Nodes below the chain are read from `db`'s
+    /// [Merkle store][crate::merkle::mem::Mem], which retains them at least until
+    /// this batch's changes are flushed (by a commit or sync after apply).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or
+    /// belongs to a dropped unapplied ancestor.
+    pub fn pinned_nodes<E, C, I, H, const N: usize>(
+        &self,
+        db: &Db<F, E, C, I, H, U, N, S>,
+    ) -> Result<Vec<D>, crate::qmdb::Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = Location<F>>,
+        H: Hasher<Digest = D>,
+    {
+        db.log
+            .speculative_pinned_nodes(&self.journal_batch)
+            .map_err(Into::into)
     }
 
     /// Read through: local diff -> parent chain -> committed DB.
@@ -3578,6 +3671,163 @@ mod tests {
         // Mutation unchanged.
         assert_eq!(mutations.len(), 1);
         assert!(mutations.contains_key(&1));
+    }
+
+    /// `operations()` must cover exactly the batch's own applied range and match the
+    /// operations a post-apply `historical_proof` recovers from the log, including
+    /// floor-raise moves and the trailing commit, for a db-based batch and for a chained
+    /// batch applied after its ancestor.
+    #[test]
+    fn operations_match_applied_log() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            type TestDb = UnorderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+
+            let config = fixed_db_config::<OneCap>("operations-match-applied-log", &context);
+            let db = TestDb::init(context, config).await.unwrap();
+
+            let key_a = Sha256::hash(&[b"operations-a"]);
+            let key_b = Sha256::hash(&[b"operations-b"]);
+
+            let seed = db
+                .new_batch()
+                .write(key_a, Some(Sha256::hash(&[b"seed-a"])))
+                .write(key_b, Some(Sha256::hash(&[b"seed-b"])))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (seed_start, seed_ops) = seed.operations();
+            let seed_root = seed.root();
+            let seed_proof = seed.proof(&db).unwrap();
+            let seed_pins = seed.pinned_nodes(&db).unwrap();
+            let (db, seed_range) = db.apply_batch(seed).await.unwrap();
+            assert_eq!(seed_start, seed_range.start);
+            assert_eq!(*seed_start + seed_ops.len() as u64, *seed_range.end);
+
+            // A chained batch's operations are its own suffix only, even though it was
+            // merkleized on top of a pending ancestor.
+            let parent = db
+                .new_batch()
+                .write(key_a, Some(Sha256::hash(&[b"parent-a"])))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let child = parent
+                .new_batch::<Sha256>()
+                .write(key_b, Some(Sha256::hash(&[b"child-b"])))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (parent_start, parent_ops) = parent.operations();
+            let (child_start, child_ops) = child.operations();
+            let (parent_root, child_root) = (parent.root(), child.root());
+            let (parent_proof, child_proof) =
+                (parent.proof(&db).unwrap(), child.proof(&db).unwrap());
+            let (parent_pins, child_pins) = (
+                parent.pinned_nodes(&db).unwrap(),
+                child.pinned_nodes(&db).unwrap(),
+            );
+            let (db, parent_range) = db.apply_batch(parent).await.unwrap();
+            let (db, child_range) = db.apply_batch(child).await.unwrap();
+            assert_eq!(parent_start, parent_range.start);
+            assert_eq!(*parent_start + parent_ops.len() as u64, *parent_range.end);
+            assert_eq!(child_start, child_range.start);
+            assert_eq!(*child_start + child_ops.len() as u64, *child_range.end);
+
+            // A write-free batch still captures its commit-only suffix.
+            let empty = db.new_batch().merkleize(&db, None).await.unwrap();
+            let (empty_start, empty_ops) = empty.operations();
+            let (empty_root, empty_proof) = (empty.root(), empty.proof(&db).unwrap());
+            let empty_pins = empty.pinned_nodes(&db).unwrap();
+            let (db, empty_range) = db.apply_batch(empty).await.unwrap();
+            assert_eq!(empty_start, empty_range.start);
+            assert_eq!(*empty_start + empty_ops.len() as u64, *empty_range.end);
+
+            // Every captured delta and proof must match what the log recovers for its
+            // range, and verify against the batch's own root with and without the pins.
+            for (start, ops, proof, pins, root) in [
+                (seed_start, seed_ops, seed_proof, seed_pins, seed_root),
+                (
+                    parent_start,
+                    parent_ops,
+                    parent_proof,
+                    parent_pins,
+                    parent_root,
+                ),
+                (child_start, child_ops, child_proof, child_pins, child_root),
+                (empty_start, empty_ops, empty_proof, empty_pins, empty_root),
+            ] {
+                let len = core::num::NonZeroU64::new(ops.len() as u64).unwrap();
+                let end = Location::new(*start + ops.len() as u64);
+                let (log_proof, log_ops) = db.historical_proof(end, start, len).await.unwrap();
+                assert_eq!(log_ops, *ops);
+                assert_eq!(log_proof, proof);
+                assert!(crate::qmdb::verify_proof::<Sha256, _, _>(
+                    &proof, start, &ops, &root
+                ));
+                assert!(crate::qmdb::verify_proof_and_pinned_nodes::<Sha256, _, _>(
+                    &proof, start, &ops, &pins, &root
+                ));
+            }
+
+            // Flushing the applied batch prunes the store to its peaks. The late batch's base is
+            // mid-mountain, so its artifacts are refused rather than returned unverifiable.
+            let late = db
+                .new_batch()
+                .write(key_a, Some(Sha256::hash(&[b"late-a"])))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(Arc::clone(&late)).await.unwrap();
+            let db = db.commit().await.unwrap();
+            assert!(matches!(
+                late.proof(&db),
+                Err(crate::qmdb::Error::Merkle(
+                    crate::merkle::Error::ElementPruned(_)
+                ))
+            ));
+            assert!(matches!(
+                late.pinned_nodes(&db),
+                Err(crate::qmdb::Error::Merkle(
+                    crate::merkle::Error::ElementPruned(_)
+                ))
+            ));
+
+            // A batch built on the flushed store reads every node below it from the pinned peaks.
+            let flushed = db
+                .new_batch()
+                .write(key_b, Some(Sha256::hash(&[b"flushed-b"])))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (flushed_start, flushed_ops) = flushed.operations();
+            let flushed_root = flushed.root();
+            let flushed_proof = flushed.proof(&db).unwrap();
+            let flushed_pins = flushed.pinned_nodes(&db).unwrap();
+            assert!(crate::qmdb::verify_proof_and_pinned_nodes::<Sha256, _, _>(
+                &flushed_proof,
+                flushed_start,
+                &flushed_ops,
+                &flushed_pins,
+                &flushed_root
+            ));
+            let (db, flushed_range) = db.apply_batch(flushed).await.unwrap();
+            assert_eq!(flushed_start, flushed_range.start);
+            assert_eq!(
+                *flushed_start + flushed_ops.len() as u64,
+                *flushed_range.end
+            );
+
+            db.destroy().await.unwrap();
+        });
     }
 
     #[test]
@@ -4929,6 +5179,488 @@ mod tests {
                 "root depended on pending-vs-committed parent path \
                  when re-creating a deleted key with collision siblings"
             );
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Ordered mirror of [`recreate_deleted_key_with_collision_sibling_root_matches`]:
+    /// re-creating a key deleted by a pending parent must match the applied-parent
+    /// path even though a colliding sibling's bucket scan exposes the deleted key's
+    /// stale committed location to the classifier.
+    #[test]
+    fn ordered_recreate_deleted_key_with_collision_sibling_root_matches() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            type TestDb = OrderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+
+            let config = fixed_db_config::<OneCap>("ordered-recreate-deleted-collision", &context);
+            let db = TestDb::init(context, config).await.unwrap();
+
+            let k0 = colliding_digest(0xAA, 0);
+            let k6 = colliding_digest(0xAA, 6);
+            let k29 = colliding_digest(0xAA, 29);
+
+            // Seed both keys so the snapshot bucket contains two entries.
+            let initial = db
+                .new_batch()
+                .write(k0, Some(colliding_digest(0xBB, 0)))
+                .write(k6, Some(colliding_digest(0xBB, 6)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(initial).await.unwrap();
+            let db = db.commit().await.unwrap();
+
+            // Parent: delete k0. k6 remains untouched.
+            let parent = db
+                .new_batch()
+                .write(k0, None)
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            // Child (pending parent): re-create k0 and write a new colliding key k29.
+            let pending_child = parent
+                .new_batch::<Sha256>()
+                .write(k0, Some(colliding_digest(0xCC, 0)))
+                .write(k29, Some(colliding_digest(0xCC, 29)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            // Commit the parent, then rebuild the same child.
+            let (db, _) = db.apply_batch(parent).await.unwrap();
+            let db = db.commit().await.unwrap();
+
+            let committed_child = db
+                .new_batch()
+                .write(k0, Some(colliding_digest(0xCC, 0)))
+                .write(k29, Some(colliding_digest(0xCC, 29)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            assert_eq!(pending_child.root(), committed_child.root());
+            assert_eq!(
+                pending_child.total_active_keys,
+                committed_child.total_active_keys
+            );
+
+            // Apply the pending child; the resulting DB must match a child built
+            // directly from the committed DB.
+            let (db, _) = db.apply_batch(pending_child).await.unwrap();
+            assert_eq!(db.root(), committed_child.root());
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Deleting a key already deleted by a pending parent must be a no-op: same root
+    /// as the applied-parent path and no double decrement of the active-key count,
+    /// even though the sibling update's bucket scan exposes the key's stale committed
+    /// location.
+    #[test]
+    fn ordered_redundant_delete_with_collision_sibling_root_matches() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            type TestDb = OrderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+
+            let config = fixed_db_config::<OneCap>("ordered-redundant-delete-collision", &context);
+            let db = TestDb::init(context, config).await.unwrap();
+
+            let k0 = colliding_digest(0xAA, 0);
+            let k6 = colliding_digest(0xAA, 6);
+
+            let initial = db
+                .new_batch()
+                .write(k0, Some(colliding_digest(0xBB, 0)))
+                .write(k6, Some(colliding_digest(0xBB, 6)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(initial).await.unwrap();
+            let db = db.commit().await.unwrap();
+
+            // Parent: delete k0.
+            let parent = db
+                .new_batch()
+                .write(k0, None)
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            // Child (pending parent): delete k0 again and update the colliding sibling k6.
+            let pending_child = parent
+                .new_batch::<Sha256>()
+                .write(k0, None)
+                .write(k6, Some(colliding_digest(0xCC, 6)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            let (db, _) = db.apply_batch(parent).await.unwrap();
+            let db = db.commit().await.unwrap();
+
+            let committed_child = db
+                .new_batch()
+                .write(k0, None)
+                .write(k6, Some(colliding_digest(0xCC, 6)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            assert_eq!(pending_child.root(), committed_child.root());
+            assert_eq!(pending_child.total_active_keys, 1);
+            assert_eq!(committed_child.total_active_keys, 1);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Reduced from a fuzzer counterexample: a parent deletes keys whose buckets the child
+    /// later touches, and building the child on the pending parent must produce the same
+    /// root as building it on the committed parent. The final key-value state is identical
+    /// either way; a divergence means the emitted operation streams (next-key pointers or
+    /// floor moves) depended on whether the parent was pending.
+    #[test]
+    fn ordered_stale_ancestor_candidates_root_matches() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            type TestDb = OrderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+
+            let config = fixed_db_config::<OneCap>("ordered-stale-candidates", &context);
+            let db = TestDb::init(context, config).await.unwrap();
+
+            let v = |n| colliding_digest(0xB0, n);
+            let initial = db
+                .new_batch()
+                .write(colliding_digest(2, 23), Some(v(0)))
+                .write(colliding_digest(3, 31), Some(v(1)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(initial).await.unwrap();
+            let db = db.commit().await.unwrap();
+
+            // Parent: delete the bucket-3 key and create in bucket 1.
+            let parent = db
+                .new_batch()
+                .write(colliding_digest(3, 31), None)
+                .write(colliding_digest(1, 9), Some(v(2)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            // Child: re-create the parent-deleted key and create in buckets 1 and 0.
+            let pending_child = parent
+                .new_batch::<Sha256>()
+                .write(colliding_digest(3, 31), Some(v(3)))
+                .write(colliding_digest(1, 20), Some(v(4)))
+                .write(colliding_digest(0, 0), Some(v(5)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            let (db, _) = db.apply_batch(parent).await.unwrap();
+            let db = db.commit().await.unwrap();
+
+            let committed_child = db
+                .new_batch()
+                .write(colliding_digest(3, 31), Some(v(3)))
+                .write(colliding_digest(1, 20), Some(v(4)))
+                .write(colliding_digest(0, 0), Some(v(5)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            assert_eq!(
+                pending_child.root(),
+                committed_child.root(),
+                "child root depended on pending-vs-committed parent path"
+            );
+            assert_eq!(
+                pending_child.total_active_keys,
+                committed_child.total_active_keys
+            );
+
+            let (db, _) = db.apply_batch(pending_child).await.unwrap();
+            assert_eq!(
+                db.root(),
+                committed_child.root(),
+                "applied pending child root diverged"
+            );
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Pins the stale-ancestor guard's position above the classifier's candidate pushes.
+    ///
+    /// The classifier resolves each mutated key's prior state by scanning its translated
+    /// bucket in the committed snapshot, and the same loop pushes each entry it examines
+    /// into the next/prev candidate sets that stitch the ordered links. In this scenario the
+    /// child updates a sibling that collides with a parent-deleted key, so the scan pulls
+    /// the deleted key's stale committed location into the loop. The guard skips the stale
+    /// entry, and it must do so before the candidate pushes: a stale prev-candidate makes
+    /// `find_prev_key`'s wrap-around land on the deleted key, whose rewrite is then skipped
+    /// as batch-created, and the true predecessor's rewrite is emitted at a different stream
+    /// position than on the committed path, so the roots diverge with identical key-value
+    /// data.
+    #[test]
+    fn ordered_stale_classifier_candidates_root_matches() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            type TestDb = OrderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+
+            let config = fixed_db_config::<OneCap>("ordered-stale-classifier", &context);
+            let db = TestDb::init(context, config).await.unwrap();
+
+            let v = |n| colliding_digest(0xB0, n);
+            let initial = db
+                .new_batch()
+                .write(colliding_digest(1, 9), Some(v(0)))
+                .write(colliding_digest(3, 10), Some(v(1)))
+                .write(colliding_digest(3, 20), Some(v(2)))
+                .write(colliding_digest(3, 31), Some(v(3)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(initial).await.unwrap();
+            let db = db.commit().await.unwrap();
+
+            // Parent: delete the last key of bucket 3.
+            let parent = db
+                .new_batch()
+                .write(colliding_digest(3, 31), None)
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            // Child: update a colliding sibling (pulling the deleted key's stale committed
+            // location into the classifier's read set), re-create the deleted key, and
+            // create keys whose predecessor searches consult the candidate sets.
+            let pending_child = parent
+                .new_batch::<Sha256>()
+                .write(colliding_digest(3, 10), Some(v(4)))
+                .write(colliding_digest(3, 31), Some(v(5)))
+                .write(colliding_digest(1, 20), Some(v(6)))
+                .write(colliding_digest(0, 0), Some(v(7)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            let (db, _) = db.apply_batch(parent).await.unwrap();
+            let db = db.commit().await.unwrap();
+
+            let committed_child = db
+                .new_batch()
+                .write(colliding_digest(3, 10), Some(v(4)))
+                .write(colliding_digest(3, 31), Some(v(5)))
+                .write(colliding_digest(1, 20), Some(v(6)))
+                .write(colliding_digest(0, 0), Some(v(7)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            assert_eq!(
+                pending_child.root(),
+                committed_child.root(),
+                "child root depended on pending-vs-committed parent path"
+            );
+            assert_eq!(
+                pending_child.total_active_keys,
+                committed_child.total_active_keys
+            );
+
+            let (db, _) = db.apply_batch(pending_child).await.unwrap();
+            assert_eq!(
+                db.root(),
+                committed_child.root(),
+                "applied pending child root diverged"
+            );
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// While the parent's delete is pending, the deleted key's op remains in the
+    /// pre-parent snapshot, so a child write to the same bucket reads it during the
+    /// bucket scan. That stale op must contribute no candidates: they reorder the
+    /// predecessor rewrites, so the root differs from the applied-parent path.
+    #[test]
+    fn ordered_stale_sibling_scan_candidates_root_matches() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            type TestDb = OrderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+            let config = fixed_db_config::<OneCap>("ordered-stale-sibling-scan", &context);
+            let db = TestDb::init(context, config).await.unwrap();
+            let v = |n| colliding_digest(0xB0, n);
+            let initial = db
+                .new_batch()
+                .write(colliding_digest(3, 1), Some(v(1)))
+                .write(colliding_digest(3, 23), Some(v(2)))
+                .write(colliding_digest(3, 31), Some(v(4)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(initial).await.unwrap();
+            let db = db.commit().await.unwrap();
+
+            // Parent: delete the bucket's largest key.
+            let parent = db
+                .new_batch()
+                .write(colliding_digest(3, 31), None)
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            // Child: write a colliding sibling (its bucket scan reads the deleted
+            // key's stale committed op), re-create the deleted key, and create a
+            // new smallest key so the wraparound predecessor search consults the
+            // candidate set.
+            let pending_child = parent
+                .new_batch::<Sha256>()
+                .write(colliding_digest(3, 7), Some(v(5)))
+                .write(colliding_digest(3, 31), Some(v(6)))
+                .write(colliding_digest(0, 0), Some(v(7)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            let (db, _) = db.apply_batch(parent).await.unwrap();
+            let db = db.commit().await.unwrap();
+
+            let committed_child = db
+                .new_batch()
+                .write(colliding_digest(3, 7), Some(v(5)))
+                .write(colliding_digest(3, 31), Some(v(6)))
+                .write(colliding_digest(0, 0), Some(v(7)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            assert_eq!(
+                pending_child.root(),
+                committed_child.root(),
+                "child root depended on pending-vs-committed parent path"
+            );
+            let (db, _) = db.apply_batch(pending_child).await.unwrap();
+            assert_eq!(db.root(), committed_child.root());
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Redundant deletes of two parent-deleted keys must not drive the active-key
+    /// count negative while a colliding create pulls their stale committed locations
+    /// into the classifier's read set.
+    #[test]
+    fn ordered_redundant_delete_underflow_regression() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            type TestDb = OrderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+
+            let config = fixed_db_config::<OneCap>("ordered-redundant-delete-underflow", &context);
+            let db = TestDb::init(context, config).await.unwrap();
+
+            let k0 = colliding_digest(0xAA, 0);
+            let k6 = colliding_digest(0xAA, 6);
+            let k29 = colliding_digest(0xAA, 29);
+
+            let initial = db
+                .new_batch()
+                .write(k0, Some(colliding_digest(0xBB, 0)))
+                .write(k6, Some(colliding_digest(0xBB, 6)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(initial).await.unwrap();
+            let db = db.commit().await.unwrap();
+
+            // Parent: delete both keys.
+            let parent = db
+                .new_batch()
+                .write(k0, None)
+                .write(k6, None)
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            // Child (pending parent): delete both again and create the colliding k29,
+            // whose bucket scan reintroduces both stale committed locations.
+            let pending_child = parent
+                .new_batch::<Sha256>()
+                .write(k0, None)
+                .write(k6, None)
+                .write(k29, Some(colliding_digest(0xCC, 29)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            let (db, _) = db.apply_batch(parent).await.unwrap();
+            let db = db.commit().await.unwrap();
+
+            let committed_child = db
+                .new_batch()
+                .write(k0, None)
+                .write(k6, None)
+                .write(k29, Some(colliding_digest(0xCC, 29)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            assert_eq!(pending_child.root(), committed_child.root());
+            assert_eq!(pending_child.total_active_keys, 1);
+            assert_eq!(committed_child.total_active_keys, 1);
 
             db.destroy().await.unwrap();
         });

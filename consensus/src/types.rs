@@ -149,7 +149,7 @@ impl From<Epoch> for U64 {
 
 /// Represents a sequential position in a chain or sequence.
 ///
-/// Height is a monotonically increasing counter.
+/// Height is a monotonically increasing counter. Height zero is the genesis block.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct Height(u64);
@@ -740,6 +740,9 @@ impl EpochInfo {
 }
 
 /// Mechanism for determining epoch boundaries.
+///
+/// Genesis is not produced by any epoch, so every epoch must contain at least one
+/// height above [`Height::zero`].
 pub trait Epocher: Clone + Send + Sync + 'static {
     /// Returns the information about an epoch containing the given block height.
     ///
@@ -758,11 +761,18 @@ pub trait Epocher: Clone + Send + Sync + 'static {
 }
 
 /// Implementation of [`Epocher`] for fixed epoch lengths.
+///
+/// Epoch `e` spans heights `e * length..(e + 1) * length`, so epoch zero includes
+/// genesis.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FixedEpocher(u64);
 
 impl FixedEpocher {
     /// Creates a new fixed epoch strategy.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `length` is one, since epoch zero would contain only genesis.
     ///
     /// # Example
     /// ```rust
@@ -771,6 +781,7 @@ impl FixedEpocher {
     /// let strategy = FixedEpocher::new(NZU64!(60_480));
     /// ```
     pub const fn new(length: NonZeroU64) -> Self {
+        assert!(length.get() > 1, "epoch length must exceed one");
         Self(length.get())
     }
 
@@ -2150,6 +2161,12 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "epoch length must exceed one")]
+    fn test_fixed_epocher_rejects_length_one() {
+        let _ = FixedEpocher::new(NZU64!(1));
+    }
+
+    #[test]
     fn test_fixed_epocher_overflow() {
         // Test that containing() returns None when last() would overflow
         let epocher = FixedEpocher::new(NZU64!(100));
@@ -2196,8 +2213,8 @@ mod tests {
         assert!(result.is_some());
         assert_eq!(result.unwrap().last(), Height::new(u64::MAX));
 
-        // Test with epoch length 1 (every height is its own epoch)
-        let epocher = FixedEpocher::new(NZU64!(1));
+        // Test with the smallest epoch length (the final epoch ends exactly at u64::MAX)
+        let epocher = FixedEpocher::new(NZU64!(2));
         let result = epocher.containing(Height::new(u64::MAX));
         assert!(result.is_some());
         assert_eq!(result.unwrap().last(), Height::new(u64::MAX));

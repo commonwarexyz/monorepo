@@ -1,50 +1,28 @@
-use super::Header;
-use crate::{BufferPool, Error};
+use super::{Header, Layout, hold::Hold, resolve_header, sync_dir};
+use crate::{BlobVersion, BufferPool, Error};
 use commonware_formatting::{from_hex, hex};
 use std::{
+    fs,
+    io::{Seek as _, SeekFrom, Write as _},
     ops::RangeInclusive,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::Arc,
 };
-use tokio::{
-    fs,
-    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
-    sync::Mutex,
-};
+use tokio::sync::Mutex;
 
 mod blob;
-
-/// Syncs a directory to ensure directory entry changes are durable.
-/// On Unix, directory metadata (file creation/deletion) must be explicitly
-/// fsynced.
-async fn sync_dir(path: &Path) -> Result<(), Error> {
-    let dir = fs::File::open(path).await.map_err(|e| {
-        Error::BlobOpenFailed(
-            path.to_string_lossy().to_string(),
-            "directory".to_string(),
-            e.into(),
-        )
-    })?;
-    dir.sync_all().await.map_err(|e| {
-        Error::BlobSyncFailed(
-            path.to_string_lossy().to_string(),
-            "directory".to_string(),
-            e.into(),
-        )
-    })
-}
 
 #[derive(Clone)]
 pub struct Config {
     pub storage_directory: PathBuf,
-    pub maximum_buffer_size: usize,
+    pub blob_layouts: RangeInclusive<Layout>,
 }
 
 impl Config {
-    pub const fn new(storage_directory: PathBuf, maximum_buffer_size: usize) -> Self {
+    pub const fn new(storage_directory: PathBuf, blob_layouts: RangeInclusive<Layout>) -> Self {
         Self {
             storage_directory,
-            maximum_buffer_size,
+            blob_layouts,
         }
     }
 }
@@ -54,29 +32,52 @@ pub struct Storage {
     lock: Arc<Mutex<()>>,
     cfg: Config,
     pool: BufferPool,
-}
-
-/// Reads a blob's leading bytes and resolves its header (see [super::header::resolve]).
-async fn resolve_header(
-    file: &mut fs::File,
-    raw_len: u64,
-    versions: &RangeInclusive<u16>,
-    partition: &str,
-    name: &[u8],
-) -> Result<Option<(u64, u16, u64)>, Error> {
-    let mut raw = vec![0u8; Header::resolve_len(raw_len)];
-    file.read_exact(&mut raw)
-        .await
-        .map_err(|_| Error::ReadFailed)?;
-    super::header::resolve(&raw, raw_len, versions, partition, name)
+    hold: Arc<Hold>,
 }
 
 impl Storage {
+    /// Create a storage instance rooted at `cfg.storage_directory`, creating the
+    /// directory if missing and holding it until every operation of this
+    /// instance has finished. Blocks while a previous instance still holds it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the directory cannot be created or its hold cannot be acquired.
     pub fn new(cfg: Config, pool: BufferPool) -> Self {
+        let hold = Hold::acquire(&cfg.storage_directory).unwrap_or_else(|e| {
+            panic!(
+                "failed to acquire storage directory hold ({}): {e}",
+                cfg.storage_directory.display()
+            )
+        });
         Self {
             lock: Arc::new(Mutex::new(())),
             cfg,
             pool,
+            hold,
+        }
+    }
+
+    /// Run `f` to completion on the blocking pool while owning the filesystem
+    /// lock and the directory hold, so dropping the returned future neither
+    /// abandons `f` mid-sequence nor lets a successor storage instance
+    /// initialize before `f` has finished. A closure dropped unstarted at
+    /// runtime shutdown yields [Error::Closed].
+    async fn dispatch<T: Send + 'static>(
+        &self,
+        f: impl FnOnce() -> Result<T, Error> + Send + 'static,
+    ) -> Result<T, Error> {
+        let guard = self.lock.clone().lock_owned().await;
+        let hold = self.hold.clone();
+        let task = tokio::task::spawn_blocking(move || {
+            let _hold = hold;
+            let _guard = guard;
+            f()
+        });
+        match task.await {
+            Ok(result) => result,
+            Err(err) if err.is_panic() => std::panic::resume_unwind(err.into_panic()),
+            Err(_) => Err(Error::Closed),
         }
     }
 }
@@ -88,160 +89,156 @@ impl crate::Storage for Storage {
         &self,
         partition: &str,
         name: &[u8],
-        versions: RangeInclusive<u16>,
-    ) -> Result<(Self::Blob, u64, u16), Error> {
+        versions: RangeInclusive<BlobVersion>,
+    ) -> Result<(Self::Blob, u64, BlobVersion), Error> {
         super::validate_partition_name(partition)?;
-
-        // Acquire the filesystem lock. The guard is owned so the creation path can move it
-        // into a task that outlives a dropped open future.
-        let guard = self.lock.clone().lock_owned().await;
 
         // Construct the full path
         let path = self.cfg.storage_directory.join(partition).join(hex(name));
-        let parent = match path.parent() {
-            Some(parent) => parent,
-            None => return Err(Error::PartitionCreationFailed(partition.into())),
-        };
+        let storage_directory = self.cfg.storage_directory.clone();
+        let partition = partition.to_string();
+        let name = name.to_vec();
+        let blob_layouts = self.cfg.blob_layouts.clone();
+        let pool = self.pool.clone();
+        let hold = self.hold.clone();
 
-        // Create the partition directory, if it does not exist
-        fs::create_dir_all(parent)
-            .await
-            .map_err(|_| Error::PartitionCreationFailed(partition.into()))?;
+        // Run the open to completion: it mutates the partition directory and the
+        // blob (create, truncate, header write, syncs), and dropping this future
+        // must not abandon that sequence half-done (a straggling truncate could
+        // clobber a successor's blob) or leave a later open trusting a header
+        // whose syncs never ran.
+        self.dispatch(move || {
+            let parent = match path.parent() {
+                Some(parent) => parent,
+                None => return Err(Error::PartitionCreationFailed(partition)),
+            };
 
-        // Open the file, creating it if it doesn't exist
-        let mut file = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)
-            .await
-            .map_err(|e| Error::BlobOpenFailed(partition.into(), hex(name), e.into()))?;
+            // Create the partition directory, if it does not exist
+            fs::create_dir_all(parent)
+                .map_err(|_| Error::PartitionCreationFailed(partition.clone()))?;
 
-        let raw_len = file.metadata().await.map_err(|_| Error::ReadFailed)?.len();
+            // Open the file, creating it if it doesn't exist
+            let mut file = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&path)
+                .map_err(|e| Error::BlobOpenFailed(partition.clone(), hex(&name), e.into()))?;
+            let raw_len = file.metadata().map_err(|_| Error::ReadFailed)?.len();
 
-        // Set the maximum buffer size
-        file.set_max_buf_size(self.cfg.maximum_buffer_size);
-
-        // Handle header: existing blobs have their header read; new blobs and blobs left torn
-        // by an interrupted creation get a fresh header written.
-        let existing = resolve_header(&mut file, raw_len, &versions, partition, name).await?;
-        let (file, guard, (logical_size, blob_version, data_offset)) = match existing {
-            Some(resolved) => (file, guard, resolved),
-            None => {
-                // Run creation to completion on a task that owns the filesystem lock:
-                // dropping the open future must not abandon the sequence half-done (a
-                // straggling truncate could clobber a successor's blob) or leave a later
-                // open trusting a header whose syncs never ran. The task hands the lock
-                // back so the open holds it until the blob is returned, like the reopen
-                // path.
-                let parent = parent.to_path_buf();
-                let storage_directory = self.cfg.storage_directory.clone();
-                let err_partition = partition.to_string();
-                let err_name = hex(name);
-                let creation = tokio::task::spawn(async move {
+            // Handle the header. Existing blobs have their header read. New blobs and blobs
+            // left torn by an interrupted creation get a fresh header written.
+            let existing = resolve_header(
+                &mut file,
+                raw_len,
+                &blob_layouts,
+                &versions,
+                &partition,
+                &name,
+            )?;
+            let (logical_size, blob_version, data_offset) = match existing {
+                Some(resolved) => resolved,
+                None => {
                     // Sync the directories before writing the header so a parseable
                     // header always implies durable directory entries (an open that
                     // parses a header never re-runs these). The storage directory is
                     // synced unconditionally: the partition directory existing in the
                     // namespace does not imply its entry is durable.
-                    sync_dir(&parent).await?;
-                    sync_dir(&storage_directory).await?;
+                    sync_dir(parent)?;
+                    sync_dir(&storage_directory)?;
 
                     // Truncate to zero before writing, per the [Header::create] contract.
-                    let (region, blob_version) = Header::create(&versions);
+                    let (region, blob_version) = Header::create(&blob_layouts, &versions);
                     let data_offset = region.len() as u64;
-                    file.set_len(0).await.map_err(|e| {
-                        Error::BlobResizeFailed(err_partition.clone(), err_name.clone(), e.into())
+                    file.set_len(0).map_err(|e| {
+                        Error::BlobResizeFailed(partition.clone(), hex(&name), e.into())
                     })?;
-                    file.rewind().await.map_err(|_| Error::WriteFailed)?;
-                    file.write_all(&region)
-                        .await
+                    file.seek(SeekFrom::Start(0))
                         .map_err(|_| Error::WriteFailed)?;
-                    file.sync_all()
-                        .await
-                        .map_err(|e| Error::BlobSyncFailed(err_partition, err_name, e.into()))?;
-
-                    Ok::<_, Error>((file, guard, (0, blob_version, data_offset)))
-                });
-                match creation.await {
-                    Ok(result) => result?,
-                    Err(err) if err.is_panic() => std::panic::resume_unwind(err.into_panic()),
-                    Err(_) => return Err(Error::Closed),
+                    file.write_all(&region).map_err(|_| Error::WriteFailed)?;
+                    file.sync_all().map_err(|e| {
+                        Error::BlobSyncFailed(partition.clone(), hex(&name), e.into())
+                    })?;
+                    (0, blob_version, data_offset)
                 }
-            }
-        };
+            };
 
-        // Convert to a blocking std::fs::File
-        let file = file.into_std().await;
-
-        // Construct the blob while still holding the filesystem lock.
-        let blob = Self::Blob::new(partition.into(), name, file, self.pool.clone(), data_offset);
-        drop(guard);
-        Ok((blob, logical_size, blob_version))
+            // Construct the blob while still holding the filesystem lock.
+            let blob = Self::Blob::new(partition, &name, file, pool, data_offset, hold);
+            Ok((blob, logical_size, blob_version))
+        })
+        .await
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
         super::validate_partition_name(partition)?;
 
-        // Acquire the filesystem lock
-        let _guard = self.lock.lock().await;
-
-        // Remove all related files
         let path = self.cfg.storage_directory.join(partition);
-        if let Some(name) = name {
-            let blob_path = path.join(hex(name));
-            fs::remove_file(blob_path)
-                .await
-                .map_err(|_| Error::BlobMissing(partition.into(), hex(name)))?;
+        let storage_directory = self.cfg.storage_directory.clone();
+        let partition = partition.to_string();
+        let name = name.map(<[u8]>::to_vec);
 
-            // Sync the partition directory to ensure the removal is durable.
-            sync_dir(&path).await?;
-        } else {
-            fs::remove_dir_all(&path)
-                .await
-                .map_err(|_| Error::PartitionMissing(partition.into()))?;
+        // Run the removal to completion: dropping this future must not abandon
+        // the sequence between an unlink and the directory sync that makes it
+        // durable.
+        self.dispatch(move || {
+            // Remove all related files
+            if let Some(name) = name {
+                let blob_path = path.join(hex(&name));
+                fs::remove_file(blob_path)
+                    .map_err(|_| Error::BlobMissing(partition, hex(&name)))?;
 
-            // Sync the storage directory to ensure the removal is durable.
-            sync_dir(&self.cfg.storage_directory).await?;
-        }
-        Ok(())
+                // Sync the partition directory to ensure the removal is durable.
+                sync_dir(&path)?;
+            } else {
+                fs::remove_dir_all(&path).map_err(|_| Error::PartitionMissing(partition))?;
+
+                // Sync the storage directory to ensure the removal is durable.
+                sync_dir(&storage_directory)?;
+            }
+            Ok(())
+        })
+        .await
     }
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
         super::validate_partition_name(partition)?;
 
-        // Acquire the filesystem lock
-        let _guard = self.lock.lock().await;
-
-        // Scan the partition directory
         let path = self.cfg.storage_directory.join(partition);
-        let mut entries = fs::read_dir(path)
-            .await
-            .map_err(|_| Error::PartitionMissing(partition.into()))?;
-        let mut blobs = Vec::new();
-        while let Some(entry) = entries.next_entry().await.map_err(|_| Error::ReadFailed)? {
-            let file_type = entry.file_type().await.map_err(|_| Error::ReadFailed)?;
-            if !file_type.is_file() {
-                return Err(Error::PartitionCorrupt(partition.into()));
-            }
-            if let Some(name) = entry.file_name().to_str() {
-                // Reject anything that isn't canonical lowercase hex (no `0x`
-                // prefix, no whitespace) since `from_hex` is lenient and
-                // storage only ever writes the canonical form via `hex()`.
-                let decoded = from_hex(name).ok_or(Error::PartitionCorrupt(partition.into()))?;
-                if hex(&decoded) != name {
-                    return Err(Error::PartitionCorrupt(partition.into()));
+        let partition = partition.to_string();
+        self.dispatch(move || {
+            // Scan the partition directory
+            let entries =
+                fs::read_dir(path).map_err(|_| Error::PartitionMissing(partition.clone()))?;
+            let mut blobs = Vec::new();
+            for entry in entries {
+                let entry = entry.map_err(|_| Error::ReadFailed)?;
+                let file_type = entry.file_type().map_err(|_| Error::ReadFailed)?;
+                if !file_type.is_file() {
+                    return Err(Error::PartitionCorrupt(partition));
                 }
+                if let Some(name) = entry.file_name().to_str() {
+                    // Reject anything that isn't canonical lowercase hex (no `0x`
+                    // prefix, no whitespace) since `from_hex` is lenient and
+                    // storage only ever writes the canonical form via `hex()`.
+                    let decoded =
+                        from_hex(name).ok_or_else(|| Error::PartitionCorrupt(partition.clone()))?;
+                    if hex(&decoded) != name {
+                        return Err(Error::PartitionCorrupt(partition));
+                    }
 
-                blobs.push(decoded);
+                    blobs.push(decoded);
+                }
             }
-        }
-        Ok(blobs)
+            Ok(blobs)
+        })
+        .await
     }
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::{Header, *};
     use crate::{
@@ -250,8 +247,9 @@ mod tests {
         telemetry::metrics::Registry,
     };
     use commonware_utils::sys_rng;
+    use futures::FutureExt as _;
     use rand::RngExt as _;
-    use std::env;
+    use std::{env, sync::mpsc::RecvTimeoutError};
 
     fn test_pool() -> BufferPool {
         let mut registry = Registry::default();
@@ -264,11 +262,109 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_hold_waits_for_straggling_remove() {
+        let storage_directory =
+            env::temp_dir().join(format!("storage_tokio_hold_remove_{}", random_suffix()));
+        let config = Config::new(storage_directory.clone(), Layout::ALL);
+        let storage = Storage::new(config.clone(), test_pool());
+
+        // Fill the partition with enough blobs that its removal takes a while,
+        // so a successor that failed to wait would observe it mid-flight.
+        let partition_path = storage_directory.join("partition");
+        std::fs::create_dir_all(&partition_path).unwrap();
+        for i in 0..5_000u64 {
+            std::fs::write(partition_path.join(hex(&i.to_be_bytes())), b"x").unwrap();
+        }
+
+        // Dispatch the partition's removal and drop its future mid-flight,
+        // leaving the removal to finish on the blocking pool as a straggler.
+        {
+            let mut remove = Box::pin(storage.remove("partition", None));
+            assert!(
+                (&mut remove).now_or_never().is_none(),
+                "removal completed before it could straggle"
+            );
+        }
+        drop(storage);
+
+        // A successor cannot initialize until the straggler finishes, so the
+        // partition is guaranteed gone by the time it scans.
+        let storage = Storage::new(config, test_pool());
+        let result = storage.scan("partition").await;
+        assert!(
+            matches!(result, Err(Error::PartitionMissing(_))),
+            "{result:?}"
+        );
+
+        drop(storage);
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_hold_retained_by_open_blob() {
+        let storage_directory =
+            env::temp_dir().join(format!("storage_tokio_hold_blob_{}", random_suffix()));
+        let config = Config::new(storage_directory.clone(), Layout::ALL);
+        let storage = Storage::new(config.clone(), test_pool());
+
+        // An open blob holds a clone of the directory hold, since a write or
+        // resize through it can still straggle. Dropping the storage while the
+        // blob lives must not release the hold.
+        let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+        drop(storage);
+
+        let config_second = config.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let second = Storage::new(config_second, test_pool());
+            tx.send(()).unwrap();
+            drop(second);
+        });
+        match rx.recv_timeout(std::time::Duration::from_millis(200)) {
+            Err(RecvTimeoutError::Timeout) => {}
+            other => panic!("second instance did not stay blocked on the hold: {other:?}"),
+        }
+        drop(blob);
+        rx.recv_timeout(std::time::Duration::from_secs(10))
+            .expect("second instance did not acquire the hold after the blob dropped");
+        handle.join().unwrap();
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    #[test]
+    fn test_hold_blocks_second_instance() {
+        let storage_directory =
+            env::temp_dir().join(format!("storage_tokio_hold_block_{}", random_suffix()));
+        let config = Config::new(storage_directory.clone(), Layout::ALL);
+        let first = Storage::new(config.clone(), test_pool());
+
+        // A second instance on the same directory cannot acquire the hold
+        // until the first releases it.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let second = Storage::new(config, test_pool());
+            tx.send(()).unwrap();
+            drop(second);
+        });
+        match rx.recv_timeout(std::time::Duration::from_millis(200)) {
+            Err(RecvTimeoutError::Timeout) => {}
+            other => panic!("second instance did not stay blocked on the hold: {other:?}"),
+        }
+        drop(first);
+        rx.recv_timeout(std::time::Duration::from_secs(10))
+            .expect("second instance did not acquire the hold after the first released it");
+        handle.join().unwrap();
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    #[tokio::test]
     async fn test_storage() {
         let mut rng = sys_rng();
         let storage_directory =
             env::temp_dir().join(format!("storage_tokio_{}", rng.random::<u64>()));
-        let config = Config::new(storage_directory, 2 * 1024 * 1024);
+        let config = Config::new(storage_directory, Layout::ALL);
         let storage = Storage::new(config, test_pool());
         run_storage_tests(storage).await;
     }
@@ -280,7 +376,7 @@ mod tests {
         let mut rng = sys_rng();
         let storage_directory =
             env::temp_dir().join(format!("storage_tokio_start_sync_{}", rng.random::<u64>()));
-        let config = Config::new(storage_directory, 2 * 1024 * 1024);
+        let config = Config::new(storage_directory, Layout::ALL);
         let storage = Storage::new(config, test_pool());
 
         let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();
@@ -310,7 +406,7 @@ mod tests {
         let mut rng = sys_rng();
         let storage_directory =
             env::temp_dir().join(format!("storage_tokio_header_{}", rng.random::<u64>()));
-        let config = Config::new(storage_directory.clone(), 2 * 1024 * 1024);
+        let config = Config::new(storage_directory.clone(), Layout::ALL);
         let storage = Storage::new(config, test_pool());
 
         // Test 1: New blob (V1 by default) returns logical size 0 and correct app version
@@ -344,7 +440,7 @@ mod tests {
         // Header version (bytes 4-5) and App version (bytes 6-7)
         assert_eq!(
             &raw_content[4..6],
-            &Layout::V1.runtime_version().to_be_bytes()
+            &Layout::V1.layout_version().to_be_bytes()
         );
         // Data should start at the data offset
         assert_eq!(&raw_content[data_offset as usize..], data);
@@ -418,7 +514,7 @@ mod tests {
     async fn test_v1_paged_alignment() {
         let storage_directory =
             env::temp_dir().join(format!("storage_tokio_aligned_{}", random_suffix()));
-        let config = Config::new(storage_directory.clone(), 2 * 1024 * 1024);
+        let config = Config::new(storage_directory.clone(), Layout::ALL);
         let storage = Storage::new(config, test_pool());
 
         // A logical page size whose physical page is exactly one 4096-byte storage page.
@@ -472,10 +568,7 @@ mod tests {
         let storage_directory =
             env::temp_dir().join(format!("test_torn_creation_{}", random_suffix()));
         let storage = Storage::new(
-            Config {
-                storage_directory: storage_directory.clone(),
-                maximum_buffer_size: 1024 * 1024,
-            },
+            Config::new(storage_directory.clone(), Layout::ALL),
             test_pool(),
         );
 
@@ -560,10 +653,7 @@ mod tests {
         let storage_directory =
             env::temp_dir().join(format!("test_dropped_open_{}", random_suffix()));
         let storage = Storage::new(
-            Config {
-                storage_directory: storage_directory.clone(),
-                maximum_buffer_size: 1024 * 1024,
-            },
+            Config::new(storage_directory.clone(), Layout::ALL),
             test_pool(),
         );
 
@@ -606,10 +696,7 @@ mod tests {
         let storage_directory =
             env::temp_dir().join(format!("test_v1_header_padding_{}", random_suffix()));
         let storage = Storage::new(
-            Config {
-                storage_directory: storage_directory.clone(),
-                maximum_buffer_size: 1024 * 1024,
-            },
+            Config::new(storage_directory.clone(), Layout::ALL),
             test_pool(),
         );
 
@@ -633,24 +720,17 @@ mod tests {
         let storage_directory =
             env::temp_dir().join(format!("test_v0_legacy_read_{}", random_suffix()));
         let storage = Storage::new(
-            Config {
-                storage_directory: storage_directory.clone(),
-                maximum_buffer_size: 1024 * 1024,
-            },
+            Config::new(storage_directory.clone(), Layout::ALL),
             test_pool(),
         );
 
-        // Fabricate a legacy V0 blob on disk (creation is always V1): an 8-byte header
+        // Fabricate a legacy V0 blob on disk (creation here produces V1): an 8-byte header
         // followed immediately by the payload.
         let payload = b"hello world";
         let partition_dir = storage_directory.join("partition");
         std::fs::create_dir_all(&partition_dir).unwrap();
         let file_path = partition_dir.join(hex(b"v0"));
-        std::fs::write(
-            &file_path,
-            crate::storage::header::tests::v0_blob_bytes(0, payload),
-        )
-        .unwrap();
+        std::fs::write(&file_path, crate::storage::tests::v0_blob_bytes(0, payload)).unwrap();
 
         // The blob opens with its data intact and remains readable and writable in place.
         let (blob, size) = storage.open("partition", b"v0").await.unwrap();
@@ -682,10 +762,7 @@ mod tests {
         let storage_directory =
             env::temp_dir().join(format!("test_magic_mismatch_{}", random_suffix()));
         let storage = Storage::new(
-            Config {
-                storage_directory: storage_directory.clone(),
-                maximum_buffer_size: 1024 * 1024,
-            },
+            Config::new(storage_directory.clone(), Layout::ALL),
             test_pool(),
         );
 
@@ -712,10 +789,7 @@ mod tests {
         let storage_directory =
             env::temp_dir().join(format!("test_partial_header_reset_{}", random_suffix()));
         let storage = Storage::new(
-            Config {
-                storage_directory: storage_directory.clone(),
-                maximum_buffer_size: 1024 * 1024,
-            },
+            Config::new(storage_directory.clone(), Layout::ALL),
             test_pool(),
         );
         let partition_path = storage_directory.join("partition");
@@ -765,10 +839,7 @@ mod tests {
                 random_suffix()
             ));
             let storage = Storage::new(
-                Config {
-                    storage_directory: storage_directory.clone(),
-                    maximum_buffer_size: 1024 * 1024,
-                },
+                Config::new(storage_directory.clone(), Layout::ALL),
                 test_pool(),
             );
 
