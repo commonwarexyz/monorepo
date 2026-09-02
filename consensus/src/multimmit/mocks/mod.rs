@@ -43,7 +43,7 @@ use commonware_cryptography::{
     sha256::Digest as Sha256Digest,
 };
 use commonware_math::poly::Poly;
-use commonware_parallel::Sequential;
+use commonware_parallel::{Sequential, Strategy};
 use commonware_utils::{Participant, TestRng, ordered::Set};
 use core::num::NonZeroU32;
 
@@ -450,6 +450,46 @@ where
     V: Variant,
 {
     scheme.sign_nullify(round)
+}
+
+/// Assembles a V-QC over view messages whose ordinary signatures are already verified.
+///
+/// This is the exact job the voter's aggregation pool runs at quorum, so benchmarks measure the
+/// production path rather than the signature-checking variant.
+#[doc(hidden)]
+pub fn assemble_vqc_preverified<P, V, H, D>(
+    scheme: &Scheme<P, V>,
+    leader: LeaderBlock<V, D>,
+    messages: &[ViewMessage<V, D>],
+    strategy: &impl Strategy,
+) -> Result<Vqc<V, D>, SchemeError>
+where
+    P: commonware_cryptography::PublicKey,
+    V: Variant,
+    H: Hasher<Digest = D>,
+    D: commonware_cryptography::Digest,
+{
+    scheme.assemble_vqc_preverified::<H, D>(leader, messages, strategy)
+}
+
+/// Assembles an L-QC over votes whose ordinary signatures are already verified.
+///
+/// This is the exact job the voter's aggregation pool runs at quorum, so benchmarks measure the
+/// production path rather than the signature-checking variant.
+#[doc(hidden)]
+pub fn assemble_lqc_preverified<P, V, H, D>(
+    scheme: &Scheme<P, V>,
+    leader: LeaderBlock<V, D>,
+    votes: &[Vote<V, D>],
+    strategy: &impl Strategy,
+) -> Result<Lqc<V, D>, SchemeError>
+where
+    P: commonware_cryptography::PublicKey,
+    V: Variant,
+    H: Hasher<Digest = D>,
+    D: commonware_cryptography::Digest,
+{
+    scheme.assemble_lqc_preverified::<H, D>(leader, votes, strategy)
 }
 
 fn digest(label: &[u8], marker: u64) -> Sha256Digest {

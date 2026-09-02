@@ -45,17 +45,22 @@ pub struct Fixture<V: Variant> {
 
 impl<V: Variant> Fixture<V> {
     pub fn new() -> Self {
-        let epoch_config = test_config();
+        Self::new_sized(PARTICIPANTS)
+    }
+
+    /// Builds one committee of `participants` validators, each producing one chain.
+    pub fn new_sized(participants_count: u32) -> Self {
+        let epoch_config = test_config(participants_count);
         let codec = epoch_config.codec_config();
         let identities = Set::try_from(
-            (0..PARTICIPANTS)
+            (0..participants_count)
                 .map(|index| ed25519::PrivateKey::from_seed(u64::from(index) + 100).public_key())
                 .collect::<Vec<_>>(),
         )
         .unwrap();
 
         let mut rng = TestRng::new(1_234);
-        let mut ordinary = Vec::with_capacity(PARTICIPANTS as usize);
+        let mut ordinary = Vec::with_capacity(participants_count as usize);
         let participants = identities
             .iter()
             .map(|identity| {
@@ -75,9 +80,14 @@ impl<V: Variant> Fixture<V> {
             &Sequential,
         )
         .unwrap();
-        let (da, da_shares) = sharing::<V>(&mut rng, u32::try_from(codec.da_quorum()).unwrap());
+        let (da, da_shares) = sharing::<V>(
+            &mut rng,
+            participants_count,
+            u32::try_from(codec.da_quorum()).unwrap(),
+        );
         let (nullification, nullification_shares) = sharing::<V>(
             &mut rng,
+            participants_count,
             u32::try_from(codec.nullification_quorum()).unwrap(),
         );
 
@@ -158,7 +168,7 @@ impl<V: Variant> Fixture<V> {
         (vqc, lqc)
     }
 
-    fn leader(&self) -> LeaderBlock<V, Digest> {
+    pub fn leader(&self) -> LeaderBlock<V, Digest> {
         let proposals = self
             .tips
             .iter()
@@ -183,7 +193,7 @@ impl<V: Variant> Fixture<V> {
         .unwrap()
     }
 
-    fn vote_body(&self, leader: &LeaderBlock<V, Digest>, signer: usize) -> VoteBody<Digest> {
+    pub fn vote_body(&self, leader: &LeaderBlock<V, Digest>, signer: usize) -> VoteBody<Digest> {
         let mut positions = vec![Position::new(1); self.codec.participants()];
         positions[signer] = Position::new(0);
         VoteBody::for_leader::<Sha256, V>(
@@ -195,7 +205,7 @@ impl<V: Variant> Fixture<V> {
         .unwrap()
     }
 
-    fn votes(&self, leader: &LeaderBlock<V, Digest>) -> Vec<Vote<V, Digest>> {
+    pub fn votes(&self, leader: &LeaderBlock<V, Digest>) -> Vec<Vote<V, Digest>> {
         self.signers
             .iter()
             .take(self.codec.view_quorum())
@@ -204,7 +214,7 @@ impl<V: Variant> Fixture<V> {
             .collect()
     }
 
-    fn view_messages(&self, leader: &LeaderBlock<V, Digest>) -> Vec<ViewMessage<V, Digest>> {
+    pub fn view_messages(&self, leader: &LeaderBlock<V, Digest>) -> Vec<ViewMessage<V, Digest>> {
         let designation = self.codec.designation_quorum();
         self.signers
             .iter()
@@ -229,9 +239,13 @@ pub fn rayon() -> Rayon {
     Rayon::new(NZUsize!(8)).unwrap()
 }
 
-fn sharing<V: Variant>(rng: &mut TestRng, required: u32) -> (Sharing<V>, Vec<Share>) {
+fn sharing<V: Variant>(
+    rng: &mut TestRng,
+    participants: u32,
+    required: u32,
+) -> (Sharing<V>, Vec<Share>) {
     let private = Poly::<Scalar>::new(rng, required - 1);
-    let shares = (0..PARTICIPANTS)
+    let shares = (0..participants)
         .map(|index| {
             let point = Scalar::from_u64(u64::from(index) + 1);
             Share::new(Participant::new(index), Private::new(private.eval(&point)))
@@ -240,10 +254,10 @@ fn sharing<V: Variant>(rng: &mut TestRng, required: u32) -> (Sharing<V>, Vec<Sha
     let public = Poly::<V::Public>::commit(private);
     let mut encoded = BytesMut::new();
     Mode::NonZeroCounter.write(&mut encoded);
-    PARTICIPANTS.write(&mut encoded);
+    participants.write(&mut encoded);
     public.write(&mut encoded);
     let mut encoded = encoded.freeze();
-    let total = NonZeroU32::new(PARTICIPANTS).unwrap();
+    let total = NonZeroU32::new(participants).unwrap();
     let sharing = Sharing::read_cfg(&mut encoded, &(total, ModeVersion::v0())).unwrap();
     (sharing, shares)
 }
@@ -252,10 +266,10 @@ fn digest(label: &[u8], marker: u64) -> Digest {
     Sha256::hash(&[label, &marker.to_be_bytes()])
 }
 
-fn test_config() -> Config<Digest> {
+fn test_config(participants: u32) -> Config<Digest> {
     let epoch = Epoch::new(9);
     let limits = Limits::new(2, 2).unwrap();
-    let tips = (0..PARTICIPANTS)
+    let tips = (0..participants)
         .map(|chain| {
             BlockRef::new(
                 ChainId::new(chain),
@@ -275,8 +289,8 @@ fn test_config() -> Config<Digest> {
     Config::new(
         epoch,
         NAMESPACE,
-        PARTICIPANTS as usize,
-        (0..PARTICIPANTS).map(Participant::new).collect(),
+        participants as usize,
+        (0..participants).map(Participant::new).collect(),
         limits,
         genesis,
     )
