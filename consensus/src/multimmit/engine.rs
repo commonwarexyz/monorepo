@@ -88,12 +88,6 @@ const DURABILITY_STORAGE_NAMESPACE: &str = "multimmit-machine";
 /// Bytes buffered before a store writes to a blob.
 const WRITE_BUFFER: NonZeroUsize = NZUsize!(1024 * 1024);
 
-/// Observation cohorts the batcher may hold in the voter's mailbox at once.
-///
-/// One cohort is ingested while the next already waits, so the voter never idles on the batcher.
-/// Any deeper queue would only move artifacts out of the fair ingress lanes, where they batch
-/// under backpressure, into a FIFO ahead of verification.
-const OBSERVATION_PIPELINE: NonZeroUsize = NZUsize!(2);
 
 /// Derives the storage sizing every durable store uses from the machine's own bounds.
 ///
@@ -772,7 +766,13 @@ where
                 codec,
                 limits: ingress_limits(&config.profile),
                 mailbox_size: config.mailbox_size,
-                observation_capacity: OBSERVATION_PIPELINE,
+                // The voter merges every queued cohort into one step of at most one verification
+                // batch, so queuing more cohorts than that only moves artifacts out of the fair
+                // ingress lanes into a FIFO the step cannot consume.
+                observation_capacity: NonZeroUsize::new(
+                    config.profile.resources().max_verification_batch(),
+                )
+                .expect("verification batch is non-zero"),
             },
         );
         let (observation_sender, observation_receiver) =

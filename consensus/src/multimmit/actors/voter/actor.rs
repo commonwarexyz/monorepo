@@ -536,6 +536,46 @@ struct TimedDurable<V: Variant, D: Digest> {
     publication: Option<TimedPublication>,
 }
 
+/// Every observation cohort the batcher had queued, merged into one machine step.
+///
+/// Cohorts wait in the voter's mailbox only while the voter is busy, so draining them together
+/// adds no latency and lets one step and one verification batch cover what arrived meanwhile.
+/// The merge stops at the machine's verification batch size, which every cohort already respects.
+struct ObservedBatch<P: PublicKey, V: Variant, D: Digest> {
+    artifacts: Vec<(P, IdentifiedArtifact<V, D>)>,
+    spans: Vec<Span>,
+    cohorts: usize,
+}
+
+impl<P: PublicKey, V: Variant, D: Digest> ObservedBatch<P, V, D> {
+    /// Merges `first` with every queued cohort that still fits, returning the first cohort that
+    /// did not so the caller can carry it into the next batch.
+    fn drain(
+        first: Observed<P, V, D>,
+        observations: &mut mailbox::UnreliableReceiver<Observed<P, V, D>>,
+        max_items: usize,
+    ) -> (Self, Option<Observed<P, V, D>>) {
+        let Observed { artifacts, span } = first;
+        let mut batch = Self {
+            artifacts,
+            spans: vec![span],
+            cohorts: 1,
+        };
+        while batch.artifacts.len() < max_items {
+            let Ok(next) = observations.try_recv() else {
+                break;
+            };
+            if batch.artifacts.len() + next.artifacts.len() > max_items {
+                return (batch, Some(next));
+            }
+            batch.artifacts.extend(next.artifacts);
+            batch.spans.push(next.span);
+            batch.cohorts += 1;
+        }
+        (batch, None)
+    }
+}
+
 /// One ready runtime source, before it is admitted to the serial protocol owner.
 enum RuntimeEvent<P: PublicKey, V: Variant, D: Digest> {
     Persistence(Result<TimedDurable<V, D>, JournalFailure>),
@@ -552,7 +592,7 @@ enum RuntimeEvent<P: PublicKey, V: Variant, D: Digest> {
     Verification(Completed<D>),
     Resolution(Message<V, D>),
     Inspection(Query<D>),
-    Observation(Observed<P, V, D>),
+    Observation(ObservedBatch<P, V, D>),
     InputClosed,
 }
 
@@ -870,6 +910,7 @@ where
                 .collect()
         };
         let verification_queue_limit = profile.resources().max_inflight_verifications();
+        let observation_batch = profile.resources().max_verification_batch();
         let driver_context = self.context.child("driver");
         #[cfg(not(test))]
         let (journal, journal_monitor) = super::journal::spawn(
@@ -923,6 +964,8 @@ where
             fast_verifications: VecDeque::new(),
             bulk_verifications: VecDeque::new(),
             verification_queue_limit,
+            observation_batch,
+            carried_observation: None,
             pending_applications: Vec::with_capacity(
                 config
                     .limits
@@ -1294,6 +1337,10 @@ where
     fast_verifications: VecDeque<PendingVerification<P, V, H::Digest>>,
     bulk_verifications: VecDeque<PendingVerification<P, V, H::Digest>>,
     verification_queue_limit: usize,
+    /// Most artifacts one merged observation step may carry: the machine's verification batch.
+    observation_batch: usize,
+    /// A queued cohort that did not fit the last merged step; it leads the next one.
+    carried_observation: Option<Observed<P, V, H::Digest>>,
     /// Bounded volatile timing for completed local signs awaiting their exact journal event.
     pending_signs: Vec<TimedSign>,
     /// Application completions awaiting an exact sign reservation in the immediate machine drain.
@@ -1399,6 +1446,21 @@ where
         }
 
         let admission = self.runtime_admission();
+
+        if self.carried_observation.is_some() && admission.allows(ReadinessCursor::OBSERVATION, None) {
+            let first = self
+                .carried_observation
+                .take()
+                .expect("a carried observation was checked above");
+            let (batch, carried) =
+                ObservedBatch::drain(first, observations, self.observation_batch);
+            self.carried_observation = carried;
+            let event = RuntimeEvent::Observation(batch);
+            readiness.record(ReadinessCursor::OBSERVATION, &event);
+            return Some(event);
+        }
+        let observation_batch = self.observation_batch;
+        let mut carried_observation = None;
         let journal_idle = self.journal_responses.is_empty();
         let (source, event) = select! {
             result = next_journal_response(
@@ -1471,8 +1533,19 @@ where
                     return pending_forever().await;
                 }
                 observations.recv().await
-            } => (ReadinessCursor::OBSERVATION, observed.map_or(RuntimeEvent::InputClosed, RuntimeEvent::Observation)),
+            } => (
+                ReadinessCursor::OBSERVATION,
+                observed.map_or(RuntimeEvent::InputClosed, |first| {
+                    let (batch, carried) =
+                        ObservedBatch::drain(first, observations, observation_batch);
+                    carried_observation = carried;
+                    RuntimeEvent::Observation(batch)
+                }),
+            ),
         };
+        if carried_observation.is_some() {
+            self.carried_observation = carried_observation;
+        }
         readiness.record(source, &event);
         Some(event)
     }
@@ -1585,9 +1658,16 @@ where
                 ReadinessCursor::RESOLUTION => {
                     mailbox.try_recv().ok().map(RuntimeEvent::Resolution)
                 }
-                ReadinessCursor::OBSERVATION => {
-                    observations.try_recv().ok().map(RuntimeEvent::Observation)
-                }
+                ReadinessCursor::OBSERVATION => self
+                    .carried_observation
+                    .take()
+                    .or_else(|| observations.try_recv().ok())
+                    .map(|first| {
+                        let (batch, carried) =
+                            ObservedBatch::drain(first, observations, self.observation_batch);
+                        self.carried_observation = carried;
+                        RuntimeEvent::Observation(batch)
+                    }),
                 ReadinessCursor::PUBLICATION => self
                     .egress
                     .next_attempt()
@@ -2500,23 +2580,32 @@ where
     }
 
     /// Ingests one peer observation batch.
-    fn ingest_observed(&mut self, observed: Observed<P, V, H::Digest>) -> Result<(), Fatal> {
-        let Observed { span, artifacts } = observed;
+    fn ingest_observed(&mut self, batch: ObservedBatch<P, V, H::Digest>) -> Result<(), Fatal> {
+        let ObservedBatch {
+            artifacts,
+            spans,
+            cohorts,
+        } = batch;
         let (sources, artifacts) = artifacts.into_iter().unzip();
         let observe = info_span!(
             parent: &self.round_span,
             "multimmit.voter.observe",
             epoch = self.protocol_epoch.get().traced(),
-            view = self.round_view.get().traced()
+            view = self.round_view.get().traced(),
+            cohorts
         );
-        observe.follows_from(span.id());
+        for span in &spans {
+            observe.follows_from(span.id());
+        }
         observe.in_scope(|| self.observe_network(artifacts, sources))?;
-        if !self
-            .batcher
-            .enqueue(batcher::Message::ObservationConsumed)
-            .accepted()
-        {
-            return Err(Fatal::Closed);
+        for _ in 0..cohorts {
+            if !self
+                .batcher
+                .enqueue(batcher::Message::ObservationConsumed)
+                .accepted()
+            {
+                return Err(Fatal::Closed);
+            }
         }
         Ok(())
     }

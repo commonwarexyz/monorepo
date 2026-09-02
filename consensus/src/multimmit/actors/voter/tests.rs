@@ -4778,7 +4778,8 @@ fn updated_broadcast_parent_is_attached_to_a_live_proposal() {
             .encode(),
             true,
         );
-        // The view-3 proposal must carry exactly the newest V-QC the node broadcast for view 1,
+        // The view-3 proposal must carry a view-1 V-QC that is at least the transcript the node
+        // broadcast: the same certificate, or one improved by votes that arrived after it,
         // whichever vote cohorts the batcher formed.
         let deadline = context.current() + Duration::from_secs(2);
         loop {
@@ -4817,8 +4818,20 @@ fn updated_broadcast_parent_is_attached_to_a_live_proposal() {
                 continue;
             }
             let published = published.expect("a view-1 V-QC was published");
-            assert_eq!(block.block().parent(), published.id::<Sha256>());
-            assert_eq!(*parent, published);
+            assert_eq!(block.block().parent(), parent.id::<Sha256>());
+            assert_eq!(parent.leader(), published.leader());
+            assert!(
+                parent.tally().signers().count() >= published.tally().signers().count(),
+                "the attached parent lost votes the broadcast certificate carried"
+            );
+            assert!(
+                published
+                    .tally()
+                    .signers()
+                    .iter()
+                    .all(|signer| parent.tally().signers().iter().any(|s| s == signer)),
+                "the attached parent is not a superset of the broadcast certificate"
+            );
             break;
         }
     });

@@ -316,12 +316,14 @@ fn checkpoint_compaction_soak_survives_a_bounded_restart() {
         cluster.observe_finality(&all).await;
         assert!(Arc::ptr_eq(&application, &cluster.app(5).log()));
         // Recovery may discard the latest rolled section when no barrier reached it before the
-        // crash. The soak above already observed two completed rolls; only the single live suffix
-        // must remain after restart.
-        assert!(matches!(
-            cluster.journal_sections(5).await.as_slice(),
-            [_]
-        ));
+        // crash, and a checkpoint published right after recovery prunes everything below the live
+        // section, whose blob only appears on its first append. The soak above already observed
+        // two completed rolls; at most the single live suffix may remain after restart.
+        let sections = cluster.journal_sections(5).await;
+        assert!(
+            sections.len() <= 1,
+            "recovered journal kept sections {sections:?}"
+        );
 
         cluster.produce_once();
         cluster
