@@ -144,6 +144,15 @@ impl Lane {
             Self::PeerObservation => 4,
         }
     }
+
+    /// Returns whether a peer, rather than the machine itself, chooses this lane's payload sizes.
+    ///
+    /// Only these lanes need a byte ceiling. Every other lane carries completions of work the
+    /// machine issued and already counted, so a byte budget there bounds nothing the item ceiling
+    /// does not, while making an over-count in a completion payload fatal to the voter.
+    pub(crate) const fn peer_supplied(self) -> bool {
+        matches!(self, Self::ResolverResult | Self::PeerObservation)
+    }
 }
 
 /// A machine transition class charged against one core quantum.

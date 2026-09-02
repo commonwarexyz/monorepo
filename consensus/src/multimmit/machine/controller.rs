@@ -145,6 +145,10 @@ impl DriveCursor {
 }
 
 /// Item-and-byte limit for one core input lane.
+///
+/// The item ceiling binds on every lane. The byte ceiling is admission-enforced only where
+/// [`Lane::peer_supplied`] holds; elsewhere it names the per-item residency an aggregate
+/// completion is charged.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) struct LaneLimit {
     items: usize,
@@ -652,7 +656,7 @@ impl<H: Hasher, V: Variant> CoreState<H, V> {
         if items > limit.items {
             return Err(CoreError::LaneItemsFull(lane));
         }
-        if total_bytes > limit.bytes {
+        if lane.peer_supplied() && total_bytes > limit.bytes {
             return Err(CoreError::LaneBytesFull(lane));
         }
 
@@ -1045,9 +1049,10 @@ impl<H: Hasher, V: Variant> CoreState<H, V> {
 
     /// Returns whether one more item can be received without consuming its source.
     ///
-    /// Byte admission remains exact in [`Self::enqueue`]. A source-specific maximum guarantees
-    /// that any valid single item fits an empty lane, so the actor uses this item check to leave
-    /// ready work in its bounded upstream queue while a lane is occupied.
+    /// Byte admission remains exact in [`Self::enqueue`] for the peer-supplied lanes. A
+    /// source-specific maximum guarantees that any valid single item fits an empty lane, so the
+    /// actor uses this item check to leave ready work in its bounded upstream queue while a lane
+    /// is occupied.
     pub(crate) const fn can_admit(&self, lane: Lane) -> bool {
         let index = lane_index(lane);
         self.usage[index].items < self.limits.lane(lane).items
@@ -2060,6 +2065,39 @@ mod tests {
             }
         };
         assert_eq!(serviced_cycle, 1);
+    }
+
+    #[test]
+    fn oversized_local_completion_is_admitted_while_peer_bytes_stay_capped() {
+        let mut core = observer_core(77);
+        let local = core.limits.lane(Lane::LocalCompletion);
+        let peer = core.limits.lane(Lane::PeerObservation);
+
+        // The machine issued this verification itself and already counted it against
+        // max_inflight_verifications, so an over-count in the completion's resident-byte
+        // accounting must not tear the voter down.
+        let ticket = core
+            .enqueue(
+                Input::Verified(VerificationCompletion::new(JobId::new(0), 0, Vec::new())),
+                local.bytes.saturating_add(1),
+            )
+            .expect("a locally issued completion is admitted past the lane byte ceiling");
+        let usage = core.usage[lane_index(Lane::LocalCompletion)];
+        assert_eq!(usage.items, 1);
+        assert!(usage.bytes > local.bytes);
+
+        // The completion is queued for service, not silently dropped.
+        assert!(
+            core.queues[lane_index(Lane::LocalCompletion)]
+                .iter()
+                .any(|queued| queued.ticket == ticket)
+        );
+
+        // Peer-supplied bytes keep their ceiling.
+        assert_eq!(
+            core.enqueue(Input::Observe(Vec::new()), peer.bytes.saturating_add(1)),
+            Err(CoreError::LaneBytesFull(Lane::PeerObservation)),
+        );
     }
 
     #[test]
