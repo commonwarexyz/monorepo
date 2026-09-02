@@ -147,9 +147,9 @@ impl RMap {
     ///
     /// # Complexity
     ///
-    /// The time complexity is O(M + K log N), where N is the total number of ranges in the map,
-    /// M is the number of ranges that overlap with the removal range (iterate part), and K is the number of
-    /// new ranges created or ranges removed (at most 2 additions and M removals).
+    /// O((M + 1) log N), where N is the number of ranges in the map and M is the number of ranges
+    /// overlapping the removal range. Each overlapping range costs one removal, plus at most two
+    /// insertions in total for the pieces that stick out.
     ///
     /// # Example
     ///
@@ -171,62 +171,21 @@ impl RMap {
             return;
         }
 
-        // Iterate over ranges that could possibly overlap with the removal range `[start, end]`.
-        // A range (r_start, r_end) overlaps if r_start <= end AND r_end >= start.
-        //
-        // We optimize the BTreeMap iteration by only looking at ranges whose start (r_start)
-        // is less than or equal to the `end` of the removal range. If r_start > end,
-        // then (r_start, r_end) cannot overlap with [start, end].
-        let mut to_add = Vec::new();
-        let mut to_remove = Vec::new();
+        // Every range that overlaps or follows `start`, cut off past `end`.
+        let overlapping: Vec<(u64, u64)> = self
+            .iter_from(start)
+            .take_while(|&(&r_start, _)| r_start <= end)
+            .map(|(&r_start, &r_end)| (r_start, r_end))
+            .collect();
 
-        for (&r_start, &r_end) in self.ranges.iter() {
-            // Case 1: No overlap
-            if r_end < start || r_start > end {
-                continue;
-            }
-
-            // Case 2: Removal range completely covers current range
-            if start <= r_start && end >= r_end {
-                to_remove.push(r_start);
-                continue;
-            }
-
-            // Case 3: Current range completely covers removal range (split)
-            if r_start < start && r_end > end {
-                to_remove.push(r_start);
-                to_add.push((r_start, start - 1));
-                to_add.push((end + 1, r_end));
-                continue;
-            }
-
-            // Case 4: Removal range overlaps start of current range
-            if start <= r_start && end < r_end {
-                // and end >= r_start implied by not Case 1
-                to_remove.push(r_start);
-                to_add.push((end + 1, r_end));
-                continue;
-            }
-
-            // Case 5: Removal range overlaps end of current range
-            if start > r_start && end >= r_end {
-                // and start <= r_end implied by not Case 1
-                to_remove.push(r_start);
-                to_add.push((r_start, start - 1));
-                continue;
-            }
-        }
-
-        // Remove anything no longer needed.
-        for r_start in to_remove {
+        // Remove each overlapping range and re-add whatever sticks out on either side.
+        for (r_start, r_end) in overlapping {
             self.ranges.remove(&r_start);
-        }
-
-        // Add anything that is now needed.
-        for (a_start, a_end) in to_add {
-            if a_start <= a_end {
-                // Ensure valid range before adding
-                self.ranges.insert(a_start, a_end);
+            if r_start < start {
+                self.ranges.insert(r_start, start - 1);
+            }
+            if r_end > end {
+                self.ranges.insert(end + 1, r_end);
             }
         }
     }
@@ -409,9 +368,8 @@ impl RMap {
     ///
     /// # Complexity
     ///
-    /// O(G log N + M) where N is the number of ranges in [RMap], G is the number of gaps
-    /// visited (at most N), and M is the number of missing items returned (at most `max`).
-    /// Each gap requires a `next_gap` call (O(log N)) and collecting items (O(items in gap)).
+    /// O(log N + M) where N is the number of ranges in [RMap] and M is the number of missing items
+    /// returned (at most `max`).
     ///
     /// # Example
     ///
@@ -438,43 +396,21 @@ impl RMap {
     pub fn missing_items(&self, start: u64, max: usize) -> Vec<u64> {
         // Ensure input is valid
         assert!(max > 0, "max must be greater than 0");
-        let mut current = start;
-
-        // Collect missing items
         let mut missing = Vec::with_capacity(max);
-        loop {
-            // If we're inside a range, skip to just after it
-            let (current_range_end, next_range_start) = self.next_gap(current);
-            if let Some(end) = current_range_end {
-                // Check if we can move past this range
-                if end == u64::MAX {
-                    break missing; // No gaps possible after u64::MAX
-                }
-                current = end + 1;
-                continue;
-            }
 
-            // We're in a gap - check if there's a next range
-            let Some(next_start) = next_range_start else {
-                break missing; // No more ranges, so no more gaps to fill
+        // Each range closes the gap before it. The scan then resumes past it.
+        let mut current = start;
+        for (&r_start, &r_end) in self.iter_from(start) {
+            missing.extend((current..r_start).take(max - missing.len()));
+            if missing.len() == max {
+                break;
+            }
+            let Some(next) = r_end.checked_add(1) else {
+                break;
             };
-
-            // Collect items from this gap until we hit the next range or have enough
-            let gap_end = next_start - 1; // next_start must be greater than or equal to 1
-            let items_needed = max - missing.len(); // there must be at least one item to collect
-            let gap_end = gap_end.min(current.saturating_add(items_needed as u64 - 1));
-            for index in current..=gap_end {
-                missing.push(index);
-            }
-
-            // If we have enough items, break
-            if missing.len() >= max {
-                break missing;
-            }
-
-            // Move to the start of the next range to check for more gaps
-            current = next_start;
+            current = next;
         }
+        missing
     }
 }
 

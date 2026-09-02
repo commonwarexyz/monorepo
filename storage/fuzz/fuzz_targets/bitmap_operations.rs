@@ -38,13 +38,11 @@ enum BitmapOperation {
 
 #[derive(Debug)]
 struct FuzzInput {
-    seed: u64,
     operations: Vec<BitmapOperation>,
 }
 
 impl<'a> Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-        let seed = u.arbitrary()?;
         let num_ops = u.int_in_range(1..=MAX_OPERATIONS)?;
         let mut operations = Vec::with_capacity(num_ops);
 
@@ -52,12 +50,12 @@ impl<'a> Arbitrary<'a> for FuzzInput {
             operations.push(u.arbitrary()?);
         }
 
-        Ok(FuzzInput { seed, operations })
+        Ok(FuzzInput { operations })
     }
 }
 
 fn fuzz(input: FuzzInput) {
-    let runner = deterministic::Runner::seeded(input.seed);
+    let runner = deterministic::Runner::default();
     const PARTITION: &str = "fuzz-mmr-bitmap-test-partition";
 
     runner.start(|context| async move {

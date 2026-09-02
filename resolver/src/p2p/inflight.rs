@@ -73,7 +73,7 @@ where
 
     /// Begin a consumer delivery for a network response, attaching the abort handle.
     /// Spawns `consumer.deliver(delivery, value)` as an in-flight future and records
-    /// the response so later subscribers can be delivered the same accepted bytes.
+    /// the response so later subscribers can be delivered the same bytes.
     pub(super) fn deliver(
         &mut self,
         delivery: Delivery<Con::Key, Con::Subscriber>,
@@ -110,6 +110,7 @@ where
 
     /// Returns the next completed delivery, or [Aborted] if it was canceled.
     /// Clears the entry's delivery aborter so the slot is available for a retry.
+    /// The outcome is `None` if the consumer dropped its verdict.
     pub(super) async fn next_delivery(
         &mut self,
     ) -> Result<
@@ -118,7 +119,7 @@ where
             Duration,
             usize,
             Delivery<Con::Key, Con::Subscriber>,
-            Outcome,
+            Option<Outcome>,
         ),
         Aborted,
     > {
@@ -294,7 +295,7 @@ mod tests {
             assert_eq!(delivered_peer, peer);
             assert_eq!(elapsed, Duration::from_millis(17));
             assert_eq!(bytes, value.len());
-            assert_eq!(outcome, Outcome::Complete);
+            assert_eq!(outcome, Some(Outcome::Complete));
 
             // The consumer was actually invoked.
             let (k, v) = events.recv().await.unwrap();
@@ -350,7 +351,7 @@ mod tests {
             let (_, _, _, delivered, outcome) =
                 inflight.next_delivery().await.expect("delivery completed");
             assert_eq!(delivered.key, key);
-            assert_eq!(outcome, Outcome::Complete);
+            assert_eq!(outcome, Some(Outcome::Complete));
             inflight.complete(&context, &key);
 
             // Late cancel finds no entry; must not panic.

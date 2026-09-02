@@ -8,11 +8,12 @@ use commonware_runtime::{
 };
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
-    merkle::{Family as MerkleFamily, full::Config as MerkleConfig, mmb, mmr},
-    qmdb::any::{
-        FixedConfig as Config,
-        batch::UnmerkleizedBatch,
-        unordered::fixed::{Db as AnyDb, Update},
+    merkle::{Graftable, full::Config as MerkleConfig, mmb, mmr},
+    qmdb::{
+        any::unordered::fixed::Update,
+        current::{
+            FixedConfig as Config, batch::UnmerkleizedBatch, unordered::fixed::Db as CurrentDb,
+        },
     },
     translator::OneCap,
 };
@@ -22,10 +23,10 @@ use std::num::NonZeroU16;
 
 type Key = FixedBytes<32>;
 type Value = FixedBytes<32>;
-type Db<F> = AnyDb<F, deterministic::Context, Key, Value, Sha256, OneCap, Sequential>;
-type Batch<F> = UnmerkleizedBatch<F, Sha256, Update<Key, Value>, Sequential>;
+type Db<F> = CurrentDb<F, deterministic::Context, Key, Value, Sha256, OneCap, 32, Sequential>;
+type Batch<F> = UnmerkleizedBatch<F, Sha256, Update<Key, Value>, 32, Sequential>;
 
-const PAGE_SIZE: NonZeroU16 = NZU16!(131);
+const PAGE_SIZE: NonZeroU16 = NZU16!(137);
 const COLLISION_GROUPS: u8 = 4;
 const KEY_SPACE: u64 = 32;
 const MAX_INITIAL_WRITES: usize = 16;
@@ -36,7 +37,8 @@ const MAX_GRANDCHILD_MUTATIONS: usize = 16;
 #[derive(Arbitrary, Debug, Clone, Copy)]
 enum Schedule {
     PendingParent,
-    DroppedCommittedPrefix,
+    PendingChain,
+    DroppedPrefixChain,
 }
 
 #[derive(Arbitrary, Debug, Clone, Copy)]
@@ -116,6 +118,7 @@ fn test_config(name: &str, pooler: &impl BufferPooler) -> Config<OneCap, Sequent
             replay_buffer: NZUsize!(1024),
             page_cache,
         },
+        grafted_metadata_partition: format!("{name}-grafted"),
         translator: OneCap,
         init_cache_size: Some(NZUsize!(3)),
         init_buffer: NZUsize!(1 << 21),
@@ -135,7 +138,7 @@ fn value_from_bytes(bytes: [u8; 32]) -> Value {
     Value::new(bytes)
 }
 
-fn apply_mutations<F: MerkleFamily>(mut batch: Batch<F>, mutations: &[Mutation]) -> Batch<F> {
+fn apply_mutations<F: Graftable>(mut batch: Batch<F>, mutations: &[Mutation]) -> Batch<F> {
     for mutation in mutations {
         batch = match mutation {
             Mutation::Write { key, value } => {
@@ -147,17 +150,18 @@ fn apply_mutations<F: MerkleFamily>(mut batch: Batch<F>, mutations: &[Mutation])
     batch
 }
 
-fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
+fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
     let runner = deterministic::Runner::default();
 
+    let test_name = test_name.to_string();
     runner.start(|context| async move {
-        let cfg = test_config(suffix, &context);
+        let cfg = test_config(&test_name, &context);
         let db: Db<F> = Db::init(context.child("storage"), cfg)
             .await
-            .expect("init unordered any db");
+            .expect("init current unordered db");
 
-        // Seed the committed base state so parent/child batching sees both
-        // translated-key collisions and ordinary committed lookups.
+        // Seed the committed base state so the wrapper sees collision-heavy
+        // inner batching before parent/child comparisons.
         let mut batch = db.new_batch();
         for write in &input.initial {
             batch = batch.write(
@@ -171,16 +175,14 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
 
         let db = match input.schedule {
             Schedule::PendingParent => {
-                // Build a parent batch, then build the child while the parent is still
-                // pending so the child must resolve through base_diff plus the stale
-                // committed index.
+                // Build the child while the parent is still pending.
                 let batch = apply_mutations(db.new_batch(), &input.parent);
                 let parent = batch.merkleize(&db, None).await.unwrap();
                 let batch = apply_mutations(parent.new_batch::<Sha256>(), &input.child);
                 let pending_child = batch.merkleize(&db, None).await.unwrap();
 
                 // Commit the parent, then rebuild the same logical child from the
-                // committed DB state. Both speculative roots must match.
+                // committed wrapper state. Both canonical and ops roots must match.
                 let (db, _) = db.apply_batch(parent).await.unwrap();
                 let db = db.commit().await.unwrap();
 
@@ -190,7 +192,12 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                 assert_eq!(
                     pending_child.root(),
                     committed_child.root(),
-                    "child root depended on pending-vs-committed parent path"
+                    "current root depended on pending-vs-committed parent path"
+                );
+                assert_eq!(
+                    pending_child.ops_root(),
+                    committed_child.ops_root(),
+                    "current ops root depended on pending-vs-committed parent path"
                 );
 
                 // Apply the pending child and verify the DB state matches.
@@ -198,42 +205,110 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                 assert_eq!(
                     db.root(),
                     committed_child.root(),
-                    "pending child root diverged"
+                    "pending child canonical root diverged"
+                );
+                assert_eq!(
+                    db.ops_root(),
+                    committed_child.ops_root(),
+                    "pending child ops root diverged"
                 );
                 db
             }
-            Schedule::DroppedCommittedPrefix => {
-                // Build A -> B, then commit and drop A before merkleizing C. C must retain
-                // only B and position that suffix relative to the now-committed A.
+            Schedule::PendingChain => {
+                // Build parent -> child -> grandchild with parent and child both pending, so
+                // the grandchild's grafted layer overlays two live ancestor diffs on the
+                // committed bitmap. This is the only schedule that checks a multi-diff
+                // ancestor walk against a committed-only reference.
+                let batch = apply_mutations(db.new_batch(), &input.parent);
+                let parent = batch.merkleize(&db, None).await.unwrap();
+                let batch = apply_mutations(parent.new_batch::<Sha256>(), &input.child);
+                let child = batch.merkleize(&db, None).await.unwrap();
+                let batch = apply_mutations(child.new_batch::<Sha256>(), &input.grandchild);
+                let pending_grandchild = batch.merkleize(&db, None).await.unwrap();
+
+                // Commit the chain prefix, then rebuild the same grandchild from the
+                // committed wrapper state. Both roots must be independent of the chain's
+                // pendency.
+                let (db, _) = db.apply_batch(parent).await.unwrap();
+                let db = db.commit().await.unwrap();
+                let (db, _) = db.apply_batch(child).await.unwrap();
+                let db = db.commit().await.unwrap();
+
+                let batch = apply_mutations(db.new_batch(), &input.grandchild);
+                let committed_grandchild = batch.merkleize(&db, None).await.unwrap();
+
+                assert_eq!(
+                    pending_grandchild.root(),
+                    committed_grandchild.root(),
+                    "current root depended on pending-vs-committed ancestor chain"
+                );
+                assert_eq!(
+                    pending_grandchild.ops_root(),
+                    committed_grandchild.ops_root(),
+                    "current ops root depended on pending-vs-committed ancestor chain"
+                );
+
+                let (db, _) = db.apply_batch(pending_grandchild).await.unwrap();
+                assert_eq!(
+                    db.root(),
+                    committed_grandchild.root(),
+                    "pending grandchild canonical root diverged"
+                );
+                assert_eq!(
+                    db.ops_root(),
+                    committed_grandchild.ops_root(),
+                    "pending grandchild ops root diverged"
+                );
+                db
+            }
+            Schedule::DroppedPrefixChain => {
+                // Build A -> B -> C, commit and drop A, then merkleize D on C: D's grafted
+                // layer overlays two live ancestor diffs while base locations trace across
+                // the dropped committed prefix. C reuses the parent mutations so the chain
+                // re-deletes and re-creates the same colliding keys.
                 let batch = apply_mutations(db.new_batch(), &input.parent);
                 let a = batch.merkleize(&db, None).await.unwrap();
                 let batch = apply_mutations(a.new_batch::<Sha256>(), &input.child);
                 let b = batch.merkleize(&db, None).await.unwrap();
+                let batch = apply_mutations(b.new_batch::<Sha256>(), &input.parent);
+                let c = batch.merkleize(&db, None).await.unwrap();
 
-                // Applying A consumes its last strong reference; B retains only a Weak parent.
+                // Applying A consumes its last strong reference. B retains only a Weak parent.
                 let (db, _) = db.apply_batch(a).await.unwrap();
                 let db = db.commit().await.unwrap();
 
-                let batch = apply_mutations(b.new_batch::<Sha256>(), &input.grandchild);
-                let retained_child = batch.merkleize(&db, None).await.unwrap();
+                let batch = apply_mutations(c.new_batch::<Sha256>(), &input.grandchild);
+                let retained_d = batch.merkleize(&db, None).await.unwrap();
 
-                // Rebuild B -> C from the committed A state as a reference.
+                // Rebuild B -> C -> D from the committed A state as a reference.
                 let batch = apply_mutations(db.new_batch(), &input.child);
                 let rebuilt_b = batch.merkleize(&db, None).await.unwrap();
-                let batch = apply_mutations(rebuilt_b.new_batch::<Sha256>(), &input.grandchild);
-                let rebuilt_child = batch.merkleize(&db, None).await.unwrap();
+                let batch = apply_mutations(rebuilt_b.new_batch::<Sha256>(), &input.parent);
+                let rebuilt_c = batch.merkleize(&db, None).await.unwrap();
+                let batch = apply_mutations(rebuilt_c.new_batch::<Sha256>(), &input.grandchild);
+                let rebuilt_d = batch.merkleize(&db, None).await.unwrap();
 
                 assert_eq!(
-                    retained_child.root(),
-                    rebuilt_child.root(),
-                    "child root depended on a committed-and-dropped prefix"
+                    retained_d.root(),
+                    rebuilt_d.root(),
+                    "current root depended on a committed-and-dropped prefix"
+                );
+                assert_eq!(
+                    retained_d.ops_root(),
+                    rebuilt_d.ops_root(),
+                    "current ops root depended on a committed-and-dropped prefix"
                 );
 
-                let (db, _) = db.apply_batch(retained_child).await.unwrap();
+                let (db, _) = db.apply_batch(retained_d).await.unwrap();
                 assert_eq!(
                     db.root(),
-                    rebuilt_child.root(),
-                    "retained-suffix child root diverged"
+                    rebuilt_d.root(),
+                    "retained-chain canonical root diverged"
+                );
+                assert_eq!(
+                    db.ops_root(),
+                    rebuilt_d.ops_root(),
+                    "retained-chain ops root diverged"
                 );
                 db
             }
@@ -245,12 +320,13 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
 
 fuzz_target!(|input: FuzzInput| {
     match input.schedule {
-        Schedule::PendingParent => {
-            fuzz_family::<mmr::Family>(&input, "fuzz-mmr-qmdb-unordered-batch-root");
-            fuzz_family::<mmb::Family>(&input, "fuzz-mmb-qmdb-unordered-batch-root");
+        Schedule::PendingParent | Schedule::PendingChain => {
+            fuzz_family::<mmr::Family>(&input, "fuzz-mmr-current-unordered-batch-root");
+            fuzz_family::<mmb::Family>(&input, "fuzz-mmb-current-unordered-batch-root");
         }
-        Schedule::DroppedCommittedPrefix => {
-            fuzz_family::<mmb::Family>(&input, "fuzz-mmb-qmdb-unordered-dropped-prefix");
+        Schedule::DroppedPrefixChain => {
+            fuzz_family::<mmr::Family>(&input, "fuzz-mmr-current-unordered-dropped-chain");
+            fuzz_family::<mmb::Family>(&input, "fuzz-mmb-current-unordered-dropped-chain");
         }
     }
 });
