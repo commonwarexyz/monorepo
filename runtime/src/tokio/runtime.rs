@@ -166,7 +166,8 @@ pub struct Config {
     /// Whether or not to catch panics.
     catch_panics: bool,
 
-    /// Base directory for all storage operations.
+    /// Base directory for all storage operations, created at start if missing
+    /// and held for the run.
     storage_directory: PathBuf,
 
     /// Blob layouts accepted by storage.
@@ -176,11 +177,6 @@ pub struct Config {
     /// restrict the range to what a rollback target can read before the upgraded binary first
     /// opens storage.
     storage_blob_layouts: RangeInclusive<BlobLayout>,
-
-    /// Maximum buffer size for operations on blobs.
-    ///
-    /// Tokio sets the default value to 2MB.
-    maximum_buffer_size: usize,
 
     /// Network configuration.
     network_cfg: NetworkConfig,
@@ -205,7 +201,6 @@ impl Config {
             catch_panics: false,
             storage_directory,
             storage_blob_layouts: BlobLayout::ALL,
-            maximum_buffer_size: 2 * 1024 * 1024, // 2 MB
             network_cfg: NetworkConfig::default(),
             network_buffer_pool_cfg: None,
             storage_buffer_pool_cfg: None,
@@ -277,11 +272,6 @@ impl Config {
         self
     }
     /// See [Config]
-    pub const fn with_maximum_buffer_size(mut self, n: usize) -> Self {
-        self.maximum_buffer_size = n;
-        self
-    }
-    /// See [Config]
     pub fn with_network_buffer_pool_config(mut self, cfg: BufferPoolConfig) -> Self {
         self.network_buffer_pool_cfg = Some(cfg);
         self
@@ -336,10 +326,6 @@ impl Config {
     /// See [Config]
     pub const fn storage_blob_layouts(&self) -> &RangeInclusive<BlobLayout> {
         &self.storage_blob_layouts
-    }
-    /// See [Config]
-    pub const fn maximum_buffer_size(&self) -> usize {
-        self.maximum_buffer_size
     }
 
     /// Returns the network buffer pool config, deriving pool parallelism from
@@ -491,15 +477,6 @@ impl crate::Runner for Runner {
             &mut runtime_registry.sub_registry("storage_buffer_pool"),
         );
 
-        // Make any storage a prior process left in the page cache crash-durable before we open it,
-        // so the data read during init is durable.
-        if let Err(e) = crate::storage::sync(&self.cfg.storage_directory) {
-            panic!(
-                "failed to sync storage filesystem at startup ({}): {e}",
-                self.cfg.storage_directory.display()
-            );
-        }
-
         // Initialize storage
         cfg_if::cfg_if! {
             if #[cfg(feature = "iouring-storage")] {
@@ -522,7 +499,6 @@ impl crate::Runner for Runner {
                     TokioStorage::new(
                         TokioStorageConfig::new(
                             self.cfg.storage_directory.clone(),
-                            self.cfg.maximum_buffer_size,
                             self.cfg.storage_blob_layouts.clone(),
                         ),
                         storage_buffer_pool.clone(),
@@ -530,6 +506,16 @@ impl crate::Runner for Runner {
                     &mut runtime_registry,
                 );
             }
+        }
+
+        // Make any storage a prior process left in the page cache crash-durable before we open it,
+        // so the data read during init is durable. This runs under the hold, after any straggling
+        // writes from a previous run have landed, so the flush covers them too.
+        if let Err(e) = crate::storage::sync(&self.cfg.storage_directory) {
+            panic!(
+                "failed to sync storage filesystem at startup ({}): {e}",
+                self.cfg.storage_directory.display()
+            );
         }
 
         // Initialize network
@@ -1214,6 +1200,46 @@ mod tests {
                 assert_runner_drains_spawned_task(execution, root_exit);
             }
         }
+    }
+
+    #[test]
+    fn test_runner_start_waits_for_previous_run() {
+        let cfg = Config::new();
+        let storage_directory = cfg.storage_directory().clone();
+
+        // The first run keeps its context, and with it the storage directory,
+        // until it is released.
+        let (started, first_started) = std::sync::mpsc::channel();
+        let (release, released) = futures::channel::oneshot::channel();
+        let first_cfg = cfg.clone();
+        let first = std::thread::spawn(move || {
+            Runner::new(first_cfg).start(|context| async move {
+                started.send(()).unwrap();
+                released.await.unwrap();
+                drop(context);
+            });
+        });
+        first_started.recv_timeout(Duration::from_secs(10)).unwrap();
+
+        // A second run on the same directory cannot start until the first has
+        // returned.
+        let (started, second_started) = std::sync::mpsc::channel();
+        let second = std::thread::spawn(move || {
+            Runner::new(cfg).start(|_| async move {
+                started.send(()).unwrap();
+            });
+        });
+        match second_started.recv_timeout(Duration::from_millis(200)) {
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            other => panic!("second run started while the first held the directory: {other:?}"),
+        }
+        release.send(()).unwrap();
+        first.join().unwrap();
+        second_started
+            .recv_timeout(Duration::from_secs(10))
+            .expect("second run did not start after the first returned");
+        second.join().unwrap();
+        let _ = std::fs::remove_dir_all(storage_directory);
     }
 
     #[test]
