@@ -110,6 +110,12 @@ pub struct Deploy {
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     frontier_proposals: bool,
 
+    /// Minimum milliseconds between two blocks built by one producer (the paper's theta).
+    ///
+    /// Zero builds as fast as block custody admits.
+    #[arg(long, default_value_t = 0)]
+    production_interval_ms: u64,
+
     /// Bytes reserved for live producer blocks awaiting ordered delivery.
     #[arg(long, default_value_t = DEFAULT_MARSHAL_LIVE_CACHE_BYTES)]
     marshal_live_cache_bytes: usize,
@@ -159,6 +165,8 @@ pub struct NodeConfig {
     pub extension_bound: u32,
     #[serde(default = "default_frontier_proposals")]
     pub frontier_proposals: bool,
+    #[serde(default)]
+    pub production_interval_ms: u64,
     pub marshal_live_cache_bytes: usize,
     pub marshal_materialized_cache_bytes: usize,
     pub storage_dir: PathBuf,
@@ -291,6 +299,7 @@ impl Deploy {
                 pipeline_depth: self.pipeline_depth,
                 extension_bound: self.extension_bound,
                 frontier_proposals: self.frontier_proposals,
+                production_interval_ms: self.production_interval_ms,
                 marshal_live_cache_bytes: self.marshal_live_cache_bytes,
                 marshal_materialized_cache_bytes: self.marshal_materialized_cache_bytes,
                 storage_dir: PathBuf::from("/home/ubuntu/data"),

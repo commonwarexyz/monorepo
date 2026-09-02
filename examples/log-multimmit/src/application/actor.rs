@@ -288,11 +288,22 @@ impl ApplicationMetrics {
     }
 }
 
+/// How this producer shapes its blocks.
+#[derive(Clone, Copy, Debug)]
+pub struct Production {
+    /// Bytes of junk data placed in every block body.
+    pub body_size: usize,
+    /// Minimum time between two blocks this producer builds; zero builds as fast as block
+    /// custody admits.
+    pub interval: Duration,
+}
+
 /// Deterministic application attachment backed by marshal block custody.
 pub struct Application<E: Clock + Spawner> {
     context: Arc<E>,
     seed: u64,
-    body_size: usize,
+    production: Production,
+    last_build: Arc<Mutex<Option<SystemTime>>>,
     publication_retention: NonZeroUsize,
     producer_chain: Option<ChainId>,
     marshal: Marshal,
@@ -305,7 +316,8 @@ impl<E: Clock + Spawner> Clone for Application<E> {
         Self {
             context: Arc::clone(&self.context),
             seed: self.seed,
-            body_size: self.body_size,
+            production: self.production,
+            last_build: Arc::clone(&self.last_build),
             publication_retention: self.publication_retention,
             producer_chain: self.producer_chain,
             marshal: self.marshal.clone(),
@@ -320,7 +332,7 @@ impl<E: Clock + Spawner> Application<E> {
     pub fn new(
         context: E,
         seed: u64,
-        body_size: usize,
+        production: Production,
         publication_retention: NonZeroUsize,
         producer_chain: Option<ChainId>,
         marshal: Marshal,
@@ -329,7 +341,8 @@ impl<E: Clock + Spawner> Application<E> {
         Self {
             context: Arc::new(context),
             seed,
-            body_size,
+            production,
+            last_build: Arc::new(Mutex::new(None)),
             publication_retention,
             producer_chain,
             marshal,
@@ -348,16 +361,31 @@ impl<E: Clock + Spawner> Automaton for Application<E> {
         context: Self::Context,
     ) -> impl Future<Output = oneshot::Receiver<Self::Digest>> + Send {
         let seed = self.seed;
-        let body_size = self.body_size;
+        let body_size = self.production.body_size;
         let marshal = self.marshal.clone();
         let staged = self.staged.clone();
         let proposal_latency = self.metrics.proposal_latency.clone();
         let started_at = SystemTime::now();
         let (mut sender, receiver) = oneshot::channel();
+        // Pace this producer to its interval: the next build starts no earlier than the
+        // interval after the previous one began.
+        let next_build = {
+            let mut last_build = self.last_build.lock();
+            let now = self.context.current();
+            let next = last_build
+                .map_or(now, |last| last + self.production.interval)
+                .max(now);
+            *last_build = Some(next);
+            next
+        };
         self.context
             .child("propose")
             .shared(true)
-            .spawn(move |_| async move {
+            .spawn(move |runtime| async move {
+                select! {
+                    _ = sender.closed() => return,
+                    () = runtime.sleep_until(next_build) => {},
+                }
                 let block = Arc::new(TransactionBlock::from_context(
                     context,
                     Body::junk(seed, context, body_size),
@@ -414,66 +442,68 @@ impl<E: Clock + Spawner> Automaton for Application<E> {
         let producer_chain = self.producer_chain;
         let body_wait = self.metrics.body_wait.clone();
         let (mut sender, receiver) = oneshot::channel();
-        self.context.child("verify").spawn(move |runtime| async move {
-            if let Some(custody) = staged.take_custody(reference) {
-                let result = select! {
-                    _ = sender.closed() => return,
-                    result = custody.wait() => result,
+        self.context
+            .child("verify")
+            .spawn(move |runtime| async move {
+                if let Some(custody) = staged.take_custody(reference) {
+                    let result = select! {
+                        _ = sender.closed() => return,
+                        result = custody.wait() => result,
+                    };
+                    match result {
+                        Ok(()) => {
+                            let _ = sender.send(true);
+                        }
+                        Err(error) => {
+                            warn!(
+                                chain = context.chain().get(),
+                                height = context.height().get(),
+                                %error,
+                                "proposed block custody failed"
+                            );
+                        }
+                    }
+                    return;
+                }
+                let requested_at = SystemTime::now();
+                // A full marshal mailbox rejects the request outright; back off briefly and retry
+                // before reporting no verdict, which consensus answers by validating again later.
+                let mut attempt = 0u32;
+                let subscription = loop {
+                    let result = select! {
+                        _ = sender.closed() => return,
+                        result = marshal.subscribe_block(reference) => result,
+                    };
+                    match result {
+                        Err(MarshalError::Busy) if attempt < BUSY_RETRIES => {
+                            attempt += 1;
+                            select! {
+                                _ = sender.closed() => return,
+                                _ = runtime.sleep(BUSY_BACKOFF * attempt) => {}
+                            }
+                        }
+                        result => break result,
+                    }
                 };
-                match result {
-                    Ok(()) => {
-                        let _ = sender.send(true);
+                match subscription {
+                    Ok(block) => {
+                        body_wait.observe_between(requested_at, SystemTime::now());
+                        if block.header() != &header {
+                            let _ = sender.send(false);
+                            return;
+                        }
+                        let _ = sender.send(staged.retain_verified(producer_chain, block));
                     }
                     Err(error) => {
                         warn!(
                             chain = context.chain().get(),
                             height = context.height().get(),
                             %error,
-                            "proposed block custody failed"
+                            "block subscription closed"
                         );
                     }
                 }
-                return;
-            }
-            let requested_at = SystemTime::now();
-            // A full marshal mailbox rejects the request outright; back off briefly and retry
-            // before reporting no verdict, which consensus answers by validating again later.
-            let mut attempt = 0u32;
-            let subscription = loop {
-                let result = select! {
-                    _ = sender.closed() => return,
-                    result = marshal.subscribe_block(reference) => result,
-                };
-                match result {
-                    Err(MarshalError::Busy) if attempt < BUSY_RETRIES => {
-                        attempt += 1;
-                        select! {
-                            _ = sender.closed() => return,
-                            _ = runtime.sleep(BUSY_BACKOFF * attempt) => {}
-                        }
-                    }
-                    result => break result,
-                }
-            };
-            match subscription {
-                Ok(block) => {
-                    body_wait.observe_between(requested_at, SystemTime::now());
-                    if block.header() != &header {
-                        let _ = sender.send(false);
-                        return;
-                    }
-                    let _ = sender.send(staged.retain_verified(producer_chain, block));
-                }
-                Err(error) => {
-                    warn!(
-                        chain = context.chain().get(),
-                        height = context.height().get(),
-                        %error,
-                        "block subscription closed"
-                    );
-                }
-            }
-        });
+            });
         ready(receiver)
     }
 }
