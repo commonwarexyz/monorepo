@@ -36,7 +36,8 @@ use commonware_cryptography::{
     sha256::Digest,
 };
 use commonware_math::algebra::Additive;
-use commonware_utils::{N5f1, sync::Mutex};
+use commonware_utils::{N5f1, sync::Mutex, test_rng};
+use rand::TryRng as _;
 use core::{num::NonZeroUsize, time::Duration};
 use proptest::{collection::vec as prop_vec, prelude::*};
 use std::{
@@ -16791,5 +16792,180 @@ fn proof_capacity_does_not_invalidate_reserved_local_completion() {
     assert!(
         machine.inspect().cached_artifacts() + machine.local_artifact_reservations()
             <= resources.max_cached_artifacts()
+    );
+}
+
+/// The DA-choice prefix cursor must never hide an eligible block.
+///
+/// A randomized mixture of out-of-order block arrivals, validations, DA-vote completions, and
+/// certificate retirements is compared against the same scan with the cursor lowered to each
+/// chain's retirement floor, which is the unindexed frontier the cursor replaces.
+#[test]
+fn da_voted_run_cursor_matches_a_full_frontier_scan() {
+    const CHAINS: usize = 4;
+    const PIPELINE_DEPTH: u32 = 8;
+    const ROUNDS: usize = 400;
+
+    let mut rng = test_rng();
+    let mut machine = Machine::new(profile_for(
+        Role::Validator(Participant::new(0)),
+        CHAINS + 1,
+        PIPELINE_DEPTH,
+    ));
+    let generation = machine.durable.generation;
+    let profile = machine.profile().clone();
+    let epoch = profile.protocol().epoch();
+    let genesis = profile.protocol().genesis().tips().to_vec();
+
+    // Pre-build one canonical chain of headers per producer so arrivals can be shuffled without
+    // ever forking a chain.
+    let mut headers: Vec<Vec<TransactionBlockHeader<Digest>>> = Vec::with_capacity(CHAINS);
+    for (chain, tip) in genesis.iter().enumerate().take(CHAINS) {
+        let mut parent = *tip;
+        let mut chain_headers = Vec::new();
+        for height in 1..=24u64 {
+            let header = TransactionBlockHeader::new(
+                epoch,
+                ChainId::new(chain as u32),
+                Height::new(height),
+                parent.digest(),
+                digest(format!("cursor probe {chain}/{height}").as_bytes()),
+            )
+            .unwrap();
+            parent = header.block_ref::<Sha256>();
+            chain_headers.push(header);
+        }
+        headers.push(chain_headers);
+    }
+
+    let mut observed = [0usize; CHAINS];
+    let mut observation = 0u32;
+    for round in 0..ROUNDS {
+        match rng.try_next_u32().unwrap() % 4 {
+            // Observe the next block on a random chain, then validate whatever became pending.
+            0 => {
+                let chain = (rng.try_next_u32().unwrap() as usize) % CHAINS;
+                let Some(header) = headers[chain].get(observed[chain]).cloned() else {
+                    continue;
+                };
+                observed[chain] += 1;
+                observation += 1;
+                let artifact = Artifact::TransactionBlock(SignedTransactionBlock::new(
+                    header,
+                    attestation(chain as u32),
+                ));
+                machine
+                    .chain
+                    .observe::<Sha256>(
+                        artifact.id::<Sha256>(),
+                        Observation::new(1, observation),
+                        &artifact,
+                        generation,
+                    )
+                    .unwrap();
+            }
+            // Validate one pending block, which is what makes a candidate eligible.
+            1 => {
+                let jobs = machine
+                    .chain
+                    .take_effects()
+                    .into_iter()
+                    .filter_map(|effect| match effect {
+                        ChainEffect::Validate(job) => Some(job),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                for job in jobs {
+                    machine
+                        .chain
+                        .complete_validation::<Sha256>(
+                            ValidationCompletion::new(
+                                job.id(),
+                                job.generation(),
+                                BlockValidity::Valid,
+                            ),
+                            generation,
+                        )
+                        .unwrap();
+                }
+            }
+            // Reserve and complete one DA-vote run, which grows the voted prefix.
+            2 => {
+                let run = machine
+                    .chain
+                    .ready_da_votes::<Sha256>(&profile, CHAINS, DA_VOTE_RUN)
+                    .unwrap();
+                for block in &run {
+                    machine.chain.mark_da_vote_reserved(block.header().clone());
+                }
+                for block in &run {
+                    machine
+                        .chain
+                        .observe_da_choice::<Sha256>(block.header())
+                        .unwrap();
+                }
+            }
+            // Retire a certified prefix, which drops choices below the new floor. Half the
+            // retirements land above the voted prefix, as a certificate the cluster formed
+            // without this node's own choice does.
+            _ => {
+                let chain = (rng.try_next_u32().unwrap() as usize) % CHAINS;
+                let voted = machine.chain.da_voted_run()[chain];
+                let ahead = rng.try_next_u32().unwrap().is_multiple_of(2);
+                let retired = if ahead {
+                    Height::new(u64::from(observed[chain] as u32))
+                } else {
+                    voted
+                };
+                if retired.get() == 0 {
+                    continue;
+                }
+                let header = headers[chain][retired.get() as usize - 1].clone();
+                let certificate = symbolic_da_certificate(header, round as u64);
+                if machine
+                    .chain
+                    .compact_certified::<Sha256>(&certificate, retired)
+                    .is_err()
+                {
+                    continue;
+                }
+            }
+        }
+
+        // The maintained cursor must equal the prefix rebuilt from the retained choices alone,
+        // and the indexed scan must return exactly what the unindexed scan returns.
+        assert_eq!(
+            machine.chain.da_voted_run(),
+            machine.chain.rebuilt_da_voted_run(),
+            "the cursor drifted from the retained DA-choice prefix in round {round}"
+        );
+        let indexed = machine
+            .chain
+            .ready_da_votes::<Sha256>(&profile, CHAINS, DA_VOTE_RUN)
+            .unwrap();
+        machine.chain.clear_da_voted_run();
+        let scanned = machine
+            .chain
+            .ready_da_votes::<Sha256>(&profile, CHAINS, DA_VOTE_RUN)
+            .unwrap();
+        assert_eq!(
+            indexed
+                .iter()
+                .map(|block| block.header().clone())
+                .collect::<Vec<_>>(),
+            scanned
+                .iter()
+                .map(|block| block.header().clone())
+                .collect::<Vec<_>>(),
+            "the cursor changed the eligible frontier in round {round}"
+        );
+        for chain in 0..CHAINS {
+            machine.chain.chase_da_voted_run_for_test(chain);
+        }
+    }
+
+    assert!(
+        machine.chain.da_voted_run().iter().any(|run| run.get() > 0),
+        "the workload must exercise a non-empty DA-choice prefix"
     );
 }

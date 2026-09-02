@@ -2412,19 +2412,14 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         &mut self,
         capabilities: &mut Capabilities<V, H::Digest>,
     ) -> Result<bool, StepError> {
-        let preferred = self
-            .chain
-            .ready_da_votes::<H>(
-                &self.profile,
-                self.profile.protocol().codec_config().chains(),
-                1,
-            )?
-            .into_iter()
-            .find_map(|block| {
-                let header = block.header();
-                (!self.da_vote_extends_durable_safety(header.chain(), header.height()))
-                    .then_some(header.chain())
-            });
+        // The frontier only picks between advanceable chains, so a floor no certificate exceeds
+        // makes the sweep pure overhead.
+        if !self.chain.has_certificate_above(&self.durable.certified_tips) {
+            return Ok(false);
+        }
+        let preferred = self.chain.selected_da_chain::<H>(&self.profile, |chain, height| {
+            !self.da_vote_extends_durable_safety(chain, height)
+        })?;
         let Some(artifact) = self.next_durable_da_certificate(preferred) else {
             return Ok(false);
         };
