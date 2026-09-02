@@ -63,6 +63,9 @@
 //! applied. Invalid batches must not be used: their methods may return incorrect data rather than
 //! erroring.
 //!
+//! Pruning the base after a batch was forked does not invalidate it: applying the batch then
+//! yields the same state as applying it before the prune (see [`Mem::apply_batch`]).
+//!
 //! # Example (MMR)
 //!
 //! ```ignore
