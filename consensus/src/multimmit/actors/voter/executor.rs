@@ -324,20 +324,18 @@ where
                 let (id, generation) = (job.id(), job.generation());
                 // Shares are admitted on structural checks alone, so this recovery's group
                 // check is where an invalid one surfaces.
-                let operation = move |strategy: T| {
-                    match scheme.assemble_da_certificate_optimistic(job.votes(), &strategy) {
-                        Ok(certificate) => Ok(CryptoOutcome::DaRecovered {
-                            started_at,
-                            completion: DaRecoveryCompletion::new(id, generation, certificate),
-                        }),
-                        Err(DaRecoveryError::InvalidShares(invalid)) => {
-                            Ok(CryptoOutcome::DaRejected {
-                                started_at,
-                                rejection: DaRecoveryRejection::new(id, generation, invalid),
-                            })
-                        }
-                        Err(DaRecoveryError::Scheme(error)) => Err(error),
-                    }
+                let operation = move |strategy: T| match scheme
+                    .assemble_da_certificate_optimistic(job.votes(), &strategy)
+                {
+                    Ok(certificate) => Ok(CryptoOutcome::DaRecovered {
+                        started_at,
+                        completion: DaRecoveryCompletion::new(id, generation, certificate),
+                    }),
+                    Err(DaRecoveryError::InvalidShares(invalid)) => Ok(CryptoOutcome::DaRejected {
+                        started_at,
+                        rejection: DaRecoveryRejection::new(id, generation, invalid),
+                    }),
+                    Err(DaRecoveryError::Scheme(error)) => Err(error),
                 };
                 self.spawn_crypto(TaskClass::CriticalAggregation, span, operation)?;
             }

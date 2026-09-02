@@ -1032,7 +1032,11 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
     }
 
     /// Returns one chain's highest held certificate above its durable floor.
-    fn certificate_above(&self, floors: &[BlockRef<D>], chain: usize) -> Option<&DaCertificate<V, D>> {
+    fn certificate_above(
+        &self,
+        floors: &[BlockRef<D>],
+        chain: usize,
+    ) -> Option<&DaCertificate<V, D>> {
         let certificates = self.certified.get(chain)?;
         let floor = floors.get(chain)?;
         certificates
@@ -1546,7 +1550,11 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         Ok(BlockValidationOutcome::Retained)
     }
 
-    fn discard_validation(&mut self, job: ValidationRecord<D>, generation: u64) -> Result<(), ChainError> {
+    fn discard_validation(
+        &mut self,
+        job: ValidationRecord<D>,
+        generation: u64,
+    ) -> Result<(), ChainError> {
         let blocks = self
             .blocks
             .get_mut(job.chain.get() as usize)
@@ -1659,7 +1667,11 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         }
     }
 
-    fn validation_parent_available(&self, chain: usize, header: &TransactionBlockHeader<D>) -> bool {
+    fn validation_parent_available(
+        &self,
+        chain: usize,
+        header: &TransactionBlockHeader<D>,
+    ) -> bool {
         let Some(parent_height) = header.height().get().checked_sub(1).map(Height::new) else {
             return false;
         };

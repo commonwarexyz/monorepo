@@ -1015,8 +1015,8 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
             .enumerate()
             .map(|(index, artifact)| (artifact, known.get(index).copied().unwrap_or(&[])))
             .collect::<Vec<_>>();
-        let claims: Vec<Option<Vec<Claim<'_, V>>>> =
-            strategy.map_collect_vec(&inputs, |(artifact, known)| {
+        let claims: Vec<Option<Vec<Claim<'_, V>>>> = strategy
+            .map_collect_vec(&inputs, |(artifact, known)| {
                 self.artifact_claims::<H, D>(artifact, known)
             });
 
@@ -1182,10 +1182,16 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
             HashMap::with_capacity(known.len());
         for message in known {
             let (signer, subject, attestation) = match message {
-                Verified::Vote(vote) => (vote.signer(), Subject::vote(vote.body()), vote.attestation()),
-                Verified::NoVote(vote) => {
-                    (vote.signer(), Subject::NoVote(vote.round()), vote.attestation())
-                }
+                Verified::Vote(vote) => (
+                    vote.signer(),
+                    Subject::vote(vote.body()),
+                    vote.attestation(),
+                ),
+                Verified::NoVote(vote) => (
+                    vote.signer(),
+                    Subject::NoVote(vote.round()),
+                    vote.attestation(),
+                ),
                 // Certificates discharge leader-block anchors, never aggregate transcripts.
                 Verified::DaCertificate(_) => continue,
             };
@@ -2755,7 +2761,9 @@ mod tests {
             let scheduled = usize::from(
                 LeaderSchedule::round_robin(fixture.codec.participants()).leader(leader.view()),
             );
-            fixture.signers[scheduled].sign_leader_block(leader).unwrap()
+            fixture.signers[scheduled]
+                .sign_leader_block(leader)
+                .unwrap()
         };
         let valid = anchored(certificate.clone());
         let invalid = anchored(forged);
@@ -2775,19 +2783,24 @@ mod tests {
             &[Verified::DaCertificate(&certificate)],
             &[],
         ];
-        let verdicts = fixture.verifier.verify_artifacts_with_known::<_, Sha256, Digest>(
-            &mut test_rng(),
-            &artifacts,
-            &held,
-            &Sequential,
-        );
+        let verdicts = fixture
+            .verifier
+            .verify_artifacts_with_known::<_, Sha256, Digest>(
+                &mut test_rng(),
+                &artifacts,
+                &held,
+                &Sequential,
+            );
         assert_eq!(verdicts, [true, true, false, false]);
         let baseline = fixture.verifier.verify_artifacts::<_, Sha256, Digest>(
             &mut test_rng(),
             &artifacts,
             &Sequential,
         );
-        assert_eq!(baseline, verdicts, "held certificates must never change a verdict");
+        assert_eq!(
+            baseline, verdicts,
+            "held certificates must never change a verdict"
+        );
     }
 
     #[test]
@@ -3198,7 +3211,9 @@ mod tests {
             })
             .collect::<Vec<_>>();
         // The last quorum member abstains in the V-QC, so both message kinds are covered.
-        let novote = fixture.signers[quorum - 1].sign_novote(fixture.round).unwrap();
+        let novote = fixture.signers[quorum - 1]
+            .sign_novote(fixture.round)
+            .unwrap();
         let mut messages = votes[..quorum - 1]
             .iter()
             .cloned()

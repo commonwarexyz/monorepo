@@ -938,16 +938,25 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         for (view, ids) in &self.artifacts_by_view {
             assert!(!ids.is_empty(), "empty view index bucket at {view:?}");
             for id in ids {
-                let entry = self.artifacts.get(id).expect("indexed artifact is retained");
+                let entry = self
+                    .artifacts
+                    .get(id)
+                    .expect("indexed artifact is retained");
                 assert_eq!(entry.artifact.view(), Some(*view), "view index disagrees");
                 by_view += 1;
             }
         }
         let mut by_position = 0usize;
         for (position, ids) in &self.artifacts_by_position {
-            assert!(!ids.is_empty(), "empty position index bucket at {position:?}");
+            assert!(
+                !ids.is_empty(),
+                "empty position index bucket at {position:?}"
+            );
             for id in ids {
-                let entry = self.artifacts.get(id).expect("indexed artifact is retained");
+                let entry = self
+                    .artifacts
+                    .get(id)
+                    .expect("indexed artifact is retained");
                 let header = match entry.artifact.as_ref() {
                     Artifact::TransactionBlock(block) => block.header(),
                     Artifact::DaVote(vote) => vote.header(),
@@ -969,7 +978,9 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             .filter(|entry| {
                 matches!(
                     entry.artifact.as_ref(),
-                    Artifact::TransactionBlock(_) | Artifact::DaVote(_) | Artifact::DaCertificate(_)
+                    Artifact::TransactionBlock(_)
+                        | Artifact::DaVote(_)
+                        | Artifact::DaCertificate(_)
                 )
             })
             .count();
@@ -984,9 +995,8 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             }
             let view = entry.artifact.view();
             let view_retired = view.is_some_and(|view| view <= self.durable.retired_view);
-            let view_unswept = view.is_some_and(|view| {
-                self.retirement_swept_view.is_none_or(|swept| swept < view)
-            });
+            let view_unswept = view
+                .is_some_and(|view| self.retirement_swept_view.is_none_or(|swept| swept < view));
             let position = match entry.artifact.as_ref() {
                 Artifact::TransactionBlock(block) => Some(block.header()),
                 Artifact::DaVote(vote) => Some(vote.header()),

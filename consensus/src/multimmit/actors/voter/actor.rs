@@ -24,9 +24,8 @@ use crate::{
             Artifact, BlockValidity, BuildCompletion, BuildId, BuildJob, Capabilities, Capability,
             CoreError, CoreState, CoreTransition, CoreTurn, CoreWork, Cursor, CustodyCancellation,
             CustodyCompletion, CustodyJob, DaRecoveryCompletion, DaRecoveryRejection,
-            DurabilityCapability,
-            DurableEffect, EffectId, IdentifiedArtifact, InputTicket, JobId, LeaderCapability,
-            LqcAggregateCompletion, NullificationRecoveryCompletion, Observation,
+            DurabilityCapability, DurableEffect, EffectId, IdentifiedArtifact, InputTicket, JobId,
+            LeaderCapability, LqcAggregateCompletion, NullificationRecoveryCompletion, Observation,
             ObservationStatus, PersistDirective, ProducerCapability, ProducerProgress,
             ProductionTimer, Profile, Rejection, ResolverCapability, Role, SignRequest, StepError,
             StepStatus, TaskClass, TaskError, TaskPermit, TaskTerminal, Timer,
@@ -1363,7 +1362,9 @@ where
 
         let admission = self.runtime_admission();
 
-        if self.carried_observation.is_some() && admission.allows(ReadinessCursor::OBSERVATION, None) {
+        if self.carried_observation.is_some()
+            && admission.allows(ReadinessCursor::OBSERVATION, None)
+        {
             let first = self
                 .carried_observation
                 .take()

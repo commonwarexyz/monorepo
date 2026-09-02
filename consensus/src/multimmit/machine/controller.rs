@@ -97,12 +97,11 @@ use super::contracts::CORE_BUDGET;
 use super::{
     Artifact, BarrierAck, BuildCompletion, Capabilities, ChainProgress, CheckpointCut,
     CustodyCancellation, CustodyCompletion, DaRecoveryCompletion, DaRecoveryRejection, DomainEvent,
-    EffectCompletion,
-    EffectId, IdentifiedArtifact, Input, Inspection, LqcAggregateCompletion, Machine,
-    NullificationRecoveryCompletion, PollResult, ProductionTimer, Profile, Progress, ReplayError,
-    ResolutionCompletion, SigningBatchPass, Snapshot, Step, StepError, StepStatus, Timer,
-    ValidationCompletion, ValidationId, ValidationJob, VerificationCompletion, VerificationPass,
-    ViewProof, VqcAggregateCompletion,
+    EffectCompletion, EffectId, IdentifiedArtifact, Input, Inspection, LqcAggregateCompletion,
+    Machine, NullificationRecoveryCompletion, PollResult, ProductionTimer, Profile, Progress,
+    ReplayError, ResolutionCompletion, SigningBatchPass, Snapshot, Step, StepError, StepStatus,
+    Timer, ValidationCompletion, ValidationId, ValidationJob, VerificationCompletion,
+    VerificationPass, ViewProof, VqcAggregateCompletion,
     contracts::{FairCursor, LANE_WEIGHTS, Lane, ServiceCycle, ServiceError, TransitionCost},
 };
 use crate::{

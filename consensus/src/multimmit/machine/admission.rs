@@ -696,12 +696,12 @@ impl<V: Variant, D: Digest> VerifyJob<V, D> {
                     Artifact::Vqc(certificate) => {
                         validate_vqc_with_votes::<H, V, D>(certificate, scheme.codec_config())
                             .map_or_else(
-                            |_| Verdict::new(item.ticket(), false),
-                            |validated| {
-                                validated_vqcs.push((index, validated));
-                                Verdict::new(item.ticket(), true)
-                            },
-                        )
+                                |_| Verdict::new(item.ticket(), false),
+                                |validated| {
+                                    validated_vqcs.push((index, validated));
+                                    Verdict::new(item.ticket(), true)
+                                },
+                            )
                     }
                     Artifact::Lqc(certificate) => {
                         validate_lqc::<H, V, D>(certificate, scheme.codec_config()).map_or_else(
@@ -791,7 +791,11 @@ impl<D: Digest> VerificationCompletion<D> {
                 .iter()
                 .all(|(index, _)| *index < verdicts.len())
         );
-        debug_assert!(validated_lqcs.iter().all(|(index, _)| *index < verdicts.len()));
+        debug_assert!(
+            validated_lqcs
+                .iter()
+                .all(|(index, _)| *index < verdicts.len())
+        );
         debug_assert!(validated_vqcs.windows(2).all(|pair| pair[0].0 < pair[1].0));
         debug_assert!(validated_lqcs.windows(2).all(|pair| pair[0].0 < pair[1].0));
         Self {

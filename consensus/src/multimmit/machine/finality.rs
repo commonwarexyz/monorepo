@@ -1756,7 +1756,10 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
         digest: Option<D>,
         retained: bool,
     ) -> Result<(), FinalityError> {
-        let key = (leader.round(), digest.unwrap_or_else(|| leader.digest::<H>()));
+        let key = (
+            leader.round(),
+            digest.unwrap_or_else(|| leader.digest::<H>()),
+        );
         if !retained {
             self.release_pool_claim(key, source);
             self.discard_unretained_pool(key);
@@ -1982,7 +1985,13 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
         }
 
         for vote in votes {
-            self.observe_aggregate_vote::<H>(id, observation, vote.signer, vote.body, vote.evidence)?;
+            self.observe_aggregate_vote::<H>(
+                id,
+                observation,
+                vote.signer,
+                vote.body,
+                vote.evidence,
+            )?;
         }
         Ok(())
     }

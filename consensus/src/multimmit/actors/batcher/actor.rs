@@ -600,7 +600,10 @@ where
                         block,
                     } => Ok((
                         LaneId::Consensus,
-                        Group::one(Self::identify(Artifact::LeaderBlock(*block), &mut scratch), received_at),
+                        Group::one(
+                            Self::identify(Artifact::LeaderBlock(*block), &mut scratch),
+                            received_at,
+                        ),
                     )),
                     ConsensusMessage::Proposal {
                         parent: Some(parent),

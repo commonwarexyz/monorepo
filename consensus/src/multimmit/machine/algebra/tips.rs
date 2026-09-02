@@ -361,7 +361,11 @@ impl<D: Digest> FinalTips<D> {
         self.blocks
             .capacity()
             .checked_mul(size_of::<BlockRef<D>>())?
-            .checked_add(self.positions.capacity().checked_mul(size_of::<Position>())?)?
+            .checked_add(
+                self.positions
+                    .capacity()
+                    .checked_mul(size_of::<Position>())?,
+            )?
             .checked_add(self.settled.capacity())
     }
 

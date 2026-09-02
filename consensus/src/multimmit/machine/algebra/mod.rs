@@ -52,7 +52,6 @@ impl<D: Digest> VerifiedVote<D> {
     }
 }
 
-
 /// Expensive deterministic outputs derived while validating one exact V-QC.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ValidatedVqc<D: Digest> {
