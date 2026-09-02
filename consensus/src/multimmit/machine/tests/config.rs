@@ -188,9 +188,9 @@ fn explicit_test_limits_cover_pinned_and_live_finality_partitions() {
 
 #[test]
 fn derived_bounds_cover_the_retention_window() {
-    // The two relationships the machine depends on: one cache slot per retained view on top of a
-    // quorum of live work, and one forwarded V-QC plus one forwarded nullification per retained
-    // view.
+    // The three relationships the machine depends on: one cache slot per retained view on top of
+    // a quorum of live work, one forwarded V-QC plus one forwarded nullification per retained
+    // view, and a forward horizon for uncertified traffic proportionate to the window kept behind.
     for participants in [1u32, 6, 11, 32] {
         for view_retention in [1u64, 64, 10_000] {
             let profile = profile(participants, view_retention).expect("derived profile is valid");
@@ -207,9 +207,32 @@ fn derived_bounds_cover_the_retention_window() {
                 "forwarding history does not cover the retention window \
                  (participants={participants}, retention={view_retention})"
             );
+            assert_eq!(
+                resources.max_future_view_distance(),
+                (retained as u64 / 8).max(3),
+                "the future-view horizon is not derived from the retention window \
+                 (participants={participants}, retention={view_retention})"
+            );
             assert_eq!(profile.view_retention(), ViewDelta::new(view_retention));
         }
     }
+}
+
+#[test]
+fn the_future_view_horizon_grows_with_retention_and_never_falls_below_three() {
+    // A short window keeps the floor; a long one widens the horizon rather than pinning it at a
+    // constant the deployment never chose.
+    let mut previous = 0;
+    for view_retention in [1u64, 8, 16, 64, 1_000, 50_000, 1_000_000] {
+        let distance = profile(6, view_retention)
+            .expect("derived profile is valid")
+            .resources()
+            .max_future_view_distance();
+        assert!(distance >= 3, "retention={view_retention}");
+        assert!(distance >= previous, "retention={view_retention}");
+        previous = distance;
+    }
+    assert!(previous > 3, "the horizon never left its floor");
 }
 
 #[test]

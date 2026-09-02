@@ -390,12 +390,20 @@ impl<H: Hasher, V: Variant> Profile<H, V> {
             .saturating_add(committee.saturating_mul(48))
             .saturating_add(3);
         let future = committee.saturating_mul(8);
+        // How far above the durable view uncertified traffic is admitted. A node that retains
+        // `retained` views behind itself serves peers that far back, so tolerating an eighth of
+        // that window ahead keeps the two horizons proportionate: a node that promises more
+        // history also accepts more of the gossip it needs to close the gap. Widening this admits
+        // no more memory, because the future-view index and the artifact cache bound that
+        // separately. The floor covers the atomic timeout choice and one self-certifying proof
+        // for retention windows shorter than eight views.
+        let future_distance = (retained / 8).max(3);
         let resources = ResourceLimits::new(
             tuning.max_artifact_bytes,
             nonzero_usize(live.saturating_add(per_view.saturating_mul(retained))),
             nonzero_usize(committee.saturating_mul(8)),
             nonzero_usize(committee.saturating_mul(8)),
-            3,
+            future_distance,
             nonzero_usize(future),
             nonzero_usize(committee.saturating_mul(4)),
             nonzero_usize(live),
