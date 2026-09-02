@@ -53,12 +53,11 @@ fn main() {
     // Setup generates configuration and needs no runtime. Run it before the
     // runner starts, since `Runner::start` acquires a hold on (and creates) the
     // storage directory inside the node directory setup requires to be empty.
-    let command = match cli.command {
-        Command::Setup(args) => return setup::run(args),
-        command => command,
-    };
+    if let Command::Setup(args) = cli.command {
+        return setup::run(args);
+    }
 
-    let runtime_dir = command.runtime_dir();
+    let runtime_dir = cli.command.runtime_dir();
     let config = tokio::Config::new()
         .with_worker_threads(cli.worker_threads)
         .with_catch_panics(false)
@@ -75,7 +74,7 @@ fn main() {
             None,
         );
 
-        match command {
+        match cli.command {
             Command::Dkg(args) => dkg::run(context, args).await,
             Command::Validator(args) => validator::run(context, args).await,
             Command::Setup(_) => unreachable!("setup runs without a runtime"),

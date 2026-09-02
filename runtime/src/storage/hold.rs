@@ -36,11 +36,6 @@ const HOLD_NAME: &str = ".hold";
 /// contents. The lock is bound to the hold file's inode: removing or recreating
 /// the storage directory while a run may still be alive voids the exclusion.
 ///
-/// A storage instance kept alive past its run (e.g. a context escaping
-/// `Runner::start`) keeps the hold, blocking a successor on the same
-/// directory until it drops. That is intentional: the escaped instance can
-/// still perform I/O.
-///
 /// The guarantee is scoped to one machine and to filesystems with real
 /// advisory locks: on network filesystems (NFS, SMB, FUSE) the lock may be
 /// client-local or per process, excluding neither other machines nor other
@@ -57,7 +52,6 @@ impl Hold {
     pub(crate) fn acquire(dir: &Path) -> io::Result<Arc<Self>> {
         std::fs::create_dir_all(dir)?;
         let file = OpenOptions::new()
-            .read(true)
             .write(true)
             .create(true)
             .truncate(false)
@@ -93,9 +87,6 @@ mod tests {
 
     #[test]
     fn test_hold_name_rejected_as_partition() {
-        // The hold file sits at the storage root alongside partition
-        // directories, so its name must never pass partition validation. A
-        // partition named after it would occupy the hold's own path.
         assert!(validate_partition_name(HOLD_NAME).is_err());
     }
 

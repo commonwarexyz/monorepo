@@ -3,6 +3,14 @@
 use commonware_macros::stability_scope;
 
 stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
+    use crate::{BlobVersion, Error};
+    use std::{
+        fs::File,
+        io::{Read as _, Seek as _, SeekFrom},
+        ops::RangeInclusive,
+        path::Path,
+    };
+
     /// Flush the whole filesystem containing `dir` at startup so that bytes a prior process wrote
     /// but did not `fsync` are crash-durable before any storage structure reads.
     ///
@@ -12,16 +20,12 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     ///   crash-durable.
     ///
     /// Assumes storage lives on a single filesystem; on Linux reliable error detection needs kernel
-    /// >= 5.8. A missing `dir` is treated as success.
+    /// >= 5.8.
     pub(crate) fn sync(dir: &std::path::Path) -> std::io::Result<()> {
         cfg_if::cfg_if! {
             if #[cfg(target_os = "linux")] {
                 use std::os::fd::AsRawFd;
-                let file = match std::fs::File::open(dir) {
-                    Ok(file) => file,
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-                    Err(e) => return Err(e),
-                };
+                let file = std::fs::File::open(dir)?;
                 // SAFETY: `file` owns a valid fd that lives across the call; `syncfs` takes only
                 // that fd, performs no memory access, and returns -1 on error.
                 if unsafe { libc::syncfs(file.as_raw_fd()) } == -1 {
@@ -42,6 +46,41 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
                 Ok(())
             }
         }
+    }
+
+    /// Syncs a directory to ensure directory entry changes are durable.
+    /// On Unix, directory metadata (file creation/deletion) must be explicitly fsynced.
+    pub(crate) fn sync_dir(path: &Path) -> Result<(), Error> {
+        let dir = File::open(path).map_err(|e| {
+            Error::BlobOpenFailed(
+                path.to_string_lossy().to_string(),
+                "directory".to_string(),
+                e.into(),
+            )
+        })?;
+        dir.sync_all().map_err(|e| {
+            Error::BlobSyncFailed(
+                path.to_string_lossy().to_string(),
+                "directory".to_string(),
+                e.into(),
+            )
+        })
+    }
+
+    /// Reads a blob's leading bytes and resolves its header (see [header::resolve]).
+    pub(crate) fn resolve_header(
+        file: &mut File,
+        raw_len: u64,
+        layouts: &RangeInclusive<Layout>,
+        versions: &RangeInclusive<BlobVersion>,
+        partition: &str,
+        name: &[u8],
+    ) -> Result<Option<(u64, BlobVersion, u64)>, Error> {
+        let mut raw = vec![0u8; Header::resolve_len(raw_len)];
+        file.seek(SeekFrom::Start(0))
+            .map_err(|_| Error::ReadFailed)?;
+        file.read_exact(&mut raw).map_err(|_| Error::ReadFailed)?;
+        header::resolve(&raw, raw_len, layouts, versions, partition, name)
     }
 
     pub(crate) mod hold;

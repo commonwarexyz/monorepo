@@ -1,35 +1,15 @@
-use super::{Header, Layout, hold::Hold};
+use super::{Header, Layout, hold::Hold, resolve_header, sync_dir};
 use crate::{BlobVersion, BufferPool, Error};
 use commonware_formatting::{from_hex, hex};
 use std::{
-    io::{Read as _, Seek as _, SeekFrom, Write as _},
+    io::{Seek as _, SeekFrom, Write as _},
     ops::RangeInclusive,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::Arc,
 };
 use tokio::sync::Mutex;
 
 mod blob;
-
-/// Syncs a directory to ensure directory entry changes are durable.
-/// On Unix, directory metadata (file creation/deletion) must be explicitly
-/// fsynced.
-fn sync_dir(path: &Path) -> Result<(), Error> {
-    let dir = std::fs::File::open(path).map_err(|e| {
-        Error::BlobOpenFailed(
-            path.to_string_lossy().to_string(),
-            "directory".to_string(),
-            e.into(),
-        )
-    })?;
-    dir.sync_all().map_err(|e| {
-        Error::BlobSyncFailed(
-            path.to_string_lossy().to_string(),
-            "directory".to_string(),
-            e.into(),
-        )
-    })
-}
 
 #[derive(Clone)]
 pub struct Config {
@@ -51,23 +31,10 @@ pub struct Storage {
     lock: Arc<Mutex<()>>,
     cfg: Config,
     pool: BufferPool,
+    /// Hold on the storage directory, cloned into every dispatched blocking
+    /// operation and every blob so a successor storage instance waits for
+    /// stragglers.
     hold: Arc<Hold>,
-}
-
-/// Reads a blob's leading bytes and resolves its header (see [super::header::resolve]).
-fn resolve_header(
-    file: &mut std::fs::File,
-    raw_len: u64,
-    layouts: &RangeInclusive<Layout>,
-    versions: &RangeInclusive<BlobVersion>,
-    partition: &str,
-    name: &[u8],
-) -> Result<Option<(u64, BlobVersion, u64)>, Error> {
-    let mut raw = vec![0u8; Header::resolve_len(raw_len)];
-    file.seek(SeekFrom::Start(0))
-        .map_err(|_| Error::ReadFailed)?;
-    file.read_exact(&mut raw).map_err(|_| Error::ReadFailed)?;
-    super::header::resolve(&raw, raw_len, layouts, versions, partition, name)
 }
 
 impl Storage {
@@ -94,6 +61,29 @@ impl Storage {
             hold,
         }
     }
+
+    /// Run `f` to completion on the blocking pool while owning the filesystem
+    /// lock and the directory hold, so dropping the returned future neither
+    /// abandons `f` mid-sequence nor lets a successor storage instance
+    /// initialize before `f` has finished. A closure dropped unstarted at
+    /// runtime shutdown yields [Error::Closed].
+    async fn dispatch<T: Send + 'static>(
+        &self,
+        f: impl FnOnce() -> Result<T, Error> + Send + 'static,
+    ) -> Result<T, Error> {
+        let guard = self.lock.clone().lock_owned().await;
+        let hold = self.hold.clone();
+        let task = tokio::task::spawn_blocking(move || {
+            let _hold = hold;
+            let _guard = guard;
+            f()
+        });
+        match task.await {
+            Ok(result) => result,
+            Err(err) if err.is_panic() => std::panic::resume_unwind(err.into_panic()),
+            Err(_) => Err(Error::Closed),
+        }
+    }
 }
 
 impl crate::Storage for Storage {
@@ -107,27 +97,19 @@ impl crate::Storage for Storage {
     ) -> Result<(Self::Blob, u64, BlobVersion), Error> {
         super::validate_partition_name(partition)?;
 
-        // Acquire the filesystem lock, owned so the open runs serialized to
-        // completion even if this future is dropped.
-        let guard = self.lock.clone().lock_owned().await;
-
-        // Run the open to completion on the blocking pool: it mutates the
-        // partition directory and the blob (create, truncate, header write,
-        // syncs), and dropping this future must not abandon that sequence
-        // half-done (a straggling truncate could clobber a successor's blob)
-        // or leave a later open trusting a header whose syncs never ran. The
-        // closure owns the directory hold, so a successor storage instance
-        // cannot initialize until the open has finished.
+        // The open mutates the partition directory and the blob (create,
+        // truncate, header write, syncs). Dropping this future must not abandon
+        // that sequence half-done (a straggling truncate could clobber a
+        // successor's blob) or leave a later open trusting a header whose syncs
+        // never ran.
         let path = self.cfg.storage_directory.join(partition).join(hex(name));
         let storage_directory = self.cfg.storage_directory.clone();
         let partition = partition.to_string();
         let name = name.to_vec();
         let blob_layouts = self.cfg.blob_layouts.clone();
+        let pool = self.pool.clone();
         let hold = self.hold.clone();
-        let open = tokio::task::spawn_blocking(move || {
-            let _hold = hold;
-            let _guard = guard;
-
+        self.dispatch(move || {
             let parent = match path.parent() {
                 Some(parent) => parent,
                 None => return Err(Error::PartitionCreationFailed(partition)),
@@ -158,7 +140,7 @@ impl crate::Storage for Storage {
                 &partition,
                 &name,
             )?;
-            let resolved = match existing {
+            let (logical_size, blob_version, data_offset) = match existing {
                 Some(resolved) => resolved,
                 None => {
                     // Sync the directories before writing the header so a parseable
@@ -184,45 +166,23 @@ impl crate::Storage for Storage {
                     (0, blob_version, data_offset)
                 }
             };
-            Ok((file, partition, name, resolved))
-        });
-        let (file, partition, name, (logical_size, blob_version, data_offset)) = match open.await {
-            Ok(result) => result?,
-            Err(err) if err.is_panic() => std::panic::resume_unwind(err.into_panic()),
-            Err(_) => return Err(Error::Closed),
-        };
 
-        let blob = Self::Blob::new(
-            partition,
-            &name,
-            file,
-            self.pool.clone(),
-            data_offset,
-            self.hold.clone(),
-        );
-        Ok((blob, logical_size, blob_version))
+            let blob = Self::Blob::new(partition, &name, file, pool, data_offset, hold);
+            Ok((blob, logical_size, blob_version))
+        })
+        .await
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
         super::validate_partition_name(partition)?;
 
-        // Acquire the filesystem lock. The guard is owned so the removal runs
-        // serialized to completion even if this future is dropped.
-        let guard = self.lock.clone().lock_owned().await;
-
-        // Run the removal to completion on the blocking pool: dropping this
-        // future must not abandon the sequence between an unlink and the
-        // directory sync that makes it durable. The closure owns the directory
-        // hold, so a successor storage instance cannot initialize until the
-        // removal has finished.
+        // Dropping this future must not abandon the sequence between an unlink
+        // and the directory sync that makes it durable.
         let path = self.cfg.storage_directory.join(partition);
         let storage_directory = self.cfg.storage_directory.clone();
         let partition = partition.to_string();
         let name = name.map(<[u8]>::to_vec);
-        let hold = self.hold.clone();
-        let removal = tokio::task::spawn_blocking(move || {
-            let _hold = hold;
-            let _guard = guard;
+        self.dispatch(move || {
             if let Some(name) = name {
                 let blob_path = path.join(hex(&name));
                 std::fs::remove_file(blob_path)
@@ -237,30 +197,16 @@ impl crate::Storage for Storage {
                 sync_dir(&storage_directory)?;
             }
             Ok(())
-        });
-        match removal.await {
-            Ok(result) => result,
-            Err(err) if err.is_panic() => std::panic::resume_unwind(err.into_panic()),
-            Err(_) => Err(Error::Closed),
-        }
+        })
+        .await
     }
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
         super::validate_partition_name(partition)?;
 
-        // Acquire the filesystem lock, owned so the scan runs serialized to
-        // completion even if this future is dropped.
-        let guard = self.lock.clone().lock_owned().await;
-
-        // Run the scan on the blocking pool. The closure owns the directory
-        // hold, so a successor storage instance cannot initialize until it
-        // has finished.
         let path = self.cfg.storage_directory.join(partition);
         let partition = partition.to_string();
-        let hold = self.hold.clone();
-        let scan = tokio::task::spawn_blocking(move || {
-            let _hold = hold;
-            let _guard = guard;
+        self.dispatch(move || {
             let entries =
                 std::fs::read_dir(path).map_err(|_| Error::PartitionMissing(partition.clone()))?;
             let mut blobs = Vec::new();
@@ -284,12 +230,8 @@ impl crate::Storage for Storage {
                 }
             }
             Ok(blobs)
-        });
-        match scan.await {
-            Ok(result) => result,
-            Err(err) if err.is_panic() => std::panic::resume_unwind(err.into_panic()),
-            Err(_) => Err(Error::Closed),
-        }
+        })
+        .await
     }
 }
 

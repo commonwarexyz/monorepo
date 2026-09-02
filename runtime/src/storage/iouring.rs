@@ -20,7 +20,7 @@
 //! This implementation is only available on Linux systems that support io_uring.
 //! It requires Linux kernel 6.1 or newer. See [crate::iouring] for details.
 
-use super::{Header, Layout, hold::Hold};
+use super::{Header, Layout, hold::Hold, resolve_header, sync_dir};
 use crate::{
     BlobVersion, Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut, ReadOptions, WriteOptions,
     iouring::{self},
@@ -31,46 +31,11 @@ use commonware_formatting::{from_hex, hex};
 use commonware_utils::sync::Mutex;
 use std::{
     fs::{self, File},
-    io::{Error as IoError, Read, Seek, SeekFrom, Write},
+    io::{Error as IoError, Seek, SeekFrom, Write},
     ops::RangeInclusive,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{Arc, atomic::AtomicBool},
 };
-
-/// Reads a blob's leading bytes and resolves its header (see [super::header::resolve]).
-fn resolve_header(
-    file: &mut File,
-    raw_len: u64,
-    layouts: &RangeInclusive<Layout>,
-    versions: &RangeInclusive<BlobVersion>,
-    partition: &str,
-    name: &[u8],
-) -> Result<Option<(u64, BlobVersion, u64)>, Error> {
-    let mut raw = vec![0u8; Header::resolve_len(raw_len)];
-    file.seek(SeekFrom::Start(0))
-        .map_err(|_| Error::ReadFailed)?;
-    file.read_exact(&mut raw).map_err(|_| Error::ReadFailed)?;
-    super::header::resolve(&raw, raw_len, layouts, versions, partition, name)
-}
-
-/// Syncs a directory to ensure directory entry changes are durable.
-/// On Unix, directory metadata (file creation/deletion) must be explicitly fsynced.
-fn sync_dir(path: &Path) -> Result<(), Error> {
-    let dir = File::open(path).map_err(|e| {
-        Error::BlobOpenFailed(
-            path.to_string_lossy().to_string(),
-            "directory".to_string(),
-            e.into(),
-        )
-    })?;
-    dir.sync_all().map_err(|e| {
-        Error::BlobSyncFailed(
-            path.to_string_lossy().to_string(),
-            "directory".to_string(),
-            e.into(),
-        )
-    })
-}
 
 /// Configuration for a [Storage].
 #[derive(Clone, Debug)]
@@ -94,7 +59,6 @@ pub struct Storage {
     blob_layouts: RangeInclusive<Layout>,
     io_handle: iouring::Handle,
     pool: BufferPool,
-    hold: Arc<Hold>,
 }
 
 impl Storage {
@@ -120,8 +84,6 @@ impl Storage {
 
         let (io_handle, iouring_loop) = iouring::IoUringLoop::new(iouring_config, registry);
 
-        // Acquire the directory hold, blocking until any previous holder,
-        // including operations still finishing from a previous run, releases.
         let hold = Hold::acquire(&storage_directory).unwrap_or_else(|e| {
             panic!(
                 "failed to acquire storage directory hold ({}): {e}",
@@ -135,16 +97,13 @@ impl Storage {
             blob_layouts,
             io_handle,
             pool,
-            hold: hold.clone(),
         };
 
         utils::thread::spawn(thread_stack_size, move || {
-            // Hold the storage directory until the ring has drained: the loop
-            // exits only after every submitter is dropped and in-flight work
-            // completes, so a successor never observes straggling ring
-            // operations. The storage instance and its blobs share the hold,
-            // covering their synchronous filesystem operations (open, remove,
-            // scan, resize), which complete within a single poll.
+            // Hold the storage directory until the ring has drained. The loop
+            // exits only after every ring handle is dropped and in-flight work
+            // completes, and the storage instance and every blob own a handle,
+            // so the hold outlives them and every operation they issue.
             let _hold = hold;
             iouring_loop.run()
         });
@@ -229,7 +188,6 @@ impl crate::Storage for Storage {
             self.io_handle.clone(),
             self.pool.clone(),
             data_offset,
-            self.hold.clone(),
         );
         Ok((blob, logical_len, blob_version))
     }
@@ -310,8 +268,6 @@ pub struct Blob {
     /// Whether the kernel and filesystem may support `RWF_DONTCACHE`.
     /// Cleared on the first EOPNOTSUPP to avoid probing on every hinted I/O operation.
     dont_cache_supported: Arc<AtomicBool>,
-    /// Hold on the storage directory, kept while this handle can still touch it.
-    hold: Arc<Hold>,
 }
 
 impl Clone for Blob {
@@ -324,7 +280,6 @@ impl Clone for Blob {
             pool: self.pool.clone(),
             data_offset: self.data_offset,
             dont_cache_supported: self.dont_cache_supported.clone(),
-            hold: self.hold.clone(),
         }
     }
 }
@@ -338,7 +293,6 @@ impl Blob {
         io_handle: iouring::Handle,
         pool: BufferPool,
         data_offset: u64,
-        hold: Arc<Hold>,
     ) -> Self {
         Self {
             partition,
@@ -348,7 +302,6 @@ impl Blob {
             pool,
             data_offset,
             dont_cache_supported: Arc::new(AtomicBool::new(true)),
-            hold,
         }
     }
 }
@@ -502,11 +455,6 @@ mod tests {
 
     fn test_pool(scope: &mut impl Register) -> BufferPool {
         BufferPool::new(BufferPoolConfig::for_storage(), scope)
-    }
-
-    /// Acquire a hold on a test's directory for blobs built without a storage.
-    fn test_hold(storage_directory: &Path) -> Arc<Hold> {
-        Hold::acquire(storage_directory).unwrap()
     }
 
     /// Build a fresh storage instance rooted in a unique temporary directory.
@@ -1181,7 +1129,6 @@ mod tests {
             submitter,
             pool,
             Layout::V0.data_offset(),
-            test_hold(&storage_directory),
         );
 
         let empty = blob.read_at(0, 0, ReadOptions::DONT_CACHE).await.unwrap();
@@ -1251,7 +1198,6 @@ mod tests {
             submitter,
             pool,
             Layout::V0.data_offset(),
-            test_hold(&storage_directory),
         );
         // Sync should fail through the blob-specific wrapper before any kernel work is attempted.
         let err = blob
@@ -1291,7 +1237,6 @@ mod tests {
             submitter,
             pool,
             Layout::V0.data_offset(),
-            test_hold(&storage_directory),
         );
         let err = blob
             .start_sync()
@@ -1335,7 +1280,6 @@ mod tests {
             submitter,
             pool,
             Layout::V0.data_offset(),
-            test_hold(&storage_directory),
         );
         let err = blob
             .resize(0)
@@ -1374,7 +1318,6 @@ mod tests {
             submitter.clone(),
             pool,
             Layout::V0.data_offset(),
-            test_hold(&storage_directory),
         );
         // The request should reach the kernel and come back as a wrapped sync failure.
         let err = blob

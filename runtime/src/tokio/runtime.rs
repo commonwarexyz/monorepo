@@ -166,12 +166,8 @@ pub struct Config {
     /// Whether or not to catch panics.
     catch_panics: bool,
 
-    /// Base directory for all storage operations, created at start if missing.
-    ///
-    /// The runtime holds an exclusive advisory lock on a `.hold` file at its
-    /// root until its storage and every operation the storage dispatched have
-    /// finished. While a previous runtime still holds the directory,
-    /// [crate::Runner::start] blocks until that hold releases.
+    /// Base directory for all storage operations, created at start if missing
+    /// and held for the run (see [Runner]).
     storage_directory: PathBuf,
 
     /// Blob layouts accepted by storage.
@@ -490,9 +486,7 @@ impl crate::Runner for Runner {
             &mut runtime_registry.sub_registry("storage_buffer_pool"),
         );
 
-        // Initialize storage. Construction acquires the storage directory
-        // hold, waiting for any operations still finishing from a previous
-        // run before the flush below.
+        // Initialize storage
         cfg_if::cfg_if! {
             if #[cfg(feature = "iouring-storage")] {
                 let mut iouring_registry = runtime_registry.sub_registry("iouring_storage");
@@ -1225,19 +1219,29 @@ mod tests {
         const LEN: usize = 64 * 1024 * 1024;
 
         // The first run dispatches a large write and returns with the write's
-        // future dropped, leaving the write to finish on the blocking pool.
+        // future dropped, leaving the write to finish on the blocking pool. A
+        // blocking task the runtime has not started when it shuts down is
+        // dropped unrun, so wait for the write to reach the file first.
+        let path = storage_directory
+            .join("partition")
+            .join(commonware_formatting::hex(b"blob"));
         Runner::new(cfg.clone()).start(|context| async move {
             let (blob, _) = context.open("partition", b"blob").await.unwrap();
+            let header = std::fs::metadata(&path).unwrap().len();
             let mut write = Box::pin(blob.write_at(0, vec![7u8; LEN], WriteOptions::default()));
             assert!(
                 (&mut write).now_or_never().is_none(),
                 "write completed before it could straggle"
             );
+            while std::fs::metadata(&path).unwrap().len() == header {
+                std::thread::yield_now();
+            }
         });
 
-        // A run releases its hold before returning, so a second run on the
-        // same directory neither blocks nor observes the write mid-flight. Run
-        // it on a helper thread so a hold that never releases fails the test
+        // A run releases its hold once its storage work has finished (for
+        // io_uring storage, when the ring thread exits), so a second run on the
+        // same directory starts without observing the write mid-flight. Run it
+        // on a helper thread so a hold that never releases fails the test
         // instead of hanging it.
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
