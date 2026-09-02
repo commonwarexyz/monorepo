@@ -876,7 +876,7 @@ impl<H: Hasher, V: Variant, B: Codec + Digestible<Digest = H::Digest>> Client<H,
 
     #[tracing::instrument(
         name = "multimmit.marshal.resolver.subscribe_block",
-        level = "info",
+        level = "debug",
         skip_all
     )]
     pub(in crate::multimmit::marshal) async fn subscribe_block(

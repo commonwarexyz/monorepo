@@ -64,7 +64,6 @@ struct Entry<P, D: Digest> {
     generation: u64,
     attempts: u64,
     transmissions: Arc<[Transmission<P, D>]>,
-    sign_ready_at: Option<SystemTime>,
     next: SystemTime,
     backoff: Duration,
     delivered: bool,
@@ -210,7 +209,6 @@ impl<P: Clone, D: Digest> Egress<P, D> {
         id: EffectId,
         generation: u64,
         transmissions: Vec<Transmission<P, D>>,
-        sign_ready_at: Option<SystemTime>,
         now: SystemTime,
         origin: PublicationOrigin,
     ) {
@@ -224,7 +222,6 @@ impl<P: Clone, D: Digest> Egress<P, D> {
                 generation,
                 attempts: 0,
                 transmissions: transmissions.into(),
-                sign_ready_at,
                 next: now,
                 backoff: self.limits.retry_initial,
                 delivered: false,
@@ -414,9 +411,9 @@ impl<P: Clone, D: Digest> Egress<P, D> {
         now: SystemTime,
         accepted: bool,
         complete: bool,
-    ) -> (bool, Option<SystemTime>) {
+    ) -> bool {
         let Some(entry) = self.entries.get_mut(&id) else {
-            return (false, None);
+            return false;
         };
         let prior = Self::deadline(entry);
         let first = accepted && !entry.delivered;
@@ -441,7 +438,6 @@ impl<P: Clone, D: Digest> Egress<P, D> {
                 .min(self.limits.retry_ceiling);
         }
         entry.complete = complete;
-        let sign_ready_at = first.then_some(entry.sign_ready_at).flatten();
         let next = Self::deadline(entry);
         let removed = self.deadlines.remove(&(prior, id));
         debug_assert!(removed, "every publication has one retry deadline");
@@ -450,7 +446,7 @@ impl<P: Clone, D: Digest> Egress<P, D> {
             inserted,
             "a submitted publication retains one repair deadline"
         );
-        (first, sign_ready_at)
+        first
     }
 }
 
@@ -527,7 +523,6 @@ mod tests {
             id,
             0,
             Vec::new(),
-            None,
             now,
             PublicationOrigin { view: View::zero() },
         );
@@ -549,7 +544,6 @@ mod tests {
             id,
             0,
             Vec::new(),
-            None,
             now,
             PublicationOrigin { view: View::zero() },
         );
@@ -577,7 +571,6 @@ mod tests {
                     id,
                     0,
                     Vec::new(),
-                    None,
                     now,
                     PublicationOrigin { view: View::zero() },
                 );
@@ -615,7 +608,6 @@ mod tests {
                 EffectId::from_cursor(Cursor::new(cursor as u64)),
                 0,
                 Vec::new(),
-                None,
                 now,
                 PublicationOrigin { view: View::zero() },
             );
@@ -645,8 +637,8 @@ mod tests {
         let mut egress = Egress::<(), Sha256Digest>::new(Epoch::new(75), limits());
         let origin = || PublicationOrigin { view: View::zero() };
 
-        egress.install(first, 0, Vec::new(), None, now, origin());
-        egress.install(second, 0, Vec::new(), None, later, origin());
+        egress.install(first, 0, Vec::new(), now, origin());
+        egress.install(second, 0, Vec::new(), later, origin());
         assert_eq!(egress.next_attempt(), Some(now));
 
         egress.retire(&[first]);
@@ -666,8 +658,8 @@ mod tests {
         let mut egress = Egress::<(), Sha256Digest>::new(Epoch::new(77), limits());
         let origin = || PublicationOrigin { view: View::zero() };
 
-        egress.install(id, 0, Vec::new(), None, later, origin());
-        egress.install(id, 1, Vec::new(), None, now, origin());
+        egress.install(id, 0, Vec::new(), later, origin());
+        egress.install(id, 1, Vec::new(), now, origin());
 
         assert_eq!(egress.entries.len(), 1);
         assert_eq!(egress.deadlines.len(), 1);
@@ -695,7 +687,6 @@ mod tests {
             id,
             0,
             Vec::new(),
-            None,
             now,
             PublicationOrigin { view: View::zero() },
         );
@@ -789,7 +780,6 @@ mod tests {
                             id,
                             0,
                             transmissions,
-                            None,
                             now,
                             PublicationOrigin { view: View::zero() },
                         );
@@ -854,7 +844,7 @@ mod tests {
 
         let first = egress.claim(id, now).expect("installed publication claims");
         assert!(first.transmit_due);
-        assert!(egress.submitted(id, now, true, true).0);
+        assert!(egress.submitted(id, now, true, true));
 
         let settled_at = now + Duration::from_millis(340);
         assert!(
@@ -870,7 +860,7 @@ mod tests {
         let (mut egress, id, now, limits) = installed_egress(83);
 
         egress.claim(id, now).expect("installed publication claims");
-        assert!(egress.submitted(id, now, true, true).0);
+        assert!(egress.submitted(id, now, true, true));
 
         let repair_at = now
             + limits
@@ -909,7 +899,7 @@ mod tests {
             .expect("rejected publication retries promptly");
         assert_eq!(retry.retries, 1);
         assert!(!retry.delivered);
-        assert!(egress.submitted(id, retry_at, true, true).0);
+        assert!(egress.submitted(id, retry_at, true, true));
         assert_eq!(
             egress.next_attempt(),
             Some(
@@ -954,7 +944,6 @@ mod tests {
                 EffectId::from_cursor(Cursor::new(cursor)),
                 0,
                 Vec::new(),
-                None,
                 now,
                 PublicationOrigin { view: View::zero() },
             );
@@ -991,7 +980,6 @@ mod tests {
             id,
             0,
             vec![transmission],
-            None,
             now,
             PublicationOrigin { view: View::zero() },
         );

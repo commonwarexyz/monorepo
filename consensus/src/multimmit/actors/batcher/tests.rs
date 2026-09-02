@@ -1204,11 +1204,18 @@ fn executes_machine_issued_jobs_with_exact_tickets() {
             harness.blocker.blocked().is_empty(),
             "a source-free verification job blocked a network peer"
         );
-        let signer = &committee.identities[2];
-        let expected = format!("batcher_latest_verified_vote{{peer=\"{signer}\"}} 1");
+        let encoded = context.encode();
         assert!(
-            context.encode().lines().any(|line| line == expected),
-            "a valid novote did not advance its embedded signer's verified view"
+            encoded
+                .lines()
+                .any(|line| line.starts_with("batcher_verified_vote_lag_count ")
+                    && !line.ends_with(" 0")),
+            "valid votes did not record their lag behind the verifying round: {encoded}"
+        );
+        // Per-participant series scale as the validator count per node.
+        assert!(
+            !encoded.contains("batcher_latest_verified_vote"),
+            "the per-participant vote gauge family is still registered: {encoded}"
         );
     });
 }

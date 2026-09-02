@@ -57,7 +57,6 @@ use commonware_runtime::{
     deterministic::{Context as DeterministicContext, FaultConfig, Runner as DeterministicRunner},
     mocks::{DeferredSync, DelayedSyncContext, PendingSyncs, next_pending_sync},
     telemetry::{metrics::count_running_tasks, traces::collector::TraceStorage},
-    utils::reschedule,
 };
 use commonware_utils::{NZU64, channel::oneshot, sync::Mutex};
 use std::{
@@ -235,23 +234,6 @@ fn metric_sample(encoded: &str, name: &str) -> f64 {
             (sample == name).then(|| value.parse().unwrap())
         })
         .unwrap_or_else(|| panic!("missing metric sample {name}: {encoded}"))
-}
-
-fn histogram_percentile_bound(encoded: &str, name: &str, percent: f64) -> f64 {
-    let count_name = name.replace("_bucket", "_count");
-    let rank = (metric_sample(encoded, &count_name) * percent / 100.0).ceil();
-    encoded
-        .lines()
-        .filter_map(|line| {
-            let (sample, value) = line.rsplit_once(' ')?;
-            if !sample.starts_with(name) || value.parse::<f64>().ok()? < rank {
-                return None;
-            }
-            let upper_bound = sample.split("le=\"").nth(1)?.split('"').next()?;
-            (upper_bound != "+Inf").then(|| upper_bound.parse().expect("finite histogram bound"))
-        })
-        .next()
-        .unwrap_or(f64::INFINITY)
 }
 
 struct Node {
@@ -1129,28 +1111,32 @@ fn fresh_validator_builds_signs_and_publishes_a_block() {
             "primary_voter_current_view",
             "primary_voter_proposal_anchor_view",
             "primary_voter_produced_blocks",
-            "primary_voter_producer_vote_shares",
             "primary_voter_producer_pipeline_blocked",
-            "primary_voter_producer_prepared",
-            "primary_voter_producer_recovery_active",
             "primary_voter_active_validations",
             "primary_voter_pending_validations",
             "primary_voter_build_active",
             "primary_voter_custody_active",
             "primary_voter_build_latency",
-            "primary_voter_custody_latency",
             "primary_voter_vqc_latency",
             "primary_voter_lqc_latency",
-            "primary_voter_ready_to_sign_latency",
-            "primary_voter_sign_ready_to_wire_latency",
-            "primary_voter_propose_to_sign_ready_latency",
-            "primary_voter_verify_to_sign_ready_latency",
-            "primary_voter_startup_drain_latency",
-            "primary_voter_chains_known{chain=\"0\"}",
             "primary_voter_chains_finalized{chain=\"0\"}",
-            "primary_voter_chains_certified{chain=\"0\"}",
+            "primary_voter_chain_certified_floor",
+            "primary_voter_chain_da_voted_floor",
+            "primary_voter_chain_known_floor",
+            "primary_voter_lagging_chains",
         ] {
             assert!(metrics.contains(name), "missing metric {name}: {metrics}");
+        }
+        // Per-chain series scale with the validator count, so only finality stays per chain.
+        for name in [
+            "primary_voter_chains_known",
+            "primary_voter_chains_certified",
+            "primary_voter_chains_da_voted",
+        ] {
+            assert!(
+                !metrics.contains(name),
+                "unexpected metric {name}: {metrics}"
+            );
         }
     });
 }
@@ -1185,127 +1171,62 @@ fn local_custody_failure_stops_the_voter() {
     });
 }
 
-struct SigningLatencySample {
-    covered_tail: f64,
-    samples: f64,
-    p95: f64,
-    p99: f64,
-}
-
-async fn signing_latency_sample(
-    context: &DeterministicContext,
-    seed: u64,
-    instance: &'static str,
-    storage_delay: Duration,
-) -> SigningLatencySample {
-    let (application, mut build) = MockApplication::with_gated_build();
-    application.permit_builds(1);
-    let gates = TestGates::default();
-    let node = Node::start_with_attachments(
-        context,
-        seed,
-        Role::Validator(Participant::new(0)),
-        instance,
-        Attachments {
-            application,
-            journal_gates: Some(gates.clone()),
-            ..Attachments::default()
-        },
-    )
-    .await;
-    let (_, mut data_rx) = node.peer(1, 0).await;
-    build.wait_started().await;
-
-    // Hold the authorization append after it reaches the journal. Private signing can finish
-    // while the owner is suspended, but the owner cannot consume the signed completion yet.
-    let mut authorization_append = gates.arm_after_append();
-    build.release();
-    authorization_append.wait_entered().await;
-
-    // Catch the signed completion after it appends, then arm the one sync that covers both the
-    // non-exposing authorization and the ready signature.
-    let mut signature_append = gates.arm_after_append();
-    authorization_append.release();
-    signature_append.wait_entered().await;
-    let mut publication_sync = gates.arm_next_start_sync();
-    signature_append.release();
-    publication_sync.wait_entered().await;
-
-    // One sync is necessary and sufficient for this causally ready authorization/signature wave.
-    // It gates the first wire exposure, giving the injected-storage sample an exact pre-ack cut.
-    let prefix = format!("{instance}_voter_");
-    let release_count = format!("{prefix}sign_ready_to_wire_latency_count");
-    let release_sum = format!("{prefix}sign_ready_to_wire_latency_sum");
-    let histogram = format!("{prefix}sign_ready_to_wire_latency_bucket");
-    let before = context.encode();
-    let initial_count = metric_sample(&before, &release_count);
-    assert_eq!(
-        initial_count, 0.0,
-        "no signed publication may precede the coalesced barrier acknowledgement"
-    );
-    let initial_sum = metric_sample(&before, &release_sum);
-    context.sleep(storage_delay).await;
-    publication_sync.release();
-    let _initial = next_block(&node, &mut data_rx).await;
-
-    for _ in 0..128 {
-        if metric_sample(&context.encode(), &release_count) >= 1.0 {
-            break;
-        }
-        reschedule().await;
-    }
-
-    let metrics = context.encode();
-    assert!(
-        metric_sample(&metrics, &format!("{prefix}ready_to_sign_latency_count")) >= 1.0,
-        "the signed block never reached private signing"
-    );
-    assert_eq!(
-        metric_sample(
-            &metrics,
-            &format!("{prefix}propose_to_sign_ready_latency_count")
-        ),
-        1.0
-    );
-    assert!(
-        metric_sample(
-            &metrics,
-            &format!("{prefix}sign_ready_to_wire_latency_count")
-        ) >= 1.0,
-        "the durable signed wave never reached the wire"
-    );
-    let final_count = metric_sample(&metrics, &release_count);
-    let final_sum = metric_sample(&metrics, &release_sum);
-    SigningLatencySample {
-        covered_tail: final_sum - initial_sum,
-        samples: final_count - initial_count,
-        p95: histogram_percentile_bound(&metrics, &histogram, 95.0),
-        p99: histogram_percentile_bound(&metrics, &histogram, 99.0),
-    }
-}
-
+/// One signed publication must not reach the wire before the barrier sync covering it.
 #[test_traced]
-fn signing_timing_includes_the_exact_storage_release_delay() {
+fn publication_waits_for_the_covering_barrier_sync() {
     const STORAGE_DELAY: Duration = Duration::from_millis(250);
 
-    let baseline =
-        DeterministicRunner::timed(Duration::from_secs(10)).start(|context| async move {
-            signing_latency_sample(&context, 81, "timing_baseline", Duration::ZERO).await
-        });
-    let delayed = DeterministicRunner::timed(Duration::from_secs(10)).start(|context| async move {
-        signing_latency_sample(&context, 81, "timing_delayed", STORAGE_DELAY).await
-    });
+    DeterministicRunner::timed(Duration::from_secs(10)).start(|context| async move {
+        let (application, mut build) = MockApplication::with_gated_build();
+        application.permit_builds(1);
+        let gates = TestGates::default();
+        let node = Node::start_with_attachments(
+            &context,
+            81,
+            Role::Validator(Participant::new(0)),
+            "publication_barrier",
+            Attachments {
+                application,
+                journal_gates: Some(gates.clone()),
+                ..Attachments::default()
+            },
+        )
+        .await;
+        let (_, mut data_rx) = node.peer(1, 0).await;
+        build.wait_started().await;
 
-    assert!(baseline.covered_tail <= 0.5 * baseline.samples);
-    assert!(
-        delayed.covered_tail >= STORAGE_DELAY.as_secs_f64(),
-        "the behind-sync sample must contain the injected storage delay"
-    );
-    assert!(delayed.covered_tail <= 0.5 * delayed.samples);
-    // Logical-time scheduling and the injected storage delay must keep both tails within the
-    // 500ms service-latency ceiling.
-    assert!(baseline.p95 <= 0.5 && baseline.p99 <= 0.5);
-    assert!(delayed.p95 <= 0.5 && delayed.p99 <= 0.5);
+        // Hold the authorization append after it reaches the journal. Private signing can finish
+        // while the owner is suspended, but the owner cannot consume the signed completion yet.
+        let mut authorization_append = gates.arm_after_append();
+        build.release();
+        authorization_append.wait_entered().await;
+
+        // Catch the signed completion after it appends, then arm the one sync that covers both the
+        // non-exposing authorization and the ready signature.
+        let mut signature_append = gates.arm_after_append();
+        authorization_append.release();
+        signature_append.wait_entered().await;
+        let mut publication_sync = gates.arm_next_start_sync();
+        signature_append.release();
+        publication_sync.wait_entered().await;
+
+        // One sync is necessary and sufficient for this causally ready authorization/signature
+        // wave. Nothing may reach the wire while it is held, however long it takes.
+        select! {
+            result = data_rx.recv() => {
+                panic!("a signed publication escaped the covering barrier sync: {result:?}");
+            },
+            () = context.sleep(STORAGE_DELAY) => {},
+        }
+
+        publication_sync.release();
+        select! {
+            _ = next_block(&node, &mut data_rx) => {},
+            () = context.sleep(Duration::from_secs(1)) => {
+                panic!("the durable signed wave never reached the wire");
+            },
+        }
+    });
 }
 
 #[test_traced]
@@ -1352,22 +1273,6 @@ fn verified_block_signing_reaches_wire_without_application_correlation() {
                 break;
             }
         }
-
-        let metrics = context.encode();
-        assert_eq!(
-            metric_sample(
-                &metrics,
-                "verify_timing_voter_verify_to_sign_ready_latency_count"
-            ),
-            1.0
-        );
-        assert_eq!(
-            metric_sample(
-                &metrics,
-                "verify_timing_voter_sign_ready_to_wire_latency_count"
-            ),
-            1.0
-        );
     });
 }
 
@@ -1447,20 +1352,6 @@ fn round_spans_track_ingress_and_publication_boundaries(traces: TraceStorage) {
                 event.metadata.content == "test reporter received activity"
                     && event
                         .expect_span_at_index(0, |span| {
-                            if span.content == "multimmit.voter.verify.complete"
-                                && span.expect_field_exact("epoch", "76").is_ok()
-                                && span.expect_field_exact("view", "1").is_ok()
-                            {
-                                Ok(())
-                            } else {
-                                Err("verified span is missing its round fields"
-                                    .to_string()
-                                    .into())
-                            }
-                        })
-                        .is_ok()
-                    && event
-                        .expect_span_at_index(1, |span| {
                             if span.content == "multimmit.voter.verify"
                                 && span.expect_field_exact("epoch", "76").is_ok()
                                 && span.expect_field_exact("view", "1").is_ok()
@@ -1472,7 +1363,7 @@ fn round_spans_track_ingress_and_publication_boundaries(traces: TraceStorage) {
                         })
                         .is_ok()
                     && event
-                        .expect_span_at_index(2, |span| {
+                        .expect_span_at_index(1, |span| {
                             if span.content == "multimmit.voter.observe"
                                 && span.expect_field_exact("epoch", "76").is_ok()
                                 && span.expect_field_exact("view", "1").is_ok()
@@ -1497,20 +1388,8 @@ fn round_spans_track_ingress_and_publication_boundaries(traces: TraceStorage) {
         events
             .expect_event(|event| {
                 event.metadata.content == "durable publication installed"
-                    && event
-                        .expect_span_at_index(0, |span| {
-                            if span.content == "multimmit.voter.publish.install"
-                                && span.expect_field_exact("epoch", "76").is_ok()
-                                && span.expect_field_exact("view", "1").is_ok()
-                            {
-                                Ok(())
-                            } else {
-                                Err("install span is missing its origin fields"
-                                    .to_string()
-                                    .into())
-                            }
-                        })
-                        .is_ok()
+                    && event.metadata.expect_field_exact("epoch", "76").is_ok()
+                    && event.metadata.expect_field_exact("view", "1").is_ok()
                     && event
                         .expect_span(|span| {
                             span.content == "multimmit.voter.round"
@@ -2002,14 +1881,6 @@ fn same_chain_validations_overlap_without_voting_past_pending_parent() {
             voted,
             [parent_header.height(), child_header.height()],
             "DA authority advances only across the contiguous valid prefix",
-        );
-        assert_eq!(
-            metric_sample(
-                &context.encode(),
-                "same_chain_validation_pipeline_voter_verify_to_sign_ready_latency_count",
-            ),
-            2.0,
-            "each application validation in the signing batch contributes a timing sample",
         );
     });
 }
@@ -5029,15 +4900,6 @@ fn recovery_ready_waits_for_the_exact_drain_acknowledgement() {
             result = data_rx.recv() => panic!("recovered publication escaped before ready: {result:?}"),
             () = context.sleep(RECOVERY_DELAY) => {},
         }
-        let metrics = context.encode();
-        assert_eq!(
-            metric_sample(
-                &metrics,
-                "recovery_target_voter_startup_drain_latency_count"
-            ),
-            0.0
-        );
-
         drain.release();
         ready.await.expect("recovered voter becomes ready");
         let recovered = select! {
@@ -5047,24 +4909,6 @@ fn recovery_ready_waits_for_the_exact_drain_acknowledgement() {
             },
         };
         assert_eq!(recovered, expected);
-
-        let metrics = context.encode();
-        assert_eq!(
-            metric_sample(
-                &metrics,
-                "recovery_target_voter_startup_drain_latency_count"
-            ),
-            1.0
-        );
-        let drain_latency = metric_sample(
-            &metrics,
-            "recovery_target_voter_startup_drain_latency_sum",
-        );
-        assert!(drain_latency >= RECOVERY_DELAY.as_secs_f64());
-        assert!(drain_latency <= 0.5);
-        let histogram = "recovery_target_voter_startup_drain_latency_bucket";
-        assert!(histogram_percentile_bound(&metrics, histogram, 95.0) <= 0.5);
-        assert!(histogram_percentile_bound(&metrics, histogram, 99.0) <= 0.5);
     });
 }
 

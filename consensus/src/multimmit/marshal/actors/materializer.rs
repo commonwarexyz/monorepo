@@ -23,7 +23,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque, btree_map::Entry},
     sync::Arc,
 };
-use tracing::{Instrument as _, info_span};
+use tracing::{Instrument as _, debug_span, info_span};
 
 /// Bounds resident segment readers independently of active read jobs.
 ///
@@ -416,7 +416,7 @@ where
                     .active_bytes
                     .checked_add(bytes)
                     .ok_or(Error::Invalid("active body read bytes overflow"))?;
-                let span = info_span!(
+                let span = debug_span!(
                     "multimmit.marshal.materializer.read",
                     request = request,
                     segment = segment,

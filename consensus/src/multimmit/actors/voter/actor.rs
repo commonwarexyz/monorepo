@@ -277,7 +277,6 @@ enum AppOutcome<V: Variant, D: Digest> {
         result: Option<D>,
     },
     Custodied {
-        started_at: SystemTime,
         id: BuildId,
         generation: u64,
         header: TransactionBlockHeader<D>,
@@ -299,45 +298,9 @@ enum AppOutcome<V: Variant, D: Digest> {
     },
 }
 
-#[derive(Copy, Clone)]
-enum AppCompletionTiming {
-    Propose(SystemTime),
-    Verify(SystemTime),
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum AppCompletionKey<D: Digest> {
-    Propose {
-        chain: u32,
-        parent: D,
-        commitment: D,
-    },
-    Verify(D),
-}
-
-struct SigningTiming<A> {
-    ready_to_sign_at: SystemTime,
-    application: A,
-}
-
-#[derive(Clone, Copy)]
-struct TimedSign {
-    id: EffectId,
-    at: SystemTime,
-}
-
-#[derive(Clone, Copy)]
-struct TimedPublication {
-    id: EffectId,
-    at: SystemTime,
-}
-
 #[derive(Clone)]
-struct InputContext<D: Digest> {
+struct InputContext {
     span: Span,
-    application: Option<(AppCompletionKey<D>, AppCompletionTiming)>,
-    sign: Option<TimedSign>,
-    publication: Option<TimedPublication>,
     view_proof: Option<(ViewProofSource, ViewProofKind)>,
 }
 
@@ -379,13 +342,11 @@ enum CryptoOutcome<V: Variant, D: Digest> {
         id: EffectId,
         generation: u64,
         artifact: Arc<Artifact<V, D>>,
-        timing: SigningTiming<Option<AppCompletionTiming>>,
     },
     SignedBatch {
         id: EffectId,
         generation: u64,
         artifacts: Vec<Artifact<V, D>>,
-        timing: SigningTiming<Vec<AppCompletionTiming>>,
     },
     DaRecovered {
         started_at: SystemTime,
@@ -529,12 +490,6 @@ impl CheckpointOrigin {
 
 struct PendingJournal<V: Variant, D: Digest> {
     response: JournalResponse<JournalDurable<V, D>>,
-    publication: Option<TimedPublication>,
-}
-
-struct TimedDurable<V: Variant, D: Digest> {
-    durable: JournalDurable<V, D>,
-    publication: Option<TimedPublication>,
 }
 
 /// Every observation cohort the batcher had queued, merged into one machine step.
@@ -579,7 +534,7 @@ impl<P: PublicKey, V: Variant, D: Digest> ObservedBatch<P, V, D> {
 
 /// One ready runtime source, before it is admitted to the serial protocol owner.
 enum RuntimeEvent<P: PublicKey, V: Variant, D: Digest> {
-    Persistence(Result<TimedDurable<V, D>, JournalFailure>),
+    Persistence(Result<JournalDurable<V, D>, JournalFailure>),
     JournalMonitor(Result<(), JournalFailure>),
     JournalCapacity(Result<(), JournalFailure>),
     Checkpoint(Result<bool, Fatal>),
@@ -598,27 +553,6 @@ enum RuntimeEvent<P: PublicKey, V: Variant, D: Digest> {
 }
 
 impl<P: PublicKey, V: Variant, D: Digest> RuntimeEvent<P, V, D> {
-    /// Returns this event's index into `metrics::EVENT_KINDS`, if it is timed.
-    const fn kind_index(&self) -> Option<usize> {
-        let kind = match self {
-            Self::Persistence(_) => 0,
-            Self::JournalMonitor(_) | Self::JournalCapacity(_) => 1,
-            Self::Checkpoint(_) => 2,
-            Self::Prune(_) => 3,
-            Self::Application(_) => 4,
-            Self::Crypto(_) => 5,
-            Self::ViewTimer | Self::ProductionTimer => 6,
-            Self::Publication => 7,
-            Self::Heartbeat => 8,
-            Self::Verification(_) => 9,
-            Self::Resolution(_) => 10,
-            Self::Inspection(_) => 11,
-            Self::Observation(_) => 12,
-            Self::InputClosed => return None,
-        };
-        Some(kind)
-    }
-
     const fn core_lane(&self) -> Option<Lane> {
         match self {
             Self::Persistence(_) => Some(Lane::PersistenceCompletion),
@@ -671,7 +605,7 @@ async fn wait_for_checkpoint<E: StorageContext, V: Variant, D: Digest>(
 async fn next_journal_response<V: Variant, D: Digest>(
     enabled: bool,
     responses: &mut VecDeque<PendingJournal<V, D>>,
-) -> Result<TimedDurable<V, D>, JournalFailure> {
+) -> Result<JournalDurable<V, D>, JournalFailure> {
     if !enabled {
         return pending_forever().await;
     }
@@ -679,13 +613,10 @@ async fn next_journal_response<V: Variant, D: Digest>(
         .front_mut()
         .expect("an enabled journal response exists");
     let durable = (&mut pending.response).await?;
-    let pending = responses
+    responses
         .pop_front()
         .expect("the completed journal response remains queued");
-    Ok(TimedDurable {
-        durable,
-        publication: pending.publication,
-    })
+    Ok(durable)
 }
 
 async fn wait_for_journal_monitor(monitor: &mut JournalMonitor) -> Result<(), JournalFailure> {
@@ -888,17 +819,11 @@ where
         let protocol = profile.protocol();
         let epoch = protocol.epoch();
         let leaders = protocol.leaders().clone();
-        let pipeline_depth = protocol.codec_config().pipeline_depth();
         let participant = match profile.role() {
             Role::Validator(participant) => Some(participant),
             Role::Observer => None,
         };
         let initial_view = machine.inspection().view();
-        let crypto_task_limit = profile
-            .resources()
-            .max_cached_artifacts()
-            .saturating_add(profile.resources().max_outbox_effects())
-            .max(3);
         let journal_capacity = NonZeroUsize::new(profile.resources().max_outbox_effects())
             .expect("validated resources reserve journal commands");
         let max_unsynced_bytes = max_unsynced_journal_bytes(profile);
@@ -967,15 +892,6 @@ where
             verification_queue_limit,
             observation_batch,
             carried_observation: None,
-            pending_applications: Vec::with_capacity(
-                config
-                    .limits
-                    .inflight_application
-                    .get()
-                    .saturating_add(pipeline_depth),
-            ),
-            pending_signs: Vec::with_capacity(crypto_task_limit),
-            pending_publication: None,
             pending_inspection: None,
             active_custody: BTreeMap::new(),
             active_validations: BTreeMap::new(),
@@ -1003,7 +919,6 @@ where
         let view = driver.update_progress_gauges();
         driver.update_chain_gauges();
         driver.refresh_round_span(view);
-        let startup_started_at = driver.context.current();
         let span = driver.round_span.clone();
         let started = span.in_scope(|| {
             if recovered {
@@ -1038,11 +953,11 @@ where
                         return;
                     }
                 };
-                let pending = driver
+                driver
                     .journal_responses
                     .pop_front()
                     .expect("the completed journal response remains queued");
-                if let Err(fatal) = driver.persistence_completed(durable, pending.publication) {
+                if let Err(fatal) = driver.persistence_completed(durable) {
                     self.failed(&fatal);
                     return;
                 }
@@ -1050,10 +965,6 @@ where
             }
             break;
         }
-        driver
-            .metrics
-            .startup_drain_latency
-            .observe_between(startup_started_at, driver.context.current());
         if let Err(fatal) = driver.seed_resolver() {
             self.failed(&fatal);
             return;
@@ -1126,6 +1037,15 @@ const fn sign_request_kind<V: Variant, D: Digest>(request: &SignRequest<V, D>) -
     }
 }
 
+/// Returns the stable verdict label recorded on one block-validation span.
+const fn validation_verdict(validity: BlockValidity) -> &'static str {
+    match validity {
+        BlockValidity::Valid => "valid",
+        BlockValidity::Invalid => "invalid",
+        BlockValidity::Unavailable => "unavailable",
+    }
+}
+
 const fn view_proof_kind<V: Variant, D: Digest>(
     artifact: &Artifact<V, D>,
 ) -> Option<ViewProofKind> {
@@ -1148,22 +1068,6 @@ const fn view_proof_admission_outcome(status: ObservationStatus) -> ViewProofAdm
             ViewProofAdmissionOutcome::VerificationJobsFull
         }
         ObservationStatus::Rejected(_) => ViewProofAdmissionOutcome::OtherRejected,
-    }
-}
-
-fn application_completion_key<H: Hasher, V: Variant>(
-    request: &SignRequest<V, H::Digest>,
-) -> Option<AppCompletionKey<H::Digest>> {
-    match request {
-        SignRequest::TransactionBlock(header) => Some(AppCompletionKey::Propose {
-            chain: header.chain().get(),
-            parent: header.parent(),
-            commitment: header.body_digest(),
-        }),
-        SignRequest::DaVote(request) => {
-            Some(AppCompletionKey::Verify(request.header().digest::<H>()))
-        }
-        _ => None,
     }
 }
 
@@ -1328,7 +1232,7 @@ where
     /// Network sources bound to the exact core input ticket that classified them.
     observation_sources: BTreeMap<InputTicket, ObservationSources<P>>,
     /// Ingress context retained until the exact core ticket is fully consumed.
-    input_spans: BTreeMap<InputTicket, InputContext<H::Digest>>,
+    input_spans: BTreeMap<InputTicket, InputContext>,
     /// Authenticated network sources keyed by Core's stable pre-verification observation identity.
     verification_sources: BTreeMap<Observation, P>,
     jobs: Pool<'static, AppResult<V, H::Digest>>,
@@ -1342,12 +1246,6 @@ where
     observation_batch: usize,
     /// A queued cohort that did not fit the last merged step; it leads the next one.
     carried_observation: Option<Observed<P, V, H::Digest>>,
-    /// Bounded volatile timing for completed local signs awaiting their exact journal event.
-    pending_signs: Vec<TimedSign>,
-    /// Application completions awaiting an exact sign reservation in the immediate machine drain.
-    pending_applications: Vec<(AppCompletionKey<H::Digest>, AppCompletionTiming)>,
-    /// Timing attached only while the exact persisted input releases its publication.
-    pending_publication: Option<TimedPublication>,
     /// One best-effort query that may lose to one already-ready runtime event.
     pending_inspection: Option<(Query<H::Digest>, bool)>,
     /// Runtime cancellation signals keyed by Core's exact local build identity.
@@ -1593,14 +1491,10 @@ where
                         .and_then(|pending| (&mut pending.response).now_or_never());
                     match ready {
                         Some(Ok(durable)) => {
-                            let pending = self
-                                .journal_responses
+                            self.journal_responses
                                 .pop_front()
                                 .expect("the completed journal response remains queued");
-                            Some(RuntimeEvent::Persistence(Ok(TimedDurable {
-                                durable,
-                                publication: pending.publication,
-                            })))
+                            Some(RuntimeEvent::Persistence(Ok(durable)))
                         }
                         Some(Err(failure)) => {
                             self.journal_responses.pop_front();
@@ -1695,27 +1589,8 @@ where
         &mut self,
         event: RuntimeEvent<P, V, H::Digest>,
     ) -> Result<RuntimeDisposition, Fatal> {
-        let Some(kind) = event.kind_index() else {
-            return self.serve_runtime_event(event);
-        };
-        let started = self.context.current();
-        let disposition = self.serve_runtime_event(event);
-        self.metrics.event_latency[kind].observe_between(started, self.context.current());
-        disposition
-    }
-
-    fn serve_runtime_event(
-        &mut self,
-        event: RuntimeEvent<P, V, H::Digest>,
-    ) -> Result<RuntimeDisposition, Fatal> {
         match event {
-            RuntimeEvent::Persistence(result) => match result {
-                Ok(TimedDurable {
-                    durable,
-                    publication,
-                }) => self.persistence_completed(durable, publication)?,
-                Err(failure) => return Err(failure.into()),
-            },
+            RuntimeEvent::Persistence(result) => self.persistence_completed(result?)?,
             RuntimeEvent::JournalMonitor(result) => {
                 return Err(match result {
                     Ok(()) => Fatal::Closed,
@@ -1849,15 +1724,6 @@ where
 
     /// Drains one bounded Core service cycle, then gives attached runtime tasks one turn.
     async fn drive_core_cycle(&mut self) -> Result<(), Fatal> {
-        let started = self.context.current();
-        let result = self.drive_core_cycle_steps().await;
-        self.metrics
-            .core_cycle_latency
-            .observe_between(started, self.context.current());
-        result
-    }
-
-    async fn drive_core_cycle_steps(&mut self) -> Result<(), Fatal> {
         let mut yielded = false;
         loop {
             if !self.journal.has_capacity() {
@@ -1889,22 +1755,6 @@ where
                         .get(&serviced.ticket)
                         .cloned()
                         .ok_or(CoreError::SchedulerInvariant)?;
-                    let stale = matches!(serviced.transition.status(), StepStatus::StaleCompletion);
-                    if !stale
-                        && self.participant.is_some()
-                        && let Some(application) = input_context.application
-                    {
-                        if self.pending_applications.len() == self.pending_applications.capacity() {
-                            self.pending_applications.remove(0);
-                        }
-                        self.pending_applications.push(application);
-                    }
-                    if !stale
-                        && let Some(sign) = input_context.sign
-                        && self.pending_signs.len() < self.pending_signs.capacity()
-                    {
-                        self.pending_signs.push(sign);
-                    }
                     if let Some((source, kind)) = input_context.view_proof
                         && let StepStatus::ResolutionCompleted { admission } =
                             serviced.transition.status()
@@ -1918,7 +1768,6 @@ where
                             })
                             .inc();
                     }
-                    self.pending_publication = input_context.publication;
                     input_context
                         .span
                         .in_scope(|| self.dispatch_transition(serviced.transition))?;
@@ -1952,7 +1801,6 @@ where
         self.execute_capabilities(capabilities)?;
         self.pending_activities.extend(activities);
         self.flush_activities();
-        self.pending_publication = None;
         self.update_retention_gauges();
         let view = self.update_progress_gauges();
         self.refresh_round_span(view);
@@ -1986,9 +1834,6 @@ where
                 ticket,
                 InputContext {
                     span: Span::current(),
-                    application: None,
-                    sign: None,
-                    publication: None,
                     view_proof: None,
                 },
             )
@@ -2044,26 +1889,6 @@ where
             self.track_transition(|core| core.producer_timer_fired(timer))?;
             Ok(())
         })
-    }
-
-    fn track_signing(&mut self, ticket: InputTicket, sign: TimedSign) -> Result<(), Fatal> {
-        self.input_spans
-            .get_mut(&ticket)
-            .ok_or(CoreError::SchedulerInvariant)?
-            .sign = Some(sign);
-        Ok(())
-    }
-
-    fn track_application(
-        &mut self,
-        ticket: InputTicket,
-        application: Option<(AppCompletionKey<H::Digest>, AppCompletionTiming)>,
-    ) -> Result<(), Fatal> {
-        self.input_spans
-            .get_mut(&ticket)
-            .ok_or(CoreError::SchedulerInvariant)?
-            .application = application;
-        Ok(())
     }
 
     const fn can_admit(&self, lane: Lane) -> bool {
@@ -2179,9 +2004,6 @@ where
         self.verification_tasks.clear();
         self.fast_verifications.clear();
         self.bulk_verifications.clear();
-        self.pending_signs.clear();
-        self.pending_applications.clear();
-        self.pending_publication = None;
         self.active_custody.clear();
         self.active_validations.clear();
         self.verification_sources.clear();
@@ -2266,17 +2088,8 @@ where
         if let Some(producer) = progress.producer {
             let _ = self
                 .metrics
-                .producer_vote_shares
-                .try_set(producer.vote_shares());
-            let _ = self
-                .metrics
                 .producer_pipeline_blocked
                 .try_set(usize::from(producer.pipeline_blocked()));
-            let _ = self.metrics.producer_prepared.try_set(producer.prepared());
-            let _ = self
-                .metrics
-                .producer_recovery_active
-                .try_set(usize::from(producer.active_recovery()));
             self.observe_producer_progress(producer);
         }
         self.view_started_at
@@ -2296,15 +2109,33 @@ where
             .observe_between(arrived_at, self.context.current());
     }
 
+    /// Exports per-chain finality plus aggregate floors for the remaining chain heights.
+    ///
+    /// The per-chain family scales with the validator count, so only the value that localizes a
+    /// single stalled chain stays per chain. Certification, DA, and dissemination report their
+    /// slowest chain instead.
     fn update_chain_gauges(&self) {
         let progress = self.machine.chain_progress();
         assert_eq!(self.metrics.chains.len(), progress.len());
+        let mut certified_floor = u64::MAX;
+        let mut da_voted_floor = u64::MAX;
+        let mut known_floor = u64::MAX;
+        let mut finalized_ceiling = 0;
         for (metrics, chain) in self.metrics.chains.iter().zip(&progress) {
-            let _ = metrics.finalized.try_set(chain.finalized().get());
-            let _ = metrics.certified.try_set(chain.certified().get());
-            let _ = metrics.da_voted.try_set(chain.da_voted().get());
-            let _ = metrics.known.try_set(chain.known().get());
+            let finalized = chain.finalized().get();
+            let _ = metrics.finalized.try_set(finalized);
+            certified_floor = certified_floor.min(chain.certified().get());
+            da_voted_floor = da_voted_floor.min(chain.da_voted().get());
+            known_floor = known_floor.min(chain.known().get());
+            finalized_ceiling = finalized_ceiling.max(finalized);
         }
+        if progress.is_empty() {
+            return;
+        }
+        let lagging = progress
+            .iter()
+            .filter(|chain| chain.finalized().get() < finalized_ceiling)
+            .count();
         let _ = self
             .metrics
             .frontier_payloads
@@ -2317,6 +2148,10 @@ where
             .metrics
             .header_restarts
             .try_set(self.machine.header_restarts());
+        let _ = self.metrics.chain_certified_floor.try_set(certified_floor);
+        let _ = self.metrics.chain_da_voted_floor.try_set(da_voted_floor);
+        let _ = self.metrics.chain_known_floor.try_set(known_floor);
+        let _ = self.metrics.lagging_chains.try_set(lagging);
     }
 
     fn observe_producer_progress(&mut self, progress: ProducerProgress) {
@@ -2467,27 +2302,17 @@ where
         transmissions: Vec<Transmission<P, H::Digest>>,
     ) -> Result<(), Fatal> {
         let now = self.context.current();
-        let sign_ready_at = self
-            .pending_publication
-            .filter(|publication| publication.id == id)
-            .map(|publication| publication.at);
-        if sign_ready_at.is_some() {
-            self.pending_publication = None;
-        }
-        let origin = debug_span!(
-            parent: &Span::current(),
-            "multimmit.voter.publish.install",
+        debug!(
             epoch = self.protocol_epoch.get().traced(),
             view = self.round_view.get().traced(),
             id = id.get().traced(),
             generation = generation.traced(),
+            "durable publication installed"
         );
-        origin.in_scope(|| debug!("durable publication installed"));
         self.egress.install(
             id,
             generation,
             transmissions,
-            sign_ready_at,
             now,
             PublicationOrigin {
                 view: self.round_view,
@@ -2507,11 +2332,7 @@ where
     /// Attempts every due publication and reports first local acceptance to the machine.
     /// Ingests one authenticated verification cohort from the batcher.
     fn ingest_completed(&mut self, completed: Completed<H::Digest>) -> Result<(), Fatal> {
-        let Completed {
-            span,
-            round,
-            completion,
-        } = completed;
+        let Completed { span, completion } = completed;
         if completion.generation() != self.core().task_generation() {
             self.metrics.stale.inc();
             return Ok(());
@@ -2524,13 +2345,8 @@ where
             return Ok(());
         }
         self.schedule_pending_verifications()?;
-        let verified = info_span!(
-            parent: &span,
-            "multimmit.voter.verify.complete",
-            epoch = round.epoch().get().traced(),
-            view = round.view().get().traced()
-        );
-        verified.in_scope(|| {
+        span.record("verdicts", completion.verdicts().len().traced());
+        span.in_scope(|| {
             self.track_transition(|core| core.verification_completed(completion))?;
             Ok(())
         })
@@ -2588,7 +2404,7 @@ where
             cohorts,
         } = batch;
         let (sources, artifacts) = artifacts.into_iter().unzip();
-        let observe = info_span!(
+        let observe = debug_span!(
             parent: &self.round_span,
             "multimmit.voter.observe",
             epoch = self.protocol_epoch.get().traced(),
@@ -2674,7 +2490,7 @@ where
         } = due;
         let attempt_number = retries.saturating_add(1);
         let attempt = if retries == 0 {
-            info_span!(
+            debug_span!(
                 parent: None,
                 "multimmit.voter.publish",
                 epoch = self.protocol_epoch.get().traced(),
@@ -2741,19 +2557,12 @@ where
         }
         attempt.record("sender_accepted", sender_accepted);
         attempt.record("sender_complete", sender_complete);
-        let (first, sign_ready_at) = if transmit_due {
-            self.egress
-                .submitted(id, self.context.current(), sender_accepted, sender_complete)
-        } else {
-            (false, None)
-        };
+        let first = transmit_due
+            && self
+                .egress
+                .submitted(id, self.context.current(), sender_accepted, sender_complete);
         attempt.record("first_accepted", first);
         if first {
-            if let Some(sign_ready_at) = sign_ready_at {
-                self.metrics
-                    .sign_ready_to_wire_latency
-                    .observe_between(sign_ready_at, self.context.current());
-            }
             self.track_transition(|core| core.publication_delivered(id, generation))?;
         }
         Ok(())

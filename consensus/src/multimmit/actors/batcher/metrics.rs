@@ -1,16 +1,21 @@
-use crate::multimmit::actors::metrics::{Peer, Traffic};
-use commonware_cryptography::PublicKey;
+use crate::multimmit::actors::metrics::Traffic;
 use commonware_runtime::{
     Metrics as MetricsTrait,
-    telemetry::metrics::{
-        Counter, CounterFamily, GaugeFamily, Histogram, MetricsExt as _, histogram,
-    },
+    telemetry::metrics::{Counter, CounterFamily, Histogram, MetricsExt as _, histogram},
 };
-use commonware_utils::ordered::Set;
 
-pub(super) struct Metrics<P: PublicKey> {
+/// View-distance buckets for the lag of a verified vote behind the job that carried it.
+///
+/// The zero bucket separates current-view votes, which is the healthy case, from any lag at all.
+const VIEW_LAG: [f64; 10] = [0.0, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0];
+
+pub(super) struct Metrics {
     pub decoded: CounterFamily<Traffic>,
-    pub latest_verified_vote: GaugeFamily<Peer<P>>,
+    /// Views a verified vote trails the job that carried it.
+    ///
+    /// One histogram replaces a per-participant gauge family, which scaled as the validator
+    /// count per node. Peers that fall behind show up as a growing upper tail.
+    pub verified_vote_lag: Histogram,
     pub forwarded: Counter,
     pub dropped_lane: Counter,
     pub dropped_peer: Counter,
@@ -24,8 +29,8 @@ pub(super) struct Metrics<P: PublicKey> {
     pub certificate_known_messages: Histogram,
 }
 
-impl<P: PublicKey> Metrics<P> {
-    pub fn new<E: MetricsTrait>(context: &E, participants: &Set<P>) -> Self {
+impl Metrics {
+    pub fn new<E: MetricsTrait>(context: &E) -> Self {
         let decoded = context.family(
             "decoded",
             "decoded canonical ingress messages by network plane",
@@ -34,13 +39,11 @@ impl<P: PublicKey> Metrics<P> {
             let _ = decoded.get_or_create(&plane);
         }
 
-        let latest_verified_vote: GaugeFamily<Peer<P>> = context.family(
-            "latest_verified_vote",
-            "latest cryptographically verified vote view by participant",
+        let verified_vote_lag = context.histogram(
+            "verified_vote_lag",
+            "views a cryptographically verified vote trails the job that carried it",
+            VIEW_LAG,
         );
-        for participant in participants {
-            latest_verified_vote.get_or_create_by(participant).set(0);
-        }
 
         let forwarded = context.counter("forwarded", "artifacts forwarded in observation cohorts");
         let dropped_lane = context.counter("dropped_lane", "artifacts dropped by a full lane");
@@ -76,7 +79,7 @@ impl<P: PublicKey> Metrics<P> {
 
         Self {
             decoded,
-            latest_verified_vote,
+            verified_vote_lag,
             forwarded,
             dropped_lane,
             dropped_peer,

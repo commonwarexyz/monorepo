@@ -245,13 +245,43 @@ where
         self.jobs.push(future.instrument(Span::current()));
     }
 
-    fn dispatch(&mut self, command: Command<H, V, B>) {
-        let span = info_span!(
-            parent: &command.span,
-            "multimmit.marshal.router.process",
-            request = command.request.kind(),
+    /// Drains one receive burst under a single span.
+    ///
+    /// Reporter hints arrive at roughly seven per validator per view, so one span per command
+    /// made the round trace mostly router bookkeeping. The drain span starts its own trace and
+    /// links back to each command's origin, which keeps causality queryable without holding the
+    /// caller's round span alive. The burst is capped by remaining job capacity so the pending
+    /// job bound is unchanged.
+    fn drain(&mut self, first: Command<H, V, B>) {
+        let capacity = self.max_pending.saturating_sub(self.jobs.len()).max(1);
+        let drain = info_span!(
+            parent: None,
+            "multimmit.marshal.router.drain",
+            triggered_by = first.request.kind(),
+            commands = tracing::field::Empty,
+            hints = tracing::field::Empty,
         );
-        let _guard = span.enter();
+        let _guard = drain.enter();
+        let mut commands = 0u64;
+        let mut hints = 0u64;
+        let mut next = Some(first);
+        while let Some(command) = next {
+            if let Some(id) = command.span.id() {
+                drain.follows_from(id);
+            }
+            commands += 1;
+            hints += u64::from(matches!(command.request, Request::Hint(_)));
+            self.dispatch(command);
+            next = (commands < capacity as u64)
+                .then(|| self.commands.try_recv().ok())
+                .flatten();
+        }
+        drain.record("commands", commands);
+        drain.record("hints", hints);
+        self.metrics.hints.inc_by(hints);
+    }
+
+    fn dispatch(&mut self, command: Command<H, V, B>) {
         let command = match command.request {
             Request::SubscribeBlock(reference, reply) => {
                 let resolver = self.resolver.clone();
@@ -486,7 +516,7 @@ where
                     let Some(command) = command else {
                         return Ok(());
                     };
-                    self.dispatch(command);
+                    self.drain(command);
                 }
                 RouterEvent::Job(result) => result?,
                 RouterEvent::Subscription(Ok((reference, result))) => {

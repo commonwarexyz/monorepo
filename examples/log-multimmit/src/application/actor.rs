@@ -5,7 +5,7 @@ use commonware_codec::{
     varint::{MAX_U32_VARINT_SIZE, MAX_U64_VARINT_SIZE},
 };
 use commonware_consensus::{
-    Automaton, Epochable as _, Heightable as _, Relay, Reporter,
+    Automaton, Epochable as _, Heightable as _, LATENCY, Relay, Reporter,
     multimmit::{
         Artifact,
         marshal::{Custody, Error as MarshalError, Mailbox, Update},
@@ -131,9 +131,7 @@ impl ProposalLatency {
             latency: context.histogram(
                 "proposal_finalization_latency",
                 "time from proposal preparation to inclusion by a directly finalized leader",
-                (1..=500)
-                    .map(|step| f64::from(step) * 0.005)
-                    .chain([5.0, 10.0, 30.0, 60.0, 120.0, 300.0]),
+                LATENCY,
             ),
             dropped: context.counter(
                 "proposal_finalization_dropped_total",
@@ -280,9 +278,7 @@ impl ApplicationMetrics {
             body_wait: context.histogram(
                 "verify_body_wait",
                 "time a remote block verification waits for its complete body from marshal",
-                (1..=200)
-                    .map(|step| f64::from(step) * 0.001)
-                    .chain([0.3, 0.5, 1.0, 5.0, 30.0]),
+                LATENCY,
             ),
         }
     }

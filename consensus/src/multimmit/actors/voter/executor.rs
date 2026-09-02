@@ -96,7 +96,9 @@ where
                     "multimmit.voter.verify",
                     epoch = self.protocol_epoch.get().traced(),
                     view = self.round_view.get().traced(),
-                    job = job.id().get().traced()
+                    job = job.id().get().traced(),
+                    items = job.items().len().traced(),
+                    verdicts = tracing::field::Empty
                 );
                 self.schedule_verification(PendingVerification {
                     span,
@@ -181,32 +183,18 @@ where
                                 span.record("positions", positions.traced());
                                 span.record("extensions", extensions.traced());
                                 self.metrics.vote_positions.observe(positions as f64);
-                                self.metrics.vote_extensions.observe(extensions as f64);
                                 if positions == 0 && extensions == 0 {
                                     self.metrics.empty_votes.inc();
                                 }
                             }
-                            SignRequest::LeaderBlock(_) => {
-                                if let Some(view) = request.consensus_view() {
-                                    self.observe_leader_latency(
-                                        view,
-                                        &self.metrics.seal_offset_latency,
-                                    );
-                                }
-                            }
                             _ => {}
                         }
-                        let timing = SigningTiming {
-                            ready_to_sign_at: self.context.current(),
-                            application: self.take_application_timing(&request),
-                        };
                         let scheme = Arc::clone(&self.scheme);
                         let operation = move |_| {
                             sign_request(&scheme, &request).map(|artifact| CryptoOutcome::Signed {
                                 id,
                                 generation,
                                 artifact: Arc::new(artifact),
-                                timing,
                             })
                         };
                         self.spawn_crypto(TaskClass::LocalSigning, span, operation)?;
@@ -230,13 +218,6 @@ where
                                 self.observe_da_vote_latency(vote.header());
                             }
                         }
-                        let timing = SigningTiming {
-                            ready_to_sign_at: self.context.current(),
-                            application: requests
-                                .iter()
-                                .filter_map(|request| self.take_application_timing(request))
-                                .collect(),
-                        };
                         // The batch is all-or-nothing and order preserving; any failure is fatal
                         // before a completion is constructed. Signatures are independent, so the
                         // batch fans out across the compute pool.
@@ -250,7 +231,6 @@ where
                                     id,
                                     generation,
                                     artifacts,
-                                    timing,
                                 })
                         };
                         self.spawn_crypto_units(TaskClass::LocalSigning, workers, span, operation)?;
@@ -650,36 +630,12 @@ where
         Ok(())
     }
 
-    fn take_application_timing(
-        &mut self,
-        request: &SignRequest<V, H::Digest>,
-    ) -> Option<AppCompletionTiming> {
-        let key = application_completion_key::<H, V>(request)?;
-        let position = self
-            .pending_applications
-            .iter()
-            .position(|(pending, _)| pending == &key)?;
-        Some(self.pending_applications.swap_remove(position).1)
-    }
-
     /// Appends one exact barrier and stages its durability completion.
     ///
     /// Barriers pipeline: the journal appends behind in-flight syncs, and completions are
     /// acknowledged strictly in cursor order.
     fn persist(&mut self, directive: PersistDirective<V, H::Digest>) -> Result<(), Fatal> {
-        let (job, staged_retention, release_after_enqueue, signed_publication) =
-            directive.into_parts();
-        let publication = signed_publication.and_then(|(sign, publication)| {
-            let position = self
-                .pending_signs
-                .iter()
-                .position(|timed| timed.id == sign)?;
-            let timed = self.pending_signs.swap_remove(position);
-            Some(TimedPublication {
-                id: publication,
-                at: timed.at,
-            })
-        });
+        let (job, staged_retention, release_after_enqueue, _) = directive.into_parts();
 
         // A dedicated span makes each barrier's wall time (append, fsync, acknowledgement)
         // visible per round; staging stalls behind exactly this interval.
@@ -694,10 +650,8 @@ where
         let barrier = job.id();
         match self.journal.try_append(span, job) {
             Ok(response) => {
-                self.journal_responses.push_back(PendingJournal {
-                    response,
-                    publication,
-                });
+                self.journal_responses
+                    .push_back(PendingJournal { response });
                 Ok(())
             }
             Err(JournalAdmission::Full(_)) => Err(CoreError::SchedulerInvariant.into()),
@@ -720,7 +674,6 @@ where
     pub(super) fn persistence_completed(
         &mut self,
         durable: JournalDurable<V, H::Digest>,
-        publication: Option<TimedPublication>,
     ) -> Result<(), Fatal> {
         let JournalDurable {
             span,
@@ -738,10 +691,6 @@ where
             .get_mut(&ticket)
             .ok_or(CoreError::SchedulerInvariant)?
             .span = span;
-        self.input_spans
-            .get_mut(&ticket)
-            .ok_or(CoreError::SchedulerInvariant)?
-            .publication = publication;
 
         Ok(())
     }
@@ -806,7 +755,6 @@ where
             chain = header.chain().get().traced(),
             height = header.height().get().traced(),
         );
-        let started_at = self.context.current();
         let mut automaton = self.automaton.clone();
         let completion_span = span.clone();
         let handle = self.context.child("custody").spawn(move |_| {
@@ -817,7 +765,6 @@ where
                 };
                 select! {
                     verdict = custody => AppOutcome::Custodied {
-                        started_at,
                         id,
                         generation,
                         header,
@@ -860,7 +807,8 @@ where
             "multimmit.voter.validate_block",
             epoch = self.protocol_epoch.get().traced(),
             chain = chain.traced(),
-            height = block.header().height().get().traced()
+            height = block.header().height().get().traced(),
+            validity = tracing::field::Empty
         );
         let started_at = self.context.current();
         let mut automaton = self.automaton.clone();
@@ -933,16 +881,6 @@ where
                 self.metrics
                     .build_latency
                     .observe_between(started_at, completed_at);
-                let application = result.map(|commitment| {
-                    (
-                        AppCompletionKey::Propose {
-                            chain: parent.chain().get(),
-                            parent: parent.digest(),
-                            commitment,
-                        },
-                        AppCompletionTiming::Propose(completed_at),
-                    )
-                });
                 if result.is_some() {
                     self.metrics.builds.inc();
                 } else {
@@ -951,13 +889,11 @@ where
                 let completed = info_span!(parent: span, "multimmit.voter.produce.complete");
                 completed.in_scope(|| {
                     let completion = BuildCompletion::new(id, generation, parent, result);
-                    let ticket =
-                        self.track_transition(|core| core.producer_build_completed(completion))?;
-                    self.track_application(ticket, application)
+                    self.track_transition(|core| core.producer_build_completed(completion))?;
+                    Ok(())
                 })
             }
             AppOutcome::Custodied {
-                started_at,
                 id,
                 generation,
                 header,
@@ -987,9 +923,6 @@ where
                     self.track_transition(|core| core.producer_custody_cancelled(cancellation))?;
                     return Ok(());
                 }
-                self.metrics
-                    .custody_latency
-                    .observe_between(started_at, self.context.current());
                 if verdict != Some(true) {
                     return Err(Fatal::Automaton);
                 }
@@ -1051,16 +984,11 @@ where
                         BlockValidity::Unavailable
                     }
                 };
-                let application = (validity == BlockValidity::Valid).then_some((
-                    AppCompletionKey::Verify(block.header().digest::<H>()),
-                    AppCompletionTiming::Verify(completed_at),
-                ));
-                let completed = info_span!(parent: span, "multimmit.voter.validate_block.complete");
-                completed.in_scope(|| {
+                span.record("validity", validation_verdict(validity));
+                span.in_scope(|| {
                     let completion = ValidationCompletion::new(id, generation, validity);
-                    let ticket =
-                        self.track_transition(|core| core.producer_validated(completion))?;
-                    self.track_application(ticket, application)
+                    self.track_transition(|core| core.producer_validated(completion))?;
+                    Ok(())
                 })
             }
             AppOutcome::ValidationCancelled { id, chain } => {
@@ -1097,29 +1025,6 @@ where
         Ok(())
     }
 
-    fn observe_sign_ready(
-        &self,
-        timing: SigningTiming<impl IntoIterator<Item = AppCompletionTiming>>,
-    ) -> SystemTime {
-        let sign_ready_at = self.context.current();
-        self.metrics
-            .ready_to_sign_latency
-            .observe_between(timing.ready_to_sign_at, sign_ready_at);
-        for application in timing.application {
-            match application {
-                AppCompletionTiming::Propose(completed_at) => self
-                    .metrics
-                    .propose_to_sign_ready_latency
-                    .observe_between(completed_at, sign_ready_at),
-                AppCompletionTiming::Verify(completed_at) => self
-                    .metrics
-                    .verify_to_sign_ready_latency
-                    .observe_between(completed_at, sign_ready_at),
-            }
-        }
-        sign_ready_at
-    }
-
     /// Feeds one completed certificate assembly or recovery back into the machine.
     fn crypto_outcome(
         &mut self,
@@ -1131,36 +1036,19 @@ where
                 id,
                 generation,
                 artifact,
-                timing,
             } => {
-                let sign_ready_at = self.observe_sign_ready(timing);
-                let ticket =
-                    self.track_transition(|core| core.signing_completed(id, generation, artifact))?;
-                self.track_signing(
-                    ticket,
-                    TimedSign {
-                        id,
-                        at: sign_ready_at,
-                    },
-                )
+                self.track_transition(|core| core.signing_completed(id, generation, artifact))?;
+                Ok(())
             }
             CryptoOutcome::SignedBatch {
                 id,
                 generation,
                 artifacts,
-                timing,
             } => {
-                let sign_ready_at = self.observe_sign_ready(timing);
-                let ticket = self.track_transition(|core| {
+                self.track_transition(|core| {
                     core.signing_batch_completed(id, generation, artifacts)
                 })?;
-                self.track_signing(
-                    ticket,
-                    TimedSign {
-                        id,
-                        at: sign_ready_at,
-                    },
-                )
+                Ok(())
             }
             CryptoOutcome::DaRecovered {
                 started_at,

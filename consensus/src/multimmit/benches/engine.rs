@@ -33,24 +33,27 @@ const PRODUCTION_INTERVAL: Duration = Duration::from_millis(50);
 const RUNTIME_SEED: u64 = 0x5eed_cafe;
 const PROFILE_SEED: u64 = 0xface_feed;
 
-// The reproducible current baseline is 50ms for all four tails. One additional histogram bucket
-// leaves deterministic scheduling headroom while still making a two-bucket regression fail.
-const COMPLETION_P95_LIMIT: Duration = Duration::from_millis(100);
-const COMPLETION_P99_LIMIT: Duration = Duration::from_millis(100);
-const RELEASE_P95_LIMIT: Duration = Duration::from_millis(100);
-const RELEASE_P99_LIMIT: Duration = Duration::from_millis(100);
+// The gated tails cover the two application arcs the engine drives: local block production, and
+// network observation through DA-vote signing. The reproducible baseline is 2ms for both build
+// tails across every profile, and 5ms/7ms for the DA-vote tails without a storage sync interval
+// against 35ms/40ms with one. Each limit sits a few histogram buckets above the slowest profile's
+// baseline, which leaves deterministic scheduling headroom while still failing on a regression.
+const BUILD_P95_LIMIT: Duration = Duration::from_millis(5);
+const BUILD_P99_LIMIT: Duration = Duration::from_millis(5);
+const DA_VOTE_P95_LIMIT: Duration = Duration::from_millis(60);
+const DA_VOTE_P99_LIMIT: Duration = Duration::from_millis(60);
 
 #[derive(Clone, Copy, Debug)]
 struct ProfileReport {
     blocks: u64,
     views: u64,
     workload_views: u64,
-    completion_samples: u64,
-    completion_p95: Duration,
-    completion_p99: Duration,
-    release_samples: u64,
-    release_p95: Duration,
-    release_p99: Duration,
+    build_samples: u64,
+    build_p95: Duration,
+    build_p99: Duration,
+    da_vote_samples: u64,
+    da_vote_p95: Duration,
+    da_vote_p99: Duration,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -144,24 +147,22 @@ fn run_profile(storage_delay: bool) -> ProfileRun {
             .map(|progress| progress.finalized().get())
             .sum();
         let metrics = context.encode();
-        let (completion_p95, completion_samples) =
-            histogram_percentile(&metrics, "ready_to_sign_latency", 95);
-        let (completion_p99, _) = histogram_percentile(&metrics, "ready_to_sign_latency", 99);
-        let (release_p95, release_samples) =
-            histogram_percentile(&metrics, "sign_ready_to_wire_latency", 95);
-        let (release_p99, _) = histogram_percentile(&metrics, "sign_ready_to_wire_latency", 99);
+        let (build_p95, build_samples) = histogram_percentile(&metrics, "build_latency", 95);
+        let (build_p99, _) = histogram_percentile(&metrics, "build_latency", 99);
+        let (da_vote_p95, da_vote_samples) = histogram_percentile(&metrics, "da_vote_latency", 95);
+        let (da_vote_p99, _) = histogram_percentile(&metrics, "da_vote_latency", 99);
 
         ProfileRun {
             report: ProfileReport {
                 blocks,
                 views,
                 workload_views,
-                completion_samples,
-                completion_p95,
-                completion_p99,
-                release_samples,
-                release_p95,
-                release_p99,
+                build_samples,
+                build_p95,
+                build_p99,
+                da_vote_samples,
+                da_vote_p95,
+                da_vote_p99,
             },
             block_elapsed,
             view_elapsed,
@@ -233,12 +234,12 @@ fn check_report(report: ProfileReport) {
     assert_eq!(report.blocks, NODES as u64 * BLOCKS_PER_CHAIN);
     assert!(report.views >= VIEW_ADVANCE);
     assert!(report.workload_views >= VIEW_ADVANCE);
-    assert!(report.completion_samples >= 100);
-    assert!(report.release_samples >= 100);
-    assert!(report.completion_p95 <= COMPLETION_P95_LIMIT);
-    assert!(report.completion_p99 <= COMPLETION_P99_LIMIT);
-    assert!(report.release_p95 <= RELEASE_P95_LIMIT);
-    assert!(report.release_p99 <= RELEASE_P99_LIMIT);
+    assert!(report.build_samples >= 100);
+    assert!(report.da_vote_samples >= 50);
+    assert!(report.build_p95 <= BUILD_P95_LIMIT);
+    assert!(report.build_p99 <= BUILD_P99_LIMIT);
+    assert!(report.da_vote_p95 <= DA_VOTE_P95_LIMIT);
+    assert!(report.da_vote_p99 <= DA_VOTE_P99_LIMIT);
 
     static REPRODUCIBLE_BASELINE: OnceLock<ProfileReport> = OnceLock::new();
     if REPRODUCIBLE_BASELINE.set(report).is_ok() {

@@ -7,7 +7,7 @@ use crate::{
     Epochable as _,
     multimmit::{
         actors::{
-            metrics::{Peer, Traffic},
+            metrics::Traffic,
             wire::{CertificateMessage, ConsensusMessage, DataMessage, Envelope, EnvelopeConfig},
         },
         config::CodecConfig,
@@ -25,10 +25,7 @@ use commonware_p2p::{Blocker, Receiver};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
     Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
-    telemetry::{
-        metrics::{GaugeExt as _, GaugeFamily},
-        traces::TracedExt as _,
-    },
+    telemetry::{metrics::Histogram, traces::TracedExt as _},
 };
 use commonware_utils::{futures::Pool, sync::Mutex};
 use futures::FutureExt as _;
@@ -45,7 +42,7 @@ use tracing::{Instrument as _, Span, debug, debug_span, error, info_span};
 type PlaneReceiver<R, M, T> = DecodingReceiver<R, Envelope<M>, T>;
 type VerifyResult<P, D> = (
     Span,
-    Result<(Round, VerificationCompletion<D>, Vec<P>), VerificationTaskPanicked>,
+    Result<(VerificationCompletion<D>, Vec<P>), VerificationTaskPanicked>,
 );
 type VerifyResults<P, D> = Pool<'static, VerifyResult<P, D>>;
 type DecodedMessage<P, M> = (P, Result<M, commonware_codec::Error>);
@@ -283,7 +280,7 @@ where
 
     mailbox: mailbox::Receiver<Message<P, V, H::Digest>>,
 
-    metrics: ActorMetrics<P>,
+    metrics: ActorMetrics,
 
     _hasher: PhantomData<H>,
 }
@@ -302,7 +299,7 @@ where
         context: E,
         config: Config<P, V, B, T>,
     ) -> (Self, mailbox::Sender<Message<P, V, H::Digest>>) {
-        let metrics = ActorMetrics::new(&context, config.scheme.participants());
+        let metrics = ActorMetrics::new(&context);
         let (sender, receiver) = mailbox::new(context.child("mailbox"), config.mailbox_size);
         (
             Self {
@@ -402,7 +399,7 @@ where
                         let scheme = Arc::clone(&self.scheme);
                         let strategy = self.strategy.clone();
                         let latency = self.metrics.verify_latency.clone();
-                        let latest_verified_vote = self.metrics.latest_verified_vote.clone();
+                        let verified_vote_lag = self.metrics.verified_vote_lag.clone();
                         let verified_votes = Arc::clone(&self.verified_votes);
                         let transcript_messages =
                             self.metrics.certificate_transcript_messages.clone();
@@ -456,8 +453,8 @@ where
                             Self::record_verified_votes(
                                 &job,
                                 &completion,
-                                &scheme,
-                                &latest_verified_vote,
+                                round,
+                                &verified_vote_lag,
                             );
                             let invalid_sources = completion
                                 .verdicts()
@@ -470,7 +467,7 @@ where
                                 .into_iter()
                                 .collect();
                             timer.observe(&context);
-                            (round, completion, invalid_sources)
+                            (completion, invalid_sources)
                         };
                         jobs.push(run_verification_operation(
                             context,
@@ -733,7 +730,7 @@ where
         completion: VerifyResult<P, H::Digest>,
     ) -> bool {
         let (span, outcome) = completion;
-        let (round, completion, invalid_sources) = match outcome {
+        let (completion, invalid_sources) = match outcome {
             Ok(outcome) => outcome,
             Err(VerificationTaskPanicked) => {
                 span.in_scope(|| error!("verification worker panicked"));
@@ -744,20 +741,19 @@ where
             self.block(peer, "cryptographic verification failed");
         }
         completions
-            .enqueue(Completed {
-                span,
-                round,
-                completion,
-            })
+            .enqueue(Completed { span, completion })
             .accepted()
     }
 
-    /// Records verified vote progress against the embedded signer, not the relaying peer.
+    /// Records how far each verified vote trails the job's round.
+    ///
+    /// The distribution answers the same question a per-participant gauge family did without
+    /// paying one series per validator: a peer that stops keeping up widens the upper tail.
     fn record_verified_votes(
         job: &VerifyJob<V, H::Digest>,
         completion: &VerificationCompletion<H::Digest>,
-        scheme: &Scheme<P, V>,
-        latest: &GaugeFamily<Peer<P>>,
+        round: Round,
+        lag: &Histogram,
     ) {
         for (item, verdict) in job.items().iter().zip(completion.verdicts()) {
             if !verdict.valid() {
@@ -767,13 +763,10 @@ where
             if !matches!(artifact, Artifact::Vote(_) | Artifact::NoVote(_)) {
                 continue;
             }
-            let (Some(view), Some(signer)) = (artifact.view(), artifact.signer()) else {
+            let Some(view) = artifact.view() else {
                 continue;
             };
-            let Some(peer) = scheme.participants().as_ref().get(signer.get() as usize) else {
-                continue;
-            };
-            let _ = latest.get_or_create_by(peer).try_set_max(view.get());
+            lag.observe(round.view().get().saturating_sub(view.get()) as f64);
         }
     }
 
