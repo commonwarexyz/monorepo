@@ -61,7 +61,7 @@ where
 }
 
 pub mod partitioned {
-    //! A variant of [super] that uses a partitioned index for the snapshot.
+    //! A variant of [super] that uses a partitioned key index.
 
     use super::*;
     use crate::index::partitioned::unordered::Index;

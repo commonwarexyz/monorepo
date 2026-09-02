@@ -16,7 +16,7 @@ pub type ProofStore<D> = crate::merkle::verification::ProofStore<Family, D>;
 pub async fn range_proof<
     D: Digest,
     H: Hasher<Family, Digest = D>,
-    S: Storage<Family, Digest = D>,
+    S: Storage<Family = Family, Digest = D>,
 >(
     hasher: &H,
     mmr: &S,
@@ -30,7 +30,7 @@ pub async fn range_proof<
 pub async fn historical_range_proof<
     D: Digest,
     H: Hasher<Family, Digest = D>,
-    S: Storage<Family, Digest = D>,
+    S: Storage<Family = Family, Digest = D>,
 >(
     hasher: &H,
     mmr: &S,
@@ -43,7 +43,7 @@ pub async fn historical_range_proof<
 }
 
 /// Return an inclusion proof for the elements at the specified locations.
-pub async fn multi_proof<D: Digest, S: Storage<Family, Digest = D>>(
+pub async fn multi_proof<D: Digest, S: Storage<Family = Family, Digest = D>>(
     mmr: &S,
     inactive_peaks: usize,
     bagging: Bagging,

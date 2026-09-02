@@ -180,7 +180,7 @@ pub struct RangeProofSpec<F: Family, D: Digest> {
 
 impl<F: Graftable, D: Digest> RangeProof<F, D> {
     /// Create a new range proof for the provided `range` of operations.
-    pub async fn new<H: Hasher<Digest = D>, S: Storage<F, Digest = D>, const N: usize>(
+    pub async fn new<H: Hasher<Digest = D>, S: Storage<Family = F, Digest = D>, const N: usize>(
         status: &impl BitmapReadable<N>,
         storage: &S,
         inactivity_floor: Location<F>,
@@ -236,7 +236,7 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
     pub async fn new_with_ops<
         H: Hasher<Digest = D>,
         C: Contiguous,
-        S: Storage<F, Digest = D>,
+        S: Storage<Family = F, Digest = D>,
         const N: usize,
     >(
         status: &impl BitmapReadable<N>,
@@ -550,7 +550,7 @@ impl<F: Graftable, D: Digest, const N: usize> OperationProof<F, D, N> {
     /// # Errors
     ///
     /// Returns [Error::OperationPruned] if `loc` falls in a pruned bitmap chunk.
-    pub async fn new<H: Hasher<Digest = D>, S: Storage<F, Digest = D>>(
+    pub async fn new<H: Hasher<Digest = D>, S: Storage<Family = F, Digest = D>>(
         status: &impl BitmapReadable<N>,
         storage: &S,
         inactivity_floor: Location<F>,
