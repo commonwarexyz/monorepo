@@ -223,9 +223,6 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
     }
 
     /// Lift a block that `from` placed on `to`.
-    ///
-    /// Simulated blocks never expire, so this stands in for the expiry an
-    /// authenticated network applies.
     pub async fn unblock(&self, from: P, to: P) -> Result<(), Error> {
         request(&self.sender, |result| Message::Unblock { from, to, result })
             .await
