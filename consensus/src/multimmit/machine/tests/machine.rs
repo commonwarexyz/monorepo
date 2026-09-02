@@ -16967,3 +16967,119 @@ fn da_voted_run_cursor_matches_a_full_frontier_scan() {
         "the workload must exercise a non-empty DA-choice prefix"
     );
 }
+
+/// Counts the hashes one signed data-availability batch transition performs.
+fn signed_batch_hash_calls(batch_items: usize) -> usize {
+    let profile: Profile<CountingHasher, MinPk> = Profile::new(
+        config_for(Epoch::new(7), contracts::CORE_BUDGET as usize, 1),
+        Role::Validator(Participant::new(0)),
+        Tuning {
+            max_artifact_bytes: NonZeroUsize::new(4 * 1024 * 1024).unwrap(),
+            ..Tuning::default()
+        },
+    )
+    .unwrap();
+    let mut machine = Machine::new(profile);
+    let mut step = machine.step(Input::Start).unwrap();
+    loop {
+        let jobs = step
+            .capabilities()
+            .iter()
+            .filter_map(|effect| match effect {
+                Capability::Durability(DurabilityCapability::Persist(job)) => {
+                    Some(job.job().clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if jobs.is_empty() {
+            break;
+        }
+        for job in jobs {
+            step = machine
+                .step(Input::Persisted(BarrierAck::new(
+                    job.id(),
+                    job.generation(),
+                    job.last_cursor(),
+                )))
+                .unwrap();
+        }
+    }
+
+    let mut requests = Vec::with_capacity(batch_items);
+    let mut artifacts = Vec::with_capacity(batch_items);
+    for chain in 0..batch_items {
+        let genesis = machine.profile().protocol().genesis().tips()[chain];
+        let header = TransactionBlockHeader::new(
+            machine.profile().protocol().epoch(),
+            ChainId::new(chain as u32),
+            Height::new(1),
+            genesis.digest(),
+            digest(format!("signed batch identity {chain}").as_bytes()),
+        )
+        .unwrap();
+        let block = Arc::new(SignedTransactionBlock::new(
+            header.clone(),
+            attestation(chain as u32),
+        ));
+        requests.push(SignRequest::DaVote(DaVoteRequest::new(block)));
+        artifacts.push(Artifact::DaVote(DaVote::new(header, threshold_share(0))));
+    }
+    let reserved = machine
+        .reserve_test_effect(DurableEffect::SignBatch(requests.into()))
+        .unwrap();
+    let signing = reserved
+        .capabilities()
+        .iter()
+        .find_map(|effect| match effect {
+            Capability::Durability(DurabilityCapability::Released(job))
+                if matches!(job.request(), DurableEffect::SignBatch(requests)
+                    if requests.len() == batch_items) =>
+            {
+                Some(job.clone())
+            }
+            _ => None,
+        })
+        .expect("the signing batch must be issued");
+
+    HASH_CALLS.store(0, Ordering::Relaxed);
+    machine
+        .step(Input::EffectCompleted(EffectCompletion::SignedBatch {
+            id: signing.id(),
+            generation: signing.generation(),
+            artifacts,
+        }))
+        .unwrap();
+    // The completion stages the batch; the durable transition that identifies every artifact
+    // runs in the machine-owned work that follows, so both belong in the measured window.
+    for _ in 0..1_000 {
+        if !machine.poll(NonZeroUsize::MAX).unwrap().work_remaining() {
+            break;
+        }
+    }
+    HASH_CALLS.load(Ordering::Relaxed)
+}
+
+/// A signed data-availability batch must identify each artifact once.
+///
+/// Identification encodes the vote, and a locally created share re-serializes its BLS point on
+/// every encode, so the batch's marginal per-artifact hash count is the guard against the
+/// transition re-deriving identifiers it already holds.
+#[test]
+fn signed_batch_identifies_each_artifact_once() {
+    let _guard = HASH_TEST_LOCK.lock();
+    let two = signed_batch_hash_calls(2);
+    let three = signed_batch_hash_calls(3);
+    let six = signed_batch_hash_calls(6);
+    let marginal = three - two;
+
+    assert_eq!(
+        six - two,
+        marginal * 4,
+        "the batch transition must cost a fixed amount per artifact"
+    );
+    assert_eq!(
+        marginal, 6,
+        "each batch artifact costs a fixed number of hashes through the durable transition"
+    );
+}

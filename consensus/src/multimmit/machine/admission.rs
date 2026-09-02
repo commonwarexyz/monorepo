@@ -165,6 +165,22 @@ impl<V: Variant, D: Digest> Artifact<V, D> {
         }
     }
 
+    /// Computes the identifier an artifact of `kind` wrapping `value` would carry.
+    ///
+    /// Wrapping a borrowed proposal or certificate in [`Artifact`] to identify it clones the whole
+    /// value first, so callers that hold only the part identify it directly.
+    pub(crate) fn id_of<H: Hasher<Digest = D>, T: Encode>(
+        kind: ArtifactKind,
+        value: &T,
+    ) -> ArtifactId<D> {
+        let kind = [kind as u8];
+        ArtifactId(H::hash(&[
+            ARTIFACT_NAMESPACE,
+            &kind,
+            value.encode().as_ref(),
+        ]))
+    }
+
     /// Computes a domain-separated identifier for the exact encoded artifact.
     pub fn id<H: Hasher<Digest = D>>(&self) -> ArtifactId<D> {
         let kind = [self.kind() as u8];

@@ -4167,7 +4167,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
 
     fn durable_occupancy_after(
         &self,
-        artifacts: impl IntoIterator<Item = ArtifactId<H::Digest>>,
+        artifacts: &[ArtifactId<H::Digest>],
         released_reservations: usize,
         added_reservations: usize,
     ) -> Option<usize> {
@@ -4175,22 +4175,27 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             .durable_signing_reservations
             .checked_sub(released_reservations)?
             .checked_add(added_reservations)?;
-        let mut added = BTreeSet::new();
-        for id in artifacts {
-            if !self.durable_artifact_references.contains_key(&id) {
-                added.insert(id);
+        // Effects carry at most one DA-vote run, so counting the distinct newcomers against the
+        // slice itself stays cheaper than building a set for a handful of identifiers.
+        let mut added = 0usize;
+        for (index, id) in artifacts.iter().enumerate() {
+            if self.durable_artifact_references.contains_key(id)
+                || artifacts[..index].contains(id)
+            {
+                continue;
             }
+            added = added.checked_add(1)?;
         }
         self.durable_artifact_references
             .len()
-            .checked_add(added.len())?
+            .checked_add(added)?
             .checked_add(reservations)
     }
 
     fn durable_occupancy_with_effect(&self, effect: &DurableEffect<V, H::Digest>) -> Option<usize> {
         let mut artifacts = Vec::new();
         DurableState::visit_effect_artifacts::<H>(effect, |id| artifacts.push(id));
-        self.durable_occupancy_after(artifacts, 0, DurableState::effect_reservations(effect))
+        self.durable_occupancy_after(&artifacts, 0, DurableState::effect_reservations(effect))
     }
 
     fn finality_floor_occupancy(
@@ -4679,7 +4684,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                     || self.durable_effect_count() >= self.profile.resources().max_outbox_effects()
                     || self
                         .durable_occupancy_after(
-                            ids.iter().copied(),
+                            &ids,
                             0,
                             DurableState::effect_reservations(effect),
                         )
@@ -4832,7 +4837,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                     || !valid_request
                     || artifact.epoch() != self.profile.protocol().epoch()
                     || self
-                        .durable_occupancy_after([artifact_id], 1, 0)
+                        .durable_occupancy_after(&[artifact_id], 1, 0)
                         .is_none_or(|occupancy| {
                             occupancy > self.profile.resources().max_cached_artifacts()
                         })
@@ -4924,20 +4929,28 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                 ) else {
                     return Err(ReplayError::Transition);
                 };
+                // Both publication batches preserve the artifact order, so one pass over the
+                // batch identifies it for validation, retention, and the effect's own ledger.
                 let ids = artifacts
                     .iter()
                     .map(|artifact| artifact.id::<H>())
-                    .collect::<BTreeSet<_>>();
+                    .collect::<Vec<_>>();
+                debug_assert_eq!(
+                    ids,
+                    Self::effect_artifact_ids(&publication_effect),
+                    "a publication batch carries its artifacts in order"
+                );
+                let distinct = ids.iter().copied().collect::<BTreeSet<_>>();
                 if *publication != EffectId::from_cursor(event.cursor())
                     || !valid_requests
-                    || ids.len() != artifacts.len()
+                    || distinct.len() != artifacts.len()
                     || artifacts.iter().any(|artifact| {
                         artifact.epoch() != self.profile.protocol().epoch()
                             || artifact.encoded_len()
                                 > self.profile.resources().max_artifact_bytes()
                     })
                     || self
-                        .durable_occupancy_after(ids.iter().copied(), requests.len(), 0)
+                        .durable_occupancy_after(&ids, requests.len(), 0)
                         .is_none_or(|occupancy| {
                             occupancy > self.profile.resources().max_cached_artifacts()
                         })
@@ -4947,8 +4960,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                 {
                     return Err(ReplayError::Transition);
                 }
-                for artifact in artifacts.iter() {
-                    let id = artifact.id::<H>();
+                for (id, artifact) in ids.iter().copied().zip(artifacts.iter()) {
                     self.durable.local.insert(id, Arc::clone(artifact));
                     self.retain_durable_artifact(id)?;
                 }
@@ -4967,7 +4979,6 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                     .remove(sign)
                     .expect("validated batch signing effect exists");
                 self.release_durable_effect(*sign, &completed)?;
-                let ids = Self::effect_artifact_ids(&publication_effect);
                 let publish = self
                     .publication_obligation(*publication, &publication_effect)
                     .is_some();
@@ -4997,7 +5008,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                     || artifact.epoch() != self.profile.protocol().epoch()
                     || artifact.encoded_len() > self.profile.resources().max_artifact_bytes()
                     || self
-                        .durable_occupancy_after([artifact_id], 0, 0)
+                        .durable_occupancy_after(&[artifact_id], 0, 0)
                         .is_none_or(|occupancy| {
                             occupancy > self.profile.resources().max_cached_artifacts()
                         })
@@ -5119,7 +5130,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                 ) || artifact.epoch() != self.profile.protocol().epoch()
                     || artifact.encoded_len() > self.profile.resources().max_artifact_bytes()
                     || self
-                        .durable_occupancy_after([artifact_id], 0, 0)
+                        .durable_occupancy_after(&[artifact_id], 0, 0)
                         .is_none_or(|occupancy| {
                             occupancy > self.profile.resources().max_cached_artifacts()
                         })

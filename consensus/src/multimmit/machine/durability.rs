@@ -1791,9 +1791,15 @@ impl<V: Variant, D: Digest> DurableState<V, D> {
                 }
             }
             DurableEffect::Propose(publication) => {
-                visit(Artifact::LeaderBlock(publication.block().as_ref().clone()).id::<H>());
+                visit(Artifact::<V, D>::id_of::<H, _>(
+                    ArtifactKind::LeaderBlock,
+                    publication.block().as_ref(),
+                ));
                 if let Some(parent) = publication.parent().exact() {
-                    visit(Artifact::Vqc(parent.as_ref().clone()).id::<H>());
+                    visit(Artifact::<V, D>::id_of::<H, _>(
+                        ArtifactKind::Vqc,
+                        parent.as_ref(),
+                    ));
                 }
             }
             DurableEffect::Send(request) => {
@@ -1806,7 +1812,10 @@ impl<V: Variant, D: Digest> DurableState<V, D> {
             }
             DurableEffect::Sign(SignRequest::LeaderBlock(request)) => {
                 if let Some(parent) = request.parent().exact() {
-                    visit(Artifact::Vqc(parent.as_ref().clone()).id::<H>());
+                    visit(Artifact::<V, D>::id_of::<H, _>(
+                        ArtifactKind::Vqc,
+                        parent.as_ref(),
+                    ));
                 }
             }
             DurableEffect::Sign(_) | DurableEffect::SignBatch(_) => {}
