@@ -2158,51 +2158,69 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             return Ok((true, capabilities));
         }
 
-        let proof = self
-            .durable
-            .forwarded_vqcs
-            .get(&self.durable.view)
-            .or_else(|| {
-                self.durable
-                    .forwarded_nullifications
-                    .get(&self.durable.view)
-            })
-            .cloned();
-        if let Some(exit) = proof.and_then(|proof| {
-            self.views
-                .exit::<H>(&self.profile, self.durable.view, proof)
-        }) {
-            if let Some(leader) = exit.rescue {
-                let request = self
-                    .views
-                    .rescue_vote::<H>(&self.profile, &self.chain, &leader)?;
-                let effect = DurableEffect::Sign(request);
-                if self.effect_fits(&effect, 0)? {
-                    capabilities.extend(self.reserve_effect(effect)?.into_capabilities());
+        // The exit reads the durable forwarding fact for the current view, and a staged change
+        // applies to durable state immediately. Deriving the exit again after staging that fact
+        // keeps the committee's next leader from waiting for another service cycle, and puts
+        // both events in one persistence range.
+        loop {
+            let held = self
+                .durable
+                .forwarded_vqcs
+                .get(&self.durable.view)
+                .or_else(|| {
+                    self.durable
+                        .forwarded_nullifications
+                        .get(&self.durable.view)
+                })
+                .cloned();
+            let derived = held.is_some();
+            if let Some(exit) = held.and_then(|proof| {
+                self.views
+                    .exit::<H>(&self.profile, self.durable.view, proof)
+            }) {
+                if let Some(leader) = exit.rescue {
+                    let request =
+                        self.views
+                            .rescue_vote::<H>(&self.profile, &self.chain, &leader)?;
+                    let effect = DurableEffect::Sign(request);
+                    if self.effect_fits(&effect, 0)? {
+                        capabilities.extend(self.reserve_effect(effect)?.into_capabilities());
+                        return Ok((true, capabilities));
+                    }
+                } else {
+                    let proof = exit.proof.id::<H>();
+                    let next = self
+                        .durable
+                        .view
+                        .get()
+                        .checked_add(1)
+                        .ok_or(StepError::IdentifierExhausted)?;
+                    let floor = View::new(next)
+                        .saturating_sub(self.profile.view_retention())
+                        .saturating_sub(ViewDelta::new(1))
+                        .max(self.durable.retired_view);
+                    let retired = self.obligations_retired_by_floor(floor);
+                    let step = self.reserve_change(Change::ViewAdvanced { proof, retired })?;
+                    capabilities.extend(step.into_capabilities());
                     return Ok((true, capabilities));
                 }
-            } else {
-                let proof = exit.proof.id::<H>();
-                let next = self
-                    .durable
-                    .view
-                    .get()
-                    .checked_add(1)
-                    .ok_or(StepError::IdentifierExhausted)?;
-                let floor = View::new(next)
-                    .saturating_sub(self.profile.view_retention())
-                    .saturating_sub(ViewDelta::new(1))
-                    .max(self.durable.retired_view);
-                let retired = self.obligations_retired_by_floor(floor);
-                let step = self.reserve_change(Change::ViewAdvanced { proof, retired })?;
-                capabilities.extend(step.into_capabilities());
+            }
+
+            let Some(change) = self.next_artifact_forwarding(None)? else {
+                break;
+            };
+            // Only the current view's proof unblocks the derivation above, and only while that
+            // pass held none. Any other forwarding ends the cycle.
+            let unblocks = !derived
+                && matches!(&change, Change::ArtifactForwarded { artifact, .. }
+                    if artifact.view() == Some(self.durable.view))
+                && cycle
+                    .charge(Lane::LocalCompletion, TransitionCost::Constant)
+                    .is_ok();
+            capabilities.extend(self.reserve_change(change)?.into_capabilities());
+            if !unblocks {
                 return Ok((true, capabilities));
             }
-        }
-
-        if let Some(change) = self.next_artifact_forwarding(None)? {
-            capabilities.extend(self.reserve_change(change)?.into_capabilities());
-            return Ok((true, capabilities));
         }
         if let Some(request) = self
             .views
