@@ -28,7 +28,7 @@ use commonware_actor::mailbox;
 use commonware_codec::{Decode, Encode, Read};
 use commonware_cryptography::{
     Digestible,
-    certificate::{Provider, Verifier},
+    certificate::{Provider, Scoped, Verifier},
 };
 use commonware_macros::{boxed, select_loop};
 use commonware_p2p::Recipients;
@@ -562,7 +562,9 @@ where
                     // Apply in-memory progress updates for this acknowledged
                     // block. The metadata sync below makes drained updates durable.
                     self.update_processed_height(height, resolver);
-                    self = self.update_processed_round(height, resolver).await;
+                    self = self
+                        .update_processed_round(height, buffer, application, resolver)
+                        .await;
                 }
                 Err(e) => return Err((height, e)),
             }
@@ -795,7 +797,7 @@ where
                     let height = block.height();
                     let stored;
                     (self, stored) = self
-                        .update_processed_round_floor(height, round, resolver)
+                        .update_processed_round_floor(height, round, buffer, application, resolver)
                         .await
                         .store_finalization(
                             height,
@@ -1318,7 +1320,13 @@ where
                 .take_pending_anchor()
                 .expect("pending floor anchor missing");
             self = self
-                .update_processed_round_floor(height, finalization.round(), resolver)
+                .update_processed_round_floor(
+                    height,
+                    finalization.round(),
+                    buffer,
+                    application,
+                    resolver,
+                )
                 .await;
             let commitments = self.take_superseded_ack_commitments();
             buffer.retire(Retirement {
@@ -1363,7 +1371,7 @@ where
             .expect("floor anchor above processed height must have predecessor");
         self.update_processed_height(dispatch_floor, resolver);
         self = self
-            .update_processed_round_floor(dispatch_floor, round, resolver)
+            .update_processed_round_floor(dispatch_floor, round, buffer, application, resolver)
             .await;
         self.stream = self
             .stream
@@ -1467,7 +1475,13 @@ where
                 let finalization = self.cache.get_finalization_for(digest).await;
                 if let Some(finalization) = &finalization {
                     self = self
-                        .update_processed_round_floor(height, finalization.round(), resolver)
+                        .update_processed_round_floor(
+                            height,
+                            finalization.round(),
+                            buffer,
+                            application,
+                            resolver,
+                        )
                         .await;
                 }
                 if finalization.is_some()
@@ -1506,9 +1520,7 @@ where
                 response.send_lossy(true);
             }
             Key::Finalized { height } => {
-                let Some((epoch, certificate_codec_config)) =
-                    self.certificate_codec_config_for_height(height)
-                else {
+                let Some((epoch, scoped)) = self.scoped_for_height(height) else {
                     debug!(
                         %height,
                         floor = %self.floor.processed_height(),
@@ -1517,6 +1529,7 @@ where
                     response.send_lossy(true);
                     return self;
                 };
+                let certificate_codec_config = scoped.certificate_codec_config();
 
                 let Ok(finalization) =
                     Finalization::read_cfg(&mut value, &certificate_codec_config)
@@ -1557,12 +1570,16 @@ where
                     return self;
                 }
                 delivers.push(PendingVerification::Finalized {
+                    scoped,
                     finalization,
                     block,
                     response,
                 });
             }
             Key::Notarized { round } => {
+                // The payload check below needs the epoch's participant set, so a
+                // scope without the full scheme counts as unavailable and the
+                // delivery is acknowledged as stale.
                 let Some(scheme) = self.provider.scheme(round.epoch()) else {
                     debug!(
                         ?round,
@@ -1605,6 +1622,7 @@ where
                     return self;
                 }
                 delivers.push(PendingVerification::Notarized {
+                    scoped: Scoped::scheme(scheme),
                     notarization,
                     block,
                     response,
@@ -1657,15 +1675,14 @@ where
             by_epoch.entry(epoch).or_default().push(i);
         }
 
-        // Batch verify each epoch group.
+        // Verify each epoch group under the scope captured at admission, so a
+        // provider that has since retired the epoch cannot fail the delivery.
         let mut verified = vec![false; delivers.len()];
-        for (epoch, indices) in &by_epoch {
-            let Some(scoped) = self.provider.scoped(*epoch) else {
-                continue;
-            };
+        for indices in by_epoch.values() {
+            let scoped = delivers[indices[0]].scoped();
             let group: Vec<_> = indices.iter().map(|&i| certs[i]).collect();
             let results =
-                verify_certificates(self.context.as_mut(), &scoped, &group, &self.strategy);
+                verify_certificates(self.context.as_mut(), scoped, &group, &self.strategy);
             for (j, &idx) in indices.iter().enumerate() {
                 verified[idx] = results[j];
             }
@@ -1687,6 +1704,7 @@ where
                     finalization,
                     block,
                     response,
+                    ..
                 } => {
                     // Valid finalization received.
                     response.send_lossy(true);
@@ -1710,7 +1728,7 @@ where
                     }
 
                     (self, _) = self
-                        .update_processed_round_floor(height, round, resolver)
+                        .update_processed_round_floor(height, round, buffer, application, resolver)
                         .await
                         .store_finalization(
                             height,
@@ -1725,6 +1743,7 @@ where
                     notarization,
                     block,
                     response,
+                    ..
                 } => {
                     // Valid notarization received.
                     response.send_lossy(true);
@@ -1770,7 +1789,13 @@ where
                     // and we resolve the notarization request before the block request.
                     if let Some(finalization) = self.cache.get_finalization_for(digest).await {
                         self = self
-                            .update_processed_round_floor(height, finalization.round(), resolver)
+                            .update_processed_round_floor(
+                                height,
+                                finalization.round(),
+                                buffer,
+                                application,
+                                resolver,
+                            )
                             .await;
 
                         // SAFETY: `digest` identifies a unique `commitment`, so this
@@ -1791,24 +1816,11 @@ where
         self
     }
 
-    /// Returns the certificate codec config for `epoch`.
-    fn certificate_codec_config(
-        &self,
-        epoch: Epoch,
-    ) -> Option<<<P::Scheme as Verifier>::Certificate as Read>::Cfg> {
-        self.provider
-            .scoped(epoch)
-            .map(|scoped| scoped.certificate_codec_config())
-    }
-
-    /// Returns the epoch containing `height` and its certificate codec config.
-    fn certificate_codec_config_for_height(
-        &self,
-        height: Height,
-    ) -> Option<(Epoch, <<P::Scheme as Verifier>::Certificate as Read>::Cfg)> {
+    /// Returns the epoch containing `height` and the scope that verifies its certificates.
+    fn scoped_for_height(&self, height: Height) -> Option<(Epoch, Scoped<P::Scheme>)> {
         let epoch = self.epocher.containing(height)?.epoch();
-        self.certificate_codec_config(epoch)
-            .map(|config| (epoch, config))
+        let scoped = self.provider.scoped(epoch)?;
+        Some((epoch, scoped))
     }
 
     // -------------------- Application Dispatch --------------------
@@ -2419,23 +2431,37 @@ where
     }
 
     /// Buffers a processed round update in memory and prunes round-bound requests.
-    async fn update_processed_round(
+    async fn update_processed_round<Buf: Buffer<V>>(
         self: Box<Self>,
         height: Height,
+        buffer: &mut Buf,
+        application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) -> Box<Self> {
         let Some(finalization) = self.get_finalization_by_height(height).await else {
             return self;
         };
-        self.update_processed_round_floor(height, finalization.round(), resolver)
-            .await
+        self.update_processed_round_floor(
+            height,
+            finalization.round(),
+            buffer,
+            application,
+            resolver,
+        )
+        .await
     }
 
     /// Buffers a processed round floor update in memory and prunes round-bound requests.
-    async fn update_processed_round_floor(
+    ///
+    /// A pending floor anchor whose round the new floor covers is released: the
+    /// same retention that prunes its fetch proves it sits at or below the
+    /// processed height, so repair and dispatch resume without it.
+    async fn update_processed_round_floor<Buf: Buffer<V>>(
         mut self: Box<Self>,
         height: Height,
         round: Round,
+        buffer: &mut Buf,
+        application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) -> Box<Self> {
         let processed_round = self.floor.round();
@@ -2455,7 +2481,23 @@ where
 
         // Resolver request retention is independent of caller-owned block subscriptions.
         resolver.retain(handler::above_round_floor::<V::Commitment>(round));
-        self
+
+        // A superseded anchor is an ancestor of a processed block, so the floor
+        // it announced is already active. Retire the acks it displaced and resume.
+        if self.floor.take_superseded_anchor(round).is_none() {
+            return self;
+        }
+        let commitments = self.take_superseded_ack_commitments();
+        buffer.retire(Retirement {
+            round_floor: round,
+            exact_retirements: commitments,
+        });
+        let repaired;
+        (self, repaired) = self.try_repair_gaps(buffer, resolver, application).await;
+        if repaired {
+            self = self.sync_finalized().await;
+        }
+        self.try_dispatch_blocks(application).await
     }
 
     /// Prunes finalized blocks and certificates below the given height.

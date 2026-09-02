@@ -481,7 +481,7 @@ mod tests {
             pending.arm();
             let completed = Arc::new(AtomicUsize::new(0));
             let completed_clone = completed.clone();
-            let task = context.inner.child("put_sync").spawn(|_| async move {
+            let task = context.inner.child("put_multi_sync").spawn(|_| async move {
                 let result = archive.put_multi_sync(0, test_key("pruned"), 0).await;
                 completed_clone.store(1, Ordering::Relaxed);
                 result

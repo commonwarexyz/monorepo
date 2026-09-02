@@ -64,6 +64,13 @@ impl<S: Scheme, C: Digest> State<S, C> {
         }
     }
 
+    /// Returns the inclusive height floor. Finalized data at or below it is
+    /// neither stored nor repaired.
+    ///
+    /// Nothing processed maps to zero because height zero is genesis, which is
+    /// anchored at startup or sits below a floor anchor and never carries a
+    /// finalization. Delivery uses the stream cursor, which keeps that state
+    /// distinct.
     pub(super) const fn processed_height(&self) -> Height {
         match self.height {
             Some(height) => height,
@@ -107,6 +114,15 @@ impl<S: Scheme, C: Digest> State<S, C> {
     #[must_use]
     pub(super) const fn take_pending_anchor(&mut self) -> Option<Finalization<S, C>> {
         self.pending.take()
+    }
+
+    /// Takes the pending anchor if the processed round floor now covers its round.
+    ///
+    /// Finalized rounds and heights increase together along the finalized chain, so
+    /// an anchor at or below the round floor sits at or below the processed height.
+    #[must_use]
+    pub(super) fn take_superseded_anchor(&mut self, round: Round) -> Option<Finalization<S, C>> {
+        self.pending.take_if(|pending| pending.round() <= round)
     }
 
     /// Returns true when the resolver request is above all processed floors.

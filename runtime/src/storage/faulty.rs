@@ -1,7 +1,8 @@
 //! A storage wrapper that injects deterministic faults for testing crash recovery.
 
 use crate::{
-    Error, Handle, IoBufs, IoBufsMut, ReadOptions, WriteOptions, deterministic::BoxDynRng,
+    BlobVersion, Error, Handle, IoBufs, IoBufsMut, ReadOptions, WriteOptions,
+    deterministic::BoxDynRng,
 };
 use bytes::Buf;
 use commonware_utils::{
@@ -32,6 +33,9 @@ enum Op {
 }
 
 /// Selects how submitted bytes are retained from a write.
+///
+/// Per the [crate::Blob] durability contract, both modes leave bytes outside the written
+/// range untouched.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PartialWriteMode {
     /// Retain bytes from the beginning of the write until the first omitted byte.
@@ -536,8 +540,8 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
         &self,
         partition: &str,
         name: &[u8],
-        versions: std::ops::RangeInclusive<u16>,
-    ) -> Result<(Self::Blob, u64, u16), Error> {
+        versions: std::ops::RangeInclusive<BlobVersion>,
+    ) -> Result<(Self::Blob, u64, BlobVersion), Error> {
         if self.ctx.should_fail(Op::Open) {
             return Err(injected_io_error().into());
         }

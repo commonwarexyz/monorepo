@@ -675,6 +675,12 @@ mod tests {
         fn block(&mut self, _peer: Self::PublicKey) -> Feedback {
             Feedback::Ok
         }
+
+        fn blocked(&mut self) -> commonware_p2p::BlockedSubscription<Self::PublicKey> {
+            let (_, receiver) =
+                commonware_utils::channel::ring::channel(commonware_utils::NZUsize!(1));
+            receiver
+        }
     }
 
     /// Tracks the set of pending requests the way the resolver engine would.

@@ -5,7 +5,7 @@
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_cryptography::Crc32;
 use commonware_runtime::{
-    Blob, BufferPooler, ReadOptions, Runner, Storage, WriteOptions, deterministic,
+    Blob, BlobVersion, BufferPooler, ReadOptions, Runner, Storage, WriteOptions, deterministic,
     mocks::MemoryStorage,
 };
 use libfuzzer_sys::fuzz_target;
@@ -15,7 +15,7 @@ const PAYLOAD: &[u8] = b"payload!";
 const NAME: &[u8] = b"blob";
 
 /// Header spec constants (see runtime/src/storage/header.rs): the prelude, the prelude plus
-/// its V1 CRC, the V1 region size, and each layout's magic plus runtime version bytes. The
+/// its V1 CRC, the V1 region size, and each layout's magic plus layout version bytes. The
 /// V1 values are asserted against a real creation before every image is classified.
 const PRELUDE: usize = 8;
 const PARSE_LEN: usize = 12;
@@ -28,6 +28,11 @@ const V1_PREFIX: [u8; 6] = *b"CWIK\x00\x01";
 fn bounded_image(u: &mut Unstructured<'_>) -> Result<Vec<u8>> {
     let len = u.int_in_range(0..=REGION + PRELUDE)?;
     Ok(u.bytes(len.min(u.len()))?.to_vec())
+}
+
+/// The versions range accepting exactly the given application-owned blob version.
+fn versions(blob_version: u16) -> std::ops::RangeInclusive<BlobVersion> {
+    BlobVersion::new(blob_version)..=BlobVersion::new(blob_version)
 }
 
 #[derive(Arbitrary, Debug)]
@@ -62,7 +67,7 @@ fn creation_outcome(image: &[u8], version: u16) -> CreationOutcome {
     }
     let stamped = u16::from_be_bytes([image[6], image[7]]);
 
-    // An intact V0 magic and runtime version parse as a legacy blob: the stamped version
+    // An intact V0 magic and layout version parse as a legacy blob: the stamped version
     // decides, and a mismatch is a genuine disagreement that never heals.
     if image[..6] == V0_PREFIX {
         return if stamped == version {
@@ -130,15 +135,13 @@ async fn assert_recovers(
     blob_version: u16,
     expected_header: &[u8],
 ) {
-    let versions = blob_version..=blob_version;
-
     // Reopen the installed crash image and verify recovery restored its logical metadata.
     let (blob, size, version) = storage
-        .open_versioned(PARTITION, name, versions.clone())
+        .open_versioned(PARTITION, name, versions(blob_version))
         .await
         .expect("partial blob creation did not recover");
     assert_eq!(size, 0);
-    assert_eq!(version, blob_version);
+    assert_eq!(version.get(), blob_version);
 
     // Inspect durable bytes before writing payload data so only header recovery shaped the image.
     let healed = storage
@@ -152,11 +155,11 @@ async fn assert_recovers(
         .expect("write after creation recovery failed");
     drop(blob);
     let (blob, size, version) = storage
-        .open_versioned(PARTITION, name, versions)
+        .open_versioned(PARTITION, name, versions(blob_version))
         .await
         .expect("reopening healed blob failed");
     assert_eq!(size, PAYLOAD.len() as u64);
-    assert_eq!(version, blob_version);
+    assert_eq!(version.get(), blob_version);
     let read = blob
         .read_at(0, PAYLOAD.len(), ReadOptions::default())
         .await
@@ -172,13 +175,12 @@ async fn assert_kept(
     image: &[u8],
     size: u64,
 ) {
-    let versions = blob_version..=blob_version;
     let (_, opened, version) = storage
-        .open_versioned(PARTITION, name, versions)
+        .open_versioned(PARTITION, name, versions(blob_version))
         .await
         .expect("intact image did not open");
     assert_eq!(opened, size);
-    assert_eq!(version, blob_version);
+    assert_eq!(version.get(), blob_version);
     let raw = storage
         .raw_blob(PARTITION, name)
         .expect("opened blob lost its image");
@@ -187,10 +189,9 @@ async fn assert_kept(
 
 /// Verify that an unclassifiable crash image fails loudly without being mutated.
 async fn assert_rejects(storage: &MemoryStorage, name: &[u8], blob_version: u16, image: &[u8]) {
-    let versions = blob_version..=blob_version;
     assert!(
         storage
-            .open_versioned(PARTITION, name, versions)
+            .open_versioned(PARTITION, name, versions(blob_version))
             .await
             .is_err(),
         "non-canonical crash image was accepted"
@@ -204,16 +205,15 @@ async fn assert_rejects(storage: &MemoryStorage, name: &[u8], blob_version: u16,
 fn fuzz(input: FuzzInput) {
     deterministic::Runner::default().start(|context| async move {
         let storage = MemoryStorage::new(context.storage_buffer_pool().clone());
-        let versions = input.blob_version..=input.blob_version;
 
         // Create the canonical V1 region through the same storage path used in production: a
         // healed image must recreate exactly this, and it anchors the spec constants.
         let (blob, size, version) = storage
-            .open_versioned(PARTITION, NAME, versions)
+            .open_versioned(PARTITION, NAME, versions(input.blob_version))
             .await
             .expect("initial blob creation failed");
         assert_eq!(size, 0);
-        assert_eq!(version, input.blob_version);
+        assert_eq!(version.get(), input.blob_version);
         drop(blob);
         let canonical = storage
             .raw_blob(PARTITION, NAME)

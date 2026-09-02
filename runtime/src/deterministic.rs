@@ -45,10 +45,8 @@
 pub use crate::storage::faulty::{
     Config as FaultConfig, PartialWriteMode, ResizeConfig, WriteConfig,
 };
-#[cfg(feature = "external")]
-use crate::{Blocker, Pacer};
 use crate::{
-    BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, IoBufs, ListenerOf,
+    BlobVersion, BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, IoBufs, ListenerOf,
     METRICS_PREFIX, Name, Panicked, child_label,
     network::{
         audited::Network as AuditedNetwork, deterministic::Network as DeterministicNetwork,
@@ -71,6 +69,8 @@ use crate::{
         supervision::Tree,
     },
 };
+#[cfg(feature = "external")]
+use crate::{Blocker, Pacer};
 use commonware_codec::Encode;
 use commonware_formatting::hex;
 use commonware_macros::select;
@@ -283,7 +283,8 @@ impl Config {
     // Setters
     /// See [Config]
     pub fn with_seed(self, seed: u64) -> Self {
-        self.with_rng(Box::new(StdRng::seed_from_u64(seed)))
+        let rng: BoxDynRng = Box::new(StdRng::seed_from_u64(seed));
+        self.with_rng(rng)
     }
 
     /// Provide the config with a dynamic RNG directly.
@@ -291,8 +292,8 @@ impl Config {
     /// This can be useful for, e.g. fuzzing, where beyond just having randomness,
     /// you might want to control specific bytes of the RNG. By taking in a dynamic
     /// RNG object, any behavior is possible.
-    pub fn with_rng(mut self, rng: BoxDynRng) -> Self {
-        self.rng = rng;
+    pub fn with_rng(mut self, rng: impl Into<BoxDynRng>) -> Self {
+        self.rng = rng.into();
         self
     }
 
@@ -1613,8 +1614,8 @@ impl crate::Storage for Context {
         &self,
         partition: &str,
         name: &[u8],
-        versions: std::ops::RangeInclusive<u16>,
-    ) -> Result<(Self::Blob, u64, u16), Error> {
+        versions: std::ops::RangeInclusive<BlobVersion>,
+    ) -> Result<(Self::Blob, u64, BlobVersion), Error> {
         self.storage.open_versioned(partition, name, versions).await
     }
 
@@ -1938,7 +1939,7 @@ mod tests {
     fn test_recover_retained_successful_resize() {
         let retained_resize = [u64::MAX, 0];
         let cfg = deterministic::Config::default()
-            .with_rng(Box::new(ScriptedRng::new(retained_resize)))
+            .with_rng(ScriptedRng::new(retained_resize))
             .with_storage_fault_config(FaultConfig::default().resize(ResizeConfig {
                 failure_rate: probability!(0.5),
                 partial_rate: probability!(0.0),

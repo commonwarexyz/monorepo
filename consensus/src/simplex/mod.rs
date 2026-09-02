@@ -8022,7 +8022,8 @@ mod tests {
             let elector = elector.clone();
             let mut case_fixture =
                 |ctx: &mut deterministic::Context, ns: &[u8], n: u32| fixture(ctx, ns, n);
-            let cfg = deterministic::Config::new().with_rng(Box::new(StdRng::from_rng(&mut *rng)));
+            let rng: deterministic::BoxDynRng = Box::new(StdRng::from_rng(&mut *rng));
+            let cfg = deterministic::Config::new().with_rng(rng);
             let executor = deterministic::Runner::new(cfg);
             executor.start(|mut context| async move {
                 let Fixture {
