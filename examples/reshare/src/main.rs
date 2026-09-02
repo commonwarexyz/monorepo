@@ -57,6 +57,8 @@ fn main() {
         return setup::run(args);
     }
 
+    // The remaining commands run a node, so they get a runtime whose storage
+    // lives inside the node directory.
     let runtime_dir = cli.command.runtime_dir();
     let config = tokio::Config::new()
         .with_worker_threads(cli.worker_threads)
