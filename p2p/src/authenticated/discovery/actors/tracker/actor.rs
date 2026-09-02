@@ -22,9 +22,8 @@ use commonware_utils::{
     ordered::Set,
     union,
 };
-use futures::Sink as _;
 use rand::{Rng, seq::SliceRandom};
-use std::{collections::HashMap, pin::Pin};
+use std::collections::HashMap;
 use tracing::debug;
 
 // Bytes to add to the namespace to prevent replay attacks.
@@ -160,7 +159,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
     fn notify_blocked(&mut self) {
         let blocked = self.directory.blocked_peers();
         self.blocked_subscribers
-            .retain_mut(|subscriber| Pin::new(subscriber).start_send(blocked.clone()).is_ok());
+            .retain(|subscriber| subscriber.send_lossy(blocked.clone()));
     }
 
     /// Handle a [`Message`].
@@ -296,12 +295,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 // Kill the peer if we're connected to it
                 self.kill_peer(&public_key);
             }
-            Message::SubscribeBlocked { mut sender } => {
+            Message::SubscribeBlocked { sender } => {
                 // Send the current blocked set immediately
-                if Pin::new(&mut sender)
-                    .start_send(self.directory.blocked_peers())
-                    .is_ok()
-                {
+                if sender.send_lossy(self.directory.blocked_peers()) {
                     self.blocked_subscribers.push(sender);
                 }
             }

@@ -17,9 +17,8 @@ use commonware_utils::{
     channel::{fallible::FallibleExt, mpsc, ring},
     ordered::Set,
 };
-use futures::Sink as _;
 use rand_core::Rng;
-use std::{collections::HashMap, pin::Pin};
+use std::collections::HashMap;
 use tracing::debug;
 
 /// The tracker actor that manages peer discovery and connection reservations.
@@ -120,7 +119,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
     fn notify_blocked(&mut self) {
         let blocked = self.directory.blocked_peers();
         self.blocked_subscribers
-            .retain_mut(|subscriber| Pin::new(subscriber).start_send(blocked.clone()).is_ok());
+            .retain(|subscriber| subscriber.send_lossy(blocked.clone()));
     }
 
     /// Handle a [`Message`].
@@ -231,12 +230,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 // Send the updated listenable IPs to the listener.
                 let _ = self.listener.set(self.directory.listenable());
             }
-            Message::SubscribeBlocked { mut sender } => {
+            Message::SubscribeBlocked { sender } => {
                 // Send the current blocked set immediately
-                if Pin::new(&mut sender)
-                    .start_send(self.directory.blocked_peers())
-                    .is_ok()
-                {
+                if sender.send_lossy(self.directory.blocked_peers()) {
                     self.blocked_subscribers.push(sender);
                 }
             }

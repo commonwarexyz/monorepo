@@ -83,6 +83,36 @@ impl<T: Send + Sync> Sender<T> {
         let shared = self.shared.lock();
         shared.receiver_dropped
     }
+
+    /// Sends an item, dropping the oldest buffered item if the channel is full.
+    ///
+    /// Returns `false` once the receiver has been dropped.
+    pub fn send_lossy(&self, item: T) -> bool {
+        let mut shared = self.shared.lock();
+
+        if shared.receiver_dropped {
+            return false;
+        }
+
+        let old_item = if shared.buffer.len() >= shared.capacity {
+            shared.buffer.pop_front()
+        } else {
+            None
+        };
+
+        shared.buffer.push_back(item);
+        let waker = shared.receiver_waker.take();
+        drop(shared);
+
+        // Drop the old item after the lock is released to avoid potential mutex poisoning
+        drop(old_item);
+
+        if let Some(w) = waker {
+            w.wake();
+        }
+
+        true
+    }
 }
 
 impl<T: Send + Sync> Clone for Sender<T> {
@@ -127,30 +157,11 @@ impl<T: Send + Sync> Sink<T> for Sender<T> {
     }
 
     fn start_send(self: Pin<&mut Self>, item: T) -> Result<(), Self::Error> {
-        let mut shared = self.shared.lock();
-
-        if shared.receiver_dropped {
-            return Err(ChannelClosed);
-        }
-
-        let old_item = if shared.buffer.len() >= shared.capacity {
-            shared.buffer.pop_front()
+        if self.send_lossy(item) {
+            Ok(())
         } else {
-            None
-        };
-
-        shared.buffer.push_back(item);
-        let waker = shared.receiver_waker.take();
-        drop(shared);
-
-        // Drop the old item after the lock is released to avoid potential mutex poisoning
-        drop(old_item);
-
-        if let Some(w) = waker {
-            w.wake();
+            Err(ChannelClosed)
         }
-
-        Ok(())
     }
 
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {

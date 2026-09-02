@@ -608,11 +608,8 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             ingress::Message::Blocked { result } => {
                 send_result(result, Ok(self.blocks.iter().cloned().collect()))
             }
-            ingress::Message::SubscribeBlocked { from, mut sender } => {
-                if Pin::new(&mut sender)
-                    .start_send(self.blocked_by(&from))
-                    .is_ok()
-                {
+            ingress::Message::SubscribeBlocked { from, sender } => {
+                if sender.send_lossy(self.blocked_by(&from)) {
                     self.blocked_subscribers.push((from, sender));
                 }
             }
@@ -664,8 +661,8 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     /// subscribers that have gone away.
     fn notify_blocked(&mut self, from: &P) {
         let blocked = self.blocked_by(from);
-        self.blocked_subscribers.retain_mut(|(subscriber, sender)| {
-            subscriber != from || Pin::new(sender).start_send(blocked.clone()).is_ok()
+        self.blocked_subscribers.retain(|(subscriber, sender)| {
+            subscriber != from || sender.send_lossy(blocked.clone())
         });
     }
 
