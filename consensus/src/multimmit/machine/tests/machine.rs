@@ -1,6 +1,6 @@
 use self::test_utils::{Runner, SymbolicPersistence, SymbolicVerifier, cohort};
 use super::{
-    contracts::{CORE_BUDGET, Lane},
+    contracts::{CORE_BUDGET, DA_VOTE_RUN, Lane},
     *,
 };
 use crate::{
@@ -8576,6 +8576,226 @@ fn durable_da_vote_enables_the_next_height_in_the_same_drain() {
     let mut choices = Vec::new();
     drain_da_choices(&mut machine, first_choice, &mut choices);
     assert_eq!(choices, vec![first, second]);
+}
+
+/// Builds `count` consecutive headers on `chain`, anchored at that chain's epoch genesis tip.
+fn da_run_headers(
+    machine: &TestMachine,
+    chain: u32,
+    count: u64,
+    label: &str,
+) -> Vec<TransactionBlockHeader<Digest>> {
+    let epoch = machine.profile().protocol().epoch();
+    let mut parent = machine.profile().protocol().genesis().tips()[chain as usize];
+    let mut headers = Vec::with_capacity(count as usize);
+    for height in 1..=count {
+        let header = TransactionBlockHeader::new(
+            epoch,
+            ChainId::new(chain),
+            Height::new(height),
+            parent.digest(),
+            digest(format!("{label} {chain} {height}").as_bytes()),
+        )
+        .unwrap();
+        parent = header.block_ref::<Sha256>();
+        headers.push(header);
+    }
+    headers
+}
+
+/// Returns the data-availability vote run staged by each signing reservation in `job`.
+fn reserved_da_runs(job: &PersistJob<MinPk, Digest>) -> Vec<Vec<TransactionBlockHeader<Digest>>> {
+    job.events()
+        .iter()
+        .filter_map(|event| {
+            let Change::OutboxQueued { effect, .. } = event.change() else {
+                return None;
+            };
+            let run = match effect.as_ref() {
+                DurableEffect::Sign(SignRequest::DaVote(request)) => {
+                    vec![request.header().clone()]
+                }
+                DurableEffect::SignBatch(requests) => requests
+                    .iter()
+                    .filter_map(|request| match request {
+                        SignRequest::DaVote(request) => Some(request.header().clone()),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => return None,
+            };
+            (!run.is_empty()).then_some(run)
+        })
+        .collect()
+}
+
+#[test]
+fn da_votes_eligible_behind_one_barrier_reserve_as_one_batch() {
+    // Four producer chains of two heights each. The first chain's first height reserves alone and
+    // leaves its barrier in flight; every block that becomes eligible behind it must arrive as one
+    // signing action carrying one consecutive run per chain, not one action per eligible block.
+    let profile = profile_with_resources(
+        Role::Validator(Participant::new(0)),
+        6,
+        4,
+        resources_with_capacities(64, 64),
+    );
+    let (mut machine, _) = start_profile(profile);
+    let runs = (1..=4)
+        .map(|chain| da_run_headers(&machine, chain, 2, "coalesced"))
+        .collect::<Vec<_>>();
+
+    // The first chain's second height waits on its parent, so only its first height is votable.
+    let held = authenticate_block(&mut machine, runs[0][1].clone(), 1);
+    assert!(validation_jobs(&held).is_empty());
+    let anchored = authenticate_block(&mut machine, runs[0][0].clone(), 1);
+    let validations = validation_jobs(&anchored);
+    let first = validations
+        .iter()
+        .find(|job| job.block().header() == &runs[0][0])
+        .expect("the anchored parent enters validation");
+    let opened = complete_validation(&mut machine, first);
+    let barrier = persist_job(&opened);
+    assert_eq!(reserved_da_runs(&barrier), vec![vec![runs[0][0].clone()]]);
+
+    // Everything else becomes eligible while that barrier is unacknowledged.
+    let child = validations
+        .iter()
+        .find(|job| job.block().header() == &runs[0][1])
+        .expect("the released child enters validation");
+    complete_validation(&mut machine, child);
+    for run in &runs[1..] {
+        for header in run {
+            validate_block(&mut machine, header.clone(), header.chain().get());
+        }
+    }
+    assert_eq!(
+        machine
+            .live_snapshot_for_test()
+            .signing_reservations()
+            .len(),
+        1,
+        "an unacknowledged reservation must absorb later eligible blocks"
+    );
+
+    // The acknowledgement releases them all as one batch, in round-robin chain order starting
+    // after the chain the previous reservation served.
+    let acknowledged = persist(&mut machine, &barrier);
+    let coalesced = reserved_da_runs(&persist_job(&acknowledged));
+    let expected = runs[1..]
+        .iter()
+        .flatten()
+        .chain(core::iter::once(&runs[0][1]))
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(coalesced, vec![expected]);
+}
+
+#[test]
+fn da_vote_batch_stops_at_the_per_chain_run_limit() {
+    // One chain far enough ahead of its certified floor to offer more consecutive heights than a
+    // single batch may carry. The run limit caps the batch; the remainder follows the next barrier.
+    let profile = profile_with_resources(
+        Role::Validator(Participant::new(0)),
+        6,
+        64,
+        resources_with_capacities(128, 128),
+    );
+    let (mut machine, _) = start_profile(profile.clone());
+    let headers = da_run_headers(&machine, 1, DA_VOTE_RUN as u64 + 4, "run limit");
+
+    let opened = validate_block(&mut machine, headers[0].clone(), 1);
+    let barrier = persist_job(&opened);
+    assert_eq!(reserved_da_runs(&barrier), vec![vec![headers[0].clone()]]);
+    for header in &headers[1..] {
+        validate_block(&mut machine, header.clone(), 1);
+    }
+
+    let acknowledged = persist(&mut machine, &barrier);
+    let capped = persist_job(&acknowledged);
+    let runs = reserved_da_runs(&capped);
+    assert_eq!(runs, vec![headers[1..=DA_VOTE_RUN].to_vec()]);
+    // The batch is one action whose event stays inside the journal's decoding bounds.
+    let config = DomainEventCodecConfig::from_profile(&profile);
+    for event in capped.events() {
+        let encoded = event.encode();
+        assert!(encoded.len() <= config.max_encoded_size());
+        assert_eq!(
+            &DomainEvent::<MinPk, Digest>::decode_cfg(encoded, &config).unwrap(),
+            event
+        );
+    }
+
+    let remainder = persist(&mut machine, &capped);
+    assert_eq!(
+        reserved_da_runs(&persist_job(&remainder)),
+        vec![headers[DA_VOTE_RUN + 1..].to_vec()]
+    );
+}
+
+#[test]
+fn wide_da_vote_publication_survives_the_snapshot_codec() {
+    // A signed run publishes as one directed batch that carries more votes than there are chains,
+    // so the recovery codecs must admit the run length the signing batch was allowed to reserve.
+    let profile = profile_with_resources(
+        Role::Validator(Participant::new(0)),
+        6,
+        64,
+        resources_with_capacities(128, 128),
+    );
+    let (mut machine, _) = start_profile(profile.clone());
+    let headers = da_run_headers(&machine, 1, DA_VOTE_RUN as u64, "wide publication");
+    assert!(DA_VOTE_RUN > profile.protocol().codec_config().chains());
+
+    let opened = validate_block(&mut machine, headers[0].clone(), 1);
+    let barrier = persist_job(&opened);
+    for header in &headers[1..] {
+        validate_block(&mut machine, header.clone(), 1);
+    }
+    let acknowledged = persist(&mut machine, &barrier);
+    let staged = persist_job(&acknowledged);
+    assert_eq!(reserved_da_runs(&staged), vec![headers[1..].to_vec()]);
+
+    let batch = acknowledged
+        .capabilities()
+        .iter()
+        .find_map(|effect| match effect {
+            Capability::Durability(DurabilityCapability::Released(job))
+                if matches!(job.request(), DurableEffect::SignBatch(_)) =>
+            {
+                Some(job.clone())
+            }
+            _ => None,
+        })
+        .expect("a coalesced run releases one batch signing job");
+    persist(&mut machine, &staged);
+    let completed = machine
+        .step(Input::EffectCompleted(EffectCompletion::SignedBatch {
+            id: batch.id(),
+            generation: batch.generation(),
+            artifacts: headers[1..]
+                .iter()
+                .map(|header| Artifact::DaVote(DaVote::new(header.clone(), threshold_share(0))))
+                .collect(),
+        }))
+        .unwrap();
+    let completed = settle(&mut machine, completed);
+    let published = persist(&mut machine, &persist_job(&completed));
+    let send = published
+        .capabilities()
+        .iter()
+        .find_map(|effect| match durable_effect(effect) {
+            Some(DurableEffect::SendBatch(requests)) => Some(requests.clone()),
+            _ => None,
+        })
+        .expect("a signed run publishes as one directed batch");
+    assert_eq!(send.len(), DA_VOTE_RUN - 1);
+
+    let snapshot = machine.live_snapshot_for_test();
+    let config = SnapshotCodecConfig::from_profile(&profile);
+    let decoded = Snapshot::<MinPk, Digest>::decode_cfg(snapshot.encode(), &config)
+        .expect("a wide directed publication stays decodable");
+    Machine::restore(profile, decoded).expect("recovery restores the wide publication");
 }
 
 #[test]
