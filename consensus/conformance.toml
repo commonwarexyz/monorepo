@@ -316,11 +316,11 @@ hash = "e53b4b684f0344590427aae976d298e3b6fd2b08ef46ff2cad5def04b4f7690b"
 
 ["commonware_consensus::simplex::marshal::conformance::CodingStorageConformance"]
 n_cases = 32
-hash = "2be181e47203e2edeb10b29295700de5ff7fb2cc0de86e8052af81539f845c22"
+hash = "de37068d25761d96f40689e120a1f194823ee5bda2c8b9a10c335d71673ca754"
 
 ["commonware_consensus::simplex::marshal::conformance::StandardStorageConformance"]
 n_cases = 32
-hash = "71e67e0f3ffc8c1eca7773e7d0e4db2165301b27cc7b4e3c80d45d2b1c2a4b59"
+hash = "726eff659a40618e7708994ba0f0011b14b8af10845afe8223d2f3bdcf69ee81"
 
 ["commonware_consensus::simplex::marshal::resolver::handler::tests::conformance::CodecConformance<Key<D>>"]
 n_cases = 65536
