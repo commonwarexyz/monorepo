@@ -28,7 +28,7 @@ use commonware_actor::mailbox;
 use commonware_codec::{Decode, Encode, Read};
 use commonware_cryptography::{
     Digestible,
-    certificate::{Provider, Verifier},
+    certificate::{Provider, Scoped, Verifier},
 };
 use commonware_macros::{boxed, select_loop};
 use commonware_p2p::Recipients;
@@ -1520,9 +1520,7 @@ where
                 response.send_lossy(true);
             }
             Key::Finalized { height } => {
-                let Some((epoch, certificate_codec_config)) =
-                    self.certificate_codec_config_for_height(height)
-                else {
+                let Some((epoch, scoped)) = self.scoped_for_height(height) else {
                     debug!(
                         %height,
                         floor = %self.floor.processed_height(),
@@ -1531,6 +1529,7 @@ where
                     response.send_lossy(true);
                     return self;
                 };
+                let certificate_codec_config = scoped.certificate_codec_config();
 
                 let Ok(finalization) =
                     Finalization::read_cfg(&mut value, &certificate_codec_config)
@@ -1571,12 +1570,16 @@ where
                     return self;
                 }
                 delivers.push(PendingVerification::Finalized {
+                    scoped,
                     finalization,
                     block,
                     response,
                 });
             }
             Key::Notarized { round } => {
+                // The payload check below needs the epoch's participant set, so a
+                // scope without the full scheme counts as unavailable and the
+                // delivery is acknowledged as stale.
                 let Some(scheme) = self.provider.scheme(round.epoch()) else {
                     debug!(
                         ?round,
@@ -1619,6 +1622,7 @@ where
                     return self;
                 }
                 delivers.push(PendingVerification::Notarized {
+                    scoped: Scoped::scheme(scheme),
                     notarization,
                     block,
                     response,
@@ -1671,15 +1675,14 @@ where
             by_epoch.entry(epoch).or_default().push(i);
         }
 
-        // Batch verify each epoch group.
+        // Verify each epoch group under the scope captured at admission, so a
+        // provider that has since retired the epoch cannot fail the delivery.
         let mut verified = vec![false; delivers.len()];
-        for (epoch, indices) in &by_epoch {
-            let Some(scoped) = self.provider.scoped(*epoch) else {
-                continue;
-            };
+        for indices in by_epoch.values() {
+            let scoped = delivers[indices[0]].scoped();
             let group: Vec<_> = indices.iter().map(|&i| certs[i]).collect();
             let results =
-                verify_certificates(self.context.as_mut(), &scoped, &group, &self.strategy);
+                verify_certificates(self.context.as_mut(), scoped, &group, &self.strategy);
             for (j, &idx) in indices.iter().enumerate() {
                 verified[idx] = results[j];
             }
@@ -1701,6 +1704,7 @@ where
                     finalization,
                     block,
                     response,
+                    ..
                 } => {
                     // Valid finalization received.
                     response.send_lossy(true);
@@ -1739,6 +1743,7 @@ where
                     notarization,
                     block,
                     response,
+                    ..
                 } => {
                     // Valid notarization received.
                     response.send_lossy(true);
@@ -1811,24 +1816,11 @@ where
         self
     }
 
-    /// Returns the certificate codec config for `epoch`.
-    fn certificate_codec_config(
-        &self,
-        epoch: Epoch,
-    ) -> Option<<<P::Scheme as Verifier>::Certificate as Read>::Cfg> {
-        self.provider
-            .scoped(epoch)
-            .map(|scoped| scoped.certificate_codec_config())
-    }
-
-    /// Returns the epoch containing `height` and its certificate codec config.
-    fn certificate_codec_config_for_height(
-        &self,
-        height: Height,
-    ) -> Option<(Epoch, <<P::Scheme as Verifier>::Certificate as Read>::Cfg)> {
+    /// Returns the epoch containing `height` and the scope that verifies its certificates.
+    fn scoped_for_height(&self, height: Height) -> Option<(Epoch, Scoped<P::Scheme>)> {
         let epoch = self.epocher.containing(height)?.epoch();
-        self.certificate_codec_config(epoch)
-            .map(|config| (epoch, config))
+        let scoped = self.provider.scoped(epoch)?;
+        Some((epoch, scoped))
     }
 
     // -------------------- Application Dispatch --------------------
