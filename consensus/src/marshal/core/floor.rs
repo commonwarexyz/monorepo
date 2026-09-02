@@ -64,6 +64,13 @@ impl<S: Scheme, C: Digest> State<S, C> {
         }
     }
 
+    /// Returns the inclusive height floor. Finalized data at or below it is
+    /// neither stored nor repaired.
+    ///
+    /// Nothing processed maps to zero because height zero is genesis, which is
+    /// anchored at startup or sits below a floor anchor and never carries a
+    /// finalization. Delivery uses the stream cursor, which keeps that state
+    /// distinct.
     pub(super) const fn processed_height(&self) -> Height {
         match self.height {
             Some(height) => height,
