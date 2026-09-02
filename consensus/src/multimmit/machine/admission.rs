@@ -240,6 +240,19 @@ impl<V: Variant, D: Digest> Artifact<V, D> {
     /// Visits every finality vote slot represented by this artifact in canonical signer order.
     pub(crate) fn visit_finality_vote_claims<H: Hasher<Digest = D>>(
         &self,
+        visit: impl FnMut(FinalityVoteClaim<D>),
+    ) {
+        self.visit_finality_vote_claims_for::<H>(None, visit);
+    }
+
+    /// Visits every finality vote slot, reusing a leader-block digest the caller already holds.
+    ///
+    /// A certificate's designated leader digest is the same for every tallied signer, and off-pool
+    /// verification derives it, so passing it here keeps the control thread from re-encoding a
+    /// whole leader block once per lifecycle step.
+    pub(crate) fn visit_finality_vote_claims_for<H: Hasher<Digest = D>>(
+        &self,
+        leader: Option<D>,
         mut visit: impl FnMut(FinalityVoteClaim<D>),
     ) {
         match self {
@@ -250,7 +263,7 @@ impl<V: Variant, D: Digest> Artifact<V, D> {
             )),
             Self::Vqc(certificate) => {
                 let round = certificate.leader().round();
-                let designated = certificate.leader().digest::<H>();
+                let designated = leader.unwrap_or_else(|| certificate.leader().digest::<H>());
                 let mut tally = certificate.tally().signers().iter().peekable();
                 let mut conflicting = certificate.conflicting_votes().iter().peekable();
                 loop {
@@ -279,9 +292,9 @@ impl<V: Variant, D: Digest> Artifact<V, D> {
             }
             Self::Lqc(certificate) => {
                 let round = certificate.leader().round();
-                let leader = certificate.leader().digest::<H>();
+                let designated = leader.unwrap_or_else(|| certificate.leader().digest::<H>());
                 for signer in certificate.tally().signers().iter() {
-                    visit(FinalityVoteClaim::new(round, leader, signer));
+                    visit(FinalityVoteClaim::new(round, designated, signer));
                 }
             }
             Self::TransactionBlock(_)
