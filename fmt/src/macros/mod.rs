@@ -1,0 +1,244 @@
+//! Identifies supported Commonware macro invocations and dispatches their delimiter
+//! contents to syntax-aware formatters.
+//!
+//! Each formatter returns a protected fragment so callers can distinguish a fully
+//! formatted body from source that had to be preserved for comments or opaque syntax.
+
+mod cfg_if;
+mod nested;
+mod select;
+mod stability;
+
+pub use select::{select, select_loop};
+use syn::{MacroDelimiter, Path, ext::IdentExt as _};
+use thiserror::Error;
+
+/// Grammar implemented for a recognized macro invocation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MacroKind {
+    /// A `cfg_if!` conditional chain.
+    CfgIf,
+    /// A single-pass `select!` expression.
+    Select,
+    /// A repeating `select_loop!` expression.
+    SelectLoop,
+    /// A `stability_mod!` module declaration.
+    StabilityMod,
+    /// A `stability_scope!` item group.
+    StabilityScope,
+}
+
+/// Classifies a supported macro from its exact path and required delimiter.
+pub(crate) fn macro_kind(path: &Path, delimiter: &MacroDelimiter) -> Option<MacroKind> {
+    if path.leading_colon.is_some() {
+        return None;
+    }
+    // Raw identifiers name the same macros, while absolute and unrelated qualified
+    // paths must remain outside this formatter's ownership.
+    let segments = path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.unraw().to_string())
+        .collect::<Vec<_>>();
+    match segments.as_slice() {
+        [name] if name == "cfg_if" && matches!(delimiter, MacroDelimiter::Brace(_)) => {
+            Some(MacroKind::CfgIf)
+        }
+        [prefix, name]
+            if prefix == "cfg_if"
+                && name == "cfg_if"
+                && matches!(delimiter, MacroDelimiter::Brace(_)) =>
+        {
+            Some(MacroKind::CfgIf)
+        }
+        [name] if name == "select" && matches!(delimiter, MacroDelimiter::Brace(_)) => {
+            Some(MacroKind::Select)
+        }
+        [name] if name == "select_loop" && matches!(delimiter, MacroDelimiter::Brace(_)) => {
+            Some(MacroKind::SelectLoop)
+        }
+        [name] if name == "stability_mod" && matches!(delimiter, MacroDelimiter::Paren(_)) => {
+            Some(MacroKind::StabilityMod)
+        }
+        [name] if name == "stability_scope" && matches!(delimiter, MacroDelimiter::Paren(_)) => {
+            Some(MacroKind::StabilityScope)
+        }
+        [prefix, name]
+            if prefix == "commonware_macros"
+                && name == "select"
+                && matches!(delimiter, MacroDelimiter::Brace(_)) =>
+        {
+            Some(MacroKind::Select)
+        }
+        [prefix, name]
+            if prefix == "commonware_macros"
+                && name == "select_loop"
+                && matches!(delimiter, MacroDelimiter::Brace(_)) =>
+        {
+            Some(MacroKind::SelectLoop)
+        }
+        [prefix, name]
+            if prefix == "commonware_macros"
+                && name == "stability_mod"
+                && matches!(delimiter, MacroDelimiter::Paren(_)) =>
+        {
+            Some(MacroKind::StabilityMod)
+        }
+        [prefix, name]
+            if prefix == "commonware_macros"
+                && name == "stability_scope"
+                && matches!(delimiter, MacroDelimiter::Paren(_)) =>
+        {
+            Some(MacroKind::StabilityScope)
+        }
+        _ => None,
+    }
+}
+
+/// Returns the source spelling of a macro delimiter pair.
+pub(crate) const fn delimiter_text(
+    delimiter: &MacroDelimiter,
+) -> Option<(&'static str, &'static str)> {
+    match delimiter {
+        MacroDelimiter::Paren(_) => Some(("(", ")")),
+        MacroDelimiter::Brace(_) => Some(("{", "}")),
+        MacroDelimiter::Bracket(_) => Some(("[", "]")),
+    }
+}
+
+/// Formats a supported macro body at its current nesting depth.
+///
+/// At the outermost depth, multiline literals are shielded before formatting and
+/// restored only when every placeholder can be matched exactly.
+pub(crate) fn format_at_depth(
+    formatter: &crate::rustfmt::Formatter,
+    kind: MacroKind,
+    source: &str,
+    options: Options,
+    depth: usize,
+) -> Result<crate::fragment::ProtectedFragment, Error> {
+    if depth == 0
+        && let Some(literals) = crate::fragment::MultilineLiterals::prepare(source)
+    {
+        // Shield only once so recursive formatters operate on the same placeholder
+        // coordinates rather than nesting independent replacement schemes.
+        let formatted = format_shielded_at_depth(formatter, kind, literals.text(), options, depth)?;
+        if let Some(restored) = literals.restore(formatted) {
+            return Ok(restored);
+        }
+        // Restoration is all-or-nothing. Formatting the original source is safer
+        // than returning a fragment with missing or duplicated literal text.
+        return format_shielded_at_depth(formatter, kind, source, options, depth);
+    }
+    format_shielded_at_depth(formatter, kind, source, options, depth)
+}
+
+/// Dispatches a body whose multiline literals have already been shielded if needed.
+fn format_shielded_at_depth(
+    formatter: &crate::rustfmt::Formatter,
+    kind: MacroKind,
+    source: &str,
+    options: Options,
+    depth: usize,
+) -> Result<crate::fragment::ProtectedFragment, Error> {
+    match kind {
+        MacroKind::CfgIf => cfg_if::cfg_if_with(formatter, source, options, depth),
+        MacroKind::Select => select::select_at_depth(formatter, source, options, depth),
+        MacroKind::SelectLoop => select::select_loop_at_depth(formatter, source, options, depth),
+        MacroKind::StabilityMod => stability::stability_mod(source),
+        MacroKind::StabilityScope => {
+            stability::stability_scope_with(formatter, source, options, depth)
+        }
+    }
+}
+
+/// Line ending emitted by a macro shell writer.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum LineEnding {
+    /// Line feed.
+    #[default]
+    Lf,
+    /// Carriage return followed by line feed.
+    Crlf,
+}
+
+impl LineEnding {
+    /// Returns the exact line ending sequence emitted by writers.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Lf => "\n",
+            Self::Crlf => "\r\n",
+        }
+    }
+}
+
+/// Placement options for a formatted macro body.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Options {
+    /// Rendered shell indentation derived from the invocation line's leading whitespace.
+    pub indentation: usize,
+    /// Absolute column immediately after the macro's opening delimiter.
+    pub body_column: usize,
+    /// Line ending to emit.
+    pub line_ending: LineEnding,
+}
+
+/// An error produced while formatting a supported macro body.
+#[derive(Debug, Error)]
+pub enum Error {
+    /// The original macro body did not match its production grammar.
+    #[error("failed to parse macro body: {0}")]
+    Parse(#[source] syn::Error),
+    /// The parsed macro body violated a shared semantic constraint.
+    #[error("invalid macro body: {0}")]
+    Validate(#[source] syn::Error),
+    /// An embedded Rust fragment could not be formatted by rustfmt.
+    #[error("failed to format embedded Rust with rustfmt: {0}")]
+    Rustfmt(#[from] crate::rustfmt::Error),
+    /// A parsed field could not be mapped back to its exact source text.
+    #[error("failed to locate macro field source: {0}")]
+    Source(#[from] crate::source::Error),
+    /// The rendered body no longer matched the production grammar.
+    #[error("formatted macro body did not parse: {0}")]
+    Output(#[source] syn::Error),
+    /// Nested supported macros exceeded the recursion bound.
+    #[error("nested supported macros exceeded the recursion limit")]
+    RecursionLimit,
+    /// A nested marker could not be restored exactly once in source order.
+    #[error("nested macro marker mismatch")]
+    MarkerMismatch,
+    /// A nested macro did not retain its expected delimiter pair.
+    #[error("nested macro did not have valid delimiters")]
+    MarkerDelimiter,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recognizes_raw_supported_macro_names() {
+        let invocation: syn::Macro = syn::parse_str("r#select! { value = future() => value }")
+            .expect("raw macro invocation should parse");
+
+        assert_eq!(
+            macro_kind(&invocation.path, &invocation.delimiter),
+            Some(MacroKind::Select)
+        );
+    }
+
+    #[test]
+    fn preserves_multiline_explicit_doc_literals() {
+        let source = "ALPHA { #[doc = r#\"first\nsecond\"#] pub struct Example; }";
+        let formatted = format_at_depth(
+            &crate::rustfmt::Formatter::default(),
+            MacroKind::StabilityScope,
+            source,
+            Options::default(),
+            0,
+        )
+        .expect("multiline doc literal should be accepted");
+
+        assert!(formatted.text().contains("r#\"first\nsecond\"#"));
+    }
+}

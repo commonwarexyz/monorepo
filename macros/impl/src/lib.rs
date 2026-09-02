@@ -9,60 +9,17 @@
 )]
 
 use crate::nextest::configured_test_groups;
+use commonware_macros_grammar::{
+    SelectBranch, SelectInput, SelectLoopInput, StabilityLevel, StabilityModInput,
+    StabilityScopeInput,
+};
 use proc_macro::TokenStream;
 use proc_macro_crate::{FoundCrate, crate_name};
 use proc_macro2::Span;
 use quote::{format_ident, quote};
-use syn::{
-    Error, Expr, Ident, ItemFn, LitInt, LitStr, Pat, Token, Visibility, braced,
-    parse::{Parse, ParseStream, Result},
-    parse_macro_input,
-};
+use syn::{Error, Expr, Ident, ItemFn, LitStr, parse_macro_input};
 
 mod nextest;
-
-/// Stability level input that accepts either a literal integer (0-4) or a named constant
-/// (ALPHA, BETA, GAMMA, DELTA, EPSILON).
-struct StabilityLevel {
-    value: u8,
-}
-
-impl Parse for StabilityLevel {
-    fn parse(input: ParseStream<'_>) -> Result<Self> {
-        let lookahead = input.lookahead1();
-        if lookahead.peek(LitInt) {
-            let lit: LitInt = input.parse()?;
-            let value: u8 = lit
-                .base10_parse()
-                .map_err(|_| Error::new(lit.span(), "stability level must be 0, 1, 2, 3, or 4"))?;
-            if value > 4 {
-                return Err(Error::new(
-                    lit.span(),
-                    "stability level must be 0, 1, 2, 3, or 4",
-                ));
-            }
-            Ok(Self { value })
-        } else if lookahead.peek(Ident) {
-            let ident: Ident = input.parse()?;
-            let value = match ident.to_string().as_str() {
-                "ALPHA" => 0,
-                "BETA" => 1,
-                "GAMMA" => 2,
-                "DELTA" => 3,
-                "EPSILON" => 4,
-                _ => {
-                    return Err(Error::new(
-                        ident.span(),
-                        "expected stability level: ALPHA, BETA, GAMMA, DELTA, EPSILON, or 0-4",
-                    ));
-                }
-            };
-            Ok(Self { value })
-        } else {
-            Err(lookahead.error())
-        }
-    }
-}
 
 fn level_name(level: u8) -> &'static str {
     match level {
@@ -107,7 +64,7 @@ fn exclusion_cfg_names(level: u8) -> Vec<proc_macro2::Ident> {
 #[proc_macro_attribute]
 pub fn stability(attr: TokenStream, item: TokenStream) -> TokenStream {
     let level = parse_macro_input!(attr as StabilityLevel);
-    let exclude_names = exclusion_cfg_names(level.value);
+    let exclude_names = exclusion_cfg_names(level.value());
 
     let item2: proc_macro2::TokenStream = item.into();
     let expanded = quote! {
@@ -118,37 +75,16 @@ pub fn stability(attr: TokenStream, item: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
-/// Input for the `stability_mod!` macro: `level, visibility mod name`
-struct StabilityModInput {
-    level: StabilityLevel,
-    visibility: Visibility,
-    name: Ident,
-}
-
-impl Parse for StabilityModInput {
-    fn parse(input: ParseStream<'_>) -> Result<Self> {
-        let level: StabilityLevel = input.parse()?;
-        input.parse::<Token![,]>()?;
-        let visibility: Visibility = input.parse()?;
-        input.parse::<Token![mod]>()?;
-        let name: Ident = input.parse()?;
-        Ok(Self {
-            level,
-            visibility,
-            name,
-        })
-    }
-}
-
 #[proc_macro]
 pub fn stability_mod(input: TokenStream) -> TokenStream {
     let StabilityModInput {
         level,
         visibility,
         name,
+        ..
     } = parse_macro_input!(input as StabilityModInput);
 
-    let exclude_names = exclusion_cfg_names(level.value);
+    let exclude_names = exclusion_cfg_names(level.value());
 
     let expanded = quote! {
         #[cfg(not(any(#(#exclude_names),*)))]
@@ -158,58 +94,14 @@ pub fn stability_mod(input: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
-/// Input for the `stability_scope!` macro: `level [, cfg(predicate)] { items... }`
-struct StabilityScopeInput {
-    level: StabilityLevel,
-    predicate: Option<syn::Meta>,
-    items: Vec<syn::Item>,
-}
-
-impl Parse for StabilityScopeInput {
-    fn parse(input: ParseStream<'_>) -> Result<Self> {
-        let level: StabilityLevel = input.parse()?;
-
-        // Check for optional cfg predicate
-        let predicate = if input.peek(Token![,]) {
-            input.parse::<Token![,]>()?;
-
-            // Parse `cfg(...)` - expect the literal identifier "cfg" followed by parenthesized content
-            let cfg_ident: Ident = input.parse()?;
-            if cfg_ident != "cfg" {
-                return Err(Error::new(cfg_ident.span(), "expected `cfg`"));
-            }
-            let cfg_content;
-            syn::parenthesized!(cfg_content in input);
-            Some(cfg_content.parse()?)
-        } else {
-            None
-        };
-
-        let content;
-        braced!(content in input);
-
-        let mut items = Vec::new();
-        while !content.is_empty() {
-            items.push(content.parse()?);
-        }
-
-        Ok(Self {
-            level,
-            predicate,
-            items,
-        })
-    }
-}
-
 #[proc_macro]
 pub fn stability_scope(input: TokenStream) -> TokenStream {
     let StabilityScopeInput {
-        level,
-        predicate,
-        items,
+        level, cfg, items, ..
     } = parse_macro_input!(input as StabilityScopeInput);
 
-    let exclude_names = exclusion_cfg_names(level.value);
+    let exclude_names = exclusion_cfg_names(level.value());
+    let predicate = cfg.map(|cfg| cfg.predicate);
 
     let cfg_attr = predicate.map_or_else(
         || quote! { #[cfg(not(any(#(#exclude_names),*)))] },
@@ -460,52 +352,6 @@ pub fn test_collect_traces(attr: TokenStream, item: TokenStream) -> TokenStream 
     TokenStream::from(expanded)
 }
 
-struct SelectInput {
-    branches: Vec<Branch>,
-}
-
-struct Branch {
-    pattern: Pat,
-    future: Expr,
-    body: Expr,
-}
-
-/// Branch for [select_loop!] with optional `else` clause for `Some` patterns.
-struct SelectLoopBranch {
-    pattern: Pat,
-    future: Expr,
-    else_body: Option<Expr>,
-    body: Expr,
-}
-
-impl Parse for SelectInput {
-    fn parse(input: ParseStream<'_>) -> Result<Self> {
-        let mut branches = Vec::new();
-
-        while !input.is_empty() {
-            let pattern = Pat::parse_single(input)?;
-            input.parse::<Token![=]>()?;
-            let future: Expr = input.parse()?;
-            input.parse::<Token![=>]>()?;
-            let body: Expr = input.parse()?;
-
-            branches.push(Branch {
-                pattern,
-                future,
-                body,
-            });
-
-            if input.peek(Token![,]) {
-                input.parse::<Token![,]>()?;
-            } else {
-                break;
-            }
-        }
-
-        Ok(Self { branches })
-    }
-}
-
 #[proc_macro]
 pub fn select(input: TokenStream) -> TokenStream {
     // Parse the input tokens
@@ -513,10 +359,11 @@ pub fn select(input: TokenStream) -> TokenStream {
 
     // Generate code from provided statements
     let mut select_branches = Vec::new();
-    for Branch {
+    for SelectBranch {
         pattern,
         future,
         body,
+        ..
     } in branches.into_iter()
     {
         // Generate branch for `select!` macro
@@ -538,156 +385,27 @@ pub fn select(input: TokenStream) -> TokenStream {
     .into()
 }
 
-/// Input for [select_loop!].
-///
-/// Parses: `context, [on_start => expr,] on_stopped => expr, branches... [, on_end => expr]`
-struct SelectLoopInput {
-    context: Expr,
-    start_expr: Option<Expr>,
-    shutdown_expr: Expr,
-    branches: Vec<SelectLoopBranch>,
-    end_expr: Option<Expr>,
-}
-
-impl Parse for SelectLoopInput {
-    fn parse(input: ParseStream<'_>) -> Result<Self> {
-        // Parse context expression
-        let context: Expr = input.parse()?;
-        input.parse::<Token![,]>()?;
-
-        // Check for optional `on_start =>`
-        let start_expr = if input.peek(Ident) {
-            let ident: Ident = input.fork().parse()?;
-            if ident == "on_start" {
-                input.parse::<Ident>()?; // consume the ident
-                input.parse::<Token![=>]>()?;
-                let expr: Expr = input.parse()?;
-                input.parse::<Token![,]>()?;
-                Some(expr)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        // Parse `on_stopped =>`
-        let on_stopped_ident: Ident = input.parse()?;
-        if on_stopped_ident != "on_stopped" {
-            return Err(Error::new(
-                on_stopped_ident.span(),
-                "expected `on_stopped` keyword",
-            ));
-        }
-        input.parse::<Token![=>]>()?;
-
-        // Parse shutdown expression
-        let shutdown_expr: Expr = input.parse()?;
-
-        // Parse comma after shutdown expression
-        input.parse::<Token![,]>()?;
-
-        // Parse branches directly (no surrounding braces)
-        // Stop when we see `on_end` or reach end of input
-        let mut branches = Vec::new();
-        while !input.is_empty() {
-            // Check if next token is `on_end`
-            if input.peek(Ident) {
-                let ident: Ident = input.fork().parse()?;
-                if ident == "on_end" {
-                    break;
-                }
-            }
-
-            let pattern = Pat::parse_single(input)?;
-            input.parse::<Token![=]>()?;
-            let future: Expr = input.parse()?;
-
-            // Parse optional else clause: `else expr`
-            let else_body = if input.peek(Token![else]) {
-                input.parse::<Token![else]>()?;
-                Some(input.parse::<Expr>()?)
-            } else {
-                None
-            };
-
-            input.parse::<Token![=>]>()?;
-            let body: Expr = input.parse()?;
-
-            branches.push(SelectLoopBranch {
-                pattern,
-                future,
-                else_body,
-                body,
-            });
-
-            if input.peek(Token![,]) {
-                input.parse::<Token![,]>()?;
-            } else {
-                break;
-            }
-        }
-
-        // Check for optional `on_end =>`
-        let end_expr = if !input.is_empty() && input.peek(Ident) {
-            let ident: Ident = input.parse()?;
-            if ident == "on_end" {
-                input.parse::<Token![=>]>()?;
-                let expr: Expr = input.parse()?;
-                if input.peek(Token![,]) {
-                    input.parse::<Token![,]>()?;
-                }
-                Some(expr)
-            } else {
-                return Err(Error::new(ident.span(), "expected `on_end` keyword"));
-            }
-        } else {
-            None
-        };
-
-        Ok(Self {
-            context,
-            start_expr,
-            shutdown_expr,
-            branches,
-            end_expr,
-        })
-    }
-}
-
 #[proc_macro]
 pub fn select_loop(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as SelectLoopInput);
+    // Parsing preserves source syntax for formatters. Expansion also requires
+    // the shared semantic check before patterns are lowered into select arms.
+    if let Err(error) = input.validate() {
+        return error.to_compile_error().into();
+    }
+
     let SelectLoopInput {
         context,
-        start_expr,
-        shutdown_expr,
+        on_start,
+        on_stopped,
         branches,
-        end_expr,
-    } = parse_macro_input!(input as SelectLoopInput);
+        on_end,
+        ..
+    } = input;
 
-    fn is_irrefutable(pat: &Pat) -> bool {
-        match pat {
-            Pat::Wild(_) | Pat::Rest(_) => true,
-            Pat::Ident(i) => i.subpat.as_ref().is_none_or(|(_, p)| is_irrefutable(p)),
-            Pat::Type(t) => is_irrefutable(&t.pat),
-            Pat::Tuple(t) => t.elems.iter().all(is_irrefutable),
-            Pat::Reference(r) => is_irrefutable(&r.pat),
-            Pat::Paren(p) => is_irrefutable(&p.pat),
-            _ => false,
-        }
-    }
-
-    for b in &branches {
-        if b.else_body.is_none() && !is_irrefutable(&b.pattern) {
-            return Error::new_spanned(
-                &b.pattern,
-                "refutable patterns require an else clause: \
-                 `Some(msg) = future else break => { ... }`",
-            )
-            .to_compile_error()
-            .into();
-        }
-    }
+    let start_expr = on_start.map(|lifecycle| lifecycle.expression);
+    let shutdown_expr = on_stopped.expression;
+    let end_expr = on_end.map(|lifecycle| lifecycle.expression);
 
     // Convert branches to tokens for the inner select!
     let branch_tokens: Vec<_> = branches
@@ -698,11 +416,12 @@ pub fn select_loop(input: TokenStream) -> TokenStream {
             let body = &b.body;
 
             // If else clause is present, use let-else to unwrap
-            b.else_body.as_ref().map_or_else(
+            b.else_clause.as_ref().map_or_else(
                 // No else: normal pattern binding (already validated as irrefutable)
                 || quote! { #pattern = #future => #body, },
                 // With else: use let-else for refutable patterns
-                |else_expr| {
+                |else_clause| {
+                    let else_expr = &else_clause.expression;
                     quote! {
                         __select_result = #future => {
                             let #pattern = __select_result else { #else_expr };

@@ -1,0 +1,19 @@
+[package]
+name = "commonware-macros-grammar"
+edition.workspace = true
+publish = true
+version.workspace = true
+license.workspace = true
+description = "Parse the input grammars shared by Commonware procedural macros and tools."
+homepage.workspace = true
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/macros/grammar"
+documentation = "https://docs.rs/commonware-macros-grammar"
+
+[lints]
+workspace = true
+
+[lib]
+bench = false
+
+[dependencies]
+syn = { workspace = true, features = ["full"] }

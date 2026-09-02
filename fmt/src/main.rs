@@ -1,0 +1,494 @@
+//! Command-line interface for formatting Commonware macro invocations.
+
+use clap::Parser;
+use std::{
+    collections::BTreeMap,
+    ffi::OsStr,
+    fs,
+    io::{self, Read as _, Write as _},
+    path::{Path, PathBuf},
+    process::ExitCode,
+};
+use tempfile::NamedTempFile;
+
+#[derive(Parser)]
+#[command(name = "commonware-fmt")]
+#[command(about = "Format Commonware macro invocations")]
+/// Command-line options controlling input, checking, and rustfmt invocation.
+struct Args {
+    /// Check whether files are formatted without writing them.
+    #[arg(long)]
+    check: bool,
+
+    /// Read one Rust source file from stdin and write it to stdout.
+    #[arg(long, conflicts_with_all = ["check", "files"])]
+    stdin: bool,
+
+    /// Rustfmt executable used for embedded Rust fragments.
+    #[arg(long, default_value = "rustfmt", value_name = "PATH")]
+    rustfmt: PathBuf,
+
+    /// Rustup toolchain argument passed to rustfmt, such as `+nightly`.
+    #[arg(long, value_name = "TOOLCHAIN")]
+    rustfmt_toolchain: Option<String>,
+
+    /// Path from which rustfmt resolves its configuration.
+    #[arg(long, value_name = "PATH")]
+    rustfmt_config_path: Option<PathBuf>,
+
+    /// Rust source files to format.
+    #[arg(
+        value_name = "FILE",
+        required_unless_present = "stdin",
+        conflicts_with = "stdin"
+    )]
+    files: Vec<PathBuf>,
+}
+
+#[derive(Default)]
+/// Results accumulated while processing a set of files.
+struct Outcome {
+    /// Files that needed formatting or were rewritten successfully.
+    changed: Vec<PathBuf>,
+    /// Diagnostics for inputs that could not be processed.
+    errors: Vec<String>,
+}
+
+/// A source file's diagnostic path and canonical I/O path.
+struct Input {
+    /// Stable path used in diagnostics and change reports.
+    display: PathBuf,
+    /// Canonical path used to read and replace the file.
+    resolved: PathBuf,
+}
+
+impl Outcome {
+    /// Returns whether accumulated results require a failing exit status.
+    const fn failed(&self, check: bool) -> bool {
+        !self.errors.is_empty() || (check && !self.changed.is_empty())
+    }
+}
+
+/// Runs the formatter in stdin, check, or in-place mode.
+fn main() -> ExitCode {
+    let args = Args::parse();
+    let formatter = formatter(&args);
+    if args.stdin {
+        return match run_stdin(&formatter) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("error: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+
+    let outcome = run_files(&formatter, &args.files, args.check);
+    if args.check {
+        for path in &outcome.changed {
+            eprintln!("{}", path.display());
+        }
+    }
+    for error in &outcome.errors {
+        eprintln!("error: {error}");
+    }
+    if outcome.failed(args.check) {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+/// Builds a source formatter from the rustfmt-related command-line options.
+fn formatter(args: &Args) -> commonware_fmt::file::Formatter {
+    let mut rustfmt = commonware_fmt::rustfmt::Formatter::new(args.rustfmt.as_os_str().to_owned());
+    if let Some(toolchain) = &args.rustfmt_toolchain {
+        rustfmt = rustfmt.with_toolchain(toolchain);
+    }
+    if let Some(config_path) = &args.rustfmt_config_path {
+        rustfmt = rustfmt.with_config_path(config_path);
+    }
+    commonware_fmt::file::Formatter::new(rustfmt)
+}
+
+/// Formats one UTF-8 Rust source file from stdin and writes it to stdout.
+fn run_stdin(formatter: &commonware_fmt::file::Formatter) -> Result<(), String> {
+    let mut source = String::new();
+    io::stdin()
+        .lock()
+        .read_to_string(&mut source)
+        .map_err(|error| format!("failed to read stdin: {error}"))?;
+    let output = formatter
+        .format(&source)
+        .map_err(|error| format!("failed to format stdin: {error}"))?;
+    write_output(io::stdout().lock(), output.text())
+}
+
+/// Writes formatted source and reports both write and buffered flush failures.
+fn write_output(mut writer: impl io::Write, output: &str) -> Result<(), String> {
+    writer
+        .write_all(output.as_bytes())
+        .map_err(|error| format!("failed to write stdout: {error}"))?;
+    writer
+        .flush()
+        .map_err(|error| format!("failed to flush stdout: {error}"))
+}
+
+/// Processes valid inputs in deterministic order without stopping after errors.
+///
+/// Check mode records files that differ. In-place mode records only files that
+/// were replaced successfully.
+fn run_files(
+    formatter: &commonware_fmt::file::Formatter,
+    paths: &[PathBuf],
+    check: bool,
+) -> Outcome {
+    let mut outcome = Outcome::default();
+    let inputs = collect_files(paths, &mut outcome.errors);
+    for input in inputs {
+        let source = match fs::read_to_string(&input.resolved) {
+            Ok(source) => source,
+            Err(error) => {
+                outcome.errors.push(format!(
+                    "failed to read `{}`: {error}",
+                    input.display.display()
+                ));
+                continue;
+            }
+        };
+        let output = match formatter.format(&source) {
+            Ok(output) => output,
+            Err(error) => {
+                outcome.errors.push(format!(
+                    "failed to format `{}`: {error}",
+                    input.display.display()
+                ));
+                continue;
+            }
+        };
+        if output.text() == source {
+            continue;
+        }
+        if check {
+            outcome.changed.push(input.display);
+            continue;
+        }
+        if let Err(error) = replace(&input.resolved, output.text()) {
+            outcome.errors.push(format!(
+                "failed to write `{}`: {error}",
+                input.display.display()
+            ));
+            continue;
+        }
+        outcome.changed.push(input.display);
+    }
+    outcome
+}
+
+/// Atomically replaces a source file while retaining its permissions.
+fn replace(path: &Path, source: &str) -> io::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let metadata = fs::metadata(path)?;
+    ensure_replaceable(&metadata)?;
+
+    // A temporary file in the same directory keeps the final rename on one filesystem.
+    let mut temporary = NamedTempFile::new_in(parent)?;
+    temporary.write_all(source.as_bytes())?;
+    temporary.flush()?;
+    temporary
+        .as_file()
+        .set_permissions(metadata.permissions())?;
+    temporary.persist(path).map_err(|error| error.error)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+/// Rejects files whose hard-linked aliases would diverge after replacement.
+fn ensure_replaceable(metadata: &fs::Metadata) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    if metadata.nlink() > 1 {
+        Err(io::Error::other(
+            "refusing to replace a file with multiple hard links",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(unix))]
+/// Rejects replacement where hard-link safety cannot be verified portably.
+fn ensure_replaceable(_metadata: &fs::Metadata) -> io::Result<()> {
+    Err(io::Error::other(
+        "replacing files is unsupported on this platform",
+    ))
+}
+
+/// Validates, canonicalizes, deduplicates, and orders Rust source paths.
+fn collect_files(paths: &[PathBuf], errors: &mut Vec<String>) -> Vec<Input> {
+    let mut files = BTreeMap::new();
+    for path in paths {
+        if path.extension() != Some(OsStr::new("rs")) {
+            errors.push(format!("`{}` is not a Rust source file", path.display()));
+            continue;
+        }
+        match fs::metadata(path) {
+            Ok(metadata) if metadata.is_file() => {}
+            Ok(_) => {
+                errors.push(format!("`{}` is not a regular file", path.display()));
+                continue;
+            }
+            Err(error) => {
+                errors.push(format!("failed to inspect `{}`: {error}", path.display()));
+                continue;
+            }
+        }
+        let resolved = match fs::canonicalize(path) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                errors.push(format!("failed to resolve `{}`: {error}", path.display()));
+                continue;
+            }
+        };
+        // Canonical paths collapse aliases. Keeping the least display path makes
+        // diagnostics independent of argument order.
+        files
+            .entry(resolved.clone())
+            .and_modify(|input: &mut Input| {
+                if path < &input.display {
+                    input.display = path.clone();
+                }
+            })
+            .or_insert_with(|| Input {
+                display: path.clone(),
+                resolved,
+            });
+    }
+    files.into_values().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct FlushError;
+
+    impl io::Write for FlushError {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::Error::other("flush failed"))
+        }
+    }
+
+    struct TempDir(tempfile::TempDir);
+
+    impl TempDir {
+        fn new() -> Self {
+            Self(tempfile::tempdir().expect("temporary directory should be created"))
+        }
+
+        fn join(&self, path: impl AsRef<Path>) -> PathBuf {
+            self.0.path().join(path)
+        }
+    }
+
+    fn unformatted() -> &'static str {
+        "fn run() { select! {value=receive()=>value} }\n"
+    }
+
+    fn format_files(paths: &[PathBuf], check: bool) -> Outcome {
+        run_files(&commonware_fmt::file::Formatter::default(), paths, check)
+    }
+
+    #[test]
+    fn stdin_conflicts_with_check_and_files() {
+        assert!(Args::try_parse_from(["commonware-fmt"]).is_err());
+        assert!(Args::try_parse_from(["commonware-fmt", "--stdin", "--check"]).is_err());
+        assert!(Args::try_parse_from(["commonware-fmt", "--stdin", "input.rs"]).is_err());
+    }
+
+    #[test]
+    fn accepts_rustfmt_configuration() {
+        let args = Args::try_parse_from([
+            "commonware-fmt",
+            "--rustfmt",
+            "/opt/rustfmt",
+            "--rustfmt-toolchain",
+            "+nightly-2026-08-01",
+            "--rustfmt-config-path",
+            "/workspace",
+            "input.rs",
+        ])
+        .unwrap();
+
+        assert_eq!(args.rustfmt, Path::new("/opt/rustfmt"));
+        assert_eq!(
+            args.rustfmt_toolchain.as_deref(),
+            Some("+nightly-2026-08-01")
+        );
+        assert_eq!(
+            args.rustfmt_config_path.as_deref(),
+            Some(Path::new("/workspace"))
+        );
+    }
+
+    #[test]
+    fn reports_buffered_stdout_errors() {
+        let error = write_output(FlushError, "output").unwrap_err();
+
+        assert_eq!(error, "failed to flush stdout: flush failed");
+    }
+
+    #[test]
+    fn collects_files_deterministically_and_deduplicates_them() {
+        let temp = TempDir::new();
+        fs::write(temp.join("a.rs"), "").expect("Rust file should be written");
+        fs::write(temp.join("b.rs"), "").expect("Rust file should be written");
+
+        let mut errors = Vec::new();
+        let files = collect_files(
+            &[temp.join("b.rs"), temp.join("a.rs"), temp.join("b.rs")],
+            &mut errors,
+        );
+        let display: Vec<_> = files.into_iter().map(|file| file.display).collect();
+
+        assert!(errors.is_empty());
+        assert_eq!(display, vec![temp.join("a.rs"), temp.join("b.rs")]);
+    }
+
+    #[test]
+    fn reports_non_rust_missing_and_directory_inputs() {
+        let temp = TempDir::new();
+        fs::write(temp.join("readme.md"), "text").expect("file should be written");
+        fs::create_dir(temp.join("directory.rs")).expect("directory should be created");
+
+        let mut errors = Vec::new();
+        let files = collect_files(
+            &[
+                temp.join("readme.md"),
+                temp.join("missing.rs"),
+                temp.join("directory.rs"),
+            ],
+            &mut errors,
+        );
+
+        assert!(files.is_empty());
+        assert_eq!(errors.len(), 3);
+        assert!(errors[0].contains("not a Rust source file"));
+        assert!(errors[1].contains("failed to inspect"));
+        assert!(errors[2].contains("not a regular file"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolves_and_deduplicates_symlinked_files() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new();
+        let target = temp.join("target.rs");
+        let link = temp.join("link.rs");
+        fs::write(&target, unformatted()).expect("Rust file should be written");
+        symlink(&target, &link).expect("symlink should be created");
+
+        let mut errors = Vec::new();
+        let files = collect_files(&[temp.join("target.rs"), link.clone()], &mut errors);
+
+        assert!(errors.is_empty());
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].display, link);
+        assert_eq!(
+            files[0].resolved,
+            fs::canonicalize(temp.join("target.rs")).unwrap()
+        );
+
+        let outcome = format_files(std::slice::from_ref(&link), false);
+        assert!(outcome.errors.is_empty());
+        assert_eq!(outcome.changed, vec![link.clone()]);
+        assert!(fs::symlink_metadata(link).unwrap().file_type().is_symlink());
+        assert_ne!(fs::read_to_string(target).unwrap(), unformatted());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_to_replace_hard_linked_files_without_writing() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+        let temp = TempDir::new();
+        let target = temp.join("target.rs");
+        let alias = temp.join("alias.rs");
+        fs::write(&target, unformatted()).expect("Rust file should be written");
+        fs::hard_link(&target, &alias).expect("hard link should be created");
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o4755))
+            .expect("permissions should be set");
+        let original_inode = fs::metadata(&target).unwrap().ino();
+        let original_mode = fs::metadata(&target).unwrap().mode();
+
+        let outcome = format_files(std::slice::from_ref(&target), false);
+
+        assert!(outcome.changed.is_empty());
+        assert_eq!(outcome.errors.len(), 1);
+        assert!(outcome.errors[0].contains("multiple hard links"));
+        assert_eq!(
+            fs::read_to_string(&target).unwrap(),
+            fs::read_to_string(&alias).unwrap()
+        );
+        assert_eq!(fs::read_to_string(&target).unwrap(), unformatted());
+        assert_eq!(fs::metadata(&target).unwrap().ino(), original_inode);
+        assert_eq!(fs::metadata(&alias).unwrap().ino(), original_inode);
+        assert_eq!(fs::metadata(&target).unwrap().nlink(), 2);
+        assert_eq!(fs::metadata(&target).unwrap().mode(), original_mode);
+    }
+
+    #[test]
+    fn check_mode_lists_changes_without_writing() {
+        let temp = TempDir::new();
+        let path = temp.join("input.rs");
+        fs::write(&path, unformatted()).expect("source should be written");
+
+        let outcome = format_files(std::slice::from_ref(&path), true);
+
+        assert!(outcome.errors.is_empty());
+        assert_eq!(outcome.changed, vec![path.clone()]);
+        assert_eq!(
+            fs::read_to_string(path).expect("source should be read"),
+            unformatted()
+        );
+    }
+
+    #[test]
+    fn fix_mode_writes_complete_formatted_files() {
+        let temp = TempDir::new();
+        let path = temp.join("input.rs");
+        fs::write(&path, unformatted()).expect("source should be written");
+
+        let first = format_files(std::slice::from_ref(&path), false);
+        let second = format_files(std::slice::from_ref(&path), false);
+
+        assert!(first.errors.is_empty());
+        assert_eq!(first.changed, vec![path]);
+        assert!(second.errors.is_empty());
+        assert!(second.changed.is_empty());
+    }
+
+    #[test]
+    fn later_files_are_processed_after_a_formatting_error() {
+        let temp = TempDir::new();
+        let invalid = temp.join("a-invalid.rs");
+        let valid = temp.join("b-valid.rs");
+        fs::write(&invalid, "fn invalid(\n").expect("invalid source should be written");
+        fs::write(&valid, unformatted()).expect("valid source should be written");
+
+        let outcome = format_files(&[invalid, valid.clone()], false);
+
+        assert_eq!(outcome.errors.len(), 1);
+        assert!(outcome.errors[0].contains("a-invalid.rs"));
+        assert_eq!(outcome.changed, vec![valid.clone()]);
+        assert_ne!(
+            fs::read_to_string(valid).expect("source should be read"),
+            unformatted()
+        );
+    }
+}

@@ -13,9 +13,11 @@ members = [
     "cryptography",
     "cryptography/curve25519",
     "deployer",
+    "fmt",
     "formatting",
     "glue",
     "macros",
+    "macros/grammar",
     "macros/impl",
     "math",
     "p2p",
@@ -131,6 +133,7 @@ commonware-formatting = { version = "2026.7.0", path = "formatting", default-fea
 commonware-glue = { version = "2026.7.0", path = "glue" }
 commonware-invariants = { version = "2026.7.0", path = "invariants" }
 commonware-macros = { version = "2026.7.0", path = "macros", default-features = false }
+commonware-macros-grammar = { version = "2026.7.0", path = "macros/grammar" }
 commonware-macros-impl = { version = "2026.7.0", path = "macros/impl" }
 commonware-math = { version = "2026.7.0", path = "math", default-features = false }
 commonware-p2p = { version = "2026.7.0", path = "p2p" }
@@ -203,6 +206,7 @@ shlex = "2.0.1"
 subtle = { version = "2.6.1", default-features = false }
 syn = "2.0.119"
 sysinfo = "0.39.6"
+tempfile = "3.27.0"
 thiserror = { version = "2.0.18", default-features = false }
 tokio = "1.52.3"
 toml = "1.1.3"
