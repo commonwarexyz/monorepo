@@ -2563,7 +2563,12 @@ mod tests {
                 DurableEffect::Broadcast(artifact)
             }
             1 => {
-                let header = conformance_header(seed, ChainId::new(0));
+                // Only a chain's producer aggregates and broadcasts that chain's DA certificates.
+                let chain = profile
+                    .protocol()
+                    .producer_chain(signer)
+                    .expect("the DA certificate lane publishes as a producer");
+                let header = conformance_header(seed, chain);
                 let artifact = Arc::new(Artifact::DaCertificate(DaCertificate::new(
                     header,
                     ThresholdCertificate::new(generated::<V::Signature>(seed)),
@@ -2652,11 +2657,12 @@ mod tests {
         V::Signature: for<'a> Arbitrary<'a>,
     {
         let lane = seed % 7;
+        // Every publication lane binds its author. Only the transaction-block and nullification
+        // lanes carry an artifact an observer may broadcast; the timeout, proposal, DA-certificate,
+        // and DA-vote lanes each demand the validator identity that authorizes them.
         let role = if seed % 16 == 1 || lane == 4 {
             Role::Validator(Participant::new(1))
-        } else if lane >= 3 {
-            Role::Validator(Participant::new(0))
-        } else if seed.is_multiple_of(4) {
+        } else if matches!(lane, 0 | 2) && seed.is_multiple_of(4) {
             Role::Observer
         } else {
             Role::Validator(Participant::new(0))
