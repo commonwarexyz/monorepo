@@ -382,8 +382,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
             return None;
         }
 
-        let pinned_positions: Vec<_> = F::nodes_to_pin(start_loc).collect();
-        if pinned_positions.len() != pinned_nodes.len() {
+        if F::nodes_to_pin(start_loc).count() != pinned_nodes.len() {
             return None;
         }
 
@@ -396,8 +395,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
         )
         .ok()?;
 
-        let mut pinned_map: BTreeMap<Position<F>, D> = pinned_positions
-            .into_iter()
+        let mut pinned_map: BTreeMap<Position<F>, D> = F::nodes_to_pin(start_loc)
             .zip(pinned_nodes.iter().copied())
             .collect();
 

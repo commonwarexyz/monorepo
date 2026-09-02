@@ -153,9 +153,16 @@ impl<F: Family, D: Digest> Mem<F, D> {
     ) -> Result<D, Error<F>> {
         let size = self.size();
         let leaves = Location::try_from(size).expect("invalid merkle size");
-        let peaks: Vec<&D> = F::peaks(size)
-            .map(|(p, _)| self.get_node_unchecked(p))
-            .collect();
+        // A u64 leaf count has at most 64 peaks, so a fixed buffer avoids a heap allocation.
+        let mut peaks = [Position::<F>::default(); 64];
+        let mut count = 0;
+        for (pos, _) in F::peaks(size) {
+            peaks[count] = pos;
+            count += 1;
+        }
+        let peaks = peaks[..count]
+            .iter()
+            .map(|&pos| self.get_node_unchecked(pos));
         hasher.root(leaves, inactive_peaks, peaks)
     }
 

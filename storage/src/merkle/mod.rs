@@ -26,7 +26,6 @@ pub mod storage;
 #[cfg(feature = "std")]
 pub mod verification;
 
-use alloc::vec::Vec;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Read, Write};
 use commonware_cryptography::Digest;
@@ -133,8 +132,6 @@ pub trait Family: Copy + Clone + Debug + Default + Send + Sync + 'static {
         Self::peaks(prune_pos)
             .filter(move |&(pos, _)| pos < prune_pos)
             .map(|(pos, _)| pos)
-            .collect::<Vec<_>>()
-            .into_iter()
     }
 
     /// Return the positions of the left and right children of the node at `pos` with the
