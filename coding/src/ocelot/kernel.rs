@@ -6,9 +6,34 @@
 //! having a kernel for the exact field you need, but should not cost too much,
 //! in exchange for having code reuse between the two field sizes.
 
-pub trait Kernel: Copy {
+pub mod portable;
+
+/// A computation which can run over an arbitrary [`Kernel`].
+///
+/// [`with_kernel`] hands its caller a kernel whose concrete type is only known
+/// at runtime, so the computation must be generic over kernels. Plain closures
+/// can't have generic call methods, so we use a trait instead: implement it on
+/// a struct capturing the computation's inputs, and return its results from
+/// [`Self::call`].
+pub trait WithKernel {
+    /// The result of the computation.
+    type Output;
+
+    /// Run the computation with a concrete kernel.
+    fn call<K: Kernel>(self, kernel: K) -> Self::Output;
+}
+
+/// Run a computation with the best [`Kernel`] this CPU supports.
+///
+/// This is the only way to gain access to a kernel, so that accelerated
+/// kernels are only constructed where their instructions are available.
+pub fn with_kernel<F: WithKernel>(f: F) -> F::Output {
+    f.call(portable::Portable)
+}
+
+pub trait Kernel: Copy + Default + Send + Sync + 'static {
     /// The type we use to hold several bytes.
-    type Vector: Copy;
+    type Vector: Copy + Send + Sync;
 
     /// The number of bytes in each [`Self::Vector`].
     ///
@@ -24,6 +49,20 @@ pub trait Kernel: Copy {
 
     /// Take a single value, and prepare it as a constant in each lane.
     fn splat(self, x: u8) -> Self::Constant;
+
+    /// Load a vector from exactly [`Self::LANES`] bytes.
+    ///
+    /// # Panics
+    ///
+    /// If `bytes.len() != Self::LANES`.
+    fn load(self, bytes: &[u8]) -> Self::Vector;
+
+    /// Store a vector into exactly [`Self::LANES`] bytes.
+    ///
+    /// # Panics
+    ///
+    /// If `out.len() != Self::LANES`.
+    fn store(self, a: Self::Vector, out: &mut [u8]);
 
     /// Compute the xor operation a ^ b, in each lane.
     ///
