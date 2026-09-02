@@ -1,6 +1,7 @@
 use criterion::criterion_main;
 
 mod aggregate;
+mod assemble;
 mod common;
 mod engine;
 mod journal;
@@ -14,6 +15,7 @@ criterion_main!(
     shares::benches,
     recover::benches,
     aggregate::benches,
+    assemble::benches,
     machine::benches,
     journal::benches,
     engine::benches,
