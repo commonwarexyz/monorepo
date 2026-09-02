@@ -50,7 +50,6 @@ enum RegularSignPass<V: Variant, D: Digest> {
         next_chain: usize,
         current: Option<ChainProposalPass<V, D>>,
         proposals: Vec<crate::multimmit::types::ChainProposal<V, D>>,
-        frontier: u64,
     },
 }
 
@@ -576,13 +575,6 @@ pub(crate) struct ViewState<V: Variant, D: Digest> {
     ready_certificate_views: BTreeSet<View>,
     certificate_scan: Option<CertificateScan<V, D>>,
     regular_sign_pass: Option<RegularSignPass<V, D>>,
-    /// Cumulative own-proposal payload entries referenced before local DA endorsement,
-    /// counted when the signed leader-block request is assembled.
-    ///
-    /// A request dropped because its durable effect does not fit still counts, and the pass
-    /// rebuilds next cycle, so sustained outbox saturation inflates this value; read spikes
-    /// against outbox pressure.
-    frontier_payloads: u64,
     /// Cumulative verified headers admitted while this node's sealed proposal view was still
     /// current: the direct count of proposal-quantization misses at this leader's own slots.
     headers_after_seal: u64,
@@ -761,7 +753,6 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
             ready_certificate_views: BTreeSet::new(),
             certificate_scan: None,
             regular_sign_pass: None,
-            frontier_payloads: 0,
             headers_after_seal: 0,
             header_restarts: 0,
             pass_restarts: (View::zero(), 0),
@@ -1294,7 +1285,6 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
                     next_chain,
                     current,
                     proposals,
-                    frontier,
                 } => {
                     if current.is_none() {
                         if let Some(tip) = parent.tips.blocks().get(*next_chain).copied() {
@@ -1315,7 +1305,7 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
                         }
                     } else {
                         match chain
-                            .resume_proposal_pass::<H>(
+                            .resume_proposal_pass(
                                 current
                                     .as_mut()
                                     .expect("the current proposal pass was checked above"),
@@ -1325,10 +1315,6 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
                             ChainProposalProgress::Pending => None,
                             ChainProposalProgress::Complete(proposal) => {
                                 proposals.push(proposal);
-                                *frontier += current
-                                    .as_ref()
-                                    .expect("the current proposal pass was checked above")
-                                    .frontier_payloads();
                                 *next_chain += 1;
                                 *current = None;
                                 None
@@ -1339,13 +1325,6 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
             };
             if let Some(request) = progress {
                 if matches!(request, SignRequest::LeaderBlock(_)) {
-                    // The count commits only when the signed request is assembled, so passes
-                    // abandoned by view changes or interleaved DA-vote work contribute nothing.
-                    if let Some(RegularSignPass::Proposal { frontier, .. }) =
-                        self.regular_sign_pass.as_ref()
-                    {
-                        self.frontier_payloads = self.frontier_payloads.saturating_add(*frontier);
-                    }
                     self.regular_sign_pass = None;
                 }
                 return Ok(RegularSignDrive {
@@ -1361,12 +1340,6 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
             complete: false,
             request: None,
         })
-    }
-
-    /// Returns the cumulative count of own-proposal payload entries referenced before local
-    /// DA endorsement.
-    pub(crate) const fn frontier_payloads(&self) -> u64 {
-        self.frontier_payloads
     }
 
     /// Returns the cumulative count of verified headers admitted while the local sealed
@@ -1485,7 +1458,6 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
             next_chain: 0,
             current: None,
             proposals: Vec::with_capacity(self.config.chains()),
-            frontier: 0,
         }))
     }
 

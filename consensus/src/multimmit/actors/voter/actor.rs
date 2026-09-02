@@ -2323,10 +2323,6 @@ where
             .count();
         let _ = self
             .metrics
-            .frontier_payloads
-            .try_set(self.machine.frontier_payloads());
-        let _ = self
-            .metrics
             .headers_after_seal
             .try_set(self.machine.headers_after_seal());
         let _ = self

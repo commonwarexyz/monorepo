@@ -211,8 +211,6 @@ pub enum ProposalPolicyArg {
     Certified,
     /// Propose the prefix the leader has DA-voted itself.
     Endorsed,
-    /// Propose producer-attested headers beyond the leader's DA frontier.
-    Frontier,
 }
 
 impl fmt::Display for ProposalPolicyArg {
@@ -229,7 +227,6 @@ impl From<ProposalPolicyArg> for ProposalPolicy {
         match value {
             ProposalPolicyArg::Certified => Self::Certified,
             ProposalPolicyArg::Endorsed => Self::Endorsed,
-            ProposalPolicyArg::Frontier => Self::Frontier,
         }
     }
 }
@@ -507,8 +504,8 @@ mod tests {
             ProposalPolicyArg::Certified
         );
         assert_eq!(
-            parse(&["deploy", "--proposal-policy", "frontier"]).proposal_policy,
-            ProposalPolicyArg::Frontier
+            parse(&["deploy", "--proposal-policy", "endorsed"]).proposal_policy,
+            ProposalPolicyArg::Endorsed
         );
         assert_eq!(
             serde_yaml::from_str::<ProposalPolicyArg>("endorsed").unwrap(),

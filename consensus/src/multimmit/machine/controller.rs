@@ -1004,12 +1004,6 @@ impl<H: Hasher, V: Variant> CoreState<H, V> {
         self.machine.chain_progress()
     }
 
-    /// Returns the cumulative count of own-proposal payload entries referenced before local
-    /// DA endorsement.
-    pub(crate) const fn frontier_payloads(&self) -> u64 {
-        self.machine.frontier_payloads()
-    }
-
     /// Returns the cumulative count of verified headers admitted while the local sealed
     /// proposal's view was still current.
     pub(crate) const fn headers_after_seal(&self) -> u64 {

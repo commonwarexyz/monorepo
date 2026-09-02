@@ -77,13 +77,6 @@ pub enum ProposalPolicy {
     /// finalized position reaches the proposed tip. This pays off when bodies reach every
     /// voter well before the view's vote event.
     Endorsed,
-    /// Propose producer-attested headers beyond the local DA frontier.
-    ///
-    /// Proposals then advance at header speed instead of body-ingest speed, at the cost of
-    /// deviating every voter that lacks the body. Referencing a header certifies nothing, so an
-    /// entry whose payload never circulates costs slots on the referenced producer's own chain
-    /// and nothing elsewhere.
-    Frontier,
 }
 
 /// The knobs an operator actually chooses for one deployment.

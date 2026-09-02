@@ -1154,10 +1154,6 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         self.project_chain_progress(&finality)
     }
 
-    pub(crate) const fn frontier_payloads(&self) -> u64 {
-        self.views.frontier_payloads()
-    }
-
     pub(crate) const fn headers_after_seal(&self) -> u64 {
         self.views.headers_after_seal()
     }

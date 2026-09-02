@@ -131,8 +131,6 @@ pub(super) struct Metrics {
     pub chain_known_floor: Gauge,
     /// Producer chains finalized below the highest finalized chain; the fan-out of a stall.
     pub lagging_chains: Gauge,
-    /// Own-proposal payload entries referenced before local DA endorsement.
-    pub frontier_payloads: Gauge,
     /// Headers admitted while this node's sealed proposal view was current; late-arrival pressure.
     pub headers_after_seal: Gauge,
     /// Proposal-pass restarts caused by those late header admissions; wasted proposal work.
@@ -310,10 +308,6 @@ impl Metrics {
         let lagging_chains = context.gauge(
             "lagging_chains",
             "producer chains finalized below the highest finalized chain",
-        );
-        let frontier_payloads = context.gauge(
-            "frontier_payloads",
-            "own-proposal payload entries referenced before local DA endorsement",
         );
         let headers_after_seal = context.gauge(
             "headers_after_seal",
@@ -496,7 +490,6 @@ impl Metrics {
             chain_da_voted_floor,
             chain_known_floor,
             lagging_chains,
-            frontier_payloads,
             headers_after_seal,
             header_restarts,
             view_timeouts,
