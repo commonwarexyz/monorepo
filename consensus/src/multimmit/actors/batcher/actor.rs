@@ -15,11 +15,11 @@ use crate::{
         scheme::bls12381_threshold::Scheme,
         types::CertificateId,
     },
-    types::Round,
+    types::{Round, View},
 };
 use commonware_actor::{Feedback, Unreliable, mailbox};
 use commonware_codec::{Codec, EncodeSize as _, Write as _};
-use commonware_cryptography::{Hasher, PublicKey, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher, PublicKey, bls12381::primitives::variant::Variant};
 use commonware_macros::{select, select_loop};
 use commonware_p2p::{Blocker, Receiver};
 use commonware_parallel::Strategy;
@@ -30,12 +30,16 @@ use commonware_runtime::{
         traces::TracedExt as _,
     },
 };
-use commonware_utils::{SystemTimeExt as _, futures::Pool};
+use commonware_utils::{SystemTimeExt as _, futures::Pool, sync::Mutex};
 use futures::FutureExt as _;
 use rand_core::CryptoRng;
 use std::{
-    collections::BTreeSet, future::pending, marker::PhantomData, panic::AssertUnwindSafe,
-    sync::Arc, time::SystemTime,
+    collections::{BTreeMap, BTreeSet},
+    future::pending,
+    marker::PhantomData,
+    panic::AssertUnwindSafe,
+    sync::Arc,
+    time::SystemTime,
 };
 use tracing::{Instrument as _, Span, debug, debug_span, error, info_span};
 
@@ -214,6 +218,50 @@ impl<P: PublicKey, V: Variant, D: commonware_cryptography::Digest> NetworkMessag
     }
 }
 
+/// Votes and novotes this batcher verified, by view, for certificate transcript discharge.
+///
+/// The machine attaches the votes it has already accepted when it admits a certificate, but at
+/// scale the view's votes are usually still in this batcher's queue at that moment. Jobs consult
+/// this cache as they start, when the same batcher has typically just verified those votes.
+struct VerifiedVotes<V: Variant, D: Digest> {
+    views: BTreeMap<View, Vec<Arc<Artifact<V, D>>>>,
+    per_view: usize,
+}
+
+impl<V: Variant, D: Digest> VerifiedVotes<V, D> {
+    /// Views kept behind the newest verified vote.
+    const RETAINED_VIEWS: u64 = 16;
+
+    const fn new(participants: usize) -> Self {
+        Self {
+            views: BTreeMap::new(),
+            // One vote and one novote per participant bound a view's distinct messages.
+            per_view: participants.saturating_mul(2),
+        }
+    }
+
+    fn record(&mut self, artifact: &Arc<Artifact<V, D>>) {
+        let Some(view) = artifact.view() else {
+            return;
+        };
+        let messages = self.views.entry(view).or_default();
+        if messages.len() < self.per_view {
+            messages.push(Arc::clone(artifact));
+        }
+        while let Some((&first, _)) = self.views.first_key_value() {
+            if first.get().saturating_add(Self::RETAINED_VIEWS) < view.get() {
+                self.views.pop_first();
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn known(&self, view: View) -> Vec<Arc<Artifact<V, D>>> {
+        self.views.get(&view).cloned().unwrap_or_default()
+    }
+}
+
 /// Bounded ingress and verification executor for one fixed epoch.
 pub struct Actor<E, H, P, V, B, T>
 where
@@ -227,6 +275,7 @@ where
     context: ContextCell<E>,
 
     scheme: Arc<Scheme<P, V>>,
+    verified_votes: Arc<Mutex<VerifiedVotes<V, H::Digest>>>,
     blocker: B,
     strategy: T,
     codec: CodecConfig,
@@ -259,6 +308,9 @@ where
         (
             Self {
                 context: ContextCell::new(context),
+                verified_votes: Arc::new(Mutex::new(VerifiedVotes::new(
+                    config.scheme.participants().as_ref().len(),
+                ))),
                 scheme: Arc::new(config.scheme),
                 blocker: config.blocker,
                 strategy: config.strategy,
@@ -359,23 +411,14 @@ where
                             return;
                         }
                         self.metrics.batch_size.observe(job.items().len() as f64);
-                        for item in job.items() {
-                            let signers = match item.artifact() {
-                                Artifact::Vqc(certificate) => certificate.tally().signers().count(),
-                                Artifact::Lqc(certificate) => certificate.tally().signers().count(),
-                                _ => continue,
-                            };
-                            self.metrics
-                                .certificate_transcript_messages
-                                .observe(signers as f64);
-                            self.metrics
-                                .certificate_known_messages
-                                .observe(item.known().len() as f64);
-                        }
                         let scheme = Arc::clone(&self.scheme);
                         let strategy = self.strategy.clone();
                         let latency = self.metrics.verify_latency.clone();
                         let latest_verified_vote = self.metrics.latest_verified_vote.clone();
+                        let verified_votes = Arc::clone(&self.verified_votes);
+                        let transcript_messages =
+                            self.metrics.certificate_transcript_messages.clone();
+                        let known_messages = self.metrics.certificate_known_messages.clone();
                         let worker = info_span!(
                             parent: &span,
                             "multimmit.batcher.verify",
@@ -387,8 +430,41 @@ where
                         let context = self.context.child("verify");
                         let operation = move |mut context: E, strategy: T| {
                             let timer = latency.timer(&context);
+                            let mut job = job;
+                            {
+                                let cache = verified_votes.lock();
+                                job.extend_known(|view| cache.known(view));
+                            }
+                            for item in job.items() {
+                                let signers = match item.artifact() {
+                                    Artifact::Vqc(certificate) => {
+                                        certificate.tally().signers().count()
+                                    }
+                                    Artifact::Lqc(certificate) => {
+                                        certificate.tally().signers().count()
+                                    }
+                                    _ => continue,
+                                };
+                                transcript_messages.observe(signers as f64);
+                                known_messages.observe(item.known().len() as f64);
+                            }
                             let completion =
                                 job.verify::<_, P, H>(&mut context, &scheme, &strategy);
+                            {
+                                let mut cache = verified_votes.lock();
+                                for (item, verdict) in
+                                    job.items().iter().zip(completion.verdicts())
+                                {
+                                    if verdict.valid()
+                                        && matches!(
+                                            item.artifact(),
+                                            Artifact::Vote(_) | Artifact::NoVote(_)
+                                        )
+                                    {
+                                        cache.record(item.shared_artifact());
+                                    }
+                                }
+                            }
                             Self::record_verified_votes(
                                 &job,
                                 &completion,
@@ -835,6 +911,33 @@ mod tests {
     use commonware_runtime::{Runner as _, Supervisor as _, tokio};
     use commonware_utils::sync::{Condvar, Mutex};
     use std::{num::NonZeroUsize, sync::Arc, thread};
+
+    #[test]
+    fn verified_votes_retain_a_bounded_window_per_view() {
+        use crate::multimmit::{config::Limits, mocks::Committee};
+        use commonware_cryptography::{bls12381::primitives::variant::MinPk, sha256::Digest};
+        let committee = Committee::<MinPk>::new(7, 6, Limits::new(2, 1).unwrap());
+        let vote = |view: u64, signer: usize| {
+            Arc::new(Artifact::<MinPk, Digest>::Vote(
+                committee.vote(signer, &committee.leader_block(view)),
+            ))
+        };
+        let mut cache = VerifiedVotes::<MinPk, Digest>::new(2);
+
+        // Distinct votes accumulate up to the per-view bound of one vote and one novote each.
+        for signer in 0..5 {
+            cache.record(&vote(5, signer));
+        }
+        assert_eq!(cache.known(View::new(5)).len(), 4);
+        assert!(cache.known(View::new(6)).is_empty());
+
+        // A vote sixteen views ahead keeps view 5; one more evicts it.
+        cache.record(&vote(21, 0));
+        assert_eq!(cache.known(View::new(5)).len(), 4);
+        cache.record(&vote(22, 0));
+        assert!(cache.known(View::new(5)).is_empty());
+        assert_eq!(cache.known(View::new(21)).len(), 1);
+    }
 
     #[derive(Default)]
     struct ServiceState {
