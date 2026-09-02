@@ -9622,7 +9622,7 @@ fn saturated_validation_chain_does_not_block_another_producer() {
     let active = active.clone();
     assert_eq!(
         machine.chain.validation_usage(),
-        (1, first_bytes, &[1, 0][..], &[first_bytes, 0][..])
+        (1, first_bytes, vec![1, 0], vec![first_bytes, 0])
     );
 
     let second_artifact = make(&machine, 0, b"validation chain zero two");
@@ -9635,7 +9635,7 @@ fn saturated_validation_chain_does_not_block_another_producer() {
     );
     assert_eq!(
         machine.chain.validation_usage(),
-        (1, first_bytes, &[1, 0][..], &[first_bytes, 0][..])
+        (1, first_bytes, vec![1, 0], vec![first_bytes, 0])
     );
 
     let other_artifact = make(&machine, 1, b"validation chain one");
@@ -9652,8 +9652,8 @@ fn saturated_validation_chain_does_not_block_another_producer() {
         (
             2,
             first_bytes + other_bytes,
-            &[1, 1][..],
-            &[first_bytes, other_bytes][..],
+            vec![1, 1],
+            vec![first_bytes, other_bytes],
         )
     );
 
@@ -9675,8 +9675,8 @@ fn saturated_validation_chain_does_not_block_another_producer() {
         (
             2,
             second_bytes + other_bytes,
-            &[1, 1][..],
-            &[second_bytes, other_bytes][..],
+            vec![1, 1],
+            vec![second_bytes, other_bytes],
         )
     );
 }

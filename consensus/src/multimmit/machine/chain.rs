@@ -439,8 +439,6 @@ struct ValidationLimits {
 struct ValidationReservations {
     items: usize,
     bytes: usize,
-    chain_items: Vec<usize>,
-    chain_bytes: Vec<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -536,6 +534,32 @@ pub(crate) enum BuildOutcome {
     Prepared,
 }
 
+/// Volatile, rebuildable per-producer-chain data-availability state, indexed by [`ChainId`].
+///
+/// Every field is derived from admitted artifacts and durable anchors, so it can be dropped and
+/// rebuilt without changing normalized protocol state.
+struct PerChainDa<V: Variant, D: Digest> {
+    blocks: BTreeMap<Height, Vec<BlockRecord<V, D>>>,
+    local_da_votes: BTreeMap<Height, DaChoice<D>>,
+    /// A height through which every integer height above `data_retired_through` is already a local
+    /// DA choice.
+    ///
+    /// Eligibility scans resume above this height instead of rediscovering the voted prefix on
+    /// every pass. The value is a lower bound: an entry below the true contiguous run only costs
+    /// a longer scan, so a missed extension can never hide an eligible block.
+    da_voted_run: Height,
+    da_safe_through: Height,
+    data_retired_through: Height,
+    /// Reserved DA votes whose signing is in flight, in ascending height order.
+    ///
+    /// A chain reserves at most one run at a time; completions consume the queue front in
+    /// order, so the queue is also the expected application sequence.
+    pending_da_votes: VecDeque<TransactionBlockHeader<D>>,
+    certified: BTreeMap<Height, Certified<V, D>>,
+    validation_items: usize,
+    validation_bytes: usize,
+}
+
 /// Volatile, rebuildable chain indexes owned by the deterministic machine.
 pub(crate) struct ChainState<V: Variant, D: Digest> {
     own_chain: Option<ChainId>,
@@ -544,23 +568,8 @@ pub(crate) struct ChainState<V: Variant, D: Digest> {
     genesis: Vec<BlockRef<D>>,
     produced: Option<BlockRef<D>>,
     producer_headers: BTreeMap<Height, TransactionBlockHeader<D>>,
-    local_da_votes: Vec<BTreeMap<Height, DaChoice<D>>>,
-    /// Per chain, a height through which every integer height above `data_retired_through` is
-    /// already a local DA choice.
-    ///
-    /// Eligibility scans resume above this height instead of rediscovering the voted prefix on
-    /// every pass. The value is a lower bound: an entry below the true contiguous run only costs
-    /// a longer scan, so a missed extension can never hide an eligible block.
-    da_voted_run: Vec<Height>,
-    da_safe_through: Vec<Height>,
-    data_retired_through: Vec<Height>,
-    /// Reserved DA votes whose signing is in flight, per chain, in ascending height order.
-    ///
-    /// A chain reserves at most one run at a time; completions consume the queue front in
-    /// order, so the queue is also the expected application sequence.
-    pending_da_votes: Vec<VecDeque<TransactionBlockHeader<D>>>,
+    chains: Vec<PerChainDa<V, D>>,
     next_da_chain: usize,
-    certified: Vec<BTreeMap<Height, Certified<V, D>>>,
     vote_pools: BTreeMap<D, VotePool<V, D>>,
     ready_recoveries: BTreeSet<BlockRef<D>>,
     recovery_jobs: BTreeMap<DaRecoveryId, DaRecoveryJob<V, D>>,
@@ -568,7 +577,6 @@ pub(crate) struct ChainState<V: Variant, D: Digest> {
     certificate_candidates: BTreeMap<BlockRef<D>, Vec<CertificateCandidate<V, D>>>,
     discarded_certificates: Vec<ArtifactId<D>>,
     ancestry: BTreeMap<BlockRef<D>, BlockRef<D>>,
-    blocks: Vec<BTreeMap<Height, Vec<BlockRecord<V, D>>>>,
     validation_jobs: BTreeMap<ValidationId, ValidationRecord<D>>,
     validation_limits: ValidationLimits,
     validation_reservations: ValidationReservations,
@@ -593,25 +601,27 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             Role::Observer => None,
         };
         let produced = own_chain.and_then(|chain| genesis.get(chain.get() as usize).copied());
-        let certified = genesis
+        let chains = genesis
             .iter()
-            .map(|block| {
-                BTreeMap::from([(
+            .map(|block| PerChainDa {
+                blocks: BTreeMap::new(),
+                local_da_votes: BTreeMap::new(),
+                da_voted_run: block.height(),
+                da_safe_through: block.height(),
+                data_retired_through: block.height(),
+                pending_da_votes: VecDeque::new(),
+                certified: BTreeMap::from([(
                     block.height(),
                     Certified {
                         block: *block,
                         certificate: None,
                     },
-                )])
+                )]),
+                validation_items: 0,
+                validation_bytes: 0,
             })
             .collect();
-        let chains = genesis.len();
-        let blocks = (0..chains).map(|_| BTreeMap::new()).collect();
         let pipeline_depth = profile.protocol().codec_config().pipeline_depth() as u64;
-        let local_da_votes = (0..genesis.len()).map(|_| BTreeMap::new()).collect();
-        let da_voted_run = genesis.iter().map(BlockRef::height).collect();
-        let da_safe_through = genesis.iter().map(BlockRef::height).collect();
-        let data_retired_through = genesis.iter().map(BlockRef::height).collect();
         let resources = profile.resources();
         let validation_limits = ValidationLimits {
             items: resources.max_cached_artifacts(),
@@ -623,12 +633,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
                 .validation_parallelism()
                 .saturating_mul(resources.max_artifact_bytes()),
         };
-        let validation_reservations = ValidationReservations {
-            items: 0,
-            bytes: 0,
-            chain_items: vec![0; chains],
-            chain_bytes: vec![0; chains],
-        };
+        let validation_reservations = ValidationReservations { items: 0, bytes: 0 };
         Self {
             own_chain,
             da_quorum: profile.protocol().codec_config().da_quorum(),
@@ -636,13 +641,8 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             genesis,
             produced,
             producer_headers: BTreeMap::new(),
-            local_da_votes,
-            da_voted_run,
-            da_safe_through,
-            data_retired_through,
-            pending_da_votes: vec![VecDeque::new(); chains],
+            chains,
             next_da_chain: 0,
-            certified,
             vote_pools: BTreeMap::new(),
             ready_recoveries: BTreeSet::new(),
             recovery_jobs: BTreeMap::new(),
@@ -650,7 +650,6 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             certificate_candidates: BTreeMap::new(),
             discarded_certificates: Vec::new(),
             ancestry: BTreeMap::new(),
-            blocks,
             validation_jobs: BTreeMap::new(),
             validation_limits,
             validation_reservations,
@@ -675,10 +674,10 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
     ) -> Result<(), ChainError> {
         for certificate in anchors {
             let block = certificate.block_ref::<H>();
-            let Some(chain) = self.certified.get(block.chain().get() as usize) else {
+            let Some(chain) = self.chains.get(block.chain().get() as usize) else {
                 return Err(ChainError::Context);
             };
-            if let Some((height, certified)) = chain.last_key_value() {
+            if let Some((height, certified)) = chain.certified.last_key_value() {
                 if *height > block.height() {
                     continue;
                 }
@@ -801,11 +800,11 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             {
                 return Err(ChainError::Context);
             }
-            self.da_safe_through[index] = safe[index];
-            self.data_retired_through[index] = tip.height();
-            self.da_voted_run[index] = self.da_voted_run[index].max(tip.height());
+            self.chains[index].da_safe_through = safe[index];
+            self.chains[index].data_retired_through = tip.height();
+            self.chains[index].da_voted_run = self.chains[index].da_voted_run.max(tip.height());
             if tip != applied {
-                self.certified[index].insert(
+                self.chains[index].certified.insert(
                     tip.height(),
                     Certified {
                         block: tip,
@@ -825,10 +824,11 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
     ) -> Result<(), ChainError> {
         let block = certificate.block_ref::<H>();
         let index = block.chain().get() as usize;
-        let applied = *self
-            .data_retired_through
+        let applied = self
+            .chains
             .get(index)
-            .ok_or(ChainError::Context)?;
+            .ok_or(ChainError::Context)?
+            .data_retired_through;
         if retired < applied || retired > block.height() {
             return Err(ChainError::Context);
         }
@@ -854,12 +854,12 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
                 through: retired,
             });
         }
-        self.certified[index].retain(|height, certified| {
+        self.chains[index].certified.retain(|height, certified| {
             *height == self.genesis[index].height() || *height > retired || certified.block == block
         });
 
         let mut removed = Vec::new();
-        self.blocks[index].retain(|height, records| {
+        self.chains[index].blocks.retain(|height, records| {
             if *height > retired {
                 return true;
             }
@@ -869,10 +869,12 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         for artifact in removed {
             self.processed.remove(&artifact);
         }
-        self.local_da_votes[index].retain(|height, _| *height > retired);
+        self.chains[index]
+            .local_da_votes
+            .retain(|height, _| *height > retired);
         // Retirement only drops choices at or below the new floor, so the surviving prefix stays
         // contiguous; raising the cursor to the floor keeps it a valid lower bound.
-        self.da_voted_run[index] = self.da_voted_run[index].max(retired);
+        self.chains[index].da_voted_run = self.chains[index].da_voted_run.max(retired);
         self.vote_pools.retain(|_, pool| {
             let candidate = pool.header.block_ref::<H>();
             candidate.chain() != block.chain() || candidate.height() > block.height()
@@ -894,7 +896,8 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         });
         self.ancestry
             .retain(|child, _| child.chain() != block.chain() || child.height() > retired);
-        self.pending_da_votes[block.chain().get() as usize]
+        self.chains[block.chain().get() as usize]
+            .pending_da_votes
             .retain(|header| header.height() > retired);
         if self.own_chain == Some(block.chain()) {
             self.producer_headers
@@ -906,8 +909,8 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         }
         // A durable certificate is a new base for the paper's DA-voting rule. Lower choices can no
         // longer add availability, so retiring them keeps the exact local suffix pipeline-bounded.
-        self.da_safe_through[index] = self.da_safe_through[index].max(block.height());
-        self.data_retired_through[index] = retired;
+        self.chains[index].da_safe_through = self.chains[index].da_safe_through.max(block.height());
+        self.chains[index].data_retired_through = retired;
         Ok(())
     }
 
@@ -918,13 +921,15 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             .iter()
             .enumerate()
             .map(|(index, floor)| {
-                let certified = self.certified[index]
+                let certified = self.chains[index]
+                    .certified
                     .iter()
                     .rev()
                     .find(|(_, certified)| certified.certificate.is_some())
                     .map_or(Height::zero(), |(height, _)| *height);
 
-                let locally_valid = self.blocks[index]
+                let locally_valid = self.chains[index]
+                    .blocks
                     .iter()
                     .rev()
                     .find(|(_, records)| {
@@ -933,7 +938,8 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
                             .any(|record| record.state == ValidationState::Valid)
                     })
                     .map(|(height, _)| *height);
-                let da_voted = self.local_da_votes[index]
+                let da_voted = self.chains[index]
+                    .local_da_votes
                     .last_key_value()
                     .map(|(height, _)| *height);
                 let produced = self
@@ -955,7 +961,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
                 // Retention drops DA votes at or below the retired frontier, so an empty vote map
                 // reports that frontier rather than dipping back to the genesis floor.
                 let da_voted = da_voted
-                    .unwrap_or_else(|| self.data_retired_through[index].max(floor.height()));
+                    .unwrap_or_else(|| self.chains[index].data_retired_through.max(floor.height()));
 
                 (known, certified, da_voted)
             })
@@ -965,7 +971,8 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
     pub(crate) fn producer_status<H: Hasher<Digest = D>>(&self) -> Option<ProducerStatus> {
         let chain = self.own_chain?;
         let produced = self.produced?;
-        let certified = self.certified[chain.get() as usize]
+        let certified = self.chains[chain.get() as usize]
+            .certified
             .iter()
             .rev()
             .find(|(_, certified)| certified.certificate.is_some())
@@ -1006,8 +1013,9 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
     /// Returns the data-availability certificate this node holds for `block`, if any.
     pub(crate) fn held_certificate(&self, block: BlockRef<D>) -> Option<&DaCertificate<V, D>> {
         let certified = self
-            .certified
+            .chains
             .get(block.chain().get() as usize)?
+            .certified
             .get(&block.height())?;
         (certified.block == block)
             .then_some(certified.certificate.as_ref())
@@ -1016,7 +1024,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
 
     /// Returns whether any chain holds a certificate above its durable floor.
     pub(crate) fn has_certificate_above(&self, floors: &[BlockRef<D>]) -> bool {
-        (0..self.certified.len()).any(|chain| self.certificate_above(floors, chain).is_some())
+        (0..self.chains.len()).any(|chain| self.certificate_above(floors, chain).is_some())
     }
 
     pub(crate) fn next_certificate_above(
@@ -1027,7 +1035,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         let preferred = preferred.map(|chain| chain.get() as usize);
         preferred
             .into_iter()
-            .chain(0..self.certified.len())
+            .chain(0..self.chains.len())
             .find_map(|chain| self.certificate_above(floors, chain))
             .cloned()
     }
@@ -1038,7 +1046,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         floors: &[BlockRef<D>],
         chain: usize,
     ) -> Option<&DaCertificate<V, D>> {
-        let certificates = self.certified.get(chain)?;
+        let certificates = &self.chains.get(chain)?.certified;
         let floor = floors.get(chain)?;
         certificates
             .range((Bound::Excluded(floor.height()), Bound::Unbounded))
@@ -1079,10 +1087,11 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
                     ValidationState::Ready
                 };
                 let chain = block.header().chain();
-                let records = self
-                    .blocks
+                let records = &mut self
+                    .chains
                     .get_mut(chain.get() as usize)
-                    .ok_or(ChainError::Context)?;
+                    .ok_or(ChainError::Context)?
+                    .blocks;
                 let block = Arc::new(block.clone());
                 let records = records.entry(block.header().height()).or_default();
                 if let Some(record) = records.iter_mut().find(|record| record.artifact == id) {
@@ -1132,9 +1141,10 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         block: &SignedTransactionBlock<V, D>,
     ) -> Result<(), ChainError> {
         let records = self
-            .blocks
+            .chains
             .get_mut(block.header().chain().get() as usize)
             .ok_or(ChainError::Context)?
+            .blocks
             .entry(block.header().height())
             .or_default();
         if records.iter().any(|record| record.artifact == id) {
@@ -1161,10 +1171,10 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         certificate: &DaCertificate<V, D>,
     ) -> Result<bool, ChainError> {
         let block = certificate.block_ref::<H>();
-        if block.chain().get() as usize >= self.certified.len() {
+        if block.chain().get() as usize >= self.chains.len() {
             return Err(ChainError::Context);
         }
-        let certified = &self.certified[block.chain().get() as usize];
+        let certified = &self.chains[block.chain().get() as usize].certified;
         if certified
             .last_key_value()
             .is_some_and(|(height, _)| *height > block.height())
@@ -1195,10 +1205,11 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
     ) -> Result<(), ChainError> {
         match artifact {
             Artifact::TransactionBlock(block) => {
-                let blocks = self
-                    .blocks
+                let blocks = &mut self
+                    .chains
                     .get_mut(block.header().chain().get() as usize)
-                    .ok_or(ChainError::Context)?;
+                    .ok_or(ChainError::Context)?
+                    .blocks;
                 let records = blocks
                     .get_mut(&block.header().height())
                     .ok_or(ChainError::Context)?;
@@ -1258,7 +1269,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         certificate: &DaCertificate<V, D>,
     ) -> Result<(), ChainError> {
         let block = certificate.block_ref::<H>();
-        let certified = &self.certified[block.chain().get() as usize];
+        let certified = &self.chains[block.chain().get() as usize].certified;
         if certified
             .last_key_value()
             .is_some_and(|(height, _)| *height > block.height())
@@ -1325,10 +1336,11 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         block: BlockRef<D>,
         certificate: DaCertificate<V, D>,
     ) -> Result<(), ChainError> {
-        let chain = self
-            .certified
+        let chain = &mut self
+            .chains
             .get_mut(block.chain().get() as usize)
-            .ok_or(ChainError::Context)?;
+            .ok_or(ChainError::Context)?
+            .certified;
         match chain.entry(block.height()) {
             std::collections::btree_map::Entry::Occupied(existing)
                 if existing.get().block != block =>
@@ -1505,7 +1517,11 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             return Ok(BlockValidationOutcome::Stale);
         };
         self.release_validation(job)?;
-        let Some(blocks) = self.blocks.get_mut(job.chain.get() as usize) else {
+        let Some(blocks) = self
+            .chains
+            .get_mut(job.chain.get() as usize)
+            .map(|chain| &mut chain.blocks)
+        else {
             return Err(ChainError::Context);
         };
         let Some(records) = blocks.get_mut(&job.height) else {
@@ -1534,9 +1550,9 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             return Ok(BlockValidationOutcome::Invalid(job.artifact));
         }
         let record = self
-            .blocks
+            .chains
             .get_mut(job.chain.get() as usize)
-            .and_then(|blocks| blocks.get_mut(&job.height))
+            .and_then(|chain| chain.blocks.get_mut(&job.height))
             .and_then(|records| {
                 records
                     .iter_mut()
@@ -1556,10 +1572,11 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         job: ValidationRecord<D>,
         generation: u64,
     ) -> Result<(), ChainError> {
-        let blocks = self
-            .blocks
+        let blocks = &mut self
+            .chains
             .get_mut(job.chain.get() as usize)
-            .ok_or(ChainError::Context)?;
+            .ok_or(ChainError::Context)?
+            .blocks;
         let records = blocks.get_mut(&job.height).ok_or(ChainError::Context)?;
         let index = records
             .iter()
@@ -1590,41 +1607,45 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             }
 
             let mut scheduled = false;
-            for offset in 0..self.blocks.len() {
-                let chain_index = (self.next_validation_chain + offset) % self.blocks.len();
+            for offset in 0..self.chains.len() {
+                let chain_index = (self.next_validation_chain + offset) % self.chains.len();
                 let chain = ChainId::new(chain_index as u32);
-                if self.validation_reservations.chain_items[chain_index]
+                if self.chains[chain_index].validation_items
                     >= self.validation_limits.items_per_chain
                 {
                     continue;
                 }
 
-                let candidate = self.blocks[chain_index]
-                    .iter()
-                    .find_map(|(height, records)| {
-                        records
-                            .iter()
-                            .enumerate()
-                            .find(|(_, record)| {
-                                record.state == ValidationState::Ready
-                                    && self.validation_parent_available(
-                                        chain_index,
-                                        record.block.header(),
-                                    )
-                            })
-                            .map(|(index, record)| (*height, index, record.artifact))
-                    });
+                let candidate =
+                    self.chains[chain_index]
+                        .blocks
+                        .iter()
+                        .find_map(|(height, records)| {
+                            records
+                                .iter()
+                                .enumerate()
+                                .find(|(_, record)| {
+                                    record.state == ValidationState::Ready
+                                        && self.validation_parent_available(
+                                            chain_index,
+                                            record.block.header(),
+                                        )
+                                })
+                                .map(|(index, record)| (*height, index, record.artifact))
+                        });
                 let Some((height, record_index, artifact)) = candidate else {
                     continue;
                 };
-                let block = Arc::clone(&self.blocks[chain_index][&height][record_index].block);
+                let block =
+                    Arc::clone(&self.chains[chain_index].blocks[&height][record_index].block);
                 let block_bytes = block.encode_size();
                 if self
                     .validation_reservations
                     .bytes
                     .checked_add(block_bytes)
                     .is_none_or(|bytes| bytes > self.validation_limits.bytes)
-                    || self.validation_reservations.chain_bytes[chain_index]
+                    || self.chains[chain_index]
+                        .validation_bytes
                         .checked_add(block_bytes)
                         .is_none_or(|bytes| bytes > self.validation_limits.bytes_per_chain)
                 {
@@ -1637,9 +1658,9 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
                     .checked_add(1)
                     .ok_or(ChainError::IdentifierExhausted)?;
                 self.reserve_validation(chain_index, block_bytes)?;
-                self.blocks
+                self.chains
                     .get_mut(chain_index)
-                    .and_then(|blocks| blocks.get_mut(&height))
+                    .and_then(|chain| chain.blocks.get_mut(&height))
                     .and_then(|records| records.get_mut(record_index))
                     .expect("the selected validation block remains retained")
                     .state = ValidationState::Pending(validation);
@@ -1658,7 +1679,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
                     generation,
                     block,
                 }));
-                self.next_validation_chain = (chain_index + 1) % self.blocks.len();
+                self.next_validation_chain = (chain_index + 1) % self.chains.len();
                 scheduled = true;
                 break;
             }
@@ -1676,7 +1697,8 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         let Some(parent_height) = header.height().get().checked_sub(1).map(Height::new) else {
             return false;
         };
-        if self.certified[chain]
+        if self.chains[chain]
+            .certified
             .get(&parent_height)
             .is_some_and(|parent| parent.block.digest() == header.parent())
         {
@@ -1684,7 +1706,8 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         }
         // Every record stores the digest it was registered with, so no header is rehashed on
         // the per-poll scheduling pass.
-        self.blocks[chain]
+        self.chains[chain]
+            .blocks
             .get(&parent_height)
             .is_some_and(|records| {
                 records.iter().any(|parent| {
@@ -1707,17 +1730,19 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             .bytes
             .checked_add(bytes)
             .ok_or(ChainError::IdentifierExhausted)?;
-        let chain_items = self.validation_reservations.chain_items[chain]
+        let chain_items = self.chains[chain]
+            .validation_items
             .checked_add(1)
             .ok_or(ChainError::IdentifierExhausted)?;
-        let chain_bytes = self.validation_reservations.chain_bytes[chain]
+        let chain_bytes = self.chains[chain]
+            .validation_bytes
             .checked_add(bytes)
             .ok_or(ChainError::IdentifierExhausted)?;
 
         self.validation_reservations.items = items;
         self.validation_reservations.bytes = total_bytes;
-        self.validation_reservations.chain_items[chain] = chain_items;
-        self.validation_reservations.chain_bytes[chain] = chain_bytes;
+        self.chains[chain].validation_items = chain_items;
+        self.chains[chain].validation_bytes = chain_bytes;
         Ok(())
     }
 
@@ -1733,27 +1758,35 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             .bytes
             .checked_sub(job.bytes)
             .ok_or(ChainError::Context)?;
-        let chain_items = self.validation_reservations.chain_items[chain]
+        let chain_items = self.chains[chain]
+            .validation_items
             .checked_sub(1)
             .ok_or(ChainError::Context)?;
-        let chain_bytes = self.validation_reservations.chain_bytes[chain]
+        let chain_bytes = self.chains[chain]
+            .validation_bytes
             .checked_sub(job.bytes)
             .ok_or(ChainError::Context)?;
 
         self.validation_reservations.items = items;
         self.validation_reservations.bytes = total_bytes;
-        self.validation_reservations.chain_items[chain] = chain_items;
-        self.validation_reservations.chain_bytes[chain] = chain_bytes;
+        self.chains[chain].validation_items = chain_items;
+        self.chains[chain].validation_bytes = chain_bytes;
         Ok(())
     }
 
     #[cfg(test)]
-    pub(crate) fn validation_usage(&self) -> (usize, usize, &[usize], &[usize]) {
+    pub(crate) fn validation_usage(&self) -> (usize, usize, Vec<usize>, Vec<usize>) {
         (
             self.validation_reservations.items,
             self.validation_reservations.bytes,
-            &self.validation_reservations.chain_items,
-            &self.validation_reservations.chain_bytes,
+            self.chains
+                .iter()
+                .map(|chain| chain.validation_items)
+                .collect(),
+            self.chains
+                .iter()
+                .map(|chain| chain.validation_bytes)
+                .collect(),
         )
     }
 
@@ -1769,9 +1802,9 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         let child = header.block_ref::<H>();
         let chain = child.chain().get() as usize;
         if self
-            .data_retired_through
+            .chains
             .get(chain)
-            .is_some_and(|retired| child.height() <= *retired)
+            .is_some_and(|chain| child.height() <= chain.data_retired_through)
         {
             return Ok(true);
         }
@@ -1820,7 +1853,8 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
                 _ => {}
             }
         }
-        let mut tip = self.certified[own_chain.get() as usize]
+        let mut tip = self.chains[own_chain.get() as usize]
+            .certified
             .last_key_value()
             .map(|(_, certified)| certified.block)
             .ok_or(ChainError::Context)?;
@@ -1875,28 +1909,32 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         &mut self,
         headers: impl IntoIterator<Item = TransactionBlockHeader<D>>,
     ) -> Result<(), ChainError> {
-        for votes in &mut self.local_da_votes {
-            votes.clear();
+        for chain in &mut self.chains {
+            chain.local_da_votes.clear();
         }
         for header in headers {
             self.insert_da_choice::<H>(header)?;
         }
         // Recovered choices arrive in no particular order, so rebuild every prefix once the set
         // is complete rather than relying on insertion to close each gap in turn.
-        for chain in 0..self.da_voted_run.len() {
-            self.da_voted_run[chain] = self.data_retired_through[chain];
+        for chain in 0..self.chains.len() {
+            self.chains[chain].da_voted_run = self.chains[chain].data_retired_through;
             self.chase_da_voted_run(chain);
         }
-        for chain in 0..self.local_da_votes.len() {
-            let mut height = self.data_retired_through[chain]
+        for chain in 0..self.chains.len() {
+            let mut height = self.chains[chain]
+                .data_retired_through
                 .get()
                 .checked_add(1)
                 .ok_or(ChainError::HeightOverflow)?;
-            while height <= self.da_safe_through[chain].get() {
-                if !self.local_da_votes[chain].contains_key(&Height::new(height)) {
+            while height <= self.chains[chain].da_safe_through.get() {
+                if !self.chains[chain]
+                    .local_da_votes
+                    .contains_key(&Height::new(height))
+                {
                     return Err(ChainError::DaVoteConflict);
                 }
-                if height == self.da_safe_through[chain].get() {
+                if height == self.chains[chain].da_safe_through.get() {
                     break;
                 }
                 height = height.checked_add(1).ok_or(ChainError::HeightOverflow)?;
@@ -1911,9 +1949,9 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             .producer_headers
             .values()
             .chain(
-                self.local_da_votes
+                self.chains
                     .iter()
-                    .flat_map(BTreeMap::values)
+                    .flat_map(|chain| chain.local_da_votes.values())
                     .map(|choice| &choice.header),
             )
             .cloned()
@@ -1942,15 +1980,16 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         header: &TransactionBlockHeader<D>,
     ) -> Result<(), ChainError> {
         let chain = header.chain().get() as usize;
-        if self.pending_da_votes[chain]
+        if self.chains[chain]
+            .pending_da_votes
             .front()
             .is_some_and(|pending| pending != header)
         {
             return Err(ChainError::DaVoteConflict);
         }
         self.insert_da_choice::<H>(header.clone())?;
-        if self.pending_da_votes[chain].front() == Some(header) {
-            self.pending_da_votes[chain].pop_front();
+        if self.chains[chain].pending_da_votes.front() == Some(header) {
+            self.chains[chain].pending_da_votes.pop_front();
         }
         Ok(())
     }
@@ -1960,24 +1999,26 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         header: TransactionBlockHeader<D>,
     ) -> Result<(), ChainError> {
         let chain = header.chain().get() as usize;
-        let retired = *self
-            .data_retired_through
+        let retired = self
+            .chains
             .get(chain)
-            .ok_or(ChainError::Context)?;
+            .ok_or(ChainError::Context)?
+            .data_retired_through;
         if header.height() <= retired {
             return Ok(());
         }
-        let safe = self.da_safe_through[chain];
+        let safe = self.chains[chain].da_safe_through;
         if header.height() > safe {
             if safe.get().checked_add(1) != Some(header.height().get()) {
                 return Err(ChainError::DaVoteConflict);
             }
-            self.da_safe_through[chain] = header.height();
+            self.chains[chain].da_safe_through = header.height();
         }
-        let votes = self
-            .local_da_votes
+        let votes = &mut self
+            .chains
             .get_mut(chain)
-            .ok_or(ChainError::Context)?;
+            .ok_or(ChainError::Context)?
+            .local_da_votes;
         match votes.get(&header.height()) {
             Some(existing) if existing.header != header => Err(ChainError::DaVoteConflict),
             Some(_) => Ok(()),
@@ -1993,18 +2034,22 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
     /// Lowers every DA-choice prefix cursor to its retirement floor.
     #[cfg(test)]
     pub(crate) fn clear_da_voted_run(&mut self) {
-        for chain in 0..self.da_voted_run.len() {
-            self.da_voted_run[chain] = self.data_retired_through[chain];
+        for chain in 0..self.chains.len() {
+            self.chains[chain].da_voted_run = self.chains[chain].data_retired_through;
         }
     }
 
     /// Rebuilds every DA-choice prefix cursor from the retained choices alone.
     #[cfg(test)]
     pub(crate) fn rebuilt_da_voted_run(&self) -> Vec<Height> {
-        let mut rebuilt = self.data_retired_through.clone();
+        let mut rebuilt = self
+            .chains
+            .iter()
+            .map(|chain| chain.data_retired_through)
+            .collect::<Vec<_>>();
         for (chain, run) in rebuilt.iter_mut().enumerate() {
             while let Some(next) = run.get().checked_add(1).map(Height::new) {
-                if !self.local_da_votes[chain].contains_key(&next) {
+                if !self.chains[chain].local_da_votes.contains_key(&next) {
                     break;
                 }
                 *run = next;
@@ -2014,8 +2059,8 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
     }
 
     #[cfg(test)]
-    pub(crate) fn da_voted_run(&self) -> &[Height] {
-        &self.da_voted_run
+    pub(crate) fn da_voted_run(&self) -> Vec<Height> {
+        self.chains.iter().map(|chain| chain.da_voted_run).collect()
     }
 
     #[cfg(test)]
@@ -2025,8 +2070,9 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
 
     /// Extends a chain's contiguous DA-choice prefix over every height it now covers.
     fn chase_da_voted_run(&mut self, chain: usize) {
-        let votes = &self.local_da_votes[chain];
-        let run = &mut self.da_voted_run[chain];
+        let chain = &mut self.chains[chain];
+        let votes = &chain.local_da_votes;
+        let run = &mut chain.da_voted_run;
         let mut extended = *run;
         while let Some(next) = extended.get().checked_add(1).map(Height::new) {
             if !votes.contains_key(&next) {
@@ -2051,10 +2097,10 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         if !matches!(profile.role(), Role::Validator(_)) || limit == 0 || run_limit == 0 {
             return Ok(Vec::new());
         }
-        let mut ready = Vec::with_capacity(limit.min(self.blocks.len()));
-        for offset in 0..self.blocks.len() {
-            let index = (self.next_da_chain + offset) % self.blocks.len();
-            if !self.pending_da_votes[index].is_empty() {
+        let mut ready = Vec::with_capacity(limit.min(self.chains.len()));
+        for offset in 0..self.chains.len() {
+            let index = (self.next_da_chain + offset) % self.chains.len();
+            if !self.chains[index].pending_da_votes.is_empty() {
                 continue;
             }
             let remaining = limit - ready.len();
@@ -2088,9 +2134,9 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         if !matches!(profile.role(), Role::Validator(_)) {
             return Ok(None);
         }
-        for offset in 0..self.blocks.len() {
-            let index = (self.next_da_chain + offset) % self.blocks.len();
-            if !self.pending_da_votes[index].is_empty() {
+        for offset in 0..self.chains.len() {
+            let index = (self.next_da_chain + offset) % self.chains.len();
+            if !self.chains[index].pending_da_votes.is_empty() {
                 continue;
             }
             let Some((_, record)) = self.eligible_da_head::<H>(profile, index)? else {
@@ -2130,7 +2176,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             {
                 break;
             }
-            let Some(records) = self.blocks[chain].get(&next) else {
+            let Some(records) = self.chains[chain].blocks.get(&next) else {
                 break;
             };
             let Some(record) = records.iter().find(|record| {
@@ -2155,27 +2201,30 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         // event-maintained set. A valid block observed while the local certified floor lags the
         // cluster becomes votable the moment the floor catches up; there is no insertion event
         // whose loss could silence this chain's DA votes.
-        let (floor, _) = self.certified[chain]
+        let (floor, _) = self.chains[chain]
+            .certified
             .last_key_value()
             .ok_or(ChainError::Context)?;
-        let start = (*floor).max(self.data_retired_through[chain]);
+        let start = (*floor).max(self.chains[chain].data_retired_through);
         // Every height in `(data_retired_through, da_voted_run]` is already a local choice, so
         // resuming above the cursor skips the voted prefix without probing it height by height.
-        let scanned = start.max(self.da_voted_run[chain]);
+        let scanned = start.max(self.chains[chain].da_voted_run);
         debug_assert!(
-            (start.get()..scanned.get())
-                .all(|height| self.local_da_votes[chain].contains_key(&Height::new(height + 1))),
+            (start.get()..scanned.get()).all(|height| self.chains[chain]
+                .local_da_votes
+                .contains_key(&Height::new(height + 1))),
             "the skipped prefix is fully voted"
         );
-        for height in self.blocks[chain]
+        for height in self.chains[chain]
+            .blocks
             .range((Bound::Excluded(scanned), Bound::Unbounded))
             .map(|(height, _)| height)
         {
-            if self.local_da_votes[chain].contains_key(height) {
+            if self.chains[chain].local_da_votes.contains_key(height) {
                 continue;
             }
             let Some((certified_height, certified)) =
-                self.certified[chain].range(..height).next_back()
+                self.chains[chain].certified.range(..height).next_back()
             else {
                 return Err(ChainError::Context);
             };
@@ -2191,7 +2240,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
                 .checked_add(1)
                 .ok_or(ChainError::HeightOverflow)?;
             while next < height.get() {
-                let Some(choice) = self.local_da_votes[chain].get(&Height::new(next)) else {
+                let Some(choice) = self.chains[chain].local_da_votes.get(&Height::new(next)) else {
                     break;
                 };
                 if choice.header.parent() != parent.digest()
@@ -2206,7 +2255,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
                 continue;
             }
 
-            let Some(records) = self.blocks[chain].get(height) else {
+            let Some(records) = self.chains[chain].blocks.get(height) else {
                 continue;
             };
             let Some(record) = records
@@ -2225,8 +2274,8 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
 
     pub(crate) fn mark_da_vote_reserved(&mut self, header: TransactionBlockHeader<D>) {
         let chain = header.chain().get() as usize;
-        self.next_da_chain = (chain + 1) % self.blocks.len();
-        self.pending_da_votes[chain].push_back(header);
+        self.next_da_chain = (chain + 1) % self.chains.len();
+        self.chains[chain].pending_da_votes.push_back(header);
     }
 
     /// Prepares a recovery completion's certificate, or consumes a stale completion.
@@ -2394,7 +2443,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         tip: BlockRef<D>,
     ) -> Result<ChainProposalPass<V, D>, ChainError> {
         let chain = tip.chain().get() as usize;
-        let certificates = self.certified.get(chain).ok_or(ChainError::Context)?;
+        let certificates = &self.chains.get(chain).ok_or(ChainError::Context)?.certified;
         let certified = certificates
             .range(..)
             .rev()
@@ -2457,9 +2506,10 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             };
             let chain = pass.tip.chain().get() as usize;
             let endorsed = self
-                .local_da_votes
+                .chains
                 .get(chain)
                 .ok_or(ChainError::Context)?
+                .local_da_votes
                 .get(&height)
                 .filter(|choice| choice.header.parent() == pass.parent.digest());
             let attested = pass
@@ -2525,10 +2575,11 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         VoteBodyPass {
             leader,
             da_frontiers: self
-                .local_da_votes
+                .chains
                 .iter()
-                .map(|votes| {
-                    votes
+                .map(|chain| {
+                    chain
+                        .local_da_votes
                         .last_key_value()
                         .map_or(Height::zero(), |(height, _)| *height)
                 })
@@ -2566,10 +2617,11 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         let parent = pass
             .parent
             .get_or_insert_with(|| proposal.anchor().block_ref::<H>());
-        let votes = self
-            .local_da_votes
+        let votes = &self
+            .chains
             .get(pass.chain)
-            .ok_or(ChainError::Context)?;
+            .ok_or(ChainError::Context)?
+            .local_da_votes;
         let frontier = *pass
             .da_frontiers
             .get(pass.chain)
@@ -2663,7 +2715,11 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
 
         for (index, proposal) in leader.proposals().iter().enumerate() {
             let chain = ChainId::new(index as u32);
-            let votes = self.local_da_votes.get(index).ok_or(ChainError::Context)?;
+            let votes = &self
+                .chains
+                .get(index)
+                .ok_or(ChainError::Context)?
+                .local_da_votes;
             let mut parent = proposal.anchor().block_ref::<H>();
             let mut position = 0usize;
 
@@ -2718,9 +2774,9 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
     }
 
     fn has_valid_block(&self, header: &TransactionBlockHeader<D>) -> bool {
-        self.blocks
+        self.chains
             .get(header.chain().get() as usize)
-            .and_then(|blocks| blocks.get(&header.height()))
+            .and_then(|chain| chain.blocks.get(&header.height()))
             .is_some_and(|records| {
                 records.iter().any(|record| {
                     record.block.header() == header && record.state == ValidationState::Valid
@@ -2740,8 +2796,9 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         height: Height,
         parent: D,
     ) -> Option<&TransactionBlockHeader<D>> {
-        self.blocks
+        self.chains
             .get(chain)?
+            .blocks
             .get(&height)?
             .iter()
             .find(|record| {
@@ -2776,7 +2833,8 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         {
             return Ok(());
         }
-        let certified = self.certified[parent.chain().get() as usize]
+        let certified = self.chains[parent.chain().get() as usize]
+            .certified
             .last_key_value()
             .map(|(height, _)| *height)
             .ok_or(ChainError::Context)?;
@@ -2842,7 +2900,8 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             let Some(pool) = self.vote_pools.get(&header.digest::<H>()) else {
                 continue;
             };
-            let certified = self.certified[own_chain.get() as usize]
+            let certified = self.chains[own_chain.get() as usize]
+                .certified
                 .get(&block.height())
                 .is_some_and(|certified| certified.block == block);
             if certified {
@@ -2890,10 +2949,11 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         let ready = Some(block.chain()) == self.own_chain
             && !self.pending_recoveries.contains(&block)
             && self
-                .certified
+                .chains
                 .get(block.chain().get() as usize)
-                .is_some_and(|certified| {
-                    certified
+                .is_some_and(|chain| {
+                    chain
+                        .certified
                         .get(&block.height())
                         .is_none_or(|certificate| certificate.block != block)
                 })
