@@ -54,7 +54,7 @@ use commonware_macros::select;
 use commonware_runtime::{
     Clock, Error as RuntimeError, Handle, Metrics, Spawner, Storage,
     telemetry::metrics::{
-        Counter, Gauge, GaugeExt as _, Histogram, HistogramExt as _, MetricsExt as _,
+        Counter, Gauge, GaugeExt as _, Histogram, HistogramExt as _, MetricsExt as _, histogram,
     },
 };
 use commonware_utils::channel::{mpsc, oneshot};
@@ -789,10 +789,12 @@ impl JournalMetrics {
                 "time from safety journal append to durable acknowledgement",
                 LATENCY,
             ),
+            // A tuning signal for the urgent-tail heuristic, always well under a second, so
+            // it does not need the full consensus latency range.
             urgent_tail_latency: context.histogram(
                 "urgent_tail_latency",
                 "time from urgent tail append to its prefix sync start",
-                LATENCY,
+                histogram::Buckets::LOCAL,
             ),
             pending_barriers: context.gauge(
                 "pending_barriers",

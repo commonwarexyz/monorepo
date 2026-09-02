@@ -53,7 +53,7 @@ use std::{
     num::NonZeroUsize,
     sync::Arc,
 };
-use tracing::{Instrument as _, Span, info_span};
+use tracing::{Instrument as _, Span, debug_span, info_span};
 
 type CustodyValues<H> = Vec<Option<catalog::CustodyRef<<H as Hasher>::Digest>>>;
 
@@ -851,7 +851,7 @@ where
             };
             match command {
                 Command::Header(span, header) => {
-                    let process = info_span!(
+                    let process = debug_span!(
                         parent: &span,
                         "multimmit.marshal.synchronizer.header",
                         chain = header.chain().get(),

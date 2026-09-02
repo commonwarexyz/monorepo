@@ -1339,11 +1339,6 @@ where
     commands: mailbox::Receiver<TracedCommand<H, V, B>>,
     delivery_cursors: mailbox::Receiver<DeliveryCursorControl>,
     deferred: Option<TracedCommand<H, V, B>>,
-    /// Start of the current deferred-slot occupancy episode, if the slot held a command
-    /// that was not ready when last observed.
-    deferred_since: Option<SystemTime>,
-    /// Completion time of the last admission cut that left further admissions pending.
-    admission_durable_at: Option<SystemTime>,
     durability: Pool<DurabilityCompletion<H::Digest>>,
     metadata_reads: Pool<MetadataCompletion<E, H>>,
     metadata_steps: usize,
@@ -1448,17 +1443,8 @@ where
 
             if let Some(command) = self.deferred.take() {
                 if self.command_ready(&command.command) {
-                    if let Some(since) = self.deferred_since.take() {
-                        self.metrics
-                            .command_defer_wait
-                            .observe_between(since, self.clock.current());
-                    }
                     self.process_command(command).await?;
                     continue;
-                }
-                if self.deferred_since.is_none() {
-                    self.deferred_since = Some(self.clock.current());
-                    self.metrics.defer(command.command.kind());
                 }
                 self.deferred = Some(command);
             // The biased select below services ready internal completions before more intake.
@@ -1546,12 +1532,10 @@ where
         let Some(enqueued) = command.enqueued.take() else {
             return;
         };
-        let now = self.clock.current();
-        self.metrics.command_dwell.observe_between(enqueued, now);
         if matches!(command.command, Command::Admit(_, _, _)) {
             self.metrics
                 .admission_command_dwell
-                .observe_between(enqueued, now);
+                .observe_between(enqueued, self.clock.current());
         }
     }
 
@@ -1824,10 +1808,6 @@ where
             }) => {
                 timer.observe(&self.clock);
                 self.admission_active = false;
-                self.admission_durable_at = self
-                    .pending_admission
-                    .is_some()
-                    .then(|| self.clock.current());
                 if result.is_ok() {
                     self.materializer
                         .retain_readers(self.stores.sealed_body_readers());
@@ -1882,11 +1862,6 @@ where
             "eager"
         };
         self.metrics.cut_trigger(trigger);
-        if let Some(durable_at) = self.admission_durable_at.take() {
-            self.metrics
-                .admission_cut_restart_gap
-                .observe_between(durable_at, self.clock.current());
-        }
         self.metrics
             .admission_cut_scheduled_items
             .inc_by(u64::try_from(cut.items).unwrap_or(u64::MAX));
@@ -3541,8 +3516,6 @@ where
             commands: receiver,
             delivery_cursors: delivery_cursor_receiver,
             deferred: None,
-            deferred_since: None,
-            admission_durable_at: None,
             durability: Pool::default(),
             metadata_reads: Pool::default(),
             metadata_steps: 0,
@@ -5735,7 +5708,7 @@ mod tests {
     }
 
     #[test]
-    fn intake_instrumentation_records_dwell_defers_and_restart_gap() {
+    fn deferred_barrier_commands_hold_intake_and_admissions_record_dwell() {
         deterministic::Runner::default().start(|context| async move {
             let committee = Committee::<MinPk>::new_with_namespace_and_producers(
                 26,
@@ -5783,24 +5756,9 @@ mod tests {
             blocked.await.unwrap();
 
             let metrics = context.encode();
-            let admit_dwell = metric_total(&metrics, "admission_command_dwell_duration_count");
-            assert!(admit_dwell >= 2, "both stage commands record dwell");
             assert!(
-                metric_total(&metrics, "command_dwell_duration_count") > admit_dwell,
-                "non-admission commands record dwell"
-            );
-            assert_eq!(
-                metric_sum(&metrics, "command_defers_total", Some("kind=\"prune\"")),
-                1,
-                "the deferred barrier command is counted once"
-            );
-            assert!(
-                metric_total(&metrics, "command_defer_wait_duration_count") >= 1,
-                "the defer episode records its wait"
-            );
-            assert!(
-                metric_total(&metrics, "admission_cut_restart_gap_duration_count") >= 1,
-                "the queued second cut records its restart gap"
+                metric_total(&metrics, "admission_command_dwell_duration_count") >= 2,
+                "both stage commands record admission dwell"
             );
 
             drop(client);

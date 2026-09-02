@@ -149,8 +149,6 @@ impl<P: PublicKey, V: Variant, D: Digest> UnreliablePolicy for Observed<P, V, D>
 pub struct Completed<D: Digest> {
     /// The issuing job's tracing span.
     pub span: Span,
-    /// The round that issued the job.
-    pub round: Round,
     /// The exact per-item verdicts.
     pub completion: VerificationCompletion<D>,
 }

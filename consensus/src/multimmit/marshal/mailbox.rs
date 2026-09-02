@@ -184,6 +184,7 @@ where
     V: Variant,
     B: Codec + Digestible<Digest = H::Digest>,
 {
+    /// Returns the stable request label for the command that triggered a router drain.
     pub(super) const fn kind(&self) -> &'static str {
         match self {
             Self::Hint(_) => "hint",
@@ -333,7 +334,6 @@ where
     }
 
     /// Constructs and durably submits the complete block produced for a consensus context.
-    #[tracing::instrument(name = "multimmit.marshal.mailbox.submit", level = "info", skip_all)]
     pub async fn submit(&self, context: Context<H::Digest>, body: B) -> Result<(), Error> {
         self.put_block(TransactionBlock::<H, B>::from_context(context, body))
             .await
@@ -527,8 +527,8 @@ where
     type Activity = Activity<V, H::Digest>;
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
-        let span = tracing::info_span!("multimmit.marshal.mailbox.report");
-        let _guard = span.enter();
+        // No span here: hints are fire-and-forget, the enqueue never awaits, and `Command::new`
+        // already snapshots `Span::current()` so the router can link back to the caller.
         match self.sender.enqueue(Command::new(Request::Hint(activity))) {
             Unreliable::Outcome(feedback) => feedback,
             Unreliable::Rejected => Feedback::Backoff,

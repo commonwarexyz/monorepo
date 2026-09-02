@@ -52,116 +52,151 @@ impl ViewProofAdmission {
     ];
 }
 
-/// Stable attribution labels for the voter loop's runtime-event sources.
-pub(super) const EVENT_KINDS: [&str; 13] = [
-    "persistence",
-    "journal",
-    "checkpoint",
-    "prune",
-    "application",
-    "crypto",
-    "timer",
-    "publication",
-    "heartbeat",
-    "verification",
-    "resolution",
-    "inspection",
-    "observation",
-];
-
+/// Per-producer-chain gauges.
+///
+/// This family scales with the producer chain count, which equals the validator count, so it
+/// carries only the value that localizes a single stalled chain. Aggregate floors for the
+/// remaining chain heights live on [`Metrics`].
 #[derive(Clone)]
 pub(super) struct ChainMetrics {
+    /// Final height of one producer chain, so a stalled chain is attributable to its producer.
     pub finalized: Gauge,
-    pub certified: Gauge,
-    pub da_voted: Gauge,
-    pub known: Gauge,
 }
 
 impl ChainMetrics {
     fn new<E: MetricsTrait>(context: &E) -> Self {
         Self {
             finalized: context.gauge("finalized", "final producer height"),
-            certified: context.gauge("certified", "DA-certified producer height"),
-            da_voted: context.gauge("da_voted", "locally DA-voted producer height"),
-            known: context.gauge("known", "locally known producer height"),
         }
     }
 }
 
 #[derive(Clone)]
 pub(super) struct Metrics {
+    /// Completions the machine discarded as stale; a sustained rate means wasted verification.
     pub stale: Counter,
+    /// Fatal epoch failures. Any increment is an alarm.
     pub fatal: Counter,
+    /// Outstanding durable publications under retry; growth means the transport is not draining.
     pub publications: Gauge,
+    /// Journal events retained since the newest recovery base; sizes recovery replay work.
     pub retained_events: Gauge,
+    /// Durable batches awaiting journal acknowledgement; the fsync backlog.
     pub staged_batches: Gauge,
+    /// Artifacts pinned by durable safety state; the retention depth behind the floors.
     pub retained_artifacts: Gauge,
-    pub artifact_cache_occupancy: Gauge,
-    pub artifact_cache_capacity: Gauge,
-    pub remote_artifact_capacity: Gauge,
-    pub local_artifact_capacity: Gauge,
-    pub verification_jobs: Gauge,
-    pub verification_job_capacity: Gauge,
-    pub future_artifacts: Gauge,
+    /// Exact nullifications above the proposal anchor; the depth of consecutive failed views.
     pub nullification_suffix: Gauge,
+    /// Retained artifacts plus local reservations. The numerator of cache saturation.
+    pub artifact_cache_occupancy: Gauge,
+    /// Configured artifact cache capacity. The denominator of cache saturation.
+    pub artifact_cache_capacity: Gauge,
+    /// Artifact capacity still available to untrusted ingress; zero means peers are shut out.
+    pub remote_artifact_capacity: Gauge,
+    /// Artifact capacity still available to local work; zero wedges local protocol progress.
+    pub local_artifact_capacity: Gauge,
+    /// Verification jobs in flight. The numerator of verify-pool saturation.
+    pub verification_jobs: Gauge,
+    /// Configured verification-job capacity. The denominator of verify-pool saturation.
+    pub verification_job_capacity: Gauge,
+    /// Retained future-view artifacts; a full index starves re-anchoring view proofs.
+    pub future_artifacts: Gauge,
+    /// Current leader-chain view. Flat means the leader chain has stopped advancing.
     pub current_view: Gauge,
+    /// Retired leader-chain view floor; its distance from the current view is retention depth.
     pub retired_view: Gauge,
+    /// Durable L-QC signing floor. Flat means finality has stopped.
     pub finality_floor: Gauge,
+    /// Leader-chain proposal anchor view; lagging the current view means proposals are wedged.
     pub proposal_anchor_view: Gauge,
+    /// Blocks this node has produced. Flat on a producer means local production has stalled.
     pub produced_blocks: Gauge,
-    pub producer_vote_shares: Gauge,
+    /// Whether the local producer is blocked at its DA pipeline limit.
     pub producer_pipeline_blocked: Gauge,
-    pub producer_prepared: Gauge,
-    pub producer_recovery_active: Gauge,
+    /// Producer-block application validations executing now.
     pub active_validations_gauge: Gauge,
+    /// Application validations waiting for execution capacity; queueing precedes view timeouts.
     pub pending_validations_gauge: Gauge,
+    /// Local application build slot occupancy.
     pub build_active_gauge: Gauge,
+    /// Local producer bodies entering validated durable custody.
     pub custody_active_gauge: Gauge,
+    /// Per-chain final heights.
     pub chains: Vec<ChainMetrics>,
+    /// Lowest DA-certified height across producer chains; the certification laggard.
+    pub chain_certified_floor: Gauge,
+    /// Lowest locally DA-voted height across producer chains; the local DA laggard.
+    pub chain_da_voted_floor: Gauge,
+    /// Lowest locally known height across producer chains; the dissemination laggard.
+    pub chain_known_floor: Gauge,
+    /// Producer chains finalized below the highest finalized chain; the fan-out of a stall.
+    pub lagging_chains: Gauge,
+    /// Own-proposal payload entries referenced before local DA endorsement.
+    pub frontier_payloads: Gauge,
+    /// Headers admitted while this node's sealed proposal view was current; late-arrival pressure.
+    pub headers_after_seal: Gauge,
+    /// Proposal-pass restarts caused by those late header admissions; wasted proposal work.
+    pub header_restarts: Gauge,
+    /// Leader-chain view timeouts. The primary liveness alarm.
     pub view_timeouts: Counter,
+    /// Whether the current view timer is armed. Zero with a flat view is a halted voter.
     pub view_timer_armed: Gauge,
+    /// Whether the current view timeout selected an ordinary vote.
     pub view_timeout_cutoff_vote: Gauge,
+    /// Whether the current view timeout selected NoVote and Nullify.
     pub view_timeout_cutoff_timeout: Gauge,
+    /// Self-certifying view proofs classified before verification; rejections are the wedge alarm.
     pub view_proof_admissions: CounterFamily<ViewProofAdmission>,
+    /// Local producer deadlines reached without a build.
     pub production_stalls: Counter,
+    /// Application blocks produced.
     pub builds: Counter,
+    /// Application builds declined.
     pub build_declines: Counter,
+    /// Application blocks rejected as invalid; a sustained rate means a misbehaving producer.
     pub invalid_blocks: Counter,
     /// Block validations the application ended without a verdict; each is scheduled again.
     pub unavailable_validations: Counter,
+    /// Nullification certificates durably selected for forwarding.
     pub forwarded_nullifications: Counter,
+    /// Transaction-block relay broadcasts requested by durable publications.
     pub relay_attempts: Counter,
+    /// Relay broadcasts rejected by a closed application endpoint; any increment is a defect.
     pub relay_closed: Counter,
+    /// Protocol messages accepted by the network, by plane.
     pub transmissions: CounterFamily<Traffic>,
+    /// Protocol bytes accepted by the network, by plane. Egress budget.
     pub transmitted_bytes: CounterFamily<Traffic>,
+    /// Protocol bytes resent by publication retries, by plane. Retry waste.
     pub retransmitted_bytes: CounterFamily<Traffic>,
+    /// Network observation to DA-vote signing. The data-availability arc.
     pub da_vote_latency: Histogram,
+    /// CPU latency of DA certificate recovery. The dominant BLS cost at scale.
     pub da_recovery_latency: Histogram,
+    /// CPU latency of nullification certificate recovery.
     pub nullification_recovery_latency: Histogram,
+    /// Leader-chain round latency. The consensus service objective.
     pub round_latency: Histogram,
+    /// Leader-observed V-QC formation latency.
     pub vqc_latency: Histogram,
+    /// Leader-observed L-QC formation latency.
     pub lqc_latency: Histogram,
+    /// Application build latency; separates application cost from consensus cost.
     pub build_latency: Histogram,
-    pub custody_latency: Histogram,
+    /// Application validation latency; separates application cost from consensus cost.
     pub validation_latency: Histogram,
-    pub ready_to_sign_latency: Histogram,
-    pub sign_ready_to_wire_latency: Histogram,
-    pub propose_to_sign_ready_latency: Histogram,
-    pub verify_to_sign_ready_latency: Histogram,
-    pub startup_drain_latency: Histogram,
-    pub event_latency: Vec<Histogram>,
-    pub core_cycle_latency: Histogram,
+    /// Proposal positions endorsed by one signed vote. Coverage per unit of bandwidth.
     pub vote_positions: Histogram,
-    pub vote_extensions: Histogram,
+    /// Signed votes endorsing nothing; wasted bandwidth and signing capacity.
     pub empty_votes: Counter,
-    pub frontier_payloads: Gauge,
+    /// Deviation records per aggregated certificate; drives redundant verification at scale.
     pub qc_deviations: Histogram,
+    /// Encoded certificate size; the certificate-plane bandwidth driver.
     pub qc_bytes: Histogram,
+    /// Queue wait of view-critical verification jobs. Rises before a straggler wedges.
     pub verification_wait_fast: Histogram,
+    /// Queue wait of bulk verification jobs.
     pub verification_wait_bulk: Histogram,
-    pub seal_offset_latency: Histogram,
-    pub headers_after_seal: Gauge,
-    pub header_restarts: Gauge,
 }
 
 /// Block-count buckets for per-vote coverage histograms.
@@ -195,13 +230,17 @@ impl Metrics {
             "retained_artifacts",
             "artifacts pinned by durable safety state",
         );
+        let nullification_suffix = context.gauge(
+            "nullification_suffix",
+            "exact nullifications retained above the proposal anchor",
+        );
         let artifact_cache_occupancy = context.gauge(
             "artifact_cache_occupancy",
             "retained artifacts plus local protocol reservations",
         );
         let artifact_cache_capacity = context.gauge(
             "artifact_cache_capacity",
-            "configured artifact cache capacity",
+            "configured artifact cache capacity, the denominator of cache saturation",
         );
         let remote_artifact_capacity = context.gauge(
             "remote_artifact_capacity",
@@ -215,34 +254,18 @@ impl Metrics {
             context.gauge("verification_jobs", "machine verification jobs in flight");
         let verification_job_capacity = context.gauge(
             "verification_job_capacity",
-            "configured machine verification-job capacity",
+            "configured verification-job capacity, the denominator of pool saturation",
         );
         let future_artifacts = context.gauge("future_artifacts", "retained future-view artifacts");
-        let nullification_suffix = context.gauge(
-            "nullification_suffix",
-            "exact nullifications retained above the proposal anchor",
-        );
         let current_view = context.gauge("current_view", "current leader-chain view");
         let retired_view = context.gauge("retired_view", "retired leader-chain view floor");
         let finality_floor = context.gauge("finality_floor", "durable L-QC signing floor");
         let proposal_anchor_view =
             context.gauge("proposal_anchor_view", "leader-chain proposal anchor view");
         let produced_blocks = context.gauge("produced_blocks", "locally produced blocks");
-        let producer_vote_shares = context.gauge(
-            "producer_vote_shares",
-            "distinct DA shares held for the local producer tip",
-        );
         let producer_pipeline_blocked = context.gauge(
             "producer_pipeline_blocked",
             "whether the local producer is blocked at its DA pipeline limit",
-        );
-        let producer_prepared = context.gauge(
-            "producer_prepared",
-            "local producer blocks prepared ahead of durable signing authority",
-        );
-        let producer_recovery_active = context.gauge(
-            "producer_recovery_active",
-            "whether DA recovery is executing for the local producer tip",
         );
         let active_validations_gauge = context.gauge(
             "active_validations",
@@ -264,6 +287,34 @@ impl Metrics {
                 ChainMetrics::new(&chain_context)
             })
             .collect();
+        let chain_certified_floor = context.gauge(
+            "chain_certified_floor",
+            "lowest DA-certified height across producer chains",
+        );
+        let chain_da_voted_floor = context.gauge(
+            "chain_da_voted_floor",
+            "lowest locally DA-voted height across producer chains",
+        );
+        let chain_known_floor = context.gauge(
+            "chain_known_floor",
+            "lowest locally known height across producer chains",
+        );
+        let lagging_chains = context.gauge(
+            "lagging_chains",
+            "producer chains finalized below the highest finalized chain",
+        );
+        let frontier_payloads = context.gauge(
+            "frontier_payloads",
+            "own-proposal payload entries referenced before local DA endorsement",
+        );
+        let headers_after_seal = context.gauge(
+            "headers_after_seal",
+            "verified headers admitted while the local sealed proposal's view was current",
+        );
+        let header_restarts = context.gauge(
+            "header_restarts",
+            "proposal-pass restarts triggered by verified header admissions",
+        );
         let view_timeouts = context.counter("view_timeouts", "leader-chain view timeouts");
         let view_timer_armed = context.gauge(
             "view_timer_armed",
@@ -359,76 +410,19 @@ impl Metrics {
         );
         let build_latency =
             context.histogram("build_latency", "application build latency", LATENCY);
-        let custody_latency = context.histogram(
-            "custody_latency",
-            "local producer body validation and durable-custody latency",
-            LATENCY,
-        );
         let validation_latency = context.histogram(
             "validation_latency",
             "application validation latency",
             LATENCY,
-        );
-        let ready_to_sign_latency = context.histogram(
-            "ready_to_sign_latency",
-            "time from private signing release to signature completion",
-            LATENCY,
-        );
-        let sign_ready_to_wire_latency = context.histogram(
-            "sign_ready_to_wire_latency",
-            "time from signature completion to first transport acceptance",
-            LATENCY,
-        );
-        let propose_to_sign_ready_latency = context.histogram(
-            "propose_to_sign_ready_latency",
-            "time from application proposal completion to signature completion",
-            LATENCY,
-        );
-        let verify_to_sign_ready_latency = context.histogram(
-            "verify_to_sign_ready_latency",
-            "time from application verification completion to signature completion",
-            LATENCY,
-        );
-        let startup_drain_latency = context.histogram(
-            "startup_drain_latency",
-            "time to drain the exact startup durability acknowledgement",
-            LATENCY,
-        );
-        let event_latency = EVENT_KINDS
-            .iter()
-            .map(|kind| {
-                context
-                    .child("events")
-                    .with_attribute("kind", kind)
-                    .histogram(
-                        "latency",
-                        "wall-clock time servicing one runtime event",
-                        histogram::Buckets::LOCAL,
-                    )
-            })
-            .collect();
-        let core_cycle_latency = context.histogram(
-            "core_cycle_latency",
-            "wall-clock time of one bounded core service cycle",
-            histogram::Buckets::LOCAL,
         );
         let vote_positions = context.histogram(
             "vote_positions",
             "proposal positions endorsed by one signed ordinary vote, summed over chains",
             COVERAGE,
         );
-        let vote_extensions = context.histogram(
-            "vote_extensions",
-            "extension payloads carried by one signed ordinary vote, summed over chains",
-            COVERAGE,
-        );
         let empty_votes = context.counter(
             "empty_votes",
             "signed ordinary votes endorsing no positions and carrying no extensions",
-        );
-        let frontier_payloads = context.gauge(
-            "frontier_payloads",
-            "cumulative own-proposal payload entries referenced before local DA endorsement",
         );
         let qc_deviations = context.histogram(
             "qc_deviations",
@@ -450,19 +444,6 @@ impl Metrics {
             "queue wait of bulk verification jobs before workers are reserved",
             histogram::Buckets::LOCAL,
         );
-        let seal_offset_latency = context.histogram(
-            "seal_offset_latency",
-            "time from view entry to the durable release of this leader's proposal signing",
-            LATENCY,
-        );
-        let headers_after_seal = context.gauge(
-            "headers_after_seal",
-            "cumulative verified headers admitted while the local sealed proposal's view was current",
-        );
-        let header_restarts = context.gauge(
-            "header_restarts",
-            "cumulative proposal-pass restarts triggered by verified header admissions",
-        );
 
         Self {
             stale,
@@ -471,6 +452,7 @@ impl Metrics {
             retained_events,
             staged_batches,
             retained_artifacts,
+            nullification_suffix,
             artifact_cache_occupancy,
             artifact_cache_capacity,
             remote_artifact_capacity,
@@ -478,21 +460,24 @@ impl Metrics {
             verification_jobs,
             verification_job_capacity,
             future_artifacts,
-            nullification_suffix,
             current_view,
             retired_view,
             finality_floor,
             proposal_anchor_view,
             produced_blocks,
-            producer_vote_shares,
             producer_pipeline_blocked,
-            producer_prepared,
-            producer_recovery_active,
             active_validations_gauge,
             pending_validations_gauge,
             build_active_gauge,
             custody_active_gauge,
             chains,
+            chain_certified_floor,
+            chain_da_voted_floor,
+            chain_known_floor,
+            lagging_chains,
+            frontier_payloads,
+            headers_after_seal,
+            header_restarts,
             view_timeouts,
             view_timer_armed,
             view_timeout_cutoff_vote,
@@ -516,26 +501,13 @@ impl Metrics {
             vqc_latency,
             lqc_latency,
             build_latency,
-            custody_latency,
             validation_latency,
-            ready_to_sign_latency,
-            sign_ready_to_wire_latency,
-            propose_to_sign_ready_latency,
-            verify_to_sign_ready_latency,
-            startup_drain_latency,
-            event_latency,
-            core_cycle_latency,
             vote_positions,
-            vote_extensions,
             empty_votes,
-            frontier_payloads,
             qc_deviations,
             qc_bytes,
             verification_wait_fast,
             verification_wait_bulk,
-            seal_offset_latency,
-            headers_after_seal,
-            header_restarts,
         }
     }
 }
@@ -559,6 +531,10 @@ mod tests {
             metrics.future_artifacts.set(3);
             metrics.view_timer_armed.set(1);
             metrics.view_timeout_cutoff_timeout.set(1);
+            metrics.chain_certified_floor.set(4);
+            metrics.chain_da_voted_floor.set(4);
+            metrics.chain_known_floor.set(5);
+            metrics.lagging_chains.set(0);
             metrics
                 .view_proof_admissions
                 .get_or_create(&ViewProofAdmission {
@@ -580,6 +556,10 @@ mod tests {
                 "engine_voter_view_timer_armed",
                 "engine_voter_view_timeout_cutoff_vote",
                 "engine_voter_view_timeout_cutoff_timeout",
+                "engine_voter_chain_certified_floor",
+                "engine_voter_chain_da_voted_floor",
+                "engine_voter_chain_known_floor",
+                "engine_voter_lagging_chains",
             ] {
                 assert!(
                     encoded.lines().any(|line| line.starts_with(name)),
@@ -600,6 +580,53 @@ mod tests {
                     && line.contains("outcome=\"VerificationJobsFull\"")
                     && line.ends_with(" 1")
             }));
+        });
+    }
+
+    /// Every series a node registers is scraped, shipped, and retained for every node in the
+    /// deployment, so the voter's footprint at cluster scale is a deliberate budget rather than
+    /// an accident. Raising this bound is a decision, not a formality.
+    #[test]
+    fn voter_series_footprint_stays_within_budget() {
+        const CHAINS: usize = 50;
+        const BUDGET: usize = 650;
+
+        deterministic::Runner::default().start(|context| async move {
+            let voter = context.child("engine").child("voter");
+            let _metrics = Metrics::new(&voter, CHAINS);
+
+            let encoded = context.encode();
+            let series = encoded
+                .lines()
+                .filter(|line| line.starts_with("engine_voter_"))
+                .count();
+            assert!(
+                series <= BUDGET,
+                "the voter registers {series} series at {CHAINS} chains, over the {BUDGET} budget"
+            );
+        });
+    }
+
+    /// The per-chain family scales with the validator count, so it must stay at one series
+    /// per chain.
+    #[test]
+    fn per_chain_family_carries_only_finalized_height() {
+        deterministic::Runner::default().start(|context| async move {
+            let voter = context.child("engine").child("voter");
+            let metrics = Metrics::new(&voter, 4);
+            for chain in &metrics.chains {
+                chain.finalized.set(1);
+            }
+
+            let encoded = context.encode();
+            assert_eq!(
+                encoded
+                    .lines()
+                    .filter(|line| line.starts_with("engine_voter_chains_"))
+                    .count(),
+                4,
+                "{encoded}"
+            );
         });
     }
 }

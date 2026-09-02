@@ -49,11 +49,6 @@ struct ReaderSourceLabel {
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-struct CommandKindLabel {
-    kind: &'static str,
-}
-
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct CutTriggerLabel {
     trigger: &'static str,
 }
@@ -98,11 +93,10 @@ pub(in crate::multimmit::marshal) struct Catalog {
     pub admission_durability: histogram::Timed,
     pub finalized_archive_durability: histogram::Timed,
     pub checkpoint_publication: histogram::Timed,
-    pub command_dwell: Histogram,
+    /// Time an admission command waits between mailbox enqueue and catalog intake.
+    ///
+    /// Admission throughput is capped by this dwell, so it is the per-node intake signal.
     pub admission_command_dwell: Histogram,
-    pub command_defer_wait: Histogram,
-    pub admission_cut_restart_gap: Histogram,
-    command_defers: CounterFamily<CommandKindLabel>,
     cut_triggers: CounterFamily<CutTriggerLabel>,
     committed_count: Gauge,
     block_cache_items: Gauge,
@@ -269,29 +263,10 @@ impl Catalog {
                 "checkpoint_publication_duration",
                 "Duration of one checkpoint-last publication sync",
             ),
-            command_dwell: context.histogram(
-                "command_dwell_duration",
-                "Time a client command waits between mailbox enqueue and catalog intake",
-                STALL,
-            ),
             admission_command_dwell: context.histogram(
                 "admission_command_dwell_duration",
                 "Time an admission command waits between mailbox enqueue and catalog intake",
                 STALL,
-            ),
-            command_defer_wait: context.histogram(
-                "command_defer_wait_duration",
-                "Time the deferred-command slot stays occupied before its command becomes ready",
-                STALL,
-            ),
-            admission_cut_restart_gap: context.histogram(
-                "admission_cut_restart_gap_duration",
-                "Delay between an admission cut completing and the next cut starting while admissions were already pending",
-                STALL,
-            ),
-            command_defers: context.family(
-                "command_defers",
-                "Commands parked in the deferred slot awaiting catalog readiness, by kind",
             ),
             cut_triggers: context.family(
                 "admission_cut_triggers",
@@ -338,12 +313,6 @@ impl Catalog {
 
     pub(in crate::multimmit::marshal) fn progress(&self, committed: Option<OutputIndex>) {
         let _ = self.committed_count.try_set(count(committed));
-    }
-
-    pub(in crate::multimmit::marshal) fn defer(&self, kind: &'static str) {
-        self.command_defers
-            .get_or_create(&CommandKindLabel { kind })
-            .inc();
     }
 
     pub(in crate::multimmit::marshal) fn cut_trigger(&self, trigger: &'static str) {
@@ -596,6 +565,8 @@ impl Resolver {
 }
 
 pub(in crate::multimmit::marshal) struct Router {
+    /// Reporter hints accepted from consensus. The observation rate the router must keep up with.
+    pub hints: Counter,
     jobs: Gauge,
     subscriptions: Gauge,
     subscription_callers: Gauge,
@@ -604,6 +575,10 @@ pub(in crate::multimmit::marshal) struct Router {
 impl Router {
     pub(in crate::multimmit::marshal) fn new(context: &impl Metrics) -> Self {
         Self {
+            hints: context.counter(
+                "hints_total",
+                "Reporter hints dispatched by the marshal router",
+            ),
             jobs: context.gauge("pending_jobs", "Concurrent marshal router jobs"),
             subscriptions: context.gauge(
                 "block_subscriptions",

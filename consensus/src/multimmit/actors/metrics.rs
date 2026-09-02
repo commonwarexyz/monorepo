@@ -1,5 +1,4 @@
-use commonware_cryptography::PublicKey;
-use commonware_runtime::telemetry::metrics::{EncodeLabelSet, EncodeLabelValue, EncodeStruct};
+use commonware_runtime::telemetry::metrics::{EncodeLabelSet, EncodeLabelValue};
 
 /// A bounded Multimmit network plane.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
@@ -26,10 +25,4 @@ impl Traffic {
         plane: TrafficPlane::Certificate,
     };
     pub const VOTER: [Self; 3] = [Self::DATA, Self::CONSENSUS, Self::CERTIFICATE];
-}
-
-/// Per-peer traffic label.
-#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeStruct)]
-pub(super) struct Peer<P: PublicKey> {
-    pub peer: P,
 }
