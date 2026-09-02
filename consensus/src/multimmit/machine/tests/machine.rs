@@ -298,6 +298,7 @@ fn profile_for_producers(
             view_timeout: Duration::from_secs(1),
             production_interval: Duration::from_millis(100),
             view_retention: retention_for(resources, participants),
+            proposal_policy: ProposalPolicy::Frontier,
             ..Tuning::default()
         },
         resources,
@@ -331,6 +332,10 @@ fn profile_with_resources(
     )
 }
 
+/// Builds a profile whose proposals reach as far as the machine allows.
+///
+/// The shared helpers pin [`ProposalPolicy::Frontier`] so the payload walk itself is under test.
+/// Tests that assert one policy's reach use [`profile_with_policy`].
 fn profile_with_retention(
     role: Role,
     participants: usize,
@@ -345,6 +350,7 @@ fn profile_with_retention(
             view_timeout: Duration::from_secs(1),
             production_interval: Duration::from_millis(100),
             view_retention,
+            proposal_policy: ProposalPolicy::Frontier,
             ..Tuning::default()
         },
         resources,
@@ -352,10 +358,11 @@ fn profile_with_retention(
     .unwrap()
 }
 
-fn profile_without_frontier_proposals(
+fn profile_with_policy(
     role: Role,
     participants: usize,
     pipeline_depth: u32,
+    proposal_policy: ProposalPolicy,
 ) -> Profile<Sha256, MinPk> {
     let resources = resources();
     Profile::with_limits(
@@ -365,7 +372,7 @@ fn profile_without_frontier_proposals(
             view_timeout: Duration::from_secs(1),
             production_interval: Duration::from_millis(100),
             view_retention: retention_for(resources, participants),
-            frontier_proposals: false,
+            proposal_policy,
             ..Tuning::default()
         },
         resources,
@@ -11169,11 +11176,12 @@ fn proposals_reference_authenticated_blocks_beyond_the_local_da_frontier() {
 }
 
 #[test]
-fn proposals_stop_at_the_local_da_frontier_when_frontier_proposals_are_disabled() {
-    let mut machine = Machine::new(profile_without_frontier_proposals(
+fn endorsed_proposals_stop_at_the_local_da_frontier() {
+    let mut machine = Machine::new(profile_with_policy(
         Role::Validator(Participant::new(0)),
         6,
         3,
+        ProposalPolicy::Endorsed,
     ));
     let start = machine.step(Input::Start).unwrap();
     persist(&mut machine, &persist_job(&start));
@@ -11190,7 +11198,51 @@ fn proposals_stop_at_the_local_da_frontier_when_frontier_proposals_are_disabled(
     assert_eq!(
         proposal.payloads(),
         &[headers[0].body_digest()],
-        "without frontier proposals the pass must end at the local DA frontier",
+        "an endorsed proposal must end at the local DA frontier",
+    );
+    assert_eq!(frontier, 0);
+}
+
+#[test]
+fn certified_proposals_stop_at_the_held_certificate() {
+    let mut machine = Machine::new(profile_with_policy(
+        Role::Validator(Participant::new(0)),
+        6,
+        3,
+        ProposalPolicy::Certified,
+    ));
+    let start = machine.step(Input::Start).unwrap();
+    persist(&mut machine, &persist_job(&start));
+    let genesis = machine.profile().protocol().genesis().tips()[1];
+    let headers = frontier_chain(&machine, 2);
+
+    let endorsed = validate_block(&mut machine, headers[0].clone(), 1);
+    persist(&mut machine, &persist_job(&endorsed));
+    let _ = authenticate_block(&mut machine, headers[1].clone(), 1);
+
+    let profile = machine.profile().clone();
+    let (uncertified, frontier) = machine.chain.proposal(&profile, genesis).unwrap();
+    assert!(
+        matches!(uncertified.anchor(), Anchor::Tip(tip) if *tip == genesis),
+        "a DA-voted block with no held certificate must not reach the proposal",
+    );
+    assert!(uncertified.payloads().is_empty());
+    assert_eq!(frontier, 0);
+
+    let certificate = symbolic_da_certificate(headers[0].clone(), 0);
+    let observed = observe(&mut machine, Artifact::DaCertificate(certificate));
+    let completed = complete_with_step(&mut machine, &observed, true);
+    persist(&mut machine, &persist_job(&completed));
+
+    let (certified, frontier) = machine.chain.proposal(&profile, genesis).unwrap();
+    assert!(
+        matches!(certified.anchor(), Anchor::Certificate(certificate)
+            if certificate.block_ref::<Sha256>() == headers[0].block_ref::<Sha256>()),
+        "the held certificate must anchor the proposal",
+    );
+    assert!(
+        certified.payloads().is_empty(),
+        "a certified proposal must add nothing above the certificate it holds",
     );
     assert_eq!(frontier, 0);
 }
@@ -11354,7 +11406,7 @@ fn invalid_blocks_never_back_frontier_entries() {
 }
 
 #[test]
-fn frontier_proposals_finalize_without_local_bodies() {
+fn frontier_policy_finalizes_without_local_bodies() {
     let profile = profile_for(Role::Validator(Participant::new(0)), 6, 3);
     let (mut machine, _) = start_profile(profile);
     let headers = frontier_chain(&machine, 2);

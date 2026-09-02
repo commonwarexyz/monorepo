@@ -1,8 +1,10 @@
 //! Remote deployment bundle generation.
 
 use crate::BULK_PORT_OFFSET;
-use clap::Args;
+use clap::{Args, ValueEnum};
+use commonware_consensus::multimmit::ProposalPolicy;
 use commonware_deployer::aws;
+use core::fmt;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeSet,
@@ -113,9 +115,9 @@ pub struct Deploy {
     #[arg(long, default_value_t = default_extension_bound())]
     extension_bound: u32,
 
-    /// Whether leaders propose producer-attested headers beyond their own DA-voted blocks.
-    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
-    frontier_proposals: bool,
+    /// How far above its anchor a leader's proposal reaches on each producer chain.
+    #[arg(long, value_enum, default_value_t)]
+    proposal_policy: ProposalPolicyArg,
 
     /// Minimum milliseconds between two blocks built by one producer (the paper's theta).
     ///
@@ -177,8 +179,8 @@ pub struct NodeConfig {
     pub pipeline_depth: u32,
     #[serde(default = "default_extension_bound")]
     pub extension_bound: u32,
-    #[serde(default = "default_frontier_proposals")]
-    pub frontier_proposals: bool,
+    #[serde(default)]
+    pub proposal_policy: ProposalPolicyArg,
     #[serde(default)]
     pub production_interval_ms: u64,
     pub marshal_live_cache_bytes: usize,
@@ -197,9 +199,39 @@ const fn default_extension_bound() -> u32 {
     16
 }
 
-/// Leaders propose attested headers beyond their DA frontier unless told otherwise.
-const fn default_frontier_proposals() -> bool {
-    true
+/// The command-line and node-config spelling of [`ProposalPolicy`].
+///
+/// The consensus crate carries no serialization or argument-parsing dependencies, so the
+/// deployable spelling of its local tuning lives here.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum ProposalPolicyArg {
+    /// Propose only blocks whose data-availability certificate the leader holds.
+    #[default]
+    Certified,
+    /// Propose the prefix the leader has DA-voted itself.
+    Endorsed,
+    /// Propose producer-attested headers beyond the leader's DA frontier.
+    Frontier,
+}
+
+impl fmt::Display for ProposalPolicyArg {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.to_possible_value()
+            .expect("every policy has one stable name")
+            .get_name()
+            .fmt(f)
+    }
+}
+
+impl From<ProposalPolicyArg> for ProposalPolicy {
+    fn from(value: ProposalPolicyArg) -> Self {
+        match value {
+            ProposalPolicyArg::Certified => Self::Certified,
+            ProposalPolicyArg::Endorsed => Self::Endorsed,
+            ProposalPolicyArg::Frontier => Self::Frontier,
+        }
+    }
 }
 
 impl Deploy {
@@ -322,7 +354,7 @@ impl Deploy {
                 body_size: self.body_size,
                 pipeline_depth: self.pipeline_depth,
                 extension_bound: self.extension_bound,
-                frontier_proposals: self.frontier_proposals,
+                proposal_policy: self.proposal_policy,
                 production_interval_ms: self.production_interval_ms,
                 marshal_live_cache_bytes: self.marshal_live_cache_bytes,
                 marshal_materialized_cache_bytes: self.marshal_materialized_cache_bytes,
@@ -466,6 +498,23 @@ mod tests {
     #[should_panic(expected = "bulk port must be above the consensus-plane port")]
     fn bulk_port_must_not_collide_with_the_consensus_plane() {
         parse(&["deploy", "--port", "3000", "--bulk-port", "3000"]).validate();
+    }
+
+    #[test]
+    fn the_proposal_policy_is_certified_unless_named() {
+        assert_eq!(
+            parse(&["deploy"]).proposal_policy,
+            ProposalPolicyArg::Certified
+        );
+        assert_eq!(
+            parse(&["deploy", "--proposal-policy", "frontier"]).proposal_policy,
+            ProposalPolicyArg::Frontier
+        );
+        assert_eq!(
+            serde_yaml::from_str::<ProposalPolicyArg>("endorsed").unwrap(),
+            ProposalPolicyArg::Endorsed,
+            "node configs must accept the same spelling the flag takes",
+        );
     }
 
     #[test]

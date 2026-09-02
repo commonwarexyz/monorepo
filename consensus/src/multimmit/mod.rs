@@ -152,7 +152,8 @@
 //! availability and uniqueness for the certified chain position, but certification does not gate the
 //! fast path: a leader may propose uncertified descendants and voters report only the prefixes they
 //! actually hold. Votes may also carry bounded extensions beyond the proposal, allowing fresh blocks
-//! to reach voters directly rather than first passing through a leader.
+//! to reach voters directly rather than first passing through a leader. How far a leader reaches
+//! above its certified anchor is local policy; see [`ProposalPolicy`].
 //!
 //! # Views and Certificates
 //!
@@ -247,8 +248,8 @@ pub mod types;
 pub use engine::{Config as EngineConfig, Engine, Inspector, OpenError, Running};
 pub use machine::{
     Artifact, ArtifactId, BarrierId, ChainProgress, Cursor, EffectId, FinalityFact, FinalityId,
-    Inspection, JobId, PoolSummary, ProducerProgress, Profile, ProfileError, ReplayError,
-    ResourceLimits, Role, Timers, Tuning, ViewProof,
+    Inspection, JobId, PoolSummary, ProducerProgress, Profile, ProfileError, ProposalPolicy,
+    ReplayError, ResourceLimits, Role, Timers, Tuning, ViewProof,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use storage::{CheckpointError, JournalError};
