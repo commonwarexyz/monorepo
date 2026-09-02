@@ -8,6 +8,7 @@ use commonware_utils::channel::oneshot;
 use std::{
     fs::File,
     io::IoSlice,
+    ops::Deref,
     os::{fd::AsRawFd, unix::fs::FileExt},
     sync::{
         Arc,
@@ -48,20 +49,38 @@ impl Cache {
     }
 }
 
+/// A blob's file together with the hold on its storage directory, so any
+/// operation that reaches the file also keeps the directory held.
+struct Held {
+    file: File,
+    _hold: Arc<Hold>,
+}
+
+impl Held {
+    fn new(file: File, hold: Arc<Hold>) -> Arc<Self> {
+        Arc::new(Self { file, _hold: hold })
+    }
+}
+
+impl Deref for Held {
+    type Target = File;
+
+    fn deref(&self) -> &File {
+        &self.file
+    }
+}
+
 #[derive(Clone)]
 pub struct Blob {
     partition: String,
     name: Vec<u8>,
-    file: Arc<File>,
+    file: Arc<Held>,
     pool: BufferPool,
     /// Physical offset where logical offset 0 begins (the size of the header region).
     data_offset: u64,
     /// Whether the kernel and filesystem may support `RWF_DONTCACHE`.
     /// Cleared on the first EOPNOTSUPP to avoid probing on every hinted I/O operation.
     dont_cache_supported: Arc<AtomicBool>,
-    /// Hold on the storage directory, cloned into every dispatched blocking
-    /// operation so a successor storage instance waits for stragglers.
-    hold: Arc<Hold>,
 }
 
 impl Blob {
@@ -76,11 +95,10 @@ impl Blob {
         Self {
             partition,
             name: name.into(),
-            file: Arc::new(file),
+            file: Held::new(file, hold),
             pool,
             data_offset,
             dont_cache_supported: Arc::new(AtomicBool::new(true)),
-            hold,
         }
     }
 
@@ -283,9 +301,7 @@ impl crate::Blob for Blob {
         } else {
             Cache::Enabled
         };
-        let hold = self.hold.clone();
         task::spawn_blocking(move || {
-            let _hold = hold;
             if let Some(buf) = bufs.as_single_mut() {
                 // Read directly into the single buffer (zero-copy).
                 Self::read_exact_at(cache, &file, buf.as_mut(), offset)?;
@@ -326,10 +342,7 @@ impl crate::Blob for Blob {
         };
         let partition = sync.then(|| self.partition.clone());
         let name = sync.then(|| self.name.clone());
-        let hold = self.hold.clone();
         task::spawn_blocking(move || {
-            let _hold = hold;
-
             // Preserve the single-buffer fast path when no option requires per-write flags.
             let bufs = if !sync && !cache.is_disabled() {
                 match bufs.try_into_single() {
@@ -384,15 +397,13 @@ impl crate::Blob for Blob {
         let len = len
             .checked_add(self.data_offset)
             .ok_or(Error::OffsetOverflow)?;
-        let hold = self.hold.clone();
-        task::spawn_blocking(move || {
-            let _hold = hold;
-            file.set_len(len)
-        })
-        .await
-        .map_err(|e| e.into())
-        .and_then(|r| r)
-        .map_err(|e| Error::BlobResizeFailed(self.partition.clone(), hex(&self.name), e.into()))?;
+        task::spawn_blocking(move || file.set_len(len))
+            .await
+            .map_err(|e| e.into())
+            .and_then(|r| r)
+            .map_err(|e| {
+                Error::BlobResizeFailed(self.partition.clone(), hex(&self.name), e.into())
+            })?;
         Ok(())
     }
 
@@ -400,16 +411,12 @@ impl crate::Blob for Blob {
         let file = self.file.clone();
         let partition = self.partition.clone();
         let name = self.name.clone();
-        let hold = self.hold.clone();
-        task::spawn_blocking(move || {
-            let _hold = hold;
-            Self::sync_inner(&file, &partition, &name)
-        })
-        .await
-        .map_err(|e| {
-            let err: std::io::Error = e.into();
-            Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), err.into())
-        })?
+        task::spawn_blocking(move || Self::sync_inner(&file, &partition, &name))
+            .await
+            .map_err(|e| {
+                let err: std::io::Error = e.into();
+                Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), err.into())
+            })?
     }
 
     async fn start_sync(&self) -> Handle<()> {
@@ -417,9 +424,7 @@ impl crate::Blob for Blob {
         let file = self.file.clone();
         let partition = self.partition.clone();
         let name = self.name.clone();
-        let hold = self.hold.clone();
         task::spawn_blocking(move || {
-            let _hold = hold;
             let result = Self::sync_inner(&file, &partition, &name);
             let _ = tx.send(result);
         });
