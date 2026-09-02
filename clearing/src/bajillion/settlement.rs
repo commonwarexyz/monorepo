@@ -27,11 +27,10 @@ use crate::bajillion::{
     },
     challenge::{self, Challenge, ChallengeError, ChallengeKind, StateOpening, Verdict},
     commitment::{self, VectorRoot},
-    payment::PaymentContext,
     transition::{
-        self, Assignment, BatchId, CloseContext, CloseLimits, EpochContext, ExternalPayout,
-        ExternalPayoutClaim, Header, RootBundle, StateCache, TerminalProof, TransitionError,
-        WithdrawalClaim, WithdrawalOutput, verify_terminal_proof_after_header,
+        self, BatchId, CloseContext, EpochContext, ExternalPayout, ExternalPayoutClaim, Header,
+        RootBundle, StateCache, TerminalProof, TransitionError, WithdrawalClaim, WithdrawalOutput,
+        verify_terminal_proof_after_header,
     },
 };
 use alloc::{
@@ -2104,57 +2103,6 @@ where
         ))
     }
 
-    fn write_context(context: &CloseContext<P, H::Digest>, buf: &mut impl BufMut) {
-        context.payment().write(buf);
-        context.deployment().write(buf);
-        context.deposit_root().write(buf);
-        context.withdrawal_root().write(buf);
-        context.predecessor_liability().write(buf);
-        context.admission_deadline().write(buf);
-        context.challenge_deadline().write(buf);
-        context.limits().write(buf);
-        context.assignment().write(buf);
-        context.predecessor_root().write(buf);
-    }
-
-    fn size_context(context: &CloseContext<P, H::Digest>) -> usize {
-        context.payment().encode_size()
-            + context.deployment().encode_size()
-            + context.deposit_root().encode_size()
-            + context.withdrawal_root().encode_size()
-            + 3 * u64::SIZE
-            + context.limits().encode_size()
-            + context.assignment().encode_size()
-            + context.predecessor_root().encode_size()
-    }
-
-    fn read_context(buf: &mut impl Buf) -> Result<CloseContext<P, H::Digest>, CodecError> {
-        let payment = PaymentContext::read(buf)?;
-        let deployment = H::Digest::read(buf)?;
-        let deposit_root = VectorRoot::read(buf)?;
-        let withdrawal_root = VectorRoot::read(buf)?;
-        let predecessor_liability = u64::read(buf)?;
-        let admission_deadline = u64::read(buf)?;
-        let challenge_deadline = u64::read(buf)?;
-        let limits = CloseLimits::read(buf)?;
-        let assignment = Assignment::read(buf)?;
-        let predecessor_root = VectorRoot::read(buf)?;
-        Ok(CloseContext::from_parts(
-            EpochContext::from_parts(
-                payment,
-                deployment,
-                deposit_root,
-                withdrawal_root,
-                predecessor_liability,
-                admission_deadline,
-                challenge_deadline,
-                limits,
-                assignment,
-            ),
-            predecessor_root,
-        ))
-    }
-
     const fn challenge_kind_tag(kind: ChallengeKind) -> u8 {
         match kind {
             ChallengeKind::HigherAckDebit => 0,
@@ -2313,7 +2261,7 @@ where
     }
 
     fn write_pipeline_entry(entry: &PipelineEntry<P, H::Digest>, buf: &mut impl BufMut) {
-        Self::write_context(&entry.admitted.context, buf);
+        entry.admitted.context.write(buf);
         buf.put_slice(&entry.admitted.deposits.encoded);
         Self::write_packed_withdrawals(&entry.admitted.withdrawals, buf);
         entry.admitted.withdrawal_total.write(buf);
@@ -2326,7 +2274,7 @@ where
     }
 
     fn size_pipeline_entry(entry: &PipelineEntry<P, H::Digest>) -> usize {
-        Self::size_context(&entry.admitted.context)
+        entry.admitted.context.encode_size()
             + entry.admitted.deposits.encoded.len()
             + Self::size_packed_withdrawals(&entry.admitted.withdrawals)
             + 2 * u64::SIZE
@@ -2342,7 +2290,7 @@ where
         bounds: &Bounds,
         committee: usize,
     ) -> Result<PipelineEntry<P, H::Digest>, CodecError> {
-        let context = Self::read_context(buf)?;
+        let context = CloseContext::read(buf)?;
         let deposits = DepositBatch::<P>::read_cfg(buf, &RangeCfg::new(0..=bounds.items))?;
         let (withdrawals, withdrawal_deadline) = Self::read_packed_withdrawals(buf, bounds)?;
         let withdrawal_total = u64::read(buf)?;
@@ -2367,13 +2315,13 @@ where
     }
 
     fn write_registered(registered: &RegisteredClose<P, H::Digest>, buf: &mut impl BufMut) {
-        Self::write_context(&registered.context, buf);
+        registered.context.write(buf);
         registered.deposits.write(buf);
         registered.withdrawals.write(buf);
     }
 
     fn size_registered(registered: &RegisteredClose<P, H::Digest>) -> usize {
-        Self::size_context(&registered.context)
+        registered.context.encode_size()
             + registered.deposits.encode_size()
             + registered.withdrawals.encode_size()
     }
@@ -2382,7 +2330,7 @@ where
         buf: &mut impl Buf,
         bounds: &Bounds,
     ) -> Result<RegisteredClose<P, H::Digest>, CodecError> {
-        let context = Self::read_context(buf)?;
+        let context = CloseContext::read(buf)?;
         let deposits = DepositBatch::<P>::read_cfg(buf, &RangeCfg::new(0..=bounds.items))?;
         let withdrawals = WithdrawalBatch::<P, H::Digest>::read_cfg(
             buf,

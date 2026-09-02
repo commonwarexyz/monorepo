@@ -1,6 +1,6 @@
 //! Custody flows: deposits, withdrawal authorization and escalation, and recovery.
 
-use super::{Agent, store::PendingWithdrawalClaim};
+use super::{Agent, evidence::unusable_head, store::PendingWithdrawalClaim};
 use crate::{
     chain::{
         client::{Chain, Client, EFFECT_ATTEMPTS, Env, POLL},
@@ -83,17 +83,30 @@ impl Agent {
             format!("terminal settlement never certifiably began (dry-run advice: {advice:?})")
         })?;
 
-        // Recovery at a frozen root requires an opening retained at or refreshed to that
-        // root. Openings refresh on every head read or balance poll, so this fails only for a
-        // wallet passive across the final finalization, which then depends on the
-        // operator's survival to serve one.
-        let opening = self
-            .store
-            .recovery_opening(&hard_fault.frozen_state_root)?
-            .context(
-                "no payer opening is retained for the frozen state root: the wallet was \
-                 passive across the final finalization and needs the operator to serve one",
-            )?;
+        // Recovery at a frozen root requires an opening at that root: the one retained at
+        // or refreshed to it by an earlier head read, or, for a wallet passive across the
+        // final finalization, one the slice holders open at the frozen head, which is the
+        // faulted deployment's certified status root.
+        let opening = match self.store.recovery_opening(&hard_fault.frozen_state_root)? {
+            Some(opening) => opening,
+            None => {
+                let status = chain
+                    .status(ctx)
+                    .await
+                    .context("read the frozen settlement head")?;
+                ensure!(
+                    status.state_root == hard_fault.frozen_state_root,
+                    "the settlement head is not the frozen state root"
+                );
+                self.holders
+                    .validator_opening(ctx, chain, &self.account(), &status)
+                    .await
+                    .context(
+                        "no payer opening is retained for the frozen state root and the \
+                         validators opened none",
+                    )?
+            }
+        };
         let expected_custody = opening.leaf.state.balance;
         let opening_digest = Sha256::hash(&[&opening.encode()]);
         let claim = SettlementTx::ClaimHardFault(ClaimHardFaultRequest {
@@ -323,13 +336,14 @@ impl Agent {
 
                 // Retain a head opening before signing. It is not sent anywhere: if the
                 // deployment later hard-faults while frozen at this root, recovery needs it.
+                // The operator serves it first, and the slice holders when it does not.
                 if self
                     .store
                     .recovery_opening(&status.state_root)
                     .context("read retained withdrawal opening")?
                     .is_none()
                 {
-                    let opening = operator_rpc::withdrawal_opening(
+                    let served = operator_rpc::withdrawal_opening(
                         ctx,
                         operator,
                         operator_rpc::WithdrawalOpeningRequest {
@@ -337,13 +351,24 @@ impl Agent {
                         },
                     )
                     .await
-                    .context("read withdrawal opening")?;
-                    ensure!(
-                        status.state_root == opening.root,
-                        "operator opening is not the settlement head"
-                    );
+                    .and_then(|opening| {
+                        ensure!(
+                            status.state_root == opening.root,
+                            "operator opening is not the settlement head"
+                        );
+                        Ok(opening.opening)
+                    });
+                    let opening = match served {
+                        Ok(opening) => opening,
+                        Err(operator_error) => self
+                            .holders
+                            .validator_opening(ctx, chain, &self.account(), &status)
+                            .await
+                            .map_err(|error| unusable_head(operator_error, error))
+                            .context("read withdrawal opening")?,
+                    };
                     self.store
-                        .retain_recovery_opening(&opening.root, &opening.opening)
+                        .retain_recovery_opening(&status.state_root, &opening)
                         .context("durably retain withdrawal opening")?;
                 }
 

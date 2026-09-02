@@ -3,8 +3,11 @@ use super::{
     client::{Chain as _, Client, EFFECT_ATTEMPTS, POLL, RECENCY_THRESHOLD},
     da, harness, ingress, light,
     node::{self, Node},
-    query::{self, CertifiedRead, Lookup, ReadRequest, ReadResponse},
-    setup::Genesis,
+    query::{
+        self, CertifiedRead, Evidence, EvidenceBody, EvidenceLookup, EvidenceRequest,
+        EvidenceResponse, Lookup, ReadRequest, ReadResponse,
+    },
+    setup::{Genesis, ValidatorEntry},
     state::{
         Advice, FaultRecord, HardFaultReasonResponse, Record, Reject, admitted_key, advise,
         anchor_key, claim_roots_key, deposit_key, execute, fault_key, hard_fault_key, refund_key,
@@ -24,9 +27,9 @@ use crate::{
     agent::{Agent, PaymentOutcome, WithdrawalOutcome},
     operator::{Operator, rpc as operator_rpc},
     protocol::{
-        AccountCache, Deployment, DepositEvent, INITIAL_BALANCE, Key, PreparedEpoch, Protocol,
-        SettlementResult, Timing, accounts, chain_id, clearing_private, committee,
-        dealt_participant, deployment, deployments, identities, operator_ack_key,
+        AccountCache, Deployment, DepositEvent, INITIAL_BALANCE, Key, MAX_SLICES, PreparedEpoch,
+        Protocol, SLICE_BITS, SettlementResult, Timing, accounts, chain_id, clearing_private,
+        committee, dealt_participant, deployment, deployments, identities, operator_ack_key,
         operator_ack_signer, operator_key, operator_signer, wallets,
     },
     rpc,
@@ -36,12 +39,13 @@ use anyhow::Context as _;
 use bytes::{Bytes, BytesMut};
 use commonware_broadcast::buffered;
 use commonware_clearing::bajillion::{
+    admission::{assigned_slice_spans, slice_holders},
     boundary::{DepositBatch, DepositRecord, SignedWithdrawal, WithdrawalAction, WithdrawalBatch},
     challenge::{AckWitness, Challenge, ChallengeKind},
-    commitment::VectorRoot,
+    commitment::{VectorKind, VectorRoot},
     payment::{VectorAck, VectorSendBody},
     state::{AccountRow, AccountState, Prefix, SettlementOutput, StateLeaf},
-    transition::{BatchId, StateCache, WithdrawalClaim},
+    transition::{Assignment, BatchId, StateCache, WithdrawalClaim, account_slice},
     vector::OutVector,
 };
 use commonware_codec::{
@@ -70,7 +74,7 @@ use commonware_cryptography::{
     Digest as _, Digestible as _, Hasher as _, Sha256, Signer as _,
     bls12381::{
         dkg::feldman_desmedt::deal,
-        primitives::{group::Share, variant::MinSig},
+        primitives::{group::Share, ops::compute_public, variant::MinSig},
     },
     certificate::{ConstantProvider, Signers, mocks::Fixture as SchemeFixture},
     ed25519,
@@ -119,7 +123,10 @@ use std::{
     num::{NonZeroU64, NonZeroUsize},
     path::Path,
     pin::Pin,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 
@@ -548,6 +555,169 @@ fn empty_register_tx() -> SettlementTx {
     })
 }
 
+/// The harness serves validator evidence over the real wire from the closes
+/// the in-process simulation sealed: every account's state openings and the
+/// slice intervals verify against the certified roots, routing advice
+/// matches the validators', and a close is pruned once the chain passes its
+/// challenge deadline.
+#[test]
+fn harness_serves_validator_evidence() {
+    deterministic::Runner::default().start(|context| async move {
+        let address = std::net::SocketAddr::from(([127, 0, 0, 1], 6_500));
+        let control = harness::start(&context, address, "harness-evidence").await;
+        let protocol = Protocol::new(NonZeroUsize::MIN).unwrap();
+        let state = genesis_cache();
+
+        // The boundary transactions are deadline-independent, so the close is
+        // built once the chain has assigned the registration's deadlines.
+        let (_, deposit_tx, register_tx) =
+            fixture_boundary(&protocol, 0, state.leaves(), b"harness-evidence-deposit");
+        control.submit(deposit_tx).await;
+        let (registered_at, _) = control.submit(register_tx).await;
+        let admission_deadline = registered_at + Timing::DEFAULT.admission_offset;
+        let challenge_deadline = admission_deadline + Timing::DEFAULT.challenge_duration;
+        let txs = close_fixture(
+            &protocol,
+            0,
+            state.leaves().to_vec(),
+            b"harness-evidence-deposit",
+            admission_deadline,
+            challenge_deadline,
+        );
+        control.submit(txs.admit_tx.clone()).await;
+        assert!(matches!(
+            control
+                .record(admitted_key(&deployment(), 0))
+                .await,
+            Some(Record::Admitted(admitted)) if admitted.roots == txs.result.roots
+        ));
+        let batch = txs.result.finalized.batch_id.into_digest();
+        let successor = StateCache::new::<Sha256>(txs.successor.clone()).unwrap();
+        assert_eq!(successor.root(), txs.result.roots.successor);
+
+        // Every account's state openings arrive through the wire, from the
+        // holders genesis routes to, and match the whole-tree openings.
+        let client = Client::new(
+            control.identity(),
+            deployment(),
+            vec![address],
+            context.child("client_rng"),
+        )
+        .unwrap();
+        for leaf in state.leaves() {
+            let account = leaf.account.clone();
+            for (lookup, cache, root) in [
+                (
+                    EvidenceLookup::PredecessorState {
+                        batch,
+                        account: account.clone(),
+                    },
+                    &state,
+                    txs.result.predecessor_root,
+                ),
+                (
+                    EvidenceLookup::SuccessorState {
+                        batch,
+                        account: account.clone(),
+                    },
+                    &successor,
+                    txs.result.roots.successor,
+                ),
+            ] {
+                let EvidenceResponse::Served(Evidence::Close {
+                    header,
+                    roots,
+                    body: EvidenceBody::State(opening),
+                }) = client.evidence(&context, lookup).await.unwrap()
+                else {
+                    panic!("the harness did not serve the state opening");
+                };
+                assert_eq!(header, txs.result.header);
+                assert_eq!(roots, txs.result.roots);
+                assert_eq!(opening, cache.opening(&account).unwrap());
+                opening
+                    .proof
+                    .verify::<Sha256>(VectorKind::State, &root, opening.leaf.encode().as_ref())
+                    .unwrap();
+            }
+            let EvidenceResponse::Served(Evidence::Genesis(opening)) = client
+                .evidence(&context, EvidenceLookup::GenesisState { account })
+                .await
+                .unwrap()
+            else {
+                panic!("the harness did not serve the genesis opening");
+            };
+            assert_eq!(opening, state.opening(&leaf.account).unwrap());
+        }
+
+        // Every slice's interval verifies at the successor root and at the
+        // genesis root, and the harness classifies unknown work like a
+        // validator does.
+        for slice in 0..MAX_SLICES as u16 {
+            for (root, leaves) in [
+                (txs.result.roots.successor, successor.leaves()),
+                (state.root(), state.leaves()),
+            ] {
+                let EvidenceResponse::Served(Evidence::Interval(range)) = client
+                    .evidence(&context, EvidenceLookup::Interval { root, slice })
+                    .await
+                    .unwrap()
+                else {
+                    panic!("the harness did not serve the interval");
+                };
+                range.verify(&root, slice, SLICE_BITS).unwrap();
+                let expected = leaves
+                    .iter()
+                    .filter(|leaf| account_slice(&leaf.account, SLICE_BITS).unwrap() == slice)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                assert_eq!(range.members, expected);
+            }
+        }
+        let account = state.leaves()[0].account.clone();
+        assert_eq!(
+            client
+                .evidence(
+                    &context,
+                    EvidenceLookup::PredecessorState {
+                        batch: Sha256::hash(&[b"unknown-batch"]),
+                        account: account.clone(),
+                    },
+                )
+                .await
+                .unwrap(),
+            EvidenceResponse::Unsealed
+        );
+        assert_eq!(
+            control
+                .evidence(EvidenceRequest::new(
+                    Sha256::hash(&[b"foreign-deployment"]),
+                    EvidenceLookup::PredecessorState {
+                        batch,
+                        account: account.clone(),
+                    },
+                ))
+                .await,
+            EvidenceResponse::Unknown
+        );
+
+        // Past the challenge deadline the close finalizes and its dealing is
+        // released, exactly as a validator prunes it.
+        let height = control.advance(0).await;
+        control.advance(challenge_deadline + 1 - height).await;
+        assert_eq!(
+            client
+                .evidence(
+                    &context,
+                    EvidenceLookup::PredecessorState { batch, account },
+                )
+                .await
+                .unwrap(),
+            EvidenceResponse::Pruned
+        );
+    });
+}
+
 #[test]
 fn deposits_dedupe_by_id_and_conflicts_are_provable() {
     deterministic::Runner::default().start(|context| async move {
@@ -631,11 +801,11 @@ fn admitted_close_finalizes_at_real_heights() {
         let batch_id = fixture.result.finalized.batch_id;
         assert_eq!(
             read(&db, &admitted_key(&deployment(), 0)).await,
-            Some(Record::Admitted(super::state::AdmittedRootsResponse {
+            Some(Record::Admitted(super::state::AdmittedRootsResponse::new(
                 batch_id,
-                change: fixture.result.roots.change,
-                finalized: false,
-            }))
+                fixture.result.roots,
+                false,
+            )))
         );
 
         // The close stays pending through the inclusive challenge deadline
@@ -657,11 +827,11 @@ fn admitted_close_finalizes_at_real_heights() {
         assert!(!finalized.hard_faulted);
         assert_eq!(
             read(&db, &admitted_key(&deployment(), 0)).await,
-            Some(Record::Admitted(super::state::AdmittedRootsResponse {
+            Some(Record::Admitted(super::state::AdmittedRootsResponse::new(
                 batch_id,
-                change: fixture.result.roots.change,
-                finalized: true,
-            }))
+                fixture.result.roots,
+                true,
+            )))
         );
         assert_eq!(
             read(&db, &claim_roots_key(&deployment(), &batch_id)).await,
@@ -2594,6 +2764,7 @@ impl EngineDefinition for Engine {
                 finalized: finalized.clone(),
                 marshal: marshal_mailbox.clone(),
                 ingress: ingress_mailbox,
+                sealer: None,
             },
         );
 
@@ -3090,6 +3261,79 @@ fn chain_finalizes_settlement_epoch() {
 
 /// The deposit label shared by the distributed fixture and its driver.
 const DISTRIBUTED_DEPOSIT: &[u8] = b"distributed-e2e-deposit";
+const DISTRIBUTED_DEPOSIT_1: &[u8] = b"distributed-e2e-deposit-1";
+
+/// The deposit label of one distributed epoch.
+fn deposit_label(epoch: u64) -> &'static [u8] {
+    match epoch {
+        0 => DISTRIBUTED_DEPOSIT,
+        1 => DISTRIBUTED_DEPOSIT_1,
+        epoch => panic!("the distributed engine closes at most two epochs, not {epoch}"),
+    }
+}
+
+/// How a validator's query server misbehaves for evidence requests.
+#[derive(Clone, Copy, Debug)]
+enum Impairment {
+    /// Every request is answered with undecodable bytes.
+    Garbage,
+    /// Every connection is accepted and never answered.
+    Silent,
+}
+
+/// A query server standing in for one validator's: it accepts every
+/// connection (counting each in `accepts`) and answers as `impairment`
+/// dictates, so a co-holder fetching an interval from it must rotate past
+/// it. The validator's sealer keeps running (its mailbox is held here for
+/// the server's lifetime), so only the evidence it serves is broken, never
+/// its sealing or voting.
+fn impaired_query(
+    context: deterministic::Context,
+    address: std::net::SocketAddr,
+    impairment: Impairment,
+    sealer: Option<da::Mailbox>,
+    accepts: Arc<AtomicUsize>,
+) {
+    context.spawn(move |context| async move {
+        let _sealer = sealer;
+        let mut listener = context
+            .bind(address)
+            .await
+            .expect("the impaired query server binds");
+        loop {
+            let Ok((_, mut sink, mut stream)) = listener.accept().await else {
+                return;
+            };
+            accepts.fetch_add(1, Ordering::Relaxed);
+            context.child("connection").spawn(move |_| async move {
+                if rpc::recv_request(&mut stream).await.is_err() {
+                    return;
+                }
+                match impairment {
+                    Impairment::Garbage => {
+                        let response = rpc::Response::Success {
+                            body: Bytes::from_static(&[0xff]),
+                        };
+                        let _ = rpc::send_response(&mut sink, &response).await;
+                    }
+                    Impairment::Silent => std::future::pending::<()>().await,
+                }
+            });
+        }
+    });
+}
+
+/// The genesis validator list of the distributed engine: validator `i`'s
+/// dealt clearing key served at its query address.
+fn validator_entries() -> Vec<ValidatorEntry> {
+    let committee = committee().unwrap();
+    (0..4)
+        .map(|index| ValidatorEntry {
+            clearing: committee.members()[usize::from(dealt_participant(index).unwrap())],
+            query: Engine::query_address(index),
+        })
+        .collect()
+}
 
 /// Settlement transaction sender type on the simulated network.
 type TxSender = commonware_p2p::simulated::Sender<ed25519::PublicKey, deterministic::Context>;
@@ -3108,14 +3352,55 @@ struct Distributed {
     driver: ClientResult,
     /// Validator indices that run no sealer and so never vote.
     silent: std::collections::BTreeSet<usize>,
+    /// Connections the impaired query server accepted, so a rotation test
+    /// proves the fetch actually met the impairment.
+    impaired_accepts: Arc<AtomicUsize>,
+    /// Per epoch, the validator the operator leaves out of its deals: a
+    /// validator that misses that close.
+    undealt: std::collections::BTreeMap<u64, usize>,
+    /// The validator whose query server misbehaves for evidence, and how.
+    impaired: Option<(usize, Impairment)>,
+    /// Epochs the driver closes back to back.
+    epochs: u64,
+    /// The validator that missed epoch 0 and fetches every retained interval
+    /// before sealing epoch 1, whose fetched records the driver compares
+    /// against its co-holders'.
+    fetcher: Option<usize>,
     /// Whether the driver expects the registration to expire into the
     /// deadline fault instead of certifying.
     expect_fault: bool,
+    /// The state root the last closed epoch settles.
     expected_root: commonware_clearing::bajillion::commitment::VectorRoot<Digest>,
     deposit_id: Digest,
 }
 
 impl Distributed {
+    /// Two back-to-back closes where the operator leaves validator 1 out of
+    /// epoch 0 and validator 2 out of epoch 1, so epoch 1 certifies only if
+    /// validator 1 fetches epoch 1's predecessor intervals from its
+    /// co-holders and seals. `impairment` breaks validator 3's query server,
+    /// a co-holder on two of validator 1's three slices.
+    fn recovering(impairment: Option<Impairment>) -> Self {
+        let mut engine = Self::new(&[], false);
+        let protocol = Protocol::new(NonZeroUsize::MIN).unwrap();
+        let state = genesis_cache();
+        let first = close_fixture(
+            &protocol,
+            0,
+            state.leaves().to_vec(),
+            DISTRIBUTED_DEPOSIT,
+            2,
+            3,
+        );
+        let second = close_fixture(&protocol, 1, first.successor, DISTRIBUTED_DEPOSIT_1, 5, 6);
+        engine.expected_root = second.result.finalized.successor_root;
+        engine.undealt = [(0, 1), (1, 2)].into_iter().collect();
+        engine.impaired = impairment.map(|impairment| (3, impairment));
+        engine.epochs = 2;
+        engine.fetcher = Some(1);
+        engine
+    }
+
     fn new(silent: &[usize], expect_fault: bool) -> Self {
         let mut rng = test_rng();
         let SchemeFixture {
@@ -3147,6 +3432,11 @@ impl Distributed {
             finalized,
             driver: ClientResult::default(),
             silent: silent.iter().copied().collect(),
+            impaired_accepts: Arc::default(),
+            undealt: std::collections::BTreeMap::new(),
+            impaired: None,
+            epochs: 1,
+            fetcher: None,
             expect_fault,
             expected_root: epoch.result.finalized.successor_root,
             deposit_id: epoch.deposit.id,
@@ -3397,7 +3687,13 @@ impl EngineDefinition for Distributed {
 
             // The driver: the operator's close worker flow as one task.
             let verdict = self.driver.clone();
-            let expect_fault = self.expect_fault;
+            let plan = Drive {
+                expect_fault: self.expect_fault,
+                epochs: self.epochs,
+                undealt: self.undealt.clone(),
+                fetcher: self.fetcher,
+                impaired: self.impaired.map(|(index, _)| index),
+            };
             let scheme_for_reads = scheme.clone();
             context.child("driver").spawn(move |context| async move {
                 let result = drive(
@@ -3407,7 +3703,7 @@ impl EngineDefinition for Distributed {
                     validators,
                     scheme_for_reads,
                     Engine::query_address(0),
-                    expect_fault,
+                    plan,
                 )
                 .await
                 .map_err(|error| format!("{error:#}"));
@@ -3490,26 +3786,14 @@ impl EngineDefinition for Distributed {
         marshal_actor.start(marshal_reporters, buffer, resolver);
         stateful_actor.start();
 
-        // Certified query server over the applied database.
-        let db = stateful_mailbox.subscribe_databases().await;
-        query::start(
-            context.child("query"),
-            query::Config {
-                address: Engine::query_address(index),
-                deployments: deployments(),
-                db: db.clone(),
-                finalized: finalized.clone(),
-                marshal: marshal_mailbox.clone(),
-                ingress: ingress_mailbox,
-            },
-        );
-
         // The sealing actor on the DA channel, keyed by the validator's
         // dealt clearing committee key.
-        if self.silent.contains(&index) {
+        let db = stateful_mailbox.subscribe_databases().await;
+        let sealer = if self.silent.contains(&index) {
             node::drain(context.child("da_drain"), settlement_da_network.1);
+            None
         } else {
-            let sealer = da::Sealer::new(
+            let (sealer, mailbox) = da::Sealer::new(
                 context.child("sealer"),
                 da::Config {
                     scheme: commonware_clearing::bajillion::admission::bls12381::Scheme::signer(
@@ -3518,11 +3802,42 @@ impl EngineDefinition for Distributed {
                     )
                     .unwrap(),
                     operators: vec![(operator_key, deployments().remove(0))],
-                    db,
+                    db: db.clone(),
                     partition: format!("{partition_prefix}-dealings"),
+                    validators: validator_entries(),
+                    fetch_timeout: Duration::from_millis(50),
                 },
             );
             sealer.start(settlement_da_network);
+            Some(mailbox)
+        };
+
+        // Certified query server over the applied database, or the impaired
+        // stand-in that answers evidence requests wrongly or never.
+        match self.impaired {
+            Some((impaired, impairment)) if impaired == index => {
+                impaired_query(
+                    context.child("query"),
+                    Engine::query_address(index),
+                    impairment,
+                    sealer,
+                    self.impaired_accepts.clone(),
+                );
+            }
+            _ => {
+                query::start(
+                    context.child("query"),
+                    query::Config {
+                        address: Engine::query_address(index),
+                        deployments: deployments(),
+                        db,
+                        finalized: finalized.clone(),
+                        marshal: marshal_mailbox.clone(),
+                        ingress: ingress_mailbox,
+                        sealer,
+                    },
+                );
+            }
         }
 
         // Simplex engine.
@@ -3574,11 +3889,53 @@ impl EngineDefinition for Distributed {
     }
 }
 
+/// What the distributed driver closes and checks.
+struct Drive {
+    /// Whether epoch 0's registration is expected to expire into the
+    /// deadline fault instead of certifying.
+    expect_fault: bool,
+    /// Epochs closed back to back.
+    epochs: u64,
+    /// Per epoch, the validator left out of the operator's deals.
+    undealt: std::collections::BTreeMap<u64, usize>,
+    /// The validator whose fetched epoch-1 predecessor intervals are compared
+    /// against its co-holders' after the run.
+    fetcher: Option<usize>,
+    /// The validator whose query server is impaired, skipped as a comparison
+    /// co-holder.
+    impaired: Option<usize>,
+}
+
+/// One slice's retained interval at `root` as validator `address` serves it.
+async fn interval(
+    context: &deterministic::Context,
+    address: std::net::SocketAddr,
+    root: VectorRoot<Digest>,
+    slice: u16,
+) -> anyhow::Result<da::SliceRange> {
+    let request = EvidenceRequest::new(deployment(), EvidenceLookup::Interval { root, slice });
+    let body = rpc::invoke(
+        context,
+        address,
+        "validator",
+        query::METHOD_EVIDENCE,
+        request.encode(),
+    )
+    .await?;
+    match EvidenceResponse::decode(body)? {
+        EvidenceResponse::Served(Evidence::Interval(range)) => Ok(range),
+        other => anyhow::bail!("validator at {address} answered {other:?} for slice {slice}"),
+    }
+}
+
 /// The operator's distributed close worker flow, driven end to end against
-/// its own followed state: deposit, boundary-only registration and the
-/// certified read-back of its assigned deadlines, dealing dissemination and
-/// vote collection through the pipeline, certified admission, and finally
-/// the agent-visible certified reads over a validator's query server.
+/// its own followed state for each planned epoch: deposit, boundary-only
+/// registration and the certified read-back of its assigned deadlines,
+/// dealing dissemination and vote collection through the pipeline, certified
+/// admission, and finally the agent-visible certified reads over a
+/// validator's query server. When a validator was planned to miss epoch 0,
+/// its fetched epoch-1 predecessor intervals are then compared byte for byte
+/// against every healthy co-holder's.
 async fn drive(
     mut context: deterministic::Context,
     mut chain: Node<deterministic::Context, TxSender>,
@@ -3586,157 +3943,172 @@ async fn drive(
     validators: Vec<ed25519::PublicKey>,
     scheme: Scheme,
     query: std::net::SocketAddr,
-    expect_fault: bool,
+    plan: Drive,
 ) -> anyhow::Result<()> {
     let protocol = Protocol::new(NonZeroUsize::MIN)?;
     let state = genesis_cache();
+    let mut latest = light::Latest::default();
+    let mut predecessor = state.leaves().to_vec();
+    let mut settled = Vec::new();
+    for epoch in 0..plan.epochs {
+        let label = deposit_label(epoch);
 
-    // The deposit carries no deadline, so it lands first: the boundary-only
-    // registration commits its root. The local backend serves nothing until
-    // the follower applied a finalized block, and each submission completes
-    // on the local certified read of its effect record.
-    let (deposit, deposit_tx, register_tx) =
-        fixture_boundary(&protocol, 0, state.leaves(), DISTRIBUTED_DEPOSIT);
-    chain.deliver(&context, &deposit_tx).await?;
-    let mut deposited = false;
-    for _ in 0..600 {
-        if chain.deposit(&context, deposit.id).await.ok().flatten() == Some(deposit.clone()) {
-            deposited = true;
-            break;
-        }
-        context.sleep(Duration::from_millis(200)).await;
-    }
-    anyhow::ensure!(deposited, "the deposit earned no custody record");
-    chain.deliver(&context, &register_tx).await?;
-
-    // Execution assigned the deadlines at the registration's inclusion
-    // height, so the close is built only after the local certified
-    // registration read reveals them: the operator's read-back flow.
-    let mut registered = None;
-    for _ in 0..600 {
-        if let Ok(Some(record)) = chain.registration(&context).await {
-            registered = Some(record);
-            break;
-        }
-        context.sleep(Duration::from_millis(200)).await;
-    }
-    let Some(record) = registered else {
-        anyhow::bail!("the registered epoch left no certified record");
-    };
-    anyhow::ensure!(record.epoch == 0, "the certified record is not epoch 0");
-    let build = build_fixture(
-        &protocol,
-        0,
-        state.leaves().to_vec(),
-        DISTRIBUTED_DEPOSIT,
-        record.admission_deadline,
-        record.challenge_deadline,
-    );
-    anyhow::ensure!(
-        build.deposit_tx == deposit_tx && build.register_tx == register_tx,
-        "the fixture boundary diverged from the submitted transactions"
-    );
-    let admission_deadline = record.admission_deadline;
-
-    // The close worker flow: assemble slices, split per-validator dealings,
-    // certify over the DA channel.
-    let slices = protocol.slices(&build.prepared)?;
-    let dealings = protocol.dealings(&build.prepared, &slices)?;
-    let dealing_slices = dealings.iter().map(Vec::len).sum();
-    let header = build.prepared.close().header;
-    let roots = build.prepared.close().roots;
-    let mut deals = Vec::new();
-    for (index, peer) in validators.iter().enumerate() {
-        let participant = dealt_participant(index)?;
-        deals.push(node::Deal {
-            participant,
-            peer: peer.clone(),
-            slices: dealings[usize::from(participant)]
-                .clone()
-                .into_iter()
-                .map(commonware_clearing::bajillion::retained::DealtSlice::strip)
-                .collect(),
-        });
-    }
-
-    if expect_fault {
-        // Quorum is unreachable: the certificate must never assemble, and
-        // the registration expires into the deadline fault at its exact
-        // absolute height.
-        let certified: Arc<Mutex<Option<()>>> = Arc::default();
-        {
-            let certified = certified.clone();
-            context.child("certify").spawn(move |_| async move {
-                if pipeline.certify(0, header, roots, deals).await.is_ok() {
-                    *certified.lock() = Some(());
-                }
-            });
-        }
+        // The deposit carries no deadline, so it lands first: the
+        // boundary-only registration commits its root. The local backend
+        // serves nothing until the follower applied a finalized block, and
+        // each submission completes on the local certified read of its
+        // effect record.
+        let (deposit, deposit_tx, register_tx) =
+            fixture_boundary(&protocol, epoch, &predecessor, label);
+        chain.deliver(&context, &deposit_tx).await?;
+        let mut deposited = false;
         for _ in 0..600 {
-            if let Some(FaultRecord::Faulted(reason)) = chain.fault(&context).await? {
-                match reason {
-                    HardFaultReasonResponse::ExpiredRegistration {
-                        epoch: 0,
-                        expired_at,
-                        ..
-                    } => {
-                        anyhow::ensure!(
-                            expired_at == admission_deadline,
-                            "the registration expired at {expired_at}, not its deadline"
-                        );
-                        anyhow::ensure!(
-                            certified.lock().is_none(),
-                            "two silent validators still assembled a certificate"
-                        );
-                        return Ok(());
-                    }
-                    reason => anyhow::bail!("unexpected fault: {reason:?}"),
-                }
+            if chain.deposit(&context, deposit.id).await.ok().flatten() == Some(deposit.clone()) {
+                deposited = true;
+                break;
             }
             context.sleep(Duration::from_millis(200)).await;
         }
-        anyhow::bail!("the registration never expired into the deadline fault")
-    }
+        anyhow::ensure!(
+            deposited,
+            "the epoch {epoch} deposit earned no custody record"
+        );
+        chain.deliver(&context, &register_tx).await?;
 
-    // Certification, local completion, and certified admission.
-    let certificate = pipeline.certify(0, header, roots, deals).await?;
-    let result = protocol.certify(
-        build.prepared,
-        slices.len(),
-        dealing_slices,
-        certificate,
-        0,
-        0,
-    )?;
-    pipeline
-        .admit(
-            crate::chain::tx::AdmitRequest::from(&result),
-            result.finalized,
-            result.roots.change,
-        )
-        .await?;
-
-    // The agents' certified reads see the distributed close: verified light
-    // client reads against a validator's query server.
-    let mut latest = light::Latest::default();
-    loop {
-        let (verified, _) =
-            verified_read(&mut context, &scheme, query, &req(Lookup::Status)).await?;
-        latest
-            .observe(verified.height)
-            .map_err(|error| anyhow::anyhow!("status read regressed: {error}"))?;
-        let Some(Record::Status(status)) = verified.record else {
-            anyhow::bail!("status read returned no record");
-        };
-        anyhow::ensure!(!status.hard_faulted, "the deployment hard-faulted");
-        if status.last_finalized == Some(0) {
-            anyhow::ensure!(
-                status.state_root == result.finalized.successor_root,
-                "finalized state root diverged from the distributed close"
-            );
-            break;
+        // Execution assigned the deadlines at the registration's inclusion
+        // height, so the close is built only after the local certified
+        // registration read reveals them: the operator's read-back flow.
+        let mut registered = None;
+        for _ in 0..600 {
+            if let Ok(Some(record)) = chain.registration(&context).await
+                && record.epoch == epoch
+            {
+                registered = Some(record);
+                break;
+            }
+            context.sleep(Duration::from_millis(200)).await;
         }
-        context.sleep(Duration::from_millis(200)).await;
+        let Some(record) = registered else {
+            anyhow::bail!("the registered epoch {epoch} left no certified record");
+        };
+        let build = build_fixture(
+            &protocol,
+            epoch,
+            predecessor.clone(),
+            label,
+            record.admission_deadline,
+            record.challenge_deadline,
+        );
+        anyhow::ensure!(
+            build.deposit_tx == deposit_tx && build.register_tx == register_tx,
+            "the fixture boundary diverged from the submitted transactions"
+        );
+        let admission_deadline = record.admission_deadline;
+
+        // The close worker flow: deal the slices once, assemble
+        // per-validator dealings, certify over the DA channel. A validator
+        // planned to miss this close is dealt nothing.
+        let slices = protocol.slices(&build.prepared)?;
+        let dealings = protocol.dealings(&build.prepared, &slices)?;
+        let dealing_slices = dealings.iter().map(Vec::len).sum();
+        let header = build.prepared.close().header;
+        let roots = build.prepared.close().roots;
+        let mut deals = Vec::new();
+        for (index, peer) in validators.iter().enumerate() {
+            if plan.undealt.get(&epoch) == Some(&index) {
+                continue;
+            }
+            let participant = dealt_participant(index)?;
+            deals.push(node::Deal::new(
+                participant,
+                peer.clone(),
+                0,
+                header,
+                roots,
+                dealings[usize::from(participant)].clone(),
+            ));
+        }
+
+        if plan.expect_fault {
+            // Quorum is unreachable: the certificate must never assemble,
+            // and the registration expires into the deadline fault at its
+            // exact absolute height.
+            let certified: Arc<Mutex<Option<()>>> = Arc::default();
+            {
+                let certified = certified.clone();
+                context.child("certify").spawn(move |_| async move {
+                    if pipeline.certify(0, header, deals).await.is_ok() {
+                        *certified.lock() = Some(());
+                    }
+                });
+            }
+            for _ in 0..600 {
+                if let Some(FaultRecord::Faulted(reason)) = chain.fault(&context).await? {
+                    match reason {
+                        HardFaultReasonResponse::ExpiredRegistration {
+                            epoch: 0,
+                            expired_at,
+                            ..
+                        } => {
+                            anyhow::ensure!(
+                                expired_at == admission_deadline,
+                                "the registration expired at {expired_at}, not its deadline"
+                            );
+                            anyhow::ensure!(
+                                certified.lock().is_none(),
+                                "two silent validators still assembled a certificate"
+                            );
+                            return Ok(());
+                        }
+                        reason => anyhow::bail!("unexpected fault: {reason:?}"),
+                    }
+                }
+                context.sleep(Duration::from_millis(200)).await;
+            }
+            anyhow::bail!("the registration never expired into the deadline fault")
+        }
+
+        // Certification, local completion, and certified admission.
+        let certificate = pipeline.certify(epoch, header, deals).await?;
+        let result = protocol.certify(
+            build.prepared,
+            slices.len(),
+            dealing_slices,
+            certificate,
+            0,
+            0,
+        )?;
+        pipeline
+            .admit(
+                crate::chain::tx::AdmitRequest::from(&result),
+                result.finalized,
+                result.roots.change,
+            )
+            .await?;
+
+        // The agents' certified reads see the distributed close: verified
+        // light client reads against a validator's query server.
+        loop {
+            let (verified, _) =
+                verified_read(&mut context, &scheme, query, &req(Lookup::Status)).await?;
+            latest
+                .observe(verified.height)
+                .map_err(|error| anyhow::anyhow!("status read regressed: {error}"))?;
+            let Some(Record::Status(status)) = verified.record else {
+                anyhow::bail!("status read returned no record");
+            };
+            anyhow::ensure!(!status.hard_faulted, "the deployment hard-faulted");
+            if status.last_finalized == Some(epoch) {
+                anyhow::ensure!(
+                    status.state_root == result.finalized.successor_root,
+                    "finalized state root diverged from the distributed close"
+                );
+                break;
+            }
+            context.sleep(Duration::from_millis(200)).await;
+        }
+        settled.push(result.finalized.successor_root);
+        predecessor = build.successor;
     }
     let deposit_request = req(Lookup::Deposit {
         id: Sha256::hash(&[DISTRIBUTED_DEPOSIT]),
@@ -3746,6 +4118,43 @@ async fn drive(
         matches!(verified.record, Some(Record::Deposit(_))),
         "deposit record was not certified"
     );
+
+    // The validator that missed epoch 0 retains epoch 1's predecessor
+    // interval of every slice in its spans exactly as its healthy
+    // co-holders do, verifiable at the root epoch 0 settled.
+    let Some(fetcher) = plan.fetcher else {
+        return Ok(());
+    };
+    let root = *settled
+        .first()
+        .context("the fetcher scenario closes epoch 0")?;
+    let committee = committee()?;
+    let assignment = Assignment::new(committee.commitment::<Sha256>(), SLICE_BITS)?;
+    let spans =
+        assigned_slice_spans::<Sha256, _>(&committee, &assignment, dealt_participant(fetcher)?)?;
+    for slice in spans.iter().flat_map(|span| span.clone()) {
+        let fetched = interval(&context, Engine::query_address(fetcher), root, slice).await?;
+        fetched.verify(&root, slice, SLICE_BITS)?;
+        let mut compared = 0;
+        for holder in slice_holders::<Sha256, _>(&committee, &assignment, slice)? {
+            let index = (0..validators.len())
+                .find(|index| dealt_participant(*index).ok() == Some(holder))
+                .context("every holder is a validator")?;
+            if index == fetcher || plan.impaired == Some(index) {
+                continue;
+            }
+            let held = interval(&context, Engine::query_address(index), root, slice).await?;
+            anyhow::ensure!(
+                held.encode() == fetched.encode(),
+                "the fetched interval of slice {slice} differs from validator {index}'s"
+            );
+            compared += 1;
+        }
+        anyhow::ensure!(
+            compared > 0,
+            "slice {slice} has no healthy co-holder to compare against"
+        );
+    }
     Ok(())
 }
 
@@ -3835,6 +4244,97 @@ fn two_silent_validators_expire_the_registration() {
         .property(ClientSucceeded)
         .run()
         .unwrap();
+}
+
+/// Every validator settled epoch 1 behind the validator that missed epoch
+/// 0: two closes finalized, the second sealed over intervals that validator
+/// fetched from its co-holders.
+#[derive(Clone)]
+struct Recovered {
+    expected_root: commonware_clearing::bajillion::commitment::VectorRoot<Digest>,
+}
+
+impl Property<ed25519::PublicKey, State> for Recovered {
+    fn name(&self) -> &str {
+        "settlement finalized epoch one after the interval fetch"
+    }
+
+    fn check<'a>(
+        &'a self,
+        _tracker: &'a ProgressTracker<ed25519::PublicKey>,
+        states: &'a [&'a State],
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            for state in states {
+                let status = match (state.reader)(status_key(&deployment())).await {
+                    Some(Record::Status(status)) => status,
+                    record => return Err(format!("expected a status record, found {record:?}")),
+                };
+                if status.last_finalized != Some(1) {
+                    return Err(format!(
+                        "epoch one did not finalize: {:?}",
+                        status.last_finalized
+                    ));
+                }
+                if status.state_root != self.expected_root {
+                    return Err("finalized state root diverged from the second close".into());
+                }
+                if status.custody != 402 || status.claimable != 0 || status.hard_faulted {
+                    return Err(format!(
+                        "unexpected settled balances: custody {} claimable {} faulted {}",
+                        status.custody, status.claimable, status.hard_faulted
+                    ));
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
+/// Runs the two-epoch recovery scenario: validator 1 misses epoch 0, fetches
+/// every slice in its spans from its co-holders over their query servers
+/// when epoch 1 is dealt, seals, and casts the third vote of the exact
+/// quorum (validator 2 is left out of epoch 1, and the silent-validator
+/// tests above show quorum has no slack). The driver then checks the fetched
+/// records against the healthy co-holders' byte for byte.
+fn recover(impairment: Option<Impairment>) {
+    let engine = Distributed::recovering(impairment);
+    let expected_root = engine.expected_root;
+    let impaired_accepts = engine.impaired_accepts.clone();
+    PlanBuilder::new(engine)
+        .seed(0)
+        .exit_condition(ClientDoneAt { height: 45 })
+        .property(ClientSucceeded)
+        .property(Recovered { expected_root })
+        .run()
+        .unwrap();
+
+    // An impaired holder was actually asked: the rotation past it is what
+    // the variant exercises, not a fetch that happened to skip it.
+    assert_eq!(
+        impaired_accepts.load(Ordering::Relaxed) > 0,
+        impairment.is_some()
+    );
+}
+
+#[test]
+fn missed_close_validator_fetches_intervals_and_seals() {
+    recover(None);
+}
+
+#[test]
+fn interval_fetch_rotates_past_a_garbage_holder() {
+    // Validator 3 answers every evidence request with undecodable bytes: the
+    // fetch declines it and the other co-holder serves each shared slice.
+    recover(Some(Impairment::Garbage));
+}
+
+#[test]
+fn interval_fetch_rotates_past_a_silent_holder() {
+    // Validator 3 accepts every connection and never answers: each attempt
+    // on it times out on the runtime clock before the other co-holder is
+    // asked.
+    recover(Some(Impairment::Silent));
 }
 
 #[test]
@@ -4787,10 +5287,19 @@ impl Walkthrough {
         let finalized = (0..participants.len())
             .map(|_| Finalized::default())
             .collect();
+
+        // Validator directory `index` holds clearing key `index` and serves
+        // evidence at its query address, exactly as setup writes genesis.
+        let validators = (0..Self::VALIDATORS)
+            .map(|index| ValidatorEntry {
+                clearing: compute_public::<MinSig>(&clearing_private(index).unwrap()),
+                query: walkthrough_query(index),
+            })
+            .collect();
         Self {
             participants,
             shares,
-            genesis: Genesis::new(identity, 0, WALKTHROUGH_TIMING, configured),
+            genesis: Genesis::new(identity, 0, WALKTHROUGH_TIMING, configured, validators),
             finalized,
             driver: ClientResult::default(),
             verdicts: Arc::new(Mutex::new(vec![None; operators])),
@@ -5220,23 +5729,10 @@ impl EngineDefinition for Walkthrough {
         marshal_actor.start(marshal_reporters, buffer, resolver);
         stateful_actor.start();
 
-        // Certified query server over the applied database.
-        let db = stateful_mailbox.subscribe_databases().await;
-        query::start(
-            context.child("query"),
-            query::Config {
-                address: walkthrough_query(index),
-                deployments: self.genesis.deployments.clone(),
-                db: db.clone(),
-                finalized: finalized.clone(),
-                marshal: marshal_mailbox.clone(),
-                ingress: ingress_mailbox,
-            },
-        );
-
         // The sealing actor on the DA channel, keyed by the validator's
         // dealt clearing committee key and configured for every operator's
         // deployment.
+        let db = stateful_mailbox.subscribe_databases().await;
         let dealers = self
             .participants
             .iter()
@@ -5244,7 +5740,7 @@ impl EngineDefinition for Walkthrough {
             .cloned()
             .zip(self.genesis.deployments.iter().cloned())
             .collect();
-        let sealer = da::Sealer::new(
+        let (sealer, sealer_mailbox) = da::Sealer::new(
             context.child("sealer"),
             da::Config {
                 scheme: commonware_clearing::bajillion::admission::bls12381::Scheme::signer(
@@ -5253,11 +5749,28 @@ impl EngineDefinition for Walkthrough {
                 )
                 .unwrap(),
                 operators: dealers,
-                db,
+                db: db.clone(),
                 partition: format!("{partition_prefix}-dealings"),
+                validators: self.genesis.validators.clone(),
+                fetch_timeout: Duration::from_secs(2),
             },
         );
         sealer.start(settlement_da_network);
+
+        // Certified query server over the applied database, serving evidence
+        // from the sealer's retained dealings.
+        query::start(
+            context.child("query"),
+            query::Config {
+                address: walkthrough_query(index),
+                deployments: self.genesis.deployments.clone(),
+                db,
+                finalized: finalized.clone(),
+                marshal: marshal_mailbox.clone(),
+                ingress: ingress_mailbox,
+                sealer: Some(sealer_mailbox),
+            },
+        );
 
         // Simplex engine.
         let engine = simplex::Engine::new(

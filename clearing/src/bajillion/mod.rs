@@ -32,9 +32,10 @@
 //! the encoded relation. It does not prove that the operator never signed another private receipt.
 //! The challenge constructors in this crate ([`transition::ChallengeIndex::new`],
 //! [`challenge::account_lookup`], and [`challenge::higher_entry_lookup`]) require the full posted
-//! corpus and the predecessor state. Slice retention guarantees that the corpus is reconstructible
-//! from honest holders, not that a challenge can be assembled from one slice with this crate's
-//! current API.
+//! corpus and the predecessor state. [`serve::SpanIndex`] derives the same lookups, state
+//! openings, and claims for the accounts in one span from that span's sealed slice and the
+//! holder's retained interval, so a wallet needs one honest holder of its account's slice rather
+//! than the reconstructed corpus.
 //!
 //! ## Payer sequencing and private evidence
 //!
@@ -227,7 +228,11 @@
 //! window of the validator ring sliding with the slice index
 //! ([`admission::slice_holders`]), so a validator's slices form one contiguous span, or
 //! two when the window wraps past the last slice ([`admission::assigned_slice_spans`]).
-//! A validator's "dealing" is one proof slice per assigned span. [`admission::seal`] rejects
+//! Spans overlap heavily, so the operator never materializes a proof slice per span:
+//! [`transition::PreparedClose::deal`] encodes each slice's dealt content once as a chunk
+//! ([`retained::Dealings`]) and ships every span as one witness followed by clones of the
+//! covered chunks ([`retained::Wire`]), one pass over the corpus however many spans there
+//! are. A validator's "dealing" is one proof slice per assigned span. [`admission::seal`] rejects
 //! any other dealing, authenticates its slices, and returns one [`admission::Vote`] plus the
 //! owned [`admission::SealedDealing`]. The dealing must be durable before the vote is
 //! released. The exact-quorum certificate authenticates the shared [`transition::Header`].
@@ -551,6 +556,7 @@ pub mod commitment;
 pub mod payment;
 pub mod posted;
 pub mod retained;
+pub mod serve;
 pub mod settlement;
 pub mod state;
 pub mod transition;

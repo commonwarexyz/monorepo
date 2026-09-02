@@ -21,8 +21,8 @@ use commonware_clearing::bajillion::{
         SettlementOutput, StateLeaf,
     },
     transition::{
-        Assignment, BatchId, CloseLimits, CoverageRange, ExternalPayoutClaim, Header, ProofSlice,
-        RootBundle, SliceBoundary, TerminalProof, WithdrawalClaim, WithdrawalOutput,
+        Assignment, BatchId, CloseContext, CloseLimits, CoverageRange, ExternalPayoutClaim, Header,
+        ProofSlice, RootBundle, SliceBoundary, TerminalProof, WithdrawalClaim, WithdrawalOutput,
     },
     vector::{OutEntry, OutTipLookup, OutVector, TransposeEntry},
 };
@@ -80,6 +80,7 @@ commonware_conformance::conformance_tests! {
     CodecConformance<BatchId<Sha256Digest>>,
     CodecConformance<Header<Sha256Digest>>,
     CodecConformance<CloseLimits>,
+    CodecConformance<CloseContext<VerifyingKey, Sha256Digest>>,
     CodecConformance<SliceBoundary>,
     CodecConformance<CoverageRange<Sha256Digest>> => 1024,
     CodecConformance<WithdrawalOutput> => 1024,

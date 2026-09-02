@@ -54,6 +54,10 @@ hash = "e891cf89f7fe717a293bb46fbd9989d07e26b3774c613ad15f56d618d2137810"
 n_cases = 1024
 hash = "0edb7721f41b8515ca4c7ea828b524dc32fe8932285751debb968bf44728471c"
 
+["conformance::CodecConformance<CloseContext<VerifyingKey,Sha256Digest>>"]
+n_cases = 65536
+hash = "1b7662331424e5e75f6dd7b2d7dcd8a046a841d99eb7d14c9d71d26ba3340e6d"
+
 ["conformance::CodecConformance<CloseLimits>"]
 n_cases = 65536
 hash = "8a29fc86a6ce23c970dbfb92c7ed92d98221305a9820c8a9f47d894d9be2e3c9"
@@ -64,7 +68,7 @@ hash = "48a782e24e6890b99c546e6204e92389437def2c6219c3c1adbddabd968dd8b8"
 
 ["conformance::CodecConformance<CoverageRange<Sha256Digest>>"]
 n_cases = 1024
-hash = "bcd33a2a7a520891839e889b86395a12dfc62aa651b1d81da66dab3e0ebabbc4"
+hash = "3d45ad4a6ffed3fffdf5a4a178f64b0e629855eac4677f1e0277bc56b3654fd0"
 
 ["conformance::CodecConformance<DepositBatch<VerifyingKey>>"]
 n_cases = 1024
@@ -124,7 +128,7 @@ hash = "8a29fc86a6ce23c970dbfb92c7ed92d98221305a9820c8a9f47d894d9be2e3c9"
 
 ["conformance::CodecConformance<ProofSlice<VerifyingKey,Sha256Digest>>"]
 n_cases = 256
-hash = "1e70849bfc9ebdde61bfde2482d8d1ba774aa0081b54b23b9f7f60a28dbf6be9"
+hash = "952e2e256387c376c10c4a97a7c811fe7278ac85104968ffa153529d548b8a37"
 
 ["conformance::CodecConformance<RangeOpening<Sha256Digest>>"]
 n_cases = 1024

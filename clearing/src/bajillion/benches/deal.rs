@@ -5,11 +5,12 @@ use super::{
         strategy,
     },
 };
+use commonware_codec::EncodeSize;
 use criterion::{Criterion, criterion_group};
 use std::hint::black_box;
 
-/// Deals every distinct span the committee is assigned: the operator's assembly cost per
-/// close, since each validator's dealing is one proof slice per span.
+/// Deals every distinct span the committee is assigned: the operator's cost per close of
+/// encoding every slice's chunk once, one witness per span, and each span's wire.
 fn bench_deal(c: &mut Criterion) {
     let validators = Validators::new();
     for (_, profile) in selected_active_profiles() {
@@ -25,11 +26,15 @@ fn bench_deal(c: &mut Criterion) {
             ),
             |b| {
                 b.iter(|| {
+                    let dealings = fixture
+                        .prepared
+                        .deal(&fixture.cache, &spans, strategy())
+                        .expect("benchmark dealing is valid");
                     black_box(
-                        fixture
-                            .prepared
-                            .assemble_slices(&fixture.cache, &spans, strategy())
-                            .expect("benchmark dealing is valid"),
+                        spans
+                            .iter()
+                            .map(|span| dealings.encode_span(span).encode_size())
+                            .sum::<usize>(),
                     )
                 });
             },

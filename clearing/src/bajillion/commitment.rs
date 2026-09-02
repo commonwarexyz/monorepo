@@ -521,6 +521,49 @@ impl<D: Digest> Tree<D> {
 /// One contiguous member interval's adjacent neighbors and shared opening.
 type Bracket<T, D> = (Option<T>, Option<T>, RangeOpening<D>);
 
+/// Values hashed per parallel block when a range opening is verified with a strategy. Even, so
+/// every pair stays inside one block.
+const LEAF_BLOCK: usize = 2048;
+
+/// Hashes `values` into positioned leaves from `start`, pairwise like the builder's two-lane
+/// path.
+fn hash_block<H, B>(
+    kind: VectorKind,
+    len: u32,
+    start: u32,
+    values: &[B],
+) -> Result<Vec<(H::Digest, u32)>, Error>
+where
+    H: Hasher,
+    B: AsRef<[u8]>,
+{
+    let mut leaves = Vec::with_capacity(values.len());
+    for (pair_index, pair) in values.chunks(2).enumerate() {
+        let first_position = start + (pair_index as u32) * 2;
+        match pair {
+            [first, second] => {
+                let second_position = first_position + 1;
+                let (first, second) = leaf_digest_pair::<H>(
+                    kind,
+                    len,
+                    first_position,
+                    first.as_ref(),
+                    second_position,
+                    second.as_ref(),
+                )?;
+                leaves.push((first, first_position));
+                leaves.push((second, second_position));
+            }
+            [first] => leaves.push((
+                leaf_digest::<H>(kind, len, first_position, first.as_ref())?,
+                first_position,
+            )),
+            _ => unreachable!("chunks(2) yields one or two values"),
+        }
+    }
+    Ok(leaves)
+}
+
 /// A bounded BMT proof for one contiguous range of encoded vector values.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RangeOpening<D: Digest> {
@@ -562,6 +605,55 @@ impl<D: Digest> RangeOpening<D> {
         Ok(())
     }
 
+    /// Hashes the covered encoded values into positioned leaves after checking that they fit
+    /// the vector from [`Self::start`].
+    fn leaves<H, B>(&self, kind: VectorKind, encoded_values: &[B]) -> Result<Vec<(D, u32)>, Error>
+    where
+        H: Hasher<Digest = D>,
+        B: AsRef<[u8]>,
+    {
+        let len = self.bound_values(encoded_values)?;
+        hash_block::<H, B>(kind, len, self.start, encoded_values)
+    }
+
+    /// Hashes the covered values like [`Self::leaves`], in parallel blocks under `strategy`.
+    fn leaves_with<H, B>(
+        &self,
+        kind: VectorKind,
+        encoded_values: &[B],
+        strategy: &impl Strategy,
+    ) -> Result<Vec<(D, u32)>, Error>
+    where
+        H: Hasher<Digest = D>,
+        B: AsRef<[u8]> + Sync,
+    {
+        let len = self.bound_values(encoded_values)?;
+
+        // Blocks have an even length, so every pair stays inside one block and each block
+        // hashes exactly as the sequential path does. The bound above keeps every position
+        // arithmetic below in range.
+        let blocks = strategy.try_map_collect_vec(
+            encoded_values.chunks(LEAF_BLOCK).enumerate(),
+            |(block_index, block)| {
+                let block_start = self.start + (block_index * LEAF_BLOCK) as u32;
+                hash_block::<H, B>(kind, len, block_start, block)
+            },
+        )?;
+        Ok(blocks.into_iter().flatten().collect())
+    }
+
+    /// Checks that the values fit the vector from `start` and returns the leaf count.
+    fn bound_values<B>(&self, encoded_values: &[B]) -> Result<u32, Error> {
+        let len = self.proof.leaf_count;
+        let count = u32::try_from(encoded_values.len())
+            .map_err(|_| Error::TooManyValues(encoded_values.len() as u64))?;
+        self.start
+            .checked_add(count)
+            .filter(|end| *end <= len)
+            .ok_or(Error::NonCanonicalPositions)?;
+        Ok(len)
+    }
+
     pub(crate) fn reconstruct<H, B>(
         &self,
         kind: VectorKind,
@@ -580,40 +672,38 @@ impl<D: Digest> RangeOpening<D> {
                 Err(Error::MalformedEmpty)
             };
         }
-        let count = u32::try_from(encoded_values.len())
-            .map_err(|_| Error::TooManyValues(encoded_values.len() as u64))?;
-        self.start
-            .checked_add(count)
-            .filter(|end| *end <= len)
-            .ok_or(Error::NonCanonicalPositions)?;
-        let mut leaves = Vec::with_capacity(encoded_values.len());
-        for (pair_index, values) in encoded_values.chunks(2).enumerate() {
-            // Interleave leaf hashing pairwise, matching the builder's two-lane path.
-            let first_position = self.start + (pair_index as u32) * 2;
-            match values {
-                [first, second] => {
-                    let second_position = first_position + 1;
-                    let (first, second) = leaf_digest_pair::<H>(
-                        kind,
-                        len,
-                        first_position,
-                        first.as_ref(),
-                        second_position,
-                        second.as_ref(),
-                    )?;
-                    leaves.push((first, first_position));
-                    leaves.push((second, second_position));
-                }
-                [first] => leaves.push((
-                    leaf_digest::<H>(kind, len, first_position, first.as_ref())?,
-                    first_position,
-                )),
-                _ => unreachable!("chunks(2) yields one or two values"),
-            }
-        }
+        let leaves = self.leaves::<H, B>(kind, encoded_values)?;
         let inner = self
             .proof
             .root_from_multi_inclusion::<H>(&leaves, &Sequential)?;
+        Ok(bind_root::<H>(kind, len, &inner))
+    }
+
+    /// Reconstructs the root like [`Self::reconstruct`], hashing the covered values and the
+    /// tree levels with `strategy`.
+    pub(crate) fn reconstruct_with<H, B>(
+        &self,
+        kind: VectorKind,
+        encoded_values: &[B],
+        strategy: &impl Strategy,
+    ) -> Result<VectorRoot<D>, Error>
+    where
+        H: Hasher<Digest = D>,
+        B: AsRef<[u8]> + Sync,
+    {
+        self.validate_shape()?;
+        let len = self.proof.leaf_count;
+        if encoded_values.is_empty() {
+            return if len == 0 && self.start == 0 {
+                Ok(empty_root::<H>(kind))
+            } else {
+                Err(Error::MalformedEmpty)
+            };
+        }
+        let leaves = self.leaves_with::<H, B>(kind, encoded_values, strategy)?;
+        let inner = self
+            .proof
+            .root_from_multi_inclusion::<H>(&leaves, strategy)?;
         Ok(bind_root::<H>(kind, len, &inner))
     }
 
@@ -633,6 +723,107 @@ impl<D: Digest> RangeOpening<D> {
         } else {
             Err(Error::InvalidOpening)
         }
+    }
+
+    /// Verifies like [`Self::verify`], hashing the covered values and the tree levels with
+    /// `strategy`. Large ranges verify in parallel this way.
+    pub fn verify_with<H, B>(
+        &self,
+        kind: VectorKind,
+        root: &VectorRoot<D>,
+        encoded_values: &[B],
+        strategy: &impl Strategy,
+    ) -> Result<(), Error>
+    where
+        H: Hasher<Digest = D>,
+        B: AsRef<[u8]> + Sync,
+    {
+        if self.reconstruct_with::<H, B>(kind, encoded_values, strategy)? == *root {
+            Ok(())
+        } else {
+            Err(Error::InvalidOpening)
+        }
+    }
+
+    /// Narrows this opening to the `sub_count` covered values starting at `sub_start`.
+    ///
+    /// `encoded_values` are the values this opening covers in position order, exactly as
+    /// passed to [`Self::verify`]. The result is what [`Tree::range_opening`] returns for the
+    /// sub-range on the same tree, byte for byte, without access to the tree.
+    ///
+    /// The caller must have verified this opening against the certified root with these values
+    /// first. Narrowing trusts the values and siblings it is given and cannot detect that either
+    /// disagrees with the tree. A corrupt input yields an opening that does not verify against
+    /// the certified root, and verifying the result costs the same as verifying any opening of
+    /// its size.
+    ///
+    /// Fails with [`Error::MalformedEmpty`] for an empty sub-range,
+    /// [`Error::NonCanonicalPositions`] when the values or the sub-range do not fit the covered
+    /// range, and [`Error::Bmt`] when the proof's sibling count does not match the covered range.
+    pub fn narrow<H, B>(
+        &self,
+        kind: VectorKind,
+        encoded_values: &[B],
+        sub_start: u32,
+        sub_count: u32,
+    ) -> Result<Self, Error>
+    where
+        H: Hasher<Digest = D>,
+        B: AsRef<[u8]>,
+    {
+        self.validate_shape()?;
+        if sub_count == 0 {
+            return Err(Error::MalformedEmpty);
+        }
+
+        // Bound the sub-range before hashing so a caller error costs no digests.
+        let count = u32::try_from(encoded_values.len())
+            .map_err(|_| Error::TooManyValues(encoded_values.len() as u64))?;
+        let end = self
+            .start
+            .checked_add(count)
+            .filter(|end| *end <= self.proof.leaf_count)
+            .ok_or(Error::NonCanonicalPositions)?;
+        let sub_end = sub_start
+            .checked_add(sub_count)
+            .filter(|sub_end| sub_start >= self.start && *sub_end <= end)
+            .ok_or(Error::NonCanonicalPositions)?;
+        let leaves = self
+            .leaves::<H, B>(kind, encoded_values)?
+            .into_iter()
+            .map(|(leaf, _)| leaf)
+            .collect::<Vec<_>>();
+        Ok(Self {
+            start: sub_start,
+            proof: self
+                .proof
+                .narrow::<H>(self.start, &leaves, sub_start, sub_end - 1)?,
+        })
+    }
+
+    /// Opens the single covered value at `position`.
+    ///
+    /// The result is what [`Tree::opening`] returns for `position` on the same tree. The trust
+    /// conditions of [`Self::narrow`] apply: the caller must have verified this opening against
+    /// the certified root with `encoded_values` first, and verifying the result is cheap.
+    ///
+    /// Fails with [`Error::NonCanonicalPositions`] when the values or `position` do not fit the
+    /// covered range, and [`Error::Bmt`] when the proof's sibling count does not match it.
+    pub fn open<H, B>(
+        &self,
+        kind: VectorKind,
+        encoded_values: &[B],
+        position: u32,
+    ) -> Result<Opening<D>, Error>
+    where
+        H: Hasher<Digest = D>,
+        B: AsRef<[u8]>,
+    {
+        let narrowed = self.narrow::<H, B>(kind, encoded_values, position, 1)?;
+        Ok(Opening {
+            position,
+            proof: narrowed.proof,
+        })
     }
 
     pub(crate) fn read_bounded(
@@ -1018,5 +1209,170 @@ mod tests {
         opening
             .verify::<Sha256, &[u8]>(VectorKind::Change, &empty.root(), &[])
             .unwrap();
+    }
+
+    fn encoded(kind: VectorKind, len: u32) -> Vec<Vec<u8>> {
+        (0..len)
+            .map(|position| format!("{kind:?}-{position}").into_bytes())
+            .collect()
+    }
+
+    fn tree_of(kind: VectorKind, values: &[Vec<u8>]) -> Tree<Sha256Digest> {
+        tree(kind, &values.iter().map(Vec::as_slice).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn open_matches_direct_opening_for_every_range() {
+        for kind in [VectorKind::State, VectorKind::Transpose] {
+            for len in 1..=40 {
+                let values = encoded(kind, len);
+                let tree = tree_of(kind, &values);
+                let root = tree.root();
+                for start in 0..len {
+                    for count in 1..=len - start {
+                        let end = start + count;
+                        let covered = &values[start as usize..end as usize];
+                        let opening = tree.range_opening(start, count).unwrap();
+                        opening.verify::<Sha256, _>(kind, &root, covered).unwrap();
+                        for position in start..end {
+                            let opened =
+                                opening.open::<Sha256, _>(kind, covered, position).unwrap();
+                            let direct = tree.opening(position).unwrap();
+                            assert_eq!(opened, direct);
+                            assert_eq!(opened.encode(), direct.encode());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn narrow_matches_direct_range_opening_for_every_sub_range() {
+        for kind in [VectorKind::State, VectorKind::Transpose] {
+            for len in 1..=16 {
+                let values = encoded(kind, len);
+                let tree = tree_of(kind, &values);
+                let root = tree.root();
+                for start in 0..len {
+                    for count in 1..=len - start {
+                        let end = start + count;
+                        let covered = &values[start as usize..end as usize];
+                        let opening = tree.range_opening(start, count).unwrap();
+                        opening.verify::<Sha256, _>(kind, &root, covered).unwrap();
+                        for sub_start in start..end {
+                            for sub_count in 1..=end - sub_start {
+                                let narrowed = opening
+                                    .narrow::<Sha256, _>(kind, covered, sub_start, sub_count)
+                                    .unwrap();
+                                let direct = tree.range_opening(sub_start, sub_count).unwrap();
+                                assert_eq!(narrowed, direct);
+                                assert_eq!(narrowed.encode(), direct.encode());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn narrowing_tampered_values_does_not_verify() {
+        let kind = VectorKind::Change;
+        let values = encoded(kind, 8);
+        let tree = tree_of(kind, &values);
+        let root = tree.root();
+        let opening = tree.range_opening(1, 6).unwrap();
+        let covered = &values[1..7];
+        opening.verify::<Sha256, _>(kind, &root, covered).unwrap();
+
+        // A tampered value outside the sub-range feeds a sibling of the narrowed proof.
+        let mut tampered = covered.to_vec();
+        tampered[0].push(0);
+        let narrowed = opening.narrow::<Sha256, _>(kind, &tampered, 3, 2).unwrap();
+        assert_ne!(narrowed, tree.range_opening(3, 2).unwrap());
+        assert!(matches!(
+            narrowed.verify::<Sha256, _>(kind, &root, &values[3..5]),
+            Err(Error::InvalidOpening)
+        ));
+        let opened = opening.open::<Sha256, _>(kind, &tampered, 3).unwrap();
+        assert_ne!(opened, tree.opening(3).unwrap());
+        assert!(matches!(
+            opened.verify::<Sha256>(kind, &root, &values[3]),
+            Err(Error::InvalidOpening)
+        ));
+
+        // A tampered value inside the sub-range never becomes a sibling, so the narrowed proof
+        // is the true one and rejects the tampered value.
+        let mut tampered = covered.to_vec();
+        tampered[2].push(0);
+        let narrowed = opening.narrow::<Sha256, _>(kind, &tampered, 3, 2).unwrap();
+        assert_eq!(narrowed, tree.range_opening(3, 2).unwrap());
+        assert!(matches!(
+            narrowed.verify::<Sha256, _>(kind, &root, &tampered[2..4]),
+            Err(Error::InvalidOpening)
+        ));
+    }
+
+    #[test]
+    fn narrow_and_open_reject_positions_outside_the_covered_range() {
+        let kind = VectorKind::Change;
+        let values = encoded(kind, 8);
+        let tree = tree_of(kind, &values);
+        let opening = tree.range_opening(2, 3).unwrap();
+        let covered = &values[2..5];
+        assert!(matches!(
+            opening.narrow::<Sha256, _>(kind, covered, 1, 2),
+            Err(Error::NonCanonicalPositions)
+        ));
+        assert!(matches!(
+            opening.narrow::<Sha256, _>(kind, covered, 4, 2),
+            Err(Error::NonCanonicalPositions)
+        ));
+        assert!(matches!(
+            opening.narrow::<Sha256, _>(kind, covered, u32::MAX, 2),
+            Err(Error::NonCanonicalPositions)
+        ));
+        assert!(matches!(
+            opening.narrow::<Sha256, _>(kind, covered, 3, 0),
+            Err(Error::MalformedEmpty)
+        ));
+        assert!(matches!(
+            opening.open::<Sha256, _>(kind, covered, 1),
+            Err(Error::NonCanonicalPositions)
+        ));
+        assert!(matches!(
+            opening.open::<Sha256, _>(kind, covered, 5),
+            Err(Error::NonCanonicalPositions)
+        ));
+
+        // Values that overrun the vector, or fewer values than the position needs, do not fit.
+        assert!(matches!(
+            opening.narrow::<Sha256, _>(kind, &values[1..], 2, 1),
+            Err(Error::NonCanonicalPositions)
+        ));
+        assert!(matches!(
+            opening.open::<Sha256, _>(kind, &covered[..2], 4),
+            Err(Error::NonCanonicalPositions)
+        ));
+
+        // A proof whose siblings do not match the range shape is rejected structurally.
+        let mut short = opening;
+        short.proof.siblings.pop();
+        assert!(matches!(
+            short.narrow::<Sha256, _>(kind, covered, 3, 1),
+            Err(Error::Bmt(bmt::Error::UnalignedProof))
+        ));
+
+        // The canonical empty opening covers no positions.
+        let empty = tree_of(kind, &[]).range_opening(0, 0).unwrap();
+        assert!(matches!(
+            empty.narrow::<Sha256, &[u8]>(kind, &[], 0, 0),
+            Err(Error::MalformedEmpty)
+        ));
+        assert!(matches!(
+            empty.open::<Sha256, &[u8]>(kind, &[], 0),
+            Err(Error::NonCanonicalPositions)
+        ));
     }
 }

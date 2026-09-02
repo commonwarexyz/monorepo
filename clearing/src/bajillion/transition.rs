@@ -13,6 +13,7 @@ use crate::bajillion::{
     challenge::{StateAbsence, StateLookup, StateOpening, StateValueOpening},
     commitment::{self, RangeOpening, Tree, VectorKind, VectorRoot},
     payment::{AckError, PaymentContext, VECTOR_ACK_AGGREGATE_NAMESPACE, verify_ack_signatures},
+    retained::{Dealings, Witness, encode_chunk},
     state::{
         AccountChange, AccountRow, AccountState, ChangeGuard, Prefix, SettlementOutput, StateLeaf,
     },
@@ -25,6 +26,7 @@ use alloc::{boxed::Box, collections::BTreeSet, vec::Vec};
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{
     Decode, Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write,
+    varint::UInt,
 };
 use commonware_cryptography::{
     BatchVerifier, Digest, Hasher, PublicKey,
@@ -382,8 +384,67 @@ impl Read for SliceBoundary {
     }
 }
 
+/// Writes one boundary as it travels in a coverage range: varint positions and prefix
+/// fields, fixed-width checksums. The coverage leaf it is checked against stays the
+/// fixed-width [Write] form.
+fn write_boundary(boundary: &SliceBoundary, writer: &mut impl BufMut) {
+    let prefix = &boundary.prefix;
+    UInt(boundary.predecessor).write(writer);
+    UInt(boundary.change).write(writer);
+    UInt(boundary.successor).write(writer);
+    UInt(prefix.debit).write(writer);
+    UInt(prefix.credit).write(writer);
+    UInt(prefix.payout).write(writer);
+    UInt(prefix.deposit).write(writer);
+    UInt(prefix.withdrawal).write(writer);
+    UInt(prefix.withdrawal_count).write(writer);
+    UInt(prefix.out_count).write(writer);
+    UInt(prefix.in_count).write(writer);
+    boundary.out_check.write(writer);
+    boundary.in_check.write(writer);
+}
+
+fn read_boundary(reader: &mut impl Buf) -> Result<SliceBoundary, CodecError> {
+    Ok(SliceBoundary {
+        predecessor: UInt::read(reader)?.into(),
+        change: UInt::read(reader)?.into(),
+        successor: UInt::read(reader)?.into(),
+        prefix: Prefix {
+            debit: UInt::read(reader)?.into(),
+            credit: UInt::read(reader)?.into(),
+            payout: UInt::read(reader)?.into(),
+            deposit: UInt::read(reader)?.into(),
+            withdrawal: UInt::read(reader)?.into(),
+            withdrawal_count: UInt::read(reader)?.into(),
+            out_count: UInt::read(reader)?.into(),
+            in_count: UInt::read(reader)?.into(),
+        },
+        out_check: Checksum::read(reader)?,
+        in_check: Checksum::read(reader)?,
+    })
+}
+
+fn boundary_size(boundary: &SliceBoundary) -> usize {
+    let prefix = &boundary.prefix;
+    UInt(boundary.predecessor).encode_size()
+        + UInt(boundary.change).encode_size()
+        + UInt(boundary.successor).encode_size()
+        + UInt(prefix.debit).encode_size()
+        + UInt(prefix.credit).encode_size()
+        + UInt(prefix.payout).encode_size()
+        + UInt(prefix.deposit).encode_size()
+        + UInt(prefix.withdrawal).encode_size()
+        + UInt(prefix.withdrawal_count).encode_size()
+        + UInt(prefix.out_count).encode_size()
+        + UInt(prefix.in_count).encode_size()
+        + Checksum::SIZE * 2
+}
+
 /// The adjacent authenticated coverage boundaries around one proof slice: one before each
 /// covered slice and one after the last.
+///
+/// Boundaries travel with varint positions and prefix fields. Each is checked against the
+/// fixed-width [SliceBoundary] leaf encoding.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CoverageRange<D: Digest> {
     /// Boundaries `B[span.start] ..= B[span.end]`, one more than the slices covered.
@@ -416,18 +477,27 @@ impl<D: Digest> CoverageRange<D> {
             .last()
             .expect("a coverage range holds at least two boundaries")
     }
+
+    /// Wire bytes of the boundary list: its length and every boundary's varint form.
+    pub(crate) fn boundaries_size(&self) -> usize {
+        self.boundaries.len().encode_size()
+            + self.boundaries.iter().map(boundary_size).sum::<usize>()
+    }
 }
 
 impl<D: Digest> Write for CoverageRange<D> {
     fn write(&self, writer: &mut impl BufMut) {
-        self.boundaries.write(writer);
+        self.boundaries.len().write(writer);
+        for boundary in &self.boundaries {
+            write_boundary(boundary, writer);
+        }
         self.opening.write(writer);
     }
 }
 
 impl<D: Digest> EncodeSize for CoverageRange<D> {
     fn encode_size(&self) -> usize {
-        self.boundaries.encode_size() + self.opening.encode_size()
+        self.boundaries_size() + self.opening.encode_size()
     }
 }
 
@@ -435,15 +505,11 @@ impl<D: Digest> Read for CoverageRange<D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let boundaries = Vec::<SliceBoundary>::read_cfg(
+        Self::read_counted(
             reader,
-            &(RangeCfg::new(2..=usize::from(MAX_SLICE_COUNT) + 1), ()),
-        )?;
-        let opening = RangeOpening::read_bounded(reader, boundaries.len(), usize::MAX)?;
-        Ok(Self {
-            boundaries,
-            opening,
-        })
+            &RangeCfg::new(2..=usize::from(MAX_SLICE_COUNT) + 1),
+            usize::MAX,
+        )
     }
 }
 
@@ -1005,6 +1071,11 @@ where
 }
 
 /// Chain-known epoch registration bound to one exact predecessor state root.
+///
+/// The codec persists an authenticated context and reads it back without boundary validation
+/// or anchor recomputation, so decoded bytes must be ones this party encoded from a context
+/// constructed through [`EpochContext::new`] and bound by the settlement chain, never bytes a
+/// peer supplied.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CloseContext<P: PublicKey, D: Digest> {
     epoch: EpochContext<P, D>,
@@ -1092,6 +1163,61 @@ impl<P: PublicKey, D: Digest> CloseContext<P, D> {
             epoch,
             predecessor_root,
         }
+    }
+}
+
+impl<P: PublicKey, D: Digest> Write for CloseContext<P, D> {
+    fn write(&self, writer: &mut impl BufMut) {
+        self.epoch.payment.write(writer);
+        self.epoch.deployment.write(writer);
+        self.epoch.deposit_root.write(writer);
+        self.epoch.withdrawal_root.write(writer);
+        self.epoch.predecessor_liability.write(writer);
+        self.epoch.admission_deadline.write(writer);
+        self.epoch.challenge_deadline.write(writer);
+        self.epoch.limits.write(writer);
+        self.epoch.assignment.write(writer);
+        self.predecessor_root.write(writer);
+    }
+}
+
+impl<P: PublicKey, D: Digest> FixedSize for CloseContext<P, D> {
+    const SIZE: usize = PaymentContext::<P, D>::SIZE
+        + D::SIZE
+        + VectorRoot::<D>::SIZE * 3
+        + u64::SIZE * 3
+        + CloseLimits::SIZE
+        + Assignment::<D>::SIZE;
+}
+
+impl<P: PublicKey, D: Digest> Read for CloseContext<P, D> {
+    type Cfg = ();
+
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let payment = PaymentContext::read(reader)?;
+        let deployment = D::read(reader)?;
+        let deposit_root = VectorRoot::read(reader)?;
+        let withdrawal_root = VectorRoot::read(reader)?;
+        let predecessor_liability = u64::read(reader)?;
+        let admission_deadline = u64::read(reader)?;
+        let challenge_deadline = u64::read(reader)?;
+        let limits = CloseLimits::read(reader)?;
+        let assignment = Assignment::read(reader)?;
+        let predecessor_root = VectorRoot::read(reader)?;
+        Ok(Self::from_parts(
+            EpochContext::from_parts(
+                payment,
+                deployment,
+                deposit_root,
+                withdrawal_root,
+                predecessor_liability,
+                admission_deadline,
+                challenge_deadline,
+                limits,
+                assignment,
+            ),
+            predecessor_root,
+        ))
     }
 }
 
@@ -1264,6 +1390,10 @@ pub struct ExternalPayoutClaim<P: PublicKey, D: Digest> {
 }
 
 impl<P: PublicKey, D: Digest> ExternalPayoutClaim<P, D> {
+    pub(crate) const fn new(leaf: AccountChange<P, D>, opening: commitment::Opening<D>) -> Self {
+        Self { leaf, opening }
+    }
+
     /// Returns the claimed change-vector position.
     #[must_use]
     pub const fn position(&self) -> u32 {
@@ -1356,6 +1486,16 @@ pub struct WithdrawalClaim<D: Digest> {
 }
 
 impl<D: Digest> WithdrawalClaim<D> {
+    pub(crate) const fn new(
+        output: WithdrawalOutput,
+        output_opening: commitment::Opening<D>,
+    ) -> Self {
+        Self {
+            output,
+            output_opening,
+        }
+    }
+
     /// Returns the certified settlement output.
     #[must_use]
     pub const fn output(&self) -> &WithdrawalOutput {
@@ -1466,6 +1606,10 @@ impl<P: PublicKey, D: Digest> PreparedClose<P, D> {
         u8::try_from(slice_count.ilog2()).expect("prepared slice count fits the supported width")
     }
 
+    fn slice_count(&self) -> u16 {
+        1_u16 << self.slice_bits()
+    }
+
     /// Validates the complete close relation without reconstructing any retained root.
     pub fn validate<H, B, R>(
         &self,
@@ -1515,7 +1659,9 @@ impl<P: PublicKey, D: Digest> PreparedClose<P, D> {
     ///
     /// A dealing is the validator's assigned spans
     /// ([assigned_slice_spans](crate::bajillion::admission::assigned_slice_spans)). A span
-    /// must be nonempty and lie within the deterministic partition.
+    /// must be nonempty and lie within the deterministic partition. Every span
+    /// materializes its rows, vectors, transpose range, and unchanged leaves, so this is
+    /// the validator-side and test form of a slice. Operators deal with [Self::deal].
     pub fn assemble_slices(
         &self,
         cache: &StateCache<P, D>,
@@ -1525,94 +1671,164 @@ impl<P: PublicKey, D: Digest> PreparedClose<P, D> {
         if cache.root() != self.predecessor_root {
             return Err(TransitionError::PredecessorRoot);
         }
-        let slice_bits = self.slice_bits();
-        let unchanged_boundaries = state_boundaries(&self.close.unchanged, slice_bits)?;
-        let slice_count = 1_u16 << slice_bits;
+        let unchanged_boundaries = state_boundaries(&self.close.unchanged, self.slice_bits())?;
         strategy.try_map_collect_vec(spans, |span| {
-            if !valid_span(span, slice_count) {
-                return Err(TransitionError::SliceIndex);
-            }
+            let witness = self.witness(cache, span)?;
             let (first, last) = (usize::from(span.start), usize::from(span.end));
             let start_boundary = self.coverage_boundaries[first];
             let end_boundary = self.coverage_boundaries[last];
-            let start = start_boundary.change as usize;
-            let end = end_boundary.change as usize;
-            let (predecessor, change_successor, opening) = self.changes.bracket(
-                &self.change_guards,
-                start_boundary.change..end_boundary.change,
-            )?;
-            let withdrawal_start = u32::try_from(start_boundary.prefix.withdrawal_count)
-                .map_err(|_| TransitionError::SliceRange)?;
-            let withdrawal_count = u32::try_from(
-                end_boundary
-                    .prefix
-                    .withdrawal_count
-                    .checked_sub(start_boundary.prefix.withdrawal_count)
-                    .ok_or(TransitionError::SliceRange)?,
-            )
-            .map_err(|_| TransitionError::SliceRange)?;
-            let transpose_start = u32::try_from(start_boundary.prefix.in_count)
-                .map_err(|_| TransitionError::SliceRange)?;
-            let transpose_count = u32::try_from(
-                end_boundary
-                    .prefix
-                    .in_count
-                    .checked_sub(start_boundary.prefix.in_count)
-                    .ok_or(TransitionError::SliceRange)?,
-            )
-            .map_err(|_| TransitionError::SliceRange)?;
-            let boundaries = self.coverage_boundaries[first..=last].to_vec();
-            let boundary_count =
-                u32::try_from(boundaries.len()).map_err(|_| TransitionError::SliceCoverage)?;
-            Ok(ProofSlice {
-                span: span.clone(),
-                coverage: CoverageRange {
-                    boundaries,
-                    opening: self
-                        .coverage
-                        .range_opening(u32::from(span.start), boundary_count)?,
-                },
-                changes: ChangeRange {
-                    predecessor,
-                    rows: self.close.rows[start..end].to_vec(),
-                    successor: change_successor,
-                    opening,
-                },
-                out_vectors: self.close.out_vectors[start..end].to_vec(),
-                operator_aggregates: self.close.operator_aggregates[first..last].to_vec(),
-                transpose: self.transpose
-                    [transpose_start as usize..(transpose_start + transpose_count) as usize]
-                    .to_vec(),
-                out_start: self.boundary_states[first].0.clone(),
-                in_start: self.boundary_states[first].1.clone(),
-                transpose_opening: (transpose_count != 0)
-                    .then(|| {
-                        self.transpose_tree
-                            .range_opening(transpose_start, transpose_count)
-                    })
-                    .transpose()?,
-                withdrawal_opening: (withdrawal_count != 0)
-                    .then(|| {
-                        self.withdrawal_output_tree
-                            .range_opening(withdrawal_start, withdrawal_count)
-                    })
-                    .transpose()?,
-                unchanged: self.close.unchanged
+            let rows = start_boundary.change as usize..end_boundary.change as usize;
+            let transpose = self.transpose_range(&start_boundary, &end_boundary)?;
+            Ok(witness.slice(
+                self.close.rows[rows.clone()].to_vec(),
+                self.close.out_vectors[rows].to_vec(),
+                self.transpose[transpose].to_vec(),
+                self.close.unchanged
                     [unchanged_boundaries[first] as usize..unchanged_boundaries[last] as usize]
                     .to_vec(),
-                predecessor: build_state_range(
-                    cache.leaves(),
-                    cache.tree(),
-                    start_boundary.predecessor,
-                    end_boundary.predecessor,
-                )?,
-                successor: build_state_range(
-                    &self.successor_leaves,
-                    &self.successor,
-                    start_boundary.successor,
-                    end_boundary.successor,
-                )?,
-            })
+            ))
+        })
+    }
+
+    /// Deals the requested contiguous slice spans as their dealt wire, encoding each
+    /// slice's content once.
+    ///
+    /// Every slice's chunk (its rows against the retained predecessor leaves, its senders'
+    /// entries, and its transpose range) is encoded once, and each span gets one witness.
+    /// [Dealings::encode_span] then assembles a span's wire from clones of those buffers,
+    /// so dealing the whole committee costs one pass over the corpus however much the
+    /// spans overlap. Spans must be nonempty and lie within the deterministic partition.
+    pub fn deal(
+        &self,
+        cache: &StateCache<P, D>,
+        spans: &[Range<u16>],
+        strategy: &impl Strategy,
+    ) -> Result<Dealings, TransitionError> {
+        if cache.root() != self.predecessor_root {
+            return Err(TransitionError::PredecessorRoot);
+        }
+        let chunks = strategy.try_map_collect_vec(
+            self.coverage_boundaries.windows(2),
+            |window| -> Result<Bytes, TransitionError> {
+                let rows = window[0].change as usize..window[1].change as usize;
+                let leaves = window[0].predecessor as usize..window[1].predecessor as usize;
+                let transpose = self.transpose_range(&window[0], &window[1])?;
+                Ok(encode_chunk(
+                    &self.close.rows[rows.clone()],
+                    &self.close.out_vectors[rows],
+                    &self.transpose[transpose],
+                    &cache.leaves()[leaves],
+                ))
+            },
+        )?;
+        let witnesses = strategy.try_map_collect_vec(
+            spans,
+            |span| -> Result<(Range<u16>, Bytes), TransitionError> {
+                Ok((span.clone(), self.witness(cache, span)?.encode()))
+            },
+        )?;
+        Ok(Dealings::new(chunks, witnesses))
+    }
+
+    /// The transpose positions between two coverage boundaries.
+    fn transpose_range(
+        &self,
+        start: &SliceBoundary,
+        end: &SliceBoundary,
+    ) -> Result<Range<usize>, TransitionError> {
+        let first =
+            usize::try_from(start.prefix.in_count).map_err(|_| TransitionError::SliceRange)?;
+        let last = usize::try_from(end.prefix.in_count).map_err(|_| TransitionError::SliceRange)?;
+        if first > last || last > self.transpose.len() {
+            return Err(TransitionError::SliceRange);
+        }
+        Ok(first..last)
+    }
+
+    /// Builds one span's witness from the retained Merkle state: every covered boundary,
+    /// the range openings narrowed to the span, the accumulator starts at its first
+    /// boundary, and the change and state guards around it.
+    fn witness(
+        &self,
+        cache: &StateCache<P, D>,
+        span: &Range<u16>,
+    ) -> Result<Witness<P, D>, TransitionError> {
+        if !valid_span(span, self.slice_count()) {
+            return Err(TransitionError::SliceIndex);
+        }
+        let (first, last) = (usize::from(span.start), usize::from(span.end));
+        let start_boundary = self.coverage_boundaries[first];
+        let end_boundary = self.coverage_boundaries[last];
+        let (change_predecessor, change_successor, change_opening) = self.changes.bracket(
+            &self.change_guards,
+            start_boundary.change..end_boundary.change,
+        )?;
+        let withdrawal_start = u32::try_from(start_boundary.prefix.withdrawal_count)
+            .map_err(|_| TransitionError::SliceRange)?;
+        let withdrawal_count = u32::try_from(
+            end_boundary
+                .prefix
+                .withdrawal_count
+                .checked_sub(start_boundary.prefix.withdrawal_count)
+                .ok_or(TransitionError::SliceRange)?,
+        )
+        .map_err(|_| TransitionError::SliceRange)?;
+        let transpose_start = u32::try_from(start_boundary.prefix.in_count)
+            .map_err(|_| TransitionError::SliceRange)?;
+        let transpose_count = u32::try_from(
+            end_boundary
+                .prefix
+                .in_count
+                .checked_sub(start_boundary.prefix.in_count)
+                .ok_or(TransitionError::SliceRange)?,
+        )
+        .map_err(|_| TransitionError::SliceRange)?;
+        let retained = end_boundary
+            .predecessor
+            .checked_sub(start_boundary.predecessor)
+            .ok_or(TransitionError::SliceRange)?;
+        let boundaries = self.coverage_boundaries[first..=last].to_vec();
+        let boundary_count =
+            u32::try_from(boundaries.len()).map_err(|_| TransitionError::SliceCoverage)?;
+        Ok(Witness {
+            retained,
+            span: span.clone(),
+            coverage: CoverageRange {
+                boundaries,
+                opening: self
+                    .coverage
+                    .range_opening(u32::from(span.start), boundary_count)?,
+            },
+            operator_aggregates: self.close.operator_aggregates[first..last].to_vec(),
+            out_start: self.boundary_states[first].0.clone(),
+            in_start: self.boundary_states[first].1.clone(),
+            transpose_opening: (transpose_count != 0)
+                .then(|| {
+                    self.transpose_tree
+                        .range_opening(transpose_start, transpose_count)
+                })
+                .transpose()?,
+            withdrawal_opening: (withdrawal_count != 0)
+                .then(|| {
+                    self.withdrawal_output_tree
+                        .range_opening(withdrawal_start, withdrawal_count)
+                })
+                .transpose()?,
+            change_predecessor,
+            change_successor,
+            change_opening,
+            predecessor: build_state_range(
+                cache.leaves(),
+                cache.tree(),
+                start_boundary.predecessor,
+                end_boundary.predecessor,
+            )?,
+            successor: build_state_range(
+                &self.successor_leaves,
+                &self.successor,
+                start_boundary.successor,
+                end_boundary.successor,
+            )?,
         })
     }
 
@@ -2226,7 +2442,7 @@ fn verify_operator_aggregate<P: PublicKey, D: Digest>(
 }
 
 /// Splits the transpose into one contiguous [start, end) group per row.
-fn transpose_groups<P: PublicKey, D: Digest>(
+pub(crate) fn transpose_groups<P: PublicKey, D: Digest>(
     rows: &[AccountRow<P, D>],
     transpose: &[TransposeEntry<P>],
 ) -> Result<Vec<(usize, usize)>, TransitionError> {
@@ -2787,7 +3003,9 @@ fn merge_state_vectors<P: PublicKey, D: Digest>(
 
 type StateVectors<P> = (Vec<StateLeaf<P>>, Vec<StateLeaf<P>>);
 
-fn derive_state_vectors<P: PublicKey, D: Digest>(
+/// Merges the unchanged leaves with the rows into the predecessor and successor live-state
+/// vectors they imply.
+pub(crate) fn derive_state_vectors<P: PublicKey, D: Digest>(
     unchanged: &[StateLeaf<P>],
     rows: &[AccountRow<P, D>],
     max_states: u64,
@@ -3108,7 +3326,15 @@ where
         return Err(TransitionError::HeaderRoot);
     }
     validate_boundary_roots::<H, P, D>(context, deposits, withdrawals)?;
-    validate_slice_after_header::<H, P, D>(context, operator, deposits, withdrawals, roots, slice)?;
+    validate_slice_after_header::<H, P, D>(
+        context,
+        operator,
+        deposits,
+        withdrawals,
+        roots,
+        slice,
+        &Sequential,
+    )?;
     // Both authorization halves are quorum-attested per slice: the operator's through its
     // combined countersignature, the payers' through this batch.
     let authorization_count = slice
@@ -3139,6 +3365,7 @@ pub(crate) fn validate_slice_after_header<H, P, D>(
     withdrawals: &WithdrawalBatch<P, D>,
     roots: &RootBundle<D>,
     slice: &ProofSlice<P, D>,
+    strategy: &impl Strategy,
 ) -> Result<(), TransitionError>
 where
     H: Hasher<Digest = D>,
@@ -3162,6 +3389,7 @@ where
         &slice.out_vectors,
         start.change,
         end.change,
+        strategy,
     )?;
 
     // Every covered boundary's change position is pinned to the rows falling in the slices
@@ -3176,91 +3404,79 @@ where
         |boundary| boundary.change,
     )?;
 
-    // Runs after the change range pins strict row order, so no combined message folds
-    // duplicate bodies, per the aggregation primitive's distinct-messages precondition.
     if slice.operator_aggregates.len() + 1 != offsets.len() {
         return Err(TransitionError::VectorAlignment);
     }
-    for (window, aggregate) in offsets.windows(2).zip(&slice.operator_aggregates) {
-        verify_operator_aggregate(
-            operator,
-            &slice.changes.rows[window[0]..window[1]],
-            aggregate.as_ref(),
-            &Sequential,
-        )?;
-    }
-
     let (predecessor, successor) = derive_state_vectors(
         &slice.unchanged,
         &slice.changes.rows,
         context.limits().max_states(),
     )?;
-    validate_state_range::<H, P, D>(
-        assignment,
-        span,
-        context.predecessor_root(),
-        &slice.predecessor,
-        &predecessor,
-        context.limits().max_states(),
-        start.predecessor..end.predecessor,
-    )?;
-    validate_boundary_positions(
-        &slice.coverage,
-        span,
-        &predecessor,
-        |leaf| &leaf.account,
-        slice_bits,
-        |boundary| boundary.predecessor,
-    )
-    .map(drop)?;
-    validate_state_range::<H, P, D>(
-        assignment,
-        span,
-        &roots.successor,
-        &slice.successor,
-        &successor,
-        context.limits().max_states(),
-        start.successor..end.successor,
-    )?;
-    validate_boundary_positions(
-        &slice.coverage,
-        span,
-        &successor,
-        |leaf| &leaf.account,
-        slice_bits,
-        |boundary| boundary.successor,
-    )
-    .map(drop)?;
 
-    // The transpose range is positionally pinned by the boundary in-counts and must
-    // authenticate under the transpose root.
-    let transpose_start =
-        u32::try_from(start.prefix.in_count).map_err(|_| TransitionError::SliceRange)?;
-    let transpose_count = u32::try_from(
-        end.prefix
-            .in_count
-            .checked_sub(start.prefix.in_count)
-            .ok_or(TransitionError::SliceRange)?,
-    )
-    .map_err(|_| TransitionError::SliceRange)?;
-    if usize::try_from(transpose_count).ok() != Some(slice.transpose.len()) {
-        return Err(TransitionError::SliceRange);
-    }
-    match (&slice.transpose_opening, slice.transpose.is_empty()) {
-        (None, true) => {}
-        (Some(opening), false)
-            if opening.start == transpose_start
-                && opening.proof.leaf_count == roots.transpose_len =>
-        {
-            let encoded = slice
-                .transpose
-                .iter()
-                .map(Encode::encode)
-                .collect::<Vec<_>>();
-            opening.verify::<H, _>(VectorKind::Transpose, &roots.transpose, &encoded)?;
+    // The change range above pinned strict row order, so no combined message folds duplicate
+    // bodies, per the aggregation primitive's distinct-messages precondition. Every remaining
+    // pairing and Merkle check is independent of the others, so they share one parallel pass.
+    let checks = (0..slice.operator_aggregates.len())
+        .map(SpanCheck::Aggregate)
+        .chain([
+            SpanCheck::Predecessor,
+            SpanCheck::Successor,
+            SpanCheck::Transpose,
+        ])
+        .collect::<Vec<_>>();
+    strategy.try_map_collect_vec(checks, |check| match check {
+        SpanCheck::Aggregate(index) => verify_operator_aggregate(
+            operator,
+            &slice.changes.rows[offsets[index]..offsets[index + 1]],
+            slice.operator_aggregates[index].as_ref(),
+            &Sequential,
+        ),
+        SpanCheck::Predecessor => {
+            validate_state_range::<H, P, D>(
+                assignment,
+                span,
+                context.predecessor_root(),
+                &slice.predecessor,
+                &predecessor,
+                context.limits().max_states(),
+                start.predecessor..end.predecessor,
+                strategy,
+            )?;
+            validate_boundary_positions(
+                &slice.coverage,
+                span,
+                &predecessor,
+                |leaf| &leaf.account,
+                slice_bits,
+                |boundary| boundary.predecessor,
+            )
+            .map(drop)
         }
-        _ => return Err(TransitionError::SliceRange),
-    }
+        SpanCheck::Successor => {
+            validate_state_range::<H, P, D>(
+                assignment,
+                span,
+                &roots.successor,
+                &slice.successor,
+                &successor,
+                context.limits().max_states(),
+                start.successor..end.successor,
+                strategy,
+            )?;
+            validate_boundary_positions(
+                &slice.coverage,
+                span,
+                &successor,
+                |leaf| &leaf.account,
+                slice_bits,
+                |boundary| boundary.successor,
+            )
+            .map(drop)
+        }
+        SpanCheck::Transpose => {
+            validate_transpose_range::<H, P, D>(roots, slice, start, end, strategy)
+        }
+    })?;
 
     // The witness start states must hash to the committed boundary checksums before any
     // accumulation resumes from them.
@@ -3269,61 +3485,84 @@ where
         return Err(TransitionError::SliceCoverage);
     }
 
-    // Row equations advance the prefix and both accumulators slice by slice. Every boundary
-    // after the first must be reached exactly: after the rows of the slice it closes, the
-    // running prefix and both accumulator checksums equal the committed values.
+    // Every slice's rows chain from the committed prefix at its opening boundary to the one at
+    // its closing boundary, so the slices validate in parallel: each validates its rows, extends
+    // the prefix through them, folds both accumulators over its edges, and collects its
+    // withdrawal outputs. Only the accumulators are then combined in order, because a boundary
+    // commits their checksums rather than their states, and every checksum must be reached
+    // exactly.
     let groups = transpose_groups(&slice.changes.rows, &slice.transpose)?;
-    let mut prefix = start.prefix;
+    let slices = strategy.try_map_collect_vec(
+        offsets.windows(2).zip(slice.coverage.boundaries.windows(2)),
+        |(window, bounds)| {
+            let (from, to) = (window[0], window[1]);
+            let mut prefix = bounds[0].prefix;
+            let mut out_acc = LtHash::new();
+            let mut in_acc = LtHash::new();
+            let mut outputs = Vec::new();
+            for ((row, out_vector), group) in slice.changes.rows[from..to]
+                .iter()
+                .zip(&slice.out_vectors[from..to])
+                .zip(&groups[from..to])
+            {
+                let incoming = &slice.transpose[group.0..group.1];
+                let delta = validate_row::<H, P, D>(
+                    context,
+                    deposits,
+                    withdrawals,
+                    row,
+                    out_vector,
+                    incoming,
+                )?;
+                prefix = prefix
+                    .checked_extend(delta)
+                    .ok_or(TransitionError::PrefixOverflow)?;
+                if prefix != row.prefix {
+                    return Err(TransitionError::Prefix);
+                }
+                for entry in out_vector.entries() {
+                    accumulate_edge(
+                        &mut out_acc,
+                        &row.account,
+                        &entry.recipient,
+                        entry.cumulative,
+                        entry.count,
+                    );
+                }
+                for entry in incoming {
+                    accumulate_edge(
+                        &mut in_acc,
+                        &entry.payer,
+                        &entry.recipient,
+                        entry.cumulative,
+                        entry.count,
+                    );
+                }
+                if let Some(request) = withdrawals.request_for(&row.account) {
+                    let SettlementOutput::Withdrawal(amount) = row.output else {
+                        return Err(TransitionError::SettlementOutput);
+                    };
+                    outputs.push(WithdrawalOutput::from_request(request, amount));
+                }
+            }
+            if prefix != bounds[1].prefix {
+                return Err(TransitionError::Prefix);
+            }
+            Ok::<_, TransitionError>((out_acc, in_acc, outputs))
+        },
+    )?;
     let mut out_acc = slice.out_start.clone();
     let mut in_acc = slice.in_start.clone();
     let mut withdrawal_outputs = Vec::new();
-    for (window, boundary) in offsets.windows(2).zip(&slice.coverage.boundaries[1..]) {
-        let (from, to) = (window[0], window[1]);
-        for ((row, out_vector), group) in slice.changes.rows[from..to]
-            .iter()
-            .zip(&slice.out_vectors[from..to])
-            .zip(&groups[from..to])
-        {
-            let incoming = &slice.transpose[group.0..group.1];
-            let delta =
-                validate_row::<H, P, D>(context, deposits, withdrawals, row, out_vector, incoming)?;
-            prefix = prefix
-                .checked_extend(delta)
-                .ok_or(TransitionError::PrefixOverflow)?;
-            if prefix != row.prefix {
-                return Err(TransitionError::Prefix);
-            }
-            for entry in out_vector.entries() {
-                accumulate_edge(
-                    &mut out_acc,
-                    &row.account,
-                    &entry.recipient,
-                    entry.cumulative,
-                    entry.count,
-                );
-            }
-            for entry in incoming {
-                accumulate_edge(
-                    &mut in_acc,
-                    &entry.payer,
-                    &entry.recipient,
-                    entry.cumulative,
-                    entry.count,
-                );
-            }
-            if let Some(request) = withdrawals.request_for(&row.account) {
-                let SettlementOutput::Withdrawal(amount) = row.output else {
-                    return Err(TransitionError::SettlementOutput);
-                };
-                withdrawal_outputs.push(WithdrawalOutput::from_request(request, amount));
-            }
-        }
-        if prefix != boundary.prefix
-            || out_acc.checksum() != boundary.out_check
-            || in_acc.checksum() != boundary.in_check
-        {
+    for ((out_partial, in_partial, outputs), boundary) in
+        slices.into_iter().zip(&slice.coverage.boundaries[1..])
+    {
+        out_acc.combine(&out_partial);
+        in_acc.combine(&in_partial);
+        if out_acc.checksum() != boundary.out_check || in_acc.checksum() != boundary.in_check {
             return Err(TransitionError::Prefix);
         }
+        withdrawal_outputs.extend(outputs);
     }
     validate_withdrawal_output_range::<H, D>(
         &roots.withdrawal_outputs,
@@ -3352,6 +3591,67 @@ where
             change_len,
             end,
         )?;
+    }
+    Ok(())
+}
+
+/// One of the independent checks a span runs in parallel once its rows are pinned.
+enum SpanCheck {
+    /// The combined operator countersignature of the slice at this offset window.
+    Aggregate(usize),
+    /// The predecessor state range and its boundary positions.
+    Predecessor,
+    /// The successor state range and its boundary positions.
+    Successor,
+    /// The transpose entries and their opening.
+    Transpose,
+}
+
+/// Checks a span's transpose entries against the committed count and opens them under the
+/// transpose root.
+fn validate_transpose_range<H, P, D>(
+    roots: &RootBundle<D>,
+    slice: &ProofSlice<P, D>,
+    start: &SliceBoundary,
+    end: &SliceBoundary,
+    strategy: &impl Strategy,
+) -> Result<(), TransitionError>
+where
+    H: Hasher<Digest = D>,
+    P: PublicKey,
+    D: Digest,
+{
+    let transpose_start =
+        u32::try_from(start.prefix.in_count).map_err(|_| TransitionError::SliceRange)?;
+    let transpose_count = u32::try_from(
+        end.prefix
+            .in_count
+            .checked_sub(start.prefix.in_count)
+            .ok_or(TransitionError::SliceRange)?,
+    )
+    .map_err(|_| TransitionError::SliceRange)?;
+    if usize::try_from(transpose_count).ok() != Some(slice.transpose.len()) {
+        return Err(TransitionError::SliceRange);
+    }
+    match (&slice.transpose_opening, slice.transpose.is_empty()) {
+        (None, true) => {}
+        (Some(opening), false)
+            if opening.start == transpose_start
+                && opening.proof.leaf_count == roots.transpose_len =>
+        {
+            let encoded = slice
+                .transpose
+                .iter()
+                .map(Encode::encode)
+                .collect::<Vec<_>>();
+            opening.verify_with::<H, _>(
+                VectorKind::Transpose,
+                &roots.transpose,
+                &encoded,
+                strategy,
+            )?;
+        }
+        _ => return Err(TransitionError::SliceRange),
     }
     Ok(())
 }
@@ -3420,6 +3720,7 @@ fn validate_boundary_positions<P: PublicKey, D: Digest, T>(
     Ok(offsets)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_change_range<H, P, D>(
     assignment: &Assignment<D>,
     span: &Range<u16>,
@@ -3428,6 +3729,7 @@ fn validate_change_range<H, P, D>(
     out_vectors: &[OutVector<P>],
     start: u32,
     end: u32,
+    strategy: &impl Strategy,
 ) -> Result<(), TransitionError>
 where
     H: Hasher<Digest = D>,
@@ -3496,7 +3798,7 @@ where
         .collect::<Vec<_>>();
     range
         .opening
-        .verify::<H, _>(VectorKind::Change, root, &encoded)?;
+        .verify_with::<H, _>(VectorKind::Change, root, &encoded, strategy)?;
     Ok(())
 }
 
@@ -3534,6 +3836,7 @@ where
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_state_range<H, P, D>(
     assignment: &Assignment<D>,
     span: &Range<u16>,
@@ -3542,6 +3845,7 @@ fn validate_state_range<H, P, D>(
     members: &[StateLeaf<P>],
     max_states: u64,
     positions: Range<u32>,
+    strategy: &impl Strategy,
 ) -> Result<(), TransitionError>
 where
     H: Hasher<Digest = D>,
@@ -3596,7 +3900,7 @@ where
     let encoded = leaves.into_iter().map(Encode::encode).collect::<Vec<_>>();
     range
         .opening
-        .verify::<H, _>(VectorKind::State, root, &encoded)?;
+        .verify_with::<H, _>(VectorKind::State, root, &encoded, strategy)?;
     Ok(())
 }
 
@@ -3923,7 +4227,21 @@ impl<D: Digest> CoverageRange<D> {
         count: usize,
         max_hashes: usize,
     ) -> Result<Self, CodecError> {
-        let boundaries = Vec::<SliceBoundary>::read_cfg(reader, &(RangeCfg::exact(count), ()))?;
+        Self::read_counted(reader, &RangeCfg::exact(count), max_hashes)
+    }
+
+    /// Reads a boundary count within `count`, that many wire boundaries, and their opening
+    /// under the hash bound.
+    fn read_counted(
+        reader: &mut impl Buf,
+        count: &RangeCfg<usize>,
+        max_hashes: usize,
+    ) -> Result<Self, CodecError> {
+        let count = usize::read_cfg(reader, count)?;
+        let mut boundaries = Vec::with_capacity(count);
+        for _ in 0..count {
+            boundaries.push(read_boundary(reader)?);
+        }
         let opening = RangeOpening::read_bounded(reader, count, max_hashes)?;
         Ok(Self {
             boundaries,

@@ -147,12 +147,13 @@ impl BlogChainFixture {
         let slice_corpus_bytes = all_slices.iter().map(EncodeSize::encode_size).sum();
         drop(all_slices);
         let (validator, dealing, dealing_bytes) = validators.largest_assignment(&close);
+        let dealings = close
+            .prepared
+            .deal(&close.cache, &spans, strategy())
+            .expect("benchmark dealing is valid");
         let dealt_dealing_bytes = dealing
             .iter()
-            .cloned()
-            .map(|slice| {
-                commonware_clearing::bajillion::retained::DealtSlice::strip(slice).encode_size()
-            })
+            .map(|slice| dealings.span_size(&slice.span))
             .sum();
         let validator_scheme = validators.signer(validator);
 
@@ -277,11 +278,19 @@ impl BlogChainFixture {
         .expect("benchmark preparation is valid")
     }
 
-    fn deal(&self) -> Vec<ProofSlice<VerifyingKey, Digest>> {
-        self.close
+    // Dealing produces every validator's wire: every slice's chunk encoded once, one witness
+    // per distinct span, and each span's wire assembled from clones of those buffers. The
+    // return value is the operator's egress in bytes.
+    fn deal(&self) -> usize {
+        let dealings = self
+            .close
             .prepared
-            .assemble_slices(&self.close.cache, &self.spans, strategy())
-            .expect("benchmark slices are valid")
+            .deal(&self.close.cache, &self.spans, strategy())
+            .expect("benchmark dealing is valid");
+        self.spans
+            .iter()
+            .map(|span| dealings.encode_span(span).encode_size())
+            .sum()
     }
 
     fn seal(

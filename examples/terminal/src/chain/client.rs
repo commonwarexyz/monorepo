@@ -34,6 +34,8 @@
 //! certified record proving the input can never land (a consumed idempotence
 //! key bound to other bytes) discards a durable intent.
 
+#[cfg(test)]
+use crate::chain::query::{EvidenceLookup, EvidenceRequest, EvidenceResponse, METHOD_EVIDENCE};
 use crate::{
     chain::{
         ingress::Submission,
@@ -57,6 +59,8 @@ use crate::{
 };
 use anyhow::{Context as _, Result, bail, ensure};
 use commonware_clearing::bajillion::{boundary::SignedWithdrawal, transition::BatchId};
+#[cfg(test)]
+use commonware_codec::DecodeExt as _;
 use commonware_codec::{Decode as _, Encode as _};
 use commonware_cryptography::sha256::Digest;
 use commonware_runtime::{Clock, Network, Spawner};
@@ -412,6 +416,9 @@ pub(crate) trait Chain: Send + 'static {
 /// configured deployment at construction: every typed read is scoped to it.
 pub(crate) struct Client {
     scheme: Scheme,
+    /// The chain genesis: the validators' evidence-serving identities, so an
+    /// evidence request routes to the exact quorum holding its slice.
+    genesis: Genesis,
     /// The deployment this client reads.
     deployment: Digest,
     /// Validator query addresses, kept as a list for failover rotation only:
@@ -450,12 +457,61 @@ impl Client {
                 identity.players().clone(),
                 identity.public().clone(),
             ),
+            genesis: identity.clone(),
             deployment,
             queries,
             latest: Latest::default(),
             primary: 0,
             rng: Box::new(rng),
         })
+    }
+
+    /// The chain genesis this client was built over: the validators'
+    /// evidence-serving identities that route an evidence request to the
+    /// exact quorum retaining its slice.
+    pub(crate) const fn genesis(&self) -> &Genesis {
+        &self.genesis
+    }
+
+    /// Fetches one piece of evidence for this deployment from the validators
+    /// retaining the lookup's slice, asking each holder in ascending
+    /// participant order until one serves it or declares it absent. Every
+    /// other answer is routing advice, and the last one is returned when no
+    /// holder serves.
+    ///
+    /// Nothing here is verified: the caller checks a served opening against
+    /// the certified roots it already holds (the admitted record's roots, a
+    /// requested interval root, or the genesis state root).
+    ///
+    /// The wallet routes through its own holder rotation (see the agent's
+    /// evidence module), so this direct form serves the query tests only.
+    #[cfg(test)]
+    pub(crate) async fn evidence<E: Env>(
+        &self,
+        ctx: &E,
+        lookup: EvidenceLookup,
+    ) -> Result<EvidenceResponse> {
+        let holders = match (&lookup, lookup.account()) {
+            (EvidenceLookup::Interval { slice, .. }, _) => self.genesis.holders_for(*slice)?,
+            (_, Some(account)) => self.genesis.holders_for_account(account)?,
+            (_, None) => bail!("evidence lookup names neither an account nor a slice"),
+        };
+        let request = EvidenceRequest::new(self.deployment, lookup);
+        let mut last = None;
+        for holder in holders {
+            let response = rpc::invoke(ctx, holder, "validator", METHOD_EVIDENCE, request.encode())
+                .await
+                .and_then(|body| {
+                    EvidenceResponse::decode(body).context("evidence response does not decode")
+                });
+            match response {
+                Ok(response @ (EvidenceResponse::Served(_) | EvidenceResponse::Absent)) => {
+                    return Ok(response);
+                }
+                other => last = Some(other),
+            }
+        }
+        last.unwrap_or_else(|| bail!("no validator holds the requested slice"))
     }
 
     /// Fetches one certified read from `address` without verifying it.

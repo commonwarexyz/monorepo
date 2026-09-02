@@ -21,20 +21,26 @@
 
 use super::{
     Agent,
+    evidence::{check_opening, unusable_head},
     store::{ContextCache, PendingPayment},
+    wallet::settlement_status,
 };
 use crate::{
-    chain::client::{Chain, Client, Env},
+    chain::{
+        client::{Chain, Client, Env},
+        state::StatusRecord,
+    },
     operator::rpc as operator_rpc,
     protocol::{Entry, Key},
 };
 use anyhow::{Context, Result, ensure};
 use commonware_clearing::bajillion::{
-    commitment::{VectorKind, VectorRoot},
+    challenge::StateOpening,
+    commitment::VectorRoot,
     payment::{PaymentContext, SendAuthorization, VectorSendBody},
+    state::AccountState,
     vector::{OutEntry, OutVector},
 };
-use commonware_codec::Encode as _;
 use commonware_cryptography::{Sha256, sha256::Digest};
 use std::{net::SocketAddr, time::Duration};
 
@@ -288,14 +294,19 @@ impl Agent {
             .store
             .recovery_opening(&cache.root)?
             .context("cached context floor opening is missing")?;
-        let floor = opening.leaf.state;
+        self.lower_bound(&opening.leaf.state, cache.epoch)
+    }
+
+    /// The lower bound [`Self::spendable`] computes from one verified floor: the
+    /// wallet's row in a certified root covering every close before `epoch`.
+    fn lower_bound(&self, floor: &AccountState, epoch: u64) -> Result<u64> {
         let debited = self
             .cumulative_debit
             .checked_sub(floor.cumulative_debit)
             .context("the wallet endpoint is behind its verified floor: stale wallet database")?;
         let funds = floor
             .balance
-            .checked_add(self.store.credits_since(cache.epoch)?)
+            .checked_add(self.store.credits_since(epoch)?)
             .context("local balance view overflow")?;
 
         // Debits can legitimately exceed the tracked funds when a deposit financed
@@ -349,26 +360,7 @@ impl Agent {
         requested: &[Entry],
         total: u64,
     ) -> Result<StagedSend> {
-        let authorization = self.sign_batch(&cache.context, requested, total)?;
-        self.store
-            .stage_payment(
-                &authorization,
-                requested,
-                &cache.root,
-                self.cumulative_debit,
-            )
-            .context("durably stage payment")?;
-        self.pending_payment = Some(PendingPayment {
-            authorization: authorization.clone(),
-            entries: requested.to_vec(),
-            recovery_root: cache.root,
-        });
-        Ok(StagedSend {
-            context: cache.context.clone(),
-            authorization,
-            entries: requested.to_vec(),
-            predecessor_state_root: cache.root,
-        })
+        self.stage_under(cache.context.clone(), cache.root, requested, total)
     }
 
     /// Adopts a corrective context and endpoint view, and re-signs the exact staged
@@ -468,10 +460,9 @@ impl Agent {
     /// A live staged context is resubmitted unchanged (a lost-response retry). A cut context
     /// resolves by settlement-anchored arithmetic: once the staged epoch has certifiably
     /// finalized, the wallet's endpoint in a Merkle-verified opening of the finalized head
-    /// decides commitment, and until then resolution errs and retries. The opening still
-    /// travels through the operator's head, so the independence is about trust, not
-    /// availability: the operator can refuse to serve it but cannot forge it, and sustained
-    /// refusal ends in the chain's liveness deadlines and the hard-fault recovery path.
+    /// decides commitment, and until then resolution errs and retries. The opening comes
+    /// from the operator's head when it verifies and from the slice holders otherwise, so
+    /// an operator that refuses or forges it can neither decide nor stall the resolution.
     async fn resolve_pending<E: Env>(
         &mut self,
         ctx: &E,
@@ -479,22 +470,28 @@ impl Agent {
         operator: SocketAddr,
         staged: StagedSend,
     ) -> Result<PendingOutcome> {
-        // Re-read the head to learn whether the staged epoch is still the operator's live context.
-        let head = operator_rpc::payment_head(
-            ctx,
-            operator,
-            operator_rpc::PaymentHeadRequest {
-                account: self.account(),
-            },
-        )
-        .await
-        .context("read payer state")?;
-        ensure!(
-            head.context.operator() == &self.operator,
-            "payment context has an unexpected operator"
-        );
+        // Re-read the head to learn whether the staged epoch is still the live context:
+        // the operator's head says so, or, without one, the chain's registration. The
+        // registration singleton keeps naming an epoch after its close is admitted,
+        // until finalization retires it, and an admitted close is fixed, so the exact
+        // bytes can never be accepted again: only an unadmitted registration is live.
+        let served = operator_head(ctx, operator, self.account(), &self.operator).await;
         let context = &staged.context;
-        if head.context.epoch() == context.epoch() && head.context.anchor() == context.anchor() {
+        let live = match &served {
+            Ok(head) => {
+                head.context.epoch() == context.epoch() && head.context.anchor() == context.anchor()
+            }
+            Err(_) => chain
+                .registration(ctx)
+                .await
+                .context("read the registered close")?
+                .is_some_and(|registration| {
+                    registration.epoch == context.epoch()
+                        && registration.anchor == *context.anchor()
+                        && registration.admitted.is_none()
+                }),
+        };
+        if live {
             // The staged context is still live: resubmit the exact bytes unchanged.
             self.store
                 .recovery_opening(&staged.predecessor_state_root)?
@@ -523,8 +520,31 @@ impl Agent {
             "the staged epoch has not finalized, so its commitment is not yet decidable"
         );
 
-        self.verify_head(&head, &status)?;
-        let endpoint = head.opening.leaf.state.cumulative_debit;
+        let endpoint = match served.and_then(|head| {
+            self.verify_head(&head, &status)?;
+            Ok(head.opening.leaf.state.cumulative_debit)
+        }) {
+            Ok(endpoint) => endpoint,
+            Err(operator_error) => {
+                let account = self.account();
+                let opening = self
+                    .holders
+                    .validator_opening(ctx, chain, &account, &status)
+                    .await
+                    .map_err(|error| unusable_head(operator_error, error))?;
+                self.retain_head(&status.state_root, &opening)?;
+
+                // Only an operator head could have re-anchored the signing state on
+                // its live context, and the cached context is at best the cut one
+                // this send was staged under. Invalidate it, so the fresh stage reads
+                // a live context instead of signing under a dead epoch.
+                self.store
+                    .clear_context()
+                    .context("invalidate cached signing context")?;
+                self.cache = None;
+                opening.leaf.state.cumulative_debit
+            }
+        };
         let staged_endpoint = staged.authorization.body().cumulative_debit();
         let outcome = if endpoint == staged_endpoint {
             // The send committed. The operator is only an optional source of receipts,
@@ -596,64 +616,73 @@ impl Agent {
     /// accepted payments that finalized root covers, and re-anchors the optimistic
     /// signing state.
     ///
-    /// This is the safety core of every head read: the opening travels through the
-    /// operator but cannot be forged, because it must Merkle-verify against the
-    /// certified state root. Retention lives here, the one chokepoint, so every
-    /// resolution that read the head leaves recovery evidence behind if the deployment
-    /// later hard-faults frozen at this root.
+    /// This is the safety core of every operator head read: the opening travels through
+    /// the operator but cannot be forged, because it must Merkle-verify against the
+    /// certified state root. Retention lives in [`Self::retain_head`], the one
+    /// chokepoint shared with validator-served openings, so every resolution that read
+    /// the head leaves recovery evidence behind if the deployment later hard-faults
+    /// frozen at this root.
     pub(super) fn verify_head(
         &mut self,
         head: &operator_rpc::PaymentHeadResponse,
-        status: &crate::chain::state::StatusRecord,
+        status: &StatusRecord,
     ) -> Result<()> {
         ensure!(
             status.state_root == head.root,
             "payer opening is not the exact settlement head"
         );
-        ensure!(
-            head.opening.leaf.account == self.account(),
-            "payer opening belongs to another account"
-        );
-        head.opening
-            .proof
-            .verify::<Sha256>(
-                VectorKind::State,
-                &head.root,
-                head.opening.leaf.encode().as_ref(),
-            )
-            .context("verify payer state opening")?;
+        check_opening(&head.opening, &head.root, &self.account())?;
+        if self.retain_head(&head.root, &head.opening)? {
+            self.cache_signing(&head.context, &head.root)?;
+        }
+        Ok(())
+    }
 
-        // A row without live custody carries nothing a hard-fault claim could release, so
-        // only live openings are retained. The store refuses dead rows for the same reason.
-        let live = head.opening.leaf.state.active && head.opening.leaf.state.balance > 0;
+    /// Durably retains a verified opening for frozen-root recovery and records the
+    /// finalized payments its endpoint covers, returning whether the row is live.
+    ///
+    /// A row without live custody carries nothing a hard-fault claim could release, so
+    /// only live openings are retained. The store refuses dead rows for the same reason.
+    pub(super) fn retain_head(
+        &mut self,
+        root: &VectorRoot<Digest>,
+        opening: &StateOpening<Key, Digest>,
+    ) -> Result<bool> {
+        let live = opening.leaf.state.active && opening.leaf.state.balance > 0;
         if live {
             self.store
-                .retain_recovery_opening(&head.root, &head.opening)
+                .retain_recovery_opening(root, opening)
                 .context("durably retain payer state opening")?;
         }
         self.store
-            .observe_finalized(head.opening.leaf.state.cumulative_debit)
+            .observe_finalized(opening.leaf.state.cumulative_debit)
             .context("record finalized payments")?;
+        Ok(live)
+    }
 
-        // A verified live head also re-anchors the optimistic signing state: the served
-        // context becomes the cached signing context and the retained opening its
-        // affordability floor. A withdrawal in flight suppresses the refresh, because it
-        // reduces the live balance before any served predecessor root can show it, and a
-        // floor cached in that window would overstate spendable balance.
-        if live
-            && head.context.operator() == &self.operator
-            && self.pending_withdrawal.is_none()
-            && self.pending_withdrawal_claim.is_none()
-        {
-            self.store
-                .cache_context(&head.context, &head.root)
-                .context("durably cache signing context")?;
-            self.cache = Some(ContextCache {
-                context: head.context.clone(),
-                root: head.root,
-                epoch: head.context.epoch(),
-            });
+    /// Re-anchors the optimistic signing state on a verified live head: `context`
+    /// becomes the cached signing context and the opening retained at `root` its
+    /// affordability floor.
+    ///
+    /// A withdrawal in flight suppresses the refresh, because it reduces the live
+    /// balance before any served predecessor root can show it, and a floor cached in
+    /// that window would overstate spendable balance.
+    fn cache_signing(
+        &mut self,
+        context: &PaymentContext<Key, Digest>,
+        root: &VectorRoot<Digest>,
+    ) -> Result<()> {
+        if self.pending_withdrawal.is_some() || self.pending_withdrawal_claim.is_some() {
+            return Ok(());
         }
+        self.store
+            .cache_context(context, root)
+            .context("durably cache signing context")?;
+        self.cache = Some(ContextCache {
+            context: context.clone(),
+            root: *root,
+            epoch: context.epoch(),
+        });
         Ok(())
     }
 
@@ -665,6 +694,11 @@ impl Agent {
     /// local floor that cannot prove affordability. The verified head it reads re-caches
     /// the signing state, so it is structural at most once per wallet lifetime in steady
     /// operation: every later context move is learned from the corrective rejection.
+    ///
+    /// The operator's head is the fast path. When it is unreachable or unusable, the
+    /// signing context is the chain's certified registration and the affordability
+    /// floor is the slice holders' opening at the certified head, so the operator is
+    /// left with nothing to do but accept the send.
     async fn stage_against_head<E: Env>(
         &mut self,
         ctx: &E,
@@ -673,31 +707,59 @@ impl Agent {
         requested: &[Entry],
         total: u64,
     ) -> Result<StagedSend> {
-        let head = operator_rpc::payment_head(
-            ctx,
-            operator,
-            operator_rpc::PaymentHeadRequest {
-                account: self.account(),
-            },
-        )
-        .await
-        .context("read payer state")?;
-        ensure!(
-            head.context.operator() == &self.operator,
-            "payment context has an unexpected operator"
-        );
-        let status = chain
-            .status(ctx)
+        let operator_error = match operator_head(ctx, operator, self.account(), &self.operator)
             .await
-            .context("read settlement payment head")?;
-        ensure!(
-            status.deployment == self.deployment,
-            "settlement status has an unexpected deployment"
-        );
-        ensure!(
-            !status.hard_faulted,
-            "settlement is permanently hard-faulted"
-        );
+        {
+            Ok(head) => {
+                let status = staging_status(ctx, chain, self.deployment).await?;
+                match self.stage_head(&head, &status, total) {
+                    Ok(()) => return self.stage_under(head.context, head.root, requested, total),
+                    Err(error) => error,
+                }
+            }
+            Err(error) => error,
+        };
+        let (context, root) = self
+            .stage_chain_head(ctx, chain, total)
+            .await
+            .map_err(|error| unusable_head(operator_error, error))?;
+        self.stage_under(context, root, requested, total)
+    }
+
+    /// Signs and durably stages a fresh send under `context`, with the opening
+    /// retained at `root` as its recovery evidence.
+    fn stage_under(
+        &mut self,
+        context: PaymentContext<Key, Digest>,
+        root: VectorRoot<Digest>,
+        requested: &[Entry],
+        total: u64,
+    ) -> Result<StagedSend> {
+        let authorization = self.sign_batch(&context, requested, total)?;
+        self.store
+            .stage_payment(&authorization, requested, &root, self.cumulative_debit)
+            .context("durably stage payment")?;
+        self.pending_payment = Some(PendingPayment {
+            authorization: authorization.clone(),
+            entries: requested.to_vec(),
+            recovery_root: root,
+        });
+        Ok(StagedSend {
+            context,
+            authorization,
+            entries: requested.to_vec(),
+            predecessor_state_root: root,
+        })
+    }
+
+    /// Admits the operator's head for staging: a live payer row whose live balance
+    /// covers `total`, verified against the certified head and retained.
+    fn stage_head(
+        &mut self,
+        head: &operator_rpc::PaymentHeadResponse,
+        status: &StatusRecord,
+        total: u64,
+    ) -> Result<()> {
         ensure!(
             head.opening.leaf.state.active && head.opening.leaf.state.balance > 0,
             "payer opening is not live"
@@ -709,22 +771,44 @@ impl Agent {
             head.state.balance >= total,
             "payer has insufficient available balance"
         );
-        self.verify_head(&head, &status)?;
-        let authorization = self.sign_batch(&head.context, requested, total)?;
-        self.store
-            .stage_payment(&authorization, requested, &head.root, self.cumulative_debit)
-            .context("durably stage payment")?;
-        self.pending_payment = Some(PendingPayment {
-            authorization: authorization.clone(),
-            entries: requested.to_vec(),
-            recovery_root: head.root,
-        });
-        Ok(StagedSend {
-            context: head.context,
-            authorization,
-            entries: requested.to_vec(),
-            predecessor_state_root: head.root,
-        })
+        self.verify_head(head, status)
+    }
+
+    /// Stages without the operator's head: the signing context is the chain's
+    /// certified registration and the affordability floor is the slice holders'
+    /// opening at the certified head, verified, retained, and cached like an operator
+    /// head. Returns the context to sign under and the root the opening is retained at.
+    async fn stage_chain_head<E: Env>(
+        &mut self,
+        ctx: &E,
+        chain: &mut Client,
+        total: u64,
+    ) -> Result<(PaymentContext<Key, Digest>, VectorRoot<Digest>)> {
+        let status = staging_status(ctx, chain, self.deployment).await?;
+        let context = registered_context(ctx, chain, &self.operator).await?;
+        let account = self.account();
+        let opening = self
+            .holders
+            .validator_opening(ctx, chain, &account, &status)
+            .await?;
+        ensure!(
+            opening.leaf.state.active && opening.leaf.state.balance > 0,
+            "payer opening is not live"
+        );
+
+        // The floor covers every close through the finalized head, so the lower bound
+        // adds only the credits held from the next epoch on.
+        let floor_epoch = status
+            .last_finalized
+            .map_or(Some(0), |last| last.checked_add(1))
+            .context("epoch overflow")?;
+        ensure!(
+            self.lower_bound(&opening.leaf.state, floor_epoch)? >= total,
+            "payer has insufficient available balance"
+        );
+        self.retain_head(&status.state_root, &opening)?;
+        self.cache_signing(&context, &status.state_root)?;
+        Ok((context, status.state_root))
     }
 
     /// Confirms the send's context is a settlement registration through a certified
@@ -822,6 +906,72 @@ impl Agent {
         self.receipt_count = receipt_count;
         Ok(accepted)
     }
+}
+
+/// The certified status a fresh send may be staged against: `deployment`, the
+/// one the wallet is bound to, not hard-faulted.
+async fn staging_status<E: Env>(
+    ctx: &E,
+    chain: &mut Client,
+    deployment: Digest,
+) -> Result<StatusRecord> {
+    let status = settlement_status(ctx, chain, deployment)
+        .await
+        .context("read settlement payment head")?;
+    ensure!(
+        !status.hard_faulted,
+        "settlement is permanently hard-faulted"
+    );
+    Ok(status)
+}
+
+/// The operator's live head for `account`, checked to name `bound`, the
+/// operator the wallet is bound to.
+pub(super) async fn operator_head<E: Env>(
+    ctx: &E,
+    operator: SocketAddr,
+    account: Key,
+    bound: &Key,
+) -> Result<operator_rpc::PaymentHeadResponse> {
+    let head =
+        operator_rpc::payment_head(ctx, operator, operator_rpc::PaymentHeadRequest { account })
+            .await
+            .context("read payer state")?;
+    ensure!(
+        head.context.operator() == bound,
+        "payment context has an unexpected operator"
+    );
+    Ok(head)
+}
+
+/// The live payment context from the chain alone: the registered epoch and the
+/// anchor settlement certified for it, under `bound`, the operator the wallet
+/// is bound to. A send signed under it needs no operator head, and the context
+/// cannot be false because the anchor is the chain's own registration record.
+///
+/// The registration singleton keeps naming an epoch after its close is
+/// admitted, until the successor registers or finalization retires it. An
+/// admitted close is fixed, so that epoch is dead for a new send: only an
+/// unadmitted registration is a live context.
+async fn registered_context<E: Env>(
+    ctx: &E,
+    chain: &mut Client,
+    bound: &Key,
+) -> Result<PaymentContext<Key, Digest>> {
+    let registration = chain
+        .registration(ctx)
+        .await
+        .context("read the registered close")?
+        .context("no close is registered, so there is no payment context to sign under")?;
+    ensure!(
+        registration.admitted.is_none(),
+        "the registered close is admitted, so there is no live payment context to sign under"
+    );
+    Ok(PaymentContext::new(
+        registration.anchor,
+        registration.epoch,
+        bound.clone(),
+    ))
 }
 
 /// Rebuilds the payment context a signed authorization binds, under the bound

@@ -30,7 +30,10 @@ The posted corpus ships movers and edges only: readers hold the previous certifi
 `Replica`, live accounts ride as one-or-two-byte rank gaps, and the transpose, predecessor
 states, successor states, and prefixes are all derived rather than shipped. Dealt slices travel
 without their unchanged state: every slice assignee retains its key interval across closes,
-hydrates each dealing against it, and validates the result against the certified roots.
+hydrates each dealing against it, and validates the result against the certified roots. The
+operator encodes each slice's dealt content once, as a chunk whose bytes do not depend on the
+span carrying it, and ships every span as one witness followed by clones of the covered
+chunks, so dealing the whole committee costs one pass over the corpus.
 
 Successful epoch registration activates one immutable payment anchor and a bounded obligation to
 admit its certified close. Operator receipts must not be released before that exact registration

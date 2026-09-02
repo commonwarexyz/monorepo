@@ -24,24 +24,31 @@
 //! under separate key material: each validator's consensus identity is its
 //! dealt threshold share, while its clearing identity is the fixed seeded
 //! BLS key setup distributes as `clearing` (key `i` to directory `i`).
+//! Genesis lists every validator's clearing public key with its query
+//! address, so a wallet can route an evidence request to the exact quorum
+//! retaining an account's slice ([`Genesis::holders_for`]).
 
 use crate::{
     chain::validator::{MAX_PARTICIPANTS, MAX_SUPPORTED_MODE, SHARING_MODE},
     protocol::{
-        Account, Deployment, Key, Timing, accounts, clearing_private, committee, operator_ack_key,
-        operator_ack_signer, operator_signer,
+        Account, Deployment, Key, SLICE_BITS, Timing, accounts, clearing_private, committee,
+        operator_ack_key, operator_ack_signer, operator_signer,
     },
 };
 use anyhow::Context as _;
 use clap::Args;
-use commonware_clearing::bajillion::transition::OperatorKey;
+use commonware_clearing::bajillion::{
+    admission::slice_holders,
+    transition::{Assignment, OperatorKey, account_slice},
+};
 use commonware_codec::{Decode as _, Encode as _};
 use commonware_cryptography::{
-    Signer as _,
+    Sha256, Signer as _,
     bls12381::{
         dkg::feldman_desmedt::{Output, deal},
         primitives::{
-            group::{Private as ClearingKey, Share},
+            group::{G2 as ClearingPublic, Private as ClearingKey, Share},
+            ops::compute_public,
             sharing::Sharing,
             variant::MinSig,
         },
@@ -51,7 +58,7 @@ use commonware_cryptography::{
 use commonware_cryptography_curve25519::signing::SigningKey as ClearingSigner;
 use commonware_formatting::{from_hex, hex};
 use commonware_math::algebra::Random as _;
-use commonware_utils::{N3f1, ordered::Set};
+use commonware_utils::{N3f1, Participant, ordered::Set};
 use rand::rngs::StdRng;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 use std::{
@@ -63,9 +70,18 @@ use std::{
 /// The trusted-dealer threshold output shared by every validator.
 pub(crate) type Identity = Output<MinSig, PublicKey>;
 
+/// One validator's evidence-serving identity: its dealt clearing committee
+/// public key and the query address that serves its retained dealings.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ValidatorEntry {
+    pub(crate) clearing: ClearingPublic,
+    pub(crate) query: SocketAddr,
+}
+
 /// The shared chain genesis: the trusted-dealer threshold identity, the
-/// chain-fixed metadata setup chooses once, and the configured deployment
-/// list, stored together in `genesis.json`.
+/// chain-fixed metadata setup chooses once, the configured deployment list,
+/// and the validators' evidence-serving identities, stored together in
+/// `genesis.json`.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Genesis {
     /// The committee threshold identity every certified read verifies against.
@@ -92,6 +108,9 @@ pub(crate) struct Genesis {
     /// clearing identity plus the accounts and initial balances its genesis
     /// machine opens with.
     pub(crate) deployments: Vec<Deployment>,
+    /// Every committee validator's clearing key with the query address
+    /// serving its retained evidence, in validator directory order.
+    pub(crate) validators: Vec<ValidatorEntry>,
 }
 
 impl Genesis {
@@ -100,6 +119,7 @@ impl Genesis {
         timestamp: u64,
         timing: Timing,
         deployments: Vec<Deployment>,
+        validators: Vec<ValidatorEntry>,
     ) -> Self {
         Self {
             identity,
@@ -107,7 +127,46 @@ impl Genesis {
             admission_offset: timing.admission_offset,
             challenge_duration: timing.challenge_duration,
             deployments,
+            validators,
         }
+    }
+
+    /// The query address of one clearing committee participant, or `None`
+    /// when genesis lists no validator holding that participant's key.
+    pub(crate) fn query_of(&self, participant: Participant) -> anyhow::Result<Option<SocketAddr>> {
+        let committee = committee()?;
+        let Some(key) = committee.members().get(usize::from(participant)) else {
+            return Ok(None);
+        };
+        Ok(self
+            .validators
+            .iter()
+            .find(|validator| validator.clearing == *key)
+            .map(|validator| validator.query))
+    }
+
+    /// The query addresses of the exact quorum retaining `slice`, in
+    /// ascending committee participant order.
+    pub(crate) fn holders_for(&self, slice: u16) -> anyhow::Result<Vec<SocketAddr>> {
+        let committee = committee()?;
+        let assignment = Assignment::new(committee.commitment::<Sha256>(), SLICE_BITS)
+            .context("construct the slice assignment")?;
+        slice_holders::<Sha256, _>(&committee, &assignment, slice)
+            .context("derive the slice holders")?
+            .into_iter()
+            .map(|participant| {
+                self.query_of(participant)?.with_context(|| {
+                    format!("genesis lists no validator for participant {participant}")
+                })
+            })
+            .collect()
+    }
+
+    /// The query addresses of the exact quorum retaining `account`'s slice,
+    /// in ascending committee participant order.
+    pub(crate) fn holders_for_account(&self, account: &Key) -> anyhow::Result<Vec<SocketAddr>> {
+        let slice = account_slice(account, SLICE_BITS).context("derive the account slice")?;
+        self.holders_for(slice)
     }
 
     /// The committee players holding dealt shares.
@@ -267,6 +326,18 @@ struct EncodedGenesis {
     challenge_duration: u64,
     /// The configured deployments sharing this chain, in operator order.
     deployments: Vec<EncodedDeployment>,
+    /// Every validator's clearing key and query address, in directory order.
+    validators: Vec<EncodedValidator>,
+}
+
+/// One validator's evidence-serving identity in `genesis.json`.
+#[derive(Serialize, Deserialize)]
+struct EncodedValidator {
+    /// Hex BLS clearing committee public key.
+    #[serde(with = "hex_committee_key")]
+    clearing: ClearingPublic,
+    /// Query server address.
+    query: SocketAddr,
 }
 
 /// One configured deployment in `genesis.json`.
@@ -371,6 +442,38 @@ pub(crate) fn read_genesis_file(path: &Path) -> anyhow::Result<Genesis> {
             "genesis deployment operators must be distinct"
         );
     }
+
+    // The validators are exactly the clearing committee, each key once, each
+    // at its own query address, so every slice's quorum resolves to distinct
+    // holders.
+    let clearing = committee().context("clearing committee is unavailable")?;
+    anyhow::ensure!(
+        encoded.validators.len() == clearing.members().len(),
+        "the genesis must list every clearing committee validator exactly once"
+    );
+    let mut participants = std::collections::BTreeSet::new();
+    let mut queries = std::collections::BTreeSet::new();
+    let validators = encoded
+        .validators
+        .into_iter()
+        .map(|validator| {
+            let participant = clearing
+                .index_of(&validator.clearing)
+                .context("a genesis validator key is not in the clearing committee")?;
+            anyhow::ensure!(
+                participants.insert(participant),
+                "genesis validator clearing keys must be distinct"
+            );
+            anyhow::ensure!(
+                queries.insert(validator.query),
+                "genesis validator query addresses must be distinct"
+            );
+            Ok(ValidatorEntry {
+                clearing: validator.clearing,
+                query: validator.query,
+            })
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
     Ok(Genesis::new(
         encoded.output,
         encoded.timestamp,
@@ -379,6 +482,7 @@ pub(crate) fn read_genesis_file(path: &Path) -> anyhow::Result<Genesis> {
             challenge_duration: encoded.challenge_duration,
         },
         deployments,
+        validators,
     ))
 }
 
@@ -502,12 +606,27 @@ fn run_inner(args: Setup) -> anyhow::Result<()> {
             .as_millis(),
     )
     .context("the system clock exceeds u64 milliseconds")?;
+    let validators = (0..args.peers)
+        .map(|index| {
+            Ok(EncodedValidator {
+                clearing: compute_public::<MinSig>(&clearing_private(index)?),
+                query: SocketAddr::new(args.host, port(args.base_query_port, index)?),
+            })
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
     let encoded = |output: Identity| EncodedGenesis {
         output,
         timestamp,
         admission_offset: Timing::GENESIS.admission_offset,
         challenge_duration: Timing::GENESIS.challenge_duration,
         deployments: deployments.iter().map(EncodedDeployment::from).collect(),
+        validators: validators
+            .iter()
+            .map(|validator| EncodedValidator {
+                clearing: validator.clearing,
+                query: validator.query,
+            })
+            .collect(),
     };
 
     for (index, signer) in signers.into_iter().enumerate() {
@@ -764,6 +883,26 @@ mod hex_clearing_public {
     }
 }
 
+/// Serde codec for a hex-encoded BLS clearing committee public key.
+mod hex_committee_key {
+    use super::*;
+
+    pub(crate) fn serialize<S: Serializer>(
+        value: &ClearingPublic,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&hex(&value.encode()))
+    }
+
+    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<ClearingPublic, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        let bytes = from_hex(&raw).ok_or_else(|| D::Error::custom("invalid hex"))?;
+        ClearingPublic::decode_cfg(bytes.as_slice(), &()).map_err(D::Error::custom)
+    }
+}
+
 /// Serde codec for a hex-encoded BLS aggregable-acknowledgment public key.
 mod hex_operator_ack {
     use super::*;
@@ -808,7 +947,7 @@ mod hex_genesis {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_cryptography::bls12381::primitives::ops::compute_public;
+    use crate::protocol::deployments;
 
     #[test]
     fn setup_writes_node_network_operator_and_genesis() {
@@ -900,7 +1039,103 @@ mod tests {
                 .expect("the dealt clearing key is in the committee");
             assert!(!dealt.contains(&participant));
             dealt.push(participant);
+
+            // Genesis lists the validator's clearing key at its query address,
+            // and resolves the participant back to that address.
+            assert_eq!(
+                genesis.validators[index],
+                ValidatorEntry {
+                    clearing: public,
+                    query: node.query,
+                }
+            );
+            assert_eq!(genesis.query_of(participant).unwrap(), Some(node.query));
         }
+
+        // Every slice resolves to its exact quorum of distinct holders in
+        // ascending participant order, and every account routes to its
+        // slice's holders.
+        let assignment = Assignment::new(clearing.commitment::<Sha256>(), SLICE_BITS).unwrap();
+        for slice in 0..assignment.slice_count() {
+            let holders = genesis.holders_for(slice).unwrap();
+            let participants = slice_holders::<Sha256, _>(&clearing, &assignment, slice).unwrap();
+            assert_eq!(holders.len(), clearing.quorum());
+            assert!(participants.windows(2).all(|pair| pair[0] < pair[1]));
+            let expected = participants
+                .iter()
+                .map(|participant| genesis.query_of(*participant).unwrap().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(holders, expected);
+            let mut distinct = holders.clone();
+            distinct.sort_unstable();
+            distinct.dedup();
+            assert_eq!(distinct.len(), holders.len());
+        }
+        for account in accounts() {
+            let slice = account_slice(&account.key, SLICE_BITS).unwrap();
+            assert_eq!(
+                genesis.holders_for_account(&account.key).unwrap(),
+                genesis.holders_for(slice).unwrap()
+            );
+        }
+        assert!(genesis.holders_for(assignment.slice_count()).is_err());
+        let _ = fs::remove_dir_all(node_dir);
+    }
+
+    /// The genesis validator list must be exactly the clearing committee,
+    /// each key once, each at a distinct query address.
+    #[test]
+    fn genesis_rejects_malformed_validator_lists() {
+        let node_dir = std::env::temp_dir().join(format!(
+            "terminal-chain-setup-validators-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&node_dir);
+        fs::create_dir_all(&node_dir).unwrap();
+        let mut rng = rand::make_rng::<StdRng>();
+        let players = Set::from_iter_dedup([PrivateKey::random(&mut rng).public_key()]);
+        let (output, _) = deal::<MinSig, _, N3f1>(&mut rng, SHARING_MODE, players).unwrap();
+        let validators = || {
+            (0..4)
+                .map(|index| EncodedValidator {
+                    clearing: compute_public::<MinSig>(&clearing_private(index).unwrap()),
+                    query: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 5_100 + index as u16),
+                })
+                .collect::<Vec<_>>()
+        };
+        let encode = |validators: Vec<EncodedValidator>| EncodedGenesis {
+            output: output.clone(),
+            timestamp: 1,
+            admission_offset: Timing::GENESIS.admission_offset,
+            challenge_duration: Timing::GENESIS.challenge_duration,
+            deployments: deployments().iter().map(EncodedDeployment::from).collect(),
+            validators,
+        };
+        let path = node_dir.join("genesis.json");
+
+        // The exact committee is accepted.
+        write_json(&path, &encode(validators())).unwrap();
+        let genesis = read_genesis_file(&path).unwrap();
+        assert_eq!(genesis.validators.len(), 4);
+
+        // A missing validator, a duplicated key, a foreign key, and a shared
+        // query address are each refused.
+        let mut missing = validators();
+        missing.pop();
+        write_json(&path, &encode(missing)).unwrap();
+        assert!(read_genesis_file(&path).is_err());
+        let mut duplicated = validators();
+        duplicated[1].clearing = duplicated[0].clearing;
+        write_json(&path, &encode(duplicated)).unwrap();
+        assert!(read_genesis_file(&path).is_err());
+        let mut foreign = validators();
+        foreign[2].clearing = operator_ack_key(0);
+        write_json(&path, &encode(foreign)).unwrap();
+        assert!(read_genesis_file(&path).is_err());
+        let mut shared = validators();
+        shared[3].query = shared[0].query;
+        write_json(&path, &encode(shared)).unwrap();
+        assert!(read_genesis_file(&path).is_err());
         let _ = fs::remove_dir_all(node_dir);
     }
 

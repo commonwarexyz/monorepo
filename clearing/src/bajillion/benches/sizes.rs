@@ -1,5 +1,5 @@
 use super::{
-    admission_fixtures::{Validators, single_spans},
+    admission_fixtures::{SLICE_BITS, Validators, single_spans},
     fixtures::{
         active_close_fixture_with_assignment, profile_key, selected_active_profiles, strategy,
     },
@@ -7,12 +7,15 @@ use super::{
 use commonware_clearing::bajillion::{
     payment::EntryReceipt,
     posted,
-    retained::{DealtBreakdown, DealtSlice},
+    retained::{DealtBreakdown, DealtSlice, decode_dealt_slice_bounded},
+    state::Prefix,
     transition::SliceBoundary,
     vector::{OutTipLookup, transpose_encode_size},
 };
-use commonware_codec::{EncodeSize, FixedSize};
+use commonware_codec::{Encode, EncodeSize, FixedSize};
 use commonware_cryptography::{Sha256, sha256::Digest};
+use commonware_cryptography_curve25519::signing::StrictVerifyingKey as VerifyingKey;
+use std::{collections::BTreeMap, ops::Range};
 
 /// Prints the byte accounting for every selected profile.
 pub(crate) fn benches() {
@@ -20,10 +23,20 @@ pub(crate) fn benches() {
     for (_, profile) in selected_active_profiles() {
         let fixture = active_close_fixture_with_assignment(profile, validators.assignment());
         let close = fixture.prepared.close();
+        let assignment = fixture.context.assignment();
         let slices = fixture
             .prepared
             .assemble_slices(&fixture.cache, &single_spans(), strategy())
             .expect("benchmark slices are valid");
+
+        // The operator's dealing: every chunk once, plus a witness per single slice and per
+        // distinct committee span.
+        let mut spans = single_spans();
+        spans.extend(validators.distinct_spans(assignment));
+        let dealings = fixture
+            .prepared
+            .deal(&fixture.cache, &spans, strategy())
+            .expect("benchmark dealing is valid");
         let slice_corpus = slices
             .iter()
             .map(|slice| slice.encoded_size())
@@ -33,8 +46,21 @@ pub(crate) fn benches() {
         for slice in slices {
             // Per-slice shape for the closed-form check: predecessor leaves, rows, successor
             // leaves, transpose entries, senders, and recipient groups, plus the opening
-            // positions the range proofs depend on.
+            // positions the range proofs depend on and the full prefix at both boundaries
+            // the varint boundary wire depends on.
             let (start, end) = (slice.coverage.start(), slice.coverage.end());
+            let fields = |prefix: &Prefix| {
+                (
+                    prefix.debit,
+                    prefix.credit,
+                    prefix.payout,
+                    prefix.deposit,
+                    prefix.withdrawal,
+                    prefix.withdrawal_count,
+                    prefix.out_count,
+                    prefix.in_count,
+                )
+            };
             let senders = slice
                 .changes
                 .rows
@@ -60,24 +86,42 @@ pub(crate) fn benches() {
                 end.prefix.in_count,
                 senders,
                 groups,
+                fields(&start.prefix),
+                fields(&end.prefix),
             ));
-            corpus.add(&DealtSlice::strip(slice).breakdown());
+            let span = slice.span.clone();
+            let stripped = DealtSlice::strip(slice, SLICE_BITS).breakdown();
+            assert_eq!(stripped.total(), dealings.span_size(&span));
+            corpus.add(&stripped);
         }
         println!("clearing slice counts: {} {counts:?}", profile_key(profile));
         let dealt_corpus = corpus.total();
 
         // Every validator's dealt share under the benchmark committee: the busiest is the
-        // per-validator ingress, the sum is the operator's egress per close.
+        // per-validator ingress, the sum is the operator's egress per close. Each distinct
+        // span's wire is decoded once, as a holder decodes it, for its byte accounting.
+        let mut breakdowns: BTreeMap<(u16, u16), DealtBreakdown> = BTreeMap::new();
+        let mut breakdown = |span: &Range<u16>| {
+            *breakdowns.entry((span.start, span.end)).or_insert_with(|| {
+                let encoded = dealings.encode_span(span).encode();
+                assert_eq!(encoded.len(), dealings.span_size(span));
+                let breakdown = decode_dealt_slice_bounded::<VerifyingKey, Digest>(
+                    encoded.as_ref(),
+                    *fixture.context.limits(),
+                    encoded.len(),
+                )
+                .expect("benchmark dealing decodes")
+                .breakdown();
+                assert_eq!(breakdown.total(), encoded.len());
+                breakdown
+            })
+        };
         let mut busiest = DealtBreakdown::default();
         let mut dealt_egress = 0_usize;
-        for spans in validators.spans(fixture.context.assignment()) {
+        for spans in validators.spans(assignment) {
             let mut dealing = DealtBreakdown::default();
-            for slice in fixture
-                .prepared
-                .assemble_slices(&fixture.cache, &spans, strategy())
-                .expect("benchmark dealing is valid")
-            {
-                dealing.add(&DealtSlice::strip(slice).breakdown());
+            for span in &spans {
+                dealing.add(&breakdown(span));
             }
             if dealing.total() > busiest.total() {
                 busiest = dealing;

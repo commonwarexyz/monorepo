@@ -560,7 +560,7 @@ impl<P: PublicKey> RowWire<P> {
 }
 
 /// The wire form of one close row against its resolved reference.
-fn row_wire<P: PublicKey, D: Digest>(
+pub(crate) fn row_wire<P: PublicKey, D: Digest>(
     row: &AccountRow<P, D>,
     reference: Reference<P>,
 ) -> RowWire<P> {
@@ -573,21 +573,26 @@ fn row_wire<P: PublicKey, D: Digest>(
     }
 }
 
-/// Resolves each row to its wire reference against the pre-close replica: live accounts
-/// become rank gaps (live accounts skipped since the previous row, in key order).
-fn resolve_references<P: PublicKey, D: Digest>(
-    close: &Close<P, D>,
-    replica: &Replica<P>,
+/// Resolves each row to its wire reference against the key-sorted `live` accounts it was
+/// built on: live accounts become rank gaps (live accounts skipped since the previous row,
+/// or since the first live account for the first row).
+///
+/// The posted corpus resolves against the whole replica. A dealt chunk resolves each
+/// slice's rows against that slice's retained leaves alone, so its bytes do not depend on
+/// the span carrying it.
+pub(crate) fn resolve_references<'a, P: PublicKey, D: Digest>(
+    rows: &[AccountRow<P, D>],
+    live: impl Iterator<Item = &'a P>,
 ) -> Vec<Reference<P>> {
-    let mut live = replica.states.keys().peekable();
-    let mut references = Vec::with_capacity(close.rows.len());
-    for row in &close.rows {
+    let mut live = live.peekable();
+    let mut references = Vec::with_capacity(rows.len());
+    for row in rows {
         let mut gap = 0_usize;
-        while live.peek().is_some_and(|key| *key < &row.account) {
+        while live.peek().is_some_and(|key| **key < row.account) {
             live.next();
             gap += 1;
         }
-        if live.peek().is_some_and(|key| *key == &row.account) {
+        if live.peek().is_some_and(|key| **key == row.account) {
             live.next();
             references.push(Reference::Live(gap));
         } else {
@@ -606,7 +611,7 @@ pub fn encoded_size<P: PublicKey, D: Digest>(
     let rows = close
         .rows
         .iter()
-        .zip(resolve_references(close, replica))
+        .zip(resolve_references(&close.rows, replica.states.keys()))
         .map(|(row, reference)| row_wire(row, reference).encode_size())
         .sum::<usize>();
     Ok(Header::<D>::SIZE
@@ -630,7 +635,11 @@ pub fn write<P: PublicKey, D: Digest>(
     close.header.write(buf);
     close.roots.write(buf);
     close.rows.len().write(buf);
-    for (row, reference) in close.rows.iter().zip(resolve_references(close, replica)) {
+    for (row, reference) in close
+        .rows
+        .iter()
+        .zip(resolve_references(&close.rows, replica.states.keys()))
+    {
         row_wire(row, reference).write(buf);
     }
     for (vector, resolved) in close.out_vectors.iter().zip(indices) {

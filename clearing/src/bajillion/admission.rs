@@ -245,6 +245,7 @@ where
                 withdrawals,
                 roots,
                 slice,
+                strategy,
             )
         })
         .map_err(|_| AdmissionError::InvalidSlice)?;

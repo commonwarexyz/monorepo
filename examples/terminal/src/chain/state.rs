@@ -108,7 +108,7 @@ use commonware_clearing::bajillion::{
         Registered, SettlementChain, SettlementError,
     },
     state::{AccountState, StateLeaf},
-    transition::{BatchId, ExternalPayout, OperatorKey, StateCache, WithdrawalOutput},
+    transition::{BatchId, ExternalPayout, OperatorKey, RootBundle, StateCache, WithdrawalOutput},
 };
 use commonware_codec::{
     Decode, Encode as _, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
@@ -413,29 +413,51 @@ impl Read for ClaimRootsResponse {
     }
 }
 
-/// The identity and change root of the close admitted for one epoch.
+/// The identity and roots of the close admitted for one epoch.
 ///
 /// Receivers anchor reconciliation against this record, so operator-served
-/// committed-side evidence is trusted only when it matches it.
+/// or validator-served committed-side evidence is trusted only when it
+/// verifies under these roots: the change root for challenge lookups and
+/// claims, the successor root for state openings, the withdrawal-output
+/// root for withdrawal claims, and the transpose root for credits.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct AdmittedRootsResponse {
     pub(crate) batch_id: BatchId<Digest>,
+    /// The change root, always `roots.change`: the one root every
+    /// reconciliation reads, kept as a field for those readers.
     pub(crate) change: VectorRoot<Digest>,
+    /// The full root bundle the admitted header commits.
+    pub(crate) roots: RootBundle<Digest>,
     /// Whether the close finalized. While false, its inclusive challenge window is open.
     pub(crate) finalized: bool,
+}
+
+impl AdmittedRootsResponse {
+    pub(crate) const fn new(
+        batch_id: BatchId<Digest>,
+        roots: RootBundle<Digest>,
+        finalized: bool,
+    ) -> Self {
+        Self {
+            batch_id,
+            change: roots.change,
+            roots,
+            finalized,
+        }
+    }
 }
 
 impl Write for AdmittedRootsResponse {
     fn write(&self, buf: &mut impl BufMut) {
         self.batch_id.write(buf);
-        self.change.write(buf);
+        self.roots.write(buf);
         self.finalized.write(buf);
     }
 }
 
 impl EncodeSize for AdmittedRootsResponse {
     fn encode_size(&self) -> usize {
-        self.batch_id.encode_size() + self.change.encode_size() + self.finalized.encode_size()
+        self.batch_id.encode_size() + self.roots.encode_size() + self.finalized.encode_size()
     }
 }
 
@@ -443,11 +465,11 @@ impl Read for AdmittedRootsResponse {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        Ok(Self {
-            batch_id: BatchId::read(buf)?,
-            change: VectorRoot::read(buf)?,
-            finalized: bool::read(buf)?,
-        })
+        Ok(Self::new(
+            BatchId::read(buf)?,
+            RootBundle::read(buf)?,
+            bool::read(buf)?,
+        ))
     }
 }
 
@@ -1324,8 +1346,7 @@ enum Fired {
     Finalized {
         epoch: u64,
         batch_id: BatchId<Digest>,
-        withdrawal_outputs: VectorRoot<Digest>,
-        change: VectorRoot<Digest>,
+        roots: RootBundle<Digest>,
     },
     /// The deployment hard-faulted.
     Faulted { reason: HardFaultReasonResponse },
@@ -1552,8 +1573,7 @@ impl Machine {
                 fired.push(Fired::Finalized {
                     epoch: finalized.epoch,
                     batch_id: finalized.batch_id,
-                    withdrawal_outputs: roots.withdrawal_outputs,
-                    change: roots.change,
+                    roots,
                 });
             }
 
@@ -1902,11 +1922,11 @@ impl Machine {
         Ok(Step::applied(vec![
             (
                 admitted_key(config.digest(), request.epoch),
-                Some(Record::Admitted(AdmittedRootsResponse {
+                Some(Record::Admitted(AdmittedRootsResponse::new(
                     batch_id,
-                    change: request.roots.change,
-                    finalized: false,
-                })),
+                    request.roots,
+                    false,
+                ))),
             ),
             (
                 registration_key(config.digest()),
@@ -2180,24 +2200,21 @@ where
                 Fired::Finalized {
                     epoch,
                     batch_id,
-                    withdrawal_outputs,
-                    change,
+                    roots,
                 } => {
                     let mut emitted = vec![
                         (
                             claim_roots_key(deployment, batch_id),
                             Some(Record::ClaimRoots(ClaimRootsResponse {
-                                withdrawal_outputs: *withdrawal_outputs,
-                                change: *change,
+                                withdrawal_outputs: roots.withdrawal_outputs,
+                                change: roots.change,
                             })),
                         ),
                         (
                             admitted_key(deployment, *epoch),
-                            Some(Record::Admitted(AdmittedRootsResponse {
-                                batch_id: *batch_id,
-                                change: *change,
-                                finalized: true,
-                            })),
+                            Some(Record::Admitted(AdmittedRootsResponse::new(
+                                *batch_id, *roots, true,
+                            ))),
                         ),
                     ];
 
@@ -2541,22 +2558,24 @@ mod codec_tests {
         let change = VectorRoot {
             digest: Sha256::hash(&[b"anchored-record-change"]),
         };
+        let root = |name: &[u8]| VectorRoot {
+            digest: Sha256::hash(&[name]),
+        };
+        let roots = RootBundle {
+            change,
+            withdrawal_outputs: root(b"anchored-record-outputs"),
+            successor: root(b"anchored-record-successor"),
+            coverage: root(b"anchored-record-coverage"),
+            transpose: root(b"anchored-record-transpose"),
+            transpose_len: 3,
+        };
         for admitted in [
-            AdmittedRootsResponse {
-                batch_id,
-                change,
-                finalized: false,
-            },
-            AdmittedRootsResponse {
-                batch_id,
-                change,
-                finalized: true,
-            },
+            AdmittedRootsResponse::new(batch_id, roots, false),
+            AdmittedRootsResponse::new(batch_id, roots, true),
         ] {
-            assert_eq!(
-                AdmittedRootsResponse::decode(admitted.encode()).unwrap(),
-                admitted
-            );
+            let decoded = AdmittedRootsResponse::decode(admitted.encode()).unwrap();
+            assert_eq!(decoded, admitted);
+            assert_eq!(decoded.change, roots.change);
         }
         let roots = ClaimRootsResponse {
             withdrawal_outputs: VectorRoot {

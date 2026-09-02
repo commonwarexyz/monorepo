@@ -113,26 +113,32 @@ impl Validators {
         .expect("benchmark assignment matches the committee")
     }
 
-    /// Deals every validator and returns the one whose full dealing encodes largest.
+    /// Deals every validator's dealt wire and returns, as proof slices, the dealing whose
+    /// wire is largest, with that dealing's full encoded size.
     pub(crate) fn largest_assignment(&self, close: &CloseFixture) -> Largest {
-        let mut largest: Option<Largest> = None;
-        for (index, spans) in self
-            .spans(close.context.assignment())
-            .into_iter()
-            .enumerate()
-        {
-            let dealing = close
-                .prepared
-                .assemble_slices(&close.cache, &spans, strategy())
-                .expect("benchmark dealing is valid");
-            let bytes = dealing.encode_size();
-            if largest.as_ref().is_none_or(|(_, _, best)| bytes > *best) {
-                largest = Some((Participant::from_usize(index), dealing, bytes));
+        let assignment = close.context.assignment();
+        let dealings = close
+            .prepared
+            .deal(&close.cache, &self.distinct_spans(assignment), strategy())
+            .expect("benchmark dealing is valid");
+        let mut largest: Option<(usize, usize)> = None;
+        for (index, spans) in self.spans(assignment).iter().enumerate() {
+            let bytes = spans
+                .iter()
+                .map(|span| dealings.span_size(span))
+                .sum::<usize>();
+            if largest.is_none_or(|(_, best)| bytes > best) {
+                largest = Some((index, bytes));
             }
         }
-        let (validator, dealing, bytes) = largest.expect("committee is nonempty");
+        let (index, _) = largest.expect("committee is nonempty");
+        let dealing = close
+            .prepared
+            .assemble_slices(&close.cache, &self.spans(assignment)[index], strategy())
+            .expect("benchmark dealing is valid");
+        let bytes = dealing.encode_size();
         assert_eq!(dealing.encode().len(), bytes);
-        (validator, dealing, bytes)
+        (Participant::from_usize(index), dealing, bytes)
     }
 }
 

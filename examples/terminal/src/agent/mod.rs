@@ -2,6 +2,7 @@
 
 mod claim;
 mod custody;
+mod evidence;
 mod pay;
 mod receive;
 mod store;

@@ -846,6 +846,109 @@ impl<D: Digest> Proof<D> {
             .collect();
         self.verify_multi_inclusion::<H>(&elements, root)
     }
+
+    /// Narrows a range proof to a sub-range without access to the tree.
+    ///
+    /// Given a range proof over the inclusive leaf range `[start, start + leaves.len() - 1]`
+    /// and the in-range leaf digests in order, produces the range proof for the inclusive
+    /// sub-range `[sub_start, sub_end]`. The result is identical to what [`Tree::range_proof`]
+    /// returns for that sub-range on the same tree: the same `leaf_count` and the same siblings
+    /// in the same order.
+    ///
+    /// At each level, a sibling the sub-range needs is either an in-range node recomputed from
+    /// `leaves` or an outer sibling taken from this proof. Recomputing every level of the full
+    /// range costs `O(leaves.len() + log(leaf_count))` hashes.
+    ///
+    /// The caller must have verified this proof against a trusted root with these `leaves`
+    /// first (see [`Proof::verify_range_inclusion`]). Narrowing trusts both the in-range leaves
+    /// and the input siblings and cannot detect that either disagrees with the tree. A corrupt
+    /// input yields a proof that does not verify against the certified root, never a misleading
+    /// proof for it, because the narrowed proof is checked like any other proof.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NoLeaves`] if `leaves` is empty, [`Error::InvalidPosition`] if the range
+    /// exceeds the tree or the sub-range is not inside the range, and [`Error::UnalignedProof`]
+    /// if the sibling count does not match the shape of the range.
+    pub fn narrow<H: Hasher<Digest = D>>(
+        &self,
+        start: u32,
+        leaves: &[D],
+        sub_start: u32,
+        sub_end: u32,
+    ) -> Result<Self, Error> {
+        if leaves.is_empty() {
+            return Err(Error::NoLeaves);
+        }
+        let leaves_len = u32::try_from(leaves.len()).map_err(|_| Error::InvalidPosition(start))?;
+        let end = start
+            .checked_add(leaves_len - 1)
+            .ok_or(Error::InvalidPosition(start))?;
+        if end >= self.leaf_count {
+            return Err(Error::InvalidPosition(end));
+        }
+        if sub_start > sub_end || sub_start < start {
+            return Err(Error::InvalidPosition(sub_start));
+        }
+        if sub_end > end {
+            return Err(Error::InvalidPosition(sub_end));
+        }
+
+        // Position-hash the in-range leaves into the first level of the full range.
+        let strategy = commonware_parallel::Sequential;
+        let mut current = leaves.to_vec();
+        hash_positioned_leaves::<H>(&mut current, start, &strategy);
+
+        let mut level_start = start as usize;
+        let mut level_end = end as usize;
+        let mut sub_start = sub_start as usize;
+        let mut sub_end = sub_end as usize;
+        let mut level_size = self.leaf_count as usize;
+        let mut siblings = self.siblings.iter();
+        let mut narrowed = Vec::new();
+        let mut extended = Vec::with_capacity(current.len() + 2);
+        for _ in 0..levels_in_tree(self.leaf_count) - 1 {
+            // Extend the full range with the outer siblings this proof supplies at this level.
+            // The extension begins at an even index so its pairs align with the tree's.
+            let base = level_start - level_start % 2;
+            extended.clear();
+            if !level_start.is_multiple_of(2) {
+                extended.push(*siblings.next().ok_or(Error::UnalignedProof)?);
+            }
+            extended.extend_from_slice(&current);
+            if level_end.is_multiple_of(2) && level_end + 1 < level_size {
+                extended.push(*siblings.next().ok_or(Error::UnalignedProof)?);
+            }
+
+            // Collect the sub-range's siblings in the order Tree::range_proof emits them.
+            if !sub_start.is_multiple_of(2) {
+                narrowed.push(extended[sub_start - 1 - base]);
+            }
+            if sub_end.is_multiple_of(2) && sub_end + 1 < level_size {
+                narrowed.push(extended[sub_end + 1 - base]);
+            }
+
+            // Hash the extended range into the next level. A trailing left child without a
+            // right sibling in the tree duplicates itself.
+            current.clear();
+            current.resize(extended.len().div_ceil(2), D::EMPTY);
+            hash_parent_level::<H>(&extended, &mut current, &strategy);
+
+            level_start /= 2;
+            level_end /= 2;
+            sub_start /= 2;
+            sub_end /= 2;
+            level_size = level_size.div_ceil(2);
+        }
+        if siblings.next().is_some() {
+            return Err(Error::UnalignedProof);
+        }
+
+        Ok(Self {
+            leaf_count: self.leaf_count,
+            siblings: narrowed,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -1791,6 +1894,161 @@ mod tests {
             proof
                 .verify_range_inclusion::<Sha256>(start as u32, &digests[start..tree_size], &root)
                 .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_narrow_matches_range_proof_exhaustively() {
+        for leaf_count in 1..=33u32 {
+            let leaves: Vec<_> = (0..leaf_count)
+                .map(|position| test_digest(b"narrow", position))
+                .collect();
+            let tree = test_tree(&leaves);
+            let root = tree.root();
+
+            for start in 0..leaf_count {
+                for end in start..leaf_count {
+                    let range = &leaves[start as usize..=end as usize];
+                    let proof = tree.range_proof(start, end).unwrap();
+                    proof
+                        .verify_range_inclusion::<Sha256>(start, range, &root)
+                        .unwrap();
+
+                    // Narrowing to the full range is the identity.
+                    assert_eq!(
+                        proof.narrow::<Sha256>(start, range, start, end).unwrap(),
+                        proof
+                    );
+
+                    for sub_start in start..=end {
+                        for sub_end in sub_start..=end {
+                            let narrowed = proof
+                                .narrow::<Sha256>(start, range, sub_start, sub_end)
+                                .unwrap();
+                            assert_eq!(
+                                narrowed,
+                                tree.range_proof(sub_start, sub_end).unwrap(),
+                                "leaf_count={leaf_count} range=[{start}, {end}] sub=[{sub_start}, {sub_end}]",
+                            );
+
+                            // A single position narrows to its element proof.
+                            if sub_start == sub_end {
+                                assert_eq!(narrowed, tree.proof(sub_start).unwrap());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Trees whose odd levels end in a duplicated node, including the single-leaf tree
+    #[rstest]
+    fn test_narrow_duplicate_node_edge_cases(#[values(1, 3, 5, 7, 9, 11, 13, 15)] tree_size: u32) {
+        let leaves: Vec<_> = (0..tree_size)
+            .map(|position| test_digest(b"narrow", position))
+            .collect();
+        let tree = test_tree(&leaves);
+        let root = tree.root();
+        let proof = tree.range_proof(0, tree_size - 1).unwrap();
+
+        // Narrow the full range to the last leaf, whose path duplicates at every odd level
+        let last = tree_size - 1;
+        let narrowed = proof.narrow::<Sha256>(0, &leaves, last, last).unwrap();
+        assert_eq!(narrowed, tree.proof(last).unwrap());
+        narrowed
+            .verify_range_inclusion::<Sha256>(last, &leaves[last as usize..], &root)
+            .unwrap();
+    }
+
+    #[test]
+    fn test_narrow_invalid_inputs() {
+        let leaves: Vec<_> = (0..8u32)
+            .map(|position| test_digest(b"narrow", position))
+            .collect();
+        let tree = test_tree(&leaves);
+        let proof = tree.range_proof(2, 5).unwrap();
+        let range = &leaves[2..=5];
+
+        // Sub-range outside the range or inverted
+        assert!(matches!(
+            proof.narrow::<Sha256>(2, range, 1, 3),
+            Err(Error::InvalidPosition(1))
+        ));
+        assert!(matches!(
+            proof.narrow::<Sha256>(2, range, 3, 6),
+            Err(Error::InvalidPosition(6))
+        ));
+        assert!(matches!(
+            proof.narrow::<Sha256>(2, range, 4, 3),
+            Err(Error::InvalidPosition(4))
+        ));
+
+        // Range beyond the tree
+        assert!(matches!(
+            proof.narrow::<Sha256>(5, range, 5, 5),
+            Err(Error::InvalidPosition(8))
+        ));
+
+        // No leaves
+        assert!(matches!(
+            proof.narrow::<Sha256>(2, &[], 2, 2),
+            Err(Error::NoLeaves)
+        ));
+
+        // Sibling count that does not match the range shape
+        let mut missing = proof.clone();
+        missing.siblings.pop().unwrap();
+        assert!(matches!(
+            missing.narrow::<Sha256>(2, range, 3, 4),
+            Err(Error::UnalignedProof)
+        ));
+        let mut extra = proof;
+        extra.siblings.push(test_digest(b"extra", 0));
+        assert!(matches!(
+            extra.narrow::<Sha256>(2, range, 3, 4),
+            Err(Error::UnalignedProof)
+        ));
+    }
+
+    #[test]
+    fn test_narrow_tampered_input_does_not_verify() {
+        let leaves: Vec<_> = (0..8u32)
+            .map(|position| test_digest(b"narrow", position))
+            .collect();
+        let tree = test_tree(&leaves);
+        let root = tree.root();
+        let proof = tree.range_proof(0, 7).unwrap();
+
+        // A tampered leaf outside the sub-range feeds a sibling of the narrowed proof
+        let mut tampered = leaves.clone();
+        tampered[1] = test_digest(b"tampered", 1);
+        let narrowed = proof.narrow::<Sha256>(0, &tampered, 4, 5).unwrap();
+        assert_ne!(narrowed, tree.range_proof(4, 5).unwrap());
+        assert!(
+            narrowed
+                .verify_range_inclusion::<Sha256>(4, &leaves[4..=5], &root)
+                .is_err()
+        );
+
+        // A tampered leaf inside the sub-range never becomes a sibling, so the narrowed
+        // proof is the true one and rejects the tampered leaf
+        let narrowed = proof.narrow::<Sha256>(0, &tampered, 0, 1).unwrap();
+        assert_eq!(narrowed, tree.range_proof(0, 1).unwrap());
+        assert!(
+            narrowed
+                .verify_range_inclusion::<Sha256>(0, &tampered[0..=1], &root)
+                .is_err()
+        );
+
+        // A tampered input sibling is copied into the narrowed proof
+        let mut proof = tree.range_proof(2, 5).unwrap();
+        proof.siblings[0] = test_digest(b"tampered", 0);
+        let narrowed = proof.narrow::<Sha256>(2, &leaves[2..=5], 3, 3).unwrap();
+        assert!(
+            narrowed
+                .verify_element_inclusion::<Sha256>(&leaves[3], 3, &root)
+                .is_err()
         );
     }
 

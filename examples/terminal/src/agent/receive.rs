@@ -57,7 +57,7 @@ impl ReconcileSummary {
 enum EntryVerdict {
     /// The committed terminal entry covered the held receipt.
     Covered,
-    /// Operator-served evidence was unavailable, unanchored, or unprovable: retry the epoch.
+    /// Served evidence was unavailable, unanchored, or unprovable: retry the epoch.
     Refused,
     /// The omission was convicted with a proven challenge.
     Convicted,
@@ -192,19 +192,22 @@ impl Agent {
     /// or above the wallet's highest held cumulative credit and payment count. The trust story
     /// is anchored: the chain certifies the batch identity and change root of the close it
     /// admitted for the epoch (read with the recency bound, so the admitted-or-absent verdict
-    /// holds at a certified tip no older than the recency threshold), and operator-served
-    /// committed-side evidence is trusted only when it matches that anchor exactly. Operator
-    /// refusal, an unanchored or unprovable lookup, and a per-epoch fault are all the
-    /// documented availability dependence: that epoch stays unreconciled and retries without
-    /// shadowing the others. The operator can never buy coverage with a fabricated root, but
-    /// conviction and the understatement alarm both need the operator-served lookup, and an
-    /// admitted close has no settlement-clock backstop for serving it. An epoch that finalizes
-    /// while that evidence is still withheld is therefore surfaced as withheld and kept
-    /// retrying, the availability dependence the protocol places on its embedding. That
-    /// dependence is bounded by the operator's retention contract: the honest operator
-    /// reconstructs a finalized close until [`Operator::RETAINED_EPOCHS`] further epochs
-    /// finalize, so a refusal for an older epoch is unavailability, and the epoch is decided
-    /// as such instead of alarmed or retried.
+    /// holds at a certified tip no older than the recency threshold), and committed-side
+    /// evidence is trusted only when it verifies under that anchor. The evidence comes from
+    /// the payer's slice holders, the validators retaining the admitted close's sealed
+    /// dealing through its challenge window, so the accused operator is never the source
+    /// of the lookup that convicts it. The operator's reconstruction is the fallback only
+    /// when every holder declines, which is the case once the window closed and the
+    /// dealing was released. A refusal from both, an unanchored or unprovable lookup, and a
+    /// per-epoch fault are all the documented availability dependence: that epoch stays
+    /// unreconciled and retries without shadowing the others. Nobody can buy coverage with
+    /// a fabricated root, but coverage of a finalized close can no longer be convicted, only
+    /// verified, so an epoch that finalizes while its evidence is still withheld is surfaced
+    /// as withheld and kept retrying. That dependence is bounded by the operator's retention
+    /// contract: the honest operator reconstructs a finalized close until
+    /// [`Operator::RETAINED_EPOCHS`] further epochs finalize, so a refusal for an older
+    /// epoch that the validators also cannot serve is unavailability, and the epoch is
+    /// decided as such instead of alarmed or retried.
     ///
     /// The challenge window sits between admission and finalization. On the first held receipt
     /// that exceeds the anchored committed entry while that window is open, the wallet convicts
@@ -320,8 +323,8 @@ impl Agent {
                     summary.convicted.push(epoch);
                     return Ok(());
                 }
-                // Operator-served evidence was unavailable, unanchored, or unprovable: retry the
-                // whole epoch next heartbeat. Once the close has finalized, withheld evidence is
+                // Served evidence was unavailable, unanchored, or unprovable: retry the whole
+                // epoch next heartbeat. Once the close has finalized, withheld evidence is
                 // an alarm, not a wait: conviction is no longer possible and coverage can no
                 // longer be verified, so surface the dead end (once per stretch of withholding)
                 // while still retrying in case the evidence is eventually served. Past the
@@ -372,8 +375,8 @@ impl Agent {
 
     /// Assesses one held receipt against the anchored committed close without mutating state.
     ///
-    /// Every operator-served-evidence failure, an unavailable, unanchored, or unprovable lookup
-    /// and a non-proven verdict, is demoted to a soft refusal so it retries rather than aborting.
+    /// Every served-evidence failure, an unavailable, unanchored, or unprovable lookup and a
+    /// non-proven verdict, is demoted to a soft refusal so it retries rather than aborting.
     #[allow(clippy::too_many_arguments, reason = "one assessment, one call site")]
     async fn assess_entry<E: Env>(
         &mut self,
@@ -385,33 +388,46 @@ impl Agent {
         account: &Key,
         held: &super::store::HeldEntry,
     ) -> EntryVerdict {
-        let Ok(evidence) = operator_rpc::committed_entry(
-            ctx,
-            operator,
-            operator_rpc::CommittedEntryRequest {
-                epoch,
-                payer: held.payer.clone(),
-                recipient: account.clone(),
-            },
-        )
-        .await
-        else {
-            return EntryVerdict::Refused;
+        // The committed entry comes from the payer's slice holders, verified against the
+        // anchored change root. The operator is the accused party, so its reconstruction is
+        // the fallback only when every holder declines.
+        let lookup = match self
+            .holders
+            .committed_entry(ctx, chain, admitted, &held.payer, account)
+            .await
+        {
+            Ok(lookup) => lookup,
+            Err(_) => {
+                let Ok(evidence) = operator_rpc::committed_entry(
+                    ctx,
+                    operator,
+                    operator_rpc::CommittedEntryRequest {
+                        epoch,
+                        payer: held.payer.clone(),
+                        recipient: account.clone(),
+                    },
+                )
+                .await
+                else {
+                    return EntryVerdict::Refused;
+                };
+
+                // Served evidence must be the anchored close before any coverage verdict: a
+                // fabricated batch or root could otherwise fake coverage through the window,
+                // or point a challenge at another close and burn the window on a worthless
+                // verdict.
+                if evidence.batch_id != admitted.batch_id || evidence.change_root != admitted.change
+                {
+                    return EntryVerdict::Refused;
+                }
+                evidence.lookup
+            }
         };
 
-        // Served evidence must be the anchored close before any coverage verdict: a fabricated
-        // batch or root could otherwise fake coverage through the window, or point a challenge at
-        // another close and burn the window on a worthless verdict.
-        if evidence.batch_id != admitted.batch_id || evidence.change_root != admitted.change {
-            return EntryVerdict::Refused;
-        }
-
-        // Resolving operator-served evidence is a cryptographic check on an untrusted party, so
-        // a failure is refusal, not a fatal error that would shadow the higher epochs.
+        // Resolving served evidence is a cryptographic check on an untrusted party, so a
+        // failure is refusal, not a fatal error that would shadow the higher epochs.
         let Ok((cumulative, count)) =
-            evidence
-                .lookup
-                .resolve::<Sha256>(&admitted.change, &held.payer, account)
+            lookup.resolve::<Sha256>(&admitted.change, &held.payer, account)
         else {
             return EntryVerdict::Refused;
         };
@@ -436,7 +452,7 @@ impl Agent {
                 count: held.count,
                 opening: held.receipt.opening.clone(),
             }),
-            sender: Box::new(evidence.lookup),
+            sender: Box::new(lookup),
         };
         let tx = SettlementTx::Challenge(ChallengeRequest {
             batch_id: admitted.batch_id,

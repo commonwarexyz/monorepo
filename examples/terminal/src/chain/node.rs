@@ -39,9 +39,10 @@ use crate::{
             db_config, sync_config,
         },
     },
-    protocol::{DepositEvent, Key, chain_id, dealt_participant, deployment_of},
+    protocol::{DepositEvent, chain_id, dealt_participant, deployment_of},
 };
 use anyhow::{Context as _, Result, bail, ensure};
+use bytes::Bytes;
 use commonware_actor::{
     Feedback,
     mailbox::{self, Policy, Receiver as MailboxReceiver, Sender as MailboxSender},
@@ -50,9 +51,9 @@ use commonware_broadcast::buffered;
 use commonware_clearing::bajillion::{
     admission::{Vote, bls12381},
     commitment::VectorRoot,
-    retained::DealtSlice,
+    retained::Wire,
     settlement::FinalizedBatch,
-    transition::{Header, ProofSlice, RootBundle},
+    transition::{Header, RootBundle},
 };
 use commonware_codec::{Decode as _, DecodeExt as _, Encode as _};
 use commonware_consensus::{
@@ -245,12 +246,39 @@ where
 /// committee participant whose vote it earns and the network peer holding
 /// that dealt key.
 pub(crate) struct Deal {
-    pub(crate) participant: Participant,
-    pub(crate) peer: ed25519::PublicKey,
-    /// The dealt wire form: one slice per assigned span without its unchanged
-    /// state, which the validator hydrates against the key interval it
-    /// retains for that span.
-    pub(crate) slices: Vec<DealtSlice<Key, Digest>>,
+    participant: Participant,
+    peer: ed25519::PublicKey,
+    /// The dealing's DA message encoded once, cloned for every resend.
+    message: Bytes,
+}
+
+impl Deal {
+    /// Encodes one validator's dealing: the close header and roots with one
+    /// slice per assigned span in the dealt wire form, without its unchanged
+    /// state and sharing its chunk buffers with every other dealing covering
+    /// the same slices, which the validator hydrates against the key interval
+    /// it retains for that span.
+    pub(crate) fn new(
+        participant: Participant,
+        peer: ed25519::PublicKey,
+        epoch: u64,
+        header: Header<Digest>,
+        roots: RootBundle<Digest>,
+        slices: Vec<Wire>,
+    ) -> Self {
+        let message = DaMessage::Dealing(Dealing {
+            epoch,
+            header,
+            roots,
+            slices,
+        })
+        .encode();
+        Self {
+            participant,
+            peer,
+            message,
+        }
+    }
 }
 
 /// A message sent to the close pipeline [`Certifier`].
@@ -260,7 +288,6 @@ pub(crate) enum Message {
     Certify {
         epoch: u64,
         header: Header<Digest>,
-        roots: RootBundle<Digest>,
         dealings: Vec<Deal>,
         response: oneshot::Sender<bls12381::Certificate>,
     },
@@ -294,14 +321,12 @@ impl Mailbox {
         &self,
         epoch: u64,
         header: Header<Digest>,
-        roots: RootBundle<Digest>,
         dealings: Vec<Deal>,
     ) -> Result<bls12381::Certificate> {
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::Certify {
             epoch,
             header,
-            roots,
             dealings,
             response,
         });
@@ -367,7 +392,7 @@ impl Pipeline {
         epoch: u64,
         header: Header<Digest>,
         roots: RootBundle<Digest>,
-        dealings: Vec<Vec<ProofSlice<Key, Digest>>>,
+        dealings: Vec<Vec<Wire>>,
     ) -> Result<bls12381::Certificate> {
         ensure!(
             dealings.len() == self.peers.len(),
@@ -376,13 +401,18 @@ impl Pipeline {
         let dealings = dealings
             .into_iter()
             .enumerate()
-            .map(|(index, slices)| Deal {
-                participant: Participant::from_usize(index),
-                peer: self.peers[index].clone(),
-                slices: slices.into_iter().map(DealtSlice::strip).collect(),
+            .map(|(index, slices)| {
+                Deal::new(
+                    Participant::from_usize(index),
+                    self.peers[index].clone(),
+                    epoch,
+                    header,
+                    roots,
+                    slices,
+                )
             })
             .collect();
-        futures::executor::block_on(self.mailbox.certify(epoch, header, roots, dealings))
+        futures::executor::block_on(self.mailbox.certify(epoch, header, dealings))
     }
 
     /// Submits the certified close and blocks until the local certified
@@ -401,7 +431,6 @@ impl Pipeline {
 struct Outstanding {
     epoch: u64,
     header: Header<Digest>,
-    roots: RootBundle<Digest>,
     dealings: Vec<Deal>,
     votes: BTreeMap<Participant, Vote>,
     response: oneshot::Sender<bls12381::Certificate>,
@@ -471,14 +500,13 @@ where
                         return;
                     };
                     match message {
-                        Message::Certify { epoch, header, roots, dealings, response } => {
+                        Message::Certify { epoch, header, dealings, response } => {
                             // A replaced certification drops the stale
                             // response: its worker observes the closed
                             // channel and fails that close.
                             self.outstanding = Some(Outstanding {
                                 epoch,
                                 header,
-                                roots,
                                 dealings,
                                 votes: BTreeMap::new(),
                                 response,
@@ -517,7 +545,8 @@ where
 
     /// Sends every outstanding dealing to its validator, skipping validators
     /// that already voted. Dissemination is recoverable off-chain traffic,
-    /// so delivery is retried on the resend tick until quorum.
+    /// so delivery is retried on the resend tick until quorum, resending the
+    /// bytes each deal encoded once.
     fn disseminate<Se>(&mut self, sender: &mut Se)
     where
         Se: Sender<PublicKey = ed25519::PublicKey>,
@@ -529,13 +558,11 @@ where
             if outstanding.votes.contains_key(&deal.participant) {
                 continue;
             }
-            let message = DaMessage::Dealing(Dealing {
-                epoch: outstanding.epoch,
-                header: outstanding.header,
-                roots: outstanding.roots,
-                slices: deal.slices.clone(),
-            });
-            let sent = sender.send(Recipients::One(deal.peer.clone()), message.encode(), true);
+            let sent = sender.send(
+                Recipients::One(deal.peer.clone()),
+                deal.message.clone(),
+                true,
+            );
             if sent.is_empty() {
                 debug!(epoch = outstanding.epoch, peer = ?deal.peer, "failed to send dealing");
             }
@@ -1123,17 +1150,22 @@ mod tests {
             let deals = validator_keys
                 .iter()
                 .enumerate()
-                .map(|(index, key)| Deal {
-                    participant: Participant::from_usize(index),
-                    peer: key.clone(),
-                    slices: Vec::new(),
+                .map(|(index, key)| {
+                    Deal::new(
+                        Participant::from_usize(index),
+                        key.clone(),
+                        0,
+                        header,
+                        roots,
+                        Vec::new(),
+                    )
                 })
                 .collect::<Vec<_>>();
             let certify = {
                 let mailbox = mailbox.clone();
                 context
                     .child("certify")
-                    .spawn(move |_| async move { mailbox.certify(0, header, roots, deals).await })
+                    .spawn(move |_| async move { mailbox.certify(0, header, deals).await })
             };
 
             // Every validator receives its dealing.
@@ -1164,33 +1196,33 @@ mod tests {
                 header: foreign_header,
                 vote: schemes[0].sign(&foreign_header).unwrap(),
             };
+            let ballot = |ballot: Ballot| {
+                let message: DaMessage = DaMessage::Vote(ballot);
+                message.encode()
+            };
             validator_chans[0].0.send(
                 Recipients::One(operator_key.clone()),
-                DaMessage::Vote(Ballot {
+                ballot(Ballot {
                     epoch: 0,
                     header,
                     vote: forged,
-                })
-                .encode(),
+                }),
                 true,
             );
-            validator_chans[0].0.send(
-                Recipients::One(operator_key.clone()),
-                DaMessage::Vote(foreign).encode(),
-                true,
-            );
+            validator_chans[0]
+                .0
+                .send(Recipients::One(operator_key.clone()), ballot(foreign), true);
 
             // The remaining validators return exactly quorum valid votes.
             for index in 1..=quorum {
                 let vote = schemes[index].sign(&header).unwrap();
                 validator_chans[index].0.send(
                     Recipients::One(operator_key.clone()),
-                    DaMessage::Vote(Ballot {
+                    ballot(Ballot {
                         epoch: 0,
                         header,
                         vote,
-                    })
-                    .encode(),
+                    }),
                     true,
                 );
             }

@@ -503,25 +503,29 @@ pub async fn run(context: tokio::Context, args: Validator) {
 
     // Sealing actor on the settlement DA channel: the validator's clearing
     // committee identity is the dealt BLS key from setup, separate material
-    // from its consensus threshold share.
+    // from its consensus threshold share. The genesis validator list names
+    // the query servers a missing retained interval is fetched from.
     let db: Database<tokio::Context> = stateful_mailbox.subscribe_databases().await;
     let clearing = clearing_bls::Scheme::signer(
         committee().expect("the demo committee is statically valid"),
         node.clearing.clone(),
     )
     .expect("the dealt clearing key must be in the committee");
-    let sealer = da::Sealer::new(
+    let (sealer, sealer_mailbox) = da::Sealer::new(
         context.child("sealer"),
         da::Config {
             scheme: clearing,
             operators: dealers,
             db: db.clone(),
             partition: format!("{partition_prefix}-dealings"),
+            validators: genesis_output.validators.clone(),
+            fetch_timeout: Duration::from_secs(2),
         },
     );
     let sealer_handle = sealer.start(settlement_da_network);
 
-    // Certified query server over the applied database.
+    // Certified query server over the applied database, serving evidence
+    // from the sealer's retained dealings.
     let query_handle = query::start(
         context.child("query"),
         query::Config {
@@ -531,6 +535,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
             finalized,
             marshal: marshal.clone(),
             ingress: ingress_mailbox,
+            sealer: Some(sealer_mailbox),
         },
     );
 

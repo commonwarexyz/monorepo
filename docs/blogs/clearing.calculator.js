@@ -2,11 +2,12 @@
 // monospace type follow the article's other figures.
 //
 // The model is the codec, not a fit: every byte below follows the encodings in
-// clearing/src/bajillion (varints for lengths, sequence numbers, amounts, and counts;
-// four-byte positions; one-byte option tags; BMT range proofs with the storage crate's
-// sibling rule). Fed the benchmark's per-slice counts it reproduces the measured sizes
-// bench to the byte. The calculator spreads accounts, senders, edges, and recipients
-// evenly over the 256 slices and assumes every edge credits a distinct account.
+// clearing/src/bajillion (varints for lengths, sequence numbers, amounts, counts, and
+// coverage boundary positions and prefixes; four-byte opening positions; one-byte option
+// tags; BMT range proofs with the storage crate's sibling rule). Fed the benchmark's
+// per-slice counts it reproduces the measured sizes bench to the byte. The calculator
+// spreads accounts, senders, edges, and recipients evenly over the 256 slices and assumes
+// every edge credits a distinct account.
 
 const RED = '#d9251c';
 const GRAY = '#666666';
@@ -19,7 +20,6 @@ const KEY = 32;
 const SIG = 64;
 const DIGEST = 32;
 const LTHASH = 2048;
-const BOUNDARY = 140;
 const AGG = 48;
 const LEAF = 65;
 const GUARD = KEY + DIGEST;
@@ -71,10 +71,20 @@ function bracket(len, start, end) {
   return { pred, succ, first: start - (pred ? 1 : 0), last: end - 1 + (succ ? 1 : 0) };
 }
 
+// One coverage boundary on the wire: three varint positions, the eight varint prefix fields
+// (debit, credit, payout, deposit, withdrawal, withdrawal count, outgoing entries, transpose
+// entries), and two 32-byte accumulator checksums.
+function boundary(pred, change, succ, prefix) {
+  let bytes = varint(pred) + varint(change) + varint(succ) + 2 * DIGEST;
+  for (const v of prefix) bytes += varint(v);
+  return bytes;
+}
+
 // One slice's shape: cumulative positions at its start and end in the predecessor,
-// change, successor, and transpose vectors, plus its senders and recipient groups.
-function shape(p0, p1, c0, c1, s0, s1, t0, t1, senders, groups) {
-  return { p0, p1, c0, c1, s0, s1, t0, t1, senders, groups };
+// change, successor, and transpose vectors, its senders and recipient groups, and the
+// eight prefix fields at its start and end.
+function shape(p0, p1, c0, c1, s0, s1, t0, t1, senders, groups, x0, x1) {
+  return { p0, p1, c0, c1, s0, s1, t0, t1, senders, groups, x0, x1 };
 }
 
 // Exact dealt bytes of one proof slice covering slices [lo, hi).
@@ -87,12 +97,18 @@ function dealtSpan(counts, lo, hi, totals, entriesPerSender, gapBytes) {
   let senders = 0;
   let groups = 0;
   let aggregates = varint(span);
+  let boundaries = varint(span + 1) + boundary(first.p0, first.c0, first.s0, first.x0);
   let groupCounts = 0;
+
+  // Every chunk carries its own transpose run count, so a span pays one varint per slice.
+  let runCounts = 0;
   for (let i = lo; i < hi; i += 1) {
     const c = counts[i];
     senders += c.senders;
     groups += c.groups;
+    runCounts += varint(c.groups);
     aggregates += 1 + (c.senders > 0 ? AGG : 0);
+    boundaries += boundary(c.p1, c.c1, c.s1, c.x1);
     const t = c.t1 - c.t0;
     if (c.groups > 0) {
       const per = Math.floor(t / c.groups);
@@ -101,10 +117,10 @@ function dealtSpan(counts, lo, hi, totals, entriesPerSender, gapBytes) {
     }
   }
   let bytes = 4 + 2 + 2;
-  bytes += varint(span + 1) + (span + 1) * BOUNDARY;
+  bytes += boundaries;
   bytes += rows * (1 + gapBytes) + senders * (varint(0) + SIG);
   bytes += senders * (varint(entriesPerSender) + entriesPerSender * (KEY + 1 + 1));
-  bytes += transpose === 0 ? varint(0) : varint(groups) + groups * KEY + groupCounts + transpose * (KEY + 1 + 1);
+  bytes += runCounts + groups * KEY + groupCounts + transpose * (KEY + 1 + 1);
   bytes += aggregates;
   bytes += 2 * LTHASH;
   const c = bracket(totals.rows, first.c0, last.c1);
@@ -165,11 +181,15 @@ function scenario(N, k) {
   const send = spread(S);
   const trans = spread(E);
   const groups = spread(R);
+  // Every edge moves one unit and nothing is deposited, withdrawn, or paid out, so the
+  // debit, credit, and both entry counts before a cut all equal the edges before it.
+  const prefix = (edges) => [edges, edges, 0, 0, 0, 0, edges, edges];
   const counts = [];
   for (let i = 0; i < SLICES; i += 1) {
     counts.push(shape(
       pred[i], pred[i + 1], rows[i], rows[i + 1], pred[i], pred[i + 1],
       trans[i], trans[i + 1], send[i + 1] - send[i], groups[i + 1] - groups[i],
+      prefix(trans[i]), prefix(trans[i + 1]),
     ));
   }
   const gapBytes = A > 0 ? varint(Math.max(0, Math.floor(N / A) - 1)) : 1;

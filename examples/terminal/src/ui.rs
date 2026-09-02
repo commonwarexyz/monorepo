@@ -1083,7 +1083,7 @@ mod tests {
         agent::Agent,
         chain::{client::Client, harness},
         operator::rpc as operator_rpc,
-        protocol::deployment,
+        protocol::{INITIAL_BALANCE, deployment},
     };
     use commonware_clearing::bajillion::commitment::VectorRoot;
     use commonware_cryptography::{Hasher as _, Sha256};
@@ -1198,7 +1198,10 @@ mod tests {
             .unwrap();
 
             assert!(state.operator.is_none());
-            assert!(state.balance.is_none());
+
+            // The validators serve the certified head, so the balance stays
+            // visible with the operator dead.
+            assert_eq!(state.balance, Some(INITIAL_BALANCE));
             assert_eq!(
                 state.pending_closes.iter().copied().collect::<Vec<_>>(),
                 [7]

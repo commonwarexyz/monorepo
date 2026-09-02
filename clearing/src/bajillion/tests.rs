@@ -1,19 +1,23 @@
 use crate::bajillion::{
     boundary::{DepositBatch, DepositRecord, SignedWithdrawal, WithdrawalAction, WithdrawalBatch},
     challenge::{
-        AckWitness, Challenge, ChallengeError, ChallengeKind, EntryWitness, Verdict,
-        account_lookup, adjudicate, higher_entry_lookup,
+        AccountLookup, AckWitness, Challenge, ChallengeError, ChallengeKind, ChangeOpening,
+        EntryWitness, StateLookup, Verdict, account_lookup, adjudicate, higher_entry_lookup,
     },
+    commitment::{self, VectorKind},
     payment::{
         AckError, EntryReceipt, SendAuthorization, VECTOR_ACK_AGGREGATE_NAMESPACE, VectorAck,
         VectorSendBody,
     },
     posted::derive_successor,
+    retained::Interval,
+    serve::{ServeError, SpanIndex},
     state::{AccountRow, AccountState, Prefix, SettlementOutput, StateLeaf},
     transition::{
-        Assignment, ChallengeIndex, Close, CloseContext, CloseLimits, EpochContext, PreparedClose,
-        StateCache, TransitionError as CloseError, prepare_close_with_strategy,
-        validate_close_with_strategy, validate_row, validate_slice,
+        Assignment, ChallengeIndex, ChangeParts, Close, CloseContext, CloseLimits, EpochContext,
+        PreparedClose, ProofSlice, RootBundle, StateCache, TransitionError as CloseError,
+        account_slice, prepare_close_with_strategy, validate_close_with_strategy, validate_row,
+        validate_slice,
     },
     vector::{OutEntry, OutVector, TransposeEntry},
 };
@@ -31,6 +35,7 @@ use commonware_cryptography_curve25519::signing::{
 };
 use commonware_parallel::Sequential;
 use commonware_utils::TestRng;
+mod rotation;
 
 const EPOCH: u64 = 7;
 const OPENING_BALANCE: u64 = 1_000_000;
@@ -96,6 +101,43 @@ fn fixture_with(
     opening: Option<&alloc::collections::BTreeMap<VerifyingKey, AccountState>>,
 ) -> Fixture {
     assert!(senders <= live && credited <= senders && out_degree <= credited);
+    fixture_from(
+        epoch,
+        live,
+        &(0..senders).collect::<Vec<_>>(),
+        credited,
+        out_degree,
+        opening,
+    )
+}
+
+/// Builds a close over `live` accounts where every `stride`th account in key order sends
+/// one unit to `out_degree` of the first `credited` accounts, so the changed rows are
+/// scattered across the key space and some slices hold only unchanged leaves.
+fn sparse_fixture(live: usize, stride: usize, credited: usize, out_degree: usize) -> Fixture {
+    fixture_from(
+        EPOCH,
+        live,
+        &(0..live).step_by(stride).collect::<Vec<_>>(),
+        credited,
+        out_degree,
+        None,
+    )
+}
+
+/// Builds a close at `epoch` over `live` accounts where the accounts at `senders` (indices
+/// in key order) each send one unit to `out_degree` of the first `credited` accounts.
+fn fixture_from(
+    epoch: u64,
+    live: usize,
+    senders: &[usize],
+    credited: usize,
+    out_degree: usize,
+    opening: Option<&alloc::collections::BTreeMap<VerifyingKey, AccountState>>,
+) -> Fixture {
+    assert!(
+        senders.iter().all(|index| *index < live) && credited <= live && out_degree <= credited
+    );
     let mut accounts = (0..live)
         .map(|index| {
             let private = SigningKey::from_seed(ACCOUNT_SEED_START + index as u64);
@@ -143,11 +185,12 @@ fn fixture_with(
     .and_then(|context| context.bind::<Sha256>(&cache, &deposits, &withdrawals))
     .unwrap();
 
-    // Edge (i -> (i + j) % credited) for j in 0..out_degree, one unit each, from the first
+    // Edge (i -> (i + j) % credited) for j in 0..out_degree, one unit each, from the
     // `senders` accounts. Rows cover exactly the senders and the credited recipients.
     let mut incoming = vec![Vec::new(); live];
     let mut vectors_by_account = vec![None; live];
-    for (index, (public, private)) in accounts.iter().enumerate().take(senders) {
+    for index in senders.iter().copied() {
+        let (public, private) = &accounts[index];
         let mut entries = (0..out_degree)
             .map(|j| OutEntry {
                 recipient: accounts[(index + j) % credited].0.clone(),
@@ -174,7 +217,7 @@ fn fixture_with(
     let mut transpose = Vec::new();
     let mut rows = Vec::with_capacity(live);
     let mut out_vectors = Vec::with_capacity(live);
-    let mut acks = Vec::with_capacity(senders);
+    let mut acks = Vec::with_capacity(senders.len());
     let mut operator_signatures = Vec::with_capacity(live);
     let mut prefix = Prefix::default();
     for (index, (public, _)) in accounts.iter().enumerate() {
@@ -1388,9 +1431,10 @@ fn split_interval(
     }
 }
 
-/// Strips, hydrates, validates, and advances every requested span of a close against
-/// retained per-slice intervals, asserting hydration parity and returning (dealt bytes,
-/// full bytes).
+/// Deals, strips, hydrates, validates, and advances every requested span of a close
+/// against retained per-slice intervals, asserting that the operator's dealt wire is the
+/// stripped slice's wire and that hydration reproduces the full slice, and returning
+/// (dealt bytes, full bytes).
 fn dealt_round_trip(
     fixture: &Fixture,
     intervals: &mut [crate::bajillion::retained::Interval<VerifyingKey>],
@@ -1402,6 +1446,10 @@ fn dealt_round_trip(
         .prepared
         .assemble_slices(&fixture.cache, spans, &Sequential)
         .unwrap();
+    let dealings = fixture
+        .prepared
+        .deal(&fixture.cache, spans, &Sequential)
+        .unwrap();
     let mut dealt_bytes = 0;
     let mut full_bytes = 0;
     for slice in slices {
@@ -1409,13 +1457,28 @@ fn dealt_round_trip(
         full_bytes += slice.encoded_size();
         assert_eq!(slice.encode().len(), slice.encoded_size());
         let expected = slice.clone();
-        let dealt = crate::bajillion::retained::DealtSlice::strip(slice);
+        let dealt = crate::bajillion::retained::DealtSlice::strip(slice, slice_bits);
         assert_eq!(dealt.span(), &span);
         dealt_bytes += dealt.encode_size();
 
-        // The dealt wire round-trips under the adversarial decode bounds before hydration.
+        // The operator's wire is the witness segment followed by one chunk per covered
+        // slice, and it is byte for byte the stripped slice's encoding.
         let encoded = dealt.encode();
         assert_eq!(encoded.len(), dealt.encode_size());
+        let wire = dealings.encode_span(&span);
+        assert_eq!(
+            wire.segments().len(),
+            usize::from(span.end - span.start) + 1
+        );
+        assert_eq!(wire.encode_size(), encoded.len());
+        assert_eq!(dealings.span_size(&span), encoded.len());
+        assert_eq!(
+            wire.encode(),
+            encoded,
+            "dealt wire must match the stripped slice"
+        );
+
+        // The dealt wire round-trips under the adversarial decode bounds before hydration.
         let decoded = crate::bajillion::retained::decode_dealt_slice_bounded::<
             VerifyingKey,
             ShaDigest,
@@ -1518,6 +1581,11 @@ fn dealt_slices_hydrate_validate_and_stream() {
         "spans must amortize the witness: {span_dealt} vs {single_dealt}"
     );
     assert_eq!(advanced, per_slice);
+    let mut whole_span = intervals.clone();
+    let (whole_dealt, _) =
+        dealt_round_trip(&second, &mut whole_span, core::slice::from_ref(&whole));
+    assert!(whole_dealt < span_dealt, "{whole_dealt} vs {span_dealt}");
+    assert_eq!(whole_span, per_slice);
 
     // A stale interval (epoch one's predecessor state) hydrates epoch two's whole-close span
     // into material that misses the certified roots.
@@ -1530,7 +1598,7 @@ fn dealt_slices_hydrate_validate_and_stream() {
     for slice in second_slices {
         let span = slice.span.clone();
         let expected = slice.clone();
-        let dealt = crate::bajillion::retained::DealtSlice::strip(slice);
+        let dealt = crate::bajillion::retained::DealtSlice::strip(slice, slice_bits);
         match dealt.hydrate::<Sha256>(
             &span_interval(&stale, &span),
             &second.context,
@@ -2239,30 +2307,266 @@ fn byzantine_operator_cannot_certify_invalid_runs() {
         .expect_err(name);
         assert!(expected(&error), "{name}: {error:?}");
 
-        // The dealt form hydrates to the same rejected span, or fails to hydrate at all.
-        let intervals = intervals_of(cache.leaves(), context.assignment().slice_bits());
-        let dealt = crate::bajillion::retained::DealtSlice::strip(slice.clone());
-        if let Ok(hydrated) = dealt.hydrate::<Sha256>(
-            &span_interval(&intervals, &whole),
-            context,
-            deposits,
-            withdrawals,
-        ) {
-            assert!(
-                validate_slice::<Sha256, _, _, AckBatchVerifier, _>(
-                    context,
-                    operator_bls,
-                    deposits,
-                    withdrawals,
-                    &close.header,
-                    &close.roots,
-                    &hydrated,
-                    &mut TestRng::new(41),
-                )
-                .is_err(),
-                "{name}: the hydrated span was certified"
-            );
+        // The dealt form, whether stripped from the slice or dealt by the operator's
+        // chunked path, decodes and hydrates to the same rejected span or fails earlier.
+        let slice_bits = context.assignment().slice_bits();
+        let intervals = intervals_of(cache.leaves(), slice_bits);
+        let interval = span_interval(&intervals, &whole);
+        let stripped = crate::bajillion::retained::DealtSlice::strip(slice.clone(), slice_bits);
+        let dealt = prepared
+            .deal(cache, core::slice::from_ref(&whole), &Sequential)
+            .unwrap()
+            .encode_span(&whole)
+            .encode();
+        assert_eq!(dealt, stripped.encode(), "{name}");
+        assert!(
+            certify_dealt(&fixture, &interval, dealt.as_ref()).is_err(),
+            "{name}: the dealt span was certified"
+        );
+    }
+}
+
+/// The stage at which a dealt wire was rejected on its way to certification.
+#[derive(Debug, Eq, PartialEq)]
+enum Rejected {
+    Decode,
+    Hydrate,
+    Validate,
+}
+
+/// Decodes one dealt wire under the fixture's limits and hydrates it against a retained
+/// interval, as a holder does before validating.
+fn hydrate_dealt(
+    fixture: &Fixture,
+    interval: &Interval<VerifyingKey>,
+    encoded: &[u8],
+) -> Result<Result<ProofSlice<VerifyingKey, ShaDigest>, commonware_codec::Error>, Rejected> {
+    let decoded =
+        crate::bajillion::retained::decode_dealt_slice_bounded::<VerifyingKey, ShaDigest>(
+            encoded,
+            *fixture.context.limits(),
+            encoded.len(),
+        )
+        .map_err(|_| Rejected::Decode)?;
+    Ok(decoded.hydrate::<Sha256>(
+        interval,
+        &fixture.context,
+        &fixture.deposits,
+        &fixture.withdrawals,
+    ))
+}
+
+/// Decodes, hydrates, and validates one dealt wire against a retained interval, as a
+/// holder does before voting.
+fn certify_dealt(
+    fixture: &Fixture,
+    interval: &Interval<VerifyingKey>,
+    encoded: &[u8],
+) -> Result<ProofSlice<VerifyingKey, ShaDigest>, Rejected> {
+    let close = fixture.prepared.close();
+    let hydrated = hydrate_dealt(fixture, interval, encoded)?.map_err(|_| Rejected::Hydrate)?;
+    validate_slice::<Sha256, _, _, AckBatchVerifier, _>(
+        &fixture.context,
+        &fixture.operator_bls,
+        &fixture.deposits,
+        &fixture.withdrawals,
+        &close.header,
+        &close.roots,
+        &hydrated,
+        &mut TestRng::new(47),
+    )
+    .map_err(|_| Rejected::Validate)?;
+    Ok(hydrated)
+}
+
+/// Every span's chunk segments are the covered slices' single-span chunks, and a span
+/// whose first slice has no rows still decodes and hydrates: the rank gap of a chunk's
+/// first row counts from its own slice's first retained leaf, not from the previous chunk.
+#[test]
+fn dealt_chunks_do_not_depend_on_their_span() {
+    let fixture = sparse_fixture(20, 3, 2, 2);
+    let slice_bits = fixture.context.assignment().slice_bits();
+    let slice_count = fixture.context.assignment().slice_count();
+    let whole = 0..slice_count;
+    let singles = single_spans(slice_bits);
+    let boundaries = fixture
+        .prepared
+        .assemble_slices(&fixture.cache, core::slice::from_ref(&whole), &Sequential)
+        .unwrap()
+        .remove(0)
+        .coverage
+        .boundaries;
+    let delta = |slice: u16, position: fn(&crate::bajillion::transition::SliceBoundary) -> u32| {
+        position(&boundaries[usize::from(slice) + 1]) - position(&boundaries[usize::from(slice)])
+    };
+    let rows = |slice: u16| delta(slice, |boundary| boundary.change);
+    let leaves = |slice: u16| delta(slice, |boundary| boundary.predecessor);
+
+    // A span opening on a slice with leaves but no rows and closing on one with rows, and
+    // its mirror: the second chunk's first gap counts from its own slice's first leaf.
+    let leading = (0..slice_count - 1)
+        .find(|slice| rows(*slice) == 0 && leaves(*slice) != 0 && rows(slice + 1) != 0)
+        .map(|slice| slice..slice + 2)
+        .expect("the fixture has a rowless slice before a slice with rows");
+    let trailing = (1..slice_count)
+        .find(|slice| rows(*slice) == 0 && leaves(*slice) != 0 && rows(slice - 1) != 0)
+        .map(|slice| slice - 1..slice + 1)
+        .expect("the fixture has a rowless slice after a slice with rows");
+    let mut spans = singles.clone();
+    spans.extend([whole.clone(), leading.clone(), trailing.clone()]);
+    let dealings = fixture
+        .prepared
+        .deal(&fixture.cache, &spans, &Sequential)
+        .unwrap();
+    let chunks = singles
+        .iter()
+        .map(|span| dealings.encode_span(span).segments()[1].clone())
+        .collect::<Vec<_>>();
+    for span in &spans {
+        let wire = dealings.encode_span(span);
+        let (witness, dealt) = wire.segments().split_first().unwrap();
+
+        // An API contract pin: a span's chunk segments are the covered slices' single-span
+        // chunks, shared buffers today and equal bytes however the wire is assembled.
+        assert_eq!(
+            dealt,
+            &chunks[usize::from(span.start)..usize::from(span.end)]
+        );
+        assert_eq!(
+            witness.len() + dealt.iter().map(bytes::Bytes::len).sum::<usize>(),
+            dealings.span_size(span)
+        );
+    }
+    for spans in [singles, vec![whole], vec![leading], vec![trailing]] {
+        dealt_round_trip(
+            &fixture,
+            &mut intervals_of(fixture.cache.leaves(), slice_bits),
+            &spans,
+        );
+    }
+}
+
+/// A chunk moved to another slice's position or altered in place is caught on the way to
+/// certification with a typed error, while the untouched wire certifies.
+#[test]
+fn tampered_dealt_chunks_are_rejected() {
+    let fixture = churn_fixture();
+    let slice_bits = fixture.context.assignment().slice_bits();
+    let slice_count = fixture.context.assignment().slice_count();
+    let whole = 0..slice_count;
+    let intervals = intervals_of(fixture.cache.leaves(), slice_bits);
+    let interval = span_interval(&intervals, &whole);
+    let wire = fixture
+        .prepared
+        .deal(&fixture.cache, core::slice::from_ref(&whole), &Sequential)
+        .unwrap()
+        .encode_span(&whole);
+    let segments = wire.segments();
+    certify_dealt(&fixture, &interval, wire.encode().as_ref()).unwrap();
+    let concat = |segments: &[bytes::Bytes]| {
+        segments
+            .iter()
+            .flat_map(|segment| segment.iter().copied())
+            .collect::<Vec<u8>>()
+    };
+
+    // Swap the two largest chunks, then swap a chunk with an empty one.
+    let mut by_size = (1..segments.len()).collect::<Vec<_>>();
+    by_size.sort_by_key(|index| core::cmp::Reverse(segments[*index].len()));
+    let (largest, second) = (by_size[0], by_size[1]);
+    let smallest = *by_size.last().unwrap();
+    assert!(segments[second].len() > 1 && segments[smallest].len() == 1);
+    for (from, to) in [(largest, second), (largest, smallest)] {
+        let mut swapped = segments.to_vec();
+        swapped.swap(from, to);
+        let verdict = certify_dealt(&fixture, &interval, &concat(&swapped));
+        assert!(
+            verdict.is_err(),
+            "chunks {from} and {to} swapped: {verdict:?}"
+        );
+    }
+
+    // Flip one byte at a stride through the second-largest chunk, starting at its first row
+    // tag: tags and counts fail decoding, signatures and amounts fail validation, and
+    // nothing certifies.
+    let mut rejected = [false; 3];
+    for offset in (0..segments[second].len()).step_by(13) {
+        let mut tampered = segments.to_vec();
+        let mut chunk = tampered[second].to_vec();
+        chunk[offset] ^= 0x40;
+        tampered[second] = chunk.into();
+        match certify_dealt(&fixture, &interval, &concat(&tampered)) {
+            Err(Rejected::Decode) => rejected[0] = true,
+            Err(Rejected::Hydrate) => rejected[1] = true,
+            Err(Rejected::Validate) => rejected[2] = true,
+            Ok(_) => panic!("chunk byte {offset} flipped and certified"),
         }
+    }
+    assert!(rejected[0] && rejected[2], "{rejected:?}");
+
+    // A rank gap that stays within the retained count but runs past its own slice's
+    // leaves decodes and is rejected by hydration: chunks resolve against their slice.
+    // The tampered chunk opens with a live row in a slice holding fewer than every
+    // retained leaf, so that slice's leaf count is the smallest gap running past it, and
+    // with at most 128 retained leaves every gap below the count is a one-byte varint
+    // that the tampered byte replaces whole.
+    let retained = interval.leaves().len();
+    assert!(retained <= 128, "{retained} retained leaves");
+    let live = (1..segments.len())
+        .find(|&index| {
+            segments[index].len() > 1
+                && (segments[index][0] & 0b10) == 0
+                && intervals[index - 1].leaves().len() < retained
+        })
+        .expect("a chunk opens with a live row in a slice without every leaf");
+    let mut tampered = segments.to_vec();
+    let mut chunk = tampered[live].to_vec();
+    chunk[1] = u8::try_from(intervals[live - 1].leaves().len()).unwrap();
+    tampered[live] = chunk.into();
+    assert!(matches!(
+        hydrate_dealt(&fixture, &interval, &concat(&tampered)),
+        Ok(Err(commonware_codec::Error::Invalid(
+            "DealtSlice",
+            "rank gap beyond the slice interval"
+        )))
+    ));
+}
+
+/// A witness whose retained count is not the coverage's predecessor position delta fails
+/// decoding, so a peer cannot loosen the rank-gap and state-range decode bounds by lying.
+#[test]
+fn mismatched_retained_count_is_rejected() {
+    let fixture = churn_fixture();
+    let slice_count = fixture.context.assignment().slice_count();
+    let whole = 0..slice_count;
+    let wire = fixture
+        .prepared
+        .deal(&fixture.cache, core::slice::from_ref(&whole), &Sequential)
+        .unwrap()
+        .encode_span(&whole)
+        .encode();
+    let decode = |encoded: &[u8]| {
+        crate::bajillion::retained::decode_dealt_slice_bounded::<VerifyingKey, ShaDigest>(
+            encoded,
+            *fixture.context.limits(),
+            encoded.len(),
+        )
+    };
+    decode(&wire).unwrap();
+
+    // The whole span retains every predecessor leaf, and the count leads the witness.
+    let retained = u32::try_from(fixture.cache.leaves().len()).unwrap();
+    for count in [retained + 1, retained - 1] {
+        let count = count.encode();
+        let mut tampered = wire.to_vec();
+        tampered[..count.len()].copy_from_slice(&count);
+        assert!(matches!(
+            decode(&tampered),
+            Err(commonware_codec::Error::Invalid(
+                "DealtSlice",
+                "retained count does not match the coverage"
+            ))
+        ));
     }
 }
 
@@ -2315,4 +2619,586 @@ fn credit_without_debit_is_caught_at_the_terminal_boundary() {
             verdict.unwrap();
         }
     }
+}
+
+/// The whole-close constructors a span index must reproduce byte for byte.
+struct Whole<'a> {
+    fixture: &'a Fixture,
+    index: ChallengeIndex<VerifyingKey, ShaDigest>,
+    successor: StateCache<VerifyingKey, ShaDigest>,
+    transpose: Vec<TransposeEntry<VerifyingKey>>,
+    transpose_tree: commitment::Tree<ShaDigest>,
+}
+
+impl<'a> Whole<'a> {
+    fn new(fixture: &'a Fixture) -> Self {
+        let close = fixture.prepared.close();
+        let index = ChallengeIndex::new::<Sha256>(&fixture.context, close).unwrap();
+        let mut leaves = close.unchanged.clone();
+        leaves.extend(
+            close
+                .rows
+                .iter()
+                .filter(|row| row.successor.active)
+                .map(|row| StateLeaf {
+                    account: row.account.clone(),
+                    state: row.successor,
+                }),
+        );
+        leaves.sort_unstable_by(|left, right| left.account.cmp(&right.account));
+        let successor = StateCache::new::<Sha256>(leaves).unwrap();
+        assert_eq!(successor.root(), close.roots.successor);
+        let transpose = close.rebuild_transpose().unwrap();
+        let mut builder =
+            commitment::Builder::<Sha256>::new(VectorKind::Transpose, transpose.len() as u32)
+                .unwrap();
+        builder.add_values(&transpose, &Sequential).unwrap();
+        let transpose_tree = builder.build(&Sequential).unwrap();
+        assert_eq!(transpose_tree.root(), close.roots.transpose);
+        Self {
+            fixture,
+            index,
+            successor,
+            transpose,
+            transpose_tree,
+        }
+    }
+}
+
+/// How many of each answer shape a span-index sweep exercised.
+#[derive(Debug, Default)]
+struct Tally {
+    predecessor: usize,
+    successor: usize,
+    changed: usize,
+    unchanged: usize,
+    unknown: usize,
+    entries: usize,
+    no_entries: usize,
+    withdrawals: usize,
+    payouts: usize,
+    credits: usize,
+    not_held: usize,
+}
+
+impl Tally {
+    fn add(&mut self, other: &Self) {
+        self.predecessor += other.predecessor;
+        self.successor += other.successor;
+        self.changed += other.changed;
+        self.unchanged += other.unchanged;
+        self.unknown += other.unknown;
+        self.entries += other.entries;
+        self.no_entries += other.no_entries;
+        self.withdrawals += other.withdrawals;
+        self.payouts += other.payouts;
+        self.credits += other.credits;
+        self.not_held += other.not_held;
+    }
+}
+
+/// Asserts every span-index answer for one held account equals the whole-close
+/// constructor's answer and verifies against the close roots.
+fn assert_served(
+    whole: &Whole<'_>,
+    served: &SpanIndex<'_, VerifyingKey, ShaDigest>,
+    account: &VerifyingKey,
+    recipients: &[VerifyingKey],
+) -> Tally {
+    let fixture = whole.fixture;
+    let close = fixture.prepared.close();
+    let roots = &close.roots;
+    let predecessor_root = fixture.context.predecessor_root();
+    let mut tally = Tally::default();
+
+    match fixture.cache.opening(account) {
+        Ok(expected) => {
+            let opening = served.predecessor_opening::<Sha256>(account).unwrap();
+            assert_eq!(opening, expected);
+            opening
+                .proof
+                .verify::<Sha256>(
+                    VectorKind::State,
+                    predecessor_root,
+                    opening.leaf.encode().as_ref(),
+                )
+                .unwrap();
+            tally.predecessor += 1;
+        }
+        Err(_) => assert!(matches!(
+            served.predecessor_opening::<Sha256>(account),
+            Err(ServeError::Absent)
+        )),
+    }
+    match whole.successor.opening(account) {
+        Ok(expected) => {
+            let opening = served.successor_opening::<Sha256>(account).unwrap();
+            assert_eq!(opening, expected);
+            opening
+                .proof
+                .verify::<Sha256>(
+                    VectorKind::State,
+                    &roots.successor,
+                    opening.leaf.encode().as_ref(),
+                )
+                .unwrap();
+            tally.successor += 1;
+        }
+        Err(_) => assert!(matches!(
+            served.successor_opening::<Sha256>(account),
+            Err(ServeError::Absent)
+        )),
+    }
+
+    let expected = account_lookup::<Sha256, _, _>(&whole.index, &fixture.cache, account).unwrap();
+    let lookup = served.account_lookup::<Sha256>(account).unwrap();
+    assert_eq!(lookup, expected);
+    lookup
+        .resolve::<Sha256>(predecessor_root, &roots.change, account)
+        .unwrap();
+    match &lookup {
+        AccountLookup::Present(_) => tally.changed += 1,
+        AccountLookup::Absent { state, .. } => match **state {
+            StateLookup::Present(_) => tally.unchanged += 1,
+            StateLookup::Absent(_) => tally.unknown += 1,
+        },
+    }
+
+    match whole.index.change_parts(account).unwrap() {
+        ChangeParts::Present { leaf, proof } => {
+            let opening = served.change_opening::<Sha256>(account).unwrap();
+            assert_eq!(
+                opening,
+                ChangeOpening {
+                    value: leaf.value(),
+                    proof,
+                }
+            );
+            opening
+                .proof
+                .verify::<Sha256>(
+                    VectorKind::Change,
+                    &roots.change,
+                    leaf.guard::<Sha256>().encode().as_ref(),
+                )
+                .unwrap();
+        }
+        ChangeParts::Absent { .. } => assert!(matches!(
+            served.change_opening::<Sha256>(account),
+            Err(ServeError::Unchanged)
+        )),
+    }
+
+    let out_vector = close
+        .rows
+        .binary_search_by(|row| row.account.cmp(account))
+        .ok()
+        .map(|index| &close.out_vectors[index]);
+    for recipient in recipients {
+        let expected =
+            higher_entry_lookup::<Sha256, _, _>(&whole.index, account, out_vector, recipient)
+                .unwrap();
+        let lookup = served
+            .higher_entry_lookup::<Sha256>(account, recipient)
+            .unwrap();
+        assert_eq!(lookup, expected);
+        let (cumulative, _) = lookup
+            .resolve::<Sha256>(&roots.change, account, recipient)
+            .unwrap();
+        if cumulative > 0 {
+            tally.entries += 1;
+        } else {
+            tally.no_entries += 1;
+        }
+    }
+
+    match fixture
+        .prepared
+        .withdrawal_claim(&fixture.withdrawals, account)
+    {
+        Ok(expected) => {
+            let claim = served.withdrawal_claim::<Sha256>(account).unwrap();
+            assert_eq!(claim, expected);
+            claim.verify::<Sha256>(&roots.withdrawal_outputs).unwrap();
+            tally.withdrawals += 1;
+        }
+        Err(_) => assert!(matches!(
+            served.withdrawal_claim::<Sha256>(account),
+            Err(ServeError::NoWithdrawal)
+        )),
+    }
+    match fixture.prepared.external_payout_claim(account) {
+        Ok(expected) => {
+            let claim = served.external_payout_claim::<Sha256>(account).unwrap();
+            assert_eq!(claim, expected);
+            claim.verify::<Sha256>(&roots.change).unwrap();
+            tally.payouts += 1;
+        }
+        Err(_) => assert!(matches!(
+            served.external_payout_claim::<Sha256>(account),
+            Err(ServeError::NoPayout)
+        )),
+    }
+
+    let start = whole
+        .transpose
+        .partition_point(|entry| entry.recipient < *account);
+    let end = whole
+        .transpose
+        .partition_point(|entry| entry.recipient <= *account);
+    if start == end {
+        assert!(matches!(
+            served.credits::<Sha256>(account),
+            Err(ServeError::NoCredit)
+        ));
+    } else {
+        let (entries, opening) = served.credits::<Sha256>(account).unwrap();
+        assert_eq!(entries, &whole.transpose[start..end]);
+        assert_eq!(
+            opening,
+            whole
+                .transpose_tree
+                .range_opening(start as u32, (end - start) as u32)
+                .unwrap()
+        );
+        let encoded = entries.iter().map(Encode::encode).collect::<Vec<_>>();
+        opening
+            .verify::<Sha256, _>(VectorKind::Transpose, &roots.transpose, &encoded)
+            .unwrap();
+        tally.credits += 1;
+    }
+    tally
+}
+
+fn assert_not_held<T>(result: Result<T, ServeError>, slice: u16) {
+    assert!(matches!(result, Err(ServeError::NotHeld { slice: held }) if held == slice));
+}
+
+/// One fresh account per slice with no state and no row, so every span has an
+/// authenticated-absence probe.
+fn absent_probes(fixture: &Fixture, slice_bits: u8) -> Vec<VerifyingKey> {
+    let mut probes: Vec<Option<VerifyingKey>> = vec![None; 1 << slice_bits];
+    for seed in 0..1_000_u64 {
+        if probes.iter().all(Option::is_some) {
+            break;
+        }
+        let key = SigningKey::from_seed(ACCOUNT_SEED_START + 5_000 + seed).public_key();
+        assert!(fixture.accounts.iter().all(|(public, _)| *public != key));
+        let slice = usize::from(account_slice(&key, slice_bits).unwrap());
+        probes[slice].get_or_insert(key);
+    }
+    probes.into_iter().map(Option::unwrap).collect()
+}
+
+#[test]
+fn span_index_matches_whole_close_constructors() {
+    let fixture = churn_fixture();
+    let whole = Whole::new(&fixture);
+    let close = fixture.prepared.close();
+    let slice_bits = fixture.context.assignment().slice_bits();
+    let slice_count = 1_u16 << slice_bits;
+    let split = slice_count / 2 + 1;
+    let whole_span = 0..slice_count;
+    let shapes: [Vec<core::ops::Range<u16>>; 3] = [
+        single_spans(slice_bits),
+        vec![split..slice_count, 0..split],
+        vec![whole_span],
+    ];
+    let intervals = intervals_of(fixture.cache.leaves(), slice_bits);
+
+    // Every account in the state or the rows plus one unknown account per slice.
+    let mut probes = fixture
+        .accounts
+        .iter()
+        .map(|(public, _)| public.clone())
+        .collect::<Vec<_>>();
+    probes.extend(absent_probes(&fixture, slice_bits));
+
+    let mut tally = Tally::default();
+    for spans in &shapes {
+        let slices = fixture
+            .prepared
+            .assemble_slices(&fixture.cache, spans, &Sequential)
+            .unwrap();
+        for slice in &slices {
+            let interval = span_interval(&intervals, &slice.span);
+            let served = SpanIndex::new::<Sha256>(
+                slice,
+                &interval,
+                &fixture.context,
+                &close.roots,
+                &fixture.withdrawals,
+            )
+            .unwrap();
+            assert_eq!(served.span(), &slice.span);
+
+            // Both ends of the span: the first and last predecessor member, successor member,
+            // and changed row.
+            let mut advanced = interval.clone();
+            advanced.advance(slice);
+            let ends = [interval.leaves(), advanced.leaves()]
+                .into_iter()
+                .flat_map(|leaves| [leaves.first(), leaves.last()])
+                .flatten()
+                .map(|leaf| &leaf.account)
+                .chain(
+                    [slice.changes.rows.first(), slice.changes.rows.last()]
+                        .into_iter()
+                        .flatten()
+                        .map(|row| &row.account),
+                );
+            for account in ends {
+                tally.add(&assert_served(&whole, &served, account, &probes));
+            }
+
+            for account in &probes {
+                let home = account_slice(account, slice_bits).unwrap();
+                if slice.span.contains(&home) {
+                    tally.add(&assert_served(&whole, &served, account, &probes));
+                    continue;
+                }
+                assert_not_held(served.predecessor_opening::<Sha256>(account), home);
+                assert_not_held(served.successor_opening::<Sha256>(account), home);
+                assert_not_held(served.account_lookup::<Sha256>(account), home);
+                assert_not_held(served.change_opening::<Sha256>(account), home);
+                assert_not_held(
+                    served.higher_entry_lookup::<Sha256>(account, &probes[0]),
+                    home,
+                );
+                assert_not_held(served.withdrawal_claim::<Sha256>(account), home);
+                assert_not_held(served.external_payout_claim::<Sha256>(account), home);
+                assert_not_held(served.credits::<Sha256>(account), home);
+                tally.not_held += 1;
+            }
+        }
+    }
+    assert!(
+        tally.predecessor > 0
+            && tally.successor > 0
+            && tally.changed > 0
+            && tally.unchanged > 0
+            && tally.unknown > 0
+            && tally.entries > 0
+            && tally.no_entries > 0
+            && tally.withdrawals > 0
+            && tally.payouts > 0
+            && tally.credits > 0
+            && tally.not_held > 0,
+        "{tally:?}"
+    );
+}
+
+#[test]
+fn span_index_rejects_wrong_intervals_and_unverifiable_openings() {
+    let fixture = churn_fixture();
+    let close = fixture.prepared.close();
+    let whole = 0..fixture.context.assignment().slice_count();
+    let slices = fixture
+        .prepared
+        .assemble_slices(&fixture.cache, core::slice::from_ref(&whole), &Sequential)
+        .unwrap();
+    let slice = &slices[0];
+    let leaves = fixture.cache.leaves();
+    let build = |interval: &Interval<VerifyingKey>, roots: &RootBundle<ShaDigest>| {
+        SpanIndex::new::<Sha256>(
+            slice,
+            interval,
+            &fixture.context,
+            roots,
+            &fixture.withdrawals,
+        )
+        .map(drop)
+    };
+    let interval = Interval::new(leaves.to_vec()).unwrap();
+    build(&interval, &close.roots).unwrap();
+
+    // An edited leaf, a dropped leaf, and a neighboring slice's interval are all rejected.
+    let mut edited = leaves.to_vec();
+    edited[3].state.balance += 1;
+    assert!(matches!(
+        build(&Interval::new(edited).unwrap(), &close.roots),
+        Err(ServeError::Interval)
+    ));
+    let mut dropped = leaves.to_vec();
+    dropped.remove(3);
+    assert!(matches!(
+        build(&Interval::new(dropped).unwrap(), &close.roots),
+        Err(ServeError::Interval)
+    ));
+    let slice_bits = fixture.context.assignment().slice_bits();
+    let partial = span_interval(&intervals_of(leaves, slice_bits), &(0..1));
+    assert!(matches!(
+        build(&partial, &close.roots),
+        Err(ServeError::Interval)
+    ));
+
+    // Roots the derived openings cannot reproduce are reported, never served.
+    let mut roots = close.roots;
+    roots.change = close.roots.successor;
+    roots.successor = close.roots.change;
+    roots.withdrawal_outputs = close.roots.transpose;
+    roots.transpose = close.roots.coverage;
+    let served = SpanIndex::new::<Sha256>(
+        slice,
+        &interval,
+        &fixture.context,
+        &roots,
+        &fixture.withdrawals,
+    )
+    .unwrap();
+    let payer = &close.rows[0].account;
+    let withdrawing = fixture.withdrawals.requests()[0].account();
+    let live = &close.unchanged[0].account;
+    let paid_out = &close
+        .rows
+        .iter()
+        .find(|row| matches!(row.output, SettlementOutput::ExternalPayout(amount) if amount > 0))
+        .unwrap()
+        .account;
+    let credited = &close
+        .rows
+        .iter()
+        .find(|row| row.successor.cumulative_credit > row.predecessor.cumulative_credit)
+        .unwrap()
+        .account;
+    assert!(matches!(
+        served.credits::<Sha256>(credited),
+        Err(ServeError::Corrupt)
+    ));
+    assert!(matches!(
+        served.change_opening::<Sha256>(payer),
+        Err(ServeError::Corrupt)
+    ));
+    assert!(matches!(
+        served.account_lookup::<Sha256>(payer),
+        Err(ServeError::Corrupt)
+    ));
+    assert!(matches!(
+        served.account_lookup::<Sha256>(live),
+        Err(ServeError::Corrupt)
+    ));
+    assert!(matches!(
+        served.higher_entry_lookup::<Sha256>(payer, live),
+        Err(ServeError::Corrupt)
+    ));
+    assert!(matches!(
+        served.withdrawal_claim::<Sha256>(withdrawing),
+        Err(ServeError::Corrupt)
+    ));
+    assert!(matches!(
+        served.external_payout_claim::<Sha256>(paid_out),
+        Err(ServeError::Corrupt)
+    ));
+    assert!(matches!(
+        served.successor_opening::<Sha256>(live),
+        Err(ServeError::Corrupt)
+    ));
+}
+
+#[test]
+fn span_index_rejects_structurally_inconsistent_slices() {
+    let fixture = churn_fixture();
+    let close = fixture.prepared.close();
+    let whole = 0..fixture.context.assignment().slice_count();
+    let slices = fixture
+        .prepared
+        .assemble_slices(&fixture.cache, core::slice::from_ref(&whole), &Sequential)
+        .unwrap();
+    let valid = &slices[0];
+    let interval = Interval::new(fixture.cache.leaves().to_vec()).unwrap();
+    let build = |slice: &ProofSlice<VerifyingKey, ShaDigest>,
+                 withdrawals: &WithdrawalBatch<VerifyingKey, ShaDigest>| {
+        SpanIndex::new::<Sha256>(
+            slice,
+            &interval,
+            &fixture.context,
+            &close.roots,
+            withdrawals,
+        )
+        .map(drop)
+    };
+    build(valid, &fixture.withdrawals).unwrap();
+    assert!(valid.changes.rows.len() >= 2);
+    assert!(!valid.transpose.is_empty());
+    assert!(valid.withdrawal_opening.is_some());
+
+    // Outgoing vectors must align one-for-one with the rows and belong to the row's payer.
+    let mut short = valid.clone();
+    short.out_vectors.pop();
+    assert!(matches!(
+        build(&short, &fixture.withdrawals),
+        Err(ServeError::Corrupt)
+    ));
+    let mut swapped = valid.clone();
+    swapped.out_vectors.swap(0, 1);
+    assert!(matches!(
+        build(&swapped, &fixture.withdrawals),
+        Err(ServeError::Corrupt)
+    ));
+
+    // The transpose opening is present exactly when the transpose is nonempty.
+    let mut unopened = valid.clone();
+    unopened.transpose_opening = None;
+    assert!(matches!(
+        build(&unopened, &fixture.withdrawals),
+        Err(ServeError::Corrupt)
+    ));
+    let mut emptied = valid.clone();
+    emptied.transpose.clear();
+    assert!(matches!(
+        build(&emptied, &fixture.withdrawals),
+        Err(ServeError::Corrupt)
+    ));
+
+    // The withdrawal opening is present exactly when a row carries a request.
+    let mut unopened = valid.clone();
+    unopened.withdrawal_opening = None;
+    assert!(matches!(
+        build(&unopened, &fixture.withdrawals),
+        Err(ServeError::Corrupt)
+    ));
+    assert!(matches!(
+        build(valid, &WithdrawalBatch::empty()),
+        Err(ServeError::Corrupt)
+    ));
+
+    // A requested account's row must settle as a withdrawal.
+    let mut relabeled = valid.clone();
+    let requested = relabeled
+        .changes
+        .rows
+        .iter()
+        .position(|row| fixture.withdrawals.request_for(&row.account).is_some())
+        .unwrap();
+    relabeled.changes.rows[requested].output = SettlementOutput::None;
+    assert!(matches!(
+        build(&relabeled, &fixture.withdrawals),
+        Err(ServeError::Corrupt)
+    ));
+
+    // A context bound to another predecessor root still indexes the slice, but nothing it
+    // derives from the predecessor state verifies. The successor root comes from the bundle
+    // and is unaffected.
+    let foreign = CloseContext::from_parts(
+        fixture.context.epoch_context().clone(),
+        close.roots.successor,
+    );
+    let served = SpanIndex::new::<Sha256>(
+        valid,
+        &interval,
+        &foreign,
+        &close.roots,
+        &fixture.withdrawals,
+    )
+    .unwrap();
+    let live = &close.unchanged[0].account;
+    assert!(matches!(
+        served.predecessor_opening::<Sha256>(live),
+        Err(ServeError::Corrupt)
+    ));
+    assert!(matches!(
+        served.account_lookup::<Sha256>(live),
+        Err(ServeError::Corrupt)
+    ));
+    served.successor_opening::<Sha256>(live).unwrap();
 }
