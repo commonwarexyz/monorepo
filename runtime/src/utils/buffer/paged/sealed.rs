@@ -103,6 +103,8 @@ impl<B: Blob> Sealed<B> {
                 .partial_page
                 .as_ref()
                 .map_or(&[][..], |p| p.as_ref()),
+            // A sealed handle is only issued once every submitted append has landed.
+            writeback: None,
         }
     }
 

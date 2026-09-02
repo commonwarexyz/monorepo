@@ -381,6 +381,37 @@ impl crate::Blob for Blob {
             .await
     }
 
+    async fn start_write_at(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+        options: WriteOptions,
+    ) -> Handle<()> {
+        let bufs = bufs.into();
+        let Some(offset) = offset.checked_add(self.data_offset) else {
+            return Handle::ready(Err(Error::OffsetOverflow));
+        };
+
+        if !bufs.has_remaining() {
+            return Handle::ready(Ok(()));
+        }
+
+        let cache = if options.contains(WriteOptions::DONT_CACHE) {
+            iouring::Cache::Disabled(self.dont_cache_supported.clone())
+        } else {
+            iouring::Cache::Enabled
+        };
+        let receiver = match self
+            .io_handle
+            .start_write_at(self.file.clone(), offset, bufs, options, cache)
+            .await
+        {
+            Ok(receiver) => receiver,
+            Err(err) => return Handle::ready(Err(err)),
+        };
+        Handle::from_future(async move { receiver.await.map_err(|_| Error::WriteFailed)? })
+    }
+
     // TODO: Make this async. See https://github.com/commonwarexyz/monorepo/issues/831
     async fn resize(&self, len: u64) -> Result<(), Error> {
         let len = len

@@ -787,6 +787,31 @@ stability_scope!(BETA {
             options: WriteOptions,
         ) -> impl Future<Output = Result<(), Error>> + Send;
 
+        /// Submit a write of `bufs` at the given offset without waiting for it to land.
+        ///
+        /// Awaiting this future waits until the write has been submitted. Awaiting the returned
+        /// [`Handle`] provides the same guarantee as awaiting [`Blob::write_at`], including its
+        /// error.
+        ///
+        /// Submitted writes carry no ordering relative to each other or to a concurrent
+        /// [`Blob::sync`], so callers must not submit overlapping ranges concurrently and must
+        /// await every outstanding handle before starting a sync that has to cover those bytes.
+        ///
+        /// The default implementation awaits the write before returning a completed handle, which
+        /// is correct but overlaps nothing.
+        #[allow(clippy::async_yields_async)]
+        fn start_write_at(
+            &self,
+            offset: u64,
+            bufs: impl Into<IoBufs> + Send,
+            options: WriteOptions,
+        ) -> impl Future<Output = Handle<()>> + Send {
+            async move {
+                let result = self.write_at(offset, bufs, options).await;
+                Handle::ready(result)
+            }
+        }
+
         /// Resize the blob to the given length.
         ///
         /// If the length is greater than the current length, the blob is extended with zeros.

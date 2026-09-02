@@ -440,6 +440,26 @@ impl Handle {
         options: WriteOptions,
         cache: Cache,
     ) -> Result<(), Error> {
+        self.start_write_at(file, offset, bufs, options, cache)
+            .await?
+            .await
+            .map_err(|_| Error::WriteFailed)?
+    }
+
+    /// Submit a positioned write, returning the completion receiver without waiting for the
+    /// write itself.
+    ///
+    /// Enqueuing applies the same backpressure as every other request (it waits when the
+    /// submission channel is full). The returned receiver resolves once the write completes.
+    #[cfg_attr(not(feature = "iouring-storage"), allow(dead_code))]
+    pub(crate) async fn start_write_at(
+        &self,
+        file: Arc<File>,
+        offset: u64,
+        bufs: IoBufs,
+        options: WriteOptions,
+        cache: Cache,
+    ) -> Result<oneshot::Receiver<Result<(), Error>>, Error> {
         let state = if !options.contains(WriteOptions::SYNC) {
             WriteAtState::Writing
         } else if bufs.chunk_count() <= IOVEC_BATCH_SIZE {
@@ -460,7 +480,7 @@ impl Handle {
         }))
         .await
         .map_err(|_| Error::WriteFailed)?;
-        rx.await.map_err(|_| Error::WriteFailed)?
+        Ok(rx)
     }
 
     /// Submit a logical fsync request and wait for its completion.
