@@ -15,7 +15,7 @@ use commonware_clearing::bajillion::{
 use commonware_codec::{Encode, EncodeSize, FixedSize};
 use commonware_cryptography::{Sha256, sha256::Digest};
 use commonware_cryptography_curve25519::signing::StrictVerifyingKey as VerifyingKey;
-use std::{collections::BTreeMap, ops::Range};
+use std::ops::Range;
 
 /// Prints the byte accounting for every selected profile.
 pub(crate) fn benches() {
@@ -98,36 +98,39 @@ pub(crate) fn benches() {
         let dealt_corpus = corpus.total();
 
         // Every validator's dealt share under the benchmark committee: the busiest is the
-        // per-validator ingress, the sum is the operator's egress per close. Each distinct
-        // span's wire is decoded once, as a holder decodes it, for its byte accounting.
-        let mut breakdowns: BTreeMap<(u16, u16), DealtBreakdown> = BTreeMap::new();
-        let mut breakdown = |span: &Range<u16>| {
-            *breakdowns.entry((span.start, span.end)).or_insert_with(|| {
-                let encoded = dealings.encode_span(span).encode();
-                assert_eq!(encoded.len(), dealings.span_size(span));
-                let breakdown = decode_dealt_slice_bounded::<VerifyingKey, Digest>(
-                    encoded.as_ref(),
-                    *fixture.context.limits(),
-                    encoded.len(),
-                )
-                .expect("benchmark dealing decodes")
-                .breakdown();
-                assert_eq!(breakdown.total(), encoded.len());
-                breakdown
-            })
-        };
-        let mut busiest = DealtBreakdown::default();
+        // per-validator ingress, the sum is the operator's egress per close. Sizes come from
+        // the encoded wire without decoding it. Only the busiest dealing is decoded, as its
+        // holder decodes it, for the per-component breakdown: decoding every distinct span
+        // would decompress two thirds of the corpus's keys about 170 times over.
+        let mut busiest_spans: Vec<Range<u16>> = Vec::new();
+        let mut busiest_total = 0_usize;
         let mut dealt_egress = 0_usize;
         for spans in validators.spans(assignment) {
-            let mut dealing = DealtBreakdown::default();
-            for span in &spans {
-                dealing.add(&breakdown(span));
+            let total = spans
+                .iter()
+                .map(|span| dealings.span_size(span))
+                .sum::<usize>();
+            if total > busiest_total {
+                busiest_total = total;
+                busiest_spans = spans.clone();
             }
-            if dealing.total() > busiest.total() {
-                busiest = dealing;
-            }
-            dealt_egress += dealing.total();
+            dealt_egress += total;
         }
+        let mut busiest = DealtBreakdown::default();
+        for span in &busiest_spans {
+            let encoded = dealings.encode_span(span).encode();
+            assert_eq!(encoded.len(), dealings.span_size(span));
+            let breakdown = decode_dealt_slice_bounded::<VerifyingKey, Digest>(
+                encoded.as_ref(),
+                *fixture.context.limits(),
+                encoded.len(),
+            )
+            .expect("benchmark dealing decodes")
+            .breakdown();
+            assert_eq!(breakdown.total(), encoded.len());
+            busiest.add(&breakdown);
+        }
+        assert_eq!(busiest.total(), busiest_total);
         let dealt_assignment = busiest.total();
         println!(
             "clearing dealt corpus breakdown: {} {corpus:?}",
