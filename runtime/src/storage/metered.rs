@@ -204,6 +204,38 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
     }
 
     #[tracing::instrument(
+        name = "runtime.storage.blob.start_write_at",
+        level = "info",
+        skip_all,
+        fields(
+            partition = %self.partition,
+            bytes = Empty,
+            options = options.0.traced(),
+        )
+    )]
+    #[allow(clippy::async_yields_async)]
+    async fn start_write_at(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+        options: WriteOptions,
+    ) -> Handle<()> {
+        let bufs = bufs.into();
+        let bufs_len = bufs.remaining();
+        self.metrics.storage_writes.inc();
+        self.metrics.storage_write_bytes.inc_by(bufs_len as u64);
+        if options.contains(WriteOptions::SYNC) {
+            self.metrics.storage_syncs.inc();
+        }
+        Span::current().record("bytes", bufs_len as u64);
+        let handle = self.inner.start_write_at(offset, bufs, options).await;
+        Handle::from_future(handle.instrument(tracing::info_span!(
+            "runtime.storage.blob.write_at",
+            partition = %self.partition,
+        )))
+    }
+
+    #[tracing::instrument(
         name = "runtime.storage.blob.resize",
         level = "info",
         skip_all,

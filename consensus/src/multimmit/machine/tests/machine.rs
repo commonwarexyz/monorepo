@@ -4942,10 +4942,11 @@ fn proposal_anchor_prefers_more_accounted_messages() {
     let fuller = Vqc::new(
         proposed.clone(),
         tally,
-        Signers::from(
+        Signers::new(
             config.participants(),
             [Participant::new(4), Participant::new(5)],
-        ),
+        )
+        .unwrap(),
         Vec::new(),
         aggregate::Signature::<MinPk>::zero(),
         config,
@@ -4987,7 +4988,7 @@ fn proposal_anchor_prefers_more_accounted_messages() {
     let smaller = Vqc::new(
         proposed,
         tally,
-        Signers::from(config.participants(), []),
+        Signers::new(config.participants(), []).unwrap(),
         conflicting,
         aggregate::Signature::<MinPk>::zero(),
         config,

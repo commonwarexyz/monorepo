@@ -182,6 +182,79 @@ impl Blob {
         Ok(())
     }
 
+    /// Prepare the blocking work for one positioned write, or `None` when there is nothing to
+    /// write. Sharing this between the awaited and submitted paths keeps one write policy.
+    fn write_job(
+        &self,
+        offset: u64,
+        bufs: IoBufs,
+        options: WriteOptions,
+    ) -> Result<Option<impl FnOnce() -> Result<(), Error> + Send + 'static>, Error> {
+        let file = self.file.clone();
+        let offset = offset
+            .checked_add(self.data_offset)
+            .ok_or(Error::OffsetOverflow)?;
+        if !bufs.has_remaining() {
+            return Ok(None);
+        }
+
+        // Derive per-write policy from the requested options and cached backend support.
+        let sync = options.contains(WriteOptions::SYNC);
+        let cache = if options.contains(WriteOptions::DONT_CACHE) {
+            Cache::Disabled(self.dont_cache_supported.clone())
+        } else {
+            Cache::Enabled
+        };
+        let partition = sync.then(|| self.partition.clone());
+        let name = sync.then(|| self.name.clone());
+        Ok(Some(move || {
+            // Preserve the single-buffer fast path when no option requires per-write flags.
+            let bufs = if !sync && !cache.is_disabled() {
+                match bufs.try_into_single() {
+                    Ok(buf) => return Self::write_single_at(&file, offset, buf.as_ref()),
+                    Err(bufs) => bufs,
+                }
+            } else {
+                bufs
+            };
+
+            cfg_if! {
+                if #[cfg(target_os = "linux")] {
+                    // Fuse durability only when the write fits one submission. Fusing every batch
+                    // would serialize the batches behind per-call durability waits. Plain batches
+                    // stay pipelined and finish with one data sync.
+                    let fused = sync && bufs.chunk_count() <= IOVEC_BATCH_SIZE;
+                    Self::write_vectored_at(
+                        cache,
+                        &file,
+                        offset,
+                        bufs,
+                        fused.then_some(libc::RWF_DSYNC),
+                    )?;
+                    if sync && !fused {
+                        file.sync_data().map_err(|e| {
+                            Error::BlobSyncFailed(
+                                partition.expect("sync write has a partition"),
+                                hex(name.as_deref().expect("sync write has a name")),
+                                e.into(),
+                            )
+                        })?;
+                    }
+                } else {
+                    Self::write_vectored_at(cache, &file, offset, bufs, None)?;
+                    if sync {
+                        Self::sync_inner(
+                            &file,
+                            partition.as_deref().expect("sync write has a partition"),
+                            name.as_deref().expect("sync write has a name"),
+                        )?;
+                    }
+                }
+            }
+            Ok(())
+        }))
+    }
+
     /// Write `bufs` at `offset`, batching up to [IOVEC_BATCH_SIZE] iovecs per submission.
     ///
     /// `flags` apply to every submission, so callers must only pass durability flags when the
@@ -326,72 +399,30 @@ impl crate::Blob for Blob {
         bufs: impl Into<IoBufs> + Send,
         options: WriteOptions,
     ) -> Result<(), Error> {
-        let bufs = bufs.into();
-        let file = self.file.clone();
-        let offset = offset
-            .checked_add(self.data_offset)
-            .ok_or(Error::OffsetOverflow)?;
-        if !bufs.has_remaining() {
+        let Some(write) = self.write_job(offset, bufs.into(), options)? else {
             return Ok(());
-        }
-
-        // Derive per-write policy from the requested options and cached backend support.
-        let sync = options.contains(WriteOptions::SYNC);
-        let cache = if options.contains(WriteOptions::DONT_CACHE) {
-            Cache::Disabled(self.dont_cache_supported.clone())
-        } else {
-            Cache::Enabled
         };
-        let partition = sync.then(|| self.partition.clone());
-        let name = sync.then(|| self.name.clone());
-        task::spawn_blocking(move || {
-            // Preserve the single-buffer fast path when no option requires per-write flags.
-            let bufs = if !sync && !cache.is_disabled() {
-                match bufs.try_into_single() {
-                    Ok(buf) => return Self::write_single_at(&file, offset, buf.as_ref()),
-                    Err(bufs) => bufs,
-                }
-            } else {
-                bufs
-            };
+        task::spawn_blocking(write)
+            .await
+            .map_err(|_| Error::WriteFailed)?
+    }
 
-            cfg_if! {
-                if #[cfg(target_os = "linux")] {
-                    // Fuse durability only when the write fits one submission. Fusing every batch
-                    // would serialize the batches behind per-call durability waits. Plain batches
-                    // stay pipelined and finish with one data sync.
-                    let fused = sync && bufs.chunk_count() <= IOVEC_BATCH_SIZE;
-                    Self::write_vectored_at(
-                        cache,
-                        &file,
-                        offset,
-                        bufs,
-                        fused.then_some(libc::RWF_DSYNC),
-                    )?;
-                    if sync && !fused {
-                        file.sync_data().map_err(|e| {
-                            Error::BlobSyncFailed(
-                                partition.expect("sync write has a partition"),
-                                hex(name.as_deref().expect("sync write has a name")),
-                                e.into(),
-                            )
-                        })?;
-                    }
-                } else {
-                    Self::write_vectored_at(cache, &file, offset, bufs, None)?;
-                    if sync {
-                        Self::sync_inner(
-                            &file,
-                            partition.as_deref().expect("sync write has a partition"),
-                            name.as_deref().expect("sync write has a name"),
-                        )?;
-                    }
-                }
-            }
-            Ok(())
-        })
-        .await
-        .map_err(|_| Error::WriteFailed)?
+    async fn start_write_at(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+        options: WriteOptions,
+    ) -> Handle<()> {
+        let write = match self.write_job(offset, bufs.into(), options) {
+            Ok(Some(write)) => write,
+            Ok(None) => return Handle::ready(Ok(())),
+            Err(err) => return Handle::ready(Err(err)),
+        };
+        let (tx, rx) = oneshot::channel();
+        task::spawn_blocking(move || {
+            let _ = tx.send(write());
+        });
+        Handle::from_receiver(rx)
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {

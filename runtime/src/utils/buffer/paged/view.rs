@@ -7,7 +7,7 @@
 //! exactly one place.
 
 use super::CacheRef;
-use crate::{Blob, Error, IoBuf, IoBufMut, IoBufs};
+use crate::{Blob, Error, IoBuf, IoBufMut, IoBufs, buffer::Writeback};
 use futures::stream::{FuturesUnordered, StreamExt};
 use std::num::NonZeroUsize;
 
@@ -25,6 +25,10 @@ pub struct View<'a, B: Blob> {
     pub(super) tail_offset: u64,
     /// Logical bytes at `[tail_offset, size)`. May be empty.
     pub(super) tail: &'a [u8],
+    /// Appends the originating writer submitted to `blob` but has not observed. A blob read must
+    /// settle them first; reads served from the tail or the page cache never need to. `None` when
+    /// the blob cannot have submitted appends outstanding.
+    pub(super) writeback: Option<&'a Writeback>,
 }
 
 /// An owned, immutable logical view of a paged [`Writer`](super::Writer).
@@ -45,6 +49,7 @@ pub struct OwnedView<B: Blob> {
     size: u64,
     tail_offset: u64,
     tail: IoBuf,
+    writeback: Writeback,
 }
 
 impl<B: Blob> OwnedView<B> {
@@ -56,6 +61,7 @@ impl<B: Blob> OwnedView<B> {
         size: u64,
         tail_offset: u64,
         tail: IoBuf,
+        writeback: Writeback,
     ) -> Self {
         Self {
             blob,
@@ -64,6 +70,7 @@ impl<B: Blob> OwnedView<B> {
             size,
             tail_offset,
             tail,
+            writeback,
         }
     }
 
@@ -76,6 +83,7 @@ impl<B: Blob> OwnedView<B> {
             size: self.size,
             tail_offset: self.tail_offset,
             tail: self.tail.as_ref(),
+            writeback: Some(&self.writeback),
         }
     }
 
@@ -160,6 +168,15 @@ impl<B: Blob> Clone for View<'_, B> {
 impl<B: Blob> Copy for View<'_, B> {}
 
 impl<B: Blob> View<'_, B> {
+    /// Wait for every append the originating writer submitted that covers a byte below `end`, so
+    /// a blob read of `[.., end)` cannot observe bytes the blob has not taken yet.
+    async fn settle_writeback(&self, end: u64) -> Result<(), Error> {
+        match self.writeback {
+            Some(writeback) => writeback.settle_through(end).await,
+            None => Ok(()),
+        }
+    }
+
     /// Copy any in-memory tail overlap into `buf`, returning the remaining prefix length.
     fn copy_tail_overlap(&self, buf: &mut [u8], offset: u64) -> usize {
         let tail_start = self.tail_offset.max(offset);
@@ -232,6 +249,8 @@ impl<B: Blob> View<'_, B> {
 
         let uncached_offset = offset + cached as u64;
         let uncached_len = remaining - cached;
+        self.settle_writeback(uncached_offset + uncached_len as u64)
+            .await?;
         self.cache_ref
             .read(
                 self.blob,
@@ -303,7 +322,12 @@ impl<B: Blob> View<'_, B> {
             return Ok(offsets.len());
         }
 
-        // Slow path: read remaining ranges from the underlying blob, concurrently.
+        // Slow path: read remaining ranges from the underlying blob, concurrently. The ranges
+        // are sorted, so the last one ends past every other.
+        let end = cache_ranges
+            .last()
+            .map_or(0, |(buf, offset)| offset + buf.len() as u64);
+        self.settle_writeback(end).await?;
         let mut reads = cache_ranges
             .iter_mut()
             .map(|(item_buf, offset)| self.cache_ref.read(self.blob, self.id, item_buf, *offset))
