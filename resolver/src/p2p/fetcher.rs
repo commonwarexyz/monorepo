@@ -552,11 +552,6 @@ where
         self.requests.len()
     }
 
-    /// Returns the number of blocked peers.
-    pub fn len_blocked(&self) -> usize {
-        self.blocked.len()
-    }
-
     /// Returns true if the fetch is in progress.
     #[cfg(test)]
     pub fn contains(&self, key: &Key) -> bool {
@@ -1219,24 +1214,6 @@ mod tests {
     }
 
     #[test]
-    fn test_len_blocked() {
-        let runner = Runner::default();
-        runner.start(|context| async {
-            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
-
-            // Initially no blocked peers
-            let initial_blocked = fetcher.len_blocked();
-
-            // The network reports a blocked peer, then lifts the block.
-            let peer = PrivateKey::from_seed(1).public_key();
-            fetcher.set_blocked([peer]);
-            assert_eq!(fetcher.len_blocked(), initial_blocked + 1);
-            fetcher.set_blocked([]);
-            assert_eq!(fetcher.len_blocked(), initial_blocked);
-        });
-    }
-
-    #[test]
     fn test_edge_cases_empty_state() {
         let runner = Runner::default();
         runner.start(|context| async {
@@ -1800,13 +1777,11 @@ mod tests {
             assert!(fetcher.targets.get(&MockKey(1)).unwrap().contains(&peer1));
             assert!(fetcher.get_eligible_peers(&MockKey(1), false).is_empty());
             assert_eq!(fetcher.get_eligible_peers(&MockKey(2), false), vec![peer2]);
-            assert_eq!(fetcher.len_blocked(), 1);
 
             // Lifting the block makes the peer eligible again and wakes the fetcher.
             fetcher.waiter = Some(context.current());
             fetcher.set_blocked([]);
             assert!(fetcher.waiter.is_none());
-            assert_eq!(fetcher.len_blocked(), 0);
             assert_eq!(fetcher.get_eligible_peers(&MockKey(1), false), vec![peer1]);
         });
     }

@@ -11,8 +11,6 @@ pub struct Metrics {
     pub fetch_active: Gauge,
     /// Current number of serves currently in flight
     pub serve_processing: Gauge,
-    /// Current number of peers the network reports as blocked
-    pub peers_blocked: Gauge,
     /// Number of fetches by status
     pub fetch: status::Counter,
     /// Number of canceled fetches by status
@@ -35,10 +33,6 @@ impl Metrics {
             "serve_processing",
             "Current number of serves currently processing",
         );
-        let peers_blocked = context.gauge(
-            "peers_blocked",
-            "Current number of peers the network reports as blocked",
-        );
         let fetch = context.family("fetch", "Number of fetches by status");
         let cancel = context.family("cancel", "Number of canceled fetches by status");
         let serve = context.family("serve", "Number of serves by status");
@@ -57,7 +51,6 @@ impl Metrics {
             fetch_pending,
             fetch_active,
             serve_processing,
-            peers_blocked,
             fetch,
             cancel,
             serve,

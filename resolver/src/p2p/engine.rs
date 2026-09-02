@@ -182,10 +182,6 @@ where
                     .fetch_pending
                     .try_set(self.fetcher.len_pending());
                 let _ = self.metrics.fetch_active.try_set(self.fetcher.len_active());
-                let _ = self
-                    .metrics
-                    .peers_blocked
-                    .try_set(self.fetcher.len_blocked());
                 let _ = self.metrics.serve_processing.try_set(self.serves.len());
 
                 // Get retry timeout (if any)
