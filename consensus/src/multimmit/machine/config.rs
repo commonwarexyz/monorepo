@@ -44,6 +44,48 @@ impl Timers {
     }
 }
 
+/// How far above its anchor a leader's proposal reaches on each producer chain.
+///
+/// Every chain proposal is anchored at the highest data-availability certificate the leader
+/// holds above that chain's ordered tip, or at the tip itself when it holds none. The anchor
+/// needs no endorsement: a certificate carries `n - 2f` DA votes and proves the block is
+/// retrievable. Blocks appended above the anchor do need endorsement, because a voter reports
+/// the proposed position it has DA-voted itself, an L-QC finalizes the position `3f + 1` of its
+/// `n - f` votes reach, and a chain whose finalized position falls below the proposed tip holds
+/// the ordering sweep at that chain until a later view. This policy is local leader choice:
+/// proposal validity and tip extraction are identical under all three.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum ProposalPolicy {
+    /// Propose only blocks whose data-availability certificate this node holds.
+    ///
+    /// The anchor is already the highest such certificate, so a certified proposal is its
+    /// anchor alone. No vote can then report a position below the proposed tip. With
+    /// [`Limits::extension_bound`] at zero that settles the chain in every L-QC, because an
+    /// L-QC leaves at most `f` votes unseen and no vote path reaches past the anchor, so the
+    /// ordering sweep never halts. Fresh blocks still reach the ordering, through the next
+    /// view's anchor and through the vote extensions a view quorum agrees on, so this trades
+    /// proposal reach for settled chains.
+    ///
+    /// [`Limits::extension_bound`]: crate::multimmit::config::Limits::extension_bound
+    #[default]
+    Certified,
+    /// Propose the prefix this node has DA-voted itself, as the paper's `ProposeChains` does.
+    ///
+    /// The leader's own DA frontier runs ahead of the committee's under load, so the voters
+    /// that have not received those blocks report lower positions. That both lowers the
+    /// finalized tip and discards the vote extensions, which count only for a chain whose
+    /// finalized position reaches the proposed tip. This pays off when bodies reach every
+    /// voter well before the view's vote event.
+    Endorsed,
+    /// Propose producer-attested headers beyond the local DA frontier.
+    ///
+    /// Proposals then advance at header speed instead of body-ingest speed, at the cost of
+    /// deviating every voter that lacks the body. Referencing a header certifies nothing, so an
+    /// entry whose payload never circulates costs slots on the referenced producer's own chain
+    /// and nothing elsewhere.
+    Frontier,
+}
+
 /// The knobs an operator actually chooses for one deployment.
 ///
 /// Every internal bound (artifact cache, forwarding history) is derived from these plus the
@@ -65,16 +107,8 @@ pub struct Tuning {
     pub view_retention: ViewDelta,
     /// The largest canonical protocol artifact this deployment accepts.
     pub max_artifact_bytes: NonZeroUsize,
-    /// Whether a leader's proposal may reference producer-attested headers beyond the blocks it
-    /// has DA-voted itself.
-    ///
-    /// Enabled, proposals advance at header speed and voters report positions below the proposed
-    /// tips for blocks whose bodies have not reached them, which deviates their votes from the
-    /// certificate reference entry. Disabled, the leader proposes only its own DA-voted prefix,
-    /// as the paper's `ProposeChains` does, and fresh blocks reach the ordering through
-    /// extensions. Either choice is local leader policy; proposal validity and extraction are
-    /// unchanged.
-    pub frontier_proposals: bool,
+    /// How far above its anchor a leader's proposal reaches on each producer chain.
+    pub proposal_policy: ProposalPolicy,
 }
 
 impl Default for Tuning {
@@ -84,7 +118,7 @@ impl Default for Tuning {
             production_interval: Duration::from_millis(250),
             view_retention: ViewDelta::new(64),
             max_artifact_bytes: NonZeroUsize::new(1024 * 1024).expect("one mebibyte is non-zero"),
-            frontier_proposals: true,
+            proposal_policy: ProposalPolicy::default(),
         }
     }
 }
@@ -225,7 +259,7 @@ pub struct Profile<H: Hasher, V: Variant> {
     timers: Timers,
     view_retention: ViewDelta,
     resources: ResourceLimits,
-    frontier_proposals: bool,
+    proposal_policy: ProposalPolicy,
     marker: PhantomData<V>,
 }
 
@@ -237,7 +271,7 @@ impl<H: Hasher, V: Variant> Clone for Profile<H, V> {
             timers: self.timers,
             view_retention: self.view_retention,
             resources: self.resources,
-            frontier_proposals: self.frontier_proposals,
+            proposal_policy: self.proposal_policy,
             marker: PhantomData,
         }
     }
@@ -358,7 +392,7 @@ impl<H: Hasher, V: Variant> Profile<H, V> {
             timers,
             view_retention: tuning.view_retention,
             resources,
-            frontier_proposals: tuning.frontier_proposals,
+            proposal_policy: tuning.proposal_policy,
             marker: PhantomData,
         })
     }
@@ -438,7 +472,7 @@ impl<H: Hasher, V: Variant> Profile<H, V> {
             timers,
             view_retention: tuning.view_retention,
             resources,
-            frontier_proposals: tuning.frontier_proposals,
+            proposal_policy: tuning.proposal_policy,
             marker: PhantomData,
         })
     }
@@ -468,9 +502,9 @@ impl<H: Hasher, V: Variant> Profile<H, V> {
         self.resources
     }
 
-    /// Returns whether proposals may reference attested headers beyond the local DA frontier.
-    pub const fn frontier_proposals(&self) -> bool {
-        self.frontier_proposals
+    /// Returns how far above its anchor a proposal from this node reaches.
+    pub const fn proposal_policy(&self) -> ProposalPolicy {
+        self.proposal_policy
     }
 
     /// Returns the thread count a view-critical execution pool needs for this committee.

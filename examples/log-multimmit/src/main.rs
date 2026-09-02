@@ -75,7 +75,7 @@ use commonware_codec::EncodeSize as _;
 use commonware_consensus::{
     Reporter,
     multimmit::{
-        Engine, EngineConfig, Profile, Role, Tuning,
+        Engine, EngineConfig, Profile, ProposalPolicy, Role, Tuning,
         config::Limits,
         marshal::{
             ArchiveConfig, ArchiveMode, Config as MarshalConfig, LqcVerifier, Start, Update,
@@ -286,9 +286,9 @@ struct Cli {
     #[arg(long, default_value_t = EXTENSION_BOUND)]
     extension_bound: u32,
 
-    /// Whether leaders propose producer-attested headers beyond their own DA-voted blocks.
-    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
-    frontier_proposals: bool,
+    /// How far above its anchor a leader's proposal reaches on each producer chain.
+    #[arg(long, value_enum, default_value_t)]
+    proposal_policy: deploy::ProposalPolicyArg,
 
     /// Minimum milliseconds between two blocks built by this producer; zero is unpaced.
     #[arg(long, default_value_t = 0)]
@@ -334,7 +334,7 @@ struct RunConfig {
     body_size: usize,
     pipeline_depth: u32,
     extension_bound: u32,
-    frontier_proposals: bool,
+    proposal_policy: ProposalPolicy,
     production_interval: Duration,
     marshal_live_cache_bytes: usize,
     marshal_materialized_cache_bytes: usize,
@@ -414,7 +414,7 @@ impl Blocker for BothPlanes {
 fn profile(
     committee: &Committee<MinPk>,
     index: usize,
-    frontier_proposals: bool,
+    proposal_policy: ProposalPolicy,
 ) -> Profile<Sha256, MinPk> {
     // The largest artifact grows with participants, chains, pipeline depth, and extension bound
     // together, so the limit follows the committee instead of a fixed figure.
@@ -433,7 +433,7 @@ fn profile(
             production_interval: PRODUCTION_RETRY_INTERVAL,
             view_retention: ViewDelta::new(VIEW_RETENTION),
             max_artifact_bytes,
-            frontier_proposals,
+            proposal_policy,
         },
     )
     .expect("profile is valid")
@@ -818,7 +818,7 @@ fn main() {
         let resolver_handle = resolver_engine.start(marshal_resolver);
         let application_context = context.child("application");
         // Match the in-memory body window to consensus's bound on live publication effects.
-        let profile = profile(&committee, index, config.frontier_proposals);
+        let profile = profile(&committee, index, config.proposal_policy);
         let publication_retention = NonZeroUsize::new(profile.resources().max_outbox_effects())
             .expect("the consensus outbox bound is non-zero");
         let application_metrics =
@@ -839,7 +839,6 @@ fn main() {
             ),
             application_reporter,
         );
-
         let producer_chain = profile
             .protocol()
             .producer_chain(Participant::from_usize(index));
@@ -1025,7 +1024,7 @@ fn load_run_config(cli: Cli) -> RunConfig {
         body_size: cli.body_size,
         pipeline_depth: cli.pipeline_depth,
         extension_bound: cli.extension_bound,
-        frontier_proposals: cli.frontier_proposals,
+        proposal_policy: cli.proposal_policy.into(),
         production_interval: Duration::from_millis(cli.production_interval_ms),
         marshal_live_cache_bytes: cli.marshal_live_cache_bytes,
         marshal_materialized_cache_bytes: cli.marshal_materialized_cache_bytes,
@@ -1089,7 +1088,7 @@ fn load_remote_config(config_path: PathBuf, hosts_path: PathBuf) -> RunConfig {
         body_size: config.body_size,
         pipeline_depth: config.pipeline_depth,
         extension_bound: config.extension_bound,
-        frontier_proposals: config.frontier_proposals,
+        proposal_policy: config.proposal_policy.into(),
         production_interval: Duration::from_millis(config.production_interval_ms),
         marshal_live_cache_bytes: config.marshal_live_cache_bytes,
         marshal_materialized_cache_bytes: config.marshal_materialized_cache_bytes,
@@ -1116,8 +1115,8 @@ mod tests {
                 vec![Participant::new(1), Participant::new(participants - 1)],
                 Limits::new(PIPELINE_DEPTH, EXTENSION_BOUND).expect("limits are valid"),
             );
-            let _ = profile(&committee, 0, true);
-            let _ = profile(&committee, 1, true);
+            let _ = profile(&committee, 0, ProposalPolicy::Certified);
+            let _ = profile(&committee, 1, ProposalPolicy::Certified);
         }
     }
 

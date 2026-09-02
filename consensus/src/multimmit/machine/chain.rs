@@ -1,8 +1,8 @@
 //! Application-independent transaction-chain work and validation.
 
 use super::{
-    Artifact, ArtifactId, DurableEffect, EffectId, Observation, Profile, ReservationBook,
-    ReservationError, Role, SignRequest,
+    Artifact, ArtifactId, DurableEffect, EffectId, Observation, Profile, ProposalPolicy,
+    ReservationBook, ReservationError, Role, SignRequest,
 };
 use crate::{
     multimmit::types::{
@@ -25,7 +25,8 @@ pub(crate) struct ChainProposalPass<V: Variant, D: Digest> {
     parent: BlockRef<D>,
     payloads: Vec<D>,
     attempted: usize,
-    limit: usize,
+    budget: usize,
+    pipeline_depth: usize,
     frontier: bool,
     frontier_payloads: u64,
 }
@@ -2408,14 +2409,23 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             Some((certificate, block)) => (Anchor::Certificate(certificate), block),
             None => (Anchor::Tip(tip), tip),
         };
+        let pipeline_depth = profile.protocol().codec_config().pipeline_depth();
+        let policy = profile.proposal_policy();
         Ok(ChainProposalPass {
             tip,
             anchor,
             parent,
             payloads: Vec::new(),
             attempted: 0,
-            limit: profile.protocol().codec_config().pipeline_depth(),
-            frontier: profile.frontier_proposals(),
+            // The anchor above already sits at the highest certificate this node holds on this
+            // chain, so nothing above it can be certified here: a certified proposal is its
+            // anchor alone and walks no payload entries.
+            budget: match policy {
+                ProposalPolicy::Certified => 0,
+                ProposalPolicy::Endorsed | ProposalPolicy::Frontier => pipeline_depth,
+            },
+            pipeline_depth,
+            frontier: matches!(policy, ProposalPolicy::Frontier),
             frontier_payloads: 0,
         })
     }
@@ -2424,21 +2434,25 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
     ///
     /// Each step appends the next consecutive block, preferring this node's own DA choice: a
     /// durably journaled DA vote outranks any other record, whatever its validation state
-    /// here. When no DA choice extends the parent and the profile allows frontier proposals,
-    /// the step references the producer-attested frontier instead: any signature-verified
-    /// header extending the current parent, whether or not its payload has arrived locally.
-    /// Frontier entries let proposals advance at header speed instead of body-ingest speed.
-    /// Otherwise the pass ends at the local DA frontier. Entries certify nothing and voters report
-    /// only the positions they endorse, so an entry whose payload never circulates costs what
-    /// a junk entry costs: slots on the referenced producer's own chain, nothing elsewhere.
+    /// here. When no DA choice extends the parent and the policy is
+    /// [`ProposalPolicy::Frontier`], the step references the producer-attested frontier
+    /// instead: any signature-verified header extending the current parent, whether or not its
+    /// payload has arrived locally. Frontier entries let proposals advance at header speed
+    /// instead of body-ingest speed. Otherwise the pass ends at the local DA frontier. Entries
+    /// certify nothing and voters report only the positions they endorse, so an entry whose
+    /// payload never circulates costs what a junk entry costs: slots on the referenced
+    /// producer's own chain, nothing elsewhere.
+    ///
+    /// [`ProposalPolicy::Certified`] appends nothing, so the first step completes the pass at
+    /// the certified anchor.
     pub(crate) fn resume_proposal_pass<H: Hasher<Digest = D>>(
         &self,
         pass: &mut ChainProposalPass<V, D>,
     ) -> Result<ChainProposalProgress<V, D>, ChainError> {
-        if pass.attempted < pass.limit {
+        if pass.attempted < pass.budget {
             pass.attempted += 1;
             let Some(height) = pass.parent.height().get().checked_add(1).map(Height::new) else {
-                pass.attempted = pass.limit;
+                pass.attempted = pass.budget;
                 return self.finish_proposal_pass(pass);
             };
             let chain = pass.tip.chain().get() as usize;
@@ -2456,7 +2470,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
                 (Some(choice), _) => (&choice.header, choice.block_ref, false),
                 (None, Some(header)) => (header, header.block_ref::<H>(), true),
                 (None, None) => {
-                    pass.attempted = pass.limit;
+                    pass.attempted = pass.budget;
                     return self.finish_proposal_pass(pass);
                 }
             };
@@ -2465,7 +2479,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             if frontier {
                 pass.frontier_payloads += 1;
             }
-            if pass.attempted < pass.limit {
+            if pass.attempted < pass.budget {
                 return Ok(ChainProposalProgress::Pending);
             }
         }
@@ -2480,7 +2494,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             pass.tip.chain(),
             pass.anchor.clone(),
             pass.payloads.clone(),
-            pass.limit,
+            pass.pipeline_depth,
         )
         .map_err(|_| ChainError::Context)?;
         Ok(ChainProposalProgress::Complete(proposal))
