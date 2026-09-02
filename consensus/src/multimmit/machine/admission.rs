@@ -627,6 +627,9 @@ impl<V: Variant, D: Digest> VerifyJob<V, D> {
                     .filter_map(|artifact| match artifact.as_ref() {
                         Artifact::Vote(vote) => Some(Verified::Vote(vote)),
                         Artifact::NoVote(vote) => Some(Verified::NoVote(vote)),
+                        Artifact::DaCertificate(certificate) => {
+                            Some(Verified::DaCertificate(certificate))
+                        }
                         _ => None,
                     })
                     .collect::<Vec<_>>()

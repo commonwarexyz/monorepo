@@ -956,6 +956,17 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         })
     }
 
+    /// Returns the data-availability certificate this node holds for `block`, if any.
+    pub(crate) fn held_certificate(&self, block: BlockRef<D>) -> Option<&DaCertificate<V, D>> {
+        let certified = self
+            .certified
+            .get(block.chain().get() as usize)?
+            .get(&block.height())?;
+        (certified.block == block)
+            .then_some(certified.certificate.as_ref())
+            .flatten()
+    }
+
     pub(crate) fn next_certificate_above(
         &self,
         floors: &[BlockRef<D>],

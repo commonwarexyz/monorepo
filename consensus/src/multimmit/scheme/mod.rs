@@ -93,12 +93,19 @@ pub enum Unverified<'a, V: Variant, D: Digest> {
 /// signature is subtracted from the aggregate instead of being paid for again with a pairing,
 /// so a certificate built from messages the node has already seen verifies without any
 /// pairing at all.
+///
+/// A recovered data-availability certificate is likewise unique for its header: a leader block
+/// anchoring a chain on a certificate the node already holds byte for byte needs no pairing for
+/// that anchor. A differing certificate for the same header is still paid for, so a known
+/// certificate can only remove work, never pass a forgery.
 #[derive(Copy, Clone, Debug)]
 pub enum Verified<'a, V: Variant, D: Digest> {
     /// An ordinary vote whose signature has been verified.
     Vote(&'a Vote<V, D>),
     /// An attributed abstention whose signature has been verified.
     NoVote(&'a NoVote<V>),
+    /// A data-availability certificate that has been verified or recovered locally.
+    DaCertificate(&'a DaCertificate<V, D>),
 }
 
 #[derive(Clone, Debug)]
