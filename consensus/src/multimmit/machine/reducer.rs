@@ -3109,10 +3109,25 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                     .register_transaction_block::<H>(id, observation, block)?;
             }
             // A certificate over messages this node already verified needs no pairings: the
-            // executor discharges every transcript term a known signature reproduces.
+            // executor discharges every transcript term a known signature reproduces. A leader
+            // block anchors every chain on a data-availability certificate; the ones this node
+            // already holds are attached so only unseen anchors cost a pairing.
             let known = match artifact.as_ref() {
                 Artifact::Vqc(certificate) => self.views.verified_messages(certificate.view()),
                 Artifact::Lqc(certificate) => self.views.verified_messages(certificate.view()),
+                Artifact::LeaderBlock(block) => block
+                    .block()
+                    .proposals()
+                    .iter()
+                    .filter_map(|proposal| match proposal.anchor() {
+                        Anchor::Certificate(certificate) => self
+                            .chain
+                            .held_certificate(certificate.block_ref::<H>())
+                            .filter(|held| *held == certificate)
+                            .map(|held| Arc::new(Artifact::DaCertificate(held.clone()))),
+                        Anchor::Tip(_) => None,
+                    })
+                    .collect(),
                 _ => Vec::new(),
             };
             items

@@ -1001,6 +1001,13 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
                     let Anchor::Certificate(certificate) = proposal.anchor() else {
                         continue;
                     };
+                    // An anchor the node already holds needs no pairing; anything else, including
+                    // a different certificate for the same header, is verified in full.
+                    if known.iter().any(|message| {
+                        matches!(message, Verified::DaCertificate(held) if *held == certificate)
+                    }) {
+                        continue;
+                    }
                     claims.push(self.da_certificate_claim(certificate)?);
                 }
                 Some(claims)
@@ -1094,6 +1101,8 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
                 Verified::NoVote(vote) => {
                     (vote.signer(), Subject::NoVote(vote.round()), vote.attestation())
                 }
+                // Certificates discharge leader-block anchors, never aggregate transcripts.
+                Verified::DaCertificate(_) => continue,
             };
             let Ok(known_signature) = decoded(attestation) else {
                 continue;
@@ -2606,6 +2615,100 @@ mod tests {
     fn leader_verification_checks_embedded_da_certificates_for_both_variants() {
         leader_verification_checks_embedded_da_certificates::<MinPk>();
         leader_verification_checks_embedded_da_certificates::<MinSig>();
+    }
+
+    fn known_da_certificates_discharge_only_matching_anchors<V: Variant>() {
+        let fixture = Fixture::<V>::new();
+        let certify = |marker: u64| {
+            let header = fixture.header(0, marker);
+            let votes = fixture
+                .signers
+                .iter()
+                .take(fixture.codec.da_quorum())
+                .map(|signer| signer.sign_da_vote(header.clone()).unwrap())
+                .collect::<Vec<_>>();
+            fixture
+                .verifier
+                .assemble_da_certificate(&votes, &Sequential)
+                .unwrap()
+        };
+        let certificate = certify(501);
+        let other_header = certify(502);
+        // A certificate whose signature belongs to another header is a forgery for this one.
+        let forged = DaCertificate::new(
+            certificate.header().clone(),
+            other_header.certificate().clone(),
+        );
+        let anchored = |anchor: DaCertificate<V, Digest>| {
+            let proposals = fixture
+                .tips
+                .iter()
+                .enumerate()
+                .map(|(index, tip)| {
+                    let anchor = if index == 0 {
+                        Anchor::Certificate(anchor.clone())
+                    } else {
+                        Anchor::Tip(*tip)
+                    };
+                    ChainProposal::new(
+                        ChainId::new(index as u32),
+                        anchor,
+                        Vec::new(),
+                        fixture.codec.pipeline_depth(),
+                    )
+                    .unwrap()
+                })
+                .collect();
+            let leader = LeaderBlock::new(
+                fixture.round,
+                CertificateId::new(digest(b"parent vqc", 701)),
+                digest(b"history", 701),
+                proposals,
+                fixture.codec,
+            )
+            .unwrap();
+            let scheduled = usize::from(
+                LeaderSchedule::round_robin(fixture.codec.participants()).leader(leader.view()),
+            );
+            fixture.signers[scheduled].sign_leader_block(leader).unwrap()
+        };
+        let valid = anchored(certificate.clone());
+        let invalid = anchored(forged);
+
+        let artifacts = [
+            Unverified::LeaderBlock(&valid),
+            Unverified::LeaderBlock(&valid),
+            Unverified::LeaderBlock(&invalid),
+            Unverified::LeaderBlock(&invalid),
+        ];
+        let held: [&[Verified<'_, V, Digest>]; 4] = [
+            // The exact anchor is held, so it costs no pairing.
+            &[Verified::DaCertificate(&certificate)],
+            // A certificate for another header matches nothing and the anchor is verified.
+            &[Verified::DaCertificate(&other_header)],
+            // Holding the genuine certificate never excuses a different one for the same header.
+            &[Verified::DaCertificate(&certificate)],
+            &[],
+        ];
+        let verdicts = fixture.verifier.verify_artifacts_with_known::<_, Sha256, Digest>(
+            &mut test_rng(),
+            &artifacts,
+            &held,
+            &Sequential,
+        );
+        assert_eq!(verdicts, [true, true, false, false]);
+        let baseline = fixture.verifier.verify_artifacts::<_, Sha256, Digest>(
+            &mut test_rng(),
+            &artifacts,
+            &Sequential,
+        );
+        assert_eq!(baseline, verdicts, "held certificates must never change a verdict");
+    }
+
+    #[test]
+    fn known_da_certificates_discharge_only_matching_anchors_for_both_variants() {
+        known_da_certificates_discharge_only_matching_anchors::<MinPk>();
+        known_da_certificates_discharge_only_matching_anchors::<MinSig>();
     }
 
     fn vqc_exact_transcript<V: Variant>() {
