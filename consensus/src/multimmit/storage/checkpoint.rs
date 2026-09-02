@@ -316,7 +316,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_checkpoint_slot_recovers_previous_snapshot() {
+    fn malformed_checkpoint_slot_fails_open_without_discarding_either_slot() {
         let fixture = fixture();
         deterministic::Runner::default().start(|context| async move {
             let (store, _) = CheckpointStore::<_, MinPk, Sha256Digest>::open(
@@ -330,32 +330,45 @@ mod tests {
             let store = store.store(fixture.first.clone()).await.unwrap();
             let store = store.store(fixture.replacement).await.unwrap();
             drop(store);
+            let (_, previous) = context.open(PARTITION, b"right").await.unwrap();
 
-            // The envelope is complete and checksum-valid, but its snapshot payload is not.
-            // The other atomic slot still contains the previous durable snapshot.
+            // The envelope is complete and checksum-valid, so the payload is exactly what was
+            // written and the store cannot tell a codec mismatch from a tampered slot. Starting
+            // from an older snapshot, or from genesis once the journal has been compacted, is
+            // worse than refusing to start.
             let mut malformed = Vec::new();
             100u64.write(&mut malformed);
             U64::new(SNAPSHOT_KEY).write(&mut malformed);
             u8::MAX.write(&mut malformed);
             let checksum = Crc32::checksum(&malformed);
             malformed.extend_from_slice(&checksum.to_be_bytes());
+            let written = malformed.len() as u64;
             let (current, _) = context.open(PARTITION, b"left").await.unwrap();
-            current.resize(malformed.len() as u64).await.unwrap();
+            current.resize(written).await.unwrap();
             current
                 .write_at(0, malformed, WriteOptions::SYNC)
                 .await
                 .unwrap();
+            drop(current);
 
-            let (store, snapshot) = CheckpointStore::<_, MinPk, Sha256Digest>::open(
+            let error = CheckpointStore::<_, MinPk, Sha256Digest>::open(
                 context.child("reopen"),
                 PARTITION.into(),
                 fixture.codec,
                 fixture.epoch,
             )
             .await
-            .unwrap();
-            assert_eq!(snapshot, Some(fixture.first.clone()));
-            assert_eq!(store.covered(), fixture.first.cursor());
+            .err()
+            .expect("a checksum-valid slot the codec cannot read is fatal");
+            assert!(matches!(
+                error,
+                CheckpointError::Storage(MetadataError::Undecodable { blob: 0, .. })
+            ));
+
+            let (_, tampered) = context.open(PARTITION, b"left").await.unwrap();
+            let (_, retained) = context.open(PARTITION, b"right").await.unwrap();
+            assert_eq!(tampered, written);
+            assert_eq!(retained, previous);
         });
     }
 

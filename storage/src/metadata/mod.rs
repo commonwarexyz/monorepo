@@ -74,6 +74,40 @@ use thiserror::Error;
 pub enum Error {
     #[error("runtime error: {0}")]
     Runtime(#[from] commonware_runtime::Error),
+    /// A blob whose checksum verified could not be decoded.
+    ///
+    /// The checksum proves the bytes are exactly the ones that were written, so both blobs are
+    /// left intact and the mismatch is reported instead of truncating durable state. Restore the
+    /// key type and codec configuration the data was written with, then reopen.
+    #[error("blob {blob} is undecodable: {reason}")]
+    Undecodable {
+        /// Which of the two atomic blobs failed to decode.
+        blob: usize,
+        /// The key whose entry failed, absent when the key itself did not decode.
+        key: Option<String>,
+        /// What the decoder could not read.
+        reason: Undecodable,
+    },
+}
+
+/// Why a checksum-valid blob could not be decoded.
+#[derive(Debug, Error)]
+pub enum Undecodable {
+    /// The key type rejected the encoded key.
+    #[error("key is malformed: {0}")]
+    Key(commonware_codec::Error),
+    /// The key decoded but does not re-encode to the bytes it consumed.
+    #[error("key is not canonical")]
+    KeyEncoding,
+    /// The value codec rejected the encoded value under the configured bounds.
+    #[error("value is malformed: {0}")]
+    Value(commonware_codec::Error),
+    /// The value decoded but does not re-encode to the bytes it consumed.
+    #[error("value is not canonical")]
+    ValueEncoding,
+    /// An entry consumed no bytes, so decoding cannot make progress.
+    #[error("entry made no decoding progress")]
+    Stalled,
 }
 
 /// Configuration for [Metadata] storage.
@@ -131,16 +165,18 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_checksum_valid_zero_progress_encoding_is_discarded() {
+    fn test_checksum_valid_zero_progress_encoding_is_reported() {
         deterministic::Runner::default().start(|context| async move {
             let mut encoded = 0u64.to_be_bytes().to_vec();
             encoded.push(1);
             let checksum = Crc32::checksum(&encoded);
             encoded.extend_from_slice(&checksum.to_be_bytes());
+            let written = encoded.len() as u64;
             let (blob, _) = context.open("test", b"left").await.unwrap();
             blob.write_at(0, encoded, WriteOptions::SYNC).await.unwrap();
+            drop(blob);
 
-            let metadata = Metadata::<_, Unit, Unit>::init(
+            let error = Metadata::<_, Unit, Unit>::init(
                 context.child("open"),
                 Config {
                     partition: "test".into(),
@@ -148,8 +184,83 @@ mod tests {
                 },
             )
             .await
+            .unwrap_err();
+            assert!(matches!(
+                error,
+                Error::Undecodable {
+                    blob: 0,
+                    reason: Undecodable::Stalled,
+                    ..
+                }
+            ));
+
+            let (_, len) = context.open("test", b"left").await.unwrap();
+            assert_eq!(len, written);
+        });
+    }
+
+    #[test_traced]
+    fn test_narrowed_codec_config_preserves_both_blobs() {
+        deterministic::Runner::default().start(|context| async move {
+            // Two syncs so both atomic blobs hold a complete, checksum-valid copy.
+            let key = U64::new(42);
+            let value = b"0123456789".to_vec();
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(
+                context.child("write"),
+                Config {
+                    partition: "test".into(),
+                    codec_config: ((0..).into(), ()),
+                },
+            )
+            .await
             .unwrap();
-            assert_eq!(metadata.get(&Unit), None);
+            metadata.put(key.clone(), value.clone());
+            metadata = metadata.sync().await.unwrap();
+            metadata.put(key.clone(), value.clone());
+            metadata.sync().await.unwrap();
+
+            let (_, left) = context.open("test", b"left").await.unwrap();
+            let (_, right) = context.open("test", b"right").await.unwrap();
+            assert!(left > 0 && right > 0);
+
+            // A configuration that cannot represent the stored value is a deployment mistake, not
+            // corruption, so it must not consume either durable copy.
+            let error = Metadata::<_, U64, Vec<u8>>::init(
+                context.child("narrow"),
+                Config {
+                    partition: "test".into(),
+                    codec_config: ((0..=4).into(), ()),
+                },
+            )
+            .await
+            .unwrap_err();
+            let Error::Undecodable {
+                blob,
+                key: reported,
+                reason: Undecodable::Value(_),
+            } = error
+            else {
+                panic!("a checksum-valid value must fail decoding, not the envelope");
+            };
+            assert_eq!(blob, 0);
+            assert_eq!(reported.as_deref(), Some(key.to_string().as_str()));
+
+            let (_, narrowed_left) = context.open("test", b"left").await.unwrap();
+            let (_, narrowed_right) = context.open("test", b"right").await.unwrap();
+            assert_eq!(narrowed_left, left);
+            assert_eq!(narrowed_right, right);
+
+            // Restoring the original configuration recovers the value.
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(
+                context.child("reopen"),
+                Config {
+                    partition: "test".into(),
+                    codec_config: ((0..).into(), ()),
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(metadata.get(&key), Some(&value));
         });
     }
 
