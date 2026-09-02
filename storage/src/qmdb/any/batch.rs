@@ -2636,9 +2636,8 @@ where
     /// # Errors
     ///
     /// Returns [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or
-    /// belongs to a dropped unapplied ancestor and
-    /// [`crate::merkle::Error::Empty`] if the batch has no operations (a [`Db::to_batch`]
-    /// snapshot).
+    /// belongs to a dropped unapplied ancestor, and [`crate::merkle::Error::Empty`] if the batch
+    /// has no operations (a [`Db::to_batch`] snapshot).
     pub fn proof<E, C, I, H, const N: usize>(
         &self,
         db: &Db<F, E, C, I, H, U, N, S>,

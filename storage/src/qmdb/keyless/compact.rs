@@ -144,14 +144,14 @@ where
     }
 
     /// Inclusion proof for the operations returned by [`Self::operations`], anchored at
-    /// this batch's tip. The operations and proof verify against [`Self::root`] via
+    /// this batch's tip. The pair verifies against [`Self::root`] via
     /// [`crate::qmdb::verify_proof`]. Together with [`Self::pinned_nodes`] they verify via
     /// [`crate::qmdb::verify_proof_and_pinned_nodes`].
     ///
-    /// Nodes below this batch's own operations are read from its unapplied ancestors, which must
-    /// still be alive, and from `db`'s [Merkle store][crate::merkle::mem::Mem]. Applying this
-    /// batch or a descendant prunes that store to its frontier, so capture the proof first.
-    /// Applying ancestors is safe.
+    /// Nodes of unapplied ancestors are read through the chain, so those ancestors must still be
+    /// alive. Nodes below the chain are read from `db`'s
+    /// [Merkle store][crate::merkle::mem::Mem], which retains them at least until this batch's
+    /// changes are applied (applying it or a descendant prunes the store to its frontier).
     ///
     /// # Errors
     ///
@@ -184,10 +184,10 @@ where
     /// compact state and replay the operations. The operations, [`Self::proof`], and pinned
     /// nodes verify against [`Self::root`] via [`crate::qmdb::verify_proof_and_pinned_nodes`].
     ///
-    /// Nodes below this batch's own operations are read from its unapplied ancestors, which must
-    /// still be alive, and from `db`'s [Merkle store][crate::merkle::mem::Mem]. Applying this
-    /// batch or a descendant prunes that store to its frontier, so capture the pinned nodes first.
-    /// Applying ancestors is safe.
+    /// Nodes of unapplied ancestors are read through the chain, so those ancestors must still be
+    /// alive. Nodes below the chain are read from `db`'s
+    /// [Merkle store][crate::merkle::mem::Mem], which retains them at least until this batch's
+    /// changes are applied (applying it or a descendant prunes the store to its frontier).
     ///
     /// # Errors
     ///
