@@ -20,10 +20,35 @@ pub use certificate::{
 use commonware_cryptography::{BatchVerifier, Digest, Hasher, PublicKey};
 use commonware_parallel::Strategy;
 use commonware_utils::Participant;
+use core::ops::Range;
 use rand_core::CryptoRng;
 
 /// One validator attestation over a clearing header.
 pub type Vote = bls12381::Vote;
+
+/// The quorum window holding one slice: `quorum` consecutive positions on the validator ring
+/// starting at `floor(slice * n / slice_count)`, returned as the wrapped part (from position
+/// zero) followed by the part up to the ring's end, so the two together enumerate the
+/// holders in ascending order.
+///
+/// The start slides monotonically around the ring as the slice index grows, so every
+/// validator's slices are contiguous (wrapping past the last slice at most once) while every
+/// slice keeps exactly one quorum of holders and loads stay balanced within one slice.
+fn window(
+    slice: u16,
+    slice_count: u16,
+    committee: &Committee,
+) -> Result<(Range<usize>, Range<usize>), AdmissionError> {
+    let n = committee.members().len();
+    let start = usize::from(slice)
+        .checked_mul(n)
+        .ok_or(AdmissionError::IncompleteAssignment)?
+        / usize::from(slice_count);
+    let end = start
+        .checked_add(committee.quorum())
+        .ok_or(AdmissionError::IncompleteAssignment)?;
+    Ok((0..end.saturating_sub(n), start..end.min(n)))
+}
 
 /// Deterministically derives the exact quorum retaining one proof slice.
 pub fn slice_holders<H, D>(
@@ -41,23 +66,8 @@ where
     if slice >= assignment.slice_count() {
         return Err(AdmissionError::IncompleteAssignment);
     }
-    let n = committee.members().len();
-    let quorum = committee.quorum();
-    let start = usize::from(slice)
-        .checked_mul(quorum)
-        .ok_or(AdmissionError::IncompleteAssignment)?
-        % n;
-    let end = start
-        .checked_add(quorum)
-        .ok_or(AdmissionError::IncompleteAssignment)?;
-    let mut holders = Vec::with_capacity(quorum);
-    if end <= n {
-        holders.extend((start..end).map(Participant::from_usize));
-    } else {
-        holders.extend((0..end - n).map(Participant::from_usize));
-        holders.extend((start..n).map(Participant::from_usize));
-    }
-    Ok(holders)
+    let (wrapped, main) = window(slice, assignment.slice_count(), committee)?;
+    Ok(wrapped.chain(main).map(Participant::from_usize).collect())
 }
 
 /// Derives every slice in one validator's dealing.
@@ -78,30 +88,67 @@ where
     if committee.commitment::<H>() != *assignment.committee() {
         return Err(AdmissionError::CommitteeMismatch);
     }
-    let quorum = committee.quorum();
-    let slice_count = usize::from(assignment.slice_count());
-    let capacity = slice_count
-        .checked_mul(quorum)
-        .and_then(|total| total.checked_add(n - 1))
+    let slice_count = assignment.slice_count();
+    let capacity = usize::from(slice_count)
+        .checked_mul(committee.quorum())
         .ok_or(AdmissionError::IncompleteAssignment)?
-        / n;
+        .div_ceil(n);
     let mut slices = Vec::with_capacity(capacity);
-    let mut start = 0_usize;
-    for slice in 0..assignment.slice_count() {
-        let end = start
-            .checked_add(quorum)
-            .ok_or(AdmissionError::IncompleteAssignment)?;
-        let assigned = if end <= n {
-            (start..end).contains(&validator)
-        } else {
-            validator >= start || validator < end - n
-        };
-        if assigned {
+    for slice in 0..slice_count {
+        let (wrapped, main) = window(slice, slice_count, committee)?;
+        if wrapped.contains(&validator) || main.contains(&validator) {
             slices.push(slice);
         }
-        start = if end >= n { end - n } else { end };
     }
     Ok(slices)
+}
+
+/// Derives one validator's dealing as contiguous slice spans, in slice order.
+///
+/// The quorum window wraps past the last slice at most once, so a dealing is one span or
+/// two, and each span is validated as one proof slice.
+pub fn assigned_slice_spans<H, D>(
+    committee: &Committee,
+    assignment: &Assignment<D>,
+    validator: Participant,
+) -> Result<Vec<Range<u16>>, AdmissionError>
+where
+    H: Hasher<Digest = D>,
+    D: Digest,
+{
+    let mut spans: Vec<Range<u16>> = Vec::with_capacity(2);
+    for slice in assigned_slice_indices::<H, D>(committee, assignment, validator)? {
+        match spans.last_mut() {
+            Some(span) if span.end == slice => span.end += 1,
+            _ => spans.push(slice..slice + 1),
+        }
+    }
+    Ok(spans)
+}
+
+/// Derives the distinct spans dealt across the whole committee, in slice order.
+///
+/// This is what the operator assembles once per close: every validator's dealing is a
+/// subset of these spans.
+pub fn committee_spans<H, D>(
+    committee: &Committee,
+    assignment: &Assignment<D>,
+) -> Result<Vec<Range<u16>>, AdmissionError>
+where
+    H: Hasher<Digest = D>,
+    D: Digest,
+{
+    let mut spans = Vec::new();
+    for validator in 0..committee.members().len() {
+        spans.extend(assigned_slice_spans::<H, D>(
+            committee,
+            assignment,
+            Participant::from_usize(validator),
+        )?);
+    }
+    spans.sort_unstable_by_key(|span| (span.start, span.end));
+    spans.dedup();
+    Ok(spans)
 }
 
 /// A validator's sealed dealing retained through the challenge deadline.
@@ -129,7 +176,7 @@ impl<P: PublicKey, D: Digest> SealedDealing<P, D> {
         &self.roots
     }
 
-    /// Canonically ordered proof slices comprising the dealing.
+    /// Canonically ordered proof slices comprising the dealing, one per assigned span.
     pub fn slices(&self) -> &[ProofSlice<P, D>] {
         &self.slices
     }
@@ -139,21 +186,22 @@ impl<P: PublicKey, D: Digest> SealedDealing<P, D> {
         self.slices
     }
 
-    /// Returns one slice for service through the challenge deadline.
+    /// Returns the proof slice covering one interval for service through the challenge
+    /// deadline.
     pub fn serve(&self, slice: u16) -> Option<&ProofSlice<P, D>> {
         self.slices
-            .binary_search_by_key(&slice, |candidate| candidate.index)
-            .ok()
-            .map(|position| &self.slices[position])
+            .iter()
+            .find(|candidate| candidate.span.contains(&slice))
     }
 }
 
 /// Authenticates and takes ownership of one validator's dealing, then signs the header.
 ///
-/// A dealing is the complete, canonically ordered set of proof slices assigned to one validator.
-/// `seal` verifies every distinct payer authorization in one randomized aggregate batch and each
-/// slice's combined operator countersignature. Applications must make the returned dealing
-/// durable before publishing the accompanying vote.
+/// A dealing is the complete, canonically ordered set of proof slices assigned to one
+/// validator: one per assigned contiguous span. `seal` verifies every distinct payer
+/// authorization in one randomized aggregate batch and each interval's combined operator
+/// countersignature. Applications must make the returned dealing durable before publishing
+/// the accompanying vote.
 #[allow(clippy::too_many_arguments)]
 pub fn seal<H, P, D, B, R>(
     scheme: &bls12381::Scheme,
@@ -179,12 +227,8 @@ where
 
     // The dealing must contain exactly the validator's deterministic assignment before any local
     // proof work can be accepted.
-    let expected = assigned_slice_indices::<H, D>(committee, context.assignment(), validator)?;
-    if dealing
-        .iter()
-        .map(|slice| slice.index)
-        .ne(expected.iter().copied())
-    {
+    let expected = assigned_slice_spans::<H, D>(committee, context.assignment(), validator)?;
+    if dealing.iter().map(|slice| &slice.span).ne(expected.iter()) {
         return Err(AdmissionError::IncompleteAssignment);
     }
     if !header.verify::<H, P>(context, roots) {
@@ -353,7 +397,7 @@ mod tests {
     }
 
     #[test]
-    fn assignment_arithmetic_matches_cyclic_reference() {
+    fn assignment_arithmetic_matches_ring_window_reference() {
         for validator_count in [1_u64, 4, 7, 10, 100] {
             let keys = validator_keys(validator_count);
             let committee = committee(&keys);
@@ -362,9 +406,10 @@ mod tests {
             for slice_bits in 0..=8 {
                 let assignment =
                     Assignment::new(committee.commitment::<Sha256>(), slice_bits).unwrap();
+                let slice_count = usize::from(assignment.slice_count());
                 let mut inverse = vec![Vec::new(); count];
                 for slice in 0..assignment.slice_count() {
-                    let start = usize::from(slice) * quorum % count;
+                    let start = usize::from(slice) * count / slice_count;
                     let mut expected = (0..quorum)
                         .map(|offset| Participant::from_usize((start + offset) % count))
                         .collect::<Vec<_>>();
@@ -378,17 +423,32 @@ mod tests {
                         inverse[usize::from(validator)].push(slice);
                     }
                 }
+                let mut loads = Vec::with_capacity(count);
                 for (validator, expected) in inverse.into_iter().enumerate() {
+                    let validator = Participant::from_usize(validator);
+                    let indices =
+                        assigned_slice_indices::<Sha256, _>(&committee, &assignment, validator)
+                            .unwrap();
+                    assert_eq!(indices, expected);
+                    loads.push(indices.len());
+
+                    // The spans are the indices grouped contiguously, and the ring window
+                    // wraps at most once, so there are at most two.
+                    let spans =
+                        assigned_slice_spans::<Sha256, _>(&committee, &assignment, validator)
+                            .unwrap();
+                    assert!(spans.len() <= 2, "{spans:?}");
+                    assert!(spans.windows(2).all(|pair| pair[0].end < pair[1].start));
                     assert_eq!(
-                        assigned_slice_indices::<Sha256, _>(
-                            &committee,
-                            &assignment,
-                            Participant::from_usize(validator),
-                        )
-                        .unwrap(),
-                        expected
+                        spans
+                            .iter()
+                            .flat_map(|span| span.clone())
+                            .collect::<Vec<_>>(),
+                        indices
                     );
                 }
+                let (min, max) = (loads.iter().min().unwrap(), loads.iter().max().unwrap());
+                assert!(max - min <= 1, "loads {min}..={max}");
             }
         }
     }
@@ -631,22 +691,25 @@ mod tests {
         let committee = committee(&validators);
         let fixture = seal_fixture(&committee, 3, false);
         let close = fixture.prepared.close();
-        let all = fixture
-            .prepared
-            .assemble_slices(&fixture.cache, &Sequential)
-            .unwrap();
         let scheme =
             bls12381::Scheme::signer(committee.clone(), validators[0].signing.clone()).unwrap();
+        let spans = assigned_slice_spans::<Sha256, _>(
+            &committee,
+            fixture.context.assignment(),
+            scheme.me().unwrap(),
+        )
+        .unwrap();
+        assert!((1..=2).contains(&spans.len()), "{spans:?}");
         let expected = assigned_slice_indices::<Sha256, _>(
             &committee,
             fixture.context.assignment(),
             scheme.me().unwrap(),
         )
         .unwrap();
-        let slices = expected
-            .iter()
-            .map(|slice| all[usize::from(*slice)].clone())
-            .collect::<Vec<_>>();
+        let slices = fixture
+            .prepared
+            .assemble_slices(&fixture.cache, &spans, &Sequential)
+            .unwrap();
         let mut rng = test_rng();
         let (vote, sealed) = seal::<Sha256, _, _, PaymentBatchVerifier, _>(
             &scheme,
@@ -662,8 +725,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(sealed.slices(), slices);
-        for slice in expected {
-            assert_eq!(sealed.serve(slice).map(|slice| slice.index), Some(slice));
+        for slice in 0..fixture.context.assignment().slice_count() {
+            let served = sealed.serve(slice).map(|served| served.span.clone());
+            if expected.contains(&slice) {
+                assert!(served.is_some_and(|span| span.contains(&slice)));
+            } else {
+                assert_eq!(served, None);
+            }
         }
 
         let (parallel_vote, parallel_sealed) = seal::<Sha256, _, _, PaymentBatchVerifier, _>(
@@ -700,8 +768,7 @@ mod tests {
         );
 
         let mut duplicate = slices.clone();
-        let last = duplicate.len() - 1;
-        duplicate[last] = duplicate[0].clone();
+        duplicate.push(duplicate[0].clone());
         assert_eq!(
             seal::<Sha256, _, _, PaymentBatchVerifier, _>(
                 &scheme,
@@ -720,8 +787,10 @@ mod tests {
         );
 
         let mut malformed = slices;
-        malformed[0].coverage.end.predecessor =
-            malformed[0].coverage.end.predecessor.saturating_add(1);
+        let last = malformed[0].coverage.boundaries.len() - 1;
+        malformed[0].coverage.boundaries[last].predecessor = malformed[0].coverage.boundaries[last]
+            .predecessor
+            .saturating_add(1);
         assert_eq!(
             seal::<Sha256, _, _, PaymentBatchVerifier, _>(
                 &scheme,
@@ -777,9 +846,10 @@ mod tests {
         let committee = committee(&validators);
         let fixture = seal_fixture(&committee, 0, true);
         let close = fixture.prepared.close();
+        let only = 0..1;
         let all = fixture
             .prepared
-            .assemble_slices(&fixture.cache, &Sequential)
+            .assemble_slices(&fixture.cache, &[only], &Sequential)
             .unwrap();
         let validator =
             slice_holders::<Sha256, ShaDigest>(&committee, fixture.context.assignment(), 0)

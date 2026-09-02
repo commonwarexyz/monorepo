@@ -324,9 +324,9 @@ fn issued_valid_state(subject: CandidateSubject) -> CertificationState {
         CertificationAction::DeliverExact(0, 1),
         CertificationAction::Seal(0),
         CertificationAction::DeliverExact(1, 0),
-        CertificationAction::DeliverExact(1, 1),
         CertificationAction::Seal(1),
         CertificationAction::DeliverExact(2, 0),
+        CertificationAction::DeliverExact(2, 1),
         CertificationAction::Seal(2),
         CertificationAction::FormCertificate,
         CertificationAction::Issue,
@@ -367,13 +367,32 @@ const fn slice_bit(slice: usize) -> u8 {
     1 << slice
 }
 
+/// Returns the first holder of one slice on the validator ring.
+///
+/// Mirrors the production window rule: the quorum window slides monotonically around the
+/// ring as the slice index grows, so every dealing is contiguous.
+const fn window_start(slice: usize) -> usize {
+    slice * VALIDATORS / SLICE_COUNT
+}
+
+/// Returns the slices whose quorum window covers `validator`.
+///
+/// In this instance slice 0 is held by validators 0, 1, and 2 and slice 1 by validators 2, 3,
+/// and 0, so validators 0 and 2 hold both slices while validators 1 and 3 hold one each.
 const fn assigned_slices(validator: usize) -> u8 {
-    match validator {
-        0 | 1 => 0b11,
-        2 => 0b01,
-        3 => 0b10,
-        _ => 0,
+    if validator >= VALIDATORS {
+        return 0;
     }
+    let mut assigned = 0;
+    let mut slice = 0;
+    while slice < SLICE_COUNT {
+        let offset = (validator + VALIDATORS - window_start(slice)) % VALIDATORS;
+        if offset < QUORUM as usize {
+            assigned |= slice_bit(slice);
+        }
+        slice += 1;
+    }
+    assigned
 }
 
 fn assigned_dealing_is_exact_and_valid(state: &CertificationState, validator: usize) -> bool {
@@ -742,6 +761,21 @@ fn every_finite_fault_profile_can_be_placed_on_either_slice() {
 }
 
 #[test]
+fn ring_window_assignment_gives_every_slice_one_quorum() {
+    assert_eq!(assigned_slices(0), 0b11);
+    assert_eq!(assigned_slices(1), 0b01);
+    assert_eq!(assigned_slices(2), 0b11);
+    assert_eq!(assigned_slices(3), 0b10);
+    assert_eq!(assigned_slices(VALIDATORS), 0);
+    for slice in 0..SLICE_COUNT {
+        let holders = (0..VALIDATORS)
+            .filter(|validator| assigned_slices(*validator) & slice_bit(slice) != 0)
+            .count();
+        assert_eq!(holders, QUORUM as usize);
+    }
+}
+
+#[test]
 fn certified_close_requires_issued_matching_candidate() {
     let registered = CertificationState::valid();
     assert_eq!(registered.issue_close(), None);
@@ -775,13 +809,13 @@ fn a_bad_slice_does_not_block_an_unaffected_honest_validator() {
     );
     assert!(
         model
-            .next_state(&state, CertificationAction::Seal(1))
+            .next_state(&state, CertificationAction::Seal(2))
             .is_none()
     );
     let unaffected = model
-        .next_state(&state, CertificationAction::Seal(2))
+        .next_state(&state, CertificationAction::Seal(1))
         .expect("validator assigned only the valid slice can seal");
-    assert_eq!(unaffected.votes, validator_bit(2));
+    assert_eq!(unaffected.votes, validator_bit(1));
     assert!(
         model
             .next_state(&state, CertificationAction::ByzantineVote)
@@ -920,15 +954,15 @@ fn every_certification_invariant_has_a_direct_negative_control() {
     unsound.certificate = true;
     unsound.retained[1] = assigned_slices(1);
     unsound.retained[2] = assigned_slices(2);
-    unsound.deliveries[1] = [Delivery::Exact; SLICE_COUNT];
-    unsound.deliveries[2][0] = Delivery::Exact;
+    unsound.deliveries[1][0] = Delivery::Exact;
+    unsound.deliveries[2] = [Delivery::Exact; SLICE_COUNT];
     assert!(!certificate_is_sound(&CertificationModel, &unsound));
 
     let mut unretained = CertificationState::valid();
     unretained.stage = Stage::Dealt;
     unretained.votes = 0b1110;
     unretained.certificate = true;
-    unretained.retained[2] = assigned_slices(2);
+    unretained.retained[1] = assigned_slices(1);
     assert!(!certified_slices_are_retained(
         &CertificationModel,
         &unretained

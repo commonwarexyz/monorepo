@@ -135,7 +135,7 @@
 //!        |                                    assemble_slices | + StateCache
 //!        |                                                   v
 //!        |                                    +-----------------------------+
-//!        |                                    | every ProofSlice            |
+//!        |                                    | one ProofSlice per span     |
 //!        |                                    +--------------+--------------+
 //!        |                                                   |
 //!        |                                    exact deterministic dealing
@@ -200,20 +200,25 @@
 //! predecessor [`transition::StateCache`]. Settlement admission sees the registered context, typed
 //! roots, terminal proof, and certificate, not the full corpus or every slice.
 //!
-//! "Deal" produces every [`transition::ProofSlice`]. Each slice is replicated to an exact
-//! quorum. A validator's "dealing" is its complete assigned subset. [`admission::seal`] rejects any other
-//! subset, authenticates its slices, and returns one [`admission::Vote`] plus the owned
-//! [`admission::SealedDealing`]. The dealing must be durable before the vote is released.
-//! The exact-quorum certificate authenticates the shared [`transition::Header`]. The separate
-//! [`transition::TerminalProof`] authenticates terminal counts and totals but does not re-establish
-//! certification or full-corpus validity.
+//! "Deal" produces one [`transition::ProofSlice`] per contiguous span of slice intervals a
+//! validator holds. Every interval is held by an exact quorum, whose members are one
+//! window of the validator ring sliding with the interval index
+//! ([`admission::slice_holders`]), so a validator's intervals form one contiguous span, or
+//! two when the window wraps past the last interval ([`admission::assigned_slice_spans`]).
+//! A validator's "dealing" is one proof slice per assigned span. [`admission::seal`] rejects
+//! any other dealing, authenticates its slices, and returns one [`admission::Vote`] plus the
+//! owned [`admission::SealedDealing`]. The dealing must be durable before the vote is
+//! released. The exact-quorum certificate authenticates the shared [`transition::Header`].
+//! The separate [`transition::TerminalProof`] authenticates terminal counts and totals but
+//! does not re-establish certification or full-corpus validity.
 //!
 //! ## Authenticate gap-free proof slices
 //!
-//! For `S` slices, the coverage tree has exactly `S + 1` boundary leaves. Boundary `B[i]`
+//! For `S` intervals, the coverage tree has exactly `S + 1` boundary leaves. Boundary `B[i]`
 //! authenticates positions in the predecessor-state, change, and successor-state vectors together
-//! with a cumulative prefix. Each slice opens the same boundary used by its neighbor, making local
-//! interval checks compose into one global relation.
+//! with a cumulative prefix. A proof slice covering intervals `lo..hi` opens every boundary
+//! `B[lo] ..= B[hi]` under one range opening, and neighboring slices open the same boundary,
+//! making local interval checks compose into one global relation.
 //!
 //! ```text
 //! CoverageRoot
@@ -224,22 +229,29 @@
 //!                     +----------+
 //!                     shared authenticated boundary
 //!
-//! slice i opens B[i] and B[i+1], then authenticates exactly:
+//! a slice covering intervals lo..hi opens B[lo] ..= B[hi], then authenticates exactly:
 //!
-//!   predecessor StateRoot  [B[i].predecessor .. B[i+1].predecessor)
-//!   ChangeRoot             [B[i].change   .. B[i+1].change)
-//!   successor StateRoot    [B[i].successor   .. B[i+1].successor)
-//!   WithdrawalOutputRoot   [prefix[i].withdrawal_count .. prefix[i+1].withdrawal_count)
+//!   predecessor StateRoot  [B[lo].predecessor .. B[hi].predecessor)
+//!   ChangeRoot             [B[lo].change   .. B[hi].change)
+//!   successor StateRoot    [B[lo].successor   .. B[hi].successor)
+//!   WithdrawalOutputRoot   [prefix[lo].withdrawal_count .. prefix[hi].withdrawal_count)
+//!
+//! and, at every covered boundary B[j], that the rows and leaves in the intervals before j
+//! advance each position exactly as committed, and that the running prefix and both
+//! accumulator checksums equal B[j]'s at the row its change position names.
 //!
 //! Ordered guards prove both sides of each disclosed state/change range.
 //! Typed openings bind root role, vector length, position, and hash domain.
-//! B[i+1] is literally the next slice's B[i], so no certified gap can be hidden.
+//! B[hi] is literally the next slice's B[lo], so no certified gap can be hidden.
 //! ```
 //!
 //! The [`transition::CoverageRange`] openings establish adjacency, while the three content roots
 //! and the withdrawal-output root authenticate the interval contents. `B[0]` pins the empty
 //! prefix. `B[S]` pins every vector length, boundary total, conservation total, and successor
-//! liability. This is why local ordered range guards cannot replace the `CoverageRoot`.
+//! liability. This is why local ordered range guards cannot replace the `CoverageRoot`. The
+//! accumulator start states and the range openings ship once per proof slice, however many
+//! slices it covers, so a span costs its holder the rows and edges plus one boundary and one
+//! operator aggregate per covered slice.
 //!
 //! ## Settle pipelined closes
 //!

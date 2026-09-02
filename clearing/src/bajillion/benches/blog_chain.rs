@@ -1,5 +1,7 @@
 use super::{
-    admission_fixtures::{FAULTS, QUORUM, SLICE_BITS, SLICES, VALIDATORS, Validators},
+    admission_fixtures::{
+        FAULTS, QUORUM, SLICE_BITS, SLICES, VALIDATORS, Validators, single_spans,
+    },
     fixtures::{
         ActiveProfile, CloseFixture, WORKERS, active_close_fixture_with_assignment, kind_label,
         profile_key, proven_challenges, selected_active_profiles, strategy,
@@ -31,6 +33,7 @@ use criterion::{BatchSize, Criterion, criterion_group};
 use std::{
     hint::black_box,
     num::{NonZeroU64, NonZeroUsize},
+    ops::Range,
     time::{Duration, Instant},
 };
 
@@ -71,6 +74,8 @@ struct BlogChainFixture {
     close: CloseFixture,
     validator: Participant,
     validator_scheme: bls12381::Scheme,
+    /// The distinct spans the committee is dealt: the operator's assembly per close.
+    spans: Vec<Range<u16>>,
     dealing: Vec<ProofSlice<VerifyingKey, Digest>>,
     commitment: CommitmentPayload,
     terminal_proof: TerminalProof<Digest>,
@@ -128,9 +133,10 @@ impl BlogChainFixture {
         .expect("benchmark close is publicly valid");
         let all_slices = close
             .prepared
-            .assemble_slices(&close.cache, strategy())
+            .assemble_slices(&close.cache, &single_spans(), strategy())
             .expect("benchmark slices are valid");
         assert_eq!(all_slices.len(), SLICES);
+        let spans = validators.distinct_spans(close.context.assignment());
         let close_bytes = close.prepared.close().encoded_size();
         let replica =
             commonware_clearing::bajillion::posted::Replica::genesis(close.cache.leaves())
@@ -139,12 +145,8 @@ impl BlogChainFixture {
             commonware_clearing::bajillion::posted::encoded_size(close.prepared.close(), &replica)
                 .expect("benchmark close posts against its own predecessor");
         let slice_corpus_bytes = all_slices.iter().map(EncodeSize::encode_size).sum();
-        let (validator, indices, dealing_bytes) =
-            validators.largest_assignment(close.context.assignment(), &all_slices);
-        let dealing = indices
-            .iter()
-            .map(|index| all_slices[usize::from(*index)].clone())
-            .collect::<Vec<_>>();
+        drop(all_slices);
+        let (validator, dealing, dealing_bytes) = validators.largest_assignment(&close);
         let dealt_dealing_bytes = dealing
             .iter()
             .cloned()
@@ -153,7 +155,6 @@ impl BlogChainFixture {
             })
             .sum();
         let validator_scheme = validators.signer(validator);
-        drop(all_slices);
 
         let header = close.prepared.close().header;
         let certificate = exact_certificate(&validators, &header);
@@ -244,6 +245,7 @@ impl BlogChainFixture {
             close,
             validator,
             validator_scheme,
+            spans,
             dealing,
             commitment,
             terminal_proof,
@@ -278,7 +280,7 @@ impl BlogChainFixture {
     fn deal(&self) -> Vec<ProofSlice<VerifyingKey, Digest>> {
         self.close
             .prepared
-            .assemble_slices(&self.close.cache, strategy())
+            .assemble_slices(&self.close.cache, &self.spans, strategy())
             .expect("benchmark slices are valid")
     }
 

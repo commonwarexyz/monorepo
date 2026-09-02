@@ -37,6 +37,7 @@ use commonware_cryptography::{
 };
 use commonware_parallel::{Sequential, Strategy};
 use commonware_utils::iter::NonEmpty;
+use core::ops::Range;
 use rand_core::CryptoRng;
 use thiserror::Error;
 
@@ -48,6 +49,13 @@ pub const HEADER_ROOT_HASH_NAMESPACE: &[u8] = b"_COMMONWARE_CLEARING_HEADER_ROOT
 pub const EPOCH_ANCHOR_HASH_NAMESPACE: &[u8] = b"_COMMONWARE_CLEARING_EPOCH_ANCHOR";
 /// Maximum number of high-order account-key bits used for deterministic proof slices.
 pub const MAX_SLICE_BITS: u8 = 8;
+/// Maximum number of deterministic slice intervals in one close.
+pub const MAX_SLICE_COUNT: u16 = 1 << MAX_SLICE_BITS;
+
+/// Returns whether a span of slices is nonempty and lies within `slice_count` slices.
+pub(crate) fn valid_span(span: &Range<u16>, slice_count: u16) -> bool {
+    span.start < span.end && span.end <= slice_count
+}
 
 /// Returns the deterministic high-order-key interval containing an account.
 pub fn account_slice<P: PublicKey>(account: &P, slice_bits: u8) -> Result<u16, TransitionError> {
@@ -374,28 +382,52 @@ impl Read for SliceBoundary {
     }
 }
 
-/// Two adjacent authenticated coverage boundaries defining one slice.
+/// The adjacent authenticated coverage boundaries around one proof slice: one before each
+/// covered interval and one after the last.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CoverageRange<D: Digest> {
-    /// Boundary before this slice.
-    pub start: SliceBoundary,
-    /// Boundary after this slice.
-    pub end: SliceBoundary,
-    /// Authentication of the two adjacent boundary values.
+    /// Boundaries `B[span.start] ..= B[span.end]`, one more than the intervals covered.
+    pub boundaries: Vec<SliceBoundary>,
+    /// Authentication of the contiguous boundary values.
     pub opening: RangeOpening<D>,
+}
+
+impl<D: Digest> CoverageRange<D> {
+    /// Boundary before the first covered interval.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the range holds fewer than two boundaries, which construction and decoding
+    /// both rule out.
+    pub fn start(&self) -> &SliceBoundary {
+        self.boundaries
+            .first()
+            .expect("a coverage range holds at least two boundaries")
+    }
+
+    /// Boundary after the last covered interval.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the range holds fewer than two boundaries, which construction and decoding
+    /// both rule out.
+    pub fn end(&self) -> &SliceBoundary {
+        self.boundaries
+            .last()
+            .expect("a coverage range holds at least two boundaries")
+    }
 }
 
 impl<D: Digest> Write for CoverageRange<D> {
     fn write(&self, writer: &mut impl BufMut) {
-        self.start.write(writer);
-        self.end.write(writer);
+        self.boundaries.write(writer);
         self.opening.write(writer);
     }
 }
 
 impl<D: Digest> EncodeSize for CoverageRange<D> {
     fn encode_size(&self) -> usize {
-        SliceBoundary::SIZE * 2 + self.opening.encode_size()
+        self.boundaries.encode_size() + self.opening.encode_size()
     }
 }
 
@@ -403,10 +435,14 @@ impl<D: Digest> Read for CoverageRange<D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let boundaries = Vec::<SliceBoundary>::read_cfg(
+            reader,
+            &(RangeCfg::new(2..=usize::from(MAX_SLICE_COUNT) + 1), ()),
+        )?;
+        let opening = RangeOpening::read_bounded(reader, boundaries.len(), usize::MAX)?;
         Ok(Self {
-            start: SliceBoundary::read(reader)?,
-            end: SliceBoundary::read(reader)?,
-            opening: RangeOpening::read_bounded(reader, 2, usize::MAX)?,
+            boundaries,
+            opening,
         })
     }
 }
@@ -435,31 +471,37 @@ pub struct StateRange<P: PublicKey, D: Digest> {
     pub opening: RangeOpening<D>,
 }
 
-/// One proof slice for independently authenticating an account interval.
+/// One proof slice for independently authenticating a contiguous run of account intervals.
+///
+/// The run is validated as one interval: every covered boundary is authenticated and
+/// checked against the disclosed material, so the run's holders verify exactly what
+/// per-interval holders would, while the accumulator start states and the range openings
+/// ship once per run.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProofSlice<P: PublicKey, D: Digest> {
-    /// Deterministic interval index.
-    pub index: u16,
-    /// Header-bound positions, prefix, and accumulators for this interval.
+    /// Deterministic interval indices covered, nonempty and contiguous.
+    pub span: Range<u16>,
+    /// Header-bound positions, prefix, and accumulators around every covered interval.
     pub coverage: CoverageRange<D>,
-    /// Exact changed rows in this interval.
+    /// Exact changed rows in the covered intervals.
     pub changes: ChangeRange<P, D>,
     /// Outgoing vectors aligned one-for-one with [`ChangeRange::rows`].
     pub out_vectors: Vec<OutVector<P>>,
-    /// Transpose entries in this interval's exact positional range.
+    /// Transpose entries in the covered intervals' exact positional range.
     pub transpose: Vec<TransposeEntry<P>>,
-    /// Full payer-vector accumulator state at the start boundary.
+    /// Full payer-vector accumulator state at the first boundary.
     pub out_start: LtHash,
-    /// Combined operator countersignature over this interval's acknowledged bodies, present
-    /// exactly when the interval contains a sending row.
-    pub operator_aggregate: Option<OperatorAggregate>,
-    /// Full transpose accumulator state at the start boundary.
+    /// Combined operator countersignatures over each covered interval's acknowledged
+    /// bodies, aligned with `span` and present exactly when the interval contains a sending
+    /// row.
+    pub operator_aggregates: Vec<Option<OperatorAggregate>>,
+    /// Full transpose accumulator state at the first boundary.
     pub in_start: LtHash,
     /// Range opening for `transpose`, present exactly when it is nonempty.
     pub transpose_opening: Option<RangeOpening<D>>,
     /// Range opening for the validator-derived withdrawal outputs in this interval.
     pub withdrawal_opening: Option<RangeOpening<D>>,
-    /// Live leaves unchanged across both roots in this interval.
+    /// Live leaves unchanged across both roots in the covered intervals.
     pub unchanged: Vec<StateLeaf<P>>,
     /// Exact guarded predecessor-state interval.
     pub predecessor: StateRange<P, D>,
@@ -470,14 +512,15 @@ pub struct ProofSlice<P: PublicKey, D: Digest> {
 impl<P: PublicKey, D: Digest> ProofSlice<P, D> {
     /// Returns the encoded size of this slice.
     pub fn encoded_size(&self) -> usize {
-        self.index.encode_size()
+        self.span.start.encode_size()
+            + self.span.end.encode_size()
             + self.coverage.encode_size()
             + self.changes.predecessor.encode_size()
             + self.changes.rows.encode_size()
             + self.changes.successor.encode_size()
             + self.changes.opening.encode_size()
             + self.out_vectors.encode_size()
-            + self.operator_aggregate.encode_size()
+            + self.operator_aggregates.encode_size()
             + transpose_encode_size(&self.transpose)
             + LtHash::SIZE * 2
             + self.transpose_opening.encode_size()
@@ -1467,10 +1510,16 @@ impl<P: PublicKey, D: Digest> PreparedClose<P, D> {
         Ok(())
     }
 
-    /// Deals every deterministic proof slice from the retained Merkle state.
+    /// Deals one proof slice per requested contiguous interval span from the retained
+    /// Merkle state.
+    ///
+    /// A dealing is the validator's assigned spans
+    /// ([assigned_slice_spans](crate::bajillion::admission::assigned_slice_spans)). A span
+    /// must be nonempty and lie within the deterministic partition.
     pub fn assemble_slices(
         &self,
         cache: &StateCache<P, D>,
+        spans: &[Range<u16>],
         strategy: &impl Strategy,
     ) -> Result<Vec<ProofSlice<P, D>>, TransitionError> {
         if cache.root() != self.predecessor_root {
@@ -1479,10 +1528,13 @@ impl<P: PublicKey, D: Digest> PreparedClose<P, D> {
         let slice_bits = self.slice_bits();
         let unchanged_boundaries = state_boundaries(&self.close.unchanged, slice_bits)?;
         let slice_count = 1_u16 << slice_bits;
-        strategy.try_map_collect_vec(0..slice_count, |index| {
-            let slice = usize::from(index);
-            let start_boundary = self.coverage_boundaries[slice];
-            let end_boundary = self.coverage_boundaries[slice + 1];
+        strategy.try_map_collect_vec(spans, |span| {
+            if !valid_span(span, slice_count) {
+                return Err(TransitionError::SliceIndex);
+            }
+            let (first, last) = (usize::from(span.start), usize::from(span.end));
+            let start_boundary = self.coverage_boundaries[first];
+            let end_boundary = self.coverage_boundaries[last];
             let start = start_boundary.change as usize;
             let end = end_boundary.change as usize;
             let (predecessor, change_successor, opening) = self.changes.bracket(
@@ -1509,12 +1561,16 @@ impl<P: PublicKey, D: Digest> PreparedClose<P, D> {
                     .ok_or(TransitionError::SliceRange)?,
             )
             .map_err(|_| TransitionError::SliceRange)?;
+            let boundaries = self.coverage_boundaries[first..=last].to_vec();
+            let boundary_count =
+                u32::try_from(boundaries.len()).map_err(|_| TransitionError::SliceCoverage)?;
             Ok(ProofSlice {
-                index,
+                span: span.clone(),
                 coverage: CoverageRange {
-                    start: start_boundary,
-                    end: end_boundary,
-                    opening: self.coverage.range_opening(u32::from(index), 2)?,
+                    boundaries,
+                    opening: self
+                        .coverage
+                        .range_opening(u32::from(span.start), boundary_count)?,
                 },
                 changes: ChangeRange {
                     predecessor,
@@ -1523,12 +1579,12 @@ impl<P: PublicKey, D: Digest> PreparedClose<P, D> {
                     opening,
                 },
                 out_vectors: self.close.out_vectors[start..end].to_vec(),
-                operator_aggregate: self.close.operator_aggregates[slice].clone(),
+                operator_aggregates: self.close.operator_aggregates[first..last].to_vec(),
                 transpose: self.transpose
                     [transpose_start as usize..(transpose_start + transpose_count) as usize]
                     .to_vec(),
-                out_start: self.boundary_states[slice].0.clone(),
-                in_start: self.boundary_states[slice].1.clone(),
+                out_start: self.boundary_states[first].0.clone(),
+                in_start: self.boundary_states[first].1.clone(),
                 transpose_opening: (transpose_count != 0)
                     .then(|| {
                         self.transpose_tree
@@ -1541,8 +1597,8 @@ impl<P: PublicKey, D: Digest> PreparedClose<P, D> {
                             .range_opening(withdrawal_start, withdrawal_count)
                     })
                     .transpose()?,
-                unchanged: self.close.unchanged[unchanged_boundaries[slice] as usize
-                    ..unchanged_boundaries[slice + 1] as usize]
+                unchanged: self.close.unchanged
+                    [unchanged_boundaries[first] as usize..unchanged_boundaries[last] as usize]
                     .to_vec(),
                 predecessor: build_state_range(
                     cache.leaves(),
@@ -1558,6 +1614,68 @@ impl<P: PublicKey, D: Digest> PreparedClose<P, D> {
                 )?,
             })
         })
+    }
+
+    /// Rewrites the corpus through `tamper` and recommits every tree, root, boundary, and
+    /// the header over the result without validating it, modeling a Byzantine operator that
+    /// deals a consistently committed but invalid close.
+    ///
+    /// `tamper` receives the close (rows, vectors, unchanged leaves, aggregates), the
+    /// successor leaves, and the transpose. Coverage boundaries and accumulator states are
+    /// re-derived from the tampered material by the same commit step the honest close uses.
+    #[cfg(test)]
+    pub(crate) fn recommit<H: Hasher<Digest = D>>(
+        &mut self,
+        context: &CloseContext<P, D>,
+        cache: &StateCache<P, D>,
+        withdrawals: &WithdrawalBatch<P, D>,
+        tamper: impl FnOnce(&mut Close<P, D>, &mut Vec<StateLeaf<P>>, &mut Vec<TransposeEntry<P>>),
+    ) {
+        tamper(
+            &mut self.close,
+            &mut self.successor_leaves,
+            &mut self.transpose,
+        );
+        let material = commit::<H, P, D>(
+            &self.close.rows,
+            &self.close.out_vectors,
+            None,
+            &self.transpose,
+            cache.leaves(),
+            &self.successor_leaves,
+            withdrawals,
+            context.assignment().slice_bits(),
+            &Sequential,
+        )
+        .expect("the tampered corpus commits");
+        self.change_leaves = material.change_leaves;
+        self.change_guards = material.change_guards;
+        self.changes = material.changes;
+        self.withdrawal_outputs = material.withdrawal_outputs;
+        self.withdrawal_output_tree = material.withdrawal_output_tree;
+        self.successor = material.successor;
+        self.transpose_tree = material.transpose_tree;
+        self.coverage_boundaries = material.coverage_boundaries;
+        self.boundary_states = material.boundary_states;
+        self.coverage = material.coverage;
+        self.close.roots = material.roots;
+        self.close.header = Header::new::<H, P>(context, &self.close.roots);
+    }
+
+    /// Rewrites one coverage boundary and recommits the coverage root and header, modeling
+    /// an operator that certifies a wrong boundary consistently.
+    #[cfg(test)]
+    pub(crate) fn corrupt_boundary<H: Hasher<Digest = D>>(
+        &mut self,
+        context: &CloseContext<P, D>,
+        index: usize,
+        corrupt: impl FnOnce(&mut SliceBoundary),
+    ) {
+        corrupt(&mut self.coverage_boundaries[index]);
+        self.coverage = coverage_tree_with_strategy::<H, D>(&self.coverage_boundaries, &Sequential)
+            .expect("coverage tree rebuilds over the rewritten boundaries");
+        self.close.roots.coverage = self.coverage.root();
+        self.close.header = Header::new::<H, P>(context, &self.close.roots);
     }
 
     /// Opens the terminal counts, flows, and accumulator equality for settlement admission.
@@ -1677,24 +1795,19 @@ where
         context.limits().max_states(),
     )?;
 
-    let successor = state_tree_with_strategy::<H, P, D>(&successor_leaves, strategy)?;
-    let (change_leaves, change_guards, changes) =
-        change_material_with_strategy::<H, P, D>(&rows, &out_vectors, strategy)?;
-    let (withdrawal_outputs, withdrawal_output_tree) =
-        withdrawal_output_material_with_strategy::<H, P, D>(&rows, withdrawals, strategy)?;
-    let transpose_tree = transpose_tree_with_strategy::<H, P, D>(&transpose, strategy)?;
-    let (coverage_boundaries, boundary_states) = derive_coverage::<P, D>(
+    let material = commit::<H, P, D>(
         &rows,
         &out_vectors,
         Some(out_partials),
         &transpose,
         cache.leaves(),
         &successor_leaves,
+        withdrawals,
         context.assignment().slice_bits(),
         strategy,
     )?;
-    let coverage = coverage_tree_with_strategy::<H, D>(&coverage_boundaries, strategy)?;
-    let operator_aggregates = coverage_boundaries
+    let operator_aggregates = material
+        .coverage_boundaries
         .windows(2)
         .map(|window| {
             let range = window[0].change as usize..window[1].change as usize;
@@ -1710,14 +1823,19 @@ where
     if state_liability(&successor_leaves)? != expected_liability {
         return Err(TransitionError::LiabilityEquation);
     }
-    let roots = RootBundle {
-        change: changes.root(),
-        withdrawal_outputs: withdrawal_output_tree.root(),
-        successor: successor.root(),
-        coverage: coverage.root(),
-        transpose: transpose_tree.root(),
-        transpose_len: u32::try_from(transpose.len()).map_err(|_| TransitionError::CloseLimit)?,
-    };
+    let Material {
+        change_leaves,
+        change_guards,
+        changes,
+        withdrawal_outputs,
+        withdrawal_output_tree,
+        successor,
+        transpose_tree,
+        coverage_boundaries,
+        boundary_states,
+        coverage,
+        roots,
+    } = material;
     let close = Close {
         header: Header::new::<H, P>(context, &roots),
         roots,
@@ -2861,6 +2979,82 @@ where
     Ok((coverage, states))
 }
 
+/// Every tree, boundary, and root a close commits, derived from its corpus material.
+struct Material<P: PublicKey, D: Digest> {
+    change_leaves: Vec<AccountChange<P, D>>,
+    change_guards: Vec<ChangeGuard<P, D>>,
+    changes: Tree<D>,
+    withdrawal_outputs: Vec<WithdrawalOutput>,
+    withdrawal_output_tree: Tree<D>,
+    successor: Tree<D>,
+    transpose_tree: Tree<D>,
+    coverage_boundaries: Vec<SliceBoundary>,
+    boundary_states: Vec<(LtHash, LtHash)>,
+    coverage: Tree<D>,
+    roots: RootBundle<D>,
+}
+
+/// Commits the corpus: builds every tree and coverage boundary and binds the root bundle.
+///
+/// This is construction only. Callers validate the material before or after, so a
+/// tampered corpus commits to roots the validation then rejects.
+#[allow(clippy::too_many_arguments)]
+fn commit<H, P, D>(
+    rows: &[AccountRow<P, D>],
+    out_vectors: &[OutVector<P>],
+    out_partials: Option<&[LtHash]>,
+    transpose: &[TransposeEntry<P>],
+    predecessor: &[StateLeaf<P>],
+    successor_leaves: &[StateLeaf<P>],
+    withdrawals: &WithdrawalBatch<P, D>,
+    slice_bits: u8,
+    strategy: &impl Strategy,
+) -> Result<Material<P, D>, TransitionError>
+where
+    H: Hasher<Digest = D>,
+    P: PublicKey,
+    D: Digest,
+{
+    let successor = state_tree_with_strategy::<H, P, D>(successor_leaves, strategy)?;
+    let (change_leaves, change_guards, changes) =
+        change_material_with_strategy::<H, P, D>(rows, out_vectors, strategy)?;
+    let (withdrawal_outputs, withdrawal_output_tree) =
+        withdrawal_output_material_with_strategy::<H, P, D>(rows, withdrawals, strategy)?;
+    let transpose_tree = transpose_tree_with_strategy::<H, P, D>(transpose, strategy)?;
+    let (coverage_boundaries, boundary_states) = derive_coverage::<P, D>(
+        rows,
+        out_vectors,
+        out_partials,
+        transpose,
+        predecessor,
+        successor_leaves,
+        slice_bits,
+        strategy,
+    )?;
+    let coverage = coverage_tree_with_strategy::<H, D>(&coverage_boundaries, strategy)?;
+    let roots = RootBundle {
+        change: changes.root(),
+        withdrawal_outputs: withdrawal_output_tree.root(),
+        successor: successor.root(),
+        coverage: coverage.root(),
+        transpose: transpose_tree.root(),
+        transpose_len: u32::try_from(transpose.len()).map_err(|_| TransitionError::CloseLimit)?,
+    };
+    Ok(Material {
+        change_leaves,
+        change_guards,
+        changes,
+        withdrawal_outputs,
+        withdrawal_output_tree,
+        successor,
+        transpose_tree,
+        coverage_boundaries,
+        boundary_states,
+        coverage,
+        roots,
+    })
+}
+
 fn coverage_tree_with_strategy<H, D>(
     coverage: &[SliceBoundary],
     strategy: &impl Strategy,
@@ -2950,27 +3144,49 @@ where
     D: Digest,
 {
     let assignment = context.assignment();
-    if slice.index >= assignment.slice_count() {
+    let span = &slice.span;
+    if !valid_span(span, assignment.slice_count()) {
         return Err(TransitionError::SliceIndex);
     }
-    validate_coverage_range::<H, D>(assignment, slice.index, &roots.coverage, &slice.coverage)?;
+    let slice_bits = assignment.slice_bits();
+    validate_coverage_range::<H, D>(assignment, span, &roots.coverage, &slice.coverage)?;
+    let start = slice.coverage.start();
+    let end = slice.coverage.end();
     validate_change_range::<H, P, D>(
         assignment,
-        slice.index,
+        span,
         &roots.change,
         &slice.changes,
         &slice.out_vectors,
-        slice.coverage.start.change,
-        slice.coverage.end.change,
+        start.change,
+        end.change,
     )?;
-    // Runs after the change range pins strict row order, so the combined message never folds
-    // duplicate bodies, per the aggregation primitive's distinct-messages precondition.
-    verify_operator_aggregate(
-        operator,
+
+    // Every covered boundary's change position is pinned to the rows falling in the slices
+    // before it, which also places each row in its own slice. The offsets are where each
+    // boundary sits among the disclosed rows.
+    let offsets = validate_boundary_positions(
+        &slice.coverage,
+        span,
         &slice.changes.rows,
-        slice.operator_aggregate.as_ref(),
-        &Sequential,
+        |row| &row.account,
+        slice_bits,
+        |boundary| boundary.change,
     )?;
+
+    // Runs after the change range pins strict row order, so no combined message folds
+    // duplicate bodies, per the aggregation primitive's distinct-messages precondition.
+    if slice.operator_aggregates.len() + 1 != offsets.len() {
+        return Err(TransitionError::VectorAlignment);
+    }
+    for (window, aggregate) in offsets.windows(2).zip(&slice.operator_aggregates) {
+        verify_operator_aggregate(
+            operator,
+            &slice.changes.rows[window[0]..window[1]],
+            aggregate.as_ref(),
+            &Sequential,
+        )?;
+    }
 
     let (predecessor, successor) = derive_state_vectors(
         &slice.unchanged,
@@ -2979,34 +3195,49 @@ where
     )?;
     validate_state_range::<H, P, D>(
         assignment,
-        slice.index,
+        span,
         context.predecessor_root(),
         &slice.predecessor,
         &predecessor,
         context.limits().max_states(),
-        slice.coverage.start.predecessor..slice.coverage.end.predecessor,
+        start.predecessor..end.predecessor,
     )?;
+    validate_boundary_positions(
+        &slice.coverage,
+        span,
+        &predecessor,
+        |leaf| &leaf.account,
+        slice_bits,
+        |boundary| boundary.predecessor,
+    )
+    .map(drop)?;
     validate_state_range::<H, P, D>(
         assignment,
-        slice.index,
+        span,
         &roots.successor,
         &slice.successor,
         &successor,
         context.limits().max_states(),
-        slice.coverage.start.successor..slice.coverage.end.successor,
+        start.successor..end.successor,
     )?;
+    validate_boundary_positions(
+        &slice.coverage,
+        span,
+        &successor,
+        |leaf| &leaf.account,
+        slice_bits,
+        |boundary| boundary.successor,
+    )
+    .map(drop)?;
 
     // The transpose interval is positionally pinned by the boundary in-counts and must
     // authenticate under the transpose root.
-    let transpose_start = u32::try_from(slice.coverage.start.prefix.in_count)
-        .map_err(|_| TransitionError::SliceRange)?;
+    let transpose_start =
+        u32::try_from(start.prefix.in_count).map_err(|_| TransitionError::SliceRange)?;
     let transpose_count = u32::try_from(
-        slice
-            .coverage
-            .end
-            .prefix
+        end.prefix
             .in_count
-            .checked_sub(slice.coverage.start.prefix.in_count)
+            .checked_sub(start.prefix.in_count)
             .ok_or(TransitionError::SliceRange)?,
     )
     .map_err(|_| TransitionError::SliceRange)?;
@@ -3031,70 +3262,75 @@ where
 
     // The witness start states must hash to the committed boundary checksums before any
     // accumulation resumes from them.
-    if slice.out_start.checksum() != slice.coverage.start.out_check
-        || slice.in_start.checksum() != slice.coverage.start.in_check
+    if slice.out_start.checksum() != start.out_check || slice.in_start.checksum() != start.in_check
     {
         return Err(TransitionError::SliceCoverage);
     }
 
-    // Row equations advance the prefix and both accumulators through the interval.
+    // Row equations advance the prefix and both accumulators slice by slice. Every boundary
+    // after the first must be reached exactly: after the rows of the slice it closes, the
+    // running prefix and both accumulator checksums equal the committed values.
     let groups = transpose_groups(&slice.changes.rows, &slice.transpose)?;
-    let mut prefix = slice.coverage.start.prefix;
+    let mut prefix = start.prefix;
     let mut out_acc = slice.out_start.clone();
     let mut in_acc = slice.in_start.clone();
     let mut withdrawal_outputs = Vec::new();
-    for ((row, out_vector), group) in slice
-        .changes
-        .rows
-        .iter()
-        .zip(&slice.out_vectors)
-        .zip(&groups)
-    {
-        let incoming = &slice.transpose[group.0..group.1];
-        let delta =
-            validate_row::<H, P, D>(context, deposits, withdrawals, row, out_vector, incoming)?;
-        prefix = prefix
-            .checked_extend(delta)
-            .ok_or(TransitionError::PrefixOverflow)?;
-        if prefix != row.prefix {
+    for (window, boundary) in offsets.windows(2).zip(&slice.coverage.boundaries[1..]) {
+        for position in window[0]..window[1] {
+            let row = &slice.changes.rows[position];
+            let out_vector = &slice.out_vectors[position];
+            let incoming = &slice.transpose[groups[position].0..groups[position].1];
+            let delta = validate_row::<H, P, D>(
+                context,
+                deposits,
+                withdrawals,
+                row,
+                out_vector,
+                incoming,
+            )?;
+            prefix = prefix
+                .checked_extend(delta)
+                .ok_or(TransitionError::PrefixOverflow)?;
+            if prefix != row.prefix {
+                return Err(TransitionError::Prefix);
+            }
+            for entry in out_vector.entries() {
+                accumulate_edge(
+                    &mut out_acc,
+                    &row.account,
+                    &entry.recipient,
+                    entry.cumulative,
+                    entry.count,
+                );
+            }
+            for entry in incoming {
+                accumulate_edge(
+                    &mut in_acc,
+                    &entry.payer,
+                    &entry.recipient,
+                    entry.cumulative,
+                    entry.count,
+                );
+            }
+            if let Some(request) = withdrawals.request_for(&row.account) {
+                let SettlementOutput::Withdrawal(amount) = row.output else {
+                    return Err(TransitionError::SettlementOutput);
+                };
+                withdrawal_outputs.push(WithdrawalOutput::from_request(request, amount));
+            }
+        }
+        if prefix != boundary.prefix
+            || out_acc.checksum() != boundary.out_check
+            || in_acc.checksum() != boundary.in_check
+        {
             return Err(TransitionError::Prefix);
         }
-        for entry in out_vector.entries() {
-            accumulate_edge(
-                &mut out_acc,
-                &row.account,
-                &entry.recipient,
-                entry.cumulative,
-                entry.count,
-            );
-        }
-        for entry in incoming {
-            accumulate_edge(
-                &mut in_acc,
-                &entry.payer,
-                &entry.recipient,
-                entry.cumulative,
-                entry.count,
-            );
-        }
-        if let Some(request) = withdrawals.request_for(&row.account) {
-            let SettlementOutput::Withdrawal(amount) = row.output else {
-                return Err(TransitionError::SettlementOutput);
-            };
-            withdrawal_outputs.push(WithdrawalOutput::from_request(request, amount));
-        }
-    }
-    if prefix != slice.coverage.end.prefix
-        || out_acc.checksum() != slice.coverage.end.out_check
-        || in_acc.checksum() != slice.coverage.end.in_check
-    {
-        return Err(TransitionError::Prefix);
     }
     validate_withdrawal_output_range::<H, D>(
         &roots.withdrawal_outputs,
         &slice.withdrawal_opening,
-        slice.coverage.start.prefix.withdrawal_count,
-        slice.coverage.end.prefix.withdrawal_count,
+        start.prefix.withdrawal_count,
+        end.prefix.withdrawal_count,
         withdrawals.len(),
         &withdrawal_outputs,
     )?;
@@ -3102,10 +3338,10 @@ where
     // The final authenticated boundary binds all vector lengths, corpus totals, and the
     // multiset equality between the two edge orderings.
     let change_len = slice.changes.opening.proof.leaf_count;
-    if slice.index + 1 == assignment.slice_count() {
-        if slice.coverage.end.predecessor != slice.predecessor.opening.proof.leaf_count
-            || slice.coverage.end.change != change_len
-            || slice.coverage.end.successor != slice.successor.opening.proof.leaf_count
+    if span.end == assignment.slice_count() {
+        if end.predecessor != slice.predecessor.opening.proof.leaf_count
+            || end.change != change_len
+            || end.successor != slice.successor.opening.proof.leaf_count
         {
             return Err(TransitionError::SliceCoverage);
         }
@@ -3115,7 +3351,7 @@ where
             deposits,
             withdrawals,
             change_len,
-            &slice.coverage.end,
+            end,
         )?;
     }
     Ok(())
@@ -3123,7 +3359,7 @@ where
 
 fn validate_coverage_range<H, D>(
     assignment: &Assignment<D>,
-    index: u16,
+    span: &Range<u16>,
     root: &VectorRoot<D>,
     range: &CoverageRange<D>,
 ) -> Result<(), TransitionError>
@@ -3132,26 +3368,62 @@ where
     D: Digest,
 {
     let expected_len = u32::from(assignment.slice_count()) + 1;
-    if range.opening.start != u32::from(index)
+    if range.boundaries.len() != usize::from(span.end - span.start) + 1
+        || range.opening.start != u32::from(span.start)
         || range.opening.proof.leaf_count != expected_len
-        || range.start.predecessor > range.end.predecessor
-        || range.start.change > range.end.change
-        || range.start.successor > range.end.successor
-        || (index == 0 && range.start != SliceBoundary::origin())
+        || range.boundaries.windows(2).any(|pair| {
+            pair[0].predecessor > pair[1].predecessor
+                || pair[0].change > pair[1].change
+                || pair[0].successor > pair[1].successor
+        })
+        || (span.start == 0 && *range.start() != SliceBoundary::origin())
     {
         return Err(TransitionError::SliceCoverage);
     }
-    range.opening.verify::<H, _>(
-        VectorKind::Coverage,
-        root,
-        &[range.start.encode(), range.end.encode()],
-    )?;
+    let encoded = range
+        .boundaries
+        .iter()
+        .map(Encode::encode)
+        .collect::<Vec<_>>();
+    range
+        .opening
+        .verify::<H, _>(VectorKind::Coverage, root, &encoded)?;
     Ok(())
+}
+
+/// Pins every covered boundary's position in one vector to the disclosed items: the items
+/// falling in the slices before each boundary, counted in key order, must advance the
+/// position from the first boundary exactly as committed. Returns those advances, the index
+/// of each boundary among the items.
+///
+/// Together with the bracket check that precedes each call (which pins the item count to
+/// the last boundary), this places every item inside the covered slices: an item before the
+/// span shifts the count at the first boundary and an item past it shifts the count at the
+/// last.
+fn validate_boundary_positions<P: PublicKey, D: Digest, T>(
+    coverage: &CoverageRange<D>,
+    span: &Range<u16>,
+    items: &[T],
+    account: impl Fn(&T) -> &P,
+    slice_bits: u8,
+    position: impl Fn(&SliceBoundary) -> u32,
+) -> Result<Vec<usize>, TransitionError> {
+    let counts = boundaries(items, account, slice_bits)?;
+    let base = position(coverage.start());
+    let mut offsets = Vec::with_capacity(coverage.boundaries.len());
+    for (index, boundary) in coverage.boundaries.iter().enumerate() {
+        let expected = counts[usize::from(span.start) + index];
+        if position(boundary).checked_sub(base) != Some(expected) {
+            return Err(TransitionError::SliceCoverage);
+        }
+        offsets.push(usize::try_from(expected).map_err(|_| TransitionError::SliceCoverage)?);
+    }
+    Ok(offsets)
 }
 
 fn validate_change_range<H, P, D>(
     assignment: &Assignment<D>,
-    index: u16,
+    span: &Range<u16>,
     root: &VectorRoot<D>,
     range: &ChangeRange<P, D>,
     out_vectors: &[OutVector<P>],
@@ -3188,25 +3460,17 @@ where
     {
         return Err(TransitionError::SliceRange);
     }
-    for row in &range.rows {
-        if account_slice(&row.account, assignment.slice_bits())
-            .map_err(|_| TransitionError::SliceBits)?
-            != index
-        {
-            return Err(TransitionError::SliceRange);
-        }
-    }
     if let Some(predecessor) = &range.predecessor
         && account_slice(predecessor.account(), assignment.slice_bits())
             .map_err(|_| TransitionError::SliceBits)?
-            >= index
+            >= span.start
     {
         return Err(TransitionError::SliceRange);
     }
     if let Some(successor) = &range.successor
         && account_slice(successor.account(), assignment.slice_bits())
             .map_err(|_| TransitionError::SliceBits)?
-            <= index
+            < span.end
     {
         return Err(TransitionError::SliceRange);
     }
@@ -3273,12 +3537,12 @@ where
 
 fn validate_state_range<H, P, D>(
     assignment: &Assignment<D>,
-    index: u16,
+    span: &Range<u16>,
     root: &VectorRoot<D>,
     range: &StateRange<P, D>,
     members: &[StateLeaf<P>],
     max_states: u64,
-    positions: core::ops::Range<u32>,
+    positions: Range<u32>,
 ) -> Result<(), TransitionError>
 where
     H: Hasher<Digest = D>,
@@ -3316,25 +3580,17 @@ where
     {
         return Err(TransitionError::SliceStateRange);
     }
-    for leaf in members {
-        if account_slice(&leaf.account, assignment.slice_bits())
-            .map_err(|_| TransitionError::SliceBits)?
-            != index
-        {
-            return Err(TransitionError::SliceStateRange);
-        }
-    }
     if let Some(predecessor) = &range.predecessor
         && account_slice(&predecessor.account, assignment.slice_bits())
             .map_err(|_| TransitionError::SliceBits)?
-            >= index
+            >= span.start
     {
         return Err(TransitionError::SliceStateRange);
     }
     if let Some(successor) = &range.successor
         && account_slice(&successor.account, assignment.slice_bits())
             .map_err(|_| TransitionError::SliceBits)?
-            <= index
+            < span.end
     {
         return Err(TransitionError::SliceStateRange);
     }
@@ -3662,16 +3918,31 @@ impl SliceCodecConfig {
 }
 
 impl<D: Digest> CoverageRange<D> {
+    /// Reads exactly `count` boundaries and their opening under the hash bound.
     pub(crate) fn read_bounded(
         reader: &mut impl Buf,
+        count: usize,
         max_hashes: usize,
     ) -> Result<Self, CodecError> {
+        let boundaries = Vec::<SliceBoundary>::read_cfg(reader, &(RangeCfg::exact(count), ()))?;
+        let opening = RangeOpening::read_bounded(reader, count, max_hashes)?;
         Ok(Self {
-            start: SliceBoundary::read(reader)?,
-            end: SliceBoundary::read(reader)?,
-            opening: RangeOpening::read_bounded(reader, 2, max_hashes)?,
+            boundaries,
+            opening,
         })
     }
+}
+
+/// Reads a proof slice's covered interval span: nonempty and within the protocol partition.
+pub(crate) fn read_span(
+    reader: &mut impl Buf,
+    name: &'static str,
+) -> Result<Range<u16>, CodecError> {
+    let span = u16::read(reader)?..u16::read(reader)?;
+    if !valid_span(&span, MAX_SLICE_COUNT) {
+        return Err(CodecError::Invalid(name, "slice span is not canonical"));
+    }
+    Ok(span)
 }
 
 impl<P: PublicKey, D: Digest> ChangeRange<P, D> {
@@ -3761,16 +4032,15 @@ pub(crate) fn read_out_vectors<P: PublicKey>(
 
 impl<P: PublicKey, D: Digest> Write for ProofSlice<P, D> {
     fn write(&self, writer: &mut impl BufMut) {
-        self.index.write(writer);
-        self.coverage.start.write(writer);
-        self.coverage.end.write(writer);
-        self.coverage.opening.write(writer);
+        self.span.start.write(writer);
+        self.span.end.write(writer);
+        self.coverage.write(writer);
         self.changes.predecessor.write(writer);
         self.changes.rows.write(writer);
         self.changes.successor.write(writer);
         self.changes.opening.write(writer);
         self.out_vectors.write(writer);
-        self.operator_aggregate.write(writer);
+        self.operator_aggregates.write(writer);
         write_transpose(&self.transpose, writer);
         self.out_start.write(writer);
         self.in_start.write(writer);
@@ -3803,16 +4073,18 @@ impl<P: PublicKey, D: Digest> Read for ProofSlice<P, D> {
             .min(u64::from(commitment::MAX_VECTOR_LENGTH));
         let row_limit = usize::try_from(row_limit)
             .map_err(|_| CodecError::Invalid("ProofSlice", "row limit is not representable"))?;
-        let index = u16::read(reader)?;
-        let coverage = CoverageRange::read_bounded(reader, config.max_proof_hashes)?;
+        let span = read_span(reader, "ProofSlice")?;
+        let intervals = usize::from(span.end - span.start);
+        let coverage = CoverageRange::read_bounded(reader, intervals + 1, config.max_proof_hashes)?;
         let changes = ChangeRange::read_bounded(reader, row_limit, config.max_proof_hashes)?;
         let out_vectors = read_out_vectors(reader, changes.rows.len(), &config.close)?;
-        let operator_aggregate = Option::<OperatorAggregate>::read(reader)?;
+        let operator_aggregates =
+            Vec::<Option<OperatorAggregate>>::read_cfg(reader, &(RangeCfg::exact(intervals), ()))?;
         let transpose_count = coverage
-            .end
+            .end()
             .prefix
             .in_count
-            .checked_sub(coverage.start.prefix.in_count)
+            .checked_sub(coverage.start().prefix.in_count)
             .filter(|count| *count <= config.close.max_total_entries)
             .and_then(|count| usize::try_from(count).ok())
             .ok_or(CodecError::Invalid(
@@ -3844,10 +4116,10 @@ impl<P: PublicKey, D: Digest> Read for ProofSlice<P, D> {
             tag => return Err(CodecError::InvalidEnum(tag)),
         };
         let withdrawal_count = coverage
-            .end
+            .end()
             .prefix
             .withdrawal_count
-            .checked_sub(coverage.start.prefix.withdrawal_count)
+            .checked_sub(coverage.start().prefix.withdrawal_count)
             .and_then(|count| usize::try_from(count).ok())
             .filter(|count| *count <= changes.rows.len())
             .ok_or(CodecError::Invalid(
@@ -3908,13 +4180,13 @@ impl<P: PublicKey, D: Digest> Read for ProofSlice<P, D> {
         let successor =
             StateRange::read_bounded(reader, successor_members, config.max_proof_hashes)?;
         Ok(Self {
-            index,
+            span,
             coverage,
             changes,
             out_vectors,
             transpose,
             out_start,
-            operator_aggregate,
+            operator_aggregates,
             in_start,
             transpose_opening,
             withdrawal_opening,
@@ -3964,9 +4236,12 @@ mod slice_arbitrary_impls {
         RangeOpening<D>: arbitrary::Arbitrary<'a>,
     {
         fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+            let count = u.int_in_range(2..=9_usize)?;
+            let boundaries = (0..count)
+                .map(|_| u.arbitrary())
+                .collect::<arbitrary::Result<Vec<SliceBoundary>>>()?;
             Ok(Self {
-                start: u.arbitrary()?,
-                end: u.arbitrary()?,
+                boundaries,
                 opening: u.arbitrary()?,
             })
         }
@@ -4019,14 +4294,16 @@ mod slice_arbitrary_impls {
         RangeOpening<D>: arbitrary::Arbitrary<'a>,
     {
         fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+            let start = u.int_in_range(0..=MAX_SLICE_COUNT - 1)?;
+            let end = u.int_in_range(start + 1..=MAX_SLICE_COUNT)?;
             Ok(Self {
-                index: u.arbitrary()?,
+                span: start..end,
                 coverage: u.arbitrary()?,
                 changes: u.arbitrary()?,
                 out_vectors: u.arbitrary()?,
                 transpose: u.arbitrary()?,
                 out_start: u.arbitrary()?,
-                operator_aggregate: u.arbitrary()?,
+                operator_aggregates: u.arbitrary()?,
                 in_start: u.arbitrary()?,
                 transpose_opening: u.arbitrary()?,
                 withdrawal_opening: u.arbitrary()?,

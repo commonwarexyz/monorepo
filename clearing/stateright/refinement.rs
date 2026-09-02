@@ -1,5 +1,9 @@
 use super::*;
-use crate::bajillion::{admission::seal, model::settlement as spec, vector::OutTipLookup};
+use crate::bajillion::{
+    admission::{assigned_slice_spans, seal},
+    model::settlement as spec,
+    vector::OutTipLookup,
+};
 use commonware_cryptography_curve25519::signing::BatchVerifier as PaymentBatchVerifier;
 
 const ACCOUNTS: [spec::Account; 3] = [
@@ -716,7 +720,16 @@ impl RefinementDriver {
                 8,
             ),
         };
-        let slices = close.prepared.assemble_slices(&cache, &Sequential).unwrap();
+        let spans = assigned_slice_spans::<Sha256, _>(
+            self.fixture.signer.committee(),
+            registered.context.assignment(),
+            self.fixture.signer.me().unwrap(),
+        )
+        .unwrap();
+        let slices = close
+            .prepared
+            .assemble_slices(&cache, &spans, &Sequential)
+            .unwrap();
         let (vote, sealed) = seal::<Sha256, _, _, PaymentBatchVerifier, _>(
             &self.fixture.signer,
             &registered.context,

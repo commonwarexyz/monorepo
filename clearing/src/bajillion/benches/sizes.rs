@@ -1,4 +1,9 @@
-use super::fixtures::{active_close_fixture, profile_key, selected_active_profiles, strategy};
+use super::{
+    admission_fixtures::{Validators, single_spans},
+    fixtures::{
+        active_close_fixture_with_assignment, profile_key, selected_active_profiles, strategy,
+    },
+};
 use commonware_clearing::bajillion::{
     payment::EntryReceipt,
     posted,
@@ -11,21 +16,38 @@ use commonware_cryptography::{Sha256, sha256::Digest};
 
 /// Prints the byte accounting for every selected profile.
 pub(crate) fn benches() {
+    let validators = Validators::new();
     for (_, profile) in selected_active_profiles() {
-        let fixture = active_close_fixture(profile);
+        let fixture = active_close_fixture_with_assignment(profile, validators.assignment());
         let close = fixture.prepared.close();
         let slices = fixture
             .prepared
-            .assemble_slices(&fixture.cache, strategy())
+            .assemble_slices(&fixture.cache, &single_spans(), strategy())
             .expect("benchmark slices are valid");
         let slice_corpus = slices
             .iter()
             .map(|slice| slice.encoded_size())
             .sum::<usize>();
         let dealt_corpus = slices
-            .iter()
-            .map(|slice| DealtSlice::strip(slice.clone()).encoded_size())
+            .into_iter()
+            .map(|slice| DealtSlice::strip(slice).encode_size())
             .sum::<usize>();
+
+        // Every validator's dealt share under the benchmark committee: the busiest is the
+        // per-validator ingress, the sum is the operator's egress per close.
+        let mut dealt_assignment = 0_usize;
+        let mut dealt_egress = 0_usize;
+        for spans in validators.spans(fixture.context.assignment()) {
+            let bytes = fixture
+                .prepared
+                .assemble_slices(&fixture.cache, &spans, strategy())
+                .expect("benchmark dealing is valid")
+                .into_iter()
+                .map(|slice| DealtSlice::strip(slice).encode_size())
+                .sum::<usize>();
+            dealt_assignment = dealt_assignment.max(bytes);
+            dealt_egress += bytes;
+        }
 
         // A retained per-edge receipt: the dual-signed acknowledgment plus the entry opening a
         // sender DO hands the payer and recipient.
@@ -60,7 +82,7 @@ pub(crate) fn benches() {
         let replica =
             posted::Replica::genesis(fixture.cache.leaves()).expect("genesis replica is canonical");
         println!(
-            "clearing sizes: {} E={} rows={} unchanged_bytes={} rows_bytes={} out_vector_bytes={} transpose_bytes={} close_bytes={} slice_corpus_bytes={} dealt_slice_corpus_bytes={} entry_receipt_bytes={} terminal_proof_bytes={} boundary_bytes={}",
+            "clearing sizes: {} E={} rows={} unchanged_bytes={} rows_bytes={} out_vector_bytes={} transpose_bytes={} close_bytes={} slice_corpus_bytes={} dealt_slice_corpus_bytes={} dealt_assignment_bytes={} dealt_egress_bytes={} entry_receipt_bytes={} terminal_proof_bytes={} boundary_bytes={}",
             profile_key(profile),
             profile.edges(),
             close.rows.len(),
@@ -71,6 +93,8 @@ pub(crate) fn benches() {
             posted::encoded_size(close, &replica).expect("posted size is computable"),
             slice_corpus,
             dealt_corpus,
+            dealt_assignment,
+            dealt_egress,
             receipt.encode_size(),
             terminal.encode_size(),
             SliceBoundary::SIZE,

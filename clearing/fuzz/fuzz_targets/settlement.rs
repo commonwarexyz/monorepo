@@ -3,7 +3,7 @@
 use arbitrary::{Arbitrary, Unstructured};
 use bytes::Bytes;
 use commonware_clearing::bajillion::{
-    admission::{Committee, assigned_slice_indices, bls12381, seal},
+    admission::{Committee, assigned_slice_spans, bls12381, seal},
     boundary::{
         DepositBatch, DepositRecord, SignedWithdrawal, WithdrawalAction, WithdrawalBatch,
         WithdrawalId,
@@ -1340,19 +1340,16 @@ impl Harness {
             &mut test_rng(),
         )
         .expect("sanitized close must validate");
-        let slices = prepared
-            .prepared
-            .assemble_slices(&prepared.predecessor, &Sequential)
-            .expect("sanitized close slices must build");
-        let assigned = assigned_slice_indices::<Sha256, _>(
+        let spans = assigned_slice_spans::<Sha256, _>(
             self.validator.committee(),
             prepared.context.assignment(),
             self.validator.me().expect("validator can sign"),
         )
-        .expect("committee-bound assignment must derive")
-        .into_iter()
-        .map(|index| slices[usize::from(index)].clone())
-        .collect::<Vec<_>>();
+        .expect("committee-bound assignment must derive");
+        let assigned = prepared
+            .prepared
+            .assemble_slices(&prepared.predecessor, &spans, &Sequential)
+            .expect("sanitized close slices must build");
         let (vote, sealed) = seal::<Sha256, _, _, PaymentBatchVerifier, _>(
             &self.validator,
             &prepared.context,
@@ -1366,12 +1363,12 @@ impl Harness {
             &Sequential,
         )
         .expect("complete validated assignment must sign");
-        assert!(
-            sealed
-                .slices()
-                .iter()
-                .all(|slice| sealed.serve(slice.index).is_some())
-        );
+        assert!(sealed.slices().iter().all(|slice| {
+            slice
+                .span
+                .clone()
+                .all(|index| sealed.serve(index).is_some())
+        }));
         self.validator
             .assemble_exact([vote])
             .expect("one-validator exact quorum must assemble")

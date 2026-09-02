@@ -40,9 +40,12 @@ anchor cannot be rolled into another epoch. Each cleanly finalized withdrawal is
 claimable as its certified destination and amount plus one opening in the withdrawal-output tree.
 
 `seal` authenticates and takes ownership of a validator's dealing before signing the Header. A
-dealing is the complete, canonically ordered set of `ProofSlice` values assigned to one validator.
-`seal` checks the local row equations and the exact state-update, prefix, accumulator, and
-conservation relations represented by the dealing and shared Header. It verifies each slice's
+dealing is the complete, canonically ordered set of `ProofSlice` values assigned to one validator:
+each slice interval is held by one quorum window of the validator ring, the window slides with
+the interval index, so a validator's intervals form one contiguous span (two when the window
+wraps) and its dealing is one `ProofSlice` per span. `seal` checks the local row equations and
+the exact state-update, prefix, accumulator, and conservation relations represented by the
+dealing and shared Header, at every covered interval boundary. It verifies each interval's
 combined operator countersignature and every distinct payer authorization in one randomized
 aggregate batch. Proofs of possession are checked when validators
 register. With `n` validators, the BLS MinSig certificate contributes a 48-byte signature and a

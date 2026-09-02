@@ -3,7 +3,7 @@
 use arbitrary::{Arbitrary, Unstructured};
 use bytes::Bytes;
 use commonware_clearing::bajillion::{
-    admission::{Committee, assigned_slice_indices, bls12381, seal},
+    admission::{Committee, assigned_slice_spans, bls12381, seal},
     boundary::{DepositBatch, DepositRecord, SignedWithdrawal, WithdrawalAction, WithdrawalBatch},
     challenge::{
         AccountLookup, AckWitness, Challenge, ChallengeKind, EntryWitness, HigherEntryLookup,
@@ -40,6 +40,7 @@ use commonware_cryptography_curve25519::signing::{
 };
 use commonware_parallel::Sequential;
 use commonware_utils::test_rng;
+use core::ops::Range;
 use libfuzzer_sys::fuzz_target;
 
 const MAX_INPUT_BYTES: usize = 16 * 1024;
@@ -1014,11 +1015,24 @@ fn bounded_withdrawals(
     .unwrap_or_default()
 }
 
+/// Deals every slice of `context` as its own span.
+fn single_spans(context: &TestCloseContext) -> Vec<Range<u16>> {
+    (0..context.assignment().slice_count())
+        .map(|slice| slice..slice + 1)
+        .collect()
+}
+
 fn mutate_slice(
     slice: &ProofSlice<VerifyingKey, Digest>,
     selector: u8,
 ) -> ProofSlice<VerifyingKey, Digest> {
     let mut mutated = slice.clone();
+    let last = mutated
+        .coverage
+        .boundaries
+        .len()
+        .checked_sub(1)
+        .expect("a coverage range holds at least two boundaries");
     let marker = Sha256::hash(&[b"transition-slice-mutation", &[selector]]);
     let live_overlap = mutated.changes.rows.first().map(|row| StateLeaf {
         account: row.account.clone(),
@@ -1029,15 +1043,15 @@ fn mutate_slice(
         },
     });
     match selector % SLICE_MUTATIONS {
-        0 => mutated.index = u16::MAX,
-        1 => mutated.coverage.start.predecessor ^= 1,
-        2 => mutated.coverage.start.change ^= 1,
-        3 => mutated.coverage.start.successor ^= 1,
-        4 => mutated.coverage.start.prefix.payout ^= 1,
-        5 => mutated.coverage.end.predecessor ^= 1,
-        6 => mutated.coverage.end.change ^= 1,
-        7 => mutated.coverage.end.successor ^= 1,
-        8 => mutated.coverage.end.prefix.payout ^= 1,
+        0 => mutated.span = u16::MAX - 1..u16::MAX,
+        1 => mutated.coverage.boundaries[0].predecessor ^= 1,
+        2 => mutated.coverage.boundaries[0].change ^= 1,
+        3 => mutated.coverage.boundaries[0].successor ^= 1,
+        4 => mutated.coverage.boundaries[0].prefix.payout ^= 1,
+        5 => mutated.coverage.boundaries[last].predecessor ^= 1,
+        6 => mutated.coverage.boundaries[last].change ^= 1,
+        7 => mutated.coverage.boundaries[last].successor ^= 1,
+        8 => mutated.coverage.boundaries[last].prefix.payout ^= 1,
         9 => mutated.coverage.opening.start = u32::MAX,
         10 => mutated.coverage.opening.proof.leaf_count ^= 1,
         11 => mutated.coverage.opening.proof.siblings.push(marker),
@@ -1152,8 +1166,12 @@ fn mutate_slice(
         32 => mutated.out_start.add(b"transition-slice-mutation"),
         33 => mutated.in_start.add(b"transition-slice-mutation"),
         34 => {
-            if mutated.operator_aggregate.is_some() {
-                mutated.operator_aggregate = None;
+            if let Some(aggregate) = mutated
+                .operator_aggregates
+                .iter_mut()
+                .find(|aggregate| aggregate.is_some())
+            {
+                *aggregate = None;
             } else {
                 mutated.changes.opening.start = u32::MAX;
             }
@@ -1381,7 +1399,7 @@ fn fuzz_transition(mut case: TransitionCase) {
     )
     .expect("constructed empty close must validate from the corpus");
     let slices = prepared
-        .assemble_slices(&cache, &Sequential)
+        .assemble_slices(&cache, &single_spans(&context), &Sequential)
         .expect("constructed empty close must split into valid slices");
     for slice in &slices {
         validate_slice::<Sha256, _, _, PaymentBatchVerifier, _>(
@@ -1486,7 +1504,7 @@ fn fuzz_transition(mut case: TransitionCase) {
     )
     .expect("constructed deposit creation must validate from the corpus");
     let slices = prepared
-        .assemble_slices(&cache, &Sequential)
+        .assemble_slices(&cache, &single_spans(&context), &Sequential)
         .expect("constructed deposit close must split into valid slices");
     for slice in &slices {
         validate_slice::<Sha256, _, _, PaymentBatchVerifier, _>(
@@ -1607,7 +1625,7 @@ fn fuzz_transition(mut case: TransitionCase) {
     );
     assert_eq!(output.amount(), opening.balance);
     let slices = prepared
-        .assemble_slices(&cache, &Sequential)
+        .assemble_slices(&cache, &single_spans(&context), &Sequential)
         .expect("constructed destruction close must split into slices");
     assert!(slices.iter().all(|slice| {
         validate_slice::<Sha256, _, _, PaymentBatchVerifier, _>(
@@ -1809,7 +1827,7 @@ fn fuzz_transition(mut case: TransitionCase) {
     )
     .expect("constructed external payout must validate again");
     let slices = prepared
-        .assemble_slices(&cache, &Sequential)
+        .assemble_slices(&cache, &single_spans(&context), &Sequential)
         .expect("external payout close must split into slices");
     assert!(slices.iter().all(|slice| {
         validate_slice::<Sha256, _, _, PaymentBatchVerifier, _>(
@@ -1941,27 +1959,28 @@ fn fuzz_admission(case: AdmissionCase) {
         .expect("nonempty admission close must validate");
     let close = prepared.close();
     let all = prepared
-        .assemble_slices(&cache, &Sequential)
+        .assemble_slices(&cache, &single_spans(&context), &Sequential)
         .expect("admission slices must build");
     let nonempty = all
         .iter()
         .find(|slice| !slice.changes.rows.is_empty())
         .expect("deposit creation has one nonempty slice")
-        .index;
+        .span
+        .start;
     let mut votes = Vec::new();
     let mut checked_nonempty_mutation = false;
     for (validator, private) in validators.iter().enumerate() {
         let scheme = bls12381::Scheme::signer(committee.clone(), private.clone())
             .expect("validator belongs to committee");
-        let assigned = assigned_slice_indices::<Sha256, _>(
+        let spans = assigned_slice_spans::<Sha256, _>(
             &committee,
             context.assignment(),
             scheme.me().expect("signer has a committee index"),
         )
-        .expect("assignment matches committee")
-        .into_iter()
-        .map(|slice| all[usize::from(slice)].clone())
-        .collect::<Vec<_>>();
+        .expect("assignment matches committee");
+        let assigned = prepared
+            .assemble_slices(&cache, &spans, &Sequential)
+            .expect("assigned dealing must build");
         let canonical = assigned.clone();
         let (vote, sealed) = seal::<Sha256, _, _, PaymentBatchVerifier, _>(
             &scheme,
@@ -1976,12 +1995,12 @@ fn fuzz_admission(case: AdmissionCase) {
             &Sequential,
         )
         .expect("complete valid assignment must sign");
-        assert!(
-            sealed
-                .slices()
-                .iter()
-                .all(|slice| sealed.serve(slice.index).is_some())
-        );
+        assert!(sealed.slices().iter().all(|slice| {
+            slice
+                .span
+                .clone()
+                .all(|index| sealed.serve(index).is_some())
+        }));
         if validator == 0 {
             let position = usize::from(case.mutation) % canonical.len();
             let mut omitted = canonical.clone();
@@ -2026,7 +2045,7 @@ fn fuzz_admission(case: AdmissionCase) {
         }
         if let Some(position) = canonical
             .iter()
-            .position(|slice| slice.index == nonempty)
+            .position(|slice| slice.span.contains(&nonempty))
             .filter(|_| !checked_nonempty_mutation)
         {
             let mut malformed = canonical.clone();

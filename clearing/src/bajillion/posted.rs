@@ -18,6 +18,8 @@
 //! - **Recipient keys in out entries**: entries reference recipients by row index,
 //!   resolved through the decoded rows.
 //! - **The transpose**: rebuilt entirely from the posted vectors.
+//! - **Fixed-width integers**: sequence numbers, cumulative amounts, and counts ride as
+//!   varints. The hash preimages they are checked against stay fixed-width.
 //!
 //! Decoding is reconstruction, not validation: [read] rebuilds the exact in-memory
 //! [Close] and the caller MUST validate it
@@ -45,7 +47,7 @@ use crate::bajillion::{
 use alloc::{collections::BTreeMap, vec::Vec};
 use bytes::{Buf, BufMut};
 use commonware_codec::{
-    EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt as _, Write,
+    EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt as _, Write, varint::UInt,
 };
 use commonware_cryptography::{Digest, Hasher, PublicKey, Verifier};
 
@@ -58,9 +60,15 @@ pub(crate) fn vectors_size<P: PublicKey>(
         .zip(indices)
         .map(|(vector, resolved)| {
             vector.entries().len().encode_size()
-                + resolved
+                + vector
+                    .entries()
                     .iter()
-                    .map(|index| index.encode_size() + u64::SIZE * 2)
+                    .zip(resolved)
+                    .map(|(entry, index)| {
+                        index.encode_size()
+                            + UInt(entry.cumulative).encode_size()
+                            + UInt(entry.count).encode_size()
+                    })
                     .sum::<usize>()
         })
         .sum::<usize>()
@@ -110,8 +118,8 @@ pub(crate) fn read_vectors<P: PublicKey, D: Digest>(
             let index = usize::read_cfg(buf, &RangeCfg::new(..skeleton.len()))?;
             entries.push(OutEntry {
                 recipient: skeleton[index].0.clone(),
-                cumulative: u64::read(buf)?,
-                count: u64::read(buf)?,
+                cumulative: UInt::read(buf)?.into(),
+                count: UInt::read(buf)?.into(),
             });
         }
         out_vectors.push(
@@ -248,8 +256,9 @@ fn resolve_entry_targets<P: PublicKey, S>(
 ///
 /// Every derived field is equation-pinned by row validation, and decode's final pass runs
 /// [validate_row] over the derived rows, so any divergence here fails decode instead of
-/// producing a close validation would reject.
-fn derive_successor<P: PublicKey, D: Digest>(
+/// producing a close validation would reject. Dealt-slice hydration shares this
+/// derivation, sourcing credit from its transpose interval instead of the global vectors.
+pub(crate) fn derive_successor<P: PublicKey, D: Digest>(
     account: &P,
     predecessor: &AccountState,
     deposits: &DepositBatch<P>,
@@ -482,10 +491,9 @@ pub fn encoded_size<P: PublicKey, D: Digest>(
             1 + match reference {
                 Reference::Live(gap) => gap.encode_size(),
                 Reference::Fresh(_) => P::SIZE,
-            } + row
-                .outgoing
-                .as_ref()
-                .map_or(0, |_| u64::SIZE + <P as Verifier>::Signature::SIZE)
+            } + row.outgoing.as_ref().map_or(0, |send| {
+                UInt(send.body().seq()).encode_size() + <P as Verifier>::Signature::SIZE
+            })
         })
         .sum::<usize>();
     Ok(Header::<D>::SIZE
@@ -523,7 +531,7 @@ pub fn write<P: PublicKey, D: Digest>(
             Reference::Fresh(account) => account.write(buf),
         }
         if let Some(send) = &row.outgoing {
-            send.body().seq().write(buf);
+            UInt(send.body().seq()).write(buf);
             send.payer_signature().write(buf);
         }
     }
@@ -531,8 +539,8 @@ pub fn write<P: PublicKey, D: Digest>(
         resolved.len().write(buf);
         for (entry, index) in vector.entries().iter().zip(resolved) {
             index.write(buf);
-            entry.cumulative.write(buf);
-            entry.count.write(buf);
+            UInt(entry.cumulative).write(buf);
+            UInt(entry.count).write(buf);
         }
     }
     close.operator_aggregates.write(buf);
@@ -588,7 +596,10 @@ where
             (account.clone(), *state)
         };
         let outgoing = if tag & OUTGOING != 0 {
-            Some((u64::read(buf)?, <P as Verifier>::Signature::read(buf)?))
+            Some((
+                UInt::read(buf)?.into(),
+                <P as Verifier>::Signature::read(buf)?,
+            ))
         } else {
             None
         };

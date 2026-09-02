@@ -13,6 +13,7 @@ use alloc::vec::Vec;
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write,
+    varint::UInt,
 };
 use commonware_cryptography::{Digest, Hasher, PublicKey, lthash::LtHash};
 use commonware_parallel::Sequential;
@@ -477,9 +478,9 @@ impl<P: PublicKey> Read for TransposeEntry<P> {
 /// The recipient-major sort makes each recipient's entries one contiguous run, so the wire
 /// form carries each recipient key once per run instead of once per entry: a run count,
 /// then per run the recipient, an entry count, and the per-entry (payer, cumulative, count)
-/// remainders. Any contiguous interval encodes this way, including intervals that start or
-/// end inside a run. Ordering is not re-validated here: decoded intervals flow into the
-/// existing canonical-sort validation.
+/// remainders with the cumulative and count as varints. Any contiguous interval encodes this
+/// way, including intervals that start or end inside a run. Ordering is not re-validated
+/// here: decoded intervals flow into the existing canonical-sort validation.
 pub fn write_transpose<P: PublicKey>(entries: &[TransposeEntry<P>], buf: &mut impl BufMut) {
     let mut runs = 0_usize;
     let mut index = 0;
@@ -502,8 +503,8 @@ pub fn write_transpose<P: PublicKey>(entries: &[TransposeEntry<P>], buf: &mut im
         (index - start).write(buf);
         for entry in &entries[start..index] {
             entry.payer.write(buf);
-            entry.cumulative.write(buf);
-            entry.count.write(buf);
+            UInt(entry.cumulative).write(buf);
+            UInt(entry.count).write(buf);
         }
     }
 }
@@ -527,8 +528,8 @@ pub fn read_transpose<P: PublicKey>(
             entries.push(TransposeEntry {
                 recipient: recipient.clone(),
                 payer: P::read(buf)?,
-                cumulative: u64::read(buf)?,
-                count: u64::read(buf)?,
+                cumulative: UInt::read(buf)?.into(),
+                count: UInt::read(buf)?.into(),
             });
         }
     }
@@ -546,8 +547,14 @@ pub fn transpose_encode_size<P: PublicKey>(entries: &[TransposeEntry<P>]) -> usi
             index += 1;
         }
         runs += 1;
-        size +=
-            P::SIZE + (index - start).encode_size() + (index - start) * (P::SIZE + u64::SIZE * 2);
+        size += P::SIZE
+            + (index - start).encode_size()
+            + entries[start..index]
+                .iter()
+                .map(|entry| {
+                    P::SIZE + UInt(entry.cumulative).encode_size() + UInt(entry.count).encode_size()
+                })
+                .sum::<usize>();
     }
     runs.encode_size() + size
 }

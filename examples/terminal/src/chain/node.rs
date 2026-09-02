@@ -247,8 +247,9 @@ where
 pub(crate) struct Deal {
     pub(crate) participant: Participant,
     pub(crate) peer: ed25519::PublicKey,
-    /// The dealt wire form: slices travel without their unchanged state, and
-    /// the validator hydrates each one against its retained key interval.
+    /// The dealt wire form: one slice per assigned span without its unchanged
+    /// state, which the validator hydrates against the key interval it
+    /// retains for that span.
     pub(crate) slices: Vec<DealtSlice<Key, Digest>>,
 }
 

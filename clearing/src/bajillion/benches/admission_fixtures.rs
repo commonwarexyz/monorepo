@@ -20,6 +20,7 @@ use commonware_cryptography_curve25519::signing::{
     BatchVerifier as PaymentBatchVerifier, StrictVerifyingKey as VerifyingKey,
 };
 use commonware_utils::{Participant, TestRng};
+use std::ops::Range;
 
 pub(crate) const VALIDATORS: usize = 100;
 pub(crate) const FAULTS: usize = 33;
@@ -28,6 +29,14 @@ pub(crate) const SLICE_BITS: u8 = 8;
 pub(crate) const SLICES: usize = 1 << SLICE_BITS;
 
 const VALIDATOR_SEED_START: u64 = 1_000_000;
+
+/// One validator, its dealing, and the dealing's encoded size.
+pub(crate) type Largest = (Participant, Vec<ProofSlice<VerifyingKey, Digest>>, usize);
+
+/// Every slice as its own span: the per-interval corpus the size accounting reports.
+pub(crate) fn single_spans() -> Vec<Range<u16>> {
+    (0..SLICES as u16).map(|slice| slice..slice + 1).collect()
+}
 
 pub(crate) struct Validators {
     committee: Committee,
@@ -81,49 +90,49 @@ impl Validators {
             .collect()
     }
 
-    pub(crate) fn largest_assignment(
-        &self,
-        assignment: &Assignment<Digest>,
-        all_slices: &[ProofSlice<VerifyingKey, Digest>],
-    ) -> (Participant, Vec<u16>, usize) {
-        let encoded_size = |indices: &[u16]| {
-            indices.len().encode_size()
-                + indices
-                    .iter()
-                    .map(|index| all_slices[usize::from(*index)].encode_size())
-                    .sum::<usize>()
-        };
-        let mut validator = Participant::new(0);
-        let mut slices = commonware_clearing::bajillion::admission::assigned_slice_indices::<
-            Sha256,
-            _,
-        >(&self.committee, assignment, validator)
-        .expect("benchmark assignment matches the committee");
-        let mut bytes = encoded_size(&slices);
-        for index in 1..VALIDATORS {
-            let candidate = Participant::from_usize(index);
-            let candidate_slices =
-                commonware_clearing::bajillion::admission::assigned_slice_indices::<Sha256, _>(
+    /// Each validator's assigned spans, in committee order.
+    pub(crate) fn spans(&self, assignment: &Assignment<Digest>) -> Vec<Vec<Range<u16>>> {
+        (0..VALIDATORS)
+            .map(|index| {
+                commonware_clearing::bajillion::admission::assigned_slice_spans::<Sha256, _>(
                     &self.committee,
                     assignment,
-                    candidate,
+                    Participant::from_usize(index),
                 )
-                .expect("benchmark assignment matches the committee");
-            let candidate_bytes = encoded_size(&candidate_slices);
-            if candidate_bytes > bytes {
-                validator = candidate;
-                slices = candidate_slices;
-                bytes = candidate_bytes;
+                .expect("benchmark assignment matches the committee")
+            })
+            .collect()
+    }
+
+    /// The distinct spans dealt across the committee: what the operator assembles once.
+    pub(crate) fn distinct_spans(&self, assignment: &Assignment<Digest>) -> Vec<Range<u16>> {
+        commonware_clearing::bajillion::admission::committee_spans::<Sha256, _>(
+            &self.committee,
+            assignment,
+        )
+        .expect("benchmark assignment matches the committee")
+    }
+
+    /// Deals every validator and returns the one whose full dealing encodes largest.
+    pub(crate) fn largest_assignment(&self, close: &CloseFixture) -> Largest {
+        let mut largest: Option<Largest> = None;
+        for (index, spans) in self
+            .spans(close.context.assignment())
+            .into_iter()
+            .enumerate()
+        {
+            let dealing = close
+                .prepared
+                .assemble_slices(&close.cache, &spans, strategy())
+                .expect("benchmark dealing is valid");
+            let bytes = dealing.encode_size();
+            if largest.as_ref().is_none_or(|(_, _, best)| bytes > *best) {
+                largest = Some((Participant::from_usize(index), dealing, bytes));
             }
         }
-        let assigned = slices
-            .iter()
-            .map(|index| all_slices[usize::from(*index)].clone())
-            .collect::<Vec<_>>();
-        let encoded = assigned.encode();
-        assert_eq!(assigned.encode_size(), encoded.len());
-        assert_eq!(bytes, encoded.len());
-        (validator, slices, encoded.len())
+        let (validator, dealing, bytes) = largest.expect("committee is nonempty");
+        assert_eq!(dealing.encode().len(), bytes);
+        (validator, dealing, bytes)
     }
 }
 
@@ -160,17 +169,13 @@ pub(crate) fn validator_fixture(profile: ActiveProfile) -> ValidatorFixture {
     .expect("benchmark close is publicly valid");
     let all_slices = close
         .prepared
-        .assemble_slices(&close.cache, strategy())
+        .assemble_slices(&close.cache, &single_spans(), strategy())
         .expect("benchmark slices are valid");
     assert_eq!(all_slices.len(), SLICES);
     let public_corpus_bytes = close.prepared.close().encoded_size();
     let slice_corpus_bytes = all_slices.iter().map(EncodeSize::encode_size).sum();
-    let (validator, indices, assignment_bytes) =
-        validators.largest_assignment(close.context.assignment(), &all_slices);
-    let slices = indices
-        .iter()
-        .map(|index| all_slices[usize::from(*index)].clone())
-        .collect::<Vec<_>>();
+    drop(all_slices);
+    let (validator, slices, assignment_bytes) = validators.largest_assignment(&close);
     ValidatorFixture {
         validators,
         close,

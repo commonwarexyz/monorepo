@@ -13,7 +13,7 @@ katex: true
 
 *Update (8/27/26): Bajillion sends now batch entries. One signature and one cumulative endpoint pay many recipients, acknowledged atomically with one receipt per entry. Withdrawals now settle all or nothing and can ride the close directly, so an uncensored exit costs one onchain transaction: the claim. Admission and close coverage are stronger, and finalized claims and paired challenge evidence are more compact.*
 
-*Update (9/1/26): Bajillion's close is now a sender vector. Each sending row carries one payer-signed cumulative vector endpoint instead of per-edge receipts, the operator's acceptance is aggregated into one countersignature per proof slice, and three acknowledgment challenges replace the four receipt challenges. The posted close ships movers and edges only against reader-held state, and validators retain their key intervals so dealings travel without unchanged leaves. The walkthrough below describes this design, and the benchmarks are re-measured on it, including a new matrix that varies the active accounts under a fixed account set.*
+*Update (9/1/26): Bajillion's close is now a sender vector. Each sending row carries one payer-signed cumulative vector endpoint instead of per-edge receipts, the operator's acceptance is aggregated into one countersignature per slice interval, and three acknowledgment challenges replace the four receipt challenges. The posted close ships movers and edges only against reader-held state, and validators retain their key intervals so dealings travel without unchanged leaves. Each validator's intervals are contiguous and dealt as one proof slice per run, so the accumulator start states and range openings ship once per validator, and sequence numbers, amounts, and counts ride as varints. The walkthrough below describes this design. Sizes are re-measured on it, including a new matrix that varies the active accounts under a fixed account set; the timings predate the contiguous dealing and varint changes and are re-measured next.*
 
 *Update (8/20/26): Bajillion now uses a 32-byte commitment and BLS12-381 multisignatures for the commitment certificate.*
 
@@ -204,7 +204,7 @@ $$
 
 The checksums are what let a committee verify the recipient-major transpose piecewise. Every edge terminal folds one canonical key, the payer, recipient, cumulative credit, and count, into an order-independent lattice-hash multiset accumulator: $u$ over the vector entries in payer-major row order and $v$ over the transpose entries in recipient-major order. Each slice resumes both accumulators from its opening boundary, folds its own interval, and must land exactly on its closing boundary. Terminal equality $u_S=v_S$ then proves the transpose is a permutation of the union of the payer vectors, so every promised credit is backed by exactly one payer-signed debit entry: double-entry bookkeeping as a multiset equation, verified without any validator seeing both sides of an edge.
 
-Each slice opens two adjacent boundaries, making its intervals gap-free across neighboring dealings. The withdrawal-count, vector-entry, and transpose-entry positions in the same prefixes select that slice's exact contiguous intervals under $\mathsf{WithdrawalOutputRoot}_e$ and $\mathsf{TransposeRoot}_e$. A terminal coverage proof authenticates the final vector counts and aggregate totals.
+A proof slice covers a contiguous run of these intervals and opens every boundary in the run under one range opening, so its intervals are gap-free across neighboring dealings and each internal boundary is checked in full by every holder of the run: the rows and leaves before it advance the committed positions exactly, and the running prefix and checksums land on it. The withdrawal-count, vector-entry, and transpose-entry positions in the same prefixes select the run's exact contiguous intervals under $\mathsf{WithdrawalOutputRoot}_e$ and $\mathsf{TransposeRoot}_e$. A terminal coverage proof authenticates the final vector counts and aggregate totals.
 
 ::: {.image-caption}
 Figure 2: Opening and successor state are rebuilt from sorted live accounts. The coverage root binds each slice's exact positions in both state vectors, the change vector, and the transpose, so account insertion and deletion cannot create a gap or overlap between validator dealings.
@@ -225,7 +225,7 @@ The committed transpose length $\ell_e$ closes a wedge: slice openings prove mem
 
 ## Seal Every Dealing Up Front
 
-Before the chain queues a close for finalization, the operator disseminates each validator's dealing. A validator authenticates every assigned slice, checks every local row, prefix transition, and accumulator transition, verifies each slice's combined operator countersignature and every distinct payer authorization across the dealing in one randomized batch, retains the evidence through the challenge deadline, and only then seals the shared commitment. No validator needs the complete corpus, but the assignments cover it exactly.
+Before the chain queues a close for finalization, the operator disseminates each validator's dealing. Each interval is held by one quorum window of the validator ring, and the window slides with the interval index, so a validator's intervals form one contiguous run (two when the window wraps past the last interval) and its dealing is one proof slice per run: the accumulator start states and the range openings travel once per run rather than once per interval. A validator authenticates every assigned run, checks every local row, prefix transition, and accumulator transition at every covered boundary, verifies each interval's combined operator countersignature and every distinct payer authorization across the dealing in one randomized batch, retains the evidence through the challenge deadline, and only then seals the shared commitment. No validator needs the complete corpus, but the assignments cover it exactly.
 
 Prefix continuity ties the epoch totals to the rows beneath them. The deposit total and withdrawal record count must reproduce the chain-sealed boundary. Every ordinary withdrawal releases its authorized positive amount exactly when the row tail covers it and nothing otherwise, while every close sweeps its authenticated epoch tail. The totals must respect the close caps and conserve payments:
 
@@ -357,7 +357,7 @@ Rollover changes only live serving state, without changing the evidence required
 
 Every profile below uses a 100-validator committee and divides the evidence into 256 slices. Strategy-enabled prepare, deal, seal, and challenge checks share one adaptive eight-worker pool (AWS c8a.4xlarge). Certificate and withdrawal-claim checks are scalar calling-thread measurements. The first matrix varies $N$, the number of live accounts. Every account sends one entry, and the same 512 accounts receive. The fixture therefore holds $A=N$ and $B=512$ while $N$ grows from 1,024 to one million; a second matrix afterward holds $N$ at one million while the active accounts shrink.
 
-No payment count appears because none is needed: rows and vector entries carry fixed-width cumulative totals, so every size in the table is the same for any $T$. Every fixture send is a batch of one entry. A terminal batch with more entries adds one 48-byte entry to its committed vector (and that entry's transpose image to the dealt slices), still independent of $T$. Each stage is measured independently. The fixture constructs the predecessor-state proof cache before measurement. Prepare builds the compact change, withdrawal-output, successor-state, coverage, and transpose roots from the owned close inputs while reusing that cache; deal derives all proof slices from the prepared close; seal checks and retains the busiest validator's dealing, verifies each slice's combined operator countersignature and every distinct payer authorization in one randomized batch, and signs the commitment. The posted close is the corpus a reader holding the previous certified state needs: live accounts ride as one-or-two-byte rank gaps and the transpose, predecessor states, successor states, and prefixes are all derived rather than shipped. Withdrawal claims are measured from separately constructed fixtures, and the claims table after the matrix scales their own variable, the close's withdrawal count, on its own axis.
+No payment count appears because none is needed: rows and vector entries carry fixed-width cumulative totals, so every size in the table is the same for any $T$. Every fixture send is a batch of one entry. A terminal batch with more entries adds one 48-byte entry to its committed vector (and that entry's transpose image to the dealt slices), still independent of $T$. Each stage is measured independently. The fixture constructs the predecessor-state proof cache before measurement. Prepare builds the compact change, withdrawal-output, successor-state, coverage, and transpose roots from the owned close inputs while reusing that cache; deal assembles one proof slice per distinct span the committee is assigned; seal checks and retains the busiest validator's dealing, verifies each interval's combined operator countersignature and every distinct payer authorization in one randomized batch, and signs the commitment. The posted close is the corpus a reader holding the previous certified state needs: live accounts ride as one-or-two-byte rank gaps and the transpose, predecessor states, successor states, and prefixes are all derived rather than shipped. Withdrawal claims are measured from separately constructed fixtures, and the claims table after the matrix scales their own variable, the close's withdrawal count, on its own axis.
 
 ```{=html}
 <div class="clearing-benchmark-table">
@@ -378,17 +378,17 @@ No payment count appears because none is needed: rows and vector entries carry f
     <tr><th colspan="5" style="text-align:left;">Construction</th></tr>
     <tr>
       <td style="padding-left:20px;">posted close</td>
-      <td style="text-align:right;">107 KB</td>
-      <td style="text-align:right;">0.94 MB</td>
-      <td style="text-align:right;">9.29 MB</td>
-      <td style="text-align:right;">92.8 MB</td>
+      <td style="text-align:right;">85.8 KB</td>
+      <td style="text-align:right;">730 KB</td>
+      <td style="text-align:right;">7.19 MB</td>
+      <td style="text-align:right;">71.8 MB</td>
     </tr>
     <tr>
       <td style="padding-left:20px;">proof-slice corpus</td>
-      <td style="text-align:right;">2.11 MB</td>
-      <td style="text-align:right;">6.52 MB</td>
-      <td style="text-align:right;">50.3 MB</td>
-      <td style="text-align:right;">487 MB</td>
+      <td style="text-align:right;">2.10 MB</td>
+      <td style="text-align:right;">6.38 MB</td>
+      <td style="text-align:right;">48.9 MB</td>
+      <td style="text-align:right;">473 MB</td>
     </tr>
     <tr>
       <td style="padding-left:20px;">prepare</td>
@@ -407,10 +407,10 @@ No payment count appears because none is needed: rows and vector entries carry f
     <tr><th colspan="5" style="text-align:left;">Certification</th></tr>
     <tr>
       <td style="padding-left:20px;">largest dealing</td>
-      <td style="text-align:right;">1.43 MB <span style="color:#666;">(-32.2%)</span></td>
-      <td style="text-align:right;">4.43 MB <span style="color:#666;">(-32.0%)</span></td>
-      <td style="text-align:right;">35.4 MB <span style="color:#666;">(-29.5%)</span></td>
-      <td style="text-align:right;">343 MB <span style="color:#666;">(-29.5%)</span></td>
+      <td style="text-align:right;">165 KB <span style="color:#666;">(-92.1%)</span></td>
+      <td style="text-align:right;">1.09 MB <span style="color:#666;">(-82.9%)</span></td>
+      <td style="text-align:right;">10.3 MB <span style="color:#666;">(-78.8%)</span></td>
+      <td style="text-align:right;">103 MB <span style="color:#666;">(-78.3%)</span></td>
     </tr>
     <tr>
       <td style="padding-left:20px;">seal</td>
@@ -533,7 +533,7 @@ Figure 4: The operator prepares the roots, then deals the evidence into slices. 
 Figure 5: These are four measured profiles, not an interpolation. Both axes are logarithmic, and each point is labeled with its measured latency. Construction and sealing scale approximately linearly once the fixed costs are amortized.
 :::
 
-Even the largest validator dealing is 29.5–32.2% smaller than the complete proof-slice corpus because it contains only that validator's assigned slices. At one million live accounts it checks 343 MB rather than the complete 487 MB corpus. That is the every-account-sends worst case, and it hides the design's real lever: dealings travel without unchanged state, because every slice assignee retains its key interval across closes and hydrates each dealing against it. When every account changes there is nothing to strip. When the movers are a fraction of the account set, the posted close and the dealt wire follow the movers:
+The busiest validator's dealing is 78–92% smaller than the complete proof-slice corpus. It holds two thirds of the intervals, but they form one or two contiguous runs, so the accumulator start states and range openings travel once per run instead of once per interval, and no unchanged leaves travel at all. At one million live accounts it checks 103 MB rather than the complete 473 MB corpus. That is the every-account-sends worst case, and it hides the design's real lever: dealings travel without unchanged state, because every assignee retains its key interval across closes and hydrates each dealing against it. When every account changes there is nothing to strip. When the movers are a fraction of the account set, the posted close and the dealt wire follow the movers:
 
 ```{=html}
 <div class="clearing-benchmark-table">
@@ -553,17 +553,17 @@ Even the largest validator dealing is 29.5–32.2% smaller than the complete pro
   <tbody>
     <tr>
       <td style="padding-left:20px;">posted close</td>
-      <td style="text-align:right;"><strong>95.5 KB</strong></td>
-      <td style="text-align:right;"><strong>0.93 MB</strong></td>
-      <td style="text-align:right;"><strong>9.28 MB</strong></td>
-      <td style="text-align:right;">92.8 MB</td>
+      <td style="text-align:right;"><strong>74.0 KB</strong></td>
+      <td style="text-align:right;"><strong>718 KB</strong></td>
+      <td style="text-align:right;"><strong>7.18 MB</strong></td>
+      <td style="text-align:right;">71.8 MB</td>
     </tr>
     <tr>
       <td style="padding-left:20px;">largest dealing</td>
-      <td style="text-align:right;"><strong>1.65 MB</strong></td>
-      <td style="text-align:right;"><strong>6.00 MB</strong></td>
-      <td style="text-align:right;"><strong>36.1 MB</strong></td>
-      <td style="text-align:right;">343 MB</td>
+      <td style="text-align:right;"><strong>192 KB</strong></td>
+      <td style="text-align:right;"><strong>1.41 MB</strong></td>
+      <td style="text-align:right;"><strong>13.7 MB</strong></td>
+      <td style="text-align:right;">103 MB</td>
     </tr>
     <tr>
       <td style="padding-left:20px;">prepare</td>
@@ -584,9 +584,9 @@ Even the largest validator dealing is 29.5–32.2% smaller than the complete pro
 </div>
 ```
 
-The posted close is about 93 bytes per active account plus its edges, whatever the account set holds: at 1,024 movers among one million accounts it is 95.5 KB, a thousandth of the every-account column. The dealt wire keeps the slice openings and its interval's row evidence but none of the unchanged leaves, so it falls from 343 MB to 1.65 MB across the same sweep. Prepare and deal retain a fixed cost in $N$ (the fresh state BMTs are rebuilt over all live leaves), while seal follows the movers because signature and countersignature verification dominate it.
+The posted close is about 72 bytes per active account plus its edges, whatever the account set holds: at 1,024 movers among one million accounts it is 74.0 KB, a thousandth of the every-account column. The dealt wire keeps one run witness and its intervals' row evidence but none of the unchanged leaves, so the busiest dealing falls from 103 MB to 192 KB across the same sweep. Prepare and deal retain a fixed cost in $N$ (the fresh state BMTs are rebuilt over all live leaves), while seal follows the movers because signature and countersignature verification dominate it.
 
-The proof-slice corpus is constant for a profile, so accepted payments only divide it. Ten million payments spread the one-million-account profile's 486,822,246 bytes to 48.7 offchain bytes per payment, and its 92,762,697-byte posted close to 9.3; a billion payments spread them to 0.487 and 0.093. The certificate is one 48-byte aggregate signature plus a $\lceil n/8\rceil$-byte signer bitmap; proofs of possession were checked when the committee registered. With the 32-byte commitment and this encoding's eight-byte bitmap-length prefix, the external 100-validator certified package is 101 bytes total. If the Bajillion validators are also the settlement chain's validators, inclusion itself supplies the attestation and only the 32-byte commitment need be retained. The 164-byte $\mathsf{RootBundle}$ admission witness and terminal proof are not included in either commitment figure. Each figure likewise shrinks as $1/T$.
+The proof-slice corpus is constant for a profile, so accepted payments only divide it. Ten million payments spread the one-million-account profile's 472,823,270 bytes to 47.3 offchain bytes per payment, and its 71,762,697-byte posted close to 7.2; a billion payments spread them to 0.473 and 0.072. The certificate is one 48-byte aggregate signature plus a $\lceil n/8\rceil$-byte signer bitmap; proofs of possession were checked when the committee registered. With the 32-byte commitment and this encoding's eight-byte bitmap-length prefix, the external 100-validator certified package is 101 bytes total. If the Bajillion validators are also the settlement chain's validators, inclusion itself supplies the attestation and only the 32-byte commitment need be retained. The 164-byte $\mathsf{RootBundle}$ admission witness and terminal proof are not included in either commitment figure. Each figure likewise shrinks as $1/T$.
 
 The certified close itself queues no withdrawals. Separate fixtures use a 21-byte destination without adding the claims to certification, once with a single withdrawal output and once with a withdrawal surge in which all $N$ accounts exit through one close. The identical $\mathsf{Amount}$ and $\mathsf{Close}$ claim proofs carry only the validator-derived destination and amount plus one $\mathsf{WithdrawalOutputRoot}$ opening. At $W=1$ either claim is 39 bytes and verifies in 0.30 µs. The surge claim grows one 32-byte sibling per doubling of the withdrawal count, reaching 359 bytes when 1,024 accounts exit together and 679 bytes when one million do, and its verification grows only by the path hashes. The $\mathsf{HigherAckDebit}$ and $\mathsf{HigherAckEntry}$ challenges carry one retained acknowledgment plus one changed-row lookup, so they grow with opening depth: 620–940 and 671–991 bytes across the matrix, checking in 0.270–0.334 ms. The $\mathsf{AckFork}$ contradiction carries two countersigned endpoints and no state opening, so it holds at 417 bytes for every $N$ and checks in about 0.32 ms. Adjudication is signature-dominated, and challenge evidence is one fixed-size acknowledgment plus at most one entry opening: an acknowledged endpoint commits its whole batch through the vector root, so representing an entry of a larger batch changes nothing about the witness or its check. Clean closes submit no fraud challenge at all, so average challenge traffic is smaller still. A challenge targets a commitment whose certificate was already checked at admission, so adjudication does not verify that certificate again.
 

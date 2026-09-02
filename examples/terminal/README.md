@@ -253,23 +253,25 @@ context the chain never registered has no close to adjudicate against and is nev
 ## Close certification and data availability
 
 Distributed certification runs over the settlement DA channel. An operator sends each
-validator exactly its assigned proof slices, stripped of their unchanged state: every slice
-travels as a `DealtSlice`, and the validator hydrates it against the key interval it retains
-for the registered close's predecessor root. Genesis seeds each deployment's intervals from
-its configured accounts, every sealed close advances them under the successor root, and the
-advanced intervals are made durable together with the sealed dealing before the vote leaves
-the validator, so dealing bytes scale with the movers rather than the account set. Retention
-is a protocol assumption: a validator that missed a close no longer holds the interval the
-next dealing hydrates against and must sync it externally before sealing again, which the
-demo surfaces as a warning. The validator routes each dealing by the
-sending operator's network identity to the deployment that operator runs and seals it with
-clearing `seal` against THAT deployment's chain-registered close from its own applied state,
-never against operator-supplied context material. The sealed dealing lands in that
-deployment's own prunable archive (the partition folds the deployment digest, so two
-deployments' closes never contend for one deadline slot), keyed by the close's batch id
-(deployment-unique by construction: the header commits the payment anchor, which folds the
-deployment digest) and sectioned by its challenge deadline height, and it is synced there
-before the vote returns to the sending operator: the vote attests to availability the
+validator exactly its assigned proof slices, one per contiguous span of slice intervals and
+stripped of their unchanged state: every slice travels as a `DealtSlice`, and the validator
+hydrates it against the key interval it retains for that span at the registered close's
+predecessor root. Intervals are retained one record per slice interval, so a committee
+rotation that reshapes a validator's spans recombines the pieces it already holds. Genesis
+seeds each deployment's intervals from its configured accounts, every sealed close advances
+them under the successor root, and the advanced intervals are made durable together with the
+sealed dealing before the vote leaves the validator, so dealing bytes scale with the movers
+rather than the account set. Retention is a protocol assumption: a validator that missed a
+close no longer holds the interval the next dealing hydrates against and must sync it
+externally before sealing again, which the demo surfaces as a warning. The validator routes
+each dealing by the sending operator's network identity to the deployment that operator runs
+and seals it with clearing `seal` against THAT deployment's chain-registered close from its
+own applied state, never against operator-supplied context material. The sealed dealing
+lands in that deployment's own prunable archive (the partition folds the deployment digest,
+so two deployments' closes never contend for one deadline slot), keyed by the close's batch
+id (deployment-unique by construction: the header commits the payment anchor, which folds
+the deployment digest) and sectioned by its challenge deadline height, and it is synced
+there before the vote returns to the sending operator: the vote attests to availability the
 validator must be able to honor, so a validator killed between seal and vote still holds its
 dealing on restart. Sections are pruned only when they lie strictly below the certified
 finalized height, where every challenge window they cover is closed, never on wall clock. A

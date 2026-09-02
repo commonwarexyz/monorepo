@@ -3,7 +3,7 @@
 use anyhow::{Context, Result, ensure};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use commonware_clearing::bajillion::{
-    admission::{Committee, SealedDealing, Vote, assigned_slice_indices, bls12381, seal},
+    admission::{Committee, SealedDealing, Vote, assigned_slice_spans, bls12381, seal},
     boundary::{DepositBatch, DepositRecord, WithdrawalAction, WithdrawalBatch},
     challenge::{HigherEntryLookup, higher_entry_lookup},
     commitment::{Opening, VectorRoot},
@@ -37,6 +37,7 @@ use commonware_utils::Participant;
 use rand_core::CryptoRng;
 use std::{
     num::{NonZeroU64, NonZeroUsize},
+    ops::Range,
     time::Instant,
 };
 
@@ -1061,19 +1062,38 @@ impl Protocol {
         })
     }
 
-    /// Assembles the canonical proof slices of a prepared close.
+    /// One committee member's assigned contiguous slice spans, in slice order.
+    fn spans(&self, epoch: &PreparedEpoch, validator: Participant) -> Result<Vec<Range<u16>>> {
+        assigned_slice_spans::<Sha256, _>(
+            &self.validators.committee,
+            epoch.context.assignment(),
+            validator,
+        )
+        .context("derive validator dealing")
+    }
+
+    /// Assembles the distinct proof slices of a prepared close: one per span
+    /// some committee member is assigned, each assembled once and ordered by
+    /// span.
     ///
     /// The distributed close worker disseminates these per-validator over the
     /// settlement DA channel. The harness seals them in process instead.
     pub(crate) fn slices(&self, epoch: &PreparedEpoch) -> Result<Vec<ProofSlice<Key, Digest>>> {
+        let mut spans = Vec::new();
+        for index in 0..self.validators.committee.members().len() {
+            spans.extend(self.spans(epoch, Participant::from_usize(index))?);
+        }
+        spans.sort_unstable_by_key(|span| (span.start, span.end));
+        spans.dedup();
         epoch
             .prepared
-            .assemble_slices(&epoch.predecessor, &self.strategy)
+            .assemble_slices(&epoch.predecessor, &spans, &self.strategy)
             .context("assemble proof slices")
     }
 
     /// Splits assembled slices into each committee member's exact dealing, in
-    /// committee participant order.
+    /// committee participant order: one slice per assigned span, in span
+    /// order.
     pub(crate) fn dealings(
         &self,
         epoch: &PreparedEpoch,
@@ -1081,20 +1101,14 @@ impl Protocol {
     ) -> Result<Vec<Vec<ProofSlice<Key, Digest>>>> {
         (0..self.validators.committee.members().len())
             .map(|index| {
-                let validator = Participant::from_usize(index);
-                let assigned = assigned_slice_indices::<Sha256, _>(
-                    &self.validators.committee,
-                    epoch.context.assignment(),
-                    validator,
-                )
-                .context("derive validator dealing")?;
-                assigned
+                self.spans(epoch, Participant::from_usize(index))?
                     .iter()
-                    .map(|slice| {
+                    .map(|span| {
                         slices
-                            .get(usize::from(*slice))
+                            .iter()
+                            .find(|slice| slice.span == *span)
                             .cloned()
-                            .context("assigned slice is missing from the assembled set")
+                            .context("assigned span is missing from the assembled set")
                     })
                     .collect()
             })
@@ -1118,25 +1132,15 @@ impl Protocol {
     ) -> Result<SettlementResult> {
         let deal_start = Instant::now();
         let slices = self.slices(&epoch)?;
+        let dealt = self.dealings(&epoch, &slices)?;
         let deal_micros = deal_start.elapsed().as_micros();
 
         let seal_start = Instant::now();
-        let mut votes = Vec::<Vote>::with_capacity(self.validators.committee.quorum());
-        let mut dealings =
-            Vec::<SealedDealing<Key, Digest>>::with_capacity(self.validators.committee.quorum());
-        for index in 0..self.validators.committee.quorum() {
-            let validator = Participant::from_usize(index);
-            let scheme = self.validators.signer(validator)?;
-            let assigned = assigned_slice_indices::<Sha256, _>(
-                &self.validators.committee,
-                epoch.context.assignment(),
-                validator,
-            )
-            .context("derive validator dealing")?;
-            let dealing = assigned
-                .iter()
-                .map(|slice| slices[usize::from(*slice)].clone())
-                .collect();
+        let quorum = self.validators.committee.quorum();
+        let mut votes = Vec::<Vote>::with_capacity(quorum);
+        let mut dealings = Vec::<SealedDealing<Key, Digest>>::with_capacity(quorum);
+        for (index, dealing) in dealt.into_iter().take(quorum).enumerate() {
+            let scheme = self.validators.signer(Participant::from_usize(index))?;
             let (vote, sealed) = seal::<Sha256, _, _, PaymentBatchVerifier, _>(
                 &scheme,
                 &epoch.context,

@@ -20,15 +20,19 @@
 //! is already deployment-unique by construction: the close header commits
 //! the payment anchor, which folds the deployment digest.
 //!
-//! Dealings travel without their unchanged state: every slice arrives as a
-//! [`DealtSlice`] and the validator hydrates it against the key interval it
-//! retains for the registered close's predecessor root, seeded from the
+//! Dealings travel without their unchanged state: every slice covers one
+//! contiguous span of slice intervals and arrives as a [`DealtSlice`], and
+//! the validator hydrates it against the key interval it retains for that
+//! span at the registered close's predecessor root, seeded from the
 //! deployment's genesis accounts and advanced with every sealed close. The
-//! advanced intervals are made durable together with the sealed dealing
-//! before the vote leaves the validator. Retention is a protocol assumption:
-//! a validator that missed a close no longer holds the interval the next
-//! dealing hydrates against and must sync it externally before sealing
-//! again, which the demo surfaces as a warning rather than implementing.
+//! intervals are retained one record per slice interval, so a committee
+//! rotation that reshapes this validator's spans recombines the pieces it
+//! already holds. The advanced intervals are made durable together with the
+//! sealed dealing before the vote leaves the validator. Retention is a
+//! protocol assumption: a validator that missed a close no longer holds the
+//! interval the next dealing hydrates against and must sync it externally
+//! before sealing again, which the demo surfaces as a warning rather than
+//! implementing.
 
 use crate::{
     chain::{
@@ -76,8 +80,9 @@ const fn slice_codec() -> SliceCodecConfig {
 }
 
 /// One validator's dealing for the registered close: the close header and
-/// roots with exactly that validator's assigned proof slices, each stripped
-/// of the unchanged state its retained interval supplies.
+/// roots with exactly that validator's assigned proof slices, one per
+/// assigned span, each stripped of the unchanged state its retained
+/// interval supplies.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Dealing {
     pub(crate) epoch: u64,
@@ -337,6 +342,10 @@ impl Read for RetainedInterval {
 /// by the epoch whose dealing the interval hydrates and keyed by the digest
 /// of the state root and slice index.
 ///
+/// Records stay per slice index even though a dealt slice covers a span:
+/// hydration concatenates the span's records in slice order, and the
+/// advanced interval is split back into per-slice records, so the store is
+/// independent of how the committee assignment groups slices into spans.
 /// Sealing epoch `e` consumes the intervals at section `e` (the registered
 /// close's predecessor root) and writes the advanced intervals at section
 /// `e + 1` (its successor root), synced together with the sealed dealing
@@ -356,6 +365,17 @@ fn interval_index(epoch: u64, slice: u16) -> u64 {
         .checked_mul(MAX_SLICES as u64)
         .and_then(|base| base.checked_add(u64::from(slice)))
         .expect("the interval index fits the epoch clock")
+}
+
+/// The key-sorted leaves of `leaves` whose account falls in `slice`.
+fn members(leaves: &[StateLeaf<Key>], slice: u16, slice_bits: u8) -> Vec<StateLeaf<Key>> {
+    leaves
+        .iter()
+        .filter(|leaf| {
+            account_slice(&leaf.account, slice_bits).expect("account keys partition") == slice
+        })
+        .cloned()
+        .collect()
 }
 
 /// Opens one deployment's durable interval store under the `partition`
@@ -411,15 +431,6 @@ async fn intervals<E: StorageContext>(
             Ok(None) => {}
             Err(error) => panic!("failed to read the retained interval store: {error:?}"),
         }
-        let members = leaves
-            .iter()
-            .filter(|leaf| {
-                account_slice(&leaf.account, crate::protocol::SLICE_BITS)
-                    .expect("demo accounts partition")
-                    == slice
-            })
-            .cloned()
-            .collect::<Vec<_>>();
         store = store
             .put_sync(
                 interval_index(0, slice),
@@ -427,7 +438,7 @@ async fn intervals<E: StorageContext>(
                 RetainedInterval {
                     root,
                     slice,
-                    leaves: members,
+                    leaves: members(&leaves, slice, crate::protocol::SLICE_BITS),
                 },
             )
             .await
@@ -673,36 +684,66 @@ where
                 }
             }
 
-            // Hydrate each dealt slice against the retained interval for the
-            // registered close's predecessor root. A missing interval means
+            // Hydrate each dealt slice against the retained interval covering
+            // its span at the registered close's predecessor root: the
+            // per-slice records concatenated in slice order, which is key
+            // order because slices are key intervals. A missing record means
             // this validator never advanced past the predecessor close and
             // must sync the interval externally before it can seal again.
             let predecessor_root = *registered.context.predecessor_root();
             let mut hydrated = Vec::with_capacity(dealing.slices.len());
             let mut retained = Vec::with_capacity(dealing.slices.len());
             let mut missing = None;
-            for slice in std::mem::take(&mut dealing.slices) {
-                let key = interval_key(&predecessor_root, slice.index);
-                let record = match intervals.get(Identifier::Key(&key)).await {
-                    Ok(record) => record,
-                    Err(error) => {
-                        error!(?error, "sealer failed to read the interval store");
-                        return;
-                    }
-                };
-                let Some(record) = record else {
-                    missing = Some(slice.index);
-                    break;
-                };
+            let mut malformed = None;
+            'slices: for slice in std::mem::take(&mut dealing.slices) {
+                let span = slice.span().clone();
+                let mut leaves = Vec::new();
+                for index in span.clone() {
+                    let key = interval_key(&predecessor_root, index);
+                    let record = match intervals.get(Identifier::Key(&key)).await {
+                        Ok(record) => record,
+                        Err(error) => {
+                            error!(?error, "sealer failed to read the interval store");
+                            return;
+                        }
+                    };
+                    let Some(record) = record else {
+                        missing = Some(index);
+                        break 'slices;
+                    };
+                    leaves.extend(record.leaves);
+                }
                 let interval =
-                    Interval::new(record.leaves).expect("a durably retained interval is canonical");
-                hydrated.push(slice.hydrate(&interval));
+                    Interval::new(leaves).expect("durably retained intervals are canonical");
+                match slice.hydrate::<Sha256>(
+                    &interval,
+                    registered.context,
+                    registered.deposits,
+                    registered.withdrawals,
+                ) {
+                    Ok(slice) => hydrated.push(slice),
+                    Err(error) => {
+                        malformed = Some((span, error));
+                        break;
+                    }
+                }
                 retained.push(interval);
             }
             if let Some(slice) = missing {
                 warn!(
                     epoch = dealing.epoch,
                     slice, "retained interval is missing; sync it externally before sealing"
+                );
+                lane.store = Some(store);
+                lane.intervals = Some(intervals);
+                continue;
+            }
+            if let Some((span, error)) = malformed {
+                warn!(
+                    epoch = dealing.epoch,
+                    ?span,
+                    ?error,
+                    "dealt slice does not hydrate against the retained interval"
                 );
                 lane.store = Some(store);
                 lane.intervals = Some(intervals);
@@ -738,34 +779,38 @@ where
             // Advance and persist the retained intervals under the sealed
             // close's successor root before anything else becomes durable: a
             // crash after this point re-seals or re-votes from the stores,
-            // and an identical advanced record is idempotently ignored.
-            // Pruning keeps the consumed and produced epochs only.
+            // and an identical advanced record is idempotently ignored. Each
+            // advanced span is split back into one record per slice index,
+            // empty for a slice with no live leaves exactly as genesis seeds
+            // it. Pruning keeps the consumed and produced epochs only.
             let successor_root = dealing.roots.successor;
+            let slice_bits = registered.context.assignment().slice_bits();
+            let next = dealing
+                .epoch
+                .checked_add(1)
+                .expect("the epoch clock is bounded");
             for (interval, slice) in retained.iter_mut().zip(sealed.slices()) {
                 interval.advance(slice);
-                let key = interval_key(&successor_root, slice.index);
-                let next = dealing
-                    .epoch
-                    .checked_add(1)
-                    .expect("the epoch clock is bounded");
-                intervals = match intervals
-                    .put_sync(
-                        interval_index(next, slice.index),
-                        key,
-                        RetainedInterval {
-                            root: successor_root,
-                            slice: slice.index,
-                            leaves: interval.leaves().to_vec(),
-                        },
-                    )
-                    .await
-                {
-                    Ok(intervals) => intervals,
-                    Err(error) => {
-                        error!(?error, "advanced interval could not be made durable");
-                        return;
-                    }
-                };
+                for index in slice.span.clone() {
+                    intervals = match intervals
+                        .put_sync(
+                            interval_index(next, index),
+                            interval_key(&successor_root, index),
+                            RetainedInterval {
+                                root: successor_root,
+                                slice: index,
+                                leaves: members(interval.leaves(), index, slice_bits),
+                            },
+                        )
+                        .await
+                    {
+                        Ok(intervals) => intervals,
+                        Err(error) => {
+                            error!(?error, "advanced interval could not be made durable");
+                            return;
+                        }
+                    };
+                }
             }
             intervals = match intervals.prune(interval_index(dealing.epoch, 0)).await {
                 Ok(intervals) => intervals,
@@ -1253,8 +1298,12 @@ mod tests {
                     .collect(),
             });
             let mut corrupt_slices = mine.clone();
-            corrupt_slices[0].coverage.end.predecessor =
-                corrupt_slices[0].coverage.end.predecessor.saturating_add(1);
+            let end = corrupt_slices[0]
+                .coverage
+                .boundaries
+                .last_mut()
+                .expect("a coverage range holds at least two boundaries");
+            end.predecessor = end.predecessor.saturating_add(1);
             let corrupt = Message::Dealing(Dealing {
                 epoch: 0,
                 header,
