@@ -1724,6 +1724,7 @@ where
 
     /// Drains one bounded Core service cycle, then gives attached runtime tasks one turn.
     async fn drive_core_cycle(&mut self) -> Result<(), Fatal> {
+        let started = self.context.current();
         let mut yielded = false;
         loop {
             if !self.journal.has_capacity() {
@@ -1733,6 +1734,7 @@ where
             let action = self.machine.next_action(POLL_BUDGET)?;
             match action {
                 CoreTurn::YieldRequired => {
+                    self.record_busy(started);
                     reschedule().await;
                     yielded = true;
                     self.machine.resume_after_yield()?;
@@ -1790,9 +1792,22 @@ where
             }
         }
         if !yielded {
+            self.record_busy(started);
             reschedule().await;
         }
         Ok(())
+    }
+
+    /// Adds the time since `started` to the voter's busy-time counter.
+    fn record_busy(&self, started: SystemTime) {
+        let elapsed = self
+            .context
+            .current()
+            .duration_since(started)
+            .unwrap_or_default();
+        self.metrics
+            .busy_micros
+            .inc_by(u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX));
     }
 
     async fn dispatch_work(&mut self, work: CoreWork<V, H::Digest>) -> Result<bool, Fatal> {

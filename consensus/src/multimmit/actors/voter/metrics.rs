@@ -139,6 +139,9 @@ pub(super) struct Metrics {
     pub header_restarts: Gauge,
     /// Leader-chain view timeouts. The primary liveness alarm.
     pub view_timeouts: Counter,
+    /// Microseconds the voter thread spent inside core service cycles. Its rate is the thread's
+    /// busy fraction, the saturation signal for the single-threaded machine.
+    pub busy_micros: Counter,
     /// Whether the current view timer is armed. Zero with a flat view is a halted voter.
     pub view_timer_armed: Gauge,
     /// Whether the current view timeout selected an ordinary vote.
@@ -316,6 +319,10 @@ impl Metrics {
             "proposal-pass restarts triggered by verified header admissions",
         );
         let view_timeouts = context.counter("view_timeouts", "leader-chain view timeouts");
+        let busy_micros = context.counter(
+            "busy_micros",
+            "microseconds the voter thread spent inside core service cycles",
+        );
         let view_timer_armed = context.gauge(
             "view_timer_armed",
             "whether the current leader-chain view timer is armed",
@@ -479,6 +486,7 @@ impl Metrics {
             headers_after_seal,
             header_restarts,
             view_timeouts,
+            busy_micros,
             view_timer_armed,
             view_timeout_cutoff_vote,
             view_timeout_cutoff_timeout,
