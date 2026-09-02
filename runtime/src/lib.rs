@@ -670,12 +670,11 @@ stability_scope!(BETA {
     /// # Cancellation
     ///
     /// Dropping an operation's future does not guarantee cancellation: the
-    /// operation may still complete, and a later operation on the same storage
-    /// may observe its effect.
+    /// operation may still complete, and later operations may observe its
+    /// effect.
     ///
-    /// Runtimes must ensure that no operation from a previous run on the same
-    /// storage takes effect after user code starts executing, including
-    /// operations whose futures were dropped.
+    /// Runtimes must ensure that no operation issued by a previous run against
+    /// the same storage is still in flight when a new run begins.
     ///
     /// # Partition Names
     ///
