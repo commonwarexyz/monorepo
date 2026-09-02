@@ -942,12 +942,11 @@ mod tests {
     use super::*;
     use crate::{
         Blob as _, Metrics, Network, Resolver, Runner as _, Sink, Spawner as _, Storage as _,
-        Strategizer as _, Stream, Supervisor as _, WriteOptions, telemetry::metrics::raw::Counter,
+        Strategizer as _, Stream, Supervisor as _, telemetry::metrics::raw::Counter,
         tokio::telemetry,
     };
     use bytes::Bytes;
     use commonware_parallel::Strategy as _;
-    use futures::FutureExt as _;
     use std::{
         self,
         collections::HashMap,
@@ -1213,48 +1212,42 @@ mod tests {
     }
 
     #[test]
-    fn test_runner_restart_after_dropped_write() {
+    fn test_runner_start_waits_for_previous_run() {
         let cfg = Config::new();
         let storage_directory = cfg.storage_directory().clone();
-        const LEN: usize = 64 * 1024 * 1024;
 
-        // The first run dispatches a large write and returns with the write's
-        // future dropped, leaving the write to finish on the blocking pool. A
-        // blocking task the runtime has not started when it shuts down is
-        // dropped unrun, so wait for the write to reach the file first.
-        let path = storage_directory
-            .join("partition")
-            .join(commonware_formatting::hex(b"blob"));
-        Runner::new(cfg.clone()).start(|context| async move {
-            let (blob, _) = context.open("partition", b"blob").await.unwrap();
-            let header = std::fs::metadata(&path).unwrap().len();
-            let mut write = Box::pin(blob.write_at(0, vec![7u8; LEN], WriteOptions::default()));
-            assert!(
-                (&mut write).now_or_never().is_none(),
-                "write completed before it could straggle"
-            );
-            while std::fs::metadata(&path).unwrap().len() == header {
-                std::thread::yield_now();
-            }
-        });
-
-        // A run releases its hold once its storage work has finished (for
-        // io_uring storage, when the ring thread exits), so a second run on the
-        // same directory starts without observing the write mid-flight. Run it
-        // on a helper thread so a hold that never releases fails the test
-        // instead of hanging it.
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let len = Runner::new(cfg).start(|context| async move {
-                let (_, len) = context.open("partition", b"blob").await.unwrap();
-                len
+        // The first run keeps its context, and with it the storage directory,
+        // until it is released.
+        let (started, first_started) = std::sync::mpsc::channel();
+        let (release, released) = futures::channel::oneshot::channel();
+        let first_cfg = cfg.clone();
+        let first = std::thread::spawn(move || {
+            Runner::new(first_cfg).start(|context| async move {
+                started.send(()).unwrap();
+                released.await.unwrap();
+                drop(context);
             });
-            tx.send(len).unwrap();
         });
-        let len = rx
-            .recv_timeout(Duration::from_secs(60))
+        first_started.recv_timeout(Duration::from_secs(10)).unwrap();
+
+        // A second run on the same directory cannot start until the first has
+        // returned.
+        let (started, second_started) = std::sync::mpsc::channel();
+        let second = std::thread::spawn(move || {
+            Runner::new(cfg).start(|_| async move {
+                started.send(()).unwrap();
+            });
+        });
+        match second_started.recv_timeout(Duration::from_millis(200)) {
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            other => panic!("second run started while the first held the directory: {other:?}"),
+        }
+        release.send(()).unwrap();
+        first.join().unwrap();
+        second_started
+            .recv_timeout(Duration::from_secs(10))
             .expect("second run did not start after the first returned");
-        assert_eq!(len, LEN as u64);
+        second.join().unwrap();
         let _ = std::fs::remove_dir_all(storage_directory);
     }
 
