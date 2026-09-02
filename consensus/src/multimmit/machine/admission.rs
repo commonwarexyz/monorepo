@@ -522,6 +522,11 @@ impl<V: Variant, D: Digest> VerificationItem<V, D> {
         &self.known
     }
 
+    /// Returns the retained decoded artifact behind its shared pointer.
+    pub(crate) const fn shared_artifact(&self) -> &Arc<Artifact<V, D>> {
+        &self.artifact
+    }
+
     /// Returns the exact correlation ticket.
     pub const fn ticket(&self) -> VerificationTicket<D> {
         self.ticket
@@ -547,6 +552,22 @@ pub struct VerifyJob<V: Variant, D: Digest> {
 }
 
 impl<V: Variant, D: Digest> VerifyJob<V, D> {
+    /// Extends every certificate item's known messages with `lookup(view)`, so a verifier can
+    /// discharge transcripts with votes it verified after the machine issued this job.
+    pub(crate) fn extend_known(
+        &mut self,
+        mut lookup: impl FnMut(View) -> Vec<Arc<Artifact<V, D>>>,
+    ) {
+        for item in &mut self.items {
+            let view = match item.artifact.as_ref() {
+                Artifact::Vqc(certificate) => certificate.view(),
+                Artifact::Lqc(certificate) => certificate.view(),
+                _ => continue,
+            };
+            item.known.extend(lookup(view));
+        }
+    }
+
     pub(crate) const fn new(
         id: JobId,
         generation: u64,
