@@ -68,8 +68,15 @@ use std::{
 use tracing::Level;
 use tracing_subscriber::layer::SubscriberExt as _;
 
-type TestBatcher =
-    Batcher<DeterministicContext, Sha256, Ed25519PublicKey, MinPk, RecordingBlocker, Sequential>;
+type TestBatcher = Batcher<
+    DeterministicContext,
+    Sha256,
+    Ed25519PublicKey,
+    MinPk,
+    RecordingBlocker,
+    Sequential,
+    Sequential,
+>;
 type TestRelay = RecordingRelay<Sha256Digest, Ed25519PublicKey>;
 type TestReporter = RecordingReporter<MinPk, Sha256Digest>;
 
@@ -578,6 +585,7 @@ impl Node {
                 scheme: committee.verifier.clone(),
                 blocker: blocker.clone(),
                 strategy: Sequential,
+                critical_strategy: Sequential,
                 codec: committee.codec(),
                 limits: ingress.unwrap_or_else(ingress_limits),
                 mailbox_size: NonZeroUsize::new(64).unwrap(),
@@ -598,6 +606,7 @@ impl Node {
         let config = Config {
             scheme,
             strategy: Sequential,
+            critical_strategy: Sequential,
             automaton: application.clone(),
             relay: relay.clone(),
             reporter: reporter.clone(),
@@ -3914,6 +3923,7 @@ fn mutable_journal_sync_failure_stops_production_engine() {
                 relay: application.clone(),
                 reporter: TestReporter::default(),
                 strategy: Sequential,
+                critical_strategy: Sequential,
                 blocker: NoopBlocker,
                 partition_prefix: "storage-failure-engine".to_owned(),
                 mailbox_size: NonZeroUsize::new(64).unwrap(),

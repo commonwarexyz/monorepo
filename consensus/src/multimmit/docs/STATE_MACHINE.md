@@ -50,6 +50,14 @@ turned into a second application protocol.
 artifact identification, and batched cryptographic verification. Decode and identification run as
 bounded strategy jobs whose completions retain the authenticated peer. `Resolver` owns transport,
 retry, and peer choice for view-proof fetches.
+
+The engine takes two execution strategies. The view-critical pool runs local signing, V-QC, L-QC,
+and nullification assembly, and the verification of leader blocks, votes, novotes, nullifies,
+nullifications, V-QCs, and L-QCs. The bulk pool runs everything else: plane decoding, ingress
+identification, transaction-header and data-availability verification, data-availability
+certificate recovery, resolver proof materialization, and the startup artifact check. Both pools
+may be the same strategy; a deployment that separates them keeps a round's own cryptography off
+the queue that block-rate work shares.
 `Voter` owns the epoch lifecycle and one private `CoreState`. `CoreState` is the sole authority for
 admission order, producer-header facts, DA choices, views, leader finality, durable events, signing
 reservations, publication obligations, retention, and snapshots.
@@ -197,6 +205,7 @@ let engine = Engine::new(
         relay,
         reporter,
         strategy,
+        critical_strategy,
         blocker,
         partition_prefix,
         mailbox_size,

@@ -104,6 +104,20 @@ fn assert_artifact_byte_limit<V: Variant>() {
 }
 
 #[test]
+fn the_view_critical_pool_scales_with_the_committee() {
+    // One view's view-critical cryptography is bounded by the committee, so the pool that runs it
+    // tracks the committee rather than the machine's total crypto slots.
+    for (participants, threads) in [(1u32, 2usize), (6, 2), (16, 2), (32, 4), (50, 6), (100, 12)] {
+        let profile = profile(participants, 64).expect("derived profile is valid");
+        assert_eq!(
+            profile.critical_threads().get(),
+            threads,
+            "participants={participants}"
+        );
+    }
+}
+
+#[test]
 fn every_committee_and_retention_window_yields_a_valid_profile() {
     // Internal bounds are derived, so an operator cannot express a manifest the machine rejects.
     // If that ever stops holding, this fails for the exact shape that broke it.

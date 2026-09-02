@@ -48,8 +48,8 @@ use std::{
 };
 use tracing::Span;
 
-type TestActor =
-    Actor<DeterministicContext, Sha256, Ed25519PublicKey, MinPk, RecordingBlocker, Sequential>;
+type TestActor<T, C> =
+    Actor<DeterministicContext, Sha256, Ed25519PublicKey, MinPk, RecordingBlocker, T, C>;
 
 #[derive(Clone, Debug)]
 struct StallingStrategy {
@@ -85,6 +85,113 @@ impl Strategy for StallingStrategy {
             }
             operation(strategy)
         }
+    }
+
+    fn fold_init<I, INIT, T, R, ID, F, RD>(
+        &self,
+        iter: I,
+        init: INIT,
+        identity: ID,
+        fold_op: F,
+        reduce_op: RD,
+    ) -> R
+    where
+        I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+        INIT: Fn() -> T + Send + Sync,
+        T: Send,
+        R: Send,
+        ID: Fn() -> R + Send + Sync,
+        F: Fn(R, &mut T, I::Item) -> R + Send + Sync,
+        RD: Fn(R, R) -> R + Send + Sync,
+    {
+        Sequential.fold_init(iter, init, identity, fold_op, reduce_op)
+    }
+
+    fn try_fold<I, R, E, ID, F, RD>(
+        &self,
+        iter: I,
+        identity: ID,
+        fold_op: F,
+        reduce_op: RD,
+    ) -> Result<R, E>
+    where
+        I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+        R: Send,
+        E: Send,
+        ID: Fn() -> R + Send + Sync,
+        F: Fn(R, I::Item) -> Result<R, E> + Send + Sync,
+        RD: Fn(R, R) -> R + Send + Sync,
+    {
+        Sequential.try_fold(iter, identity, fold_op, reduce_op)
+    }
+
+    fn run<R, SEQ, PAR>(&self, len: usize, serial: SEQ, parallel: PAR) -> R
+    where
+        R: Send,
+        SEQ: FnOnce() -> R + Send,
+        PAR: FnOnce() -> R + Send,
+    {
+        Sequential.run(len, serial, parallel)
+    }
+
+    fn try_run<R, E, SEQ, PAR>(&self, len: usize, serial: SEQ, parallel: PAR) -> Result<R, E>
+    where
+        R: Send,
+        E: Send,
+        SEQ: FnOnce() -> Result<R, E> + Send,
+        PAR: FnOnce() -> Result<R, E> + Send,
+    {
+        Sequential.try_run(len, serial, parallel)
+    }
+
+    fn join<A, B, RA, RB>(&self, a: A, b: B) -> (RA, RB)
+    where
+        A: FnOnce() -> RA + Send,
+        B: FnOnce() -> RB + Send,
+        RA: Send,
+        RB: Send,
+    {
+        Sequential.join(a, b)
+    }
+
+    fn sort_by<T, C>(&self, items: &mut [T], compare: C)
+    where
+        T: Send,
+        C: Fn(&T, &T) -> std::cmp::Ordering + Send + Sync,
+    {
+        Sequential.sort_by(items, compare);
+    }
+}
+
+/// A strategy that counts the jobs submitted to it and runs them like [`Sequential`].
+///
+/// Two instances separate the pools an actor was configured with, so a job's execution pool is
+/// observable without a real thread pool.
+#[derive(Clone, Debug, Default)]
+struct CountingStrategy {
+    spawns: Arc<AtomicUsize>,
+}
+
+impl CountingStrategy {
+    /// Returns how many jobs this pool has been handed.
+    fn spawns(&self) -> usize {
+        self.spawns.load(Ordering::SeqCst)
+    }
+}
+
+impl Strategy for CountingStrategy {
+    fn manual(&self) -> Manual<Self> {
+        Manual::new(self.clone(), NonZeroUsize::MIN)
+    }
+
+    fn spawn<F, T>(&self, operation: F) -> impl Future<Output = T> + Send + 'static
+    where
+        F: FnOnce(Self) -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        self.spawns.fetch_add(1, Ordering::SeqCst);
+        let strategy = self.clone();
+        async move { operation(strategy) }
     }
 
     fn fold_init<I, INIT, T, R, ID, F, RD>(
@@ -279,12 +386,13 @@ impl ReadyHarness {
         certificates: ReadyReceiver,
         observation_capacity: NonZeroUsize,
     ) -> Self {
-        let (actor, mailbox): (TestActor, _) = Actor::new(
+        let (actor, mailbox): (TestActor<Sequential, Sequential>, _) = Actor::new(
             context.child("batcher"),
             Config {
                 scheme: committee.verifier.clone(),
                 blocker: RecordingBlocker::default(),
                 strategy: Sequential,
+                critical_strategy: Sequential,
                 codec: committee.codec(),
                 limits,
                 mailbox_size: NonZeroUsize::new(16).unwrap(),
@@ -329,6 +437,7 @@ fn stalled_decode_and_identification_workers_do_not_block_control() {
                     MinPk,
                     RecordingBlocker,
                     StallingStrategy,
+                    StallingStrategy,
                 >,
                 _,
             ) = Actor::new(
@@ -336,6 +445,7 @@ fn stalled_decode_and_identification_workers_do_not_block_control() {
                 Config {
                     scheme: committee.verifier.clone(),
                     blocker: RecordingBlocker::default(),
+                    critical_strategy: strategy.clone(),
                     strategy,
                     codec: committee.codec(),
                     limits: limits(),
@@ -552,6 +662,17 @@ impl Harness {
     }
 
     async fn with_limits(context: &DeterministicContext, seed: u64, limits: IngressLimits) -> Self {
+        Self::with_strategies(context, seed, limits, Sequential, Sequential).await
+    }
+
+    /// Starts a batcher whose bulk and view-critical pools are supplied separately.
+    async fn with_strategies<T: Strategy, C: Strategy>(
+        context: &DeterministicContext,
+        seed: u64,
+        limits: IngressLimits,
+        strategy: T,
+        critical_strategy: C,
+    ) -> Self {
         let committee = Committee::<MinPk>::new(seed, 6, Limits::new(2, 1).unwrap());
         let me = committee.identities[0].clone();
         let peers = committee.identities.clone();
@@ -569,12 +690,13 @@ impl Harness {
         let mut receivers = receivers.into_iter();
 
         let blocker = RecordingBlocker::default();
-        let (actor, mailbox): (TestActor, _) = Actor::new(
+        let (actor, mailbox): (TestActor<T, C>, _) = Actor::new(
             context.child("batcher"),
             Config {
                 scheme: committee.verifier.clone(),
                 blocker: blocker.clone(),
-                strategy: Sequential,
+                strategy,
+                critical_strategy,
                 codec: committee.codec(),
                 limits,
                 mailbox_size: NonZeroUsize::new(16).unwrap(),
@@ -1248,6 +1370,96 @@ fn executes_machine_issued_jobs_with_exact_tickets() {
         assert!(
             !encoded.contains("batcher_latest_verified_vote"),
             "the per-participant vote gauge family is still registered: {encoded}"
+        );
+    });
+}
+
+#[test_traced]
+fn view_critical_and_bulk_jobs_run_on_their_own_pools() {
+    let executor = DeterministicRunner::default();
+    executor.start(|context| async move {
+        let critical = CountingStrategy::default();
+        let bulk = CountingStrategy::default();
+        let mut harness =
+            Harness::with_strategies(&context, 61, limits(), bulk.clone(), critical.clone()).await;
+
+        // The production Core issues both jobs, so the classification under test is the machine's.
+        let novote = Artifact::NoVote(harness.committee.novote(2, 1));
+        let block = Artifact::TransactionBlock(
+            harness
+                .committee
+                .signed_block(0, Sha256::hash(&[b"bulk header"])),
+        );
+        let round = Round::new(harness.committee.config.epoch(), View::new(1));
+        let view_critical = machine_issued_jobs(&harness.committee, vec![novote]);
+        let bulk_jobs = machine_issued_jobs(&harness.committee, vec![block]);
+        assert!(
+            view_critical.iter().all(VerifyJob::view_critical),
+            "a novote is view progress"
+        );
+        assert!(
+            !bulk_jobs.iter().any(VerifyJob::view_critical),
+            "a transaction-block header is not view progress"
+        );
+
+        let view_critical_jobs = view_critical.len();
+        let mut expected = 0;
+        for job in view_critical {
+            expected += job.items().len();
+            let sources = vec![None; job.items().len()];
+            assert!(
+                harness
+                    .mailbox
+                    .enqueue(Message::Verify {
+                        span: Span::none(),
+                        round,
+                        job,
+                        sources,
+                    })
+                    .accepted()
+            );
+        }
+        let mut items = 0;
+        while items < expected {
+            let Completed { completion, .. } =
+                harness.completions.recv().await.expect("batcher running");
+            items += completion.verdicts().len();
+        }
+        assert_eq!(critical.spawns(), view_critical_jobs);
+        assert_eq!(
+            bulk.spawns(),
+            0,
+            "a view-critical job queued behind bulk verification"
+        );
+
+        let jobs = bulk_jobs.len();
+        let mut expected = 0;
+        for job in bulk_jobs {
+            expected += job.items().len();
+            let sources = vec![None; job.items().len()];
+            assert!(
+                harness
+                    .mailbox
+                    .enqueue(Message::Verify {
+                        span: Span::none(),
+                        round,
+                        job,
+                        sources,
+                    })
+                    .accepted()
+            );
+        }
+        let mut items = 0;
+        while items < expected {
+            let Completed { completion, .. } =
+                harness.completions.recv().await.expect("batcher running");
+            items += completion.verdicts().len();
+        }
+        assert_eq!(bulk.spawns(), jobs);
+        assert_eq!(
+            critical.spawns(),
+            view_critical_jobs,
+            "a bulk job occupied the view-critical pool"
         );
     });
 }

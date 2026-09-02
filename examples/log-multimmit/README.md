@@ -136,8 +136,11 @@ cargo run --release -- deploy \
 ```
 
 The six nodes are assigned round-robin across the two regions, placing three in `us-west-2` and
-three in `us-east-1`. `--nodes` changes the committee size (six is the minimum), `--producers`
-selects producer keys in chain order (and defaults to every validator), while `--bootstrappers`,
+three in `us-east-1`. `--compute-threads` sizes the bulk verification pool, while
+`--critical-threads` sizes the separate pool that runs signing, certificate assembly, and the
+verdicts a view waits on; it defaults to one thread per eight validators, and at least two.
+`--nodes` changes the committee size (six is the minimum), `--producers` selects producer keys in
+chain order (and defaults to every validator), while `--bootstrappers`,
 storage IOPS and throughput, marshal cache budgets, profiling, trace sampling, the two P2P ports
 (`--port` and `--bulk-port`), dashboard, and binary filename can also be overridden. The generated
 `config.yaml` opens both ports in the validator security group. `--body-size` controls the complete junk

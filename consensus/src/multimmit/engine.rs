@@ -483,7 +483,7 @@ where
 }
 
 /// Configuration for one Multimmit engine.
-pub struct Config<H, P, V, A, R, F, T, B>
+pub struct Config<H, P, V, A, R, F, T, C, B>
 where
     H: Hasher,
     P: PublicKey,
@@ -492,6 +492,7 @@ where
     R: Relay<Digest = H::Digest, PublicKey = P, Plan = ()>,
     F: Reporter<Activity = Activity<V, H::Digest>>,
     T: Strategy,
+    C: Strategy,
     B: Blocker<PublicKey = P>,
 {
     /// The immutable local machine profile.
@@ -504,8 +505,19 @@ where
     pub relay: R,
     /// Authenticated activity reporting.
     pub reporter: F,
-    /// Execution strategy for CPU-heavy cryptography.
+    /// Execution strategy for bulk CPU-heavy cryptography.
+    ///
+    /// Carries plane decoding, ingress identification, transaction-block header and
+    /// data-availability verification, data-availability certificate recovery, resolver proof
+    /// materialization, and the startup artifact check.
     pub strategy: T,
+    /// Execution strategy for view-critical CPU-heavy cryptography.
+    ///
+    /// Carries local signing, V-QC, L-QC, and nullification assembly, and the verification of
+    /// leader blocks, votes, novotes, nullifies, nullifications, V-QCs, and L-QCs. Sizing it from
+    /// [`Profile::critical_threads`] keeps the round's own cryptography off the bulk queue, where
+    /// a 50-validator deployment measured 5 ms of median assembly latency for 250 us of work.
+    pub critical_strategy: C,
     /// Peer blocker for invalid traffic.
     pub blocker: B,
     /// Storage partition prefix owned exclusively by this engine.
@@ -614,7 +626,7 @@ impl<V: Variant, D: Digest> Running<V, D> {
 }
 
 /// One attached Multimmit engine.
-pub struct Engine<E, H, P, V, A, R, F, T, B>
+pub struct Engine<E, H, P, V, A, R, F, T, C, B>
 where
     E: Clock + CryptoRng + Spawner + Storage + Metrics + BufferPooler + StorageContext,
     H: Hasher,
@@ -624,14 +636,15 @@ where
     R: Relay<Digest = H::Digest, PublicKey = P, Plan = ()>,
     F: Reporter<Activity = Activity<V, H::Digest>>,
     T: Strategy,
+    C: Strategy,
     B: Blocker<PublicKey = P>,
 {
     context: ContextCell<E>,
-    config: Config<H, P, V, A, R, F, T, B>,
+    config: Config<H, P, V, A, R, F, T, C, B>,
     checkpoint_interval: NonZeroU64,
 }
 
-impl<E, H, P, V, A, R, F, T, B> Engine<E, H, P, V, A, R, F, T, B>
+impl<E, H, P, V, A, R, F, T, C, B> Engine<E, H, P, V, A, R, F, T, C, B>
 where
     E: Clock + CryptoRng + Spawner + Storage + Metrics + BufferPooler + StorageContext,
     H: Hasher,
@@ -641,6 +654,7 @@ where
     R: Relay<Digest = H::Digest, PublicKey = P, Plan = ()>,
     F: Reporter<Activity = Activity<V, H::Digest>>,
     T: Strategy,
+    C: Strategy,
     B: Blocker<PublicKey = P> + Clone + Send + 'static,
 {
     /// Validates configuration consistency without starting work.
@@ -649,7 +663,7 @@ where
     ///
     /// Panics when the scheme, profile, and role disagree; a mismatch would otherwise surface as
     /// runtime signing failures.
-    pub fn new(context: E, config: Config<H, P, V, A, R, F, T, B>) -> Self {
+    pub fn new(context: E, config: Config<H, P, V, A, R, F, T, C, B>) -> Self {
         use crate::Epochable as _;
         let protocol = config.profile.protocol();
         assert_eq!(
@@ -756,12 +770,13 @@ where
             .me()
             .and_then(|participant| config.scheme.participants().get(participant.into()))
             .cloned();
-        let (batcher, batcher_mailbox) = batcher::Actor::<E, H, P, V, B, T>::new(
+        let (batcher, batcher_mailbox) = batcher::Actor::<E, H, P, V, B, T, C>::new(
             context.child("batcher"),
             batcher::Config {
                 scheme: config.scheme.clone(),
                 blocker: config.blocker.clone(),
                 strategy: config.strategy.clone(),
+                critical_strategy: config.critical_strategy.clone(),
                 codec,
                 limits: ingress_limits(&config.profile),
                 mailbox_size: config.mailbox_size,
@@ -800,6 +815,7 @@ where
             voter::Config {
                 scheme: config.scheme,
                 strategy: config.strategy,
+                critical_strategy: config.critical_strategy,
                 automaton: config.automaton,
                 relay: config.relay,
                 reporter: config.reporter,
@@ -962,6 +978,7 @@ mod tests {
         MockApplication,
         NoopReporter<MinPk, Sha256Digest>,
         Sequential,
+        Sequential,
         NoopBlocker,
     > {
         let role = Role::Validator(Participant::new(index as u32));
@@ -973,6 +990,7 @@ mod tests {
             relay: application,
             reporter: NoopReporter::default(),
             strategy: Sequential,
+            critical_strategy: Sequential,
             blocker: NoopBlocker,
             profile,
             partition_prefix: format!("{prefix}-{index}"),
