@@ -9,13 +9,13 @@ use crate::{
     qmdb::{
         self, Error,
         any::ValueEncoding,
-        immutable::{self, CompactDb, Metrics, Operation},
+        immutable::{self, Metrics, Operation},
         operation::Key,
         sync,
     },
     translator::Translator,
 };
-use commonware_codec::{EncodeShared, Read};
+use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use commonware_utils::range::NonEmptyRange;
@@ -162,63 +162,6 @@ where
             inactivity_floor,
         )
         .await
-    }
-
-    fn root(&self) -> Self::Digest {
-        self.root()
-    }
-}
-
-impl<F, E, K, V, H, Cfg, S> sync::Database for CompactDb<F, E, K, V, H, Cfg, S>
-where
-    F: Family,
-    E: Context,
-    K: Key,
-    V: ValueEncoding,
-    H: Hasher,
-    S: Strategy,
-    Operation<F, K, V>: EncodeShared,
-    Operation<F, K, V>: Read<Cfg = Cfg>,
-    Cfg: Clone + Send + Sync + 'static,
-{
-    type Family = F;
-    type Op = Operation<F, K, V>;
-    type Journal = sync::journal::Memory<F, E, Operation<F, K, V>>;
-    type Config = immutable::CompactConfig<Cfg, S>;
-    type Digest = H::Digest;
-    type Context = E;
-    type Hasher = H;
-
-    async fn from_sync_result(
-        context: Self::Context,
-        config: Self::Config,
-        log: Self::Journal,
-        pinned_nodes: Option<Vec<Self::Digest>>,
-        range: NonEmptyRange<Location<F>>,
-        _apply_batch_size: NonZeroU64,
-    ) -> Result<Self, Error<F>> {
-        crate::qmdb::compact::from_sync_result(
-            context,
-            config,
-            log,
-            pinned_nodes,
-            range,
-            Self::init_from_sync,
-        )
-        .await
-    }
-
-    async fn persist_sync_result(self) -> Result<Self, Error<F>> {
-        self.sync().await
-    }
-
-    async fn local_pinned_nodes(
-        _context: Self::Context,
-        _config: &Self::Config,
-        _target: &sync::Target<F, Self::Digest>,
-        _journal: &Self::Journal,
-    ) -> Result<Option<Vec<Self::Digest>>, Error<F>> {
-        Ok(None)
     }
 
     fn root(&self) -> Self::Digest {

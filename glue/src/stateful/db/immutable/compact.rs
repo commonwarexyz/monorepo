@@ -1,96 +1,30 @@
-//! Compact [`ManagedDb`] implementation for QMDB
+//! Compact [`ManagedDb`](crate::stateful::db::ManagedDb) support for QMDB
 //! [`immutable`](commonware_storage::qmdb::immutable) databases.
 //!
-//! These compact databases retain only the current Merkle peaks, so the glue
-//! adapters expose set and merkleization operations but no historical reads.
+//! These compact databases retain only the current Merkle peaks, so the adapter exposes set and
+//! merkleization operations but no historical reads. The shared implementation lives in
+//! [`crate::stateful::db::compact`].
 
-use crate::stateful::db::{
-    BatchContext, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb, SyncEngineConfig,
-    Unmerkleized as UnmerkleizedTrait, sync_compact_db,
-};
-use commonware_codec::{EncodeShared, Read as CodecRead};
+use crate::stateful::db::compact::CompactUnmerkleized;
+use commonware_codec::CodecShared;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
-use commonware_runtime::{Handle, Spawner};
 use commonware_storage::{
     Context,
-    merkle::{Family, Location},
-    qmdb::{
-        Error,
-        any::value::{FixedEncoding, FixedValue, ValueEncoding, VariableEncoding, VariableValue},
-        immutable::{
-            CompactDb, CompactMerkleizedBatch, CompactUnmerkleizedBatch, Operation, fixed,
-            initial_root, variable,
-        },
-        operation::Key,
-        sync::{self},
-    },
+    merkle::Family,
+    qmdb::{any::value::ValueEncoding, immutable::Operation, operation::Key},
 };
-use commonware_utils::{Array, channel::mpsc};
-use std::{ops::Deref, sync::Arc};
 
-/// Wraps an unjournaled immutable batch before merkleization.
-pub struct ImmutableUnjournaledUnmerkleized<F, E, K, V, H, S, C = ()>
+impl<F, E, K, V, H, S> CompactUnmerkleized<F, E, Operation<F, K, V>, H, S>
 where
     F: Family,
     E: Context,
     K: Key,
     V: ValueEncoding,
     H: Hasher,
-    Operation<F, K, V>: EncodeShared,
-    Operation<F, K, V>: CodecRead<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
     S: Strategy,
+    Operation<F, K, V>: CodecShared,
 {
-    batch: CompactUnmerkleizedBatch<F, H, K, V, S>,
-    db: Shared<CompactDb<F, E, K, V, H, C, S>>,
-    metadata: Option<V::Value>,
-    inactivity_floor: Option<Location<F>>,
-}
-
-impl<F, E, K, V, H, S, C> Deref for ImmutableUnjournaledUnmerkleized<F, E, K, V, H, S, C>
-where
-    F: Family,
-    E: Context,
-    K: Key,
-    V: ValueEncoding,
-    H: Hasher,
-    Operation<F, K, V>: EncodeShared,
-    Operation<F, K, V>: CodecRead<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
-    S: Strategy,
-{
-    type Target = CompactUnmerkleizedBatch<F, H, K, V, S>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.batch
-    }
-}
-
-impl<F, E, K, V, H, S, C> ImmutableUnjournaledUnmerkleized<F, E, K, V, H, S, C>
-where
-    F: Family,
-    E: Context,
-    K: Key,
-    V: ValueEncoding,
-    H: Hasher,
-    Operation<F, K, V>: EncodeShared,
-    Operation<F, K, V>: CodecRead<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
-    S: Strategy,
-{
-    /// Set commit metadata included in the next merkleization.
-    pub fn with_metadata(mut self, metadata: V::Value) -> Self {
-        self.metadata = Some(metadata);
-        self
-    }
-
-    /// Set the inactivity floor included in the next merkleization.
-    pub const fn with_inactivity_floor(mut self, floor: Location<F>) -> Self {
-        self.inactivity_floor = Some(floor);
-        self
-    }
-
     /// Set `key` to `value` in the speculative batch.
     pub fn set(mut self, key: K, value: V::Value) -> Self {
         self.batch = self.batch.set(key, value);
@@ -98,358 +32,30 @@ where
     }
 }
 
-/// Wraps an unjournaled immutable batch after merkleization.
-pub struct ImmutableUnjournaledMerkleized<F, E, K, V, H, S, C = ()>
-where
-    F: Family,
-    E: Context,
-    K: Key,
-    V: ValueEncoding,
-    H: Hasher,
-    Operation<F, K, V>: EncodeShared,
-    Operation<F, K, V>: CodecRead<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
-    S: Strategy,
-{
-    inner: Arc<CompactMerkleizedBatch<F, H::Digest, K, V, S>>,
-    db: Shared<CompactDb<F, E, K, V, H, C, S>>,
-}
-
-impl<F, E, K, V, H, S, C> Clone for ImmutableUnjournaledMerkleized<F, E, K, V, H, S, C>
-where
-    F: Family,
-    E: Context,
-    K: Key,
-    V: ValueEncoding,
-    H: Hasher,
-    Operation<F, K, V>: EncodeShared,
-    Operation<F, K, V>: CodecRead<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
-    S: Strategy,
-{
-    fn clone(&self) -> Self {
-        Self {
-            inner: Arc::clone(&self.inner),
-            db: self.db.clone(),
-        }
-    }
-}
-
-impl<F, E, K, V, H, S, C> Deref for ImmutableUnjournaledMerkleized<F, E, K, V, H, S, C>
-where
-    F: Family,
-    E: Context,
-    K: Key,
-    V: ValueEncoding,
-    H: Hasher,
-    Operation<F, K, V>: EncodeShared,
-    Operation<F, K, V>: CodecRead<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
-    S: Strategy,
-{
-    type Target = CompactMerkleizedBatch<F, H::Digest, K, V, S>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.inner
-    }
-}
-
-impl<F, E, K, V, H, S, C> UnmerkleizedTrait
-    for ImmutableUnjournaledUnmerkleized<F, E, K, V, H, S, C>
-where
-    F: Family,
-    E: Context,
-    K: Key,
-    V: ValueEncoding,
-    H: Hasher,
-    Operation<F, K, V>: EncodeShared,
-    Operation<F, K, V>: CodecRead<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
-    S: Strategy,
-{
-    type Merkleized = ImmutableUnjournaledMerkleized<F, E, K, V, H, S, C>;
-    type Error = Error<F>;
-
-    async fn merkleize(self) -> Result<Self::Merkleized, Error<F>> {
-        let db = self.db.read().await;
-        let merkleized = self
-            .batch
-            .merkleize(
-                &db,
-                self.metadata,
-                self.inactivity_floor.unwrap_or_default(),
-            )
-            .await;
-        Ok(ImmutableUnjournaledMerkleized {
-            inner: merkleized,
-            db: self.db.clone(),
-        })
-    }
-}
-
-impl<F, E, K, V, H, S, C> MerkleizedTrait for ImmutableUnjournaledMerkleized<F, E, K, V, H, S, C>
-where
-    F: Family,
-    E: Context,
-    K: Key,
-    V: ValueEncoding,
-    H: Hasher,
-    Operation<F, K, V>: EncodeShared,
-    Operation<F, K, V>: CodecRead<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
-    S: Strategy,
-{
-    type Digest = H::Digest;
-    type Unmerkleized = ImmutableUnjournaledUnmerkleized<F, E, K, V, H, S, C>;
-
-    fn root(&self) -> H::Digest {
-        self.inner.root()
-    }
-
-    fn new_batch(&self) -> Self::Unmerkleized {
-        ImmutableUnjournaledUnmerkleized {
-            batch: self.inner.new_batch::<H>(),
-            db: self.db.clone(),
-            metadata: None,
-            inactivity_floor: None,
-        }
-    }
-}
-
-impl<F, E, K, V, H, S> ManagedDb<E> for fixed::CompactDb<F, E, K, V, H, S>
-where
-    F: Family,
-    E: Context,
-    K: Array,
-    V: FixedValue + 'static,
-    H: Hasher + 'static,
-    S: Strategy,
-    Operation<F, K, FixedEncoding<V>>: EncodeShared + CodecRead<Cfg = ()>,
-{
-    type Unmerkleized = ImmutableUnjournaledUnmerkleized<F, E, K, FixedEncoding<V>, H, S, ()>;
-    type Merkleized = ImmutableUnjournaledMerkleized<F, E, K, FixedEncoding<V>, H, S, ()>;
-    type Error = Error<F>;
-    type Config = fixed::CompactConfig<S>;
-    type SyncTarget = sync::CompactTarget<F, H::Digest>;
-
-    async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
-        <Self>::init(context, config).await
-    }
-
-    fn initial_sync_target() -> Self::SyncTarget {
-        sync::CompactTarget {
-            root: initial_root::<F, K, FixedEncoding<V>, H>(),
-            size: Location::new(1),
-        }
-    }
-
-    fn new_batch(database: BatchContext<'_, Self>) -> Self::Unmerkleized {
-        let (database, shared) = database.into_parts();
-        ImmutableUnjournaledUnmerkleized {
-            batch: database.new_batch(),
-            db: shared,
-            metadata: None,
-            inactivity_floor: None,
-        }
-    }
-
-    fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
-        batch.root() == target.root && target.size == batch.bounds().tip.size
-    }
-
-    async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
-        let (db, _) = self.apply_batch(batch.inner).await?;
-        Ok(db)
-    }
-
-    async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {
-        self.start_sync().await
-    }
-
-    async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
-        Self::prune(self, target.size).await
-    }
-
-    fn sync_target(&self) -> Self::SyncTarget {
-        self.target()
-    }
-
-    async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
-        let db = self.rewind(target.size).await?;
-
-        let rewound_target = db.sync_target();
-        assert_eq!(
-            rewound_target, target,
-            "rewound database target mismatch after rewind",
-        );
-        Ok(db)
-    }
-}
-
-impl<F, E, K, V, H, C, S> ManagedDb<E> for variable::CompactDb<F, E, K, V, H, C, S>
-where
-    F: Family,
-    E: Context,
-    K: Key,
-    V: VariableValue + 'static,
-    H: Hasher + 'static,
-    Operation<F, K, VariableEncoding<V>>: EncodeShared + CodecRead<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
-    S: Strategy,
-{
-    type Unmerkleized = ImmutableUnjournaledUnmerkleized<F, E, K, VariableEncoding<V>, H, S, C>;
-    type Merkleized = ImmutableUnjournaledMerkleized<F, E, K, VariableEncoding<V>, H, S, C>;
-    type Error = Error<F>;
-    type Config = variable::CompactConfig<C, S>;
-    type SyncTarget = sync::CompactTarget<F, H::Digest>;
-
-    async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
-        <Self>::init(context, config).await
-    }
-
-    fn initial_sync_target() -> Self::SyncTarget {
-        sync::CompactTarget {
-            root: initial_root::<F, K, VariableEncoding<V>, H>(),
-            size: Location::new(1),
-        }
-    }
-
-    fn new_batch(database: BatchContext<'_, Self>) -> Self::Unmerkleized {
-        let (database, shared) = database.into_parts();
-        ImmutableUnjournaledUnmerkleized {
-            batch: database.new_batch(),
-            db: shared,
-            metadata: None,
-            inactivity_floor: None,
-        }
-    }
-
-    fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
-        batch.root() == target.root && target.size == batch.bounds().tip.size
-    }
-
-    async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
-        let (db, _) = self.apply_batch(batch.inner).await?;
-        Ok(db)
-    }
-
-    async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {
-        self.start_sync().await
-    }
-
-    async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
-        Self::prune(self, target.size).await
-    }
-
-    fn sync_target(&self) -> Self::SyncTarget {
-        self.target()
-    }
-
-    async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
-        let db = self.rewind(target.size).await?;
-
-        let rewound_target = db.sync_target();
-        assert_eq!(
-            rewound_target, target,
-            "rewound database target mismatch after rewind",
-        );
-        Ok(db)
-    }
-}
-
-impl<F, E, K, V, H, R, S> StateSyncDb<E, R> for fixed::CompactDb<F, E, K, V, H, S>
-where
-    F: Family,
-    E: Context + Spawner,
-    K: Array,
-    V: FixedValue + 'static,
-    H: Hasher + 'static,
-    S: Strategy,
-    Operation<F, K, FixedEncoding<V>>: EncodeShared + CodecRead<Cfg = ()>,
-    R: sync::SourceFor<Self>,
-{
-    type SyncError = sync::Error<F, R::Error, H::Digest>;
-
-    async fn sync_db(
-        context: E,
-        config: Self::Config,
-        source: R,
-        target: Self::SyncTarget,
-        tip_updates: mpsc::Receiver<Self::SyncTarget>,
-        finish: Option<mpsc::Receiver<()>>,
-        reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
-        sync_config: SyncEngineConfig,
-    ) -> Result<Self, Self::SyncError> {
-        sync_compact_db(
-            context,
-            config,
-            source,
-            target,
-            tip_updates,
-            finish,
-            reached_target,
-            sync_config,
-        )
-        .await
-    }
-}
-
-impl<F, E, K, V, H, C, R, S> StateSyncDb<E, R> for variable::CompactDb<F, E, K, V, H, C, S>
-where
-    F: Family,
-    E: Context + Spawner,
-    K: Key,
-    V: VariableValue + 'static,
-    H: Hasher + 'static,
-    Operation<F, K, VariableEncoding<V>>: EncodeShared + CodecRead<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
-    S: Strategy,
-    R: sync::SourceFor<Self>,
-{
-    type SyncError = sync::Error<F, R::Error, H::Digest>;
-
-    async fn sync_db(
-        context: E,
-        config: Self::Config,
-        source: R,
-        target: Self::SyncTarget,
-        tip_updates: mpsc::Receiver<Self::SyncTarget>,
-        finish: Option<mpsc::Receiver<()>>,
-        reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
-        sync_config: SyncEngineConfig,
-    ) -> Result<Self, Self::SyncError> {
-        sync_compact_db(
-            context,
-            config,
-            source,
-            target,
-            tip_updates,
-            finish,
-            reached_target,
-            sync_config,
-        )
-        .await
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stateful::db::{ManagedDb, Merkleized as _, Shared, StateSyncDb, SyncEngineConfig};
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::select;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        BufferPooler, Clock as _, Metrics as _, Runner as _, Supervisor as _,
+        BufferPooler, Clock as _, Metrics as _, Runner as _, Spawner as _, Supervisor as _,
         buffer::paged::CacheRef, deterministic,
     };
     use commonware_storage::{
         journal::contiguous::fixed::Config as FixedJournalConfig,
         merkle::{full::Config as MerkleConfig, mmr},
+        qmdb::{
+            Error,
+            immutable::{fixed, variable},
+            sync,
+        },
         translator::TwoCap,
     };
-    use commonware_utils::{NZU16, NZU64, NZUsize};
+    use commonware_utils::{NZU16, NZU64, NZUsize, channel::mpsc};
     use futures::pin_mut;
-    use std::time::Duration;
+    use std::{sync::Arc, time::Duration};
 
     type FixedDb =
         fixed::CompactDb<mmr::Family, deterministic::Context, Digest, Digest, Sha256, Sequential>;
@@ -461,7 +67,6 @@ mod tests {
         Digest,
         Vec<u8>,
         Sha256,
-        ((), (commonware_codec::RangeCfg<usize>, ())),
         Sequential,
     >;
 
@@ -477,7 +82,6 @@ mod tests {
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             },
-            commit_codec_config: (),
         }
     }
 
