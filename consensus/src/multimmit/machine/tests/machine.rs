@@ -17085,3 +17085,73 @@ fn signed_batch_identifies_each_artifact_once() {
         "each batch artifact costs a fixed number of hashes through the durable transition"
     );
 }
+
+/// Counts the hashes a verified V-QC claim performs through its finality lifecycle.
+fn vqc_finality_hash_calls(with_derivations: bool) -> usize {
+    let machine = Machine::new(profile_for(Role::Observer, 6, 4));
+    let certificate = view_one_vqc(&machine);
+    let artifact = Arc::new(Artifact::Vqc(certificate.clone()));
+    let resources = resources();
+    let profile = Profile::<CountingHasher, MinPk>::with_limits(
+        config_for(Epoch::new(7), 6, 4),
+        Role::Observer,
+        Tuning {
+            view_timeout: Duration::from_secs(1),
+            production_interval: Duration::from_millis(100),
+            view_retention: retention_for(resources, 6),
+            ..Tuning::default()
+        },
+        resources,
+    )
+    .unwrap();
+    let mut finality = super::finality::FinalityState::new::<CountingHasher>(&profile);
+    let id = artifact.id::<Sha256>();
+    let observation = Observation::new(1, 0);
+    finality
+        .claim_finality::<CountingHasher>(id, observation, Arc::clone(&artifact), &profile)
+        .unwrap();
+    let derivations = with_derivations.then(|| {
+        let mut validated = validate_vqc::<CountingHasher, MinPk, Digest>(
+            &certificate,
+            profile.protocol().codec_config(),
+        )
+        .unwrap();
+        super::finality::CertificateDerivations::Vqc {
+            leader: validated.leader(),
+            votes: validated.take_votes(),
+        }
+    });
+
+    HASH_CALLS.store(0, Ordering::Relaxed);
+    finality
+        .validate_finality_claim::<CountingHasher>(
+            id,
+            observation,
+            &artifact,
+            &profile,
+            derivations,
+        )
+        .unwrap();
+    HASH_CALLS.load(Ordering::Relaxed)
+}
+
+/// A verified V-QC must not re-encode its leader block on the control thread.
+///
+/// The compute pool derives the designated leader digest while it validates the certificate, and
+/// the claim lifecycle visits every tallied signer three times, so recomputing the digest per
+/// visit would re-encode a whole leader block on each pass.
+#[test]
+fn verified_vqc_finality_reuses_the_derived_leader_digest() {
+    let _guard = HASH_TEST_LOCK.lock();
+    let derived = vqc_finality_hash_calls(true);
+    let recomputed = vqc_finality_hash_calls(false);
+
+    assert_eq!(
+        derived, 1,
+        "a derived certificate must only hash its new pool's proposal paths"
+    );
+    assert!(
+        recomputed > derived,
+        "the recovery path derives the digests the compute pool would have supplied"
+    );
+}

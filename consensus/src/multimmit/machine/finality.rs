@@ -237,6 +237,15 @@ impl<V: Variant, D: Digest> FinalityClaim<V, D> {
         self.reservations.retains(key)
     }
 
+    /// Returns the leader-block digest off-pool verification already derived for this claim.
+    const fn derived_leader(&self) -> Option<D> {
+        match self.derivations.as_ref() {
+            Some(CertificateDerivations::Vqc { leader, .. })
+            | Some(CertificateDerivations::Lqc { leader, .. }) => Some(*leader),
+            None => None,
+        }
+    }
+
     fn ordered(&self) -> bool {
         self.reservations.ordered()
     }
@@ -962,7 +971,7 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
                 .or_default()
                 .insert((observation, id));
         }
-        self.register_finality_claims::<H>(id, observation, &artifact, &claim);
+        self.register_finality_claims::<H>(id, observation, &artifact, &claim, None);
         self.finality_claims.insert(id, claim);
         Ok(())
     }
@@ -1199,11 +1208,7 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
                 self.reject_finality::<H>(id, claim.artifact.as_ref())?;
             }
             ClaimVerdict::Valid => {
-                let derived_leader = match claim.derivations.as_ref() {
-                    Some(CertificateDerivations::Vqc { leader, .. })
-                    | Some(CertificateDerivations::Lqc { leader, .. }) => Some(*leader),
-                    None => None,
-                };
+                let derived_leader = claim.derived_leader();
                 let certificate_key = match claim.artifact.as_ref() {
                     Artifact::Vqc(certificate) => Some((
                         certificate.leader().round(),
@@ -1233,8 +1238,17 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
                     }
                     reservation.retained = !matches!(admission, PoolAdmission::Dropped);
                 }
-                self.remove_dropped_claims::<H>(id, claim.artifact.as_ref(), &claim)?;
-                self.register_finality_claims::<H>(id, observation, &claim.artifact, &claim);
+                // The certificate key already resolved the leader digest, so the rest of the
+                // lifecycle reuses it instead of re-encoding the leader block three more times.
+                let leader = certificate_key.map(|(_, leader)| leader);
+                self.remove_dropped_claims::<H>(id, claim.artifact.as_ref(), &claim, leader)?;
+                self.register_finality_claims::<H>(
+                    id,
+                    observation,
+                    &claim.artifact,
+                    &claim,
+                    leader,
+                );
                 if matches!(claim.artifact.as_ref(), Artifact::Lqc(_)) {
                     outputs.push(FinalityOutput::Finality(
                         id,
@@ -1291,31 +1305,45 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
         observation: Observation,
         artifact: &Artifact<V, D>,
         batch: &FinalityClaim<V, D>,
+        leader: Option<D>,
     ) {
         let leader_key = match artifact {
-            Artifact::LeaderBlock(block) => {
-                Some((block.block().round(), block.block().digest::<H>()))
-            }
+            Artifact::LeaderBlock(block) => Some((
+                block.block().round(),
+                leader.unwrap_or_else(|| block.block().digest::<H>()),
+            )),
             Artifact::Vqc(certificate) => Some((
                 certificate.leader().round(),
-                certificate.leader().digest::<H>(),
+                leader.unwrap_or_else(|| certificate.leader().digest::<H>()),
             )),
             Artifact::Lqc(certificate) => Some((
                 certificate.leader().round(),
-                certificate.leader().digest::<H>(),
+                leader.unwrap_or_else(|| certificate.leader().digest::<H>()),
             )),
             _ => None,
         };
         if let Some(key) = leader_key.filter(|key| batch.retains(*key)) {
             self.finality_pool_claims.entry(key).or_default().insert(id);
         }
-        artifact.visit_finality_vote_claims::<H>(|claim| {
+        // A certificate's tallied signers all share the designated pool, so the retention test
+        // and the pool-claim insert are settled once per distinct key rather than per signer.
+        let certificate = matches!(artifact, Artifact::Vqc(_) | Artifact::Lqc(_));
+        let mut settled: Option<(PoolKey<D>, bool)> = None;
+        artifact.visit_finality_vote_claims_for::<H>(leader, |claim| {
             let key = claim.pool();
-            if !batch.retains(key) {
+            let retained = match settled {
+                Some((previous, retained)) if previous == key => retained,
+                _ => {
+                    let retained = batch.retains(key);
+                    settled = Some((key, retained));
+                    if retained && certificate {
+                        self.finality_pool_claims.entry(key).or_default().insert(id);
+                    }
+                    retained
+                }
+            };
+            if !retained {
                 return;
-            }
-            if matches!(artifact, Artifact::Vqc(_) | Artifact::Lqc(_)) {
-                self.finality_pool_claims.entry(key).or_default().insert(id);
             }
             self.pending_finality
                 .entry(key)
@@ -1332,7 +1360,7 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
         if self.is_retired(artifact) {
             return Ok(());
         }
-        self.release_unretained_finality::<H, _>(id, artifact, |_| false)
+        self.release_unretained_finality::<H, _>(id, artifact, None, |_| false)
     }
 
     fn remove_dropped_claims<H: Hasher<Digest = D>>(
@@ -1340,14 +1368,16 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
         id: ArtifactId<D>,
         artifact: &Artifact<V, D>,
         claim: &FinalityClaim<V, D>,
+        leader: Option<D>,
     ) -> Result<(), FinalityError> {
-        self.release_unretained_finality::<H, _>(id, artifact, |key| claim.retains(key))
+        self.release_unretained_finality::<H, _>(id, artifact, leader, |key| claim.retains(key))
     }
 
     fn release_unretained_finality<H, F>(
         &mut self,
         id: ArtifactId<D>,
         artifact: &Artifact<V, D>,
+        leader: Option<D>,
         retained: F,
     ) -> Result<(), FinalityError>
     where
@@ -1355,7 +1385,10 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
         F: Fn(PoolKey<D>) -> bool,
     {
         if let Artifact::LeaderBlock(block) = artifact {
-            let key = (block.block().round(), block.block().digest::<H>());
+            let key = (
+                block.block().round(),
+                leader.unwrap_or_else(|| block.block().digest::<H>()),
+            );
             if retained(key) {
                 return Ok(());
             }
@@ -1365,16 +1398,29 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
             self.settle_pool::<H>(key)?;
         }
 
+        // The retention test and the pool-claim release are settled once per distinct key: every
+        // tallied signer of a certificate shares the designated pool.
         let mut result = Ok(());
-        artifact.visit_finality_vote_claims::<H>(|claim| {
+        let mut settled: Option<(PoolKey<D>, bool)> = None;
+        artifact.visit_finality_vote_claims_for::<H>(leader, |claim| {
             if result.is_err() {
                 return;
             }
             let key = claim.pool();
-            if retained(key) {
+            let release = match settled {
+                Some((previous, release)) if previous == key => release,
+                _ => {
+                    let release = !retained(key);
+                    settled = Some((key, release));
+                    if release {
+                        self.release_pool_claim(key, id);
+                    }
+                    release
+                }
+            };
+            if !release {
                 return;
             }
-            self.release_pool_claim(key, id);
             if let Some(pending) = self.pending_finality.get_mut(&key) {
                 pending.remove_claim(claim.signer(), id);
                 pending.remove_candidate(claim.signer(), id);
@@ -1406,16 +1452,31 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
                     id,
                     observation,
                     block.block().clone(),
+                    Some(key.1),
                     claim.retains(key),
                 )?;
             }
             Artifact::Vqc(certificate) => {
-                self.observe_leader::<H>(id, observation, certificate.leader().clone(), true)?;
+                let derived = claim.derived_leader();
+                self.observe_leader::<H>(
+                    id,
+                    observation,
+                    certificate.leader().clone(),
+                    derived,
+                    true,
+                )?;
                 let derivations = claim.derivations.take();
                 self.observe_vqc::<H>(id, observation, certificate, claim, derivations)?;
             }
             Artifact::Lqc(certificate) => {
-                self.observe_leader::<H>(id, observation, certificate.leader().clone(), true)?;
+                let derived = claim.derived_leader();
+                self.observe_leader::<H>(
+                    id,
+                    observation,
+                    certificate.leader().clone(),
+                    derived,
+                    true,
+                )?;
                 let derivations = claim.derivations.take();
                 self.observe_lqc::<H>(id, observation, certificate, derivations)?;
             }
@@ -1692,9 +1753,10 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
         source: ArtifactId<D>,
         observation: Observation,
         leader: LeaderBlock<V, D>,
+        digest: Option<D>,
         retained: bool,
     ) -> Result<(), FinalityError> {
-        let key = (leader.round(), leader.digest::<H>());
+        let key = (leader.round(), digest.unwrap_or_else(|| leader.digest::<H>()));
         if !retained {
             self.release_pool_claim(key, source);
             self.discard_unretained_pool(key);
