@@ -444,7 +444,7 @@ pub fn run_scenario<P: Simplex>(
     let byzantine_policy = input.byzantine_policy;
     let actions = input.actions.clone();
     let rng = FuzzRng::new(input.raw_bytes.clone());
-    let cfg = deterministic::Config::new().with_rng(Box::new(rng));
+    let cfg = deterministic::Config::new().with_rng(rng);
     let executor = deterministic::Runner::new(cfg);
     let fault_bytes = input.raw_bytes.clone();
 

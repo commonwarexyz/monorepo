@@ -374,7 +374,7 @@ async fn drive_post_prune_window(
 }
 
 fn fuzz(data: FuzzInput) {
-    let cfg = deterministic::Config::new().with_rng(Box::new(FuzzRng::new(data.raw_bytes)));
+    let cfg = deterministic::Config::new().with_rng(FuzzRng::new(data.raw_bytes));
     let runner = deterministic::Runner::new(cfg);
 
     runner.start(|context| async move {

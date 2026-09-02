@@ -302,6 +302,11 @@ impl Blocker for FuzzBlocker {
     fn block(&mut self, _peer: Self::PublicKey) -> Feedback {
         Feedback::Ok
     }
+
+    fn blocked(&mut self) -> commonware_p2p::BlockedSubscription<Self::PublicKey> {
+        let (_, receiver) = commonware_utils::channel::ring::channel(commonware_utils::NZUsize!(1));
+        receiver
+    }
 }
 
 #[derive(Debug)]
@@ -615,7 +620,7 @@ fn start_engine(
 }
 
 fn fuzz(input: FuzzInput) {
-    let cfg = deterministic::Config::new().with_rng(Box::new(FuzzRng::new(input.raw_bytes)));
+    let cfg = deterministic::Config::new().with_rng(FuzzRng::new(input.raw_bytes));
     let executor = deterministic::Runner::new(cfg);
 
     executor.start(|mut context| async move {

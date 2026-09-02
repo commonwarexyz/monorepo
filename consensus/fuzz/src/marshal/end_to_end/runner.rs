@@ -342,7 +342,7 @@ fn run_standard_disrupter<P: Simplex>(
     broadcast_fault: Option<block_disrupter::MarshalBroadcastFault>,
 ) {
     let rng = FuzzRng::new(input.raw_bytes.clone());
-    let cfg = deterministic::Config::new().with_rng(Box::new(rng));
+    let cfg = deterministic::Config::new().with_rng(rng);
     let executor = deterministic::Runner::new(cfg);
 
     // Only the block-dissemination target honors the fuzzed term length (its
@@ -568,7 +568,7 @@ where
     SchemeOf<P>: SimplexScheme<CommitmentOf<P>>,
 {
     let rng = FuzzRng::new(input.raw_bytes.clone());
-    let cfg = deterministic::Config::new().with_rng(Box::new(rng));
+    let cfg = deterministic::Config::new().with_rng(rng);
     let executor = deterministic::Runner::new(cfg);
 
     executor.start(|mut context| async move {

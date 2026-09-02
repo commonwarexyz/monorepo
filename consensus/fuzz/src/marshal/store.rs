@@ -385,7 +385,7 @@ fn assert_returned_block(block: &B, returned: B, label: &str) {
 /// not checked. App: none (plain delivery sink).
 pub fn fuzz_marshal_actor_store(input: MarshalActorStoreInput) {
     let rng = FuzzRng::new(input.raw_bytes.clone());
-    let cfg = deterministic::Config::new().with_rng(Box::new(rng));
+    let cfg = deterministic::Config::new().with_rng(rng);
     let executor = deterministic::Runner::new(cfg);
 
     executor.start(|mut context| async move {

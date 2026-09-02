@@ -140,7 +140,7 @@ where
     M::Wrapper: Clone + Send + 'static,
 {
     let rng = FuzzRng::new(input.raw_bytes.clone());
-    let config = deterministic::Config::new().with_rng(Box::new(rng));
+    let config = deterministic::Config::new().with_rng(rng);
     let executor = deterministic::Runner::new(config);
 
     executor.start(|mut context| async move {

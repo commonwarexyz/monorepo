@@ -12,21 +12,16 @@ use commonware_storage::journal::{
         fixed::{Config as JournalConfig, Journal},
     },
 };
-use commonware_utils::{FuzzRng, NZU16, NZU64, NZUsize};
+use commonware_storage_fuzz::bounded_buffer;
+use commonware_utils::{NZU16, NZU64, NZUsize};
 use futures::{StreamExt, pin_mut};
 use libfuzzer_sys::fuzz_target;
 use std::num::NonZeroU16;
 
-const MAX_REPLAY_BUF: usize = 2048;
 const MAX_WRITE_BUF: usize = 2048;
 const MAX_OPERATIONS: usize = 50;
 const MAX_APPEND_MANY: u8 = 20;
 const MAX_READ_MANY: usize = 16;
-
-fn bounded_non_zero(u: &mut Unstructured<'_>) -> Result<usize> {
-    let v = u.int_in_range(1..=MAX_REPLAY_BUF)?;
-    Ok(v)
-}
 
 fn bounded_append_count(u: &mut Unstructured<'_>) -> Result<u8> {
     u.int_in_range(0..=MAX_APPEND_MANY)
@@ -68,7 +63,7 @@ enum JournalOperation {
         min_pos: u64,
     },
     Replay {
-        #[arbitrary(with = bounded_non_zero)]
+        #[arbitrary(with = bounded_buffer)]
         buffer: usize,
         start_pos: u64,
     },
@@ -105,7 +100,6 @@ enum JournalOperation {
 #[derive(Debug)]
 struct FuzzInput {
     ops: Vec<JournalOperation>,
-    raw_bytes: Vec<u8>,
 }
 
 impl<'a> Arbitrary<'a> for FuzzInput {
@@ -114,8 +108,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
         let ops = (0..num_ops)
             .map(|_| JournalOperation::arbitrary(u))
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        let raw_bytes = u.bytes(u.len())?.to_vec();
-        Ok(FuzzInput { ops, raw_bytes })
+        Ok(FuzzInput { ops })
     }
 }
 
@@ -149,8 +142,7 @@ async fn reopen(
 }
 
 fn fuzz(input: FuzzInput) {
-    let cfg = deterministic::Config::new().with_rng(Box::new(FuzzRng::new(input.raw_bytes)));
-    let runner = deterministic::Runner::new(cfg);
+    let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
         let cfg = JournalConfig {

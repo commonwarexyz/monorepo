@@ -10,7 +10,7 @@ use commonware_storage::merkle::{
     Bagging::ForwardFold, Error, Family as MerkleFamily, Location, LocationRangeExt as _, Position,
     full::Config, hasher::Standard, mem::Mem, mmb, mmr,
 };
-use commonware_utils::{FuzzRng, NZU16, NZU64, NZUsize, non_empty_range};
+use commonware_utils::{NZU16, NZU64, NZUsize, non_empty_range};
 use libfuzzer_sys::fuzz_target;
 use std::num::NonZeroU16;
 
@@ -22,53 +22,31 @@ const ITEMS_PER_BLOB: u64 = 7;
 
 #[derive(Arbitrary, Debug, Clone)]
 enum Operation {
-    Add {
-        data: Vec<u8>,
-    },
-    AddBatched {
-        items: Vec<Vec<u8>>,
-    },
-    GetNode {
-        pos: u64,
-    },
-    Proof {
-        location: u64,
-    },
-    RangeProof {
-        start_loc: u8,
-        end_loc: u8,
-    },
-    HistoricalRangeProof {
-        start_loc: u8,
-        end_loc: u8,
-    },
+    Add { data: Vec<u8> },
+    AddBatched { items: Vec<Vec<u8>> },
+    GetNode { pos: u64 },
+    Proof { location: u64 },
+    RangeProof { start_loc: u8, end_loc: u8 },
+    HistoricalRangeProof { start_loc: u8, end_loc: u8 },
     Sync,
     PruneAll,
-    PruneToPos {
-        pos: u64,
-    },
+    PruneToPos { pos: u64 },
     GetRoot,
     GetSize,
     GetLeaves,
     GetPrunedToPos,
     GetOldestRetainedPos,
     Reinit,
-    InitSync {
-        lower_bound_seed: u16,
-        upper_bound_seed: u16,
-    },
+    InitSync { lower_bound: u16, upper_bound: u16 },
 }
 
 #[derive(Debug)]
 struct FuzzInput {
-    raw_bytes: Vec<u8>,
     operations: Vec<Operation>,
 }
 
 impl<'a> Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-        let raw_len = u.len().min(8);
-        let raw_bytes = u.bytes(raw_len)?.to_vec();
         let num_ops = u.int_in_range(1..=MAX_OPERATIONS)?;
         let mut operations = Vec::with_capacity(num_ops);
 
@@ -76,10 +54,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
             operations.push(u.arbitrary()?);
         }
 
-        Ok(FuzzInput {
-            raw_bytes,
-            operations,
-        })
+        Ok(FuzzInput { operations })
     }
 }
 
@@ -116,9 +91,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
     type Merkle<F, E, D> = commonware_storage::merkle::full::Merkle<F, E, D, Sequential>;
     type SyncConfig<F, D> = commonware_storage::merkle::full::SyncConfig<F, D, Sequential>;
 
-    let cfg =
-        deterministic::Config::new().with_rng(Box::new(FuzzRng::new(input.raw_bytes.clone())));
-    let runner = deterministic::Runner::new(cfg);
+    let runner = deterministic::Runner::default();
 
     runner.start(|context| {
         let operations = input.operations.clone();
@@ -262,8 +235,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                         let requested_leaves = if historical_sizes.is_empty() {
                             merkle.leaves()
                         } else {
-                            let seed = (start_loc + end_loc) as usize;
-                            let idx = seed % historical_sizes.len();
+                            let idx = (start_loc + end_loc) as usize % historical_sizes.len();
                             historical_sizes[idx]
                         };
                         let expected_root = historical_root::<F>(&leaves, requested_leaves);
@@ -362,16 +334,16 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                     }
 
                     Operation::InitSync {
-                        lower_bound_seed,
-                        upper_bound_seed,
+                        lower_bound,
+                        upper_bound,
                     } => {
                         const MAX_RANGE_SIZE: u64 = 1000;
 
                         let lower_bound_loc =
-                            Location::<F>::new(lower_bound_seed as u64 % MAX_RANGE_SIZE);
+                            Location::<F>::new(lower_bound as u64 % MAX_RANGE_SIZE);
                         // +1 to ensure the range is non-empty
                         let upper_bound_loc = Location::<F>::new(
-                            *(lower_bound_loc + ((upper_bound_seed as u64) % MAX_RANGE_SIZE) + 1),
+                            *(lower_bound_loc + ((upper_bound as u64) % MAX_RANGE_SIZE) + 1),
                         );
 
                         let sync_suffix = format!("{suffix}-sync");

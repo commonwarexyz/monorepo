@@ -5254,7 +5254,7 @@ mod tests {
 
     /// Reduced from a fuzzer counterexample: a parent deletes keys whose buckets the child
     /// later touches, and building the child on the pending parent must produce the same
-    /// root as building it on the applied parent. The final key-value state is identical
+    /// root as building it on the committed parent. The final key-value state is identical
     /// either way; a divergence means the emitted operation streams (next-key pointers or
     /// floor moves) depended on whether the parent was pending.
     #[test]
@@ -5285,10 +5285,9 @@ mod tests {
             let (db, _) = db.apply_batch(initial).await.unwrap();
             let db = db.commit().await.unwrap();
 
-            // Parent: a no-op delete and a live delete in bucket 3, plus a create in bucket 1.
+            // Parent: delete the bucket-3 key and create in bucket 1.
             let parent = db
                 .new_batch()
-                .write(colliding_digest(3, 11), None)
                 .write(colliding_digest(3, 31), None)
                 .write(colliding_digest(1, 9), Some(v(2)))
                 .merkleize(&db, None)
@@ -5320,7 +5319,108 @@ mod tests {
             assert_eq!(
                 pending_child.root(),
                 committed_child.root(),
-                "child root depended on pending-vs-applied parent path"
+                "child root depended on pending-vs-committed parent path"
+            );
+            assert_eq!(
+                pending_child.total_active_keys,
+                committed_child.total_active_keys
+            );
+
+            let (db, _) = db.apply_batch(pending_child).await.unwrap();
+            assert_eq!(
+                db.root(),
+                committed_child.root(),
+                "applied pending child root diverged"
+            );
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Pins the stale-ancestor guard's position above the classifier's candidate pushes.
+    ///
+    /// The classifier resolves each mutated key's prior state by scanning its translated
+    /// bucket in the committed snapshot, and the same loop pushes each entry it examines
+    /// into the next/prev candidate sets that stitch the ordered links. In this scenario the
+    /// child updates a sibling that collides with a parent-deleted key, so the scan pulls
+    /// the deleted key's stale committed location into the loop. The guard skips the stale
+    /// entry, and it must do so before the candidate pushes: a stale prev-candidate makes
+    /// `find_prev_key`'s wrap-around land on the deleted key, whose rewrite is then skipped
+    /// as batch-created, and the true predecessor's rewrite is emitted at a different stream
+    /// position than on the committed path, so the roots diverge with identical key-value
+    /// data.
+    #[test]
+    fn ordered_stale_classifier_candidates_root_matches() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            type TestDb = OrderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+
+            let config = fixed_db_config::<OneCap>("ordered-stale-classifier", &context);
+            let db = TestDb::init(context, config).await.unwrap();
+
+            let v = |n| colliding_digest(0xB0, n);
+            let initial = db
+                .new_batch()
+                .write(colliding_digest(1, 9), Some(v(0)))
+                .write(colliding_digest(3, 10), Some(v(1)))
+                .write(colliding_digest(3, 20), Some(v(2)))
+                .write(colliding_digest(3, 31), Some(v(3)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(initial).await.unwrap();
+            let db = db.commit().await.unwrap();
+
+            // Parent: delete the last key of bucket 3.
+            let parent = db
+                .new_batch()
+                .write(colliding_digest(3, 31), None)
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            // Child: update a colliding sibling (pulling the deleted key's stale committed
+            // location into the classifier's read set), re-create the deleted key, and
+            // create keys whose predecessor searches consult the candidate sets.
+            let pending_child = parent
+                .new_batch::<Sha256>()
+                .write(colliding_digest(3, 10), Some(v(4)))
+                .write(colliding_digest(3, 31), Some(v(5)))
+                .write(colliding_digest(1, 20), Some(v(6)))
+                .write(colliding_digest(0, 0), Some(v(7)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            let (db, _) = db.apply_batch(parent).await.unwrap();
+            let db = db.commit().await.unwrap();
+
+            let committed_child = db
+                .new_batch()
+                .write(colliding_digest(3, 10), Some(v(4)))
+                .write(colliding_digest(3, 31), Some(v(5)))
+                .write(colliding_digest(1, 20), Some(v(6)))
+                .write(colliding_digest(0, 0), Some(v(7)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            assert_eq!(
+                pending_child.root(),
+                committed_child.root(),
+                "child root depended on pending-vs-committed parent path"
+            );
+            assert_eq!(
+                pending_child.total_active_keys,
+                committed_child.total_active_keys
             );
 
             let (db, _) = db.apply_batch(pending_child).await.unwrap();
@@ -5401,7 +5501,7 @@ mod tests {
             assert_eq!(
                 pending_child.root(),
                 committed_child.root(),
-                "child root depended on pending-vs-applied parent path"
+                "child root depended on pending-vs-committed parent path"
             );
             let (db, _) = db.apply_batch(pending_child).await.unwrap();
             assert_eq!(db.root(), committed_child.root());

@@ -2,7 +2,7 @@
 
 use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::cache::{Cache, Config};
-use commonware_utils::{FuzzRng, NZU64, NZUsize};
+use commonware_utils::{NZU64, NZUsize};
 use libfuzzer_sys::{
     arbitrary::{Arbitrary, Unstructured},
     fuzz_target,
@@ -50,16 +50,12 @@ struct CacheConfig {
 
 #[derive(Clone, Debug)]
 struct FuzzInput {
-    raw_bytes: Vec<u8>,
     config: CacheConfig,
     operations: Vec<Operation>,
 }
 
 impl<'a> Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut Unstructured<'a>) -> Result<Self, libfuzzer_sys::arbitrary::Error> {
-        let raw_len = u.len().min(8);
-        let raw_bytes = u.bytes(raw_len)?.to_vec();
-
         let items_per_blob =
             (u16::arbitrary(u)? as u64 % MAX_ITEMS_PER_BLOB).max(MIN_ITEMS_PER_BLOB);
         let write_buffer = (u16::arbitrary(u)? as usize % MAX_WRITE_BUFFER).max(MIN_WRITE_BUFFER);
@@ -117,17 +113,12 @@ impl<'a> Arbitrary<'a> for FuzzInput {
             operations.push(op);
         }
 
-        Ok(FuzzInput {
-            raw_bytes,
-            config,
-            operations,
-        })
+        Ok(FuzzInput { config, operations })
     }
 }
 
 fn fuzz(input: FuzzInput) {
-    let cfg = deterministic::Config::new().with_rng(Box::new(FuzzRng::new(input.raw_bytes)));
-    let executor = deterministic::Runner::new(cfg);
+    let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         let cfg = Config {
             partition: "fuzz-cache".into(),

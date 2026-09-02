@@ -136,7 +136,7 @@ async fn commit_pending<F: Graftable>(
 }
 
 fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
-    let cfg = deterministic::Config::new().with_rng(Box::new(FuzzRng::new(data.raw_bytes.clone())));
+    let cfg = deterministic::Config::new().with_rng(FuzzRng::new(data.raw_bytes.clone()));
     let runner = deterministic::Runner::new(cfg);
 
     let suffix = suffix.to_string();

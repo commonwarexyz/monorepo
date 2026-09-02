@@ -75,7 +75,7 @@ struct FuzzInput {
 
 fn fuzz(input: FuzzInput) {
     // Initialize the runtime
-    let cfg = deterministic::Config::new().with_rng(Box::new(FuzzRng::new(input.raw_bytes)));
+    let cfg = deterministic::Config::new().with_rng(FuzzRng::new(input.raw_bytes));
     let runner = deterministic::Runner::new(cfg);
     runner.start(|context| async move {
         // Initialize the ordinal

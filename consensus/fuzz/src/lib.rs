@@ -152,7 +152,7 @@ fn bounded_fuzz_runtime_config(
     prefix_views: u64,
 ) -> deterministic::Config {
     deterministic::Config::new()
-        .with_rng(Box::new(FuzzRng::new(raw_bytes.to_vec())))
+        .with_rng(FuzzRng::new(raw_bytes.to_vec()))
         .with_timeout(Some(fuzz_runtime_timeout(
             required_containers,
             prefix_views,

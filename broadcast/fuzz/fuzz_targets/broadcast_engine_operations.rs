@@ -351,8 +351,7 @@ fn drain_ready_subscriptions(pending: &mut Pool<'_, Subscription>) {
 }
 
 fn fuzz(input: FuzzInput) {
-    let cfg =
-        deterministic::Config::new().with_rng(Box::new(FuzzRng::new(input.raw_fuzz_bytes.clone())));
+    let cfg = deterministic::Config::new().with_rng(FuzzRng::new(input.raw_fuzz_bytes.clone()));
     let executor = deterministic::Runner::new(cfg);
     executor.start(|context| async move {
         // Generate peer identities before building the network so the initial

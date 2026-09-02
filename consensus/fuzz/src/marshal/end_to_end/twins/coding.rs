@@ -423,7 +423,7 @@ where
     .into();
     let probe_input: Arc<str> = format!("{:?}", MarshalTwinsInputDebug(&input)).into();
     let rng = FuzzRng::new(entropy.clone());
-    let cfg = deterministic::Config::new().with_rng(Box::new(rng));
+    let cfg = deterministic::Config::new().with_rng(rng);
     let executor = deterministic::Runner::new(cfg);
 
     executor.start(|mut context| async move {

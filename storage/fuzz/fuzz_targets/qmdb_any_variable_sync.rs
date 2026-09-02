@@ -179,8 +179,7 @@ fn test_config(
 }
 
 fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
-    let cfg =
-        deterministic::Config::new().with_rng(Box::new(FuzzRng::new(input.raw_bytes.clone())));
+    let cfg = deterministic::Config::new().with_rng(FuzzRng::new(input.raw_bytes.clone()));
     let runner = deterministic::Runner::new(cfg);
 
     let test_name = test_name.to_string();

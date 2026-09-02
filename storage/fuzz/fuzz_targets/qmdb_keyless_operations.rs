@@ -278,8 +278,7 @@ fn fuzz_family<F: Family, S: Strategy>(
     strategy: impl FnOnce(&deterministic::Context) -> S,
 ) {
     deterministic::Runner::default();
-    let cfg =
-        deterministic::Config::new().with_rng(Box::new(FuzzRng::new(input.raw_bytes.clone())));
+    let cfg = deterministic::Config::new().with_rng(FuzzRng::new(input.raw_bytes.clone()));
     let runner = deterministic::Runner::new(cfg);
 
     runner.start(|context| async move {

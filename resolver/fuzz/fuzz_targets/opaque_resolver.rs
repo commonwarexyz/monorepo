@@ -232,7 +232,7 @@ impl Consumer for GatedConsumer {
 }
 
 fn run(input: FuzzInput) -> String {
-    let cfg = deterministic::Config::new().with_rng(Box::new(FuzzRng::new(input.raw_bytes)));
+    let cfg = deterministic::Config::new().with_rng(FuzzRng::new(input.raw_bytes));
     let executor = deterministic::Runner::new(cfg);
     executor.start(|context| async move {
         let misses: HashMap<u8, u8> = input.misses.iter().copied().collect();
