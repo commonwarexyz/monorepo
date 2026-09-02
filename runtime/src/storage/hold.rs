@@ -1,5 +1,5 @@
-//! An exclusive hold on a storage directory, ensuring operations dispatched by
-//! a previous run never interfere with a successor.
+//! An exclusive hold on a storage directory, so no operation from a previous
+//! run is still in flight when a new run begins.
 
 use std::{
     fs::{File, OpenOptions, TryLockError},
@@ -11,36 +11,39 @@ use tracing::warn;
 
 /// Name of the hold file at the storage directory root.
 ///
-/// This never collides with stored data. Blobs live one level down inside a
-/// partition directory, so none can occupy the root, and `validate_partition_name`
-/// rejects the `.` in `.hold`, so no partition can either.
+/// It cannot collide with stored data: blobs live inside partition directories,
+/// and `validate_partition_name` rejects the `.`, so no partition can take this
+/// name.
 const HOLD_NAME: &str = ".hold";
 
 /// An exclusive hold on a storage directory, backed by an OS advisory lock on
 /// a file within it.
 ///
 /// A backend shares the hold (via [Arc]) with everything that can still touch
-/// the directory once its storage instance is gone: every blocking operation
-/// it dispatches, every blob it opened, and (for io_uring) the ring thread. The
-/// hold is released only once all of them have finished, including operations
-/// whose futures were dropped mid-flight (dropping a future does not cancel
-/// work already handed to a blocking pool or ring). [Hold::acquire] waits for
-/// that release, so a successor never observes a previous run's operations
-/// landing underneath it.
+/// the directory after its storage instance is gone. For tokio that is every
+/// blob's file handle and every dispatched blocking operation. For io_uring it
+/// is the ring thread, which the instance and every blob keep alive through
+/// their ring handles. The hold is released only once all of them have
+/// finished, including operations whose futures were dropped, since dropping a
+/// future does not cancel work already handed to a blocking pool or ring.
+/// [Hold::acquire] waits for that release.
 ///
-/// The lock is held by the open file description, not by the file's existence:
-/// the operating system releases it when the holding process exits (cleanly or
-/// not), so a crashed run never requires manual cleanup. The hold file is empty
-/// and never deleted. It is only a lock target, so the holder of a contended
-/// lock is found with the usual tools (`lsof`, `fuser`) rather than from its
-/// contents. The lock is bound to the hold file's inode: removing or recreating
-/// the storage directory while a run may still be alive voids the exclusion.
+/// The lock lives on the open file description, not the file: the OS releases
+/// it when the holding process exits, cleanly or not, so a crash needs no
+/// cleanup. Every thread of the process shares that description, so a blocking
+/// pool thread holds the lock through the same file, and exit releases it only
+/// after every thread has stopped, so an operation still running when the
+/// process dies cannot land under a successor. Child processes do not inherit
+/// it, since the file is opened close-on-exec. The file is empty and never
+/// deleted, so a contended holder is found with `lsof` or `fuser`. The lock is
+/// bound to the inode: removing or recreating the directory while a run may
+/// still be alive voids the exclusion.
 ///
 /// The guarantee is scoped to one machine and to filesystems with real
-/// advisory locks: on network filesystems (NFS, SMB, FUSE) the lock may be
-/// client-local or per process, excluding neither other machines nor other
-/// instances in the same process. A filesystem without advisory-lock support
-/// fails acquisition, which fails storage construction.
+/// advisory locks. On network filesystems (NFS, SMB, FUSE) the lock may be
+/// client-local or per process, so it may exclude neither other machines nor
+/// other instances in the same process. A filesystem that rejects the lock
+/// fails storage construction.
 pub(crate) struct Hold {
     _file: File,
 }
