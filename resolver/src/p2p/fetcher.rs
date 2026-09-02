@@ -103,9 +103,6 @@ where
     me: Option<P>,
     /// Peers the network currently blocks, replaced wholesale on every update.
     blocked: HashSet<P>,
-    /// Peers this fetcher asked the network to block that no update has confirmed
-    /// yet, so a retry cannot pick one before the block takes effect.
-    pending_blocks: HashSet<P>,
     /// Participants and their performance (throughput in bytes per second, higher is
     /// better). Stored as `Reverse` so the set orders the best-performing peer first.
     participants: PrioritySet<P, Reverse<u128>>,
@@ -192,7 +189,6 @@ where
             context,
             me: config.me,
             blocked: HashSet::new(),
-            pending_blocks: HashSet::new(),
             participants: PrioritySet::new(),
             request_id: 0,
             active: PrioritySet::new(),
@@ -243,7 +239,7 @@ where
         // Collect eligible peers
         let mut eligible: Vec<P> = participant_iter
             .filter(|(p, _)| self.me.as_ref() != Some(p)) // not self
-            .filter(|(p, _)| !self.blocked.contains(p) && !self.pending_blocks.contains(p)) // not blocked
+            .filter(|(p, _)| !self.blocked.contains(p)) // not blocked
             .filter(|(p, _)| targets.is_none_or(|t| t.contains(p))) // matches target if any
             .map(|(p, _)| p.clone())
             .collect();
@@ -454,7 +450,8 @@ where
     /// should be attributed to the peer.
     ///
     /// Targets are not removed here. The caller clears them when the logical fetch completes or
-    /// is ignored. On invalid data, the caller blocks the peer, removing it from all target sets.
+    /// is ignored. On invalid data, the caller blocks the peer, which is then skipped until the
+    /// network unblocks it.
     ///
     /// Note that this matches responses against the peer a request was already sent to. A later
     /// `reconcile()` call may remove that peer from the candidate pool for future sends, but it
@@ -498,21 +495,13 @@ where
         self.waiter = None;
     }
 
-    /// Marks a peer blocked until the network confirms or lifts the block.
-    ///
-    /// The peer keeps its place in any target sets and becomes eligible again
-    /// once an update from the network no longer lists it.
-    pub fn block(&mut self, peer: P) {
-        self.pending_blocks.insert(peer);
-    }
-
     /// Replaces the set of peers the network currently blocks.
     ///
-    /// Clears the waiter, since an unblocked peer may make a waiting fetch servable.
+    /// Blocked peers keep their place in any target sets and are skipped until
+    /// a later update no longer lists them. Clears the waiter, since an
+    /// unblocked peer may make a waiting fetch servable.
     pub fn set_blocked(&mut self, blocked: impl IntoIterator<Item = P>) {
         self.blocked = blocked.into_iter().collect();
-        self.pending_blocks
-            .retain(|peer| !self.blocked.contains(peer));
         self.waiter = None;
     }
 
@@ -565,7 +554,7 @@ where
 
     /// Returns the number of blocked peers.
     pub fn len_blocked(&self) -> usize {
-        self.blocked.union(&self.pending_blocks).count()
+        self.blocked.len()
     }
 
     /// Returns true if the fetch is in progress.
@@ -1220,13 +1209,12 @@ mod tests {
             let peer2 = PrivateKey::from_seed(2).public_key();
 
             // Test reconcile with peers
-            fetcher.reconcile(&[peer1.clone(), peer2]);
+            fetcher.reconcile(&[peer1.clone(), peer2.clone()]);
 
-            // Test block peer
-            fetcher.block(peer1);
-
-            // Initially no blocked peers (this depends on internal requester state)
-            // The len_blocked function returns the count from the requester
+            // A blocked participant is skipped without leaving the participant set.
+            fetcher.set_blocked([peer1.clone()]);
+            assert_eq!(fetcher.get_eligible_peers(&MockKey(1), false), vec![peer2]);
+            assert!(fetcher.participants.contains(&peer1));
         });
     }
 
@@ -1239,13 +1227,12 @@ mod tests {
             // Initially no blocked peers
             let initial_blocked = fetcher.len_blocked();
 
-            // Block a peer
+            // The network reports a blocked peer, then lifts the block.
             let peer = PrivateKey::from_seed(1).public_key();
-            fetcher.block(peer);
-
-            // The count should potentially increase (depends on requester implementation)
-            let after_block = fetcher.len_blocked();
-            assert!(after_block >= initial_blocked);
+            fetcher.set_blocked([peer]);
+            assert_eq!(fetcher.len_blocked(), initial_blocked + 1);
+            fetcher.set_blocked([]);
+            assert_eq!(fetcher.len_blocked(), initial_blocked);
         });
     }
 
@@ -1462,7 +1449,7 @@ mod tests {
             );
 
             // Block the peer we'll use as target, so fetch has no eligible participants
-            fetcher.block(blocked_peer.clone());
+            fetcher.set_blocked([blocked_peer.clone()]);
 
             // Add key with targets pointing only to blocked peer
             fetcher.add_ready(MockKey(1));
@@ -1797,7 +1784,7 @@ mod tests {
     }
 
     #[test]
-    fn test_block_keeps_targets_until_unblocked() {
+    fn test_blocked_peers_keep_targets_until_unblocked() {
         let runner = Runner::default();
         runner.start(|context| async move {
             let mut fetcher = create_test_fetcher::<SuccessMockSender>(context.child("fetcher"));
@@ -1809,34 +1796,18 @@ mod tests {
             fetcher.add_targets(MockKey(2), [peer1.clone(), peer2.clone()]);
 
             // A blocked peer keeps its place in every target set but is not eligible.
-            fetcher.block(peer1.clone());
+            fetcher.set_blocked([peer1.clone()]);
             assert!(fetcher.targets.get(&MockKey(1)).unwrap().contains(&peer1));
             assert!(fetcher.get_eligible_peers(&MockKey(1), false).is_empty());
-            assert_eq!(
-                fetcher.get_eligible_peers(&MockKey(2), false),
-                vec![peer2.clone()]
-            );
+            assert_eq!(fetcher.get_eligible_peers(&MockKey(2), false), vec![peer2]);
             assert_eq!(fetcher.len_blocked(), 1);
 
-            // The network confirms the block, then lifts it.
-            fetcher.set_blocked([peer1.clone()]);
-            assert!(fetcher.pending_blocks.is_empty());
-            assert!(fetcher.get_eligible_peers(&MockKey(1), false).is_empty());
+            // Lifting the block makes the peer eligible again and wakes the fetcher.
             fetcher.waiter = Some(context.current());
             fetcher.set_blocked([]);
             assert!(fetcher.waiter.is_none());
             assert_eq!(fetcher.len_blocked(), 0);
-            assert_eq!(
-                fetcher.get_eligible_peers(&MockKey(1), false),
-                vec![peer1.clone()]
-            );
-
-            // A local block stays in force until the network reports it.
-            fetcher.block(peer2.clone());
-            fetcher.set_blocked([]);
-            assert_eq!(fetcher.get_eligible_peers(&MockKey(2), false), vec![peer1]);
-            fetcher.set_blocked([peer2]);
-            assert!(fetcher.pending_blocks.is_empty());
+            assert_eq!(fetcher.get_eligible_peers(&MockKey(1), false), vec![peer1]);
         });
     }
 

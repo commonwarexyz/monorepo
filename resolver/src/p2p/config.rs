@@ -19,7 +19,11 @@ pub struct Config<
     /// Peer selection for outbound fetches is documented in the [`p2p`](crate::p2p) module.
     pub peer_provider: D,
 
-    /// The blocker that will be used to block peers that send invalid responses
+    /// The blocker that will be used to block peers that send invalid responses.
+    ///
+    /// The engine also subscribes to [`Blocker::blocked`] and skips the peers it
+    /// reports, so a blocked peer becomes eligible again once the network
+    /// unblocks it.
     pub blocker: B,
 
     /// The consumer that gets notified when data is available

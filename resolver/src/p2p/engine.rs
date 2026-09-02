@@ -532,10 +532,10 @@ where
                     return;
                 }
 
-                // If the data is invalid, block the peer and try again. The peer
-                // stays ineligible until the network reports it unblocked.
-                commonware_p2p::block!(self.blocker, peer.clone(), "invalid data received");
-                self.fetcher.block(peer);
+                // If the data is invalid, block the peer and try again. The network
+                // reports the block through the blocked subscription, which is what
+                // makes the peer ineligible until it is unblocked.
+                commonware_p2p::block!(self.blocker, peer, "invalid data received");
                 self.metrics.fetch.inc(Status::Failure);
                 self.inflight.discard_response(&key);
                 self.fetcher.add_retry(key);

@@ -73,6 +73,7 @@ pub enum Message<P: PublicKey, E: Clock> {
         from: P,
         /// The public key of the peer to unblock.
         to: P,
+        /// One-shot channel to confirm the block was lifted.
         result: oneshot::Sender<Result<(), Error>>,
     },
     Blocked {
@@ -221,7 +222,10 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
             .ok_or(Error::NetworkClosed)?
     }
 
-    /// Lift a block that `from` placed on `to`, as the network does when a block expires.
+    /// Lift a block that `from` placed on `to`.
+    ///
+    /// Simulated blocks never expire, so this stands in for the expiry an
+    /// authenticated network applies.
     pub async fn unblock(&self, from: P, to: P) -> Result<(), Error> {
         request(&self.sender, |result| Message::Unblock { from, to, result })
             .await

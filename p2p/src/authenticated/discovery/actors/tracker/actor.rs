@@ -289,11 +289,12 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             }
             Message::Block { public_key } => {
                 // Block the peer
-                self.directory.block(&public_key);
+                if self.directory.block(&public_key) {
+                    self.notify_blocked();
+                }
 
                 // Kill the peer if we're connected to it
                 self.kill_peer(&public_key);
-                self.notify_blocked();
             }
             Message::SubscribeBlocked { mut sender } => {
                 // Send the current blocked set immediately

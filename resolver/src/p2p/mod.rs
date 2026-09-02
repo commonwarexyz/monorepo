@@ -2112,7 +2112,7 @@ mod tests {
             context.sleep(Duration::from_millis(100)).await;
 
             // Start fetch with targets for both peer 2 (invalid data) and peer 3 (valid data)
-            // When peer 2 returns invalid data, only peer 2 should be removed from targets
+            // When peer 2 returns invalid data, only peer 2 should be skipped
             // Peer 3 should still be tried as a target and succeed
             mailbox1.fetch_targeted(
                 key.clone(),
@@ -2136,6 +2136,68 @@ mod tests {
                 status_metric_total(&metrics, "actor_fetch_total", "Success"),
                 1
             );
+        });
+    }
+
+    /// A blocker whose blocked-set subscription closes immediately, as test
+    /// mocks elsewhere in the workspace do.
+    #[derive(Clone)]
+    struct ClosedBlocker;
+
+    impl Blocker for ClosedBlocker {
+        type PublicKey = PublicKey;
+
+        fn block(&mut self, _peer: Self::PublicKey) -> commonware_actor::Feedback {
+            commonware_actor::Feedback::Ok
+        }
+
+        fn blocked(&mut self) -> commonware_p2p::BlockedSubscription<Self::PublicKey> {
+            let (_, receiver) = commonware_utils::channel::ring::channel(NZUsize!(1));
+            receiver
+        }
+    }
+
+    #[test_traced]
+    fn test_closed_blocked_subscription_keeps_fetching() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2]).await;
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+
+            let key = Key(1);
+            let data = Bytes::from("data for key 1");
+            let mut prod2 = Producer::default();
+            prod2.insert(key.clone(), data.clone());
+
+            let (cons1, mut cons_out1) = consumer();
+
+            // The engine keeps serving fetches when the blocked-set stream ends.
+            let scheme = schemes.remove(0);
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                ClosedBlocker,
+                scheme,
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            );
+
+            let scheme = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                dummy_consumer(),
+                prod2,
+            );
+
+            mailbox1.fetch(key.clone());
+            assert_eq!(cons_out1.recv().await.unwrap(), (key, data));
         });
     }
 

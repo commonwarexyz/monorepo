@@ -386,8 +386,9 @@ stability_scope!(BETA {
 
         /// Subscribe to the set of peers this node currently blocks.
         ///
-        /// A new subscription receives the current set promptly, and every later
-        /// value replaces the previous one as peers are blocked or unblocked.
+        /// The subscription yields the current set once the request is processed,
+        /// then a new set whenever a peer is blocked or unblocked. An unread set is
+        /// replaced by the next one, so a reader always sees the latest state.
         fn blocked(&mut self) -> BlockedSubscription<Self::PublicKey>;
     }
 });
