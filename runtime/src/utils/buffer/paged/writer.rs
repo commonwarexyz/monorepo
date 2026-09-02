@@ -30,6 +30,11 @@
 //! the write buffer or the page cache, and anything that has to reach the blob for them (a blob
 //! read, a sync, a resize, a page rewrite, a replay, a snapshot, or a seal) waits for them first.
 //!
+//! Appends to fresh pages proceed while a sync started by [Writer::start_sync] is in flight.
+//! That sync keeps its original coverage, and the writes submitted under it are covered by the
+//! next barrier. Rewriting a partial page waits when the pending barrier promises a prefix
+//! newer than the checksum already known durable.
+//!
 //! # Checksums
 //!
 //! Each physical page ends in a two-slot CRC record. The slots let a partial page be rewritten
@@ -350,13 +355,13 @@ impl<B: Blob> Writer<B> {
         let mut physical_pages = IoBufs::default();
         self.append_full_pages(&bulk, None, &mut physical_pages);
 
+        // The tip is empty, so the blob holds no partial page and the pages written below are
+        // fresh. They cannot overlap anything an in-flight sync covers, so this path submits
+        // without resolving that barrier.
         assert!(
             self.partial_page_state.is_none(),
             "an empty tip implies no partial page state"
         );
-
-        // Direct blob writes must not overtake an earlier started sync barrier.
-        self.sync_state.wait_for_pending().await?;
 
         // Cache the pages before `replace` publishes the new size, so reads of the bulk range are
         // served from the cache while the blob write is still in flight. Insert in
@@ -431,6 +436,9 @@ impl<B: Blob> Writer<B> {
     /// Appends only ever cover disjoint, increasing ranges, so submitted appends need no ordering
     /// among themselves. Everything that reads those bytes from the blob, syncs it, resizes it,
     /// or rewrites a page must settle them first.
+    ///
+    /// A submission does not wait for an in-flight sync. The only page it can share with one is
+    /// the partial tip, which [Self::flush_internal] argues stays recoverable.
     async fn submit_append(
         &mut self,
         logical: u64,
@@ -443,7 +451,7 @@ impl<B: Blob> Writer<B> {
         let handle = self
             .sync_state
             .start_write_at(&self.blob, physical, pages, WriteOptions::DONT_CACHE)
-            .await?;
+            .await;
         self.writeback.push(logical, handle.into());
         Ok(())
     }
@@ -479,12 +487,18 @@ impl<B: Blob> Writer<B> {
             return Ok(false);
         }
 
-        // A flush mutates the blob, so first resolve any outstanding start_sync barrier. Once
-        // no unsynced mutation remains, the last flushed partial state is durable and becomes
-        // the checksum the rewrite below must preserve.
-        self.sync_state.wait_for_pending().await?;
+        let submit = !write_partial_page && !sync;
+        // A partial-page rewrite must preserve both the durable prefix and any prefix an
+        // outstanding barrier promises. When those checksums differ, wait for that barrier
+        // before choosing the slot to retain. Fresh pages can be submitted immediately.
+        if !submit || self.partial_page_state != self.durable_page_state {
+            self.sync_state.wait_for_pending().await?;
+        }
         if self.sync_state.is_clean() {
             self.durable_page_state = self.partial_page_state;
+        }
+        if !submit {
+            self.settle().await?;
         }
 
         // Prepare the *physical* pages corresponding to the data in the buffer. Rewrites
@@ -501,15 +515,6 @@ impl<B: Blob> Writer<B> {
             !physical_pages.is_empty(),
             "flush work predicate must match physical page construction"
         );
-
-        // Only a plain full-page flush is submitted without waiting: it appends beyond every
-        // earlier write. A partial page is rewritten as it grows, and a durable flush must cover
-        // the appends before it, so both wait for the submitted appends to land first.
-        let submit = !write_partial_page && !sync;
-        if !submit {
-            self.settle().await?;
-        }
-
         // Split buffered bytes into full logical pages to hand off now, leaving any trailing
         // partial page in tip for continued buffering.
         let flush_offset = self.buffer.offset;
@@ -1025,8 +1030,8 @@ impl<B: Blob> Writer<B> {
     /// completion handle.
     ///
     /// Awaiting the returned [`Handle`] waits for the same durability guarantee as [`Self::sync`]
-    /// for the state flushed by this call. Later calls to [`Self::sync`] and writer methods that
-    /// mutate the blob first wait for any outstanding start_sync handles.
+    /// for the state flushed by this call. Appends to fresh pages can overlap this barrier;
+    /// rewrites preserve the checksum covering its prefix or wait for it to complete.
     pub async fn start_sync(&mut self) -> Handle<()> {
         // A durability barrier must cover the submitted appends, which the blob may not have
         // taken yet.
@@ -1233,6 +1238,10 @@ impl<B: Blob> Writer<B> {
 
     /// Wait for any started sync and every submitted append to complete without starting a new
     /// sync.
+    ///
+    /// Appends submitted while that sync was in flight are not covered by it. They have landed
+    /// once this returns, so the blob has no I/O outstanding, but they need a later
+    /// [`Self::sync`] to become durable.
     pub async fn wait_for_sync(&mut self) -> Result<(), Error> {
         self.settle().await?;
         self.sync_state.wait_for_pending().await
@@ -3052,8 +3061,9 @@ mod tests {
     }
 
     #[test_traced("DEBUG")]
-    // Verifies a large append cannot flush before pending start_sync finishes.
-    fn test_write_flush_waits_for_outstanding_start_sync() {
+    // Verifies a large append flushes while a started sync is still in flight, and that the
+    // bytes it writes are left for a later barrier.
+    fn test_write_flush_proceeds_under_outstanding_start_sync() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let inner = SyncTrackingBlob::new();
@@ -3064,29 +3074,23 @@ mod tests {
             let handle = writer.start_sync().await;
             let deferred = next_pending_sync(&pending);
 
+            // The append writes its pages without waiting for the parked sync.
             let data = vec![7; BUFFER_SIZE + PAGE_SIZE.get() as usize];
-            let append = context.child("append").spawn(move |_| async move {
-                writer.append(&data).await.unwrap();
-                writer
-            });
-            // The append has reached the pending sync wait.
-            deferred
-                .blocked
-                .await
-                .expect("append never waited on start_sync");
-            let (_, writes, full_syncs, range_syncs) = inner.snapshot();
-            assert_eq!(writes, 0);
+            writer.append(&data).await.unwrap();
+            let (durable, writes, full_syncs, range_syncs) = inner.snapshot();
+            assert!(writes > 0, "append must write under an in-flight sync");
             assert_eq!(full_syncs, 0);
             assert_eq!(range_syncs, 0);
+            assert!(durable.is_empty(), "no barrier has completed yet");
 
-            // Release the started sync so the append can flush.
+            // Releasing the started sync resolves it, and the appended bytes still need a
+            // barrier of their own.
             deferred.release.send(Ok(())).unwrap();
-            let mut writer = append.await.unwrap();
             handle.await.unwrap();
             writer.sync().await.unwrap();
-            let (_, writes, full_syncs, _) = inner.snapshot();
-            assert!(writes > 0);
+            let (durable, _, full_syncs, _) = inner.snapshot();
             assert!(full_syncs > 0);
+            assert_eq!(durable.len(), inner.size() as usize);
         });
     }
 
@@ -3236,7 +3240,7 @@ mod tests {
 
     #[test_traced("DEBUG")]
     // Verifies resize growth cannot write zeros before pending start_sync finishes.
-    fn test_resize_grow_waits_for_outstanding_start_sync_before_writing() {
+    fn test_resize_grow_proceeds_under_outstanding_start_sync() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let inner = SyncTrackingBlob::new();
@@ -3248,31 +3252,23 @@ mod tests {
             let prior = writer.start_sync().await;
             let deferred = next_pending_sync(&pending);
 
+            // Growth writes its zero-filled pages without waiting for the parked sync.
             let target_size = (BUFFER_SIZE + PAGE_SIZE.get() as usize) as u64;
-            let resize = context.child("resize_grow").spawn(move |_| async move {
-                writer.resize(target_size).await.unwrap();
-                writer
-            });
-
-            // Growth must wait before writing zero-filled pages.
-            deferred
-                .blocked
-                .await
-                .expect("resize grow never waited on start_sync");
-            let (_, writes, full_syncs, range_syncs) = inner.snapshot();
-            assert_eq!(writes, 0);
+            writer.resize(target_size).await.unwrap();
+            let (durable, writes, full_syncs, range_syncs) = inner.snapshot();
+            assert!(writes > 0, "grow must write under an in-flight sync");
             assert_eq!(full_syncs, 0);
             assert_eq!(range_syncs, 0);
+            assert!(durable.is_empty(), "no barrier has completed yet");
 
-            // Releasing the sync lets the resize complete.
+            // Releasing the sync resolves it, and the grown bytes still need their own barrier.
             deferred.release.send(Ok(())).unwrap();
-            let mut writer = resize.await.unwrap();
             prior.await.unwrap();
             assert_eq!(writer.size(), target_size);
             writer.sync().await.unwrap();
-            let (_, writes, full_syncs, _) = inner.snapshot();
-            assert!(writes > 0);
+            let (durable, _, full_syncs, _) = inner.snapshot();
             assert!(full_syncs > 0);
+            assert_eq!(durable.len(), inner.size() as usize);
         });
     }
 
@@ -6007,27 +6003,33 @@ mod tests {
         });
     }
 
+    /// Completion channel for a blob operation a test is holding back.
+    type ParkedCompletion = oneshot::Sender<Result<(), Error>>;
+
     /// One write submitted through [crate::Blob::start_write_at] and held back until a test
     /// decides it reaches the blob.
     struct ParkedWrite {
         offset: u64,
         bufs: IoBufs,
         options: WriteOptions,
-        done: oneshot::Sender<Result<(), Error>>,
+        done: ParkedCompletion,
     }
 
-    /// Blob wrapper that parks submitted writes so a test controls when they reach the blob.
+    /// Blob wrapper that parks submitted writes and started syncs so a test controls when each
+    /// reaches the blob.
     ///
-    /// Awaited writes, reads, resizes, and syncs pass straight through, so a test observes
-    /// exactly which bytes the writer defers and which operations wait for them. Each sync
-    /// records how many submitted writes had landed when it ran, which is what a durability
-    /// barrier has to cover.
+    /// Awaited writes, reads, resizes, and blocking syncs pass straight through, so a test
+    /// observes exactly which bytes the writer defers and which operations wait for them. Each
+    /// sync records how many submitted writes had landed when it started, which is what a
+    /// durability barrier has to cover. A submitted write that is never landed models a write
+    /// lost to a crash, since it never reaches the underlying blob.
     #[derive(Clone)]
     struct ParkedWriteBlob<B: Blob> {
         inner: B,
         parked: Arc<Mutex<VecDeque<ParkedWrite>>>,
         landed: Arc<AtomicUsize>,
         syncs: Arc<Mutex<Vec<usize>>>,
+        parked_syncs: Arc<Mutex<VecDeque<ParkedCompletion>>>,
     }
 
     impl<B: Blob> ParkedWriteBlob<B> {
@@ -6037,12 +6039,18 @@ mod tests {
                 parked: Arc::new(Mutex::new(VecDeque::new())),
                 landed: Arc::new(AtomicUsize::new(0)),
                 syncs: Arc::new(Mutex::new(Vec::new())),
+                parked_syncs: Arc::new(Mutex::new(VecDeque::new())),
             }
         }
 
         /// Number of submitted writes that have not reached the blob.
         fn parked(&self) -> usize {
             self.parked.lock().len()
+        }
+
+        /// Number of started syncs that have not completed.
+        fn parked_syncs(&self) -> usize {
+            self.parked_syncs.lock().len()
         }
 
         /// Number of submitted writes that have reached the blob.
@@ -6080,6 +6088,27 @@ mod tests {
             let write = self.take_oldest();
             let _ = write.done.send(Err(Error::Io(
                 std::io::Error::other("injected submitted write failure").into(),
+            )));
+        }
+
+        fn take_oldest_sync(&self) -> ParkedCompletion {
+            self.parked_syncs
+                .lock()
+                .pop_front()
+                .expect("no started sync is parked")
+        }
+
+        /// Let the oldest started sync complete.
+        async fn land_oldest_sync(&self) {
+            let done = self.take_oldest_sync();
+            let _ = done.send(self.inner.sync().await);
+        }
+
+        /// Fail the oldest started sync.
+        fn fail_oldest_sync(&self) {
+            let done = self.take_oldest_sync();
+            let _ = done.send(Err(Error::Io(
+                std::io::Error::other("injected sync failure").into(),
             )));
         }
 
@@ -6148,7 +6177,9 @@ mod tests {
 
         async fn start_sync(&self) -> Handle<()> {
             self.record_sync();
-            self.inner.start_sync().await
+            let (done, receiver) = oneshot::channel();
+            self.parked_syncs.lock().push_back(done);
+            Handle::from_receiver(receiver)
         }
     }
 
@@ -6410,6 +6441,261 @@ mod tests {
                 .unwrap()
                 .coalesce();
             assert_eq!(read.as_ref(), durable.as_slice());
+        });
+    }
+
+    /// Reopen `name` with a plain blob and return the logical bytes recovery keeps.
+    async fn recovered_bytes(context: &deterministic::Context, name: &[u8]) -> Vec<u8> {
+        let (blob, blob_size) = context.open("test_partition", name).await.unwrap();
+        let cache_ref = CacheRef::from_pooler(context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+        let writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            .await
+            .unwrap();
+        let size = writer.size() as usize;
+        if size == 0 {
+            return Vec::new();
+        }
+        writer
+            .read_at(0, size)
+            .await
+            .unwrap()
+            .coalesce()
+            .as_ref()
+            .to_vec()
+    }
+
+    #[test_traced]
+    fn test_append_does_not_wait_for_in_flight_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, mut writer) = parked_writer(&context, b"append_under_sync").await;
+
+            // Land a first append and start a barrier for it.
+            let first = page_bytes(3);
+            writer.append(&first).await.unwrap();
+            blob.land_oldest().await;
+            let barrier = writer.start_sync().await;
+            assert_eq!(blob.parked_syncs(), 1);
+
+            // A direct-path append submits without waiting for the in-flight sync.
+            let second = page_bytes(3);
+            writer
+                .append(&second)
+                .now_or_never()
+                .expect("a direct append must not wait for an in-flight sync")
+                .unwrap();
+            assert_eq!(blob.parked(), 1);
+
+            // So does an append whose buffered flush crosses a page boundary. The first two
+            // chunks stay in the write buffer and the third overflows it.
+            let mut buffered = 0;
+            for chunk in [100, 60, 60] {
+                writer
+                    .append(&vec![0xCD; chunk])
+                    .now_or_never()
+                    .expect("a buffered flush must not wait for an in-flight sync")
+                    .unwrap();
+                buffered += chunk;
+            }
+            assert_eq!(blob.parked(), 2, "the buffered flush submitted one write");
+            assert_eq!(blob.parked_syncs(), 1, "the barrier is still in flight");
+            assert_eq!(
+                writer.size(),
+                (first.len() + second.len() + buffered) as u64
+            );
+
+            // The barrier resolves without any of those writes having landed.
+            blob.land_oldest_sync().await;
+            barrier.await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_partial_rewrite_waits_for_in_flight_checksum() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, mut writer) = parked_writer(&context, b"partial_under_sync").await;
+            writer.append(&[1; 24]).await.unwrap();
+            writer.sync().await.unwrap();
+            writer.append(&[2; 8]).await.unwrap();
+            let barrier = writer.start_sync().await;
+            let promised = writer.partial_page_state;
+            assert_ne!(promised, writer.durable_page_state);
+            let page_size = PAGE_SIZE.get() as usize;
+            let before = blob
+                .inner
+                .read_at(
+                    0,
+                    page_size + CHECKSUM_SIZE as usize,
+                    ReadOptions::default(),
+                )
+                .await
+                .unwrap()
+                .coalesce();
+
+            {
+                let data = page_bytes(3);
+                let mut append = std::pin::pin!(writer.append(&data));
+                assert!(append.as_mut().now_or_never().is_none());
+                assert_eq!(blob.parked(), 0);
+                blob.land_oldest_sync().await;
+                append.await.unwrap();
+            }
+            barrier.await.unwrap();
+            blob.land_oldest().await;
+            let page = blob
+                .inner
+                .read_at(
+                    0,
+                    page_size + CHECKSUM_SIZE as usize,
+                    ReadOptions::default(),
+                )
+                .await
+                .unwrap()
+                .coalesce();
+            // The rewrite retains the checksum promised by the completed barrier.
+            let promised = promised.unwrap();
+            let record = &page.as_ref()[page_size..];
+            assert_eq!(
+                &record[promised.slot.offset()..promised.slot.offset() + CHECKSUM_SLOT_SIZE],
+                &before.as_ref()[page_size + promised.slot.offset()
+                    ..page_size + promised.slot.offset() + CHECKSUM_SLOT_SIZE],
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_in_flight_sync_covers_only_earlier_bytes() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, mut writer) = parked_writer(&context, b"sync_coverage").await;
+
+            // Land a first append and start a barrier for it.
+            let first = page_bytes(3);
+            writer.append(&first).await.unwrap();
+            blob.land_oldest().await;
+            let first_barrier = writer.start_sync().await;
+            assert_eq!(
+                blob.syncs(),
+                vec![1],
+                "the barrier covers the landed append"
+            );
+
+            // Submit a second append underneath that barrier and let the barrier finish.
+            writer.append(&page_bytes(3)).await.unwrap();
+            assert_eq!(blob.parked(), 1);
+            blob.land_oldest_sync().await;
+            first_barrier.await.unwrap();
+            assert_eq!(
+                blob.syncs(),
+                vec![1],
+                "the completed barrier never covered the later append"
+            );
+
+            // The later bytes stay unsynced until the next barrier, which settles them first.
+            let mut second_barrier = std::pin::pin!(writer.start_sync());
+            assert!(
+                second_barrier.as_mut().now_or_never().is_none(),
+                "a new barrier must settle the submitted append first"
+            );
+            blob.land_oldest().await;
+            let handle = second_barrier.await;
+            assert_eq!(
+                blob.syncs(),
+                vec![1, 2],
+                "the second barrier covers both appends"
+            );
+            blob.land_oldest_sync().await;
+            handle.await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_recovery_keeps_the_prefix_the_landed_barrier_covered() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let name = b"sync_coverage_recovery";
+            let (blob, mut writer) = parked_writer(&context, name).await;
+
+            // A first append made durable by its own barrier.
+            let first = page_bytes(3);
+            writer.append(&first).await.unwrap();
+            blob.land_oldest().await;
+            let barrier = writer.start_sync().await;
+
+            // A second append submitted while that barrier is in flight.
+            writer.append(&page_bytes(3)).await.unwrap();
+            blob.land_oldest_sync().await;
+            barrier.await.unwrap();
+            assert_eq!(blob.parked(), 1, "the later append has not landed");
+
+            // Losing the process here keeps exactly the bytes the barrier covered.
+            drop(writer);
+            assert_eq!(recovered_bytes(&context, name).await, first);
+        });
+    }
+
+    #[test_traced]
+    fn test_recovery_keeps_everything_once_the_later_barrier_lands() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let name = b"sync_coverage_recovery_full";
+            let (blob, mut writer) = parked_writer(&context, name).await;
+
+            let first = page_bytes(3);
+            writer.append(&first).await.unwrap();
+            blob.land_oldest().await;
+            let first_barrier = writer.start_sync().await;
+
+            // Submit a second append under the in-flight barrier, then complete that barrier.
+            let second = page_bytes(3);
+            writer.append(&second).await.unwrap();
+            blob.land_oldest_sync().await;
+            first_barrier.await.unwrap();
+
+            // A barrier requested afterwards settles the later append and covers it.
+            {
+                let mut second_barrier = std::pin::pin!(writer.start_sync());
+                assert!(second_barrier.as_mut().now_or_never().is_none());
+                blob.land_oldest().await;
+                let handle = second_barrier.await;
+                blob.land_oldest_sync().await;
+                handle.await.unwrap();
+            }
+
+            drop(writer);
+            let mut expected = first;
+            expected.extend_from_slice(&second);
+            assert_eq!(recovered_bytes(&context, name).await, expected);
+        });
+    }
+
+    #[test_traced]
+    fn test_failed_in_flight_sync_is_reported_at_the_next_operation() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, mut writer) = parked_writer(&context, b"sync_failure").await;
+
+            let first = page_bytes(3);
+            writer.append(&first).await.unwrap();
+            blob.land_oldest().await;
+            let barrier = writer.start_sync().await;
+
+            // Appends keep going while the barrier is in flight and cannot observe its failure,
+            // because they never wait for it.
+            writer.append(&page_bytes(3)).await.unwrap();
+            blob.fail_oldest_sync();
+            assert!(matches!(barrier.await, Err(Error::Io(_))));
+            writer
+                .append(&page_bytes(3))
+                .now_or_never()
+                .expect("an append must not wait for the failed barrier")
+                .unwrap();
+
+            // The next operation that waits for the barrier reports the failure.
+            blob.land_oldest().await;
+            blob.land_oldest().await;
+            assert!(matches!(writer.wait_for_sync().await, Err(Error::Io(_))));
         });
     }
 }

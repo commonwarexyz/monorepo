@@ -147,22 +147,30 @@ impl Writeback {
 
 /// Tracks whether blob mutations still need a sync.
 ///
-/// Callers rely on three properties:
-/// - Every operation that mutates the blob first waits for an in-flight sync, so a started
-///   sync's coverage is never disturbed by later writes.
-/// - [SyncState::start_sync] on a [SyncState::Pending] state returns the in-flight sync's
-///   handle (completed syncs resolve immediately), so re-requesting a sync is a cheap way to
-///   observe outstanding work.
+/// Callers rely on four properties:
+/// - Every operation that mutates bytes an in-flight sync covers first waits for that sync, so a
+///   started sync's coverage is never disturbed by later writes. [SyncState::start_write_at] is
+///   the sole exception: its caller guarantees the submitted write lands where a crash still
+///   recovers everything the in-flight sync promised.
+/// - [SyncState::start_sync] on a [SyncState::Pending] state whose sync covers every mutation
+///   returns that sync's handle (completed syncs resolve immediately), so re-requesting a sync is
+///   a cheap way to observe outstanding work. When writes were submitted after the sync started,
+///   a new barrier is started for them instead.
+/// - A barrier only covers submitted writes the caller has already observed, so callers must
+///   await their handles before requesting one.
 /// - A failure is never lost: every handle cloned from the shared completion reports it, and
 ///   an unobserved failure surfaces from [SyncState::wait_for_pending] on the next operation,
 ///   which also marks the state [SyncState::Dirty] since the mutations still need durability.
+///   Submitting a write does not wait for the in-flight sync, so a sync that fails while writes
+///   are being submitted is reported by the next operation that waits for it.
 enum SyncState {
     // No unsynced mutations.
     Clean,
     // Unsynced mutations need a sync.
     Dirty,
-    // A started sync is in flight.
-    Pending(Completion),
+    // A started sync is in flight. `uncovered` records whether writes submitted after it started
+    // still need a barrier of their own.
+    Pending { sync: Completion, uncovered: bool },
 }
 
 impl SyncState {
@@ -174,20 +182,34 @@ impl SyncState {
     /// Mark a new unsynced mutation.
     fn mark_dirty(&mut self) {
         assert!(
-            !matches!(self, Self::Pending(_)),
+            !matches!(self, Self::Pending { .. }),
             "pending sync must be joined before marking dirty"
         );
         *self = Self::Dirty;
     }
 
+    /// Mark an unsynced mutation submitted while a sync may still be in flight.
+    ///
+    /// The in-flight sync keeps its own coverage; this only records that the submitted write
+    /// needs a barrier of its own.
+    fn mark_uncovered(&mut self) {
+        match self {
+            Self::Pending { uncovered, .. } => *uncovered = true,
+            _ => *self = Self::Dirty,
+        }
+    }
+
     /// Wait for an in-flight sync before reusing or mutating the blob.
     async fn wait_for_pending(&mut self) -> Result<(), crate::Error> {
-        let Self::Pending(pending) = self else {
+        let Self::Pending { sync, uncovered } = self else {
             return Ok(());
         };
-        match pending.wait().await {
+        let uncovered = *uncovered;
+        let result = sync.wait().await;
+        match result {
             Ok(()) => {
-                *self = Self::Clean;
+                // Writes submitted after the sync started are still unsynced.
+                *self = if uncovered { Self::Dirty } else { Self::Clean };
                 Ok(())
             }
             Err(err) => {
@@ -230,11 +252,15 @@ impl SyncState {
                 *self = Self::Clean;
                 Ok(())
             }
-            Self::Pending(_) => unreachable!("pending sync waited above"),
+            Self::Pending { .. } => unreachable!("pending sync waited above"),
         }
     }
 
     /// Submit a write without waiting for it to land, returning a handle for its completion.
+    ///
+    /// Unlike every other mutation, this does not wait for an in-flight sync. The caller is
+    /// responsible for only submitting writes that leave the bytes that sync covers recoverable;
+    /// the paged writer's flush path documents the argument for its own writes.
     ///
     /// The caller owns the returned handle and must await it before anything that depends on the
     /// write having landed, including every durability barrier this state starts.
@@ -244,16 +270,15 @@ impl SyncState {
         offset: u64,
         bufs: impl Into<crate::IoBufs> + Send,
         options: WriteOptions,
-    ) -> Result<crate::Handle<()>, crate::Error> {
+    ) -> crate::Handle<()> {
         assert!(
             !options.contains(WriteOptions::SYNC),
             "a submitted write cannot carry its own durability"
         );
-        self.wait_for_pending().await?;
         // The write may land at any point from here on, so it needs a later sync regardless of
         // whether the caller ever observes its completion.
-        self.mark_dirty();
-        Ok(blob.start_write_at(offset, bufs, options).await)
+        self.mark_uncovered();
+        blob.start_write_at(offset, bufs, options).await
     }
 
     /// Resize the blob and require a later sync.
@@ -265,6 +290,9 @@ impl SyncState {
     }
 
     /// Make all pending mutations durable before returning.
+    ///
+    /// The barrier covers writes submitted while an earlier sync was in flight, so the caller
+    /// must have observed those writes' completion first.
     async fn sync(&mut self, blob: &impl crate::Blob) -> Result<(), crate::Error> {
         self.wait_for_pending().await?;
         if matches!(self, Self::Clean) {
@@ -276,17 +304,33 @@ impl SyncState {
     }
 
     /// Start making pending mutations durable and return a handle for completion.
+    ///
+    /// Writes submitted after the in-flight sync started are not covered by it, so this waits
+    /// for that sync and starts a barrier that does cover them. The caller must have observed
+    /// those writes' completion first.
     async fn start_sync(&mut self, blob: &impl crate::Blob) -> crate::Handle<()> {
+        if let Self::Pending { sync, uncovered } = self {
+            if !*uncovered {
+                // The in-flight sync covers every mutation, so observing it is enough.
+                return sync.handle();
+            }
+            if let Err(err) = self.wait_for_pending().await {
+                return crate::Handle::ready(Err(err));
+            }
+        }
         match self {
             Self::Clean => crate::Handle::ready(Ok(())),
             Self::Dirty => {
                 // Store a shared completion so repeated calls observe the same sync.
                 let pending = Completion::from(blob.start_sync().await);
                 let handle = pending.handle();
-                *self = Self::Pending(pending);
+                *self = Self::Pending {
+                    sync: pending,
+                    uncovered: false,
+                };
                 handle
             }
-            Self::Pending(pending) => pending.handle(),
+            Self::Pending { .. } => unreachable!("a covered sync returned above"),
         }
     }
 }
