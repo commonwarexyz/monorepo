@@ -1485,6 +1485,18 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
         !self.ready_lqcs.is_empty()
     }
 
+    /// Returns whether a local pool above `floor` already reached finality and owes an L-QC.
+    ///
+    /// Such a pool holds every vote the certificate needs, so the aggregate arrives without any
+    /// network round trip and a peer request for the same evidence would be wasted.
+    pub(crate) fn assembling_above(&self, floor: View) -> bool {
+        self.ready_lqcs.iter().any(|(_, key)| key.0.view() > floor)
+            || self
+                .lqc_aggregate_jobs
+                .values()
+                .any(|record| record.key.0.view() > floor)
+    }
+
     pub(crate) fn take_finality_effects(&mut self) -> Vec<FinalityEffect<V, D>> {
         std::mem::take(&mut self.finality_effects)
     }

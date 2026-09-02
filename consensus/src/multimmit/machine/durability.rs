@@ -1245,9 +1245,12 @@ pub enum Change<V: Variant, D: Digest> {
         /// Highest accepted certificate for the chain.
         artifact: Arc<Artifact<V, D>>,
     },
-    /// Retains one locally assembled view certificate before representative selection.
+    /// Retains one locally assembled view certificate without queuing a publication.
+    ///
+    /// V-QCs and nullifications reach peers later through representative selection. An L-QC is
+    /// local finality evidence that lagging peers fetch through resolution.
     ViewCertificateCreated {
-        /// Exact locally assembled V-QC or nullification.
+        /// Exact locally assembled V-QC, nullification, or L-QC.
         artifact: Arc<Artifact<V, D>>,
     },
     /// Durably marks and broadcasts the selected first certificate for one view.
