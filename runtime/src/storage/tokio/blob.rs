@@ -49,8 +49,10 @@ impl Cache {
     }
 }
 
-/// A blob's file together with the hold on its storage directory, so any
-/// operation that reaches the file also keeps the directory held.
+/// A blob's file bundled with the hold on its storage directory.
+///
+/// An operation must capture the file to touch it, so it carries the hold
+/// into the blocking pool without having to remember to.
 struct Held {
     file: File,
     _hold: Arc<Hold>,
