@@ -1005,6 +1005,35 @@ mod tests {
         });
     }
 
+    /// A proof requested directly from an unmerged, speculative [`MerkleizedBatch`] (i.e. before
+    /// it is applied to `base`) must succeed even when building the Merkle path for one of the
+    /// batch's own newly appended leaves requires sibling nodes that only exist in `base` --
+    /// the batch chain alone does not contain nodes committed before the fork.
+    fn speculative_proof_uses_base_fallback<F: Family>() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let hasher: H = Standard::new(ForwardFold);
+            let base = build_reference::<F>(&hasher, 50);
+            let mut batch = base.new_batch();
+            for i in 50u64..55 {
+                let element = hasher.digest(&i.to_be_bytes());
+                batch = batch.add(&hasher, &element);
+            }
+            let m = batch.merkleize(&base, &hasher);
+            let expected_root = batch_root(&base, &m, &hasher);
+
+            let loc = Location::<F>::new(52);
+            let element = hasher.digest(&52u64.to_be_bytes());
+            let proof = m.proof(&base, &hasher, loc, 0).unwrap();
+            assert!(proof.verify_element_inclusion(&hasher, &element, loc, &expected_root));
+
+            let range = Location::<F>::new(50)..Location::<F>::new(55);
+            let elements: Vec<D> = (50u64..55).map(|i| hasher.digest(&i.to_be_bytes())).collect();
+            let rp = m.range_proof(&base, &hasher, range.clone(), 0).unwrap();
+            assert!(rp.verify_range_inclusion(&hasher, &elements, range.start, &expected_root));
+        });
+    }
+
     fn empty_batch<F: Family>() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
@@ -1254,6 +1283,10 @@ mod tests {
         proof_verification::<crate::mmr::Family>();
     }
     #[test]
+    fn mmr_speculative_proof_uses_base_fallback() {
+        speculative_proof_uses_base_fallback::<crate::mmr::Family>();
+    }
+    #[test]
     fn mmr_empty_batch() {
         empty_batch::<crate::mmr::Family>();
     }
@@ -1376,6 +1409,10 @@ mod tests {
     #[test]
     fn mmb_proof_verification() {
         proof_verification::<crate::mmb::Family>();
+    }
+    #[test]
+    fn mmb_speculative_proof_uses_base_fallback() {
+        speculative_proof_uses_base_fallback::<crate::mmb::Family>();
     }
     #[test]
     fn mmb_empty_batch() {
