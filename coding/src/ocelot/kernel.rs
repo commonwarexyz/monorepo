@@ -5,6 +5,15 @@
 //! version of ocelot, need to be combined. This is perhaps less optimal than
 //! having a kernel for the exact field you need, but should not cost too much,
 //! in exchange for having code reuse between the two field sizes.
+//!
+//! # Backends
+//!
+//! Each backend lives in its own submodule, and [`with_kernel`] selects the
+//! best one available on the current CPU:
+//!
+//! - [`portable`]: scalar operations on 16 bytes at a time, with no platform
+//!   requirements. This is the fallback when nothing better is available, and
+//!   the reference other backends are tested against.
 
 pub mod portable;
 
