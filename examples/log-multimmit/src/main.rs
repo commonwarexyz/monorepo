@@ -344,8 +344,16 @@ struct RunConfig {
     log_level: Level,
 }
 
+/// Consumes the total order: stamps this producer's ordering latency, then hands the block to
+/// the configured sink.
 #[derive(Clone)]
-enum ApplicationReporter {
+struct ApplicationReporter {
+    latency: application::ProposalLatency,
+    sink: OrderedSink,
+}
+
+#[derive(Clone)]
+enum OrderedSink {
     Headless(application::NoopReporter),
     Gui(gui::OrderedReporter),
 }
@@ -354,9 +362,11 @@ impl Reporter for ApplicationReporter {
     type Activity = Update<application::Block>;
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
-        match self {
-            Self::Headless(reporter) => reporter.report(activity),
-            Self::Gui(reporter) => reporter.report(activity),
+        let Update::Block { block, .. } = &activity;
+        self.latency.order(block.reference());
+        match &mut self.sink {
+            OrderedSink::Headless(reporter) => reporter.report(activity),
+            OrderedSink::Gui(reporter) => reporter.report(activity),
         }
     }
 }
@@ -807,10 +817,19 @@ fn main() {
         );
         let resolver_handle = resolver_engine.start(marshal_resolver);
         let application_context = context.child("application");
-        let application_reporter = gui.as_ref().map_or(
-            ApplicationReporter::Headless(application::NoopReporter),
-            |(_, _, reporter)| ApplicationReporter::Gui(reporter.clone()),
-        );
+        // Match the in-memory body window to consensus's bound on live publication effects.
+        let profile = profile(&committee, index, config.frontier_proposals);
+        let publication_retention = NonZeroUsize::new(profile.resources().max_outbox_effects())
+            .expect("the consensus outbox bound is non-zero");
+        let application_metrics =
+            application::ApplicationMetrics::new(&application_context, publication_retention);
+        let application_reporter = ApplicationReporter {
+            latency: application_metrics.proposal_latency.clone(),
+            sink: gui.as_ref().map_or(
+                OrderedSink::Headless(application::NoopReporter),
+                |(_, _, reporter)| OrderedSink::Gui(reporter.clone()),
+            ),
+        };
         let (marshal, marshal_handle) = marshal_service.start(
             resolver_mailbox,
             CommitteeVerifier(
@@ -821,15 +840,9 @@ fn main() {
             application_reporter,
         );
 
-        // Match the in-memory body window to consensus's bound on live publication effects.
-        let profile = profile(&committee, index, config.frontier_proposals);
-        let publication_retention = NonZeroUsize::new(profile.resources().max_outbox_effects())
-            .expect("the consensus outbox bound is non-zero");
         let producer_chain = profile
             .protocol()
             .producer_chain(Participant::from_usize(index));
-        let application_metrics =
-            application::ApplicationMetrics::new(&application_context, publication_retention);
 
         // The automaton owns bodies; consensus receives only their canonical header digests.
         let application = application::Application::new(

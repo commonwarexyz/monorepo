@@ -111,53 +111,69 @@ pub type Block = TransactionBlock<Sha256, Body>;
 /// Marshal facade shared by the application and consensus reporter.
 pub type Marshal = Mailbox<Sha256, MinPk, Body, ed25519::PublicKey>;
 
-type ProposalStarts = VecDeque<(BlockRef<Sha256Digest>, SystemTime)>;
+/// One of this producer's blocks awaiting its consensus milestones.
+struct ProposalStart {
+    block: BlockRef<Sha256Digest>,
+    started_at: SystemTime,
+    finalized: bool,
+}
 
-/// Tracks temporary proposal-to-consensus-finality latency for the example dashboard.
+/// Tracks a producer's blocks from build to consensus finality and to ordered delivery.
+///
+/// Finality is the pool fact that places the block under a directly finalized leader. Ordering
+/// is the block's delivery in the total order, the point DAG-based protocols report as commit
+/// latency. A start is kept until the block is ordered or evicted.
 #[derive(Clone)]
 pub struct ProposalLatency {
-    started: Arc<Mutex<ProposalStarts>>,
+    started: Arc<Mutex<VecDeque<ProposalStart>>>,
     capacity: usize,
-    latency: Histogram,
+    finality: Histogram,
+    ordering: Histogram,
     dropped: Counter,
 }
 
 impl ProposalLatency {
-    /// Registers the proposal latency histogram.
+    /// Registers the proposal latency histograms.
     pub fn new(context: &impl Metrics, capacity: NonZeroUsize) -> Self {
         Self {
             started: Arc::new(Mutex::new(VecDeque::new())),
             capacity: capacity.get(),
-            latency: context.histogram(
+            finality: context.histogram(
                 "proposal_finalization_latency",
-                "time from proposal preparation to inclusion by a directly finalized leader",
+                "time from block build to inclusion by a directly finalized leader",
+                LATENCY,
+            ),
+            ordering: context.histogram(
+                "proposal_ordering_latency",
+                "time from block build to delivery in the total order",
                 LATENCY,
             ),
             dropped: context.counter(
-                "proposal_finalization_dropped_total",
-                "proposal latency samples dropped before direct finality",
+                "proposal_latency_dropped_total",
+                "proposal latency samples evicted before ordered delivery",
             ),
         }
     }
 
     fn start(&self, block: BlockRef<Sha256Digest>, started_at: SystemTime) {
         let mut started = self.started.lock();
-        if started.iter().any(|(reference, _)| *reference == block) {
+        if started.iter().any(|start| start.block == block) {
             return;
         }
         while started.len() >= self.capacity {
             started.pop_front();
             self.dropped.inc();
         }
-        started.push_back((block, started_at));
+        started.push_back(ProposalStart {
+            block,
+            started_at,
+            finalized: false,
+        });
     }
 
     fn cancel(&self, block: BlockRef<Sha256Digest>) {
         let mut started = self.started.lock();
-        if let Some(index) = started
-            .iter()
-            .position(|(reference, _)| *reference == block)
-        {
+        if let Some(index) = started.iter().position(|start| start.block == block) {
             started.remove(index);
         }
     }
@@ -186,17 +202,30 @@ impl ProposalLatency {
             finalized
         };
         let mut samples = Vec::new();
-        self.started.lock().retain(|(reference, started_at)| {
-            if finalized.contains(reference) {
-                samples.push(*started_at);
-                false
-            } else {
-                true
+        for start in self.started.lock().iter_mut() {
+            if !start.finalized && finalized.contains(&start.block) {
+                start.finalized = true;
+                samples.push(start.started_at);
             }
-        });
+        }
         let now = SystemTime::now();
         for started_at in samples {
-            self.latency.observe_between(started_at, now);
+            self.finality.observe_between(started_at, now);
+        }
+    }
+
+    /// Records the ordered delivery of `block` and forgets its start.
+    pub fn order(&self, block: BlockRef<Sha256Digest>) {
+        let start = {
+            let mut started = self.started.lock();
+            started
+                .iter()
+                .position(|start| start.block == block)
+                .and_then(|index| started.remove(index))
+        };
+        if let Some(start) = start {
+            self.ordering
+                .observe_between(start.started_at, SystemTime::now());
         }
     }
 }
@@ -361,7 +390,6 @@ impl<E: Clock + Spawner> Automaton for Application<E> {
         let marshal = self.marshal.clone();
         let staged = self.staged.clone();
         let proposal_latency = self.metrics.proposal_latency.clone();
-        let started_at = SystemTime::now();
         let (mut sender, receiver) = oneshot::channel();
         // Pace this producer to its interval: the next build starts no earlier than the
         // interval after the previous one began.
@@ -382,6 +410,9 @@ impl<E: Clock + Spawner> Automaton for Application<E> {
                     _ = sender.closed() => return,
                     () = runtime.sleep_until(next_build) => {},
                 }
+                // Latency is measured from the moment the block is built, not from the
+                // request: the pacing wait above is production policy, not consensus time.
+                let started_at = runtime.current();
                 let block = Arc::new(TransactionBlock::from_context(
                     context,
                     Body::junk(seed, context, body_size),
@@ -614,7 +645,7 @@ mod tests {
             }
             let started = latency.started.lock();
             assert_eq!(started.len(), 2);
-            assert_eq!(started.front().unwrap().0.height(), Height::new(2));
+            assert_eq!(started.front().unwrap().block.height(), Height::new(2));
         });
     }
 
@@ -642,9 +673,9 @@ mod tests {
             }
 
             let started = latency.started.lock();
-            assert!(!started.iter().any(|(reference, _)| *reference == old));
-            assert!(started.iter().any(|(reference, _)| *reference == newer));
-            assert!(started.iter().any(|(reference, _)| *reference == newest));
+            assert!(!started.iter().any(|start| start.block == old));
+            assert!(started.iter().any(|start| start.block == newer));
+            assert!(started.iter().any(|start| start.block == newest));
         });
     }
 
@@ -678,10 +709,12 @@ mod tests {
                     .started
                     .lock()
                     .iter()
-                    .any(|(reference, _)| *reference == left.reference())
+                    .any(|start| start.block == left.reference() && !start.finalized)
             );
 
             latency.finalize(&[left.reference()], &staged);
+            assert!(latency.started.lock().iter().all(|start| start.finalized));
+            latency.order(left.reference());
             assert!(latency.started.lock().is_empty());
 
             let parent = Arc::new(TransactionBlock::<Sha256, _>::from_context(
@@ -704,6 +737,25 @@ mod tests {
             latency.start(parent.reference(), SystemTime::now());
 
             latency.finalize(&[child.reference()], &staged);
+            assert!(latency.started.lock().iter().all(|start| start.finalized));
+            latency.order(parent.reference());
+            assert!(latency.started.lock().is_empty());
+        });
+    }
+
+    #[test]
+    fn proposal_latency_orders_blocks_that_were_never_directly_finalized() {
+        deterministic::Runner::default().start(|context| async move {
+            let latency = ProposalLatency::new(&context, NZUsize!(2));
+            let block = BlockRef::new(
+                commonware_consensus::multimmit::types::ChainId::new(0),
+                Height::new(1),
+                Sha256::hash(&[b"block"]),
+            );
+            latency.start(block, SystemTime::now());
+            latency.order(block);
+            assert!(latency.started.lock().is_empty());
+            latency.order(block);
             assert!(latency.started.lock().is_empty());
         });
     }
