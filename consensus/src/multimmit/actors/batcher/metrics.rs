@@ -18,6 +18,10 @@ pub(super) struct Metrics<P: PublicKey> {
     pub blocked: Counter,
     pub batch_size: Histogram,
     pub verify_latency: histogram::Timed,
+    /// Transcript messages of one verified certificate.
+    pub certificate_transcript_messages: Histogram,
+    /// Transcript messages of one verified certificate that a locally verified vote discharged.
+    pub certificate_known_messages: Histogram,
 }
 
 impl<P: PublicKey> Metrics<P> {
@@ -54,6 +58,16 @@ impl<P: PublicKey> Metrics<P> {
             "artifacts in one verification job",
             [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0],
         );
+        let certificate_transcript_messages = context.histogram(
+            "certificate_transcript_messages",
+            "transcript messages of one verified certificate",
+            [0.0, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 48.0, 64.0, 128.0, 256.0],
+        );
+        let certificate_known_messages = context.histogram(
+            "certificate_known_messages",
+            "transcript messages of one verified certificate discharged by known votes",
+            [0.0, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 48.0, 64.0, 128.0, 256.0],
+        );
         let verify_latency = context.histogram(
             "verify_latency",
             "latency of one verification job",
@@ -69,6 +83,8 @@ impl<P: PublicKey> Metrics<P> {
             dropped_voter_cohorts,
             blocked,
             batch_size,
+            certificate_transcript_messages,
+            certificate_known_messages,
             verify_latency: histogram::Timed::new(verify_latency),
         }
     }

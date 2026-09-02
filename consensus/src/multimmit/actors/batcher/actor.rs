@@ -359,6 +359,19 @@ where
                             return;
                         }
                         self.metrics.batch_size.observe(job.items().len() as f64);
+                        for item in job.items() {
+                            let signers = match item.artifact() {
+                                Artifact::Vqc(certificate) => certificate.tally().signers().count(),
+                                Artifact::Lqc(certificate) => certificate.tally().signers().count(),
+                                _ => continue,
+                            };
+                            self.metrics
+                                .certificate_transcript_messages
+                                .observe(signers as f64);
+                            self.metrics
+                                .certificate_known_messages
+                                .observe(item.known().len() as f64);
+                        }
                         let scheme = Arc::clone(&self.scheme);
                         let strategy = self.strategy.clone();
                         let latency = self.metrics.verify_latency.clone();
