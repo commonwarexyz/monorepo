@@ -19,7 +19,7 @@ use commonware_cryptography::{
 };
 use commonware_math::algebra::Additive as _;
 use commonware_utils::Participant;
-use std::num::NonZeroUsize;
+use std::{num::NonZeroUsize, time::SystemTime};
 
 const CHAINS: usize = 4;
 const PEERS: usize = 4;
@@ -72,7 +72,7 @@ pub fn exercise_lanes(input: &[u8]) {
                 let peer = peers[usize::from(b) % PEERS].clone();
                 let artifact = artifact(b);
                 let artifact = (artifact.id::<commonware_cryptography::Sha256>(), artifact);
-                if lanes.push_group(lane, peer, Group::one(artifact)).is_ok() {
+                if lanes.push_group(lane, peer, Group::one(artifact, SystemTime::UNIX_EPOCH)).is_ok() {
                     buffered += 1;
                 }
             }
@@ -81,7 +81,7 @@ pub fn exercise_lanes(input: &[u8]) {
                 let artifacts = [artifact(b), artifact(b.wrapping_add(1))]
                     .map(|artifact| (artifact.id::<commonware_cryptography::Sha256>(), artifact));
                 if lanes
-                    .push_group(LaneId::Consensus, peer, Group::pair(artifacts))
+                    .push_group(LaneId::Consensus, peer, Group::pair(artifacts, SystemTime::UNIX_EPOCH))
                     .is_ok()
                 {
                     buffered += 2;

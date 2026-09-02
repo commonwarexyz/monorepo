@@ -506,6 +506,8 @@ struct ObservedBatch<P: PublicKey, V: Variant, D: Digest> {
     artifacts: Vec<(P, IdentifiedArtifact<V, D>)>,
     spans: Vec<Span>,
     cohorts: usize,
+    /// The earliest hand-off among the merged cohorts.
+    forwarded_at: SystemTime,
 }
 
 impl<P: PublicKey, V: Variant, D: Digest> ObservedBatch<P, V, D> {
@@ -516,11 +518,16 @@ impl<P: PublicKey, V: Variant, D: Digest> ObservedBatch<P, V, D> {
         observations: &mut mailbox::UnreliableReceiver<Observed<P, V, D>>,
         max_items: usize,
     ) -> (Self, Option<Observed<P, V, D>>) {
-        let Observed { artifacts, span } = first;
+        let Observed {
+            artifacts,
+            span,
+            forwarded_at,
+        } = first;
         let mut batch = Self {
             artifacts,
             spans: vec![span],
             cohorts: 1,
+            forwarded_at,
         };
         while batch.artifacts.len() < max_items {
             let Ok(next) = observations.try_recv() else {
@@ -532,6 +539,7 @@ impl<P: PublicKey, V: Variant, D: Digest> ObservedBatch<P, V, D> {
             batch.artifacts.extend(next.artifacts);
             batch.spans.push(next.span);
             batch.cohorts += 1;
+            batch.forwarded_at = batch.forwarded_at.min(next.forwarded_at);
         }
         (batch, None)
     }
@@ -2422,7 +2430,11 @@ where
             artifacts,
             spans,
             cohorts,
+            forwarded_at,
         } = batch;
+        self.metrics
+            .observation_wait
+            .observe_between(forwarded_at, self.context.current());
         let (sources, artifacts) = artifacts.into_iter().unzip();
         let observe = debug_span!(
             parent: &self.round_span,

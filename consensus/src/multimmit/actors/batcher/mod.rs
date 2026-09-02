@@ -35,7 +35,7 @@ use commonware_cryptography::{Digest, PublicKey, bls12381::primitives::variant::
 use commonware_utils::N5f1;
 #[cfg(any(test, feature = "test-utils"))]
 pub use fuzz::exercise_lanes;
-use std::{collections::VecDeque, num::NonZeroUsize};
+use std::{collections::VecDeque, num::NonZeroUsize, time::SystemTime};
 use tracing::Span;
 
 /// Explicit ingress and verification resource bounds.
@@ -143,6 +143,8 @@ pub struct Observed<P: PublicKey, V: Variant, D: Digest> {
     pub artifacts: Vec<(P, IdentifiedArtifact<V, D>)>,
     /// The ingress tracing span for this cohort.
     pub span: Span,
+    /// When the batcher handed the cohort to the voter.
+    pub forwarded_at: SystemTime,
 }
 
 impl<P: PublicKey, V: Variant, D: Digest> UnreliablePolicy for Observed<P, V, D> {
