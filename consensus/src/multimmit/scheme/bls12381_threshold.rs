@@ -1313,7 +1313,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
 
     /// Builds the atomic claim for one aggregate transcript (a V-QC or L-QC).
     ///
-    /// Mirrors [`aggregate::verify_transcript`]'s validation: the transcript must be
+    /// Mirrors aggregate-transcript verification: the transcript must be
     /// non-empty, every signer must resolve to a distinct non-zero public key, and the
     /// signature must be non-zero.
     fn aggregate_claim<'a>(

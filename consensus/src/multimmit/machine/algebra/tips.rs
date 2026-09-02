@@ -207,7 +207,7 @@ pub(crate) struct VqcExtraction<D: Digest> {
 impl<D: Digest> VqcExtraction<D> {
     /// Extracts ordering data from one authenticated V-QC transcript.
     ///
-    /// Production extraction flows through [`validate_vqc`], which reuses the leader digest
+    /// Production extraction flows through [`super::validate_vqc`], which reuses the leader digest
     /// across derivations; this convenience wrapper serves tests and mocks.
     #[cfg(any(test, feature = "mocks"))]
     pub(crate) fn new<H, V>(
