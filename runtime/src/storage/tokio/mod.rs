@@ -32,9 +32,6 @@ pub struct Storage {
     lock: Arc<Mutex<()>>,
     cfg: Config,
     pool: BufferPool,
-    /// Hold on the storage directory, cloned into every dispatched blocking
-    /// operation and every blob so a successor storage instance waits for
-    /// stragglers.
     hold: Arc<Hold>,
 }
 
