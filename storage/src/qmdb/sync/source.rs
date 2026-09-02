@@ -795,6 +795,13 @@ pub(crate) mod tests {
         let decoded = Request::<mmr::Family>::decode(valid.encode()).unwrap();
         assert_eq!(decoded, valid);
 
+        let valid = Request::<mmr::Family>::Boundary {
+            size: Location::new(10),
+            start: Location::new(3),
+        };
+        let decoded = Request::<mmr::Family>::decode(valid.encode()).unwrap();
+        assert_eq!(decoded, valid);
+
         let mut malformed = Vec::new();
         1u8.write(&mut malformed); // Boundary tag
         Location::<mmr::Family>::new(10).write(&mut malformed);

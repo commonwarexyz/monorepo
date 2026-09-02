@@ -60,6 +60,7 @@
 //!   [Encode], [Codec], [EncodeFixed], and [CodecFixed] when `T: FixedSize`.
 //! - Collections: [`Vec`], [`Option`], `BTreeMap`, `BTreeSet`
 //! - Tuples: `(T1, T2, ...)` (up to 12 elements)
+//! - Markers: `PhantomData<T>` (encodes as zero bytes)
 //! - Common External Types: [::bytes::Bytes], `Arc` (encoding only)
 //!
 //! With the `std` feature (enabled by default):
@@ -242,16 +243,30 @@ commonware_macros::stability_scope!(BETA {
     pub use extensions::*;
     pub use mode::{InvalidMode, Mode, Modes};
 
-    // Re-export bytes for derive-generated code
+    // Names referenced by derive-generated code; not public API.
     #[doc(hidden)]
-    pub use bytes;
+    pub mod __private {
+        pub use bytes::{Buf, BufMut};
+
+        use crate::IsUnit;
+
+        /// Returns the unit-like config value (`C::default()`) for an unmarked derived field.
+        pub fn unit_cfg<C: IsUnit>() -> C {
+            C::default()
+        }
+    }
 
     /// Derives [Write](trait@Write) by writing each field in declaration order; enum variants
     /// write their mandatory `#[codec(tag = N)]` byte first, and `write_bufs` forwards to each
     /// field's `write_bufs`.
     ///
+    /// Field declaration order is the wire format: reordering the fields of a derived type is
+    /// a wire-format change.
+    ///
     /// All four codec derives accept `#[codec(bound = "...")]` to replace the auto-generated
-    /// per-field bounds (an empty string keeps only the type's inherited bounds).
+    /// per-field bounds (an empty string keeps only the type's inherited bounds). The generated
+    /// bounds are per-field (`FieldTy: Write`), so a generic-mentioning field's type appears in
+    /// the impl's public where clause.
     ///
     /// ```
     /// use commonware_codec::{DecodeExt, Encode, EncodeSize, Read, Write};
@@ -291,8 +306,12 @@ commonware_macros::stability_scope!(BETA {
     /// Derives [EncodeSize](trait@EncodeSize) as the sum of field sizes, plus one tag byte for
     /// enums; `encode_inline_size` forwards to each field's `encode_inline_size`.
     ///
-    /// Never derive this alongside [FixedSize](trait@FixedSize), which provides
-    /// [EncodeSize](trait@EncodeSize) automatically.
+    /// Derive [Write](macro@Write) and [EncodeSize](macro@EncodeSize) together: the generated
+    /// `write_bufs` and `encode_inline_size` are a matched pair, and mixing a derived half with
+    /// a manual half that keeps the trait defaults breaks the inline-size contract.
+    ///
+    /// Deriving this alongside [FixedSize](trait@FixedSize) fails to compile: `FixedSize`
+    /// provides [EncodeSize](trait@EncodeSize) through a blanket impl.
     pub use commonware_codec_macros::EncodeSize;
 
     /// Derives [FixedSize](trait@FixedSize) with `SIZE` the sum of field sizes.
@@ -324,7 +343,9 @@ commonware_macros::stability_scope!(BETA {
     /// `Cfg` is `()` unless exactly one field (or at most one per enum variant) is marked
     /// `#[codec(cfg)]`, in which case that field's [Read::Cfg](trait@Read) becomes the
     /// container's and receives the caller's config; every other field must have a unit-like
-    /// ([IsUnit]) config. Unknown enum tags yield [Error::InvalidEnum].
+    /// ([IsUnit]) config. When multiple enum variants carry `#[codec(cfg)]` fields, their `Cfg`
+    /// types must all be the container's (taken from the first such field in declaration
+    /// order). Unknown enum tags yield [Error::InvalidEnum].
     ///
     /// ```
     /// use bytes::Bytes;

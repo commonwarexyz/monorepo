@@ -566,6 +566,7 @@ pub enum FinalizeError<P> {
 
 /// The output of a successful DKG.
 #[derive(Debug, Clone, PartialEq, Eq, EncodeSize, Write)]
+#[codec(bound = "P: PublicKey")]
 pub struct Output<V: Variant, P> {
     summary: Summary,
     public: Sharing<V>,

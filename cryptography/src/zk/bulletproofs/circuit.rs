@@ -235,6 +235,7 @@ impl<F: Ring> Mul<&[F]> for &SparseMatrix<F> {
     }
 }
 
+// codec: manual -- the encoding skips the `zero` helper field, so it is not a plain field fold.
 impl<F: Write> Write for SparseMatrix<F> {
     fn write(&self, buf: &mut impl BufMut) {
         self.width.write(buf);

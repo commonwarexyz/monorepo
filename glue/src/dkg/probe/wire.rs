@@ -176,10 +176,25 @@ where
 mod tests {
     use super::{Message, Tag};
     use crate::dkg::tests::mocks;
-    use commonware_codec::conformance::CodecConformance;
+    use commonware_codec::{Encode, conformance::CodecConformance};
+    use commonware_consensus::types::Epoch;
 
     commonware_conformance::conformance_tests! {
         CodecConformance<Tag>,
         CodecConformance<Message<mocks::TestScheme, mocks::TestMarshalVariant>>,
+    }
+
+    #[test]
+    fn test_message_tag_lockstep() {
+        type TestMessage = Message<mocks::TestScheme, mocks::TestMarshalVariant>;
+        let epoch = Epoch::new(1);
+        let pairs = [
+            (TestMessage::BoundaryRequest(epoch), Tag::BoundaryRequest),
+            (TestMessage::BlockRequest(epoch), Tag::BlockRequest),
+            (TestMessage::LatestRequest, Tag::LatestRequest),
+        ];
+        for (message, tag) in pairs {
+            assert_eq!(message.encode()[0], tag.encode()[0]);
+        }
     }
 }

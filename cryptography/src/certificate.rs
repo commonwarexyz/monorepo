@@ -106,6 +106,7 @@ impl<S: Scheme> Hash for Attestation<S> {
     }
 }
 
+// codec: manual -- the Lazy signature must stay inline in write_bufs; a derive would push it.
 impl<S: Scheme> Write for Attestation<S> {
     fn write(&self, writer: &mut impl BufMut) {
         self.signer.write(writer);

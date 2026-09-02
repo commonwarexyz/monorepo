@@ -1671,10 +1671,7 @@ impl<S: Scheme, D: Digest> Read for Backfiller<S, D> {
                 let v = Response::<S, D>::read_cfg(reader, cfg)?;
                 Ok(Self::Response(v))
             }
-            _ => Err(Error::Invalid(
-                "consensus::simplex::Backfiller",
-                "Invalid type",
-            )),
+            _ => Err(Error::InvalidEnum(tag)),
         }
     }
 }
@@ -2169,10 +2166,7 @@ impl<S: Scheme, D: Digest> Read for Activity<S, D> {
                 let v = NullifyFinalize::<S, D>::read(reader)?;
                 Ok(Self::NullifyFinalize(v))
             }
-            _ => Err(Error::Invalid(
-                "consensus::simplex::Activity",
-                "Invalid type",
-            )),
+            _ => Err(Error::InvalidEnum(tag)),
         }
     }
 }

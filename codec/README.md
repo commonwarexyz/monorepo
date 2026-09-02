@@ -7,7 +7,7 @@ Serialize structured data.
 
 ## Deriving
 
-`Write`, `EncodeSize`, `FixedSize`, and `Read` can be derived for types whose encoding is a plain field-order fold. Hand-write `Read` only when decoding must validate: a manual `read_cfg` marks the types that check more than structure.
+`Write`, `EncodeSize`, `FixedSize`, and `Read` can be derived for types whose encoding is a plain field-order fold. On a derived type, field declaration order is the wire format: reordering fields is a wire-format change, so every derived type should be pinned by a conformance fixture. Keep an impl hand-written when decoding must validate beyond structure, when the config needs adapting before it reaches a field, or when the encoding is not a plain fold (varint transforms, skipped fields, padded frames, `Lazy` fields).
 
 ## Status 
 

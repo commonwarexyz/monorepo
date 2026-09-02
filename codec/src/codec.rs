@@ -425,7 +425,7 @@ mod tests {
     use super::*;
     use crate::{
         EncodeSize, Error, FixedArray, FixedSize, RangeCfg, Read, Write,
-        extensions::{DecodeExt, ReadExt},
+        extensions::{DecodeExt, DecodeRangeExt, ReadExt},
         types::tests::TrackingWriteBuf,
     };
     use bytes::Bytes;
@@ -852,7 +852,10 @@ mod tests {
             value
         );
         let tight: RangeCfg<usize> = (0..=1).into();
-        assert!(DerivedCfg::decode_cfg(encoded, &tight).is_err());
+        assert!(matches!(
+            DerivedCfg::decode_cfg(encoded, &tight),
+            Err(Error::InvalidLength(3))
+        ));
     }
 
     #[test]
@@ -926,7 +929,10 @@ mod tests {
 
         let tight: RangeCfg<usize> = (0..=1).into();
         let value = DerivedCfgEnum::Data(Bytes::from_static(b"ab"));
-        assert!(DerivedCfgEnum::decode_cfg(value.encode(), &tight).is_err());
+        assert!(matches!(
+            DerivedCfgEnum::decode_cfg(value.encode(), &tight),
+            Err(Error::InvalidLength(2))
+        ));
     }
 
     #[derive(Debug, PartialEq, Write, Read, FixedSize)]
@@ -985,5 +991,156 @@ mod tests {
         let encoded = root.encode();
         assert_eq!(encoded.len(), root.encode_size());
         assert_eq!(encoded[..], [0, 0, 0, 9, 1, 0, 0, 0, 5, 0]);
+    }
+
+    #[test]
+    fn test_derive_truncated() {
+        assert!(matches!(
+            DerivedNamed::decode(Bytes::from_static(&[1, 2])),
+            Err(Error::EndOfBuffer)
+        ));
+        assert!(matches!(
+            DerivedEnum::decode(Bytes::from_static(&[0x01])),
+            Err(Error::EndOfBuffer)
+        ));
+        assert!(matches!(
+            DerivedEnum::decode(Bytes::from_static(&[])),
+            Err(Error::EndOfBuffer)
+        ));
+    }
+
+    #[test]
+    fn test_derive_extra_data() {
+        let value = DerivedNamed {
+            a: 1,
+            b: None,
+            c: false,
+        };
+        let mut raw = value.encode().to_vec();
+        raw.push(0);
+        assert!(matches!(
+            DerivedNamed::decode(&raw[..]),
+            Err(Error::ExtraData(1))
+        ));
+    }
+
+    #[test]
+    fn test_derive_enum_tag_boundaries() {
+        for tag in [0xD0u8, 0xD2, 0xFF] {
+            assert!(matches!(
+                DerivedEnum::decode(vec![tag].as_slice()),
+                Err(Error::InvalidEnum(t)) if t == tag
+            ));
+        }
+    }
+
+    #[derive(Debug, PartialEq, Write, EncodeSize, Read)]
+    struct DerivedNested {
+        #[codec(cfg)]
+        inner: DerivedCfg,
+        n: u32,
+    }
+
+    #[test]
+    fn test_derive_nested_cfg() {
+        let value = DerivedNested {
+            inner: DerivedCfg {
+                seq: 0x0102,
+                data: Bytes::from_static(b"ab"),
+            },
+            n: 7,
+        };
+        let encoded = value.encode();
+        assert_eq!(encoded.len(), value.encode_size());
+        let cfg: RangeCfg<usize> = (0..=8).into();
+        assert_eq!(DerivedNested::decode_cfg(encoded, &cfg).unwrap(), value);
+    }
+
+    #[derive(Debug, PartialEq, Write, EncodeSize, Read)]
+    enum DerivedGenericEnum<T> {
+        #[codec(tag = 0)]
+        Empty,
+        #[codec(tag = 1)]
+        Value(T),
+    }
+
+    #[test]
+    fn test_derive_generic_enum() {
+        let value = DerivedGenericEnum::Value(0x0203u16);
+        let encoded = value.encode();
+        assert_eq!(encoded[..], [0x01, 2, 3]);
+        assert_eq!(DerivedGenericEnum::decode(encoded).unwrap(), value);
+        assert_eq!(
+            DerivedGenericEnum::<u16>::decode(DerivedGenericEnum::<u16>::Empty.encode()).unwrap(),
+            DerivedGenericEnum::Empty
+        );
+    }
+
+    #[derive(Debug, PartialEq, Write, EncodeSize, Read)]
+    enum DerivedTwoCfg {
+        #[codec(tag = 0)]
+        Compact(#[codec(cfg)] Bytes),
+        #[codec(tag = 1)]
+        Labeled {
+            n: u16,
+            #[codec(cfg)]
+            data: Bytes,
+        },
+    }
+
+    #[test]
+    fn test_derive_enum_cfg_both_variants() {
+        let cfg: RangeCfg<usize> = (0..=8).into();
+        let value = DerivedTwoCfg::Compact(Bytes::from_static(b"a"));
+        assert_eq!(value.encode_inline_size(), 2);
+        assert_eq!(
+            DerivedTwoCfg::decode_cfg(value.encode(), &cfg).unwrap(),
+            value
+        );
+
+        let value = DerivedTwoCfg::Labeled {
+            n: 5,
+            data: Bytes::from_static(b"bc"),
+        };
+        assert_eq!(
+            DerivedTwoCfg::decode_cfg(value.encode(), &cfg).unwrap(),
+            value
+        );
+    }
+
+    #[derive(Debug, PartialEq, Write, Read, FixedSize)]
+    struct DerivedEmptyNamed {}
+
+    #[test]
+    fn test_derive_empty_named() {
+        assert_eq!(DerivedEmptyNamed::SIZE, 0);
+        let _pad = [0u8; DerivedFixedPair::SIZE];
+        let encoded = DerivedEmptyNamed {}.encode();
+        assert!(encoded.is_empty());
+        assert_eq!(
+            DerivedEmptyNamed::decode(encoded).unwrap(),
+            DerivedEmptyNamed {}
+        );
+    }
+
+    #[test]
+    fn test_derive_in_vec() {
+        let values = vec![
+            DerivedNamed {
+                a: 1,
+                b: None,
+                c: true,
+            },
+            DerivedNamed {
+                a: 2,
+                b: Some(3),
+                c: false,
+            },
+        ];
+        let encoded = values.encode();
+        assert_eq!(
+            Vec::<DerivedNamed>::decode_range(encoded, 0..=4).unwrap(),
+            values
+        );
     }
 }

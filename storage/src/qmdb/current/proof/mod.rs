@@ -150,6 +150,8 @@ where
 #[derive(Clone, Eq, PartialEq, Debug, EncodeSize, Read, Write)]
 pub struct RangeProof<F: Graftable, D: Digest> {
     /// The Merkle digest material required to verify the proof.
+    ///
+    /// Decoded with the caller's config: the maximum number of digests in the proof.
     #[codec(cfg)]
     pub proof: Proof<F, D>,
 
@@ -502,6 +504,8 @@ pub struct OperationProof<F: Graftable, D: Digest, const N: usize> {
     pub chunk: [u8; N],
 
     /// The range proof that incorporates activity status for the operation designated by `loc`.
+    ///
+    /// Decoded with the caller's config: the maximum number of digests in the embedded proof.
     #[codec(cfg)]
     pub range_proof: RangeProof<F, D>,
 }

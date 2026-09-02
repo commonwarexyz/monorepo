@@ -809,6 +809,15 @@ mod test {
             CodecConformance<wire::Tag>,
             CodecConformance<wire::Message<Scheme, Variant>>,
         }
+
+        #[test]
+        fn test_message_tag_lockstep() {
+            use commonware_codec::Encode;
+            assert_eq!(
+                wire::Message::<Scheme, Variant>::Request.encode()[0],
+                wire::Tag::Request.encode()[0]
+            );
+        }
     }
 
     /// Storage configuration for one of marshal's immutable archives.

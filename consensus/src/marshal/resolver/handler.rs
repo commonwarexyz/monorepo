@@ -600,6 +600,22 @@ mod tests {
     }
 
     #[test]
+    fn test_subject_matches_wire_tag() {
+        let keys = [
+            Key::<D>::Block(Sha256::hash(&[b"test"])),
+            Key::<D>::Finalized {
+                height: Height::new(1),
+            },
+            Key::<D>::Notarized {
+                round: Round::new(Epoch::new(0), View::new(1)),
+            },
+        ];
+        for key in keys {
+            assert_eq!(key.encode()[0], key.subject());
+        }
+    }
+
+    #[test]
     fn test_subject_hash() {
         use std::collections::HashSet;
 

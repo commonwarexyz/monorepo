@@ -479,7 +479,7 @@ mod tests {
         // Type byte 4 is invalid (Data=0, Greeting=1, BitVec=2, Peers=3)
         let invalid_payload = [4, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
         let result = Payload::<PublicKey>::decode_cfg(&invalid_payload[..], &cfg);
-        assert!(result.is_err());
+        assert!(matches!(result, Err(CodecError::InvalidEnum(4))));
     }
 
     #[test]

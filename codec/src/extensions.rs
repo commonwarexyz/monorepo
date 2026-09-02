@@ -24,7 +24,12 @@ impl<T: Read<Cfg = ()>> ReadExt for T {}
 
 /// Trait for types that are unit-like, i.e. have only one possible value.
 ///
-/// This is typically used to implement the `DefaultExt` trait for types that are unit-like.
+/// Derived [Read] implementations silently decode every unmarked field with its `Cfg`'s
+/// [Default], gated on this trait: never implement it for a type with more than one value.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not a unit-like config",
+    note = "a field whose `Read::Cfg` is not unit-like must be marked `#[codec(cfg)]`, or the container needs a hand-written `Read`"
+)]
 pub trait IsUnit: Default {}
 
 // Generate `IsUnit` implementations for types with only one possible value.
@@ -48,14 +53,6 @@ impl_is_unit_for_tuple!(A, B, C, D, E, F, G, H, I);
 impl_is_unit_for_tuple!(A, B, C, D, E, F, G, H, I, J);
 impl_is_unit_for_tuple!(A, B, C, D, E, F, G, H, I, J, K);
 impl_is_unit_for_tuple!(A, B, C, D, E, F, G, H, I, J, K, L);
-
-/// Returns the config for a type whose `Cfg` is [IsUnit].
-///
-/// Used by derive-generated [Read] implementations for fields that require no configuration.
-#[doc(hidden)]
-pub fn unit_cfg<C: IsUnit>() -> C {
-    C::default()
-}
 
 /// Extension trait providing ergonomic decode method for types requiring no specific configuration.
 /// This is typically types with only one possible value, such as the unit type `()` or tuples of

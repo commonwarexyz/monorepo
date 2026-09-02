@@ -63,7 +63,7 @@ impl<Key: Span> Read for Payload<Key> {
                 Ok(Self::Response(data))
             }
             2 => Ok(Self::Error),
-            _ => Err(Error::Invalid("Payload", "Invalid payload type")),
+            _ => Err(Error::InvalidEnum(payload_type)),
         }
     }
 }

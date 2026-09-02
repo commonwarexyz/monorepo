@@ -360,6 +360,7 @@ pub struct Certificate<V: Variant> {
     pub signature: Lazy<aggregate::Signature<V>>,
 }
 
+// codec: manual -- the Lazy signature must stay inline in write_bufs; a derive would push it.
 impl<V: Variant> Write for Certificate<V> {
     fn write(&self, writer: &mut impl BufMut) {
         self.signers.write(writer);

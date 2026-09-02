@@ -785,6 +785,7 @@ pub struct DealerLog {
 #[cfg(feature = "arbitrary")]
 impl arbitrary::Arbitrary<'_> for DealerLog {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        // Draw order determines the committed conformance fixture bytes; keep it stable.
         Ok(Self {
             commitments: u.arbitrary()?,
             dealing: u.arbitrary()?,

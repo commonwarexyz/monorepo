@@ -36,8 +36,9 @@ pub fn write(input: &DeriveInput) -> Result<TokenStream> {
     };
 
     Ok(quote! {
+        #[automatically_derived]
         impl #impl_generics #codec::Write for #ident #ty_generics #where_clause {
-            fn write(&self, #buf: &mut impl #codec::bytes::BufMut) {
+            fn write(&self, #buf: &mut impl #codec::__private::BufMut) {
                 #write_body
             }
 
@@ -73,6 +74,7 @@ pub fn encode_size(input: &DeriveInput) -> Result<TokenStream> {
     };
 
     Ok(quote! {
+        #[automatically_derived]
         impl #impl_generics #codec::EncodeSize for #ident #ty_generics #where_clause {
             fn encode_size(&self) -> usize {
                 #size_body
@@ -112,6 +114,7 @@ pub fn fixed_size(input: &DeriveInput) -> Result<TokenStream> {
     }));
 
     Ok(quote! {
+        #[automatically_derived]
         impl #impl_generics #codec::FixedSize for #ident #ty_generics #where_clause {
             const SIZE: usize = #size;
         }
@@ -126,7 +129,7 @@ pub fn read(input: &DeriveInput) -> Result<TokenStream> {
     // config to thread through (and for an enum's variant cfg types to unify). The field's
     // type has to implement Read via the container's inherited bounds instead.
     let preds = predicates(&container, |field| {
-        if field.cfg {
+        if field.cfg.is_some() {
             return Vec::new();
         }
         let ty = &field.ty;
@@ -139,14 +142,17 @@ pub fn read(input: &DeriveInput) -> Result<TokenStream> {
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
     let ident = &container.ident;
 
-    let cfg_ty = container.fields().find(|field| field.cfg).map_or_else(
-        || quote!(()),
-        |field| {
-            let ty = &field.ty;
-            quote!(<#ty as #codec::Read>::Cfg)
-        },
-    );
-    let cfg = if container.fields().any(|field| field.cfg) {
+    let cfg_ty = container
+        .fields()
+        .find(|field| field.cfg.is_some())
+        .map_or_else(
+            || quote!(()),
+            |field| {
+                let ty = &field.ty;
+                quote!(<#ty as #codec::Read>::Cfg)
+            },
+        );
+    let cfg = if container.fields().any(|field| field.cfg.is_some()) {
         format_ident!("cfg")
     } else {
         format_ident!("_cfg")
@@ -161,11 +167,12 @@ pub fn read(input: &DeriveInput) -> Result<TokenStream> {
     };
 
     Ok(quote! {
+        #[automatically_derived]
         impl #impl_generics #codec::Read for #ident #ty_generics #where_clause {
             type Cfg = #cfg_ty;
 
             fn read_cfg(
-                #buf: &mut impl #codec::bytes::Buf,
+                #buf: &mut impl #codec::__private::Buf,
                 #cfg: &Self::Cfg,
             ) -> ::core::result::Result<Self, #codec::Error> {
                 #body
@@ -313,13 +320,13 @@ fn enum_size_body(
 fn field_read(codec: &TokenStream, field: &Field, cfg: &Ident) -> TokenStream {
     let binding = &field.binding;
     let ty = &field.ty;
-    if field.cfg {
+    if field.cfg.is_some() {
         quote!(let #binding = <#ty as #codec::Read>::read_cfg(buf, #cfg)?;)
     } else {
         quote! {
             let #binding = <#ty as #codec::Read>::read_cfg(
                 buf,
-                &#codec::unit_cfg::<<#ty as #codec::Read>::Cfg>(),
+                &#codec::__private::unit_cfg::<<#ty as #codec::Read>::Cfg>(),
             )?;
         }
     }
@@ -419,6 +426,39 @@ mod tests {
             }
         };
         assert!(err(write(&input)).contains("number too large"));
+    }
+
+    #[test]
+    fn test_tag_suffixed() {
+        let input: DeriveInput = parse_quote! {
+            enum E {
+                #[codec(tag = 1u16)]
+                A(u8),
+            }
+        };
+        assert!(err(write(&input)).contains("unsuffixed"));
+    }
+
+    #[test]
+    fn test_discriminant_rejected() {
+        let input: DeriveInput = parse_quote! {
+            enum E {
+                #[codec(tag = 0)]
+                A = 5,
+            }
+        };
+        assert!(err(write(&input)).contains("discriminants"));
+    }
+
+    #[test]
+    fn test_duplicate_bound() {
+        let input: DeriveInput = parse_quote! {
+            #[codec(bound = "T: Clone", bound = "T: Copy")]
+            struct S<T> {
+                a: T,
+            }
+        };
+        assert!(err(write(&input)).contains("duplicate `bound`"));
     }
 
     #[test]

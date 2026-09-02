@@ -126,7 +126,7 @@ impl Read for IpAddr {
         match version {
             4 => Ok(Self::V4(Ipv4Addr::read(buf)?)),
             6 => Ok(Self::V6(Ipv6Addr::read(buf)?)),
-            _ => Err(Error::Invalid("IpAddr", "Invalid version")),
+            _ => Err(Error::InvalidEnum(version)),
         }
     }
 }

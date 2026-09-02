@@ -281,8 +281,8 @@ stability_scope!(BETA {
     }
 
     impl Header {
-        /// Size of the header prelude in bytes.
-        pub(crate) const PRELUDE_SIZE: usize = 8;
+        /// Size of the header prelude in bytes: the header's full fixed encoding.
+        pub(crate) const PRELUDE_SIZE: usize = Self::SIZE;
 
         /// Size of the V1 header extension in bytes (CRC32 over the prelude).
         pub(crate) const EXTENSION_SIZE: usize = 4;

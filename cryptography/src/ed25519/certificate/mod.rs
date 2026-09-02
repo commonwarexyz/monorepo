@@ -345,6 +345,7 @@ impl arbitrary::Arbitrary<'_> for Certificate {
     }
 }
 
+// codec: manual -- the Lazy signatures must stay inline in write_bufs; a derive would push them.
 impl Write for Certificate {
     fn write(&self, writer: &mut impl BufMut) {
         self.signers.write(writer);

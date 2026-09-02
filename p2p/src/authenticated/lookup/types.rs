@@ -84,6 +84,16 @@ mod tests {
     }
 
     #[test]
+    fn test_decode_ping() {
+        let encoded = Message::Ping.encode();
+        assert_eq!(encoded[..], [PING_PREFIX]);
+        assert!(matches!(
+            Message::decode_cfg(encoded, &4).unwrap(),
+            Message::Ping
+        ));
+    }
+
+    #[test]
     fn test_decode_data_exceeding_limit() {
         let payload = Message::Data(Data {
             channel: 9,
