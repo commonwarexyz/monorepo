@@ -25,7 +25,10 @@ use commonware_p2p::{Blocker, Receiver};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
     Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
-    telemetry::{metrics::Histogram, traces::TracedExt as _},
+    telemetry::{
+        metrics::{Histogram, HistogramExt as _},
+        traces::TracedExt as _,
+    },
 };
 use commonware_utils::{futures::Pool, sync::Mutex};
 use futures::FutureExt as _;
@@ -36,6 +39,7 @@ use std::{
     marker::PhantomData,
     panic::AssertUnwindSafe,
     sync::Arc,
+    time::SystemTime,
 };
 use tracing::{Instrument as _, Span, debug, debug_span, error, info_span};
 
@@ -524,8 +528,9 @@ where
                         let message = NetworkMessage::Consensus((peer, Ok(message)));
                         let chains = self.codec.chains();
                         let scheme = Arc::clone(&self.scheme);
+                        let received_at = self.context.current();
                         ingress.push(run_ingress_operation(self.strategy.clone(), move || {
-                            Self::prepare(message, chains, &scheme)
+                            Self::prepare(message, chains, &scheme, received_at)
                         }));
                     }
                     NetworkMessage::Certificate((peer, message)) => {
@@ -537,8 +542,9 @@ where
                         let message = NetworkMessage::Certificate((peer, Ok(message)));
                         let chains = self.codec.chains();
                         let scheme = Arc::clone(&self.scheme);
+                        let received_at = self.context.current();
                         ingress.push(run_ingress_operation(self.strategy.clone(), move || {
-                            Self::prepare(message, chains, &scheme)
+                            Self::prepare(message, chains, &scheme, received_at)
                         }));
                     }
                     NetworkMessage::Data((peer, message)) => {
@@ -550,8 +556,9 @@ where
                         let message = NetworkMessage::Data((peer, Ok(message)));
                         let chains = self.codec.chains();
                         let scheme = Arc::clone(&self.scheme);
+                        let received_at = self.context.current();
                         ingress.push(run_ingress_operation(self.strategy.clone(), move || {
-                            Self::prepare(message, chains, &scheme)
+                            Self::prepare(message, chains, &scheme, received_at)
                         }));
                     }
                 }
@@ -581,6 +588,7 @@ where
         message: NetworkMessage<P, V, H::Digest>,
         chains: usize,
         scheme: &Scheme<P, V>,
+        received_at: SystemTime,
     ) -> IngressResult<P, V, H::Digest> {
         let mut scratch = Vec::new();
         let (peer, prepared) = match message {
@@ -592,7 +600,7 @@ where
                         block,
                     } => Ok((
                         LaneId::Consensus,
-                        Group::one(Self::identify(Artifact::LeaderBlock(*block), &mut scratch)),
+                        Group::one(Self::identify(Artifact::LeaderBlock(*block), &mut scratch), received_at),
                     )),
                     ConsensusMessage::Proposal {
                         parent: Some(parent),
@@ -612,7 +620,7 @@ where
                             let block_id = block.id_with_scratch::<H>(&mut scratch);
                             Ok((
                                 LaneId::Consensus,
-                                Group::pair([(parent_id, parent), (block_id, block)]),
+                                Group::pair([(parent_id, parent), (block_id, block)], received_at),
                             ))
                         }
                     }
@@ -623,7 +631,7 @@ where
                             .expect("non-proposal consensus messages contain one artifact");
                         Ok((
                             LaneId::Consensus,
-                            Group::one(Self::identify(artifact, &mut scratch)),
+                            Group::one(Self::identify(artifact, &mut scratch), received_at),
                         ))
                     }
                 };
@@ -638,7 +646,7 @@ where
                     peer,
                     Ok((
                         LaneId::Certificate,
-                        Group::one(Self::identify(artifact, &mut scratch)),
+                        Group::one(Self::identify(artifact, &mut scratch), received_at),
                     )),
                 )
             }
@@ -666,7 +674,7 @@ where
                         peer,
                         Ok((
                             LaneId::Data(chain),
-                            Group::one(Self::identify(artifact, &mut scratch)),
+                            Group::one(Self::identify(artifact, &mut scratch), received_at),
                         )),
                     )
                 }
@@ -847,13 +855,20 @@ where
         }
         let items = selected.len() as u64;
         let span = debug_span!("multimmit.batcher.observe", items);
+        let now = self.context.current();
         let cohort = selected
             .into_iter()
-            .map(|selected| (selected.peer, selected.artifact))
+            .map(|selected| {
+                self.metrics
+                    .ingress_dwell
+                    .observe_between(selected.received_at, now);
+                (selected.peer, selected.artifact)
+            })
             .collect();
         match observations.enqueue(Observed {
             span,
             artifacts: cohort,
+            forwarded_at: now,
         }) {
             Unreliable::Rejected => {
                 self.metrics.dropped_voter_cohorts.inc();

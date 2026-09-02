@@ -142,6 +142,9 @@ pub(super) struct Metrics {
     /// Microseconds the voter thread spent inside core service cycles. Its rate is the thread's
     /// busy fraction, the saturation signal for the single-threaded machine.
     pub busy_micros: Counter,
+    /// Batcher hand-off to voter ingestion of one observation cohort. The mailbox queue on the
+    /// round's critical path.
+    pub observation_wait: Histogram,
     /// Whether the current view timer is armed. Zero with a flat view is a halted voter.
     pub view_timer_armed: Gauge,
     /// Whether the current view timeout selected an ordinary vote.
@@ -321,6 +324,11 @@ impl Metrics {
             "proposal-pass restarts triggered by verified header admissions",
         );
         let view_timeouts = context.counter("view_timeouts", "leader-chain view timeouts");
+        let observation_wait = context.histogram(
+            "observation_wait",
+            "batcher hand-off to voter ingestion of one observation cohort",
+            LATENCY,
+        );
         let busy_micros = context.counter(
             "busy_micros",
             "microseconds the voter thread spent inside core service cycles",
@@ -493,6 +501,7 @@ impl Metrics {
             header_restarts,
             view_timeouts,
             busy_micros,
+            observation_wait,
             view_timer_armed,
             view_timeout_cutoff_vote,
             view_timeout_cutoff_timeout,
@@ -604,7 +613,7 @@ mod tests {
     #[test]
     fn voter_series_footprint_stays_within_budget() {
         const CHAINS: usize = 50;
-        const BUDGET: usize = 650;
+        const BUDGET: usize = 720;
 
         deterministic::Runner::default().start(|context| async move {
             let voter = context.child("engine").child("voter");

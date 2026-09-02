@@ -1,4 +1,4 @@
-use crate::multimmit::actors::metrics::Traffic;
+use crate::{LATENCY, multimmit::actors::metrics::Traffic};
 use commonware_runtime::{
     Metrics as MetricsTrait,
     telemetry::metrics::{Counter, CounterFamily, Histogram, MetricsExt as _, histogram},
@@ -22,6 +22,9 @@ pub(super) struct Metrics {
     pub dropped_voter_cohorts: Counter,
     pub blocked: Counter,
     pub batch_size: Histogram,
+    /// Network receipt to voter hand-off of one artifact. The ingress queue on the round's
+    /// critical path.
+    pub ingress_dwell: Histogram,
     pub verify_latency: histogram::Timed,
     /// Transcript messages of one verified certificate.
     pub certificate_transcript_messages: Histogram,
@@ -71,6 +74,11 @@ impl Metrics {
             "transcript messages of one verified certificate discharged by known votes",
             [0.0, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 48.0, 64.0, 128.0, 256.0],
         );
+        let ingress_dwell = context.histogram(
+            "ingress_dwell",
+            "network receipt to voter hand-off of one artifact",
+            LATENCY,
+        );
         let verify_latency = context.histogram(
             "verify_latency",
             "latency of one verification job",
@@ -86,6 +94,7 @@ impl Metrics {
             dropped_voter_cohorts,
             blocked,
             batch_size,
+            ingress_dwell,
             certificate_transcript_messages,
             certificate_known_messages,
             verify_latency: histogram::Timed::new(verify_latency),

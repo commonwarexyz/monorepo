@@ -5,7 +5,10 @@ use super::{Drop, IngressLimits};
 use crate::multimmit::machine::Artifact;
 use crate::multimmit::machine::IdentifiedArtifact;
 use commonware_cryptography::{Digest, PublicKey, bls12381::primitives::variant::Variant};
-use std::collections::{HashMap, VecDeque};
+use std::{
+    collections::{HashMap, VecDeque},
+    time::SystemTime,
+};
 
 /// The destination lane for one decoded artifact.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -46,24 +49,31 @@ pub(super) struct Group<V: Variant, D: Digest> {
     first: IdentifiedArtifact<V, D>,
     second: Option<Box<IdentifiedArtifact<V, D>>>,
     bytes: usize,
+    /// When the network message carrying the group arrived at the batcher.
+    received_at: SystemTime,
 }
 
 impl<V: Variant, D: Digest> Group<V, D> {
-    pub(super) fn one(artifact: IdentifiedArtifact<V, D>) -> Self {
+    pub(super) fn one(artifact: IdentifiedArtifact<V, D>, received_at: SystemTime) -> Self {
         let bytes = artifact.1.encoded_len();
         Self {
             first: artifact,
             second: None,
             bytes,
+            received_at,
         }
     }
 
-    pub(super) fn pair([first, second]: [IdentifiedArtifact<V, D>; 2]) -> Self {
+    pub(super) fn pair(
+        [first, second]: [IdentifiedArtifact<V, D>; 2],
+        received_at: SystemTime,
+    ) -> Self {
         let bytes = first.1.encoded_len().saturating_add(second.1.encoded_len());
         Self {
             first,
             second: Some(Box::new(second)),
             bytes,
+            received_at,
         }
     }
 
@@ -81,6 +91,8 @@ impl<V: Variant, D: Digest> Group<V, D> {
 pub(super) struct Selected<P: PublicKey, V: Variant, D: Digest> {
     pub(super) artifact: IdentifiedArtifact<V, D>,
     pub(super) peer: P,
+    /// When the network message carrying the artifact arrived at the batcher.
+    pub(super) received_at: SystemTime,
 }
 
 #[cfg(test)]
@@ -295,20 +307,24 @@ impl<P: PublicKey, V: Variant, D: Digest> Lanes<P, V, D> {
             let Some((peer, group)) = selected else {
                 break;
             };
+            let received_at = group.received_at;
             match group.second {
                 Some(second) => {
                     cohort.push(Selected {
                         artifact: group.first,
                         peer: peer.clone(),
+                        received_at,
                     });
                     cohort.push(Selected {
                         artifact: *second,
                         peer,
+                        received_at,
                     });
                 }
                 None => cohort.push(Selected {
                     artifact: group.first,
                     peer,
+                    received_at,
                 }),
             }
         }
@@ -326,7 +342,9 @@ mod tests {
         ed25519::{PrivateKey as Ed25519PrivateKey, PublicKey as Ed25519PublicKey},
         sha256::Digest as Sha256Digest,
     };
-    use std::num::NonZeroUsize;
+    use std::{num::NonZeroUsize, time::SystemTime};
+
+    const EPOCH: SystemTime = SystemTime::UNIX_EPOCH;
 
     fn limits() -> IngressLimits {
         IngressLimits {
@@ -377,7 +395,7 @@ mod tests {
                 .push_group(
                     *lane,
                     source.clone(),
-                    Group::one(identified(artifact.clone())),
+                    Group::one(identified(artifact.clone()), EPOCH),
                 )
                 .unwrap();
         }
@@ -409,7 +427,7 @@ mod tests {
                 .push_group(
                     *lane,
                     peer.clone(),
-                    Group::one(identified(artifact.clone())),
+                    Group::one(identified(artifact.clone()), EPOCH),
                 )
                 .unwrap();
             assert_eq!(lanes.items(), sources.len());
@@ -453,7 +471,7 @@ mod tests {
             .push_group(
                 LaneId::Data(0),
                 peer(0),
-                Group::one(identified(block0.clone())),
+                Group::one(identified(block0.clone()), EPOCH),
             )
             .unwrap();
         assert_eq!(lanes.flush(16), vec![block0.clone()]);
@@ -463,14 +481,14 @@ mod tests {
             .push_group(
                 LaneId::Data(0),
                 peer(0),
-                Group::one(identified(block0.clone())),
+                Group::one(identified(block0.clone()), EPOCH),
             )
             .unwrap();
         lanes
             .push_group(
                 LaneId::Data(1),
                 peer(1),
-                Group::one(identified(block1.clone())),
+                Group::one(identified(block1.clone()), EPOCH),
             )
             .unwrap();
         assert_eq!(lanes.flush(16), vec![block1, block0]);
@@ -488,21 +506,21 @@ mod tests {
             .push_group(
                 LaneId::Consensus,
                 peer(0),
-                Group::one(identified(novote.clone())),
+                Group::one(identified(novote.clone()), EPOCH),
             )
             .unwrap();
         lanes
             .push_group(
                 LaneId::Certificate,
                 peer(1),
-                Group::one(identified(nullification.clone())),
+                Group::one(identified(nullification.clone()), EPOCH),
             )
             .unwrap();
         lanes
             .push_group(
                 LaneId::Data(0),
                 peer(2),
-                Group::one(identified(block.clone())),
+                Group::one(identified(block.clone()), EPOCH),
             )
             .unwrap();
 
@@ -525,7 +543,7 @@ mod tests {
                 .push_group(
                     LaneId::Consensus,
                     peer(signer as u8),
-                    Group::one(identified(novote)),
+                    Group::one(identified(novote), EPOCH),
                 )
                 .unwrap();
         }
@@ -549,14 +567,14 @@ mod tests {
             .push_group(
                 LaneId::Consensus,
                 peer(0),
-                Group::one(identified(novote.clone())),
+                Group::one(identified(novote.clone()), EPOCH),
             )
             .unwrap();
         assert_eq!(
             lanes.push_group(
                 LaneId::Consensus,
                 peer(0),
-                Group::one(identified(novote.clone())),
+                Group::one(identified(novote.clone()), EPOCH),
             ),
             Err(Drop::Peer)
         );
@@ -564,14 +582,14 @@ mod tests {
             .push_group(
                 LaneId::Consensus,
                 peer(1),
-                Group::one(identified(novote.clone())),
+                Group::one(identified(novote.clone()), EPOCH),
             )
             .unwrap();
         assert_eq!(
             lanes.push_group(
                 LaneId::Consensus,
                 peer(2),
-                Group::one(identified(novote.clone())),
+                Group::one(identified(novote.clone()), EPOCH),
             ),
             Err(Drop::Lane)
         );
@@ -579,7 +597,7 @@ mod tests {
         // Draining the lane restores peer budgets exactly.
         assert_eq!(lanes.flush(16).len(), 2);
         lanes
-            .push_group(LaneId::Consensus, peer(0), Group::one(identified(novote)))
+            .push_group(LaneId::Consensus, peer(0), Group::one(identified(novote), EPOCH))
             .unwrap();
     }
 
@@ -596,18 +614,18 @@ mod tests {
             .push_group(
                 LaneId::Consensus,
                 peer(0),
-                Group::one(identified(replay.clone())),
+                Group::one(identified(replay.clone()), EPOCH),
             )
             .unwrap();
         lanes
             .push_group(
                 LaneId::Consensus,
                 peer(0),
-                Group::one(identified(replay.clone())),
+                Group::one(identified(replay.clone()), EPOCH),
             )
             .unwrap();
         assert_eq!(
-            lanes.push_group(LaneId::Consensus, peer(0), Group::one(identified(replay)),),
+            lanes.push_group(LaneId::Consensus, peer(0), Group::one(identified(replay), EPOCH),),
             Err(Drop::Peer),
             "one of at most f faulty identities exhausted its lane share",
         );
@@ -615,7 +633,7 @@ mod tests {
             .push_group(
                 LaneId::Consensus,
                 peer(1),
-                Group::one(identified(correct.clone())),
+                Group::one(identified(correct.clone()), EPOCH),
             )
             .expect("a correct identity retains admission capacity");
 
@@ -639,7 +657,7 @@ mod tests {
             .push_group(
                 LaneId::Consensus,
                 peer(0),
-                Group::pair([identified(first.clone()), identified(second.clone())]),
+                Group::pair([identified(first.clone()), identified(second.clone())], EPOCH),
             )
             .unwrap();
         assert_eq!(ordered.flush(2), vec![first.clone(), second.clone()]);
@@ -677,7 +695,7 @@ mod tests {
                 lanes.push_group(
                     LaneId::Consensus,
                     peer(0),
-                    Group::pair([identified(first.clone()), identified(second.clone())]),
+                    Group::pair([identified(first.clone()), identified(second.clone())], EPOCH),
                 ),
                 Err(expected),
             );
@@ -702,7 +720,7 @@ mod tests {
             .push_group(
                 LaneId::Consensus,
                 peer(0),
-                Group::pair([identified(parent.clone()), identified(block.clone())]),
+                Group::pair([identified(parent.clone()), identified(block.clone())], EPOCH),
             )
             .unwrap();
         assert_eq!(lanes.flush(2), vec![parent, block]);
