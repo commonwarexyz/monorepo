@@ -86,9 +86,9 @@ pub struct Config<P: PublicKey> {
 /// unavailable, the fetch waits for them.
 ///
 /// Targets persist through transient failures (timeout, "no data" response, send failure) since
-/// the peer might be slow or might receive the data later. Targets are only removed when:
-/// - A peer is blocked (sent invalid data)
-/// - The fetch succeeds (all targets for that key are cleared)
+/// the peer might be slow or might receive the data later, and are cleared when the fetch
+/// succeeds. A blocked target is skipped until the network unblocks it, so a fetch whose every
+/// target is blocked stays outstanding and resumes once one of them is unblocked.
 pub struct Fetcher<E, P, Key, NetS>
 where
     E: Clock + Rng + Metrics,
@@ -101,8 +101,8 @@ where
     // Peer management
     /// Local identity (to exclude from requests)
     me: Option<P>,
-    /// Participants to exclude from requests (blocked peers)
-    excluded: HashSet<P>,
+    /// Peers the network currently blocks, replaced wholesale on every update.
+    blocked: HashSet<P>,
     /// Participants and their performance (throughput in bytes per second, higher is
     /// better). Stored as `Reverse` so the set orders the best-performing peer first.
     participants: PrioritySet<P, Reverse<u128>>,
@@ -141,8 +141,8 @@ where
 
     /// Per-key target peers restricting which peers are used to fetch each key.
     /// Only target peers are tried, waiting for them if unavailable. There is no
-    /// fallback to other peers. Targets persist through transient failures, they are
-    /// only removed when blocked (invalid data) or cleared on successful fetch.
+    /// fallback to other peers. Targets persist through transient failures and are
+    /// cleared on successful fetch. Blocked targets are skipped until unblocked.
     targets: HashMap<Key, HashSet<P>>,
 
     /// Per-peer performance metric (exponential moving average of throughput in bytes per second)
@@ -188,7 +188,7 @@ where
         Self {
             context,
             me: config.me,
-            excluded: HashSet::new(),
+            blocked: HashSet::new(),
             participants: PrioritySet::new(),
             request_id: 0,
             active: PrioritySet::new(),
@@ -239,7 +239,7 @@ where
         // Collect eligible peers
         let mut eligible: Vec<P> = participant_iter
             .filter(|(p, _)| self.me.as_ref() != Some(p)) // not self
-            .filter(|(p, _)| !self.excluded.contains(p)) // not blocked
+            .filter(|(p, _)| !self.blocked.contains(p)) // not blocked
             .filter(|(p, _)| targets.is_none_or(|t| t.contains(p))) // matches target if any
             .map(|(p, _)| p.clone())
             .collect();
@@ -450,7 +450,8 @@ where
     /// should be attributed to the peer.
     ///
     /// Targets are not removed here. The caller clears them when the logical fetch completes or
-    /// is ignored. On invalid data, the caller blocks the peer, removing it from all target sets.
+    /// is ignored. On invalid data, the caller blocks the peer, which is then skipped until the
+    /// network unblocks it.
     ///
     /// Note that this matches responses against the peer a request was already sent to. A later
     /// `reconcile()` call may remove that peer from the candidate pool for future sends, but it
@@ -494,16 +495,14 @@ where
         self.waiter = None;
     }
 
-    /// Blocks a peer from being used to fetch data.
+    /// Replaces the set of peers the network currently blocks.
     ///
-    /// Also removes the peer from all target sets.
-    pub fn block(&mut self, peer: P) {
-        // Remove peer from all target sets (keeping empty entries)
-        for targets in self.targets.values_mut() {
-            targets.remove(&peer);
-        }
-
-        self.excluded.insert(peer);
+    /// Blocked peers keep their place in any target sets and are skipped until
+    /// a later update no longer lists them. Clears the waiter, since an
+    /// unblocked peer may make a waiting fetch servable.
+    pub fn set_blocked(&mut self, blocked: impl IntoIterator<Item = P>) {
+        self.blocked = blocked.into_iter().collect();
+        self.waiter = None;
     }
 
     /// Add target peers for fetching a key.
@@ -551,11 +550,6 @@ where
     /// Returns the number of active fetches.
     pub fn len_active(&self) -> usize {
         self.requests.len()
-    }
-
-    /// Returns the number of blocked peers.
-    pub fn len_blocked(&self) -> usize {
-        self.excluded.len()
     }
 
     /// Returns true if the fetch is in progress.
@@ -1210,32 +1204,12 @@ mod tests {
             let peer2 = PrivateKey::from_seed(2).public_key();
 
             // Test reconcile with peers
-            fetcher.reconcile(&[peer1.clone(), peer2]);
+            fetcher.reconcile(&[peer1.clone(), peer2.clone()]);
 
-            // Test block peer
-            fetcher.block(peer1);
-
-            // Initially no blocked peers (this depends on internal requester state)
-            // The len_blocked function returns the count from the requester
-        });
-    }
-
-    #[test]
-    fn test_len_blocked() {
-        let runner = Runner::default();
-        runner.start(|context| async {
-            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
-
-            // Initially no blocked peers
-            let initial_blocked = fetcher.len_blocked();
-
-            // Block a peer
-            let peer = PrivateKey::from_seed(1).public_key();
-            fetcher.block(peer);
-
-            // The count should potentially increase (depends on requester implementation)
-            let after_block = fetcher.len_blocked();
-            assert!(after_block >= initial_blocked);
+            // A blocked participant is skipped without leaving the participant set.
+            fetcher.set_blocked([peer1.clone()]);
+            assert_eq!(fetcher.get_eligible_peers(&MockKey(1), false), vec![peer2]);
+            assert!(fetcher.participants.contains(&peer1));
         });
     }
 
@@ -1452,7 +1426,7 @@ mod tests {
             );
 
             // Block the peer we'll use as target, so fetch has no eligible participants
-            fetcher.block(blocked_peer.clone());
+            fetcher.set_blocked([blocked_peer.clone()]);
 
             // Add key with targets pointing only to blocked peer
             fetcher.add_ready(MockKey(1));
@@ -1787,58 +1761,28 @@ mod tests {
     }
 
     #[test]
-    fn test_block_removes_from_targets() {
+    fn test_blocked_peers_keep_targets_until_unblocked() {
         let runner = Runner::default();
-        runner.start(|context| async {
-            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
+        runner.start(|context| async move {
+            let mut fetcher = create_test_fetcher::<SuccessMockSender>(context.child("fetcher"));
+            let public_key = PrivateKey::from_seed(0).public_key();
             let peer1 = PrivateKey::from_seed(1).public_key();
             let peer2 = PrivateKey::from_seed(2).public_key();
-            let peer3 = PrivateKey::from_seed(3).public_key();
+            fetcher.reconcile(&[public_key, peer1.clone(), peer2.clone()]);
+            fetcher.add_targets(MockKey(1), [peer1.clone()]);
+            fetcher.add_targets(MockKey(2), [peer1.clone(), peer2.clone()]);
 
-            // Add targets for multiple keys with various peers
-            fetcher.add_targets(MockKey(1), [peer1.clone(), peer2.clone()]);
-            fetcher.add_targets(MockKey(2), [peer1.clone(), peer3.clone()]);
-            fetcher.add_targets(MockKey(3), [peer2.clone()]);
+            // A blocked peer keeps its place in every target set but is not eligible.
+            fetcher.set_blocked([peer1.clone()]);
+            assert!(fetcher.targets.get(&MockKey(1)).unwrap().contains(&peer1));
+            assert!(fetcher.get_eligible_peers(&MockKey(1), false).is_empty());
+            assert_eq!(fetcher.get_eligible_peers(&MockKey(2), false), vec![peer2]);
 
-            // Verify initial state
-            assert_eq!(fetcher.targets.get(&MockKey(1)).unwrap().len(), 2);
-            assert_eq!(fetcher.targets.get(&MockKey(2)).unwrap().len(), 2);
-            assert_eq!(fetcher.targets.get(&MockKey(3)).unwrap().len(), 1);
-
-            // Block peer1
-            fetcher.block(peer1.clone());
-
-            // peer1 should be removed from all target sets
-            let key1_targets = fetcher.targets.get(&MockKey(1)).unwrap();
-            assert_eq!(key1_targets.len(), 1);
-            assert!(!key1_targets.contains(&peer1));
-            assert!(key1_targets.contains(&peer2));
-
-            let key2_targets = fetcher.targets.get(&MockKey(2)).unwrap();
-            assert_eq!(key2_targets.len(), 1);
-            assert!(!key2_targets.contains(&peer1));
-            assert!(key2_targets.contains(&peer3));
-
-            // MockKey(3) shouldn't be affected (peer1 wasn't a target)
-            let key3_targets = fetcher.targets.get(&MockKey(3)).unwrap();
-            assert_eq!(key3_targets.len(), 1);
-            assert!(key3_targets.contains(&peer2));
-
-            // Block peer2 - should remove from MockKey(1) and MockKey(3)
-            fetcher.block(peer2);
-
-            // MockKey(1) now has empty targets (entry kept to prevent fallback)
-            assert!(fetcher.targets.contains_key(&MockKey(1)));
-            assert!(fetcher.targets.get(&MockKey(1)).unwrap().is_empty());
-
-            // MockKey(2) still has peer3
-            let key2_targets = fetcher.targets.get(&MockKey(2)).unwrap();
-            assert_eq!(key2_targets.len(), 1);
-            assert!(key2_targets.contains(&peer3));
-
-            // MockKey(3) now has empty targets (entry kept to prevent fallback)
-            assert!(fetcher.targets.contains_key(&MockKey(3)));
-            assert!(fetcher.targets.get(&MockKey(3)).unwrap().is_empty());
+            // Lifting the block makes the peer eligible again and wakes the fetcher.
+            fetcher.waiter = Some(context.current());
+            fetcher.set_blocked([]);
+            assert!(fetcher.waiter.is_none());
+            assert_eq!(fetcher.get_eligible_peers(&MockKey(1), false), vec![peer1]);
         });
     }
 

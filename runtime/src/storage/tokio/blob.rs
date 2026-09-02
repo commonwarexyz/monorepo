@@ -1,10 +1,14 @@
-use crate::{Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut, ReadOptions, WriteOptions};
+use crate::{
+    Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut, ReadOptions, WriteOptions,
+    storage::hold::Hold,
+};
 use cfg_if::cfg_if;
 use commonware_formatting::hex;
 use commonware_utils::channel::oneshot;
 use std::{
     fs::File,
     io::IoSlice,
+    ops::Deref,
     os::{fd::AsRawFd, unix::fs::FileExt},
     sync::{
         Arc,
@@ -45,11 +49,34 @@ impl Cache {
     }
 }
 
+/// A blob's file bundled with the hold on its storage directory.
+///
+/// An operation must capture the file to touch it, so it carries the hold
+/// into the blocking pool without having to remember to.
+struct Held {
+    file: File,
+    _hold: Arc<Hold>,
+}
+
+impl Held {
+    fn new(file: File, hold: Arc<Hold>) -> Arc<Self> {
+        Arc::new(Self { file, _hold: hold })
+    }
+}
+
+impl Deref for Held {
+    type Target = File;
+
+    fn deref(&self) -> &File {
+        &self.file
+    }
+}
+
 #[derive(Clone)]
 pub struct Blob {
     partition: String,
     name: Vec<u8>,
-    file: Arc<File>,
+    file: Arc<Held>,
     pool: BufferPool,
     /// Physical offset where logical offset 0 begins (the size of the header region).
     data_offset: u64,
@@ -59,17 +86,18 @@ pub struct Blob {
 }
 
 impl Blob {
-    pub fn new(
+    pub(crate) fn new(
         partition: String,
         name: &[u8],
         file: File,
         pool: BufferPool,
         data_offset: u64,
+        hold: Arc<Hold>,
     ) -> Self {
         Self {
             partition,
             name: name.into(),
-            file: Arc::new(file),
+            file: Held::new(file, hold),
             pool,
             data_offset,
             dont_cache_supported: Arc::new(AtomicBool::new(true)),

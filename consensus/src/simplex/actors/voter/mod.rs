@@ -4020,6 +4020,7 @@ mod tests {
                 )
             };
             let (_, notarization_1) = build_notarization(&schemes, &proposal(1, 0), quorum);
+            let (_, notarization_2) = build_notarization(&schemes, &proposal(2, 1), quorum);
             let (_, notarization_3) = build_notarization(&schemes, &proposal(3, 2), quorum);
 
             // Deliver notarization(1) and wait for the voter to certify it and
@@ -4033,12 +4034,10 @@ mod tests {
             }
             while resolver_receiver.recv().now_or_never().flatten().is_some() {}
 
-            // Deliver notarization(3), skipping notarization(2): the voter
-            // observed the certificate broadcast for view 3 but missed the one
-            // for view 2. Certifying view 3 requires view 2's exact-view
-            // certificate, so the voter must fetch it. The certificate update
-            // must reach the resolver first: it opens unrestricted background
-            // repair that a later leader target cannot narrow.
+            // Deliver notarization(3) without notarization(2). The voter saw
+            // the certificate for view 3 but missed the one for view 2.
+            // Certifying view 3 requires the exact certificate for view 2, so
+            // the voter asks any validator for it.
             mailbox.recovered(Certificate::Notarization(notarization_3));
             assert!(matches!(
                 resolver_receiver.recv().await.unwrap(),
@@ -4062,12 +4061,51 @@ mod tests {
                         assert_eq!(proposal, View::new(3));
                         assert_eq!(view, View::new(2));
                         assert!(matches!(kind, crate::simplex::actors::Kind::Notarization));
-                        assert!(target.is_some(), "certification repair should retain leader affinity");
+                        assert!(target.is_none());
                         break;
                     },
                     _ = context.sleep(Duration::from_secs(20)) => {
                         panic!("voter never requested the missed notarization");
                     },
+                }
+            }
+
+            // Deliver the fetched parent. The voter must certify the parent
+            // before the child and then resume finalize voting.
+            while batcher_receiver.recv().now_or_never().flatten().is_some() {}
+            mailbox.recovered(Certificate::Notarization(notarization_2));
+            let mut certified = Vec::new();
+            let mut finalized = Vec::new();
+            loop {
+                select! {
+                    message = resolver_receiver.recv() => match message.unwrap() {
+                        MailboxMessage::Certified { view, success, .. }
+                            if view == View::new(2) || view == View::new(3) =>
+                        {
+                            assert!(success);
+                            certified.push(view);
+                        }
+                        MailboxMessage::Certificate { .. }
+                        | MailboxMessage::Certified { .. }
+                        | MailboxMessage::Resolve { .. } => {}
+                    },
+                    message = batcher_receiver.recv() => {
+                        if let batcher::Message::Constructed(Vote::Finalize(vote)) = message.unwrap()
+                            && (vote.view() == View::new(2) || vote.view() == View::new(3))
+                        {
+                            finalized.push(vote.view());
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(20)) => {
+                        panic!(
+                            "recovery stalled: certified={certified:?}, finalized={finalized:?}"
+                        );
+                    },
+                }
+                if certified == [View::new(2), View::new(3)]
+                    && finalized.contains(&View::new(3))
+                {
+                    break;
                 }
             }
         });

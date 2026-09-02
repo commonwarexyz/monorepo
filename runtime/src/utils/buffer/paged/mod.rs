@@ -16,12 +16,13 @@
 //!
 //! # Storage-page alignment
 //!
-//! Physical page `p` begins at blob offset `p * physical_page_size`, and a newly created blob
-//! begins its data on a 4096-byte boundary. Choosing a logical page size such that the physical
-//! page size is a power of two (see [page_size]) therefore makes every physical page either fit
-//! within a single 4096-byte storage page or start on a 4096-byte boundary and span whole
-//! storage pages. Blobs created before the aligned layout begin their data at offset 8 and never
-//! align, regardless of the page size chosen.
+//! Physical page `p` begins at blob offset `p * physical_page_size`, and a blob created with
+//! the default layout ([crate::DEFAULT_BLOB_LAYOUT]) begins its data on a 4096-byte boundary.
+//! Choosing a logical page size such that the physical page size is a power of two (see
+//! [page_size]) therefore makes every physical page either fit within a single 4096-byte
+//! storage page or start on a 4096-byte boundary and span whole storage pages. Blobs with the
+//! unaligned [crate::BlobLayout::V0] layout begin their data at offset 8 and never align,
+//! regardless of the page size chosen.
 //!
 //! Alignment is a performance property, not a correctness requirement: any page size works, but
 //! physical pages that straddle storage-page boundaries amplify cold random reads.
@@ -65,10 +66,11 @@ pub const CHECKSUM_SIZE: u64 = Checksum::SIZE as u64;
 
 /// The storage-page granularity physical pages should align to (see the module docs).
 pub(crate) const STORAGE_PAGE_SIZE: u64 = 4096;
-// The alignment reasoning above assumes newly created blobs place their data on a
-// storage-page boundary.
+
+// The alignment reasoning above assumes blobs created with the default layout place their
+// data on a storage-page boundary.
 const _: () = assert!(
-    crate::storage::Layout::V1
+    crate::DEFAULT_BLOB_LAYOUT
         .data_offset()
         .is_multiple_of(STORAGE_PAGE_SIZE)
 );
@@ -116,6 +118,39 @@ pub(crate) fn validate_page_for_tests(page: &[u8]) -> bool {
     Checksum::validate_page(page).is_some()
 }
 
+/// Select a physical page's authoritative checksum slot, falling back to the other slot if a
+/// write tore, and return the CRC-validated logical length (or `None` when neither slot
+/// verifies).
+///
+/// `page` is one raw physical page: `logical_page_size` bytes followed by the checksum record.
+/// This deliberately re-derives the slot arbitration instead of calling the production
+/// validator so fuzz oracles built on it do not trust the reader they are checking.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn page_len(page: &[u8], logical_page_size: usize) -> Option<usize> {
+    let footer = page.get(logical_page_size..)?;
+    if footer.len() != CHECKSUM_SIZE as usize {
+        return None;
+    }
+    let slots = [
+        (
+            u16::from_be_bytes(footer[0..2].try_into().unwrap()) as usize,
+            u32::from_be_bytes(footer[2..6].try_into().unwrap()),
+        ),
+        (
+            u16::from_be_bytes(footer[6..8].try_into().unwrap()) as usize,
+            u32::from_be_bytes(footer[8..12].try_into().unwrap()),
+        ),
+    ];
+    let authoritative = usize::from(slots[1].0 > slots[0].0);
+    for slot in [authoritative, authoritative ^ 1] {
+        let (len, checksum) = slots[slot];
+        if len > 0 && len <= logical_page_size && Crc32::checksum(&page[..len]) == checksum {
+            return Some(len);
+        }
+    }
+    None
+}
+
 /// Flip one byte inside physical page `page` of the blob at `name`, leaving every other page
 /// valid. Models a torn interior page: a crash during an in-flight fsync can lose an interior
 /// page while later pages persist. Physical pages are the logical page plus the checksum record.
@@ -131,9 +166,14 @@ pub async fn corrupt_page(
     let physical_page_size = logical_page_size + CHECKSUM_SIZE;
     let offset = page * physical_page_size;
     let (blob, size) = storage.open(partition, name).await.unwrap();
+
+    // A complete physical page must follow the target: a trailing truncated physical page
+    // can never validate, so a target followed only by one would be the last validatable
+    // page.
     assert!(
-        size.checked_sub(physical_page_size)
-            .is_some_and(|remaining| offset < remaining),
+        offset
+            .checked_add(physical_page_size * 2)
+            .is_some_and(|end| end <= size),
         "corruption target must be an interior page"
     );
     let byte = blob

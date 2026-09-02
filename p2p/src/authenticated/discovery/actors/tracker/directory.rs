@@ -347,17 +347,19 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     ///
     /// Peers can be blocked even if they don't have a record yet. The block will be applied
     /// when they are later added to a peer set.
-    pub fn block(&mut self, peer: &C) {
+    ///
+    /// Returns `true` if the peer was newly blocked.
+    pub fn block(&mut self, peer: &C) -> bool {
         // Already blocked
         if self.is_blocked(peer) {
-            return;
+            return false;
         }
 
         // If record exists, check if it's blockable
         if let Some(record) = self.peers.get(peer)
             && !record.is_blockable()
         {
-            return;
+            return false;
         }
 
         let blocked_until = self.context.current() + self.block_duration;
@@ -367,6 +369,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             .blocked
             .get_or_create_by(peer)
             .try_set(blocked_until.epoch_millis());
+        true
     }
 
     // ---------- Getters ----------
@@ -475,9 +478,23 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         !self.is_blocked(peer) && self.peers.get(peer).is_some_and(|r| r.acceptable())
     }
 
-    /// Unblock all peers whose block has expired and update primary peer set knowledge bitmaps.
-    pub fn unblock_expired(&mut self) {
+    /// Returns the peers that are currently blocked.
+    pub fn blocked_peers(&self) -> OrderedSet<C> {
         let now = self.context.current();
+        OrderedSet::from_iter_dedup(
+            self.blocked
+                .iter()
+                .filter(|(_, until)| **until > now)
+                .map(|(peer, _)| peer.clone()),
+        )
+    }
+
+    /// Unblock all peers whose block has expired and update primary peer set knowledge bitmaps.
+    ///
+    /// Returns `true` if any peers were unblocked.
+    pub fn unblock_expired(&mut self) -> bool {
+        let now = self.context.current();
+        let mut any_unblocked = false;
         while let Some((_, &blocked_until)) = self.blocked.peek() {
             if blocked_until > now {
                 break;
@@ -485,6 +502,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             let (peer, _) = self.blocked.pop().unwrap();
             debug!(?peer, "unblocked peer");
             self.metrics.blocked.remove_by(&peer);
+            any_unblocked = true;
 
             // Update primary-set knowledge (BitVec gossip); secondaries have no bitmap.
             if let Some(record) = self.peers.get(&peer) {
@@ -494,6 +512,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
                 }
             }
         }
+
+        any_unblocked
     }
 
     /// Waits until the next blocked peer should be unblocked.

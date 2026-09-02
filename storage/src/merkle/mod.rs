@@ -388,10 +388,6 @@ pub enum Error<F: Family> {
     #[error("root mismatch")]
     RootMismatch,
 
-    /// A required digest is missing.
-    #[error("missing digest: {0}")]
-    MissingDigest(Position<F>),
-
     /// A metadata error occurred.
     #[cfg(feature = "std")]
     #[error("metadata error: {0}")]
@@ -401,11 +397,6 @@ pub enum Error<F: Family> {
     #[cfg(feature = "std")]
     #[error("journal error: {0}")]
     Journal(#[from] crate::journal::Error),
-
-    /// A runtime error occurred.
-    #[cfg(feature = "std")]
-    #[error("runtime error: {0}")]
-    Runtime(#[from] commonware_runtime::Error),
 
     /// A required node is missing.
     #[error("missing node: {0}")]
