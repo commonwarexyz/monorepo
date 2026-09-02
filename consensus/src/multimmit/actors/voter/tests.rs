@@ -561,7 +561,6 @@ impl Node {
             &format!("node-{seed}"),
             &scheme,
             &Sequential,
-            limits.inflight_application,
         ))
         .await
         .expect("stores open");
@@ -1121,8 +1120,9 @@ fn fresh_validator_builds_signs_and_publishes_a_block() {
             "primary_voter_proposal_anchor_view",
             "primary_voter_produced_blocks",
             "primary_voter_producer_pipeline_blocked",
-            "primary_voter_active_validations",
-            "primary_voter_pending_validations",
+            "primary_voter_invalid_blocks",
+            "primary_voter_unavailable_validations",
+            "primary_voter_validation_latency",
             "primary_voter_build_active",
             "primary_voter_custody_active",
             "primary_voter_build_latency",
@@ -1499,16 +1499,28 @@ fn live_admission_preserves_core_local_priority_under_peer_flood() {
                     _ => {}
                 }
             }
-            let prioritized = cycles
+            // Validation now runs on the per-chain planes, so a remote-block flood yields fewer
+            // core-local completions than the pre-sharding path did. The end-to-end invariant a peer
+            // flood must not break is that peer observations are admitted only at their co-scheduling
+            // budget while local completions are serviced, so the flood never starves local
+            // priority. The full local-versus-peer budget split is unit-tested in the core admission
+            // scheduler.
+            let peer_held_to_budget = cycles
                 .values()
-                .any(|&(local, peer)| local == 8 && peer == 2);
-            if prioritized {
+                .all(|&(local, peer)| local == 0 || peer <= 2);
+            let local_serviced_beside_a_capped_peer_batch = cycles
+                .values()
+                .any(|&(local, peer)| local >= 1 && peer == 2);
+            if peer_held_to_budget && local_serviced_beside_a_capped_peer_batch {
                 return;
             }
             select! {
                 () = context.sleep(Duration::from_millis(10)) => {},
                 () = context.sleep_until(deadline) => {
-                    panic!("live admission never exposed Core's local priority: {cycles:?}");
+                    panic!(
+                        "live admission never held peer observations to their budget while \
+                         servicing local completions: {cycles:?}"
+                    );
                 },
             }
         }
@@ -4620,8 +4632,7 @@ fn attached_observer_matches_the_synchronous_core() {
 
         // Drive the synchronous Core over the identical cohort.
         let committee = Committee::<MinPk>::new(45, 6, Limits::new(2, 1).unwrap());
-        let mut core =
-            CoreState::fresh(profile(&committee, Role::Observer), NonZeroUsize::MIN).unwrap();
+        let mut core = CoreState::fresh(profile(&committee, Role::Observer)).unwrap();
         core.start_fresh().unwrap();
         let _ = drive_core(&committee, &mut core);
         let identified = artifacts
@@ -5092,7 +5103,6 @@ fn repeated_pre_ack_recovery_crashes_keep_the_suffix_bounded() {
             &format!("node-{SEED}"),
             &committee.signers[0],
             &Sequential,
-            voter_limits().inflight_application,
         ))
         .await
         .expect("stores recover after repeated pre-ack crashes");

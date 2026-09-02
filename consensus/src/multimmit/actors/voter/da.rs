@@ -78,6 +78,21 @@ pub(super) enum DaTaskUpdate<V: Variant, D: Digest> {
         /// The attributed signers.
         signers: Vec<Participant>,
     },
+    /// The contiguous eligible data-availability-vote run one remote validator plane now offers.
+    ///
+    /// Central drains the run in its reservation loop and mirrors `ready_through` into the frontier
+    /// shadow it reads synchronously at vote and proposal time. The shadow can only lag this offer
+    /// by an in-flight message, a safe lower bound, because central alone mints the durable choice.
+    DaVoteReady {
+        /// The process generation that spawned the task.
+        generation: u64,
+        /// The producer chain this run belongs to.
+        chain: ChainId,
+        /// The contiguous eligible run above the certified anchor, lowest height first.
+        candidates: Vec<Arc<SignedTransactionBlock<V, D>>>,
+        /// The greatest height the run reaches, or the certified anchor when the run is empty.
+        ready_through: Height,
+    },
 }
 
 impl<V: Variant, D: Digest> Policy for DaTaskUpdate<V, D> {
@@ -643,6 +658,9 @@ mod tests {
                     assert!(verify.verify_da_certificate(&certificate));
                 }
                 DaTaskUpdate::BlockSigners { .. } => panic!("a valid quorum must not be rejected"),
+                DaTaskUpdate::DaVoteReady { .. } => {
+                    panic!("the own-chain recovery task never offers da-vote candidates")
+                }
             }
         });
     }
@@ -719,6 +737,9 @@ mod tests {
                     assert_eq!(signers, vec![culprit]);
                 }
                 DaTaskUpdate::Recovered { .. } => panic!("an invalid share must fail the quorum"),
+                DaTaskUpdate::DaVoteReady { .. } => {
+                    panic!("the own-chain recovery task never offers da-vote candidates")
+                }
             }
             // A fresh signer re-arms a quorum that excludes the rejected culprit.
             let replacement = signers[replacement_index]
@@ -742,6 +763,9 @@ mod tests {
                 }
                 DaTaskUpdate::BlockSigners { .. } => {
                     panic!("the re-armed quorum must recover")
+                }
+                DaTaskUpdate::DaVoteReady { .. } => {
+                    panic!("the own-chain recovery task never offers da-vote candidates")
                 }
             }
         });

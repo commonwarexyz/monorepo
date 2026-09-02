@@ -2,15 +2,15 @@
 
 use super::{
     Artifact, ArtifactBatch, ArtifactId, BarrierAck, BarrierId, Capability, ChainState, Change,
-    Cursor, Dependency, DurableEffect, DurableJob, DurableState, EffectId, FinalityFact, Input,
-    JobId, Observation, PersistJob, PoolSummary, Profile, ReplayError, ResolutionCompletion,
+    Cursor, DaChoice, Dependency, DurableEffect, DurableJob, DurableState, EffectId, FinalityFact,
+    Input, JobId, Observation, PersistJob, PoolSummary, Profile, ReplayError, ResolutionCompletion,
     ResolutionJob, Role, Scheduler, SignRequest, Snapshot, VerificationTicket,
     finality::{FinalityState, PreparedLqc},
     view::ViewState,
 };
 use crate::{
     Viewable as _,
-    multimmit::types::{CertificateId, ChainId, Context, Height, SignedTransactionBlock},
+    multimmit::types::{BlockRef, CertificateId, ChainId, Context, Height, SignedTransactionBlock},
     types::{Epoch, Round, View},
 };
 use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
@@ -1124,6 +1124,28 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             .certified_tips
             .get(chain.get() as usize)
             .map(|tip| tip.height())
+    }
+
+    /// Returns one producer chain's certified anchor, for re-seeding its validator plane.
+    pub(crate) fn certified_anchor(&self, chain: ChainId) -> BlockRef<H::Digest> {
+        self.chain.certified_anchor(chain)
+    }
+
+    /// Returns one producer chain's durable DA choices, for re-seeding its validator plane.
+    pub(crate) fn chosen_choices(&self, chain: ChainId) -> Vec<DaChoice<H::Digest>> {
+        self.chain.chosen_choices(chain)
+    }
+
+    /// Records one chain's offered eligible run and frontier reach from its validator plane.
+    pub(crate) fn note_da_vote_ready(
+        &mut self,
+        chain: ChainId,
+        candidates: Vec<Arc<SignedTransactionBlock<V, H::Digest>>>,
+        ready_through: Height,
+    ) {
+        self.chain
+            .note_da_vote_ready(chain, candidates, ready_through);
+        self.wake();
     }
 
     pub(crate) fn progress(&self) -> Progress {

@@ -21,15 +21,15 @@ use crate::{
         },
         config::LeaderSchedule,
         machine::{
-            Artifact, BlockValidity, BuildCompletion, BuildId, BuildJob, Capabilities, Capability,
-            CoreError, CoreState, CoreTransition, CoreTurn, CoreWork, Cursor, CustodyCancellation,
+            Artifact, BuildCompletion, BuildId, BuildJob, Capabilities, Capability, CoreError,
+            CoreState, CoreTransition, CoreTurn, CoreWork, Cursor, CustodyCancellation,
             CustodyCompletion, CustodyJob, DurabilityCapability, DurableEffect, EffectId,
             IdentifiedArtifact, InputTicket, JobId, LeaderCapability, LqcAggregateCompletion,
-            NullificationRecoveryCompletion, Observation, ObservationStatus, PersistDirective,
-            ProducerCapability, ProducerProgress, ProductionTimer, Profile, Rejection,
-            ResolverCapability, Role, SignRequest, StepError, StepStatus, TaskClass, TaskError,
-            TaskPermit, TaskTerminal, Timer, ValidationCompletion, ValidationId, ValidationJob,
-            VerificationCapability, ViewProof, VqcAggregateCompletion, contracts::Lane,
+            NullificationRecoveryCompletion, Observation, ObservationStatus, PerChainValidator,
+            PersistDirective, ProducerCapability, ProducerProgress, ProductionTimer, Profile,
+            Rejection, ResolverCapability, Role, SignRequest, StepError, StepStatus, TaskClass,
+            TaskError, TaskPermit, TaskTerminal, Timer, VerificationCapability, ViewProof,
+            VqcAggregateCompletion, contracts::Lane,
         },
         scheme::bls12381_threshold::{DaRecoveryError, Error as SchemeError, Scheme},
         storage::{CheckpointError, CheckpointStore},
@@ -75,8 +75,11 @@ use tracing::{Instrument as _, Span, debug, debug_span, error, info, info_span, 
 mod da;
 #[path = "executor.rs"]
 mod executor;
+#[path = "validator.rs"]
+mod validator;
 
 use da::{ChainCommand, DaPlane, DaTaskUpdate};
+use validator::{ValidatorCommand, ValidatorPlane};
 
 /// One reconciled worker result for a bulk-cryptography task.
 type CryptoTaskOutcome<V, D> = (
@@ -280,7 +283,7 @@ enum Fatal {
 }
 
 /// One completed asynchronous application job.
-enum AppOutcome<V: Variant, D: Digest> {
+enum AppOutcome<D: Digest> {
     Built {
         started_at: SystemTime,
         id: BuildId,
@@ -297,17 +300,6 @@ enum AppOutcome<V: Variant, D: Digest> {
     CustodyCancelled {
         cancellation: CustodyCancellation,
     },
-    Validated {
-        started_at: SystemTime,
-        id: ValidationId,
-        generation: u64,
-        block: Arc<SignedTransactionBlock<V, D>>,
-        verdict: Option<bool>,
-    },
-    ValidationCancelled {
-        id: ValidationId,
-        chain: ChainId,
-    },
 }
 
 #[derive(Clone)]
@@ -319,7 +311,7 @@ struct InputContext {
 /// One signature, certificate assembly, or recovery as it returns from the compute pool.
 type CryptoResult<V, D> = (TaskPermit, CryptoTaskOutcome<V, D>);
 
-type AppResult<V, D> = (TaskPermit, Span, Result<AppOutcome<V, D>, RuntimeError>);
+type AppResult<D> = (TaskPermit, Span, Result<AppOutcome<D>, RuntimeError>);
 
 /// Submits CPU work directly to the configured strategy while the actor awaits its completion.
 async fn run_crypto_operation<P, O, T>(
@@ -557,7 +549,7 @@ enum RuntimeEvent<P: PublicKey, V: Variant, D: Digest> {
     JournalCapacity(Result<(), JournalFailure>),
     Checkpoint(Result<bool, Fatal>),
     Prune(Result<(), JournalFailure>),
-    Application(AppResult<V, D>),
+    Application(AppResult<D>),
     Crypto(CryptoResult<V, D>),
     DaTask(DaTaskUpdate<V, D>),
     ViewTimer,
@@ -878,21 +870,37 @@ where
         );
 
         let da_own_chain = participant.and_then(|p| protocol.producer_chain(p));
-        let (da_update_sender, da_updates, da_command, da_command_receiver) =
-            if da_own_chain.is_some() {
-                let (update_sender, update_receiver) =
-                    mailbox::new(driver_context.child("da_updates"), config.mailbox_size);
-                let (command_sender, command_receiver) =
-                    mailbox::new(driver_context.child("da_commands"), config.mailbox_size);
-                (
-                    Some(update_sender),
-                    Some(update_receiver),
-                    Some(command_sender),
-                    Some(command_receiver),
-                )
-            } else {
-                (None, None, None, None)
-            };
+        // Every validator, producer or not, runs the remote validator planes and shares one update
+        // channel with the own-chain recovery task; only a producer runs that recovery task.
+        let (da_update_sender, da_updates) = if participant.is_some() {
+            let (sender, receiver) =
+                mailbox::new(driver_context.child("da_updates"), config.mailbox_size);
+            (Some(sender), Some(receiver))
+        } else {
+            (None, None)
+        };
+        let (da_command, da_command_receiver) = if da_own_chain.is_some() {
+            let (sender, receiver) =
+                mailbox::new(driver_context.child("da_commands"), config.mailbox_size);
+            (Some(sender), Some(receiver))
+        } else {
+            (None, None)
+        };
+        let validator_chains = if participant.is_some() {
+            protocol.codec_config().chains()
+        } else {
+            0
+        };
+        let mut validator_commands = Vec::with_capacity(validator_chains);
+        let mut validator_receivers = Vec::with_capacity(validator_chains);
+        for _ in 0..validator_chains {
+            let (sender, receiver) = mailbox::new(
+                driver_context.child("validator_commands"),
+                config.mailbox_size,
+            );
+            validator_commands.push(sender);
+            validator_receivers.push(Some(receiver));
+        }
         let mut driver = Driver {
             context: driver_context,
             protocol_epoch: epoch,
@@ -932,7 +940,6 @@ where
             carried_observation: None,
             pending_inspection: None,
             active_custody: BTreeMap::new(),
-            active_validations: BTreeMap::new(),
             view_timer: None,
             production_timer: None,
             heartbeat_at: self
@@ -953,6 +960,9 @@ where
             da_command,
             da_command_receiver,
             da_handle: None,
+            validator_commands,
+            validator_receivers,
+            validator_handles: Vec::new(),
             metrics: self.metrics.clone(),
             #[cfg(test)]
             test_hooks: self.test_hooks.clone(),
@@ -1078,15 +1088,6 @@ const fn sign_request_kind<V: Variant, D: Digest>(request: &SignRequest<V, D>) -
         SignRequest::Vote(_) => "vote",
         SignRequest::NoVote { .. } => "no_vote",
         SignRequest::Nullify { .. } => "nullify",
-    }
-}
-
-/// Returns the stable verdict label recorded on one block-validation span.
-const fn validation_verdict(validity: BlockValidity) -> &'static str {
-    match validity {
-        BlockValidity::Valid => "valid",
-        BlockValidity::Invalid => "invalid",
-        BlockValidity::Unavailable => "unavailable",
     }
 }
 
@@ -1234,6 +1235,11 @@ impl ReadinessCursor {
     }
 }
 
+/// One producer chain's validator-plane command endpoint, indexed by chain in the voter.
+type ValidatorCommandSender<V, D> = mailbox::Sender<validator::ValidatorCommand<V, D>>;
+/// One producer chain's validator-plane command receiver, taken by its task on first spawn.
+type ValidatorCommandReceiver<V, D> = mailbox::Receiver<validator::ValidatorCommand<V, D>>;
+
 /// All state owned by one running voter.
 struct Driver<E, H, P, V, A, R, F, T, C, S1, S2, S3>
 where
@@ -1282,7 +1288,7 @@ where
     input_spans: BTreeMap<InputTicket, InputContext>,
     /// Authenticated network sources keyed by Core's stable pre-verification observation identity.
     verification_sources: BTreeMap<Observation, P>,
-    jobs: Pool<'static, AppResult<V, H::Digest>>,
+    jobs: Pool<'static, AppResult<H::Digest>>,
     crypto: Pool<'static, CryptoResult<V, H::Digest>>,
     /// Bulk-verification jobs retain their affine permits until the batcher returns them.
     verification_tasks: BTreeMap<JobId, TaskPermit>,
@@ -1297,8 +1303,6 @@ where
     pending_inspection: Option<(Query<H::Digest>, bool)>,
     /// Runtime cancellation signals keyed by Core's exact local build identity.
     active_custody: BTreeMap<BuildId, Option<oneshot::Sender<()>>>,
-    /// Runtime cancellation signals keyed by Core's exact validation identity.
-    active_validations: BTreeMap<ValidationId, Option<oneshot::Sender<()>>>,
     view_timer: Option<(Timer, SystemTime)>,
     production_timer: Option<(ProductionTimer<H::Digest>, SystemTime, Span)>,
     /// When periodic metrics and producer-stall checks next run.
@@ -1327,6 +1331,12 @@ where
     da_command_receiver: Option<mailbox::Receiver<ChainCommand<V, H::Digest>>>,
     /// Handle to the current-generation DA task, aborted when the generation advances.
     da_handle: Option<Handle<()>>,
+    /// Per-producer-chain remote validator plane command endpoints, indexed by chain.
+    validator_commands: Vec<ValidatorCommandSender<V, H::Digest>>,
+    /// Validator command receivers moved into each task on first spawn, indexed by chain.
+    validator_receivers: Vec<Option<ValidatorCommandReceiver<V, H::Digest>>>,
+    /// Handles to the current-generation validator tasks; the tasks live until the runtime stops.
+    validator_handles: Vec<Handle<()>>,
     metrics: ActorMetrics,
     #[cfg(test)]
     test_hooks: TestHooks<V, H::Digest>,
@@ -2079,6 +2089,7 @@ where
             self.production_timer = None;
             self.core_mut().advance_task_generation(generation)?;
             self.spawn_da_task(generation);
+            self.spawn_validator_tasks(generation);
         }
         if matches!(transition.status(), StepStatus::StaleCompletion) {
             self.metrics.stale.inc();
@@ -2101,7 +2112,6 @@ where
         self.fast_verifications.clear();
         self.bulk_verifications.clear();
         self.active_custody.clear();
-        self.active_validations.clear();
         self.verification_sources.clear();
     }
 
@@ -2164,6 +2174,75 @@ where
         self.da_handle = Some(handle);
     }
 
+    /// Spawns one remote validator plane per producer chain on first entry to a generation, or
+    /// reconfigures the long-lived tasks and re-seeds their anchors and choices for a later one.
+    ///
+    /// Each task validates its chain's blocks on the shared work-stealing pool and offers the
+    /// contiguous eligible run; central mints every durable choice and reads the offered runs. A
+    /// saturated per-chain command mailbox backpressures that chain's admission alone.
+    fn spawn_validator_tasks(&mut self, generation: u64) {
+        if self.participant.is_none() {
+            return;
+        }
+        let Some(update_sender) = self.da_update_sender.clone() else {
+            return;
+        };
+        if !self.validator_handles.is_empty() {
+            for chain in 0..self.validator_commands.len() {
+                let chain_id = ChainId::new(chain as u32);
+                let anchor = self.machine.certified_anchor(chain_id);
+                let choices = self.machine.chosen_choices(chain_id);
+                let command = &self.validator_commands[chain];
+                let _ = command.enqueue(ValidatorCommand::Reconfigure { generation, anchor });
+                let _ = command.enqueue(ValidatorCommand::Chosen(choices));
+            }
+            return;
+        }
+        let codec = self.machine.profile().protocol().codec_config();
+        let pipeline_depth = codec.pipeline_depth() as u64;
+        let run_cap = codec.pipeline_depth();
+        let items_limit = self.machine.profile().validation_parallelism();
+        let bytes_limit =
+            items_limit.saturating_mul(self.machine.profile().resources().max_artifact_bytes());
+        for chain in 0..self.validator_commands.len() {
+            let Some(receiver) = self.validator_receivers[chain].take() else {
+                continue;
+            };
+            let chain_id = ChainId::new(chain as u32);
+            let anchor = self.machine.certified_anchor(chain_id);
+            let validator = PerChainValidator::new(
+                chain_id,
+                pipeline_depth,
+                items_limit,
+                bytes_limit,
+                anchor,
+                generation,
+            );
+            let automaton = self.automaton.clone();
+            let updates = update_sender.clone();
+            let latency = self.metrics.validation_latency.clone();
+            let invalid = self.metrics.invalid_blocks.clone();
+            let unavailable = self.metrics.unavailable_validations.clone();
+            let handle = self.context.child("validator").spawn(move |context| {
+                ValidatorPlane::<_, H, _, V>::new(
+                    context,
+                    automaton,
+                    validator,
+                    updates,
+                    chain_id,
+                    run_cap,
+                    latency,
+                    invalid,
+                    unavailable,
+                )
+                .run(receiver)
+            });
+            self.validator_handles.push(handle);
+            let choices = self.machine.chosen_choices(chain_id);
+            let _ = self.validator_commands[chain].enqueue(ValidatorCommand::Chosen(choices));
+        }
+    }
+
     /// Applies one result returned by the own-chain data-availability task.
     ///
     /// Results from a superseded generation are dropped, mirroring how stale async completions are
@@ -2191,6 +2270,20 @@ where
                     return Ok(());
                 }
                 self.block_da_signers(&signers)
+            }
+            DaTaskUpdate::DaVoteReady {
+                generation,
+                chain,
+                candidates,
+                ready_through,
+            } => {
+                if generation != self.core().task_generation() {
+                    self.metrics.stale.inc();
+                    return Ok(());
+                }
+                self.machine
+                    .note_da_vote_ready(chain, candidates, ready_through);
+                Ok(())
             }
         }
     }
@@ -2254,15 +2347,6 @@ where
             .metrics
             .view_timeout_cutoff_timeout
             .try_set(usize::from(progress.timeout_cutoff_timeout));
-        let (active_validations, pending_validations) = self.core().validation_counts();
-        let _ = self
-            .metrics
-            .active_validations_gauge
-            .try_set(active_validations);
-        let _ = self
-            .metrics
-            .pending_validations_gauge
-            .try_set(pending_validations);
         let _ = self
             .metrics
             .build_active_gauge

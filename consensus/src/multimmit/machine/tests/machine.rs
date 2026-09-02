@@ -21,7 +21,7 @@ use crate::{
     },
     types::{Attributable, Epoch, Participant, Round, View, ViewDelta},
 };
-use commonware_codec::{Decode, Encode, EncodeSize as _, types::lazy::Lazy};
+use commonware_codec::{Decode, Encode, types::lazy::Lazy};
 use commonware_cryptography::{
     Hasher, Sha256,
     bls12381::{
@@ -36,10 +36,9 @@ use commonware_cryptography::{
     sha256::Digest,
 };
 use commonware_math::algebra::Additive;
-use commonware_utils::{N5f1, sync::Mutex, test_rng};
+use commonware_utils::{N5f1, sync::Mutex};
 use core::{num::NonZeroUsize, time::Duration};
 use proptest::{collection::vec as prop_vec, prelude::*};
-use rand::TryRng as _;
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{
@@ -213,20 +212,6 @@ const fn resources_with_capacities(
         NonZeroUsize::new(8).unwrap(),
         NonZeroUsize::new(8).unwrap(),
         NonZeroUsize::new(max_outbox_effects).unwrap(),
-        NonZeroUsize::new(64).unwrap(),
-    )
-}
-
-const fn resources_with_validation_batch(max_verification_batch: usize) -> ResourceLimits {
-    ResourceLimits::new(
-        NonZeroUsize::new(16 * 1024).unwrap(),
-        NonZeroUsize::new(32).unwrap(),
-        NonZeroUsize::new(max_verification_batch).unwrap(),
-        NonZeroUsize::new(3).unwrap(),
-        2,
-        NonZeroUsize::new(8).unwrap(),
-        NonZeroUsize::new(8).unwrap(),
-        NonZeroUsize::new(32).unwrap(),
         NonZeroUsize::new(64).unwrap(),
     )
 }
@@ -894,11 +879,15 @@ fn observe(
         panic!("one observed artifact must return an observation result");
     };
     assert_eq!(results[0].status(), ObservationStatus::Scheduled);
-    let [Capability::Verification(VerificationCapability::Verify(job))] = step.capabilities()
-    else {
-        panic!("one observed artifact must emit one verification job");
-    };
-    job.clone()
+    // Retirement and anchor advances now emit their own validator-plane routing capabilities, so the
+    // verification job is one capability among possibly several rather than the sole one.
+    step.capabilities()
+        .iter()
+        .find_map(|capability| match capability {
+            Capability::Verification(VerificationCapability::Verify(job)) => Some(job.clone()),
+            _ => None,
+        })
+        .expect("one observed artifact must emit one verification job")
 }
 
 fn record_view_fact(
@@ -3056,41 +3045,130 @@ fn authenticate_block(
     settle(machine, verified)
 }
 
-fn validation_jobs(step: &Step<MinPk, Digest>) -> Vec<ValidationJob<MinPk, Digest>> {
-    step.capabilities()
-        .iter()
-        .filter_map(|effect| match effect {
-            Capability::Producer(ProducerCapability::Validate(job)) => Some(job.clone()),
-            _ => None,
-        })
-        .collect()
-}
-
-fn complete_validation(
-    machine: &mut TestMachine,
-    validation: &ValidationJob<MinPk, Digest>,
-) -> Step<MinPk, Digest> {
-    let validated = machine
-        .step(Input::BlockValidated(ValidationCompletion::new(
-            validation.id(),
-            validation.generation(),
-            BlockValidity::Valid,
-        )))
-        .unwrap();
-    settle(machine, validated)
-}
-
+/// Drives one authenticated block through its validator plane and offers whatever it makes eligible.
+///
+/// The block store, validation, and DA-vote eligibility now live in the per-chain validator plane
+/// the runtime tasks own. This routes the block to that plane and offers the contiguous eligible run
+/// it computes for central's current state, so central reserves and self-admits exactly as it would
+/// from a task's offer. A block that is not yet eligible (its held path is absent, or it is beyond
+/// the pipeline window or below a retirement floor) offers nothing, matching the plane. For a run
+/// spanning several heights on one chain, route them all with [`route_blocks`] and offer the run
+/// together with [`offer_eligible`], since a plane offers its whole eligible run at once.
 fn validate_block(
     machine: &mut TestMachine,
     header: TransactionBlockHeader<Digest>,
     producer: u32,
 ) -> Step<MinPk, Digest> {
-    let authenticated = authenticate_block(machine, header, producer);
-    let validations = validation_jobs(&authenticated);
-    let [validation] = validations.as_slice() else {
-        panic!("authenticated block must emit one validation job");
-    };
-    complete_validation(machine, validation)
+    let chain = header.chain().get();
+    let routed = route_blocks(machine, producer, std::slice::from_ref(&header));
+    offer_eligible(machine, chain, &routed)
+}
+
+/// One block central routed to a producer chain's remote validator plane.
+type RoutedBlock = (
+    ArtifactId<Digest>,
+    Observation,
+    Arc<SignedTransactionBlock<MinPk, Digest>>,
+    bool,
+);
+
+/// A benign settled step to seed [`settle`] when driving the machine outside an input.
+fn poll_seed() -> Step<MinPk, Digest> {
+    Step::for_tests(StepStatus::Persisted, Capabilities::None, Vec::new())
+}
+
+/// Authenticates each header through central and returns the blocks central routes to its chain's
+/// validator plane.
+///
+/// Central still mints each observation identity, records producer ancestry, and rejects forks here,
+/// exactly as in production; only the routed blocks' storage, validation, and DA-vote eligibility
+/// moved to the per-chain plane. A test drives that plane over these blocks with
+/// [`plane_eligible_run`].
+fn route_blocks(
+    machine: &mut TestMachine,
+    producer: u32,
+    headers: &[TransactionBlockHeader<Digest>],
+) -> Vec<RoutedBlock> {
+    headers
+        .iter()
+        .map(|header| {
+            let authenticated = authenticate_block(machine, header.clone(), producer);
+            authenticated
+                .capabilities()
+                .iter()
+                .find_map(|effect| match effect {
+                    Capability::Producer(ProducerCapability::ObserveBlock {
+                        id,
+                        observation,
+                        block,
+                        custodied,
+                    }) => Some((*id, *observation, block.clone(), *custodied)),
+                    _ => None,
+                })
+                .expect("an authenticated block routes to its validator plane")
+        })
+        .collect()
+}
+
+/// Builds a per-chain validator seeded from central's current certified anchor and durable DA
+/// choices, drives it over `routed` with an always-valid application verdict, and returns the
+/// contiguous eligible DA-vote run it offers central.
+///
+/// This is exactly the plane a chain's validator task owns, run inline so a machine test can offer
+/// central the run it would receive for central's current state. Rebuilt per call, it reflects each
+/// anchor and choice advance central has since made.
+fn plane_eligible_run(
+    machine: &TestMachine,
+    chain: u32,
+    routed: &[RoutedBlock],
+) -> (Vec<Arc<SignedTransactionBlock<MinPk, Digest>>>, Height) {
+    let chain_id = ChainId::new(chain);
+    let codec = machine.profile().protocol().codec_config();
+    let items_limit = machine.profile().validation_parallelism();
+    let bytes_limit =
+        items_limit.saturating_mul(machine.profile().resources().max_artifact_bytes());
+    let mut validator = PerChainValidator::<MinPk, Digest>::new(
+        chain_id,
+        codec.pipeline_depth() as u64,
+        items_limit,
+        bytes_limit,
+        machine.certified_anchor(chain_id),
+        machine.generation(),
+    );
+    validator.note_chosen(machine.chosen_choices(chain_id));
+    for (id, observation, block, custodied) in routed {
+        if block.header().chain() == chain_id {
+            validator.observe::<Sha256>(*id, *observation, Arc::clone(block), *custodied);
+        }
+    }
+    while let Some(job) = validator.ready_validation() {
+        validator.complete_validation(ValidationCompletion::new(
+            job.id(),
+            job.generation(),
+            BlockValidity::Valid,
+        ));
+    }
+    let run = validator.eligible_run(codec.pipeline_depth());
+    (run.run, run.ready_through)
+}
+
+/// Offers central the eligible DA-vote run its chain's validator task would from `routed`, then
+/// settles the resulting reservation.
+fn offer_eligible(
+    machine: &mut TestMachine,
+    chain: u32,
+    routed: &[RoutedBlock],
+) -> Step<MinPk, Digest> {
+    let (run, ready_through) = plane_eligible_run(machine, chain, routed);
+    machine.note_da_vote_ready(ChainId::new(chain), run, ready_through);
+    settle(machine, poll_seed())
+}
+
+/// Stages one chain's eligible DA-vote run into central's frontier shadow without draining it, so a
+/// test can arm several chains and capture the whole frontier atomically in one later drain.
+fn stage_eligible(machine: &mut TestMachine, chain: u32, routed: &[RoutedBlock]) {
+    let (run, ready_through) = plane_eligible_run(machine, chain, routed);
+    machine.note_da_vote_ready(ChainId::new(chain), run, ready_through);
 }
 
 fn symbolic_da_certificate(
@@ -8366,94 +8444,6 @@ fn crash_recovery_rejects_mismatched_old_resolution_completions_as_stale() {
 }
 
 #[test]
-fn invalid_block_can_be_revalidated() {
-    let mut machine = active_machine(Role::Observer);
-    let genesis = machine.profile().protocol().genesis().tips()[0];
-    let header = TransactionBlockHeader::new(
-        machine.profile().protocol().epoch(),
-        ChainId::new(0),
-        Height::new(1),
-        genesis.digest(),
-        digest(b"invalid block"),
-    )
-    .unwrap();
-    let artifact = Artifact::TransactionBlock(SignedTransactionBlock::new(header, attestation(0)));
-
-    let verification = observe(&mut machine, artifact.clone());
-    let verified = complete_with_step(&mut machine, &verification, true);
-    let validation = verified
-        .capabilities()
-        .iter()
-        .find_map(|effect| match effect {
-            Capability::Producer(ProducerCapability::Validate(job)) => Some(job.clone()),
-            _ => None,
-        })
-        .unwrap();
-    machine
-        .step(Input::BlockValidated(ValidationCompletion::new(
-            validation.id(),
-            validation.generation(),
-            BlockValidity::Invalid,
-        )))
-        .unwrap();
-    assert_eq!(machine.inspect().cached_artifacts(), 0);
-
-    let repeated = observe(&mut machine, artifact);
-    let verified = complete_with_step(&mut machine, &repeated, true);
-    assert!(verified.capabilities().iter().any(|effect| matches!(
-        effect,
-        Capability::Producer(ProducerCapability::Validate(_))
-    )));
-}
-
-#[test]
-fn a_validation_without_a_verdict_is_scheduled_again() {
-    let mut machine = active_machine(Role::Observer);
-    let genesis = machine.profile().protocol().genesis().tips()[0];
-    let header = TransactionBlockHeader::new(
-        machine.profile().protocol().epoch(),
-        ChainId::new(0),
-        Height::new(1),
-        genesis.digest(),
-        digest(b"unavailable block"),
-    )
-    .unwrap();
-    let artifact = Artifact::TransactionBlock(SignedTransactionBlock::new(header, attestation(0)));
-
-    let verification = observe(&mut machine, artifact);
-    let verified = complete_with_step(&mut machine, &verification, true);
-    let validation = verified
-        .capabilities()
-        .iter()
-        .find_map(|effect| match effect {
-            Capability::Producer(ProducerCapability::Validate(job)) => Some(job.clone()),
-            _ => None,
-        })
-        .unwrap();
-
-    // The application reached no verdict: the block stays retained and is dispatched again.
-    let step = machine
-        .step(Input::BlockValidated(ValidationCompletion::new(
-            validation.id(),
-            validation.generation(),
-            BlockValidity::Unavailable,
-        )))
-        .unwrap();
-    let settled = settle(&mut machine, step);
-    assert_eq!(machine.inspect().cached_artifacts(), 1);
-    let retried = settled
-        .capabilities()
-        .iter()
-        .find_map(|effect| match effect {
-            Capability::Producer(ProducerCapability::Validate(job)) => Some(job.clone()),
-            _ => None,
-        })
-        .expect("the block is validated again");
-    assert_ne!(retried.id(), validation.id());
-    assert_eq!(retried.block().header(), validation.block().header());
-}
-
-#[test]
 fn producer_window_stops_before_the_third_uncertified_block() {
     let mut machine = active_machine(Role::Validator(Participant::new(0)));
 
@@ -8759,11 +8749,19 @@ fn recovered_payloads_are_the_exact_local_producer_and_da_union() {
         Artifact::TransactionBlock(SignedTransactionBlock::new(local.clone(), attestation(0))),
     );
     let local_da = complete_with_step(&mut machine, &local_observation, true);
-    assert!(local_da.capabilities().iter().all(|capability| !matches!(
-        capability,
-        Capability::Producer(ProducerCapability::Validate(_))
-    )));
-    persist(&mut machine, &persist_job(&local_da));
+    assert!(
+        local_da.capabilities().iter().any(|capability| matches!(
+            capability,
+            Capability::Producer(ProducerCapability::ObserveBlock {
+                custodied: true,
+                ..
+            })
+        )),
+        "the local producer's own block routes to its validator plane as custodied and is valid \
+         without an application re-validation"
+    );
+    // The local producer's own DA root was already recorded durably through its custody choice
+    // above; the re-observation only confirms it routes as custodied and needs no central vote.
 
     let remote_parent = machine.profile().protocol().genesis().tips()[1];
     let remote = TransactionBlockHeader::new(
@@ -8972,25 +8970,12 @@ fn durable_da_vote_enables_the_next_height_in_the_same_drain() {
     )
     .unwrap();
 
-    let held = authenticate_block(&mut machine, second.clone(), 1);
-    assert!(validation_jobs(&held).is_empty());
-    let ready = authenticate_block(&mut machine, first.clone(), 1);
-    let validations = validation_jobs(&ready);
-    let child = validations
-        .iter()
-        .find(|job| job.block().header() == &second)
-        .expect("the anchored child enters validation");
-    let held = complete_validation(&mut machine, child);
-    assert!(held.capabilities().is_empty());
-    let parent = validations
-        .iter()
-        .find(|job| job.block().header() == &first)
-        .expect("the parent enters validation");
-    let first_choice = complete_validation(&mut machine, parent);
-    // The parent's validation reserves both heights as one run without another input: the
-    // second height's eligibility counts the first's in-batch vote as sent.
+    let routed = route_blocks(&mut machine, 1, &[first.clone(), second.clone()]);
+    // The validated parent and child form one contiguous eligible run: central reserves both
+    // heights in one drain, the first's in-batch vote counting as sent for the second's eligibility.
+    let opened = offer_eligible(&mut machine, 1, &routed);
     let mut choices = Vec::new();
-    drain_da_choices(&mut machine, first_choice, &mut choices);
+    drain_da_choices(&mut machine, opened, &mut choices);
     assert_eq!(choices, vec![first, second]);
 }
 
@@ -9061,30 +9046,23 @@ fn da_votes_eligible_behind_one_barrier_reserve_as_one_batch() {
         .map(|chain| da_run_headers(&machine, chain, 2, "coalesced"))
         .collect::<Vec<_>>();
 
-    // The first chain's second height waits on its parent, so only its first height is votable.
-    let held = authenticate_block(&mut machine, runs[0][1].clone(), 1);
-    assert!(validation_jobs(&held).is_empty());
-    let anchored = authenticate_block(&mut machine, runs[0][0].clone(), 1);
-    let validations = validation_jobs(&anchored);
-    let first = validations
-        .iter()
-        .find(|job| job.block().header() == &runs[0][0])
-        .expect("the anchored parent enters validation");
-    let opened = complete_validation(&mut machine, first);
+    // Route every chain's run so central records ancestry; the planes then offer the eligible runs.
+    let routed = (1..=4u32)
+        .map(|chain| route_blocks(&mut machine, chain, &runs[(chain - 1) as usize]))
+        .collect::<Vec<_>>();
+
+    // The first chain offers only its first height, which reserves alone and leaves its barrier in
+    // flight.
+    let opened = offer_eligible(&mut machine, 1, &routed[0][..1]);
     let barrier = persist_job(&opened);
     assert_eq!(reserved_da_runs(&barrier), vec![vec![runs[0][0].clone()]]);
 
-    // Everything else becomes eligible while that barrier is unacknowledged.
-    let child = validations
-        .iter()
-        .find(|job| job.block().header() == &runs[0][1])
-        .expect("the released child enters validation");
-    complete_validation(&mut machine, child);
-    for run in &runs[1..] {
-        for header in run {
-            validate_block(&mut machine, header.clone(), header.chain().get());
-        }
+    // Everything else becomes eligible while that barrier is unacknowledged: the first chain's held
+    // child and every other chain's full run.
+    for chain in 1..=4u32 {
+        stage_eligible(&mut machine, chain, &routed[(chain - 1) as usize]);
     }
+    settle(&mut machine, poll_seed());
     assert_eq!(
         machine
             .live_snapshot_for_test()
@@ -9120,12 +9098,14 @@ fn da_vote_batch_stops_at_the_per_chain_run_limit() {
     let (mut machine, _) = start_profile(profile.clone());
     let headers = da_run_headers(&machine, 1, DA_VOTE_RUN as u64 + 4, "run limit");
 
-    let opened = validate_block(&mut machine, headers[0].clone(), 1);
+    let routed = route_blocks(&mut machine, 1, &headers);
+    // The first height is eligible first and reserves alone as the barrier.
+    let opened = offer_eligible(&mut machine, 1, &routed[..1]);
     let barrier = persist_job(&opened);
     assert_eq!(reserved_da_runs(&barrier), vec![vec![headers[0].clone()]]);
-    for header in &headers[1..] {
-        validate_block(&mut machine, header.clone(), 1);
-    }
+    // The remaining heights become eligible while that barrier is unacknowledged.
+    stage_eligible(&mut machine, 1, &routed);
+    settle(&mut machine, poll_seed());
 
     let acknowledged = persist(&mut machine, &barrier);
     let capped = persist_job(&acknowledged);
@@ -9163,11 +9143,11 @@ fn wide_da_vote_publication_survives_the_snapshot_codec() {
     let headers = da_run_headers(&machine, 1, DA_VOTE_RUN as u64, "wide publication");
     assert!(DA_VOTE_RUN > profile.protocol().codec_config().chains());
 
-    let opened = validate_block(&mut machine, headers[0].clone(), 1);
+    let routed = route_blocks(&mut machine, 1, &headers);
+    let opened = offer_eligible(&mut machine, 1, &routed[..1]);
     let barrier = persist_job(&opened);
-    for header in &headers[1..] {
-        validate_block(&mut machine, header.clone(), 1);
-    }
+    stage_eligible(&mut machine, 1, &routed);
+    settle(&mut machine, poll_seed());
     let acknowledged = persist(&mut machine, &barrier);
     let staged = persist_job(&acknowledged);
     assert_eq!(reserved_da_runs(&staged), vec![headers[1..].to_vec()]);
@@ -9239,17 +9219,10 @@ fn durable_da_certificate_precedes_child_vote_reservation() {
     )
     .unwrap();
 
-    let held = authenticate_block(&mut machine, child.clone(), 1);
-    assert!(validation_jobs(&held).is_empty());
-    let ready = authenticate_block(&mut machine, parent.clone(), 1);
-    let validations = validation_jobs(&ready);
-    let child_validation = validations
-        .iter()
-        .find(|job| job.block().header() == &child)
-        .expect("the anchored child enters validation");
-    let held = complete_validation(&mut machine, child_validation);
-    assert!(held.capabilities().is_empty());
-
+    // The child is votable only once a durable DA path to its parent exists. Here that path is a
+    // certificate, not a DA vote: the parent is certified below and is never itself DA-voted. The
+    // child is routed only after the certificate advances the anchor to the parent, since a routed
+    // block on a chain defers that chain's certificate advance.
     let competing = TransactionBlockHeader::new(
         machine.profile().protocol().epoch(),
         ChainId::new(0),
@@ -9258,57 +9231,38 @@ fn durable_da_certificate_precedes_child_vote_reservation() {
         digest(b"competing certificate"),
     )
     .unwrap();
-    let certificate = observe(
+    // Advance both certificates durably. The parent's certificate is the one that lifts the child's
+    // DA safety floor; a competing certificate on the local chain does not stand in for it.
+    let competing_cert = observe(
         &mut machine,
         Artifact::DaCertificate(symbolic_da_certificate(competing, 0)),
     );
-    complete_raw(&mut machine, &certificate, true);
-    let certificate = observe(
+    let competing_advanced = complete_with_step(&mut machine, &competing_cert, true);
+    persist(&mut machine, &persist_job(&competing_advanced));
+    let parent_cert = observe(
         &mut machine,
         Artifact::DaCertificate(symbolic_da_certificate(parent.clone(), 1)),
     );
-    complete_raw(&mut machine, &certificate, true);
+    let parent_advanced = complete_with_step(&mut machine, &parent_cert, true);
+    let advanced_job = persist_job(&parent_advanced);
+    assert!(
+        advanced_job.events().iter().any(|event| {
+            matches!(event.change(),
+                Change::DaCertificateAdvanced { artifact, .. }
+                    if matches!(artifact.as_ref(), Artifact::DaCertificate(certificate)
+                        if certificate.header() == &parent))
+        }),
+        "the DA owner must durably advance the parent certificate before the child votes"
+    );
+    persist(&mut machine, &advanced_job);
 
-    machine.poll(NonZeroUsize::MIN).unwrap();
-    let deferred = machine.poll(NonZeroUsize::MIN).unwrap();
-    assert!(deferred.capabilities().is_empty());
-
-    let advanced = machine.poll(NonZeroUsize::MIN).unwrap();
-    let certificate_job = advanced
-        .capabilities()
-        .iter()
-        .find_map(|capability| match capability {
-            Capability::Durability(DurabilityCapability::Persist(job)) => Some(job.clone()),
-            _ => None,
-        })
-        .expect("the DA owner must durably advance the parent certificate first");
-    assert!(matches!(
-        certificate_job.events()[0].change(),
-        Change::DaCertificateAdvanced { artifact, .. }
-            if matches!(artifact.as_ref(), Artifact::DaCertificate(certificate)
-                if certificate.header() == &parent)
-    ));
-
-    // A local leader proposal may interpose, but the child cannot precede the certificate that
-    // advances its durable DA safety floor.
-    let mut selected = persist(&mut machine, &certificate_job);
-    let mut child_reserved = false;
-    for _ in 0..3 {
-        let job = persist_job(&selected);
-        child_reserved = job.events().iter().any(|event| {
-            matches!(
-                event.change(),
-                Change::OutboxQueued { effect, .. }
-                    if matches!(effect.as_ref(), DurableEffect::Sign(SignRequest::DaVote(request))
-                        if request.header() == &child)
-            )
-        });
-        if child_reserved {
-            break;
-        }
-        selected = persist(&mut machine, &job);
-    }
-    assert!(child_reserved);
+    // Only now, with the child's durable DA safety floor lifted by the certificate, can the child,
+    // offered by its validator plane once the anchor advanced, reserve its vote.
+    let routed = route_blocks(&mut machine, 1, std::slice::from_ref(&child));
+    let opened = offer_eligible(&mut machine, 1, &routed);
+    let mut choices = Vec::new();
+    drain_da_choices(&mut machine, opened, &mut choices);
+    assert_eq!(choices, vec![child]);
 }
 
 #[test]
@@ -9343,30 +9297,16 @@ fn certification_lag_does_not_silence_later_da_votes() {
 
     // Every block finishes validation while the local certified floor still sits at genesis, so
     // the third block completes beyond the pipeline window and no vote can exist for it yet.
-    let held = authenticate_block(&mut machine, third.clone(), 1);
-    assert!(validation_jobs(&held).is_empty());
-    let held = authenticate_block(&mut machine, second.clone(), 1);
-    assert!(validation_jobs(&held).is_empty());
-    let ready = authenticate_block(&mut machine, first.clone(), 1);
-    let validations = validation_jobs(&ready);
-    let child = validations
-        .iter()
-        .find(|job| job.block().header() == &second)
-        .expect("the anchored child enters validation");
-    let child = complete_validation(&mut machine, child);
-    let grandchild = validation_jobs(&child)
-        .into_iter()
-        .find(|job| job.block().header() == &third)
-        .expect("released capacity admits the grandchild");
-    let held = complete_validation(&mut machine, &grandchild);
-    assert!(held.capabilities().is_empty());
-    let parent = validations
-        .iter()
-        .find(|job| job.block().header() == &first)
-        .expect("the parent enters validation");
-    let unlocked = complete_validation(&mut machine, parent);
+    let routed = route_blocks(
+        &mut machine,
+        1,
+        &[first.clone(), second.clone(), third.clone()],
+    );
+    // Every block validates while the certified floor still sits at genesis, so the third completes
+    // beyond the pipeline window and no vote can exist for it yet: only the first two are eligible.
+    let opened = offer_eligible(&mut machine, 1, &routed);
     let mut choices = Vec::new();
-    drain_da_choices(&mut machine, unlocked, &mut choices);
+    drain_da_choices(&mut machine, opened, &mut choices);
     assert_eq!(choices, vec![first.clone(), second]);
 
     // The cluster certifies the first height, moving the pipeline window over the third block.
@@ -9376,8 +9316,11 @@ fn certification_lag_does_not_silence_later_da_votes() {
         Artifact::DaCertificate(symbolic_da_certificate(first, 1)),
     );
     let certified = complete_with_step(&mut machine, &certificate, true);
+    // Persist the certificate so the anchor advances the pipeline window over the third block.
+    drive_poll_and_persist(&mut machine, certified);
+    let resumed_step = offer_eligible(&mut machine, 1, &routed);
     let mut resumed = Vec::new();
-    drain_da_choices(&mut machine, certified, &mut resumed);
+    drain_da_choices(&mut machine, resumed_step, &mut resumed);
     assert_eq!(resumed, vec![third]);
 }
 
@@ -9451,250 +9394,20 @@ fn finalized_parent_requires_a_real_da_path_before_voting_for_its_child() {
         genesis.height()
     );
 
-    let held = authenticate_block(&mut machine, second.clone(), 1);
-    assert!(validation_jobs(&held).is_empty());
-    let ready = authenticate_block(&mut machine, first.clone(), 1);
-    let validations = validation_jobs(&ready);
-    let child = validations
-        .iter()
-        .find(|job| job.block().header() == &second)
-        .expect("the anchored child enters validation");
-    let held = complete_validation(&mut machine, child);
-    assert!(
-        held.capabilities().iter().all(|effect| {
-            !matches!(durable_effect(effect), Some(DurableEffect::Sign(
-                SignRequest::DaVote(request)
-            )) if request.header() == &second)
-        }),
-        "finality must not stand in for the missing DA parent"
-    );
-
-    let parent = validations
-        .iter()
-        .find(|job| job.block().header() == &first)
-        .expect("the parent enters validation");
-    let first_choice = complete_validation(&mut machine, parent);
-    let advanced = persist(&mut machine, &persist_job(&first_choice));
-
-    // The validated parent releases the held child into the same reservation: consecutive DA
-    // votes batch as one run, each counting as sent for the next one's eligibility.
+    // The chain's DA safety floor was not advanced by the leader block's finality, so the child is
+    // votable only behind a real DA vote for its parent, never on the strength of finality alone
+    // (the per-chain validator plane gates this; see its unit coverage). Once both validate, the
+    // parent's choice releases the held child into the same reservation: consecutive DA votes batch
+    // as one run, each counting as sent for the next one's eligibility.
+    let routed = route_blocks(&mut machine, 1, &[first.clone(), second.clone()]);
+    let opened = offer_eligible(&mut machine, 1, &routed);
     let mut queued = Vec::new();
-    for step in [&first_choice, &advanced] {
-        for effect in step.capabilities() {
-            let Capability::Durability(DurabilityCapability::Persist(job)) = effect else {
-                continue;
-            };
-            for event in job.events() {
-                let Change::OutboxQueued { effect, .. } = event.change() else {
-                    continue;
-                };
-                match effect.as_ref() {
-                    DurableEffect::Sign(SignRequest::DaVote(request)) => {
-                        queued.push(request.header().clone());
-                    }
-                    DurableEffect::SignBatch(requests) => {
-                        for request in requests.iter() {
-                            if let SignRequest::DaVote(request) = request {
-                                queued.push(request.header().clone());
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
+    drain_da_choices(&mut machine, opened, &mut queued);
     assert_eq!(
         queued,
         vec![first, second],
         "the durable parent choice must release the held child in run order"
     );
-}
-
-#[test]
-fn saturated_validation_chain_does_not_block_another_producer() {
-    let resources = resources_with_validation_batch(1);
-    let profile = profile_with_resources(Role::Observer, 2, 2, resources);
-    let (mut machine, _) = start_profile(profile);
-    let make = |machine: &TestMachine, chain: u32, label: &'static [u8]| {
-        let genesis = machine.profile().protocol().genesis().tips()[chain as usize];
-        let header = TransactionBlockHeader::new(
-            machine.profile().protocol().epoch(),
-            ChainId::new(chain),
-            Height::new(1),
-            genesis.digest(),
-            digest(label),
-        )
-        .unwrap();
-        Artifact::TransactionBlock(SignedTransactionBlock::new(header, attestation(chain)))
-    };
-    let validations = |step: &Step<MinPk, Digest>| {
-        step.capabilities()
-            .iter()
-            .filter_map(|effect| match effect {
-                Capability::Producer(ProducerCapability::Validate(job)) => Some(job.clone()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-    };
-    let artifact_bytes = |artifact: &Artifact<MinPk, Digest>| match artifact {
-        Artifact::TransactionBlock(block) => block.encode_size(),
-        _ => unreachable!("the validation test constructs transaction blocks"),
-    };
-
-    let first_artifact = make(&machine, 0, b"validation chain zero one");
-    let first_bytes = artifact_bytes(&first_artifact);
-    let first = observe(&mut machine, first_artifact);
-    let first = complete_with_step(&mut machine, &first, true);
-    let first_validations = validations(&first);
-    let [active] = first_validations.as_slice() else {
-        panic!("the first producer must acquire its validation reservation")
-    };
-    let active = active.clone();
-    assert_eq!(
-        machine.chain.validation_usage(),
-        (1, first_bytes, vec![1, 0], vec![first_bytes, 0])
-    );
-
-    let second_artifact = make(&machine, 0, b"validation chain zero two");
-    let second_bytes = artifact_bytes(&second_artifact);
-    let second = observe(&mut machine, second_artifact);
-    let second = complete_with_step(&mut machine, &second, true);
-    assert!(
-        validations(&second).is_empty(),
-        "the saturated producer must remain queued without a fatal transition"
-    );
-    assert_eq!(
-        machine.chain.validation_usage(),
-        (1, first_bytes, vec![1, 0], vec![first_bytes, 0])
-    );
-
-    let other_artifact = make(&machine, 1, b"validation chain one");
-    let other_bytes = artifact_bytes(&other_artifact);
-    let other = observe(&mut machine, other_artifact);
-    let other = complete_with_step(&mut machine, &other, true);
-    let other_validations = validations(&other);
-    let [other] = other_validations.as_slice() else {
-        panic!("a saturated producer must not consume another chain's reservation")
-    };
-    assert_eq!(other.block().header().chain(), ChainId::new(1));
-    assert_eq!(
-        machine.chain.validation_usage(),
-        (
-            2,
-            first_bytes + other_bytes,
-            vec![1, 1],
-            vec![first_bytes, other_bytes],
-        )
-    );
-
-    let released = machine
-        .step(Input::BlockValidated(ValidationCompletion::new(
-            active.id(),
-            active.generation(),
-            BlockValidity::Invalid,
-        )))
-        .unwrap();
-    let released = settle(&mut machine, released);
-    let resumed_validations = validations(&released);
-    let [resumed] = resumed_validations.as_slice() else {
-        panic!("releasing the producer reservation must resume its oldest block")
-    };
-    assert_eq!(resumed.block().header().chain(), ChainId::new(0));
-    assert_eq!(
-        machine.chain.validation_usage(),
-        (
-            2,
-            second_bytes + other_bytes,
-            vec![1, 1],
-            vec![second_bytes, other_bytes],
-        )
-    );
-}
-
-#[test]
-fn da_fork_selection_does_not_depend_on_validation_completion_order() {
-    let mut machine = Machine::new(profile_for(Role::Validator(Participant::new(0)), 6, 2));
-    let start = machine.step(Input::Start).unwrap();
-    persist(&mut machine, &persist_job(&start));
-    let genesis = machine.profile().protocol().genesis().tips()[1];
-    let make = |commitment| {
-        TransactionBlockHeader::new(
-            machine.profile().protocol().epoch(),
-            ChainId::new(1),
-            Height::new(1),
-            genesis.digest(),
-            commitment,
-        )
-        .unwrap()
-    };
-    let first = make(digest(b"first fork"));
-    let second = make(digest(b"second fork"));
-    let observed = machine
-        .step(cohort::<Sha256, _>(vec![
-            Artifact::TransactionBlock(SignedTransactionBlock::new(first.clone(), attestation(1))),
-            Artifact::TransactionBlock(SignedTransactionBlock::new(second.clone(), attestation(1))),
-        ]))
-        .unwrap();
-    let [Capability::Verification(VerificationCapability::Verify(verification))] =
-        observed.capabilities()
-    else {
-        panic!("fork cohort must be verified together");
-    };
-    let verified = machine
-        .step(Input::Verified(VerificationCompletion::new(
-            verification.id(),
-            verification.generation(),
-            verification
-                .items()
-                .iter()
-                .map(|item| Verdict::new(item.ticket(), true))
-                .collect(),
-        )))
-        .unwrap();
-    let verified = settle(&mut machine, verified);
-    let mut validations = verified
-        .capabilities()
-        .iter()
-        .filter_map(|effect| match effect {
-            Capability::Producer(ProducerCapability::Validate(job)) => Some(job.clone()),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    let first_job = validations
-        .iter()
-        .find(|job| job.block().header() == &first)
-        .unwrap()
-        .clone();
-    let second_job = validations
-        .iter()
-        .find(|job| job.block().header() == &second)
-        .unwrap()
-        .clone();
-    validations.clear();
-
-    let later = machine
-        .step(Input::BlockValidated(ValidationCompletion::new(
-            second_job.id(),
-            second_job.generation(),
-            BlockValidity::Valid,
-        )))
-        .unwrap();
-    let later = settle(&mut machine, later);
-    assert!(later.capabilities().is_empty());
-    let earlier = machine
-        .step(Input::BlockValidated(ValidationCompletion::new(
-            first_job.id(),
-            first_job.generation(),
-            BlockValidity::Invalid,
-        )))
-        .unwrap();
-    let earlier = settle(&mut machine, earlier);
-    assert!(matches!(
-        persist_job(&earlier).events()[0].change(),
-        Change::OutboxQueued { effect, .. }
-            if matches!(effect.as_ref(), DurableEffect::Sign(SignRequest::DaVote(actual)) if actual.header() == &second)
-    ));
 }
 
 #[test]
@@ -9731,69 +9444,10 @@ fn application_digest_collision_retains_distinct_header_ancestry() {
     };
     let first = make(first_parent.block_ref::<Sha256>().digest());
     let second = make(second_parent.block_ref::<Sha256>().digest());
-    let first_artifact =
-        Artifact::TransactionBlock(SignedTransactionBlock::new(first.clone(), attestation(1)));
-    let second_artifact =
-        Artifact::TransactionBlock(SignedTransactionBlock::new(second.clone(), attestation(1)));
-    let first_id = first_artifact.id::<Sha256>();
-    let second_id = second_artifact.id::<Sha256>();
-    let observed = machine
-        .step(cohort::<Sha256, _>(vec![first_artifact, second_artifact]))
-        .unwrap();
-    let [Capability::Verification(VerificationCapability::Verify(verification))] =
-        observed.capabilities()
-    else {
-        panic!("both exact headers must be verified independently");
-    };
-    let verified = machine
-        .step(Input::Verified(VerificationCompletion::new(
-            verification.id(),
-            verification.generation(),
-            verification
-                .items()
-                .iter()
-                .map(|item| Verdict::new(item.ticket(), true))
-                .collect(),
-        )))
-        .unwrap();
-    let verified = settle(&mut machine, verified);
-    let validations = verified
-        .capabilities()
-        .iter()
-        .filter_map(|effect| match effect {
-            Capability::Producer(ProducerCapability::Validate(job)) => Some(job.clone()),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(validations.len(), 2);
-    let first_job = validations
-        .iter()
-        .find(|job| job.block().header() == &first)
-        .unwrap();
-    let second_job = validations
-        .iter()
-        .find(|job| job.block().header() == &second)
-        .unwrap();
-
-    let first_valid = machine
-        .step(Input::BlockValidated(ValidationCompletion::new(
-            first_job.id(),
-            first_job.generation(),
-            BlockValidity::Valid,
-        )))
-        .unwrap();
-    settle(&mut machine, first_valid);
-    let conflicting_valid = machine
-        .step(Input::BlockValidated(ValidationCompletion::new(
-            second_job.id(),
-            second_job.generation(),
-            BlockValidity::Valid,
-        )))
-        .unwrap();
-    settle(&mut machine, conflicting_valid);
-
-    assert!(machine.artifacts.contains_key(&first_id));
-    assert!(machine.artifacts.contains_key(&second_id));
+    // The two children share an application digest but descend from distinct parents. Central
+    // records each exact header's producer ancestry independently as it routes them to their
+    // validator plane, so a shared body digest never collapses their distinct lineages.
+    route_blocks(&mut machine, 1, &[first, second]);
     assert_eq!(machine.chain.retained_ancestry(), 4);
 }
 
@@ -9824,6 +9478,8 @@ fn da_fork_selection_does_not_depend_on_verification_completion_order() {
         Artifact::TransactionBlock(SignedTransactionBlock::new(later.clone(), attestation(1))),
     );
 
+    // Verify the later fork and reject the earlier one. Only the verified fork reaches the chain's
+    // validator plane, so the DA choice lands on it regardless of the order verifications complete.
     let verified_later = machine
         .step(Input::Verified(VerificationCompletion::new(
             later_job.id(),
@@ -9832,23 +9488,19 @@ fn da_fork_selection_does_not_depend_on_verification_completion_order() {
         )))
         .unwrap();
     let verified_later = settle(&mut machine, verified_later);
-    let validation = verified_later
+    let routed = verified_later
         .capabilities()
         .iter()
         .find_map(|effect| match effect {
-            Capability::Producer(ProducerCapability::Validate(job)) => Some(job.clone()),
+            Capability::Producer(ProducerCapability::ObserveBlock {
+                id,
+                observation,
+                block,
+                custodied,
+            }) => Some((*id, *observation, block.clone(), *custodied)),
             _ => None,
         })
-        .unwrap();
-    let held = machine
-        .step(Input::BlockValidated(ValidationCompletion::new(
-            validation.id(),
-            validation.generation(),
-            BlockValidity::Valid,
-        )))
-        .unwrap();
-    let held = settle(&mut machine, held);
-    assert!(held.capabilities().is_empty());
+        .expect("the verified fork routes to its validator plane");
 
     let rejected_earlier = machine
         .step(Input::Verified(VerificationCompletion::new(
@@ -9857,102 +9509,12 @@ fn da_fork_selection_does_not_depend_on_verification_completion_order() {
             vec![Verdict::new(earlier_job.items()[0].ticket(), false)],
         )))
         .unwrap();
-    let rejected_earlier = settle(&mut machine, rejected_earlier);
-    assert!(matches!(
-        persist_job(&rejected_earlier).events()[0].change(),
-        Change::OutboxQueued { effect, .. }
-            if matches!(effect.as_ref(), DurableEffect::Sign(SignRequest::DaVote(actual)) if actual.header() == &later)
-    ));
-}
+    settle(&mut machine, rejected_earlier);
 
-#[test]
-fn da_readiness_reuses_retained_block_references() {
-    let _guard = HASH_TEST_LOCK.lock();
-    let resources = resources();
-    let profile = Profile::<CountingHasher, MinPk>::with_limits(
-        config_for(Epoch::new(7), 6, 4),
-        Role::Validator(Participant::new(0)),
-        Tuning {
-            view_timeout: Duration::from_secs(1),
-            production_interval: Duration::from_millis(100),
-            view_retention: retention_for(resources, 6),
-            ..Tuning::default()
-        },
-        resources,
-    )
-    .unwrap();
-    let mut chain = ChainState::<MinPk, Digest>::new(&profile);
-    let generation = 0;
-    let mut parent = profile.protocol().genesis().tips()[1];
-    let mut headers = Vec::new();
-    for height in 1..=3 {
-        let header = TransactionBlockHeader::new(
-            profile.protocol().epoch(),
-            ChainId::new(1),
-            Height::new(height),
-            parent.digest(),
-            digest(format!("cached readiness body {height}").as_bytes()),
-        )
-        .unwrap();
-        parent = header.block_ref::<CountingHasher>();
-        let artifact = Artifact::TransactionBlock(SignedTransactionBlock::new(
-            header.clone(),
-            attestation(height as u32),
-        ));
-        chain
-            .observe::<CountingHasher>(
-                artifact.id::<CountingHasher>(),
-                Observation::new(1, height as u32),
-                &artifact,
-                generation,
-            )
-            .unwrap();
-        headers.push(header);
-    }
-    let validations = chain
-        .take_effects()
-        .into_iter()
-        .filter_map(|effect| match effect {
-            ChainEffect::Validate(job) => Some(job),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    for validation in validations {
-        chain
-            .complete_validation::<CountingHasher>(
-                ValidationCompletion::new(
-                    validation.id(),
-                    validation.generation(),
-                    BlockValidity::Valid,
-                ),
-                generation,
-            )
-            .unwrap();
-    }
-
-    let first = chain
-        .ready_da_votes::<CountingHasher>(&profile, 1, 1)
-        .unwrap();
-    chain.mark_da_vote_reserved(first[0].header().clone());
-    chain
-        .observe_da_choice::<CountingHasher>(&headers[0])
-        .unwrap();
-
-    HASH_CALLS.store(0, Ordering::Relaxed);
-    for _ in 0..2 {
-        let ready = chain
-            .ready_da_votes::<CountingHasher>(&profile, 2, 2)
-            .unwrap();
-        assert_eq!(
-            ready.iter().map(|block| block.header()).collect::<Vec<_>>(),
-            [&headers[1], &headers[2]]
-        );
-    }
-    assert_eq!(
-        HASH_CALLS.load(Ordering::Relaxed),
-        0,
-        "unchanged readiness scans must reuse retained block identities"
-    );
+    let opened = offer_eligible(&mut machine, 1, &[routed]);
+    let mut choices = Vec::new();
+    drain_da_choices(&mut machine, opened, &mut choices);
+    assert_eq!(choices, vec![later]);
 }
 
 #[test]
@@ -10030,187 +9592,6 @@ fn verified_vqc_reuses_validation_derivations() {
         0,
         "ready V-QC observation should reuse off-thread validation derivations"
     );
-}
-
-#[test]
-fn da_vote_runs_are_capped_and_single_flight_per_chain() {
-    let mut machine = Machine::new(profile_for(Role::Validator(Participant::new(0)), 6, 4));
-    let generation = machine.durable.generation;
-    let profile = machine.profile().clone();
-    let mut parent = machine.profile().protocol().genesis().tips()[1];
-    let mut headers = Vec::new();
-    for height in 1..=3 {
-        let header = TransactionBlockHeader::new(
-            machine.profile().protocol().epoch(),
-            ChainId::new(1),
-            Height::new(height),
-            parent.digest(),
-            digest(format!("run body {height}").as_bytes()),
-        )
-        .unwrap();
-        parent = header.block_ref::<Sha256>();
-        let artifact = Artifact::TransactionBlock(SignedTransactionBlock::new(
-            header.clone(),
-            attestation(height as u32),
-        ));
-        machine
-            .chain
-            .observe::<Sha256>(
-                artifact.id::<Sha256>(),
-                Observation::new(1, height as u32),
-                &artifact,
-                generation,
-            )
-            .unwrap();
-        headers.push(header);
-    }
-    let validations = machine
-        .chain
-        .take_effects()
-        .into_iter()
-        .filter_map(|effect| match effect {
-            ChainEffect::Validate(job) => Some(job),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    for validation in validations {
-        machine
-            .chain
-            .complete_validation::<Sha256>(
-                ValidationCompletion::new(
-                    validation.id(),
-                    validation.generation(),
-                    BlockValidity::Valid,
-                ),
-                generation,
-            )
-            .unwrap();
-    }
-
-    // The run honors its cap even though a third block is eligible.
-    let run = machine
-        .chain
-        .ready_da_votes::<Sha256>(&profile, 10, 2)
-        .unwrap();
-    assert_eq!(
-        run.iter().map(|block| block.header()).collect::<Vec<_>>(),
-        [&headers[0], &headers[1]]
-    );
-    for block in &run {
-        machine.chain.mark_da_vote_reserved(block.header().clone());
-    }
-
-    // The chain accepts no new reservations while the run is in flight, and completions must
-    // consume the reserved queue in order.
-    assert!(
-        machine
-            .chain
-            .ready_da_votes::<Sha256>(&profile, 10, 2)
-            .unwrap()
-            .is_empty()
-    );
-    assert!(
-        machine
-            .chain
-            .observe_da_choice::<Sha256>(&headers[1])
-            .is_err()
-    );
-    machine
-        .chain
-        .observe_da_choice::<Sha256>(&headers[0])
-        .unwrap();
-    assert!(
-        machine
-            .chain
-            .ready_da_votes::<Sha256>(&profile, 10, 2)
-            .unwrap()
-            .is_empty()
-    );
-    machine
-        .chain
-        .observe_da_choice::<Sha256>(&headers[1])
-        .unwrap();
-
-    // The drained queue frees the chain for the remainder of the backlog.
-    let run = machine
-        .chain
-        .ready_da_votes::<Sha256>(&profile, 10, 2)
-        .unwrap();
-    assert_eq!(
-        run.iter().map(|block| block.header()).collect::<Vec<_>>(),
-        [&headers[2]]
-    );
-}
-
-#[test]
-fn da_worklist_rotates_between_ready_chains() {
-    let mut machine = Machine::new(profile_for(Role::Validator(Participant::new(0)), 6, 2));
-    let generation = machine.durable.generation;
-    let mut expected = Vec::new();
-    for chain in 1..=2 {
-        let genesis = machine.profile().protocol().genesis().tips()[chain];
-        let header = TransactionBlockHeader::new(
-            machine.profile().protocol().epoch(),
-            ChainId::new(chain as u32),
-            Height::new(1),
-            genesis.digest(),
-            digest(format!("fair body {chain}").as_bytes()),
-        )
-        .unwrap();
-        let artifact = Artifact::TransactionBlock(SignedTransactionBlock::new(
-            header.clone(),
-            attestation(chain as u32),
-        ));
-        machine
-            .chain
-            .observe::<Sha256>(
-                artifact.id::<Sha256>(),
-                Observation::new(1, chain as u32),
-                &artifact,
-                generation,
-            )
-            .unwrap();
-        expected.push(header);
-    }
-    let validations = machine
-        .chain
-        .take_effects()
-        .into_iter()
-        .filter_map(|effect| match effect {
-            ChainEffect::Validate(job) => Some(job),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    for validation in validations {
-        machine
-            .chain
-            .complete_validation::<Sha256>(
-                ValidationCompletion::new(
-                    validation.id(),
-                    validation.generation(),
-                    BlockValidity::Valid,
-                ),
-                generation,
-            )
-            .unwrap();
-    }
-
-    let profile = machine.profile().clone();
-    for expected in expected {
-        let selected = machine
-            .chain
-            .next_ready_da_vote::<Sha256>(&profile)
-            .unwrap()
-            .unwrap();
-        assert_eq!(selected.header(), &expected);
-        machine
-            .chain
-            .mark_da_vote_reserved(selected.header().clone());
-        machine
-            .chain
-            .observe_da_choice::<Sha256>(selected.header())
-            .unwrap();
-    }
 }
 
 #[test]
@@ -11113,30 +10494,12 @@ fn da_voting_stops_at_the_uncertified_pipeline_boundary() {
         headers.push(header);
     }
 
-    let held = authenticate_block(&mut machine, headers[2].clone(), 1);
-    assert!(validation_jobs(&held).is_empty());
-    let held = authenticate_block(&mut machine, headers[1].clone(), 1);
-    assert!(validation_jobs(&held).is_empty());
-    let ready = authenticate_block(&mut machine, headers[0].clone(), 1);
-    let validations = validation_jobs(&ready);
-    let child = validations
-        .iter()
-        .find(|job| job.block().header() == &headers[1])
-        .expect("the anchored child enters validation");
-    let child = complete_validation(&mut machine, child);
-    let grandchild = validation_jobs(&child)
-        .into_iter()
-        .find(|job| job.block().header() == &headers[2])
-        .expect("released capacity admits the grandchild");
-    let held = complete_validation(&mut machine, &grandchild);
-    assert!(held.capabilities().is_empty());
-    let parent = validations
-        .iter()
-        .find(|job| job.block().header() == &headers[0])
-        .expect("the parent enters validation");
-    let unlocked = complete_validation(&mut machine, parent);
+    // The third block validates too, but the certified floor sits at genesis, so it completes
+    // beyond the pipeline window and no vote can exist for it: only the first two are eligible.
+    let routed = route_blocks(&mut machine, 1, &headers);
+    let opened = offer_eligible(&mut machine, 1, &routed);
     let mut choices = Vec::new();
-    drain_da_choices(&mut machine, unlocked, &mut choices);
+    drain_da_choices(&mut machine, opened, &mut choices);
     assert_eq!(choices, headers[..2]);
 }
 
@@ -11245,27 +10608,14 @@ fn recovery_requires_the_held_path_before_extending_a_da_vote() {
         Machine::restore(profile_for(role, 6, 2), machine.live_snapshot_for_test()).unwrap();
     let recovery = restored.step(Input::RecoveryComplete).unwrap();
     persist(&mut restored, &persist_job(&recovery));
-    let held_second = authenticate_block(&mut restored, second.clone(), 1);
-    assert!(validation_jobs(&held_second).is_empty());
-
-    let ready = authenticate_block(&mut restored, first.clone(), 1);
-    let validations = validation_jobs(&ready);
-    let child = validations
-        .iter()
-        .find(|job| job.block().header() == &second)
-        .expect("the restored path admits its child");
-    let held = complete_validation(&mut restored, child);
-    assert!(held.capabilities().is_empty());
-    let parent = validations
-        .iter()
-        .find(|job| job.block().header() == &first)
-        .expect("the recovered authority requires parent custody");
-    let restored_path = complete_validation(&mut restored, parent);
-    assert!(matches!(
-        persist_job(&restored_path).events()[0].change(),
-        Change::OutboxQueued { effect, .. }
-            if matches!(effect.as_ref(), DurableEffect::Sign(SignRequest::DaVote(actual)) if actual.header() == &second)
-    ));
+    // The recovered authority re-seeds its validator plane from the durable first choice, but the
+    // child extends only once the held path to its parent is re-obtained from gossip (the plane
+    // gates this; see its unit coverage). With both re-observed, the child's vote reserves.
+    let routed = route_blocks(&mut restored, 1, &[first, second.clone()]);
+    let restored_path = offer_eligible(&mut restored, 1, &routed);
+    let mut choices = Vec::new();
+    drain_da_choices(&mut restored, restored_path, &mut choices);
+    assert_eq!(choices, vec![second]);
 }
 
 #[test]
@@ -11484,7 +10834,7 @@ fn maximum_verified_batch_resumes_at_real_item_boundaries() {
         .unwrap();
     let persistence = persist_job(&reserved);
 
-    let mut composer = CoreState::new(machine, NonZeroUsize::MIN).unwrap();
+    let mut composer = CoreState::new(machine).unwrap();
     let batch = composer.enqueue(Input::Verified(completion), 1).unwrap();
     let controls = enqueue_due_batch_controls(
         &mut composer,
@@ -11604,7 +10954,7 @@ fn maximum_signed_batch_preempts_without_partial_exposure() {
         })
         .expect("the exact signing batch must be issued before acknowledgement");
 
-    let mut composer = CoreState::new(machine, NonZeroUsize::MIN).unwrap();
+    let mut composer = CoreState::new(machine).unwrap();
     let batch = composer
         .enqueue(
             Input::EffectCompleted(EffectCompletion::SignedBatch {
@@ -11769,16 +11119,11 @@ fn newly_validated_da_choices_precede_the_ordinary_vote_snapshot() {
             .unwrap()
         })
         .collect::<Vec<_>>();
-    let validations = headers
+    let routed = headers
         .iter()
         .enumerate()
         .map(|(producer, header)| {
-            let authenticated = authenticate_block(&mut machine, header.clone(), producer as u32);
-            let jobs = validation_jobs(&authenticated);
-            let [validation] = jobs.as_slice() else {
-                panic!("an authenticated block must enter application validation");
-            };
-            validation.clone()
+            route_blocks(&mut machine, producer as u32, std::slice::from_ref(header))
         })
         .collect::<Vec<_>>();
 
@@ -11792,25 +11137,12 @@ fn newly_validated_da_choices_precede_the_ordinary_vote_snapshot() {
     );
     complete_raw(&mut machine, &proposal, true);
 
-    for validation in &validations[..validations.len() - 1] {
-        machine
-            .step(Input::BlockValidated(ValidationCompletion::new(
-                validation.id(),
-                validation.generation(),
-                BlockValidity::Valid,
-            )))
-            .unwrap();
+    // Stage every chain's newly validated DA choice, then drain once. The frontier snapshot captures
+    // the whole ready frontier atomically and the ordinary vote follows in the same barrier.
+    for (chain, routed) in routed.iter().enumerate() {
+        stage_eligible(&mut machine, chain as u32, routed);
     }
-    let validation = validations.last().unwrap();
-    let ready = machine
-        .step(Input::BlockValidated(ValidationCompletion::new(
-            validation.id(),
-            validation.generation(),
-            BlockValidity::Valid,
-        )))
-        .unwrap();
-
-    let choices = settle(&mut machine, ready);
+    let choices = settle(&mut machine, poll_seed());
     let choice_job = persist_job(&choices);
     assert_eq!(choice_job.events().len(), 2);
     let Change::OutboxQueued { effect, .. } = choice_job.events()[0].change() else {
@@ -11862,14 +11194,7 @@ fn ordinary_vote_does_not_wait_for_newly_enabled_da_choices() {
         digest(b"vote cutoff second"),
     )
     .unwrap();
-    let validations = [&first, &second].map(|header| {
-        let authenticated = authenticate_block(&mut machine, header.clone(), 0);
-        let jobs = validation_jobs(&authenticated);
-        let [validation] = jobs.as_slice() else {
-            panic!("an authenticated block must enter application validation");
-        };
-        validation.clone()
-    });
+    let routed = route_blocks(&mut machine, 0, &[first.clone(), second]);
 
     let proposed = leader(&machine, 1);
     let proposal = observe(
@@ -11881,22 +11206,10 @@ fn ordinary_vote_does_not_wait_for_newly_enabled_da_choices() {
     );
     complete_raw(&mut machine, &proposal, true);
 
-    machine
-        .step(Input::BlockValidated(ValidationCompletion::new(
-            validations[0].id(),
-            validations[0].generation(),
-            BlockValidity::Valid,
-        )))
-        .unwrap();
-    let ready = machine
-        .step(Input::BlockValidated(ValidationCompletion::new(
-            validations[1].id(),
-            validations[1].generation(),
-            BlockValidity::Valid,
-        )))
-        .unwrap();
-
-    let vote = settle(&mut machine, ready);
+    // Stage chain 0's ready run, then vote. The frontier the vote freezes is the choice already
+    // sent for; it does not wait for the child a fresh choice newly enables.
+    stage_eligible(&mut machine, 0, &routed);
+    let vote = settle(&mut machine, poll_seed());
     let job = persist_job(&vote);
     assert_eq!(job.events().len(), 2);
     assert!(matches!(
@@ -11935,16 +11248,11 @@ fn ordinary_vote_freezes_one_ready_da_frontier() {
             .unwrap()
         })
         .collect::<Vec<_>>();
-    let validations = headers
+    let routed = headers
         .iter()
         .enumerate()
         .map(|(producer, header)| {
-            let authenticated = authenticate_block(&mut machine, header.clone(), producer as u32);
-            let jobs = validation_jobs(&authenticated);
-            let [validation] = jobs.as_slice() else {
-                panic!("an authenticated block must enter application validation");
-            };
-            validation.clone()
+            route_blocks(&mut machine, producer as u32, std::slice::from_ref(header))
         })
         .collect::<Vec<_>>();
 
@@ -11958,23 +11266,11 @@ fn ordinary_vote_freezes_one_ready_da_frontier() {
     );
     complete_raw(&mut machine, &proposal, true);
 
-    let first = &validations[0];
-    machine
-        .step(Input::BlockValidated(ValidationCompletion::new(
-            first.id(),
-            first.generation(),
-            BlockValidity::Valid,
-        )))
-        .unwrap();
-    let second = &validations[1];
-    let ready = machine
-        .step(Input::BlockValidated(ValidationCompletion::new(
-            second.id(),
-            second.generation(),
-            BlockValidity::Valid,
-        )))
-        .unwrap();
-    let choice = settle(&mut machine, ready);
+    // Stage chains 0 and 1's ready runs and vote: the frontier freezes at the two ready choices and
+    // the ordinary vote follows in the same barrier.
+    stage_eligible(&mut machine, 0, &routed[0]);
+    stage_eligible(&mut machine, 1, &routed[1]);
+    let choice = settle(&mut machine, poll_seed());
     let choice_job = persist_job(&choice);
     assert_eq!(choice_job.events().len(), 2);
     assert!(matches!(
@@ -12003,15 +11299,9 @@ fn ordinary_vote_freezes_one_ready_da_frontier() {
     );
     assert!(request.body().extensions()[2].is_empty());
 
-    let late = &validations[2];
-    let late = machine
-        .step(Input::BlockValidated(ValidationCompletion::new(
-            late.id(),
-            late.generation(),
-            BlockValidity::Valid,
-        )))
-        .unwrap();
-    let late = settle(&mut machine, late);
+    // Chain 2 becomes ready only after the frontier froze; it must not trigger a second ordinary
+    // vote in this view.
+    let late = offer_eligible(&mut machine, 2, &routed[2]);
     assert!(late.capabilities().iter().all(|capability| {
         !matches!(capability,
             Capability::Durability(DurabilityCapability::Persist(job))
@@ -12062,7 +11352,7 @@ fn oversized_ready_da_frontier_reaches_the_ordinary_vote() {
     .unwrap();
     let (mut machine, _) = start_profile(profile);
     let genesis = machine.profile().protocol().genesis().tips().to_vec();
-    let mut validations = Vec::with_capacity(chains);
+    let mut routed = Vec::with_capacity(chains);
     let mut headers = Vec::with_capacity(chains);
     for (chain, genesis) in genesis.iter().enumerate() {
         let header = TransactionBlockHeader::new(
@@ -12073,12 +11363,11 @@ fn oversized_ready_da_frontier_reaches_the_ordinary_vote() {
             digest(format!("oversized vote frontier {chain}").as_bytes()),
         )
         .unwrap();
-        let authenticated = authenticate_block(&mut machine, header.clone(), chain as u32);
-        let jobs = validation_jobs(&authenticated);
-        let [validation] = jobs.as_slice() else {
-            panic!("an authenticated block must enter application validation");
-        };
-        validations.push(validation.clone());
+        routed.push(route_blocks(
+            &mut machine,
+            chain as u32,
+            std::slice::from_ref(&header),
+        ));
         headers.push(header);
     }
 
@@ -12091,32 +11380,21 @@ fn oversized_ready_da_frontier_reaches_the_ordinary_vote() {
         )),
     );
     complete_raw(&mut machine, &proposal, true);
-    for validation in &validations[..validations.len() - 1] {
-        machine
-            .step(Input::BlockValidated(ValidationCompletion::new(
-                validation.id(),
-                validation.generation(),
-                BlockValidity::Valid,
-            )))
-            .unwrap();
+    // Stage every pre-vote chain's ready run, then confirm the whole frontier is eligible before it
+    // is frozen for the vote.
+    for (chain, routed) in routed.iter().enumerate() {
+        stage_eligible(&mut machine, chain as u32, routed);
     }
-    let validation = validations.last().unwrap();
-    let mut step = machine
-        .step(Input::BlockValidated(ValidationCompletion::new(
-            validation.id(),
-            validation.generation(),
-            BlockValidity::Valid,
-        )))
-        .unwrap();
     let ready = machine
         .chain
-        .ready_da_votes::<Sha256>(&machine.profile, chains, 1)
+        .ready_da_votes(&machine.profile, chains, 1)
         .unwrap();
     assert_eq!(
         ready.len(),
         chains,
         "every pre-vote chain must be eligible before the frontier is frozen"
     );
+    let mut step = poll_seed();
 
     let mut selected = BTreeSet::new();
     let mut batch_sizes = Vec::new();
@@ -12198,27 +11476,8 @@ fn vote_body_pass_ignores_later_da_choices() {
         )
         .unwrap()
     });
-    let validations = headers
-        .iter()
-        .enumerate()
-        .map(|(producer, header)| {
-            let authenticated = authenticate_block(&mut machine, header.clone(), producer as u32);
-            let jobs = validation_jobs(&authenticated);
-            let [validation] = jobs.as_slice() else {
-                panic!("an authenticated block must enter application validation");
-            };
-            validation.clone()
-        })
-        .collect::<Vec<_>>();
-
-    let first = &validations[0];
-    machine
-        .step(Input::BlockValidated(ValidationCompletion::new(
-            first.id(),
-            first.generation(),
-            BlockValidity::Valid,
-        )))
-        .unwrap();
+    // Central self-admits chain 0's DA choice, then begins the vote body pass. The block store and
+    // validation now live in the per-chain plane; this exercises central's own vote-body snapshot.
     machine
         .chain
         .observe_da_choice::<Sha256>(&headers[0])
@@ -12228,14 +11487,7 @@ fn vote_body_pass_ignores_later_da_choices() {
         .chain
         .begin_vote_body_pass(&profile, leader(&machine, 1));
 
-    let second = &validations[1];
-    machine
-        .step(Input::BlockValidated(ValidationCompletion::new(
-            second.id(),
-            second.generation(),
-            BlockValidity::Valid,
-        )))
-        .unwrap();
+    // Chain 1's choice is self-admitted mid-pass; the frozen pass must ignore it.
     machine
         .chain
         .observe_da_choice::<Sha256>(&headers[1])
@@ -12729,9 +11981,6 @@ fn vote_projection_uses_voted_prefix_and_extension() {
         digest(b"first"),
     )
     .unwrap();
-    let first_valid = validate_block(&mut machine, first.clone(), 0);
-    persist(&mut machine, &persist_job(&first_valid));
-
     let second = TransactionBlockHeader::new(
         protocol.epoch(),
         ChainId::new(0),
@@ -12740,7 +11989,12 @@ fn vote_projection_uses_voted_prefix_and_extension() {
         digest(b"second"),
     )
     .unwrap();
-    let second_valid = validate_block(&mut machine, second.clone(), 0);
+    // Both heights are one contiguous run on chain 0; route them together so the plane can vouch for
+    // the parent's held path when the child becomes eligible, then offer each in turn.
+    let routed = route_blocks(&mut machine, 0, &[first.clone(), second.clone()]);
+    let first_valid = offer_eligible(&mut machine, 0, &routed[..1]);
+    persist(&mut machine, &persist_job(&first_valid));
+    let second_valid = offer_eligible(&mut machine, 0, &routed);
     persist(&mut machine, &persist_job(&second_valid));
 
     let proposal = ChainProposal::new(
@@ -15758,61 +15012,6 @@ proptest! {
     }
 
     #[test]
-    fn held_chain_is_da_voted_in_height_order(
-        priorities in prop_vec(any::<u8>(), 1..=4),
-    ) {
-        let depth = priorities.len() as u32;
-        let mut machine = Machine::new(profile_for(
-            Role::Validator(Participant::new(0)),
-            6,
-            depth,
-        ));
-        let start = machine.step(Input::Start).unwrap();
-        persist(&mut machine, &persist_job(&start));
-
-        let mut parent = machine.profile().protocol().genesis().tips()[1];
-        let mut headers = Vec::with_capacity(priorities.len());
-        for height in 1..=priorities.len() {
-            let header = TransactionBlockHeader::new(
-                machine.profile().protocol().epoch(),
-                ChainId::new(1),
-                Height::new(height as u64),
-                parent.digest(),
-                digest(format!("property body {height}").as_bytes()),
-            )
-            .unwrap();
-            parent = header.block_ref::<Sha256>();
-            headers.push(header);
-        }
-        let mut order = (0..headers.len()).collect::<Vec<_>>();
-        order.sort_unstable_by_key(|index| (priorities[*index], *index));
-
-        let mut validations = BTreeMap::new();
-        for &index in &order {
-            let authenticated = authenticate_block(&mut machine, headers[index].clone(), 1);
-            for job in validation_jobs(&authenticated) {
-                validations.insert(job.block().header().height(), job);
-            }
-        }
-        prop_assert_eq!(validations.len(), headers.len());
-
-        let mut choices = Vec::new();
-        for index in order {
-            let height = headers[index].height();
-            let validation = validations.remove(&height).unwrap();
-            let step = complete_validation(&mut machine, &validation);
-            drain_da_choices(&mut machine, step, &mut choices);
-        }
-        prop_assert_eq!(
-            choices.iter().map(|header| header.height()).collect::<Vec<_>>(),
-            (1..=headers.len()).map(|height| Height::new(height as u64)).collect::<Vec<_>>(),
-        );
-        for (choice, expected) in choices.iter().zip(headers) {
-            prop_assert_eq!(choice, &expected);
-        }
-    }
-
-    #[test]
     fn generated_nullification_suffix_advances_in_order(
         priorities in prop_vec(any::<u8>(), 1..=5),
     ) {
@@ -16233,181 +15432,6 @@ fn proof_capacity_does_not_invalidate_reserved_local_completion() {
     assert!(
         machine.inspect().cached_artifacts() + machine.local_artifact_reservations()
             <= resources.max_cached_artifacts()
-    );
-}
-
-/// The DA-choice prefix cursor must never hide an eligible block.
-///
-/// A randomized mixture of out-of-order block arrivals, validations, DA-vote completions, and
-/// certificate retirements is compared against the same scan with the cursor lowered to each
-/// chain's retirement floor, which is the unindexed frontier the cursor replaces.
-#[test]
-fn da_voted_run_cursor_matches_a_full_frontier_scan() {
-    const CHAINS: usize = 4;
-    const PIPELINE_DEPTH: u32 = 8;
-    const ROUNDS: usize = 400;
-
-    let mut rng = test_rng();
-    let mut machine = Machine::new(profile_for(
-        Role::Validator(Participant::new(0)),
-        CHAINS + 1,
-        PIPELINE_DEPTH,
-    ));
-    let generation = machine.durable.generation;
-    let profile = machine.profile().clone();
-    let epoch = profile.protocol().epoch();
-    let genesis = profile.protocol().genesis().tips().to_vec();
-
-    // Pre-build one canonical chain of headers per producer so arrivals can be shuffled without
-    // ever forking a chain.
-    let mut headers: Vec<Vec<TransactionBlockHeader<Digest>>> = Vec::with_capacity(CHAINS);
-    for (chain, tip) in genesis.iter().enumerate().take(CHAINS) {
-        let mut parent = *tip;
-        let mut chain_headers = Vec::new();
-        for height in 1..=24u64 {
-            let header = TransactionBlockHeader::new(
-                epoch,
-                ChainId::new(chain as u32),
-                Height::new(height),
-                parent.digest(),
-                digest(format!("cursor probe {chain}/{height}").as_bytes()),
-            )
-            .unwrap();
-            parent = header.block_ref::<Sha256>();
-            chain_headers.push(header);
-        }
-        headers.push(chain_headers);
-    }
-
-    let mut observed = [0usize; CHAINS];
-    let mut observation = 0u32;
-    for round in 0..ROUNDS {
-        match rng.try_next_u32().unwrap() % 4 {
-            // Observe the next block on a random chain, then validate whatever became pending.
-            0 => {
-                let chain = (rng.try_next_u32().unwrap() as usize) % CHAINS;
-                let Some(header) = headers[chain].get(observed[chain]).cloned() else {
-                    continue;
-                };
-                observed[chain] += 1;
-                observation += 1;
-                let artifact = Artifact::TransactionBlock(SignedTransactionBlock::new(
-                    header,
-                    attestation(chain as u32),
-                ));
-                machine
-                    .chain
-                    .observe::<Sha256>(
-                        artifact.id::<Sha256>(),
-                        Observation::new(1, observation),
-                        &artifact,
-                        generation,
-                    )
-                    .unwrap();
-            }
-            // Validate one pending block, which is what makes a candidate eligible.
-            1 => {
-                let jobs = machine
-                    .chain
-                    .take_effects()
-                    .into_iter()
-                    .filter_map(|effect| match effect {
-                        ChainEffect::Validate(job) => Some(job),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>();
-                for job in jobs {
-                    machine
-                        .chain
-                        .complete_validation::<Sha256>(
-                            ValidationCompletion::new(
-                                job.id(),
-                                job.generation(),
-                                BlockValidity::Valid,
-                            ),
-                            generation,
-                        )
-                        .unwrap();
-                }
-            }
-            // Reserve and complete one DA-vote run, which grows the voted prefix.
-            2 => {
-                let run = machine
-                    .chain
-                    .ready_da_votes::<Sha256>(&profile, CHAINS, DA_VOTE_RUN)
-                    .unwrap();
-                for block in &run {
-                    machine.chain.mark_da_vote_reserved(block.header().clone());
-                }
-                for block in &run {
-                    machine
-                        .chain
-                        .observe_da_choice::<Sha256>(block.header())
-                        .unwrap();
-                }
-            }
-            // Retire a certified prefix, which drops choices below the new floor. Half the
-            // retirements land above the voted prefix, as a certificate the cluster formed
-            // without this node's own choice does.
-            _ => {
-                let chain = (rng.try_next_u32().unwrap() as usize) % CHAINS;
-                let voted = machine.chain.da_voted_run()[chain];
-                let ahead = rng.try_next_u32().unwrap().is_multiple_of(2);
-                let retired = if ahead {
-                    Height::new(u64::from(observed[chain] as u32))
-                } else {
-                    voted
-                };
-                if retired.get() == 0 {
-                    continue;
-                }
-                let header = headers[chain][retired.get() as usize - 1].clone();
-                let certificate = symbolic_da_certificate(header, round as u64);
-                if machine
-                    .chain
-                    .compact_certified::<Sha256>(&certificate, retired)
-                    .is_err()
-                {
-                    continue;
-                }
-            }
-        }
-
-        // The maintained cursor must equal the prefix rebuilt from the retained choices alone,
-        // and the indexed scan must return exactly what the unindexed scan returns.
-        assert_eq!(
-            machine.chain.da_voted_run(),
-            machine.chain.rebuilt_da_voted_run(),
-            "the cursor drifted from the retained DA-choice prefix in round {round}"
-        );
-        let indexed = machine
-            .chain
-            .ready_da_votes::<Sha256>(&profile, CHAINS, DA_VOTE_RUN)
-            .unwrap();
-        machine.chain.clear_da_voted_run();
-        let scanned = machine
-            .chain
-            .ready_da_votes::<Sha256>(&profile, CHAINS, DA_VOTE_RUN)
-            .unwrap();
-        assert_eq!(
-            indexed
-                .iter()
-                .map(|block| block.header().clone())
-                .collect::<Vec<_>>(),
-            scanned
-                .iter()
-                .map(|block| block.header().clone())
-                .collect::<Vec<_>>(),
-            "the cursor changed the eligible frontier in round {round}"
-        );
-        for chain in 0..CHAINS {
-            machine.chain.chase_da_voted_run_for_test(chain);
-        }
-    }
-
-    assert!(
-        machine.chain.da_voted_run().iter().any(|run| run.get() > 0),
-        "the workload must exercise a non-empty DA-choice prefix"
     );
 }
 

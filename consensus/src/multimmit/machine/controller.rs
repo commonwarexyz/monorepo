@@ -96,16 +96,17 @@
 use super::contracts::CORE_BUDGET;
 use super::{
     Artifact, BarrierAck, BuildCompletion, Capabilities, ChainProgress, CheckpointCut,
-    CustodyCancellation, CustodyCompletion, DomainEvent, EffectCompletion, EffectId,
+    CustodyCancellation, CustodyCompletion, DaChoice, DomainEvent, EffectCompletion, EffectId,
     IdentifiedArtifact, Input, Inspection, LqcAggregateCompletion, Machine,
     NullificationRecoveryCompletion, PollResult, ProductionTimer, Profile, Progress, ReplayError,
     ResolutionCompletion, SigningBatchPass, Snapshot, Step, StepError, StepStatus, Timer,
-    ValidationCompletion, ValidationId, ValidationJob, VerificationCompletion, VerificationPass,
-    ViewProof, VqcAggregateCompletion,
+    VerificationCompletion, VerificationPass, ViewProof, VqcAggregateCompletion,
     contracts::{FairCursor, LANE_WEIGHTS, Lane, ServiceCycle, ServiceError, TransitionCost},
 };
 use crate::{
-    multimmit::types::{Activity, BlockRef, ChainId, Context, DaCertificate},
+    multimmit::types::{
+        Activity, BlockRef, ChainId, Context, DaCertificate, SignedTransactionBlock,
+    },
     types::{Height, View},
 };
 use commonware_codec::EncodeSize as _;
@@ -351,9 +352,6 @@ pub(crate) struct CoreState<H: Hasher, V: Variant> {
     /// Applications may keep a future-context request pending until its parent state is available.
     /// The reducer independently withholds DA authority until the chain's contiguous valid prefix
     /// advances.
-    active_validations: Vec<BTreeMap<ValidationId, Height>>,
-    validation_parallelism: usize,
-    pending_validations: ProducerAdmissions<ValidationJob<V, H::Digest>>,
     limits: CoreLimits,
     queues: [VecDeque<QueuedInput<V, H::Digest>>; LANE_COUNT],
     usage: [LaneUsage; LANE_COUNT],
@@ -377,29 +375,19 @@ impl<H: Hasher, V: Variant> CoreState<H, V> {
     }
 
     /// Constructs the complete protocol owner for a never-started epoch.
-    pub(crate) fn fresh(
-        profile: Profile<H, V>,
-        application_tasks: NonZeroUsize,
-    ) -> Result<Self, CoreBootstrapError> {
-        Ok(Self::new(Machine::new(profile), application_tasks)?)
+    pub(crate) fn fresh(profile: Profile<H, V>) -> Result<Self, CoreBootstrapError> {
+        Ok(Self::new(Machine::new(profile))?)
     }
 
     /// Restores the complete protocol owner at one acknowledged snapshot cut.
     pub(crate) fn restore(
         profile: Profile<H, V>,
         snapshot: Snapshot<V, H::Digest>,
-        application_tasks: NonZeroUsize,
     ) -> Result<Self, CoreBootstrapError> {
-        Ok(Self::new(
-            Machine::restore(profile, snapshot)?,
-            application_tasks,
-        )?)
+        Ok(Self::new(Machine::restore(profile, snapshot)?)?)
     }
 
-    pub(super) fn new(
-        machine: Machine<H, V>,
-        application_tasks: NonZeroUsize,
-    ) -> Result<Self, CoreError> {
+    pub(super) fn new(machine: Machine<H, V>) -> Result<Self, CoreError> {
         let limits = CoreLimits::derive(&machine)?;
         let resources = machine.profile().resources();
         let crypto_tasks = resources
@@ -408,51 +396,15 @@ impl<H: Hasher, V: Variant> CoreState<H, V> {
             .max(3);
         let generation = machine.inspect().generation();
         let local_custody = machine.profile().protocol().codec_config().pipeline_depth();
-        let tasks = TaskReservations::new(
-            generation,
-            TaskLimits::new(application_tasks.get(), local_custody, crypto_tasks),
-        )?;
-        let chains = machine.profile().protocol().codec_config().chains();
-        let validation_parallelism = machine.profile().validation_parallelism();
-        let pending_items = machine.profile().validation_capacity();
-        let per_chain_items = validation_parallelism;
-        let pending_bytes = pending_items
-            .checked_mul(resources.max_artifact_bytes())
-            .ok_or(CoreError::CapacityOverflow)?;
-        let per_chain_bytes = per_chain_items
-            .checked_mul(resources.max_artifact_bytes())
-            .ok_or(CoreError::CapacityOverflow)?;
-        let pending_validations = ProducerAdmissions::new(
-            chains,
-            pending_items,
-            per_chain_items,
-            pending_bytes,
-            per_chain_bytes,
-        )?;
-        Ok(Self::with_limits(
-            machine,
-            limits,
-            tasks,
-            chains,
-            validation_parallelism,
-            pending_validations,
-        ))
+        let tasks =
+            TaskReservations::new(generation, TaskLimits::new(local_custody, crypto_tasks))?;
+        Ok(Self::with_limits(machine, limits, tasks))
     }
 
-    fn with_limits(
-        machine: Machine<H, V>,
-        limits: CoreLimits,
-        tasks: TaskReservations,
-        chains: usize,
-        validation_parallelism: usize,
-        pending_validations: ProducerAdmissions<ValidationJob<V, H::Digest>>,
-    ) -> Self {
+    fn with_limits(machine: Machine<H, V>, limits: CoreLimits, tasks: TaskReservations) -> Self {
         Self {
             machine,
             tasks,
-            active_validations: (0..chains).map(|_| BTreeMap::new()).collect(),
-            validation_parallelism,
-            pending_validations,
             limits,
             queues: std::array::from_fn(|_| VecDeque::new()),
             usage: [LaneUsage::default(); LANE_COUNT],
@@ -579,13 +531,6 @@ impl<H: Hasher, V: Variant> CoreState<H, V> {
         cancellation: CustodyCancellation,
     ) -> Result<InputTicket, CoreError> {
         self.enqueue(Input::CustodyCancelled(cancellation), 1)
-    }
-
-    pub(crate) fn producer_validated(
-        &mut self,
-        completion: ValidationCompletion,
-    ) -> Result<InputTicket, CoreError> {
-        self.enqueue(Input::BlockValidated(completion), 1)
     }
 
     pub(crate) fn producer_timer_fired(
@@ -999,6 +944,27 @@ impl<H: Hasher, V: Variant> CoreState<H, V> {
         self.machine.own_certified_height()
     }
 
+    /// Returns one producer chain's certified anchor, for re-seeding its validator plane.
+    pub(crate) fn certified_anchor(&self, chain: ChainId) -> BlockRef<H::Digest> {
+        self.machine.certified_anchor(chain)
+    }
+
+    /// Returns one producer chain's durable DA choices, for re-seeding its validator plane.
+    pub(crate) fn chosen_choices(&self, chain: ChainId) -> Vec<DaChoice<H::Digest>> {
+        self.machine.chosen_choices(chain)
+    }
+
+    /// Records one chain's offered eligible run and frontier reach from its validator plane.
+    pub(crate) fn note_da_vote_ready(
+        &mut self,
+        chain: ChainId,
+        candidates: Vec<Arc<SignedTransactionBlock<V, H::Digest>>>,
+        ready_through: Height,
+    ) {
+        self.machine
+            .note_da_vote_ready(chain, candidates, ready_through);
+    }
+
     /// Projects per-producer-chain progress for periodic metrics refresh.
     pub(crate) fn chain_progress(&self) -> Vec<ChainProgress> {
         self.machine.chain_progress()
@@ -1080,20 +1046,11 @@ impl<H: Hasher, V: Variant> CoreState<H, V> {
 
     pub(crate) fn advance_task_generation(&mut self, generation: u64) -> Result<usize, TaskError> {
         let released = self.tasks.advance_generation(generation)?;
-        for active in &mut self.active_validations {
-            active.clear();
-        }
-        self.pending_validations.clear();
         Ok(released)
     }
 
     pub(crate) fn shutdown_tasks(&mut self) -> usize {
-        let released = self.tasks.shutdown();
-        for active in &mut self.active_validations {
-            active.clear();
-        }
-        self.pending_validations.clear();
-        released
+        self.tasks.shutdown()
     }
 
     pub(crate) const fn local_build_active(&self) -> bool {
@@ -1102,108 +1059,6 @@ impl<H: Hasher, V: Variant> CoreState<H, V> {
 
     pub(crate) const fn local_custody_active(&self) -> usize {
         self.tasks.local_custody
-    }
-
-    pub(crate) fn schedule_validation(
-        &mut self,
-        job: ValidationJob<V, H::Digest>,
-    ) -> Result<Option<ValidationDispatch<V, H::Digest>>, TaskError> {
-        let chain = job.block().header().chain().get();
-        match self.start_validation(job)? {
-            ValidationStart::Started(dispatch) => Ok(Some(dispatch)),
-            ValidationStart::Blocked(job) => {
-                let bytes = job.block().encode_size();
-                self.pending_validations.admit(chain, job, bytes)?;
-                Ok(None)
-            }
-        }
-    }
-
-    fn start_validation(
-        &mut self,
-        job: ValidationJob<V, H::Digest>,
-    ) -> Result<ValidationStart<V, H::Digest>, TaskError> {
-        let chain = job.block().header().chain().get();
-        let active = self
-            .active_validations
-            .get_mut(chain as usize)
-            .ok_or(TaskError::UnknownChain)?;
-        if active.len() >= self.validation_parallelism {
-            return Ok(ValidationStart::Blocked(job));
-        }
-        let permit = match self.tasks.reserve(TaskClass::RemoteValidation) {
-            Ok(permit) => permit,
-            Err(TaskError::ClassFull) => return Ok(ValidationStart::Blocked(job)),
-            Err(error) => return Err(error),
-        };
-        let previous = active.insert(job.id(), job.block().header().height());
-        debug_assert!(previous.is_none());
-        Ok(ValidationStart::Started(ValidationDispatch { permit, job }))
-    }
-
-    pub(crate) fn validation_finished(
-        &mut self,
-        chain: ChainId,
-        id: ValidationId,
-    ) -> Result<Option<ValidationDispatch<V, H::Digest>>, TaskError> {
-        let active = self
-            .active_validations
-            .get_mut(chain.get() as usize)
-            .ok_or(TaskError::UnknownChain)?;
-        if active.remove(&id).is_none() {
-            return Err(TaskError::Accounting);
-        }
-        let active = &self.active_validations;
-        let validation_parallelism = self.validation_parallelism;
-        let Some(job) = self
-            .pending_validations
-            .pop_ready(|chain| active[chain as usize].len() < validation_parallelism)
-        else {
-            return Ok(None);
-        };
-        match self.start_validation(job)? {
-            ValidationStart::Started(dispatch) => Ok(Some(dispatch)),
-            ValidationStart::Blocked(_) => Err(TaskError::Accounting),
-        }
-    }
-
-    pub(crate) fn cancel_validations(
-        &mut self,
-        chain: ChainId,
-        through: Height,
-    ) -> Vec<ValidationId> {
-        self.pending_validations.retain(|job| {
-            job.block().header().chain() != chain || job.block().header().height() > through
-        });
-        self.active_validations
-            .get(chain.get() as usize)
-            .into_iter()
-            .flat_map(BTreeMap::iter)
-            .filter_map(|(id, height)| (*height <= through).then_some(*id))
-            .collect()
-    }
-
-    pub(crate) fn validation_counts(&self) -> (usize, usize) {
-        (
-            self.active_validations.iter().map(BTreeMap::len).sum(),
-            self.pending_validations.len(),
-        )
-    }
-}
-
-pub(crate) struct ValidationDispatch<V: Variant, D: Digest> {
-    permit: TaskPermit,
-    job: ValidationJob<V, D>,
-}
-
-enum ValidationStart<V: Variant, D: Digest> {
-    Started(ValidationDispatch<V, D>),
-    Blocked(ValidationJob<V, D>),
-}
-
-impl<V: Variant, D: Digest> ValidationDispatch<V, D> {
-    pub(crate) fn into_parts(self) -> (TaskPermit, ValidationJob<V, D>) {
-        (self.permit, self.job)
     }
 }
 
@@ -1220,7 +1075,6 @@ const fn input_lane<V: Variant, D: Digest>(input: &Input<V, D>) -> Lane {
         | Input::BlockBuilt(_)
         | Input::BlockCustodied(_)
         | Input::CustodyCancelled(_)
-        | Input::BlockValidated(_)
         | Input::RecoveredCertificate { .. }
         | Input::NullificationRecovered(_)
         | Input::VqcAggregated(_)
@@ -1310,7 +1164,6 @@ const fn lane_at(index: usize) -> Lane {
 pub(crate) enum TaskClass {
     LocalBuild,
     LocalCustody,
-    RemoteValidation,
     LocalSigning,
     CriticalAggregation,
     #[allow(dead_code)]
@@ -1350,19 +1203,13 @@ impl TaskPermit {
 /// Bounded task policy. Two crypto slots are structurally unavailable to bulk work.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TaskLimits {
-    remote_validations: usize,
     local_custody: usize,
     crypto_tasks: usize,
 }
 
 impl TaskLimits {
-    pub(crate) const fn new(
-        remote_validations: usize,
-        local_custody: usize,
-        crypto_tasks: usize,
-    ) -> Self {
+    pub(crate) const fn new(local_custody: usize, crypto_tasks: usize) -> Self {
         Self {
-            remote_validations,
             local_custody,
             crypto_tasks,
         }
@@ -1375,7 +1222,6 @@ pub(crate) struct TaskReservations {
     limits: TaskLimits,
     next_id: u64,
     active: BTreeMap<u64, (TaskClass, usize)>,
-    remote_validations: usize,
     local_build: bool,
     local_custody: usize,
     local_signing: usize,
@@ -1386,7 +1232,7 @@ pub(crate) struct TaskReservations {
 
 impl TaskReservations {
     pub(crate) const fn new(generation: u64, limits: TaskLimits) -> Result<Self, TaskError> {
-        if limits.remote_validations == 0 || limits.local_custody == 0 || limits.crypto_tasks < 3 {
+        if limits.local_custody == 0 || limits.crypto_tasks < 3 {
             return Err(TaskError::InvalidLimits);
         }
         Ok(Self {
@@ -1394,7 +1240,6 @@ impl TaskReservations {
             limits,
             next_id: 0,
             active: BTreeMap::new(),
-            remote_validations: 0,
             local_build: false,
             local_custody: 0,
             local_signing: 0,
@@ -1405,6 +1250,7 @@ impl TaskReservations {
     }
 
     /// Reserves both execution capacity and one completion return path.
+    #[cfg(test)]
     pub(crate) fn reserve(&mut self, class: TaskClass) -> Result<TaskPermit, TaskError> {
         self.reserve_units(class, 1)
     }
@@ -1431,11 +1277,6 @@ impl TaskReservations {
             TaskClass::LocalCustody if self.local_custody >= self.limits.local_custody => {
                 return Err(TaskError::ClassFull);
             }
-            TaskClass::RemoteValidation
-                if self.remote_validations >= self.limits.remote_validations =>
-            {
-                return Err(TaskError::ClassFull);
-            }
             TaskClass::LocalSigning
                 if crypto_used.saturating_add(units) > self.limits.crypto_tasks
                     || (self.critical_aggregation == 0
@@ -1456,9 +1297,7 @@ impl TaskReservations {
             {
                 return Err(TaskError::ClassFull);
             }
-            TaskClass::LocalBuild | TaskClass::LocalCustody | TaskClass::RemoteValidation
-                if units != 1 =>
-            {
+            TaskClass::LocalBuild | TaskClass::LocalCustody if units != 1 => {
                 return Err(TaskError::InvalidLimits);
             }
             _ => {}
@@ -1469,7 +1308,6 @@ impl TaskReservations {
         match class {
             TaskClass::LocalBuild => self.local_build = true,
             TaskClass::LocalCustody => self.local_custody += 1,
-            TaskClass::RemoteValidation => self.remote_validations += 1,
             TaskClass::LocalSigning => self.local_signing += units,
             TaskClass::CriticalAggregation => self.critical_aggregation += units,
             TaskClass::BulkCrypto => self.bulk_crypto += units,
@@ -1521,7 +1359,6 @@ impl TaskReservations {
     fn clear(&mut self) -> usize {
         let released = self.active.len();
         self.active.clear();
-        self.remote_validations = 0;
         self.local_build = false;
         self.local_custody = 0;
         self.local_signing = 0;
@@ -1539,12 +1376,6 @@ impl TaskReservations {
             TaskClass::LocalCustody => {
                 self.local_custody = self
                     .local_custody
-                    .checked_sub(units)
-                    .ok_or(TaskError::Accounting)?;
-            }
-            TaskClass::RemoteValidation => {
-                self.remote_validations = self
-                    .remote_validations
                     .checked_sub(units)
                     .ok_or(TaskError::Accounting)?;
             }
@@ -1572,134 +1403,6 @@ impl TaskReservations {
 
     pub(crate) const fn generation(&self) -> u64 {
         self.generation
-    }
-}
-
-/// Bounded per-producer queues serviced by one rotating cursor.
-struct ProducerItem<T> {
-    item: T,
-    bytes: usize,
-}
-
-pub(crate) struct ProducerAdmissions<T> {
-    queues: Vec<VecDeque<ProducerItem<T>>>,
-    next: usize,
-    len: usize,
-    bytes: usize,
-    global_limit: usize,
-    per_chain_limit: usize,
-    global_byte_limit: usize,
-    per_chain_byte_limit: usize,
-    chain_bytes: Vec<usize>,
-}
-
-impl<T> ProducerAdmissions<T> {
-    pub(crate) fn new(
-        chains: usize,
-        global_limit: usize,
-        per_chain_limit: usize,
-        global_byte_limit: usize,
-        per_chain_byte_limit: usize,
-    ) -> Result<Self, TaskError> {
-        if chains == 0
-            || global_limit == 0
-            || per_chain_limit == 0
-            || global_byte_limit == 0
-            || per_chain_byte_limit == 0
-        {
-            return Err(TaskError::InvalidLimits);
-        }
-        Ok(Self {
-            queues: (0..chains).map(|_| VecDeque::new()).collect(),
-            next: 0,
-            len: 0,
-            bytes: 0,
-            global_limit,
-            per_chain_limit,
-            global_byte_limit,
-            per_chain_byte_limit,
-            chain_bytes: vec![0; chains],
-        })
-    }
-
-    pub(crate) fn admit(&mut self, chain: u32, item: T, bytes: usize) -> Result<(), TaskError> {
-        if bytes == 0 {
-            return Err(TaskError::InvalidLimits);
-        }
-        let index = chain as usize;
-        let queue = self.queues.get_mut(index).ok_or(TaskError::UnknownChain)?;
-        let total_bytes = self.bytes.checked_add(bytes).ok_or(TaskError::Accounting)?;
-        let producer_bytes = self.chain_bytes[index]
-            .checked_add(bytes)
-            .ok_or(TaskError::Accounting)?;
-        if self.len >= self.global_limit
-            || queue.len() >= self.per_chain_limit
-            || total_bytes > self.global_byte_limit
-            || producer_bytes > self.per_chain_byte_limit
-        {
-            return Err(TaskError::ClassFull);
-        }
-        queue.push_back(ProducerItem { item, bytes });
-        self.len += 1;
-        self.bytes = total_bytes;
-        self.chain_bytes[index] = producer_bytes;
-        Ok(())
-    }
-
-    /// Returns the next eligible chain's oldest item and rotates past that chain.
-    pub(crate) fn pop_ready(&mut self, mut ready: impl FnMut(u32) -> bool) -> Option<T> {
-        for offset in 0..self.queues.len() {
-            let index = (self.next + offset) % self.queues.len();
-            if self.queues[index].is_empty() || !ready(index as u32) {
-                continue;
-            }
-            self.next = (index + 1) % self.queues.len();
-            self.len -= 1;
-            let queued = self.queues[index]
-                .pop_front()
-                .expect("a selected producer queue is non-empty");
-            self.bytes -= queued.bytes;
-            self.chain_bytes[index] -= queued.bytes;
-            return Some(queued.item);
-        }
-        None
-    }
-
-    /// Retains queued jobs still owned by their producer chain.
-    pub(crate) fn retain(&mut self, mut retain: impl FnMut(&T) -> bool) {
-        for (index, queue) in self.queues.iter_mut().enumerate() {
-            queue.retain(|entry| {
-                if retain(&entry.item) {
-                    return true;
-                }
-                self.len -= 1;
-                self.bytes -= entry.bytes;
-                self.chain_bytes[index] -= entry.bytes;
-                false
-            });
-        }
-    }
-
-    pub(crate) const fn len(&self) -> usize {
-        self.len
-    }
-
-    /// Drops every queued producer job and returns the released item count.
-    pub(crate) fn clear(&mut self) -> usize {
-        let released = self.len;
-        for queue in &mut self.queues {
-            queue.clear();
-        }
-        self.chain_bytes.fill(0);
-        self.len = 0;
-        self.bytes = 0;
-        self.next = 0;
-        released
-    }
-
-    #[cfg(test)]
-    pub(crate) const fn bytes(&self) -> usize {
-        self.bytes
     }
 }
 
@@ -1756,8 +1459,6 @@ pub(crate) enum TaskError {
     Accounting,
     #[error("the task executor is stopped")]
     Stopped,
-    #[error("the producer chain is outside the configured committee")]
-    UnknownChain,
 }
 
 #[cfg(test)]
@@ -1797,7 +1498,7 @@ mod tests {
             },
         )
         .unwrap();
-        CoreState::new(Machine::new(profile), NonZeroUsize::MIN).unwrap()
+        CoreState::new(Machine::new(profile)).unwrap()
     }
 
     fn queued_input(
@@ -1883,7 +1584,7 @@ mod tests {
             .unwrap();
         assert!(machine.scheduler.has_work());
 
-        let mut core = CoreState::new(machine, NonZeroUsize::MIN).unwrap();
+        let mut core = CoreState::new(machine).unwrap();
         for _ in 0..3 {
             core.enqueue(Input::Observe(Vec::new()), 1).unwrap();
         }
@@ -2012,7 +1713,7 @@ mod tests {
         machine.step(Input::Persisted(start_ack)).unwrap();
         while machine.poll(NonZeroUsize::MIN).unwrap().work_remaining() {}
 
-        let mut core = CoreState::new(machine, NonZeroUsize::MIN).unwrap();
+        let mut core = CoreState::new(machine).unwrap();
         let lanes = [
             Lane::PersistenceCompletion,
             Lane::LocalCompletion,
@@ -2147,7 +1848,7 @@ mod tests {
 
     #[test]
     fn task_saturation_preserves_named_critical_capacity() {
-        let mut tasks = TaskReservations::new(7, TaskLimits::new(2, 3, 5)).unwrap();
+        let mut tasks = TaskReservations::new(7, TaskLimits::new(3, 5)).unwrap();
         let bulk = (0..3)
             .map(|_| tasks.reserve(TaskClass::BulkCrypto).unwrap())
             .collect::<Vec<_>>();
@@ -2167,11 +1868,8 @@ mod tests {
 
     #[test]
     fn local_custody_capacity_is_bounded_and_independent() {
-        let mut tasks = TaskReservations::new(7, TaskLimits::new(2, 3, 3)).unwrap();
+        let mut tasks = TaskReservations::new(7, TaskLimits::new(3, 3)).unwrap();
         let build = tasks.reserve(TaskClass::LocalBuild).unwrap();
-        let validations = (0..2)
-            .map(|_| tasks.reserve(TaskClass::RemoteValidation).unwrap())
-            .collect::<Vec<_>>();
         let custody = (0..3)
             .map(|_| tasks.reserve(TaskClass::LocalCustody).unwrap())
             .collect::<Vec<_>>();
@@ -2181,14 +1879,14 @@ mod tests {
         );
 
         tasks.finish(build, TaskTerminal::Completed).unwrap();
-        for permit in validations.into_iter().chain(custody) {
+        for permit in custody {
             tasks.finish(permit, TaskTerminal::Completed).unwrap();
         }
     }
 
     #[test]
     fn stale_generation_cannot_release_current_capacity() {
-        let mut tasks = TaskReservations::new(11, TaskLimits::new(2, 3, 3)).unwrap();
+        let mut tasks = TaskReservations::new(11, TaskLimits::new(3, 3)).unwrap();
         let old = tasks.reserve(TaskClass::LocalBuild).unwrap();
         assert_eq!(tasks.advance_generation(12).unwrap(), 1);
         let current = tasks.reserve(TaskClass::LocalBuild).unwrap();
@@ -2201,9 +1899,9 @@ mod tests {
 
     #[test]
     fn shutdown_reconciles_every_permit_and_rejects_new_work() {
-        let mut tasks = TaskReservations::new(3, TaskLimits::new(2, 3, 4)).unwrap();
+        let mut tasks = TaskReservations::new(3, TaskLimits::new(3, 4)).unwrap();
         tasks.reserve(TaskClass::LocalBuild).unwrap();
-        tasks.reserve(TaskClass::RemoteValidation).unwrap();
+        tasks.reserve(TaskClass::LocalCustody).unwrap();
         tasks.reserve(TaskClass::LocalSigning).unwrap();
         assert_eq!(tasks.shutdown(), 3);
         assert_eq!(
@@ -2213,41 +1911,17 @@ mod tests {
     }
 
     #[test]
-    fn producer_admission_rotates_across_nonempty_chains() {
-        let mut queue = ProducerAdmissions::new(3, 8, 4, 80, 40).unwrap();
-        queue.admit(0, (0, 'a'), 10).unwrap();
-        queue.admit(0, (0, 'b'), 10).unwrap();
-        queue.admit(1, (1, 'a'), 10).unwrap();
-        queue.admit(2, (2, 'a'), 10).unwrap();
-
-        let order = (0..4)
-            .map(|_| queue.pop_ready(|_| true).unwrap().0)
-            .collect::<Vec<_>>();
-        assert_eq!(order, [0, 1, 2, 0]);
-    }
-
-    #[test]
-    fn producer_admission_enforces_global_and_per_chain_caps() {
-        let mut queue = ProducerAdmissions::new(3, 2, 1, 20, 10).unwrap();
-        queue.admit(0, 'a', 10).unwrap();
-        assert_eq!(queue.admit(0, 'b', 1), Err(TaskError::ClassFull));
-        queue.admit(1, 'a', 10).unwrap();
-        assert_eq!(queue.admit(2, 'a', 1), Err(TaskError::ClassFull));
-        assert_eq!(queue.bytes(), 20);
-    }
-
-    #[test]
-    fn local_build_is_independent_of_remote_validation_saturation() {
-        let mut tasks = TaskReservations::new(1, TaskLimits::new(2, 3, 3)).unwrap();
-        let first = tasks.reserve(TaskClass::RemoteValidation).unwrap();
-        let second = tasks.reserve(TaskClass::RemoteValidation).unwrap();
+    fn local_build_is_independent_of_custody_saturation() {
+        let mut tasks = TaskReservations::new(1, TaskLimits::new(2, 3)).unwrap();
+        let first = tasks.reserve(TaskClass::LocalCustody).unwrap();
+        let second = tasks.reserve(TaskClass::LocalCustody).unwrap();
         assert_eq!(
-            tasks.reserve(TaskClass::RemoteValidation),
+            tasks.reserve(TaskClass::LocalCustody),
             Err(TaskError::ClassFull)
         );
         tasks.reserve(TaskClass::LocalBuild).unwrap();
         tasks.finish(first, TaskTerminal::Completed).unwrap();
-        let replacement = tasks.reserve(TaskClass::RemoteValidation).unwrap();
+        let replacement = tasks.reserve(TaskClass::LocalCustody).unwrap();
         tasks.finish(second, TaskTerminal::Cancelled).unwrap();
         tasks.finish(replacement, TaskTerminal::Completed).unwrap();
     }

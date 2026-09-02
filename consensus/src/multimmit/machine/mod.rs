@@ -131,6 +131,7 @@ mod publication;
 mod reducer;
 mod scheduler;
 mod state;
+mod validator;
 mod view;
 
 #[cfg(all(feature = "test-utils", feature = "mocks", not(target_arch = "wasm32")))]
@@ -154,6 +155,7 @@ pub(crate) use state::{
     PendingPersistence, PendingSigningCompletion, Progress,
 };
 pub use state::{ChainProgress, Inspection, ProducerProgress};
+pub(crate) use validator::*;
 pub(crate) use view::{
     NullificationRecoveryCompletion, NullificationRecoveryJob, VqcAggregateCompletion,
     VqcAggregateJob,

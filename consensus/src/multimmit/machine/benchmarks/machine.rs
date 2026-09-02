@@ -5,11 +5,11 @@ use crate::{
     multimmit::{
         config::Config,
         machine::{
-            Artifact, BarrierAck, BlockValidity, Capabilities, Capability, DurabilityCapability,
-            DurableEffect, EffectCompletion, EffectId, Input, LeaderCapability, Machine,
-            ObservationStatus, ProducerCapability, Profile, PublicationDischarge,
-            ResolverCapability, Role, SignRequest, Snapshot, StepStatus, Tuning,
-            ValidationCompletion, Verdict, VerificationCapability, VerificationCompletion,
+            Artifact, BarrierAck, Capabilities, Capability, DurabilityCapability, DurableEffect,
+            EffectCompletion, EffectId, Input, LeaderCapability, Machine, ObservationStatus,
+            ProducerCapability, Profile, PublicationDischarge, ResolverCapability, Role,
+            SignRequest, Snapshot, StepStatus, Tuning, Verdict, VerificationCapability,
+            VerificationCompletion,
         },
         types::{
             Anchor, ChainId, ChainProposal, DaCertificate, DaVote, SignedLeaderBlock,
@@ -172,13 +172,18 @@ fn drain_validator(machine: &mut fabric::BenchMachine, effects: fabric::BenchCap
                     effects.extend(fabric::verify_all_true(machine, &job));
                     continue;
                 }
-                Capability::Producer(ProducerCapability::Validate(job)) => machine
-                    .step(Input::BlockValidated(ValidationCompletion::new(
-                        job.id(),
-                        job.generation(),
-                        BlockValidity::Valid,
-                    )))
-                    .unwrap(),
+                // Drive the chain's validator plane inline: the routed block is valid, so offer it
+                // as the chain's eligible run for central to reserve, exactly as a task would.
+                Capability::Producer(ProducerCapability::ObserveBlock { block, .. }) => {
+                    let chain = block.header().chain();
+                    let height = block.header().height();
+                    machine.note_da_vote_ready(chain, vec![block], height);
+                    continue;
+                }
+                Capability::Producer(
+                    ProducerCapability::ValidatorAnchor(_)
+                    | ProducerCapability::ValidatorChosen { .. },
+                ) => continue,
                 Capability::Durability(DurabilityCapability::Released(job)) => {
                     match job.request() {
                         DurableEffect::Sign(SignRequest::DaVote(request)) => machine
@@ -281,13 +286,18 @@ fn local_sign_completion_fixture() -> (fabric::BenchMachine, EffectCompletion<Mi
                     effects.extend(fabric::verify_all_true(&mut machine, &job));
                     continue;
                 }
-                Capability::Producer(ProducerCapability::Validate(job)) => machine
-                    .step(Input::BlockValidated(ValidationCompletion::new(
-                        job.id(),
-                        job.generation(),
-                        BlockValidity::Valid,
-                    )))
-                    .unwrap(),
+                // Drive the chain's validator plane inline: the routed block is valid, so offer it
+                // as the chain's eligible run for central to reserve, exactly as a task would.
+                Capability::Producer(ProducerCapability::ObserveBlock { block, .. }) => {
+                    let chain = block.header().chain();
+                    let height = block.header().height();
+                    machine.note_da_vote_ready(chain, vec![block], height);
+                    continue;
+                }
+                Capability::Producer(
+                    ProducerCapability::ValidatorAnchor(_)
+                    | ProducerCapability::ValidatorChosen { .. },
+                ) => continue,
                 Capability::Durability(DurabilityCapability::Released(job)) => {
                     match job.request() {
                         DurableEffect::Sign(SignRequest::DaVote(request)) => {

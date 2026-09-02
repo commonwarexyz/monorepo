@@ -114,9 +114,7 @@ pub(super) struct Metrics {
     /// Whether the local producer is blocked at its DA pipeline limit.
     pub producer_pipeline_blocked: Gauge,
     /// Producer-block application validations executing now.
-    pub active_validations_gauge: Gauge,
     /// Application validations waiting for execution capacity; queueing precedes view timeouts.
-    pub pending_validations_gauge: Gauge,
     /// Local application build slot occupancy.
     pub build_active_gauge: Gauge,
     /// Local producer bodies entering validated durable custody.
@@ -272,14 +270,6 @@ impl Metrics {
         let producer_pipeline_blocked = context.gauge(
             "producer_pipeline_blocked",
             "whether the local producer is blocked at its DA pipeline limit",
-        );
-        let active_validations_gauge = context.gauge(
-            "active_validations",
-            "active producer-block application validations",
-        );
-        let pending_validations_gauge = context.gauge(
-            "pending_validations",
-            "application validations waiting for bounded execution capacity",
         );
         let build_active_gauge =
             context.gauge("build_active", "local application build slot occupancy");
@@ -481,8 +471,6 @@ impl Metrics {
             proposal_anchor_view,
             produced_blocks,
             producer_pipeline_blocked,
-            active_validations_gauge,
-            pending_validations_gauge,
             build_active_gauge,
             custody_active_gauge,
             chains,

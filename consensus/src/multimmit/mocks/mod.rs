@@ -584,7 +584,7 @@ mod size_probe {
                 .iter()
                 .map(|(id, artifact)| id.encode_size() + artifact.encode_size())
                 .sum();
-            let mut core = CoreState::fresh(profile, NonZeroUsize::MIN).unwrap();
+            let mut core = CoreState::fresh(profile).unwrap();
             core.start_fresh().unwrap();
             let mut observed = Some((observed, resident_bytes));
             loop {
