@@ -298,7 +298,7 @@ fn profile_for_producers(
             view_timeout: Duration::from_secs(1),
             production_interval: Duration::from_millis(100),
             view_retention: retention_for(resources, participants),
-            proposal_policy: ProposalPolicy::Frontier,
+            proposal_policy: ProposalPolicy::Endorsed,
             ..Tuning::default()
         },
         resources,
@@ -334,7 +334,7 @@ fn profile_with_resources(
 
 /// Builds a profile whose proposals reach as far as the machine allows.
 ///
-/// The shared helpers pin [`ProposalPolicy::Frontier`] so the payload walk itself is under test.
+/// The shared helpers pin [`ProposalPolicy::Endorsed`] so the payload walk itself is under test.
 /// Tests that assert one policy's reach use [`profile_with_policy`].
 fn profile_with_retention(
     role: Role,
@@ -350,7 +350,7 @@ fn profile_with_retention(
             view_timeout: Duration::from_secs(1),
             production_interval: Duration::from_millis(100),
             view_retention,
-            proposal_policy: ProposalPolicy::Frontier,
+            proposal_policy: ProposalPolicy::Endorsed,
             ..Tuning::default()
         },
         resources,
@@ -10771,12 +10771,12 @@ fn invalid_da_certificate_does_not_block_the_valid_certificate() {
     let recovered = observe(&mut machine, Artifact::DaCertificate(recovered));
     complete(&mut machine, &recovered, true);
     let profile = machine.profile().clone();
-    let (waiting, _) = machine.chain.proposal(&profile, genesis).unwrap();
+    let waiting = machine.chain.proposal(&profile, genesis).unwrap();
     assert!(matches!(waiting.anchor(), Anchor::Tip(_)));
 
     let advanced = complete_with_step(&mut machine, &forged, false);
     persist(&mut machine, &persist_job(&advanced));
-    let (promoted, _) = machine.chain.proposal(&profile, genesis).unwrap();
+    let promoted = machine.chain.proposal(&profile, genesis).unwrap();
     assert!(matches!(promoted.anchor(), Anchor::Certificate(_)));
     assert_eq!(machine.inspect().ready_artifacts().len(), 1);
 }
@@ -10800,33 +10800,6 @@ fn frontier_chain(machine: &TestMachine, count: u64) -> Vec<TransactionBlockHead
 }
 
 #[test]
-fn proposals_reference_authenticated_blocks_beyond_the_local_da_frontier() {
-    let mut machine = Machine::new(profile_for(Role::Validator(Participant::new(0)), 6, 3));
-    let start = machine.step(Input::Start).unwrap();
-    persist(&mut machine, &persist_job(&start));
-    let genesis = machine.profile().protocol().genesis().tips()[1];
-    let headers = frontier_chain(&machine, 3);
-
-    let endorsed = validate_block(&mut machine, headers[0].clone(), 1);
-    persist(&mut machine, &persist_job(&endorsed));
-    let _ = authenticate_block(&mut machine, headers[1].clone(), 1);
-    let _ = authenticate_block(&mut machine, headers[2].clone(), 1);
-
-    let profile = machine.profile().clone();
-    let (proposal, frontier) = machine.chain.proposal(&profile, genesis).unwrap();
-    assert_eq!(
-        proposal.payloads(),
-        &[
-            headers[0].body_digest(),
-            headers[1].body_digest(),
-            headers[2].body_digest(),
-        ],
-        "the proposal must extend past the local DA frontier along attested headers",
-    );
-    assert_eq!(frontier, 2);
-}
-
-#[test]
 fn endorsed_proposals_stop_at_the_local_da_frontier() {
     let mut machine = Machine::new(profile_with_policy(
         Role::Validator(Participant::new(0)),
@@ -10845,13 +10818,12 @@ fn endorsed_proposals_stop_at_the_local_da_frontier() {
     let _ = authenticate_block(&mut machine, headers[2].clone(), 1);
 
     let profile = machine.profile().clone();
-    let (proposal, frontier) = machine.chain.proposal(&profile, genesis).unwrap();
+    let proposal = machine.chain.proposal(&profile, genesis).unwrap();
     assert_eq!(
         proposal.payloads(),
         &[headers[0].body_digest()],
         "an endorsed proposal must end at the local DA frontier",
     );
-    assert_eq!(frontier, 0);
 }
 
 #[test]
@@ -10872,20 +10844,19 @@ fn certified_proposals_stop_at_the_held_certificate() {
     let _ = authenticate_block(&mut machine, headers[1].clone(), 1);
 
     let profile = machine.profile().clone();
-    let (uncertified, frontier) = machine.chain.proposal(&profile, genesis).unwrap();
+    let uncertified = machine.chain.proposal(&profile, genesis).unwrap();
     assert!(
         matches!(uncertified.anchor(), Anchor::Tip(tip) if *tip == genesis),
         "a DA-voted block with no held certificate must not reach the proposal",
     );
     assert!(uncertified.payloads().is_empty());
-    assert_eq!(frontier, 0);
 
     let certificate = symbolic_da_certificate(headers[0].clone(), 0);
     let observed = observe(&mut machine, Artifact::DaCertificate(certificate));
     let completed = complete_with_step(&mut machine, &observed, true);
     persist(&mut machine, &persist_job(&completed));
 
-    let (certified, frontier) = machine.chain.proposal(&profile, genesis).unwrap();
+    let certified = machine.chain.proposal(&profile, genesis).unwrap();
     assert!(
         matches!(certified.anchor(), Anchor::Certificate(certificate)
             if certificate.block_ref::<Sha256>() == headers[0].block_ref::<Sha256>()),
@@ -10895,185 +10866,35 @@ fn certified_proposals_stop_at_the_held_certificate() {
         certified.payloads().is_empty(),
         "a certified proposal must add nothing above the certificate it holds",
     );
-    assert_eq!(frontier, 0);
 }
 
 #[test]
-fn proposals_skip_blocks_that_are_still_authenticating() {
-    let mut machine = Machine::new(profile_for(Role::Validator(Participant::new(0)), 6, 3));
-    let start = machine.step(Input::Start).unwrap();
-    persist(&mut machine, &persist_job(&start));
-    let genesis = machine.profile().protocol().genesis().tips()[1];
-    let headers = frontier_chain(&machine, 2);
-
-    let endorsed = validate_block(&mut machine, headers[0].clone(), 1);
-    persist(&mut machine, &persist_job(&endorsed));
-    let _ = observe(
-        &mut machine,
-        Artifact::TransactionBlock(SignedTransactionBlock::new(
-            headers[1].clone(),
-            attestation(1),
-        )),
-    );
-
-    let profile = machine.profile().clone();
-    let (proposal, frontier) = machine.chain.proposal(&profile, genesis).unwrap();
-    assert_eq!(
-        proposal.payloads(),
-        &[headers[0].body_digest()],
-        "an unverified producer signature must never back a proposal entry",
-    );
-    assert_eq!(frontier, 0);
-}
-
-#[test]
-fn proposals_stop_at_a_frontier_gap() {
-    let mut machine = Machine::new(profile_for(Role::Validator(Participant::new(0)), 6, 3));
-    let start = machine.step(Input::Start).unwrap();
-    persist(&mut machine, &persist_job(&start));
-    let genesis = machine.profile().protocol().genesis().tips()[1];
-    let headers = frontier_chain(&machine, 3);
-
-    let endorsed = validate_block(&mut machine, headers[0].clone(), 1);
-    persist(&mut machine, &persist_job(&endorsed));
-    let _ = authenticate_block(&mut machine, headers[2].clone(), 1);
-
-    let profile = machine.profile().clone();
-    let (proposal, frontier) = machine.chain.proposal(&profile, genesis).unwrap();
-    assert_eq!(
-        proposal.payloads(),
-        &[headers[0].body_digest()],
-        "a missing height must stop the walk even when deeper headers are attested",
-    );
-    assert_eq!(frontier, 0);
-}
-
-#[test]
-fn equivocating_frontier_records_resolve_to_the_earliest_observed() {
-    let mut machine = Machine::new(profile_for(Role::Validator(Participant::new(0)), 6, 3));
-    let start = machine.step(Input::Start).unwrap();
-    persist(&mut machine, &persist_job(&start));
-    let genesis = machine.profile().protocol().genesis().tips()[1];
-    let headers = frontier_chain(&machine, 1);
-
-    let endorsed = validate_block(&mut machine, headers[0].clone(), 1);
-    persist(&mut machine, &persist_job(&endorsed));
-    let parent = headers[0].block_ref::<Sha256>();
-    let make = |label: &[u8]| {
-        TransactionBlockHeader::new(
-            machine.profile().protocol().epoch(),
-            ChainId::new(1),
-            Height::new(2),
-            parent.digest(),
-            digest(label),
-        )
-        .unwrap()
-    };
-    let first = make(b"equivocation first");
-    let second = make(b"equivocation second");
-    let _ = authenticate_block(&mut machine, first.clone(), 1);
-    let _ = authenticate_block(&mut machine, second, 1);
-
-    let profile = machine.profile().clone();
-    let (proposal, frontier) = machine.chain.proposal(&profile, genesis).unwrap();
-    assert_eq!(
-        proposal.payloads(),
-        &[headers[0].body_digest(), first.body_digest()],
-        "among verified equivocating records the earliest observed backs the entry",
-    );
-    assert_eq!(frontier, 1);
-}
-
-#[test]
-fn da_choices_outrank_earlier_observed_equivocating_records() {
-    let role = Role::Validator(Participant::new(0));
-    let mut machine = Machine::new(profile_for(role, 6, 3));
-    let start = machine.step(Input::Start).unwrap();
-    persist(&mut machine, &persist_job(&start));
-    let genesis = machine.profile().protocol().genesis().tips()[1];
-    let headers = frontier_chain(&machine, 1);
-    let endorsed = validate_block(&mut machine, headers[0].clone(), 1);
-    persist(&mut machine, &persist_job(&endorsed));
-
-    // After a restart, the DA choice is rebuilt from the journal while the header index
-    // starts empty. An equivocating sibling delivered first is then the earliest observed
-    // record at the DA-voted height, and must still lose to the durable DA choice.
-    let mut restored =
-        Machine::restore(profile_for(role, 6, 3), machine.live_snapshot_for_test()).unwrap();
-    let recovery = restored.step(Input::RecoveryComplete).unwrap();
-    persist(&mut restored, &persist_job(&recovery));
-    let sibling = TransactionBlockHeader::new(
-        restored.profile().protocol().epoch(),
-        ChainId::new(1),
-        Height::new(1),
-        genesis.digest(),
-        digest(b"equivocating sibling"),
-    )
-    .unwrap();
-    let _ = authenticate_block(&mut restored, sibling, 1);
-
-    let profile = restored.profile().clone();
-    let (proposal, frontier) = restored.chain.proposal(&profile, genesis).unwrap();
-    assert_eq!(
-        proposal.payloads(),
-        &[headers[0].body_digest()],
-        "the durable DA choice must outrank any earlier-observed record",
-    );
-    assert_eq!(frontier, 0);
-}
-
-#[test]
-fn invalid_blocks_never_back_frontier_entries() {
-    let mut machine = Machine::new(profile_for(Role::Validator(Participant::new(0)), 6, 3));
-    let start = machine.step(Input::Start).unwrap();
-    persist(&mut machine, &persist_job(&start));
-    let genesis = machine.profile().protocol().genesis().tips()[1];
-    let headers = frontier_chain(&machine, 2);
-
-    let endorsed = validate_block(&mut machine, headers[0].clone(), 1);
-    persist(&mut machine, &persist_job(&endorsed));
-    let authenticated = authenticate_block(&mut machine, headers[1].clone(), 1);
-    let validations = validation_jobs(&authenticated);
-    let [validation] = validations.as_slice() else {
-        panic!("the authenticated block must emit one validation job");
-    };
-    let invalidated = machine
-        .step(Input::BlockValidated(ValidationCompletion::new(
-            validation.id(),
-            validation.generation(),
-            BlockValidity::Invalid,
-        )))
-        .unwrap();
-    let _ = settle(&mut machine, invalidated);
-
-    let profile = machine.profile().clone();
-    let (proposal, frontier) = machine.chain.proposal(&profile, genesis).unwrap();
-    assert_eq!(
-        proposal.payloads(),
-        &[headers[0].body_digest()],
-        "a block proven invalid must never back a proposal entry",
-    );
-    assert_eq!(frontier, 0);
-}
-
-#[test]
-fn frontier_policy_finalizes_without_local_bodies() {
+fn position_finality_covers_proposed_blocks_without_local_bodies() {
     let profile = profile_for(Role::Validator(Participant::new(0)), 6, 3);
     let (mut machine, _) = start_profile(profile);
     let headers = frontier_chain(&machine, 2);
-    let _ = authenticate_block(&mut machine, headers[0].clone(), 1);
-    let _ = authenticate_block(&mut machine, headers[1].clone(), 1);
 
-    // This node's own proposal extends chain 1 along the attested frontier, with no payload
-    // ever ingested locally.
+    // A leader proposes chain 1 two blocks past its tip. This node never ingests either body,
+    // yet position finality must still cover the blocks the committee endorses.
     let protocol = machine.profile().protocol().clone();
-    let profile = machine.profile().clone();
     let proposals = protocol
         .genesis()
         .tips()
-        .to_vec()
-        .into_iter()
-        .map(|tip| machine.chain.proposal(&profile, tip).unwrap().0)
+        .iter()
+        .map(|tip| {
+            let payloads = if tip.chain() == ChainId::new(1) {
+                vec![headers[0].body_digest(), headers[1].body_digest()]
+            } else {
+                Vec::new()
+            };
+            ChainProposal::new(
+                tip.chain(),
+                Anchor::Tip(*tip),
+                payloads,
+                protocol.codec_config().pipeline_depth(),
+            )
+            .unwrap()
+        })
         .collect::<Vec<_>>();
     let block = LeaderBlock::new(
         Round::new(protocol.epoch(), View::new(2)),
@@ -11480,7 +11301,7 @@ fn proposal_fact_uses_the_highest_certificate_and_voted_suffix() {
     persist(&mut machine, &persist_job(&second_choice));
 
     let profile = machine.profile().clone();
-    let (proposal, _) = machine.chain.proposal(&profile, genesis).unwrap();
+    let proposal = machine.chain.proposal(&profile, genesis).unwrap();
     assert_eq!(proposal.anchor(), &Anchor::Certificate(certificate));
     assert_eq!(proposal.payloads(), &[second.body_digest()]);
 }

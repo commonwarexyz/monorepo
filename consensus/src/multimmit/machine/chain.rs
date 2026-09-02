@@ -27,16 +27,6 @@ pub(crate) struct ChainProposalPass<V: Variant, D: Digest> {
     attempted: usize,
     budget: usize,
     pipeline_depth: usize,
-    frontier: bool,
-    frontier_payloads: u64,
-}
-
-impl<V: Variant, D: Digest> ChainProposalPass<V, D> {
-    /// Returns how many of this pass's payload entries were referenced before local DA
-    /// endorsement.
-    pub(crate) const fn frontier_payloads(&self) -> u64 {
-        self.frontier_payloads
-    }
 }
 
 pub(crate) enum ChainProposalProgress<V: Variant, D: Digest> {
@@ -2203,30 +2193,20 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             // anchor alone and walks no payload entries.
             budget: match policy {
                 ProposalPolicy::Certified => 0,
-                ProposalPolicy::Endorsed | ProposalPolicy::Frontier => pipeline_depth,
+                ProposalPolicy::Endorsed => pipeline_depth,
             },
             pipeline_depth,
-            frontier: matches!(policy, ProposalPolicy::Frontier),
-            frontier_payloads: 0,
         })
     }
 
     /// Advances one chain-proposal pass by one payload entry.
     ///
-    /// Each step appends the next consecutive block, preferring this node's own DA choice: a
-    /// durably journaled DA vote outranks any other record, whatever its validation state
-    /// here. When no DA choice extends the parent and the policy is
-    /// [`ProposalPolicy::Frontier`], the step references the producer-attested frontier
-    /// instead: any signature-verified header extending the current parent, whether or not its
-    /// payload has arrived locally. Frontier entries let proposals advance at header speed
-    /// instead of body-ingest speed. Otherwise the pass ends at the local DA frontier. Entries
-    /// certify nothing and voters report only the positions they endorse, so an entry whose
-    /// payload never circulates costs what a junk entry costs: slots on the referenced
-    /// producer's own chain, nothing elsewhere.
+    /// Each step appends this node's own DA choice for the next consecutive height when it
+    /// extends the current parent, and otherwise ends the pass at the local DA frontier.
     ///
     /// [`ProposalPolicy::Certified`] appends nothing, so the first step completes the pass at
     /// the certified anchor.
-    pub(crate) fn resume_proposal_pass<H: Hasher<Digest = D>>(
+    pub(crate) fn resume_proposal_pass(
         &self,
         pass: &mut ChainProposalPass<V, D>,
     ) -> Result<ChainProposalProgress<V, D>, ChainError> {
@@ -2244,23 +2224,12 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
                 .local_da_votes
                 .get(&height)
                 .filter(|choice| choice.header.parent() == pass.parent.digest());
-            let attested = pass
-                .frontier
-                .then(|| self.attested_header(chain, height, pass.parent.digest()))
-                .flatten();
-            let (header, block_ref, frontier) = match (endorsed, attested) {
-                (Some(choice), _) => (&choice.header, choice.block_ref, false),
-                (None, Some(header)) => (header, header.block_ref::<H>(), true),
-                (None, None) => {
-                    pass.attempted = pass.budget;
-                    return self.finish_proposal_pass(pass);
-                }
+            let Some(choice) = endorsed else {
+                pass.attempted = pass.budget;
+                return self.finish_proposal_pass(pass);
             };
-            pass.payloads.push(header.body_digest());
-            pass.parent = block_ref;
-            if frontier {
-                pass.frontier_payloads += 1;
-            }
+            pass.payloads.push(choice.header.body_digest());
+            pass.parent = choice.block_ref;
             if pass.attempted < pass.budget {
                 return Ok(ChainProposalProgress::Pending);
             }
@@ -2287,13 +2256,13 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         &self,
         profile: &Profile<H, V>,
         tip: BlockRef<D>,
-    ) -> Result<(ChainProposal<V, D>, u64), ChainError> {
+    ) -> Result<ChainProposal<V, D>, ChainError> {
         let mut pass = self.begin_proposal_pass::<H>(profile, tip)?;
         loop {
-            match self.resume_proposal_pass::<H>(&mut pass)? {
+            match self.resume_proposal_pass(&mut pass)? {
                 ChainProposalProgress::Pending => {}
                 ChainProposalProgress::Complete(proposal) => {
-                    return Ok((proposal, pass.frontier_payloads));
+                    return Ok(proposal);
                 }
             }
         }
@@ -2514,30 +2483,6 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
                     record.block.header() == header && record.state == ValidationState::Valid
                 })
             })
-    }
-
-    /// Returns the earliest-observed producer-attested header at `height` extending `parent`.
-    ///
-    /// Records still authenticating are never eligible: their producer signatures are
-    /// unverified, so their payload digests cannot be referenced. An equivocating producer may
-    /// leave several verified records at one height; the earliest observed one is chosen, and
-    /// any choice is safe because proposal entries certify nothing.
-    fn attested_header(
-        &self,
-        chain: usize,
-        height: Height,
-        parent: D,
-    ) -> Option<&TransactionBlockHeader<D>> {
-        self.chains
-            .get(chain)?
-            .blocks
-            .get(&height)?
-            .iter()
-            .find(|record| {
-                record.state != ValidationState::Authenticating
-                    && record.block.header().parent() == parent
-            })
-            .map(|record| record.block.header())
     }
 
     pub(crate) fn drive<H: Hasher<Digest = D>>(
