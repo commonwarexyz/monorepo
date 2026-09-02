@@ -539,18 +539,6 @@ fn threshold_share(signer: u32) -> ThresholdShare<MinPk> {
     )
 }
 
-fn distinct_threshold_share(signer: u32, marker: u64) -> ThresholdShare<MinPk> {
-    let private = Private::new(Scalar::from_u64(marker + 1));
-    ThresholdShare::new(
-        Participant::new(signer),
-        Lazy::from(sign_message::<MinPk>(
-            &private,
-            b"_COMMONWARE_CONSENSUS_MULTIMMIT_TEST_SHARE",
-            b"distinct share",
-        )),
-    )
-}
-
 fn symbolic_threshold_certificate(marker: u64) -> ThresholdCertificate<MinPk> {
     let private = Private::new(Scalar::from_u64(marker + 1));
     ThresholdCertificate::new(sign_message::<MinPk>(
@@ -929,38 +917,6 @@ fn record_view_fact(
             &profile,
         )
         .unwrap();
-}
-
-fn record_da_recovery_candidate(machine: &mut TestMachine, label: &[u8]) {
-    let chain = match machine.profile().role() {
-        Role::Validator(participant) => participant,
-        Role::Observer => panic!("a DA recovery candidate requires a producer role"),
-    };
-    let genesis = machine.profile().protocol().genesis().tips()[chain.get() as usize];
-    let header = TransactionBlockHeader::new(
-        machine.profile().protocol().epoch(),
-        ChainId::new(chain.get()),
-        Height::new(1),
-        genesis.digest(),
-        digest(label),
-    )
-    .unwrap();
-    machine
-        .chain
-        .observe_producer_choice::<Sha256>(&header)
-        .unwrap();
-    for signer in 0..4 {
-        let artifact = Artifact::DaVote(DaVote::new(header.clone(), threshold_share(signer)));
-        machine
-            .chain
-            .observe::<Sha256>(
-                artifact.id::<Sha256>(),
-                Observation::new(1, signer),
-                &artifact,
-                machine.durable.generation,
-            )
-            .unwrap();
-    }
 }
 
 /// Folds scheduler work into a step until the machine stages a durable event or quiesces.
@@ -3177,9 +3133,12 @@ fn drain_da_choices(
     }
 }
 
-fn produce_and_collect_da(
-    machine: &mut TestMachine,
-) -> (TransactionBlockHeader<Digest>, DaRecoveryJob<MinPk, Digest>) {
+/// Produces, custodies, and signs one own-chain block, returning its recorded producer header.
+///
+/// The own-chain data-availability plane runs on its own task, so central no longer pools shares
+/// or issues recovery. Certificate-admission tests supply a certificate directly through
+/// [`Input::RecoveredCertificate`], exactly as the task returns one.
+fn produce_own_header(machine: &mut TestMachine) -> TransactionBlockHeader<Digest> {
     let ready = machine.step(Input::ProducerWake).unwrap();
     let ready = settle(machine, ready);
     let build = build_job(&ready);
@@ -3206,37 +3165,7 @@ fn produce_and_collect_da(
         })
         .unwrap();
     persist(machine, &persist_job(&completed));
-
-    let votes = (0..4)
-        .map(|signer| Artifact::DaVote(DaVote::new(header.clone(), threshold_share(signer))))
-        .collect();
-    let observed = machine.step(cohort::<Sha256, _>(votes)).unwrap();
-    let [Capability::Verification(VerificationCapability::Verify(verification))] =
-        observed.capabilities()
-    else {
-        panic!("DA shares must enter cryptographic verification");
-    };
-    let verified = machine
-        .step(Input::Verified(VerificationCompletion::new(
-            verification.id(),
-            verification.generation(),
-            verification
-                .items()
-                .iter()
-                .map(|item| Verdict::new(item.ticket(), true))
-                .collect(),
-        )))
-        .unwrap();
-    let verified = settle(machine, verified);
-    let recovery = verified
-        .capabilities()
-        .iter()
-        .find_map(|effect| match effect {
-            Capability::Producer(ProducerCapability::RecoverDa(job)) => Some(job.clone()),
-            _ => None,
-        })
-        .expect("exactly n-2f verified shares must trigger recovery");
-    (header, recovery)
+    header
 }
 
 #[test]
@@ -9867,79 +9796,6 @@ fn application_digest_collision_retains_distinct_header_ancestry() {
 }
 
 #[test]
-fn application_digest_collision_does_not_merge_da_vote_pools() {
-    let mut machine = Machine::new(profile_for(Role::Validator(Participant::new(1)), 6, 2));
-    let start = machine.step(Input::Start).unwrap();
-    persist(&mut machine, &persist_job(&start));
-    let genesis = machine.profile().protocol().genesis().tips()[1];
-    let commitment = digest(b"shared DA digest");
-    let make = |parent| {
-        TransactionBlockHeader::new(
-            machine.profile().protocol().epoch(),
-            ChainId::new(1),
-            Height::new(1),
-            parent,
-            commitment,
-        )
-        .unwrap()
-    };
-    let first = make(genesis.digest());
-    let conflicting = make(digest(b"conflicting DA parent"));
-    machine
-        .chain
-        .observe_producer_choice::<Sha256>(&first)
-        .unwrap();
-    let votes = (0..3)
-        .map(|signer| Artifact::DaVote(DaVote::new(first.clone(), threshold_share(signer))))
-        .chain([Artifact::DaVote(DaVote::new(
-            conflicting,
-            threshold_share(3),
-        ))])
-        .collect();
-    let observed = machine.step(cohort::<Sha256, _>(votes)).unwrap();
-    let [Capability::Verification(VerificationCapability::Verify(verification))] =
-        observed.capabilities()
-    else {
-        panic!("both exact DA votes must be verified independently");
-    };
-    let verified = machine
-        .step(Input::Verified(VerificationCompletion::new(
-            verification.id(),
-            verification.generation(),
-            verification
-                .items()
-                .iter()
-                .map(|item| Verdict::new(item.ticket(), true))
-                .collect(),
-        )))
-        .unwrap();
-    let verified = settle(&mut machine, verified);
-    assert!(
-        verified.capabilities().iter().all(|effect| !matches!(
-            effect,
-            Capability::Producer(ProducerCapability::RecoverDa(_))
-        )),
-        "shares over different exact headers must not combine into a DA quorum"
-    );
-
-    let final_vote = observe(
-        &mut machine,
-        Artifact::DaVote(DaVote::new(first.clone(), threshold_share(3))),
-    );
-    let recovered = complete_with_step(&mut machine, &final_vote, true);
-    let recovered = settle(&mut machine, recovered);
-    let recovery = recovered
-        .capabilities()
-        .iter()
-        .find_map(|effect| match effect {
-            Capability::Producer(ProducerCapability::RecoverDa(job)) => Some(job),
-            _ => None,
-        });
-    let recovery = recovery.expect("one exact-header pool reaches the DA quorum");
-    assert!(recovery.votes().iter().all(|vote| vote.header() == &first));
-}
-
-#[test]
 fn da_fork_selection_does_not_depend_on_verification_completion_order() {
     let mut machine = Machine::new(profile_for(Role::Validator(Participant::new(0)), 6, 2));
     let start = machine.step(Input::Start).unwrap();
@@ -10360,22 +10216,14 @@ fn producer_recovers_the_canonical_da_quorum_and_retains_the_certificate() {
     let mut machine = Machine::new(profile_for(Role::Validator(Participant::new(0)), 6, 2));
     let start = machine.step(Input::Start).unwrap();
     persist(&mut machine, &persist_job(&start));
-    let (header, recovery) = produce_and_collect_da(&mut machine);
-    assert_eq!(
-        recovery
-            .votes()
-            .iter()
-            .map(|vote| vote.signer())
-            .collect::<Vec<_>>(),
-        (0..4).map(Participant::new).collect::<Vec<_>>()
-    );
+    let header = produce_own_header(&mut machine);
+    let block = header.block_ref::<Sha256>();
     let certificate = symbolic_da_certificate(header, 0);
     let recovered = machine
-        .step(Input::DaRecovered(DaRecoveryCompletion::new(
-            recovery.id(),
-            recovery.generation(),
-            certificate.clone(),
-        )))
+        .step(Input::RecoveredCertificate {
+            block,
+            certificate: certificate.clone(),
+        })
         .unwrap();
     // Recovery completions always park; settling drains the completion into its staging barrier.
     assert_eq!(recovered.status(), &StepStatus::CompletionDeferred);
@@ -10430,162 +10278,6 @@ fn inspection_reports_known_unfinalized_chain_tips() {
     assert_eq!(progress.finalized(), Height::zero());
     assert_eq!(progress.certified(), Height::new(1));
     assert_eq!(progress.known(), Height::new(1));
-}
-
-/// A rejected recovery must drop exactly the attributed shares and re-arm a different quorum.
-///
-/// Shares reach the pool on structural checks alone, so recovery is where an invalid one is
-/// found. One adversarial share therefore costs one extra attempt, and the signer it names can
-/// never re-enter the pool for that header no matter how many shares it resends.
-#[test]
-fn rejected_da_shares_re_arm_a_quorum_that_excludes_them() {
-    let mut machine = Machine::new(profile_for(Role::Validator(Participant::new(0)), 6, 2));
-    let start = machine.step(Input::Start).unwrap();
-    persist(&mut machine, &persist_job(&start));
-    let (header, recovery) = produce_and_collect_da(&mut machine);
-    let culprit = recovery.votes()[1].signer();
-    assert_eq!(culprit, Participant::new(1));
-
-    // Pool the shares the first quorum did not select, so a retry has something to choose.
-    for signer in 4..6 {
-        let job = observe(
-            &mut machine,
-            Artifact::DaVote(DaVote::new(header.clone(), threshold_share(signer))),
-        );
-        complete(&mut machine, &job, true);
-    }
-
-    let rejection = machine
-        .step(Input::DaRejected(DaRecoveryRejection::new(
-            recovery.id(),
-            recovery.generation(),
-            vec![culprit],
-        )))
-        .unwrap();
-    assert_eq!(rejection.status(), &StepStatus::CompletionDeferred);
-    let rejection = settle(&mut machine, rejection);
-    let retry = rejection
-        .capabilities()
-        .iter()
-        .find_map(|effect| match effect {
-            Capability::Producer(ProducerCapability::RecoverDa(job)) => Some(job.clone()),
-            _ => None,
-        })
-        .expect("the surviving pool re-arms recovery");
-    let signers = retry
-        .votes()
-        .iter()
-        .map(|vote| vote.signer())
-        .collect::<Vec<_>>();
-    assert_eq!(
-        signers.len(),
-        machine.profile.protocol().codec_config().da_quorum()
-    );
-    assert!(!signers.contains(&culprit), "retried quorum: {signers:?}");
-
-    // A rejected signer's later share for the same header is refused, so a flood of invalid
-    // shares cannot re-enter the pool or force another attempt.
-    let resent = observe(
-        &mut machine,
-        Artifact::DaVote(DaVote::new(header, distinct_threshold_share(1, 77))),
-    );
-    complete(&mut machine, &resent, true);
-    let further = machine
-        .step(Input::DaRejected(DaRecoveryRejection::new(
-            retry.id(),
-            retry.generation(),
-            Vec::new(),
-        )))
-        .unwrap();
-    let further = settle(&mut machine, further);
-    let next = further
-        .capabilities()
-        .iter()
-        .find_map(|effect| match effect {
-            Capability::Producer(ProducerCapability::RecoverDa(job)) => Some(job.clone()),
-            _ => None,
-        })
-        .expect("an unattributed rejection re-arms the same pool");
-    assert!(
-        !next.votes().iter().any(|vote| vote.signer() == culprit),
-        "a rejected signer re-entered the pool"
-    );
-}
-
-#[test]
-fn mismatched_da_recovery_does_not_consume_the_job() {
-    let mut machine = Machine::new(profile_for(Role::Validator(Participant::new(0)), 6, 2));
-    let start = machine.step(Input::Start).unwrap();
-    persist(&mut machine, &persist_job(&start));
-    let (header, recovery) = produce_and_collect_da(&mut machine);
-
-    let mismatched_header = TransactionBlockHeader::new(
-        header.epoch(),
-        header.chain(),
-        header.height(),
-        header.parent(),
-        digest(b"mismatched DA recovery subject"),
-    )
-    .unwrap();
-    let mismatched = symbolic_da_certificate(mismatched_header, 0);
-    let parked = machine
-        .step(Input::DaRecovered(DaRecoveryCompletion::new(
-            recovery.id(),
-            recovery.generation(),
-            mismatched,
-        )))
-        .unwrap();
-    assert_eq!(parked.status(), &StepStatus::CompletionDeferred);
-    // The mismatch surfaces exactly once when the parked completion drains; the recovery job
-    // survives for the corrected certificate.
-    assert!(matches!(
-        machine.poll(NonZeroUsize::MIN),
-        Err(StepError::CompletionMismatch)
-    ));
-
-    let certificate = symbolic_da_certificate(header, 0);
-    let certificate_id = Artifact::DaCertificate(certificate.clone()).id::<Sha256>();
-    let matched = machine
-        .step(Input::DaRecovered(DaRecoveryCompletion::new(
-            recovery.id(),
-            recovery.generation(),
-            certificate.clone(),
-        )))
-        .unwrap();
-    assert_eq!(matched.status(), &StepStatus::CompletionDeferred);
-    let matched = settle(&mut machine, matched);
-    assert!(machine.artifacts.contains_key(&certificate_id));
-    assert!(matches!(
-        persist_job(&matched).events()[0].change(),
-        Change::DaCertificateAdvanced { artifact, .. }
-            if matches!(artifact.as_ref(), Artifact::DaCertificate(actual) if actual == &certificate)
-    ));
-}
-
-#[test]
-fn stale_recovery_completion_releases_the_job_and_rereadies_the_block() {
-    let mut machine = Machine::new(profile_for(Role::Validator(Participant::new(0)), 6, 2));
-    let start = machine.step(Input::Start).unwrap();
-    persist(&mut machine, &persist_job(&start));
-    let (header, recovery) = produce_and_collect_da(&mut machine);
-    assert_eq!(machine.chain.recovery_reservations(), 1);
-    assert!(!machine.chain.has_ready_recovery());
-
-    // A generation advance strands the dispatched job. Consuming its completion must release
-    // the reservation and re-derive readiness from the surviving vote pool, not leave the
-    // block parked behind a job nobody will complete.
-    let stale = DaRecoveryCompletion::new(
-        recovery.id(),
-        recovery.generation(),
-        symbolic_da_certificate(header, 0),
-    );
-    let released = machine
-        .chain
-        .prepare_recovery::<Sha256>(&stale, recovery.generation() + 1)
-        .unwrap();
-    assert!(released.is_none());
-    assert_eq!(machine.chain.recovery_reservations(), 0);
-    assert!(machine.chain.has_ready_recovery());
 }
 
 #[test]
@@ -10729,17 +10421,14 @@ fn local_da_certificate_promotes_an_identical_pending_artifact() {
     let mut machine = Machine::new(profile_for(Role::Validator(Participant::new(0)), 6, 2));
     let start = machine.step(Input::Start).unwrap();
     persist(&mut machine, &persist_job(&start));
-    let (header, recovery) = produce_and_collect_da(&mut machine);
+    let header = produce_own_header(&mut machine);
+    let block = header.block_ref::<Sha256>();
     let certificate = symbolic_da_certificate(header, 0);
     let certificate_id = Artifact::DaCertificate(certificate.clone()).id::<Sha256>();
     let inbound = observe(&mut machine, Artifact::DaCertificate(certificate.clone()));
 
     let local = machine
-        .step(Input::DaRecovered(DaRecoveryCompletion::new(
-            recovery.id(),
-            recovery.generation(),
-            certificate,
-        )))
+        .step(Input::RecoveredCertificate { block, certificate })
         .unwrap();
     // Recovery completions always park; settling drains the completion into its staging barrier.
     assert_eq!(local.status(), &StepStatus::CompletionDeferred);
@@ -11027,46 +10716,6 @@ fn finality_floor_preserves_an_lqc_aggregation_reservation() {
     assert!(
         machine.durable_artifact_references.len()
             <= machine.profile().resources().max_cached_artifacts()
-    );
-}
-
-#[test]
-fn da_recovery_reserves_its_publication_slot() {
-    let mut machine = Machine::new(profile_for(Role::Validator(Participant::new(0)), 6, 2));
-    let start = machine.step(Input::Start).unwrap();
-    persist(&mut machine, &persist_job(&start));
-    let (header, recovery) = produce_and_collect_da(&mut machine);
-    let limit = machine.profile().resources().max_outbox_effects();
-    let filler = Arc::new(leader_artifact(&machine, 10));
-
-    while machine.inspect().outbox().len()
-        + machine.chain.build_reservations()
-        + machine.chain.recovery_reservations()
-        < limit
-    {
-        let reserved = machine
-            .reserve_test_effect(DurableEffect::Broadcast(Arc::clone(&filler)))
-            .unwrap();
-        persist(&mut machine, &persist_job(&reserved));
-    }
-    assert!(matches!(
-        machine.reserve_test_effect(DurableEffect::Broadcast(filler)),
-        Err(StepError::OutboxFull)
-    ));
-
-    let certificate = symbolic_da_certificate(header, 0);
-    let completed = machine
-        .step(Input::DaRecovered(DaRecoveryCompletion::new(
-            recovery.id(),
-            recovery.generation(),
-            certificate,
-        )))
-        .unwrap();
-    let completed = settle(&mut machine, completed);
-    persist(&mut machine, &persist_job(&completed));
-    assert_eq!(
-        machine.inspect().outbox().len() + machine.chain.build_reservations(),
-        limit
     );
 }
 
@@ -13769,237 +13418,6 @@ fn invalid_earlier_message_unblocks_sticky_vqc_choice() {
 }
 
 #[test]
-fn current_view_certificate_preempts_da_recovery_when_one_slot_is_free() {
-    let limits = resources_with_capacities(32, 1);
-    let profile = Profile::with_limits(
-        config_for(Epoch::new(7), 6, 2),
-        Role::Validator(Participant::new(5)),
-        Tuning {
-            view_timeout: Duration::from_secs(1),
-            production_interval: Duration::from_millis(100),
-            view_retention: retention_for(limits, 6),
-            ..Tuning::default()
-        },
-        limits,
-    )
-    .unwrap();
-    let (mut machine, _) = start_profile(profile);
-    let round = Round::new(machine.profile().protocol().epoch(), View::new(1));
-    machine
-        .views
-        .observe_sign_request(&SignRequest::NoVote { round })
-        .unwrap();
-
-    record_da_recovery_candidate(&mut machine, b"certificate priority");
-
-    let proposed = leader(&machine, 1);
-    let proposal = Arc::new(Artifact::LeaderBlock(SignedLeaderBlock::new(
-        proposed.clone(),
-        attestation(0),
-    )));
-    let view_profile = machine.profile.clone();
-    machine
-        .views
-        .observe::<Sha256>(
-            proposal.id::<Sha256>(),
-            Observation::new(2, 0),
-            &proposal,
-            None,
-            &view_profile,
-        )
-        .unwrap();
-    let messages = [
-        Artifact::Vote(view_vote(&machine, &proposed, 0)),
-        Artifact::Vote(view_vote(&machine, &proposed, 1)),
-        Artifact::Vote(view_vote(&machine, &proposed, 2)),
-        Artifact::NoVote(no_vote(&machine, View::new(1), 3)),
-        Artifact::NoVote(no_vote(&machine, View::new(1), 4)),
-    ];
-    for (index, artifact) in messages.into_iter().enumerate() {
-        let artifact = Arc::new(artifact);
-        machine
-            .views
-            .observe::<Sha256>(
-                artifact.id::<Sha256>(),
-                Observation::new(3, index as u32),
-                &artifact,
-                None,
-                &view_profile,
-            )
-            .unwrap();
-    }
-
-    let driven = machine.step(Input::ProducerWake).unwrap();
-    let driven = settle(&mut machine, driven);
-    assert!(driven.capabilities().iter().any(|effect| matches!(
-        effect,
-        Capability::Leader(LeaderCapability::AggregateVqc(_))
-    )));
-    assert!(!driven.capabilities().iter().any(|effect| matches!(
-        effect,
-        Capability::Producer(ProducerCapability::RecoverDa(_))
-    )));
-}
-
-#[test]
-fn da_recovery_preempts_noncurrent_view_certificate() {
-    let limits = resources_with_capacities(32, 1);
-    let profile = profile_with_resources(Role::Validator(Participant::new(5)), 6, 2, limits);
-    let (mut machine, _) = start_profile(profile);
-    record_da_recovery_candidate(&mut machine, b"background recovery fairness");
-    for signer in 0..3 {
-        let share = Artifact::Nullify(nullify(&machine, View::new(2), signer));
-        record_view_fact(&mut machine, Observation::new(2, signer), share);
-    }
-
-    let driven = machine.step(Input::ProducerWake).unwrap();
-    let driven = settle(&mut machine, driven);
-    assert!(driven.capabilities().iter().any(|effect| matches!(
-        effect,
-        Capability::Producer(ProducerCapability::RecoverDa(_))
-    )));
-    assert!(!driven.capabilities().iter().any(|effect| matches!(
-        effect,
-        Capability::Leader(LeaderCapability::RecoverNullification(_))
-    )));
-}
-
-#[test]
-fn newer_da_certificate_recovery_reuses_superseded_slot() {
-    let limits = resources_with_capacities(32, 1);
-    let profile = profile_with_resources(Role::Validator(Participant::new(5)), 6, 2, limits);
-    let (mut machine, _) = start_profile(profile);
-    record_da_recovery_candidate(&mut machine, b"first background recovery");
-    for signer in 0..3 {
-        let share = Artifact::Nullify(nullify(&machine, View::new(2), signer));
-        record_view_fact(&mut machine, Observation::new(2, signer), share);
-    }
-
-    let driven = machine.step(Input::ProducerWake).unwrap();
-    let driven = settle(&mut machine, driven);
-    let first = driven
-        .capabilities()
-        .iter()
-        .find_map(|effect| match effect {
-            Capability::Producer(ProducerCapability::RecoverDa(job)) => Some(job.clone()),
-            _ => None,
-        })
-        .expect("DA recovery must receive the first slot");
-    let first_header = first.votes()[0].header().clone();
-    let certificate = symbolic_da_certificate(first_header.clone(), 0);
-    let completed = machine
-        .step(Input::DaRecovered(DaRecoveryCompletion::new(
-            first.id(),
-            first.generation(),
-            certificate,
-        )))
-        .unwrap();
-    // Stage the recovery barrier before the second candidate appears, as the old inline
-    // completion did.
-    let completed = settle(&mut machine, completed);
-
-    // The certificate is an aggregate with no local signature pending behind it, so its
-    // broadcast releases with the staging step and still occupies the durable slot.
-    let broadcast = completed
-        .capabilities()
-        .iter()
-        .find_map(|effect| match effect {
-            Capability::Durability(DurabilityCapability::Released(job))
-                if matches!(job.request(), DurableEffect::Broadcast(_)) =>
-            {
-                Some(job.clone())
-            }
-            _ => None,
-        })
-        .expect("the first DA certificate must occupy the durable slot");
-    let published = persist(&mut machine, &persist_job(&completed));
-    assert!(
-        !published
-            .capabilities()
-            .iter()
-            .any(|effect| matches!(durable_effect(effect), Some(DurableEffect::Broadcast(_)))),
-        "persistence must not release the staged broadcast a second time"
-    );
-    let delivered = machine
-        .step(Input::EffectCompleted(EffectCompletion::Delivered {
-            id: broadcast.id(),
-            generation: broadcast.generation(),
-        }))
-        .unwrap();
-    assert!(delivered.capabilities().is_empty());
-    let chain = match machine.profile().role() {
-        Role::Validator(participant) => participant,
-        Role::Observer => unreachable!("the test profile is a validator"),
-    };
-    let second_header = TransactionBlockHeader::new(
-        machine.profile().protocol().epoch(),
-        ChainId::new(chain.get()),
-        Height::new(2),
-        first_header.block_ref::<Sha256>().digest(),
-        digest(b"second background recovery"),
-    )
-    .unwrap();
-    machine
-        .chain
-        .observe_producer_choice::<Sha256>(&second_header)
-        .unwrap();
-    for signer in 0..4 {
-        let artifact =
-            Artifact::DaVote(DaVote::new(second_header.clone(), threshold_share(signer)));
-        machine
-            .chain
-            .observe::<Sha256>(
-                artifact.id::<Sha256>(),
-                Observation::new(3, signer),
-                &artifact,
-                machine.durable.generation,
-            )
-            .unwrap();
-    }
-
-    let released = machine.step(Input::ProducerWake).unwrap();
-    let released = settle(&mut machine, released);
-    assert!(!released.capabilities().iter().any(|effect| matches!(
-        effect,
-        Capability::Leader(LeaderCapability::RecoverNullification(_))
-    )));
-    let second = released
-        .capabilities()
-        .iter()
-        .find_map(|effect| match effect {
-            Capability::Producer(ProducerCapability::RecoverDa(job))
-                if job.votes()[0].header() == &second_header =>
-            {
-                Some(job.clone())
-            }
-            _ => None,
-        })
-        .expect("the newer DA certificate reuses the superseded publication slot");
-    let certificate = symbolic_da_certificate(second_header.clone(), 0);
-    let completed = machine
-        .step(Input::DaRecovered(DaRecoveryCompletion::new(
-            second.id(),
-            second.generation(),
-            certificate,
-        )))
-        .unwrap();
-    let completed = settle(&mut machine, completed);
-    persist(&mut machine, &persist_job(&completed));
-
-    assert_eq!(machine.durable.outbox.len(), 1);
-    assert_eq!(
-        machine.durable.certified_tips[chain.get() as usize],
-        second_header.block_ref::<Sha256>()
-    );
-    assert!(machine.durable.outbox.values().any(|effect| {
-        effect.artifacts().iter().any(|artifact| {
-            matches!(artifact.as_ref(), Artifact::DaCertificate(certificate)
-                if certificate.header() == &second_header)
-        })
-    }));
-}
-
-#[test]
 fn proposal_anchor_does_not_retire_the_certificate_broadcast() {
     // A leader block anchoring a chain's newest DA certificate is not a substitute for the
     // certificate broadcast: peers never admit proposal anchors into their DA state, so
@@ -14009,26 +13427,13 @@ fn proposal_anchor_does_not_retire_the_certificate_broadcast() {
     let limits = resources_with_capacities(32, 4);
     let profile = profile_with_resources(Role::Validator(Participant::new(5)), 6, 2, limits);
     let (mut machine, _) = start_profile(profile);
-    record_da_recovery_candidate(&mut machine, b"anchored certificate");
-
-    let driven = machine.step(Input::ProducerWake).unwrap();
-    let driven = settle(&mut machine, driven);
-    let recovery = driven
-        .capabilities()
-        .iter()
-        .find_map(|effect| match effect {
-            Capability::Producer(ProducerCapability::RecoverDa(job)) => Some(job.clone()),
-            _ => None,
-        })
-        .expect("the producer tip must schedule a DA recovery");
-    let header = recovery.votes()[0].header().clone();
+    let header = produce_own_header(&mut machine);
     let certificate = symbolic_da_certificate(header.clone(), 0);
     let completed = machine
-        .step(Input::DaRecovered(DaRecoveryCompletion::new(
-            recovery.id(),
-            recovery.generation(),
-            certificate.clone(),
-        )))
+        .step(Input::RecoveredCertificate {
+            block: header.block_ref::<Sha256>(),
+            certificate: certificate.clone(),
+        })
         .unwrap();
     let completed = settle(&mut machine, completed);
     let broadcast = completed
@@ -17294,7 +16699,7 @@ fn signed_batch_identifies_each_artifact_once() {
         "the batch transition must cost a fixed amount per artifact"
     );
     assert_eq!(
-        marginal, 6,
+        marginal, 4,
         "each batch artifact costs a fixed number of hashes through the durable transition"
     );
 }

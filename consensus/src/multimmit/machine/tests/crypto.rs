@@ -506,21 +506,26 @@ fn execute_da_trace<V: Variant>(fixture: &Fixture<V>) {
         .map(|signer| Artifact::DaVote(signer.sign_da_vote(header.clone()).unwrap()))
         .collect();
     let verified = fixture.verify(&mut machine, votes);
-    let recovery = verified
+    // Central forwards the authenticated shares to the own-chain DA task rather than pooling
+    // them; the task assembles the certificate off-thread and returns it for central to admit.
+    let shares = verified
         .capabilities()
         .iter()
-        .find_map(|effect| match effect {
-            Capability::Producer(ProducerCapability::RecoverDa(job)) => Some(job.clone()),
+        .filter_map(|effect| match effect {
+            Capability::Producer(ProducerCapability::ForwardShare(share)) => {
+                Some(share.as_ref().clone())
+            }
             _ => None,
         })
-        .expect("a verified DA quorum must issue recovery");
+        .collect::<Vec<_>>();
+    assert_eq!(shares.len(), fixture.codec.da_quorum());
     let sequential = fixture
         .verifier
-        .assemble_da_certificate(recovery.votes(), &Sequential)
+        .assemble_da_certificate(&shares, &Sequential)
         .unwrap();
     let parallel = fixture
         .verifier
-        .assemble_da_certificate(recovery.votes(), &parallel())
+        .assemble_da_certificate(&shares, &parallel())
         .unwrap();
     assert_eq!(sequential, parallel);
     assert!(fixture.verifier.verify_da_certificate(&sequential));
@@ -528,14 +533,13 @@ fn execute_da_trace<V: Variant>(fixture: &Fixture<V>) {
     let artifact_id = artifact.id::<Sha256>();
 
     let recovered = machine
-        .step(Input::DaRecovered(DaRecoveryCompletion::new(
-            recovery.id(),
-            recovery.generation(),
-            sequential,
-        )))
+        .step(Input::RecoveredCertificate {
+            block: header.block_ref::<Sha256>(),
+            certificate: sequential,
+        })
         .unwrap();
-    // Recovery completions always park; settling drains the completion into its staging
-    // barrier, and the self-admission the old status reported shows up in the artifact cache.
+    // Recovered certificates park; settling drains the completion into its staging barrier and
+    // the self-admission shows up in the artifact cache.
     assert_eq!(recovered.status(), &StepStatus::CompletionDeferred);
     let recovered = settle(&mut machine, recovered);
     assert!(machine.artifacts.contains_key(&artifact_id));

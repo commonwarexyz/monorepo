@@ -127,23 +127,12 @@ fn render_lanes(frame: &mut Frame<'_>, area: Rect, state: &UiSnapshot) {
         || String::from("waiting for inspection"),
         |inspection| {
             let producer = inspection.producer.map_or_else(String::new, |producer| {
-                let recovery = if producer.recovery_active {
-                    "active"
-                } else if producer.recovery_pending {
-                    "pending"
-                } else if producer.recovery_ready {
-                    "ready"
-                } else {
-                    "shares"
-                };
                 format!(
-                    " · C{} DA {}/{} shares {}/{} recovery {}{}{}",
+                    " · C{} DA {}/{} quorum {}{}{}",
                     producer.chain,
                     producer.produced,
                     producer.certified,
-                    producer.vote_shares,
                     producer.da_quorum,
-                    recovery,
                     if producer.pipeline_blocked {
                         " BLOCKED"
                     } else {

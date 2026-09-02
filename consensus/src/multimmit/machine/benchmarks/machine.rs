@@ -204,7 +204,9 @@ fn drain_validator(machine: &mut fabric::BenchMachine, effects: fabric::BenchCap
                 }
                 Capability::Leader(LeaderCapability::ArmTimer(_))
                 | Capability::Producer(ProducerCapability::ArmTimer(_))
-                | Capability::Producer(ProducerCapability::RecoverDa(_))
+                | Capability::Producer(
+                    ProducerCapability::ForwardShare(_) | ProducerCapability::AnchorAdvanced(_),
+                )
                 | Capability::Leader(LeaderCapability::RecoverNullification(_))
                 | Capability::Leader(LeaderCapability::AggregateVqc(_))
                 | Capability::Leader(LeaderCapability::AggregateLqc(_))
@@ -313,7 +315,9 @@ fn local_sign_completion_fixture() -> (fabric::BenchMachine, EffectCompletion<Mi
                 }
                 Capability::Leader(LeaderCapability::ArmTimer(_))
                 | Capability::Producer(ProducerCapability::ArmTimer(_))
-                | Capability::Producer(ProducerCapability::RecoverDa(_))
+                | Capability::Producer(
+                    ProducerCapability::ForwardShare(_) | ProducerCapability::AnchorAdvanced(_),
+                )
                 | Capability::Leader(LeaderCapability::RecoverNullification(_))
                 | Capability::Leader(LeaderCapability::AggregateVqc(_))
                 | Capability::Leader(LeaderCapability::AggregateLqc(_))

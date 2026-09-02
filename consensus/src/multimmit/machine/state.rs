@@ -213,14 +213,10 @@ pub struct ProducerProgress {
     chain: ChainId,
     produced: Height,
     certified: Height,
-    vote_shares: usize,
     da_quorum: usize,
     pipeline_depth: u64,
     prepared: usize,
     pipeline_blocked: bool,
-    ready_recovery: bool,
-    pending_recovery: bool,
-    active_recovery: bool,
     wake: bool,
     timer_armed: bool,
     build_pending: bool,
@@ -240,10 +236,6 @@ impl ProducerProgress {
     pub const fn certified(self) -> Height {
         self.certified
     }
-    /// Returns distinct DA shares held for the produced tip.
-    pub const fn vote_shares(self) -> usize {
-        self.vote_shares
-    }
     /// Returns the DA share quorum.
     pub const fn da_quorum(self) -> usize {
         self.da_quorum
@@ -255,18 +247,6 @@ impl ProducerProgress {
     /// Returns locally prepared producer blocks not yet reserved for signing.
     pub const fn prepared(self) -> usize {
         self.prepared
-    }
-    /// Returns whether the produced tip is ready to schedule DA recovery.
-    pub const fn ready_recovery(self) -> bool {
-        self.ready_recovery
-    }
-    /// Returns whether recovery is reserved for the produced tip.
-    pub const fn pending_recovery(self) -> bool {
-        self.pending_recovery
-    }
-    /// Returns whether recovery is executing for the produced tip.
-    pub const fn active_recovery(self) -> bool {
-        self.active_recovery
     }
     /// Returns whether production has a pending wake.
     pub const fn wake(self) -> bool {
@@ -1119,14 +1099,10 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             chain: status.chain,
             produced: status.produced,
             certified: status.certified,
-            vote_shares: status.vote_shares,
             da_quorum: status.da_quorum,
             pipeline_depth: status.pipeline_depth,
             prepared: status.prepared,
             pipeline_blocked: status.pipeline_blocked,
-            ready_recovery: status.ready_recovery,
-            pending_recovery: status.pending_recovery,
-            active_recovery: status.active_recovery,
             wake: status.wake,
             timer_armed: status.timer_armed,
             build_pending: status.build_pending,
@@ -1136,6 +1112,18 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
 
     pub(crate) const fn generation(&self) -> u64 {
         self.durable.generation
+    }
+
+    /// Returns the own producer chain's certified tip height, if this validator produces one.
+    pub(crate) fn own_certified_height(&self) -> Option<Height> {
+        let Role::Validator(participant) = self.profile.role() else {
+            return None;
+        };
+        let chain = self.profile.protocol().producer_chain(participant)?;
+        self.durable
+            .certified_tips
+            .get(chain.get() as usize)
+            .map(|tip| tip.height())
     }
 
     pub(crate) fn progress(&self) -> Progress {

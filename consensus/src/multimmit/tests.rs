@@ -135,7 +135,6 @@ fn assert_profile_resource_bounds(
             u64::try_from(profile.protocol().codec_config().pipeline_depth())
                 .expect("pipeline depth is representable")
         );
-        assert!(producer.vote_shares() <= profile.protocol().codec_config().participants());
     }
 }
 
