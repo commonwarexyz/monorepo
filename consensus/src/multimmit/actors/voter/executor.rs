@@ -309,10 +309,6 @@ where
             ProducerCapability::CancelCustody(cancellation) => {
                 self.cancel_custody(cancellation)?;
             }
-            ProducerCapability::Validate(job) => self.schedule_validation(job)?,
-            ProducerCapability::CancelValidations { chain, through } => {
-                self.cancel_validations(chain, through);
-            }
             // The own-chain DA plane runs on its own task: central just routes authenticated
             // shares and anchor advances to it and never blocks on it.
             ProducerCapability::ForwardShare(share) => {
@@ -323,6 +319,36 @@ where
             ProducerCapability::AnchorAdvanced(height) => {
                 if let Some(command) = &self.da_command {
                     let _ = command.enqueue(ChainCommand::AnchorAdvanced(height));
+                }
+            }
+            // Each remote validator plane runs on its own per-chain task; central routes the block,
+            // the certified anchor, and the durable choices to it and never blocks on it.
+            ProducerCapability::ObserveBlock {
+                id,
+                observation,
+                block,
+                custodied,
+            } => {
+                let chain = block.header().chain().get() as usize;
+                if let Some(command) = self.validator_commands.get(chain) {
+                    let _ = command.enqueue(super::validator::ValidatorCommand::Observe {
+                        id,
+                        observation,
+                        block,
+                        custodied,
+                    });
+                }
+            }
+            ProducerCapability::ValidatorAnchor(anchor) => {
+                let chain = anchor.chain().get() as usize;
+                if let Some(command) = self.validator_commands.get(chain) {
+                    let _ =
+                        command.enqueue(super::validator::ValidatorCommand::AnchorAdvanced(anchor));
+                }
+            }
+            ProducerCapability::ValidatorChosen { chain, choices } => {
+                if let Some(command) = self.validator_commands.get(chain.get() as usize) {
+                    let _ = command.enqueue(super::validator::ValidatorCommand::Chosen(choices));
                 }
             }
         }
@@ -808,81 +834,12 @@ where
     }
 
     /// Starts a validation within the global and per-producer application bounds.
-    fn schedule_validation(&mut self, job: ValidationJob<V, H::Digest>) -> Result<(), Fatal> {
-        if let Some(dispatch) = self.core_mut().schedule_validation(job)? {
-            self.spawn_validation(dispatch)?;
-        }
-        Ok(())
-    }
-
-    /// Spawns the deterministic application check for one authenticated header.
-    fn spawn_validation(
-        &mut self,
-        dispatch: crate::multimmit::machine::ValidationDispatch<V, H::Digest>,
-    ) -> Result<(), Fatal> {
-        let (permit, job) = dispatch.into_parts();
-        let chain = job.block().header().chain().get();
-
-        let (id, generation) = (job.id(), job.generation());
-        let block = Arc::new(job.block().clone());
-        let context = Context::from(block.header());
-        let commitment = block.header().body_digest();
-        let (cancel, cancelled) = oneshot::channel();
-        let previous = self.active_validations.insert(id, Some(cancel));
-        assert!(previous.is_none(), "producer application slot is occupied");
-        let span = info_span!(
-            "multimmit.voter.validate_block",
-            epoch = self.protocol_epoch.get().traced(),
-            chain = chain.traced(),
-            height = block.header().height().get().traced(),
-            validity = tracing::field::Empty
-        );
-        let started_at = self.context.current();
-        let mut automaton = self.automaton.clone();
-        let completion_span = span.clone();
-        let handle = self.context.child("validate").spawn(move |_| {
-            async move {
-                let validation = async {
-                    let receiver = automaton.verify(context, commitment).await;
-                    receiver.await.ok()
-                };
-                select! {
-                    verdict = validation => AppOutcome::Validated {
-                        started_at,
-                        id,
-                        generation,
-                        block,
-                        verdict,
-                    },
-                    _ = cancelled => AppOutcome::ValidationCancelled {
-                        id,
-                        chain: ChainId::new(chain),
-                    },
-                }
-            }
-            .instrument(span)
-        });
-        self.jobs
-            .push(async move { (permit, completion_span, handle.await) });
-        Ok(())
-    }
-
-    fn validation_finished(&mut self, chain: ChainId, id: ValidationId) -> Result<(), Fatal> {
-        if self.active_validations.remove(&id).is_none() {
-            return Err(TaskError::Accounting.into());
-        }
-        if let Some(dispatch) = self.core_mut().validation_finished(chain, id)? {
-            self.spawn_validation(dispatch)?;
-        }
-        Ok(())
-    }
-
     /// Commits one completed build or validation job to protocol state.
     pub(super) fn application_outcome(
         &mut self,
         permit: TaskPermit,
         span: &Span,
-        outcome: Result<AppOutcome<V, H::Digest>, RuntimeError>,
+        outcome: Result<AppOutcome<H::Digest>, RuntimeError>,
     ) -> Result<(), Fatal> {
         let outcome = match outcome {
             Ok(outcome) => outcome,
@@ -973,68 +930,6 @@ where
                 }
                 self.track_transition(|core| core.producer_custody_cancelled(cancellation))?;
                 Ok(())
-            }
-            AppOutcome::Validated {
-                started_at,
-                id,
-                generation,
-                block,
-                verdict,
-            } => {
-                let terminal = if verdict.is_some() {
-                    TaskTerminal::Completed
-                } else {
-                    TaskTerminal::Failed
-                };
-                if !self.finish_task(permit, terminal)? {
-                    return Ok(());
-                }
-                let completed_at = self.context.current();
-                self.metrics
-                    .validation_latency
-                    .observe_between(started_at, completed_at);
-                self.validation_finished(block.header().chain(), id)?;
-
-                let validity = match verdict {
-                    Some(true) => BlockValidity::Valid,
-                    Some(false) => {
-                        self.metrics.invalid_blocks.inc();
-                        BlockValidity::Invalid
-                    }
-                    None => {
-                        self.metrics.unavailable_validations.inc();
-                        warn!(
-                            chain = block.header().chain().get(),
-                            height = block.header().height().get(),
-                            "application reached no validation verdict; retrying"
-                        );
-                        BlockValidity::Unavailable
-                    }
-                };
-                span.record("validity", validation_verdict(validity));
-                span.in_scope(|| {
-                    let completion = ValidationCompletion::new(id, generation, validity);
-                    self.track_transition(|core| core.producer_validated(completion))?;
-                    Ok(())
-                })
-            }
-            AppOutcome::ValidationCancelled { id, chain } => {
-                if !self.finish_task(permit, TaskTerminal::Cancelled)? {
-                    return Ok(());
-                }
-                self.validation_finished(chain, id)?;
-                Ok(())
-            }
-        }
-    }
-
-    fn cancel_validations(&mut self, chain: ChainId, through: Height) {
-        for id in self.core_mut().cancel_validations(chain, through) {
-            let Some(cancel) = self.active_validations.get_mut(&id) else {
-                continue;
-            };
-            if let Some(cancel) = cancel.take() {
-                let _ = cancel.send(());
             }
         }
     }

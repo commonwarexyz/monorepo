@@ -1235,7 +1235,7 @@ fn machine_issued_jobs_for(
     CoreState<Sha256, MinPk>,
     Vec<VerifyJob<MinPk, Sha256Digest>>,
 ) {
-    let mut core = CoreState::fresh(observer_profile(committee), NonZeroUsize::MIN).unwrap();
+    let mut core = CoreState::fresh(observer_profile(committee)).unwrap();
     core.start_fresh().unwrap();
     let mut observed = Some((identified, resident_bytes));
     let mut jobs: Vec<VerifyJob<MinPk, Sha256Digest>> = Vec::new();

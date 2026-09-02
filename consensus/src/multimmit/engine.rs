@@ -333,7 +333,6 @@ pub(crate) async fn open_stores<E, H, P, V>(
     prefix: &str,
     scheme: &Scheme<P, V>,
     strategy: &impl Strategy,
-    application_tasks: NonZeroUsize,
 ) -> Result<Stores<E, H, V>, OpenError>
 where
     E: CryptoRng + Storage + Metrics + BufferPooler + StorageContext + Supervisor,
@@ -393,18 +392,18 @@ where
     let journal = journal.finish()?;
     let startup = if !saw_record && checkpoint.is_none() {
         Startup::Fresh {
-            core: Box::new(CoreState::fresh(profile, application_tasks)?),
+            core: Box::new(CoreState::fresh(profile)?),
             journal: Box::new(journal),
         }
     } else {
         let snapshot = match checkpoint {
             Some(snapshot) => snapshot,
-            None => CoreState::fresh(profile.clone(), application_tasks)?
+            None => CoreState::fresh(profile.clone())?
                 .checkpoint_cut()
                 .ok_or(OpenError::CoreInitialization)?
                 .materialize(),
         };
-        let mut core = CoreState::restore(profile, snapshot, application_tasks)?;
+        let mut core = CoreState::restore(profile, snapshot)?;
         info_span!(
             "multimmit.engine.open_stores.replay",
             records = records.len().traced(),
@@ -747,7 +746,6 @@ where
             &config.partition_prefix,
             &config.scheme,
             &config.strategy,
-            voter_limits.inflight_application,
         )
         .await?;
         if let Startup::Recovered(recovered) = &stores.startup {
@@ -1527,7 +1525,6 @@ mod tests {
                 "restart-0",
                 &committee.verifier,
                 &Sequential,
-                NZUsize!(8),
             ))
             .await
             .expect("stores reopen");
@@ -1765,7 +1762,6 @@ mod tests {
                 &format!("{prefix}-0"),
                 &committee.verifier,
                 &Sequential,
-                NZUsize!(8),
             ))
             .await
             .expect("stores recover");

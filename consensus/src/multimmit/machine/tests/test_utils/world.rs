@@ -7,11 +7,11 @@ use crate::{
             Artifact, ArtifactId, BlockValidity, BuildCompletion, Capability, Change, Cursor,
             CustodyCompletion, DomainEvent, DurabilityCapability, DurableEffect, DurableJob,
             EffectCompletion, EffectId, FinalityFact, Input, Inspection, LeaderCapability,
-            LqcAggregateCompletion, LqcAggregateJob, Machine, PersistJob, ProducerCapability,
-            ProductionTimer, Profile, ResolutionCompletion, ResolverCapability, Role, SignRequest,
-            Snapshot, Step, StepError, StepStatus, Timer, Tuning, ValidationCompletion, Verdict,
-            VerificationCapability, VerificationCompletion, VerificationTicket, ViewProof,
-            VqcAggregateCompletion, VqcAggregateJob,
+            LqcAggregateCompletion, LqcAggregateJob, Machine, Observation, PerChainValidator,
+            PersistJob, ProducerCapability, ProductionTimer, Profile, ResolutionCompletion,
+            ResolverCapability, Role, SignRequest, Snapshot, Step, StepError, StepStatus, Timer,
+            Tuning, ValidationCompletion, Verdict, VerificationCapability, VerificationCompletion,
+            VerificationTicket, ViewProof, VqcAggregateCompletion, VqcAggregateJob,
         },
         types::{
             Anchor, Attestation, BlockRef, CertificateId, ChainId, ChainProposal, DaVote,
@@ -134,10 +134,6 @@ enum Action {
     },
     HandleResolutionEffect {
         replica: usize,
-    },
-    Validate {
-        replica: usize,
-        order: CompletionOrder,
     },
     Resolve {
         replica: usize,
@@ -387,8 +383,36 @@ impl Fixture {
     }
 }
 
+/// Builds one deterministic per-chain validator plane per producer chain, anchored at genesis.
+fn build_validators(profile: &Profile<Sha256, MinPk>) -> Vec<PerChainValidator<MinPk, Digest>> {
+    let codec = profile.protocol().codec_config();
+    let pipeline_depth = codec.pipeline_depth() as u64;
+    let items = profile.validation_parallelism();
+    let bytes = items.saturating_mul(profile.resources().max_artifact_bytes());
+    profile
+        .protocol()
+        .genesis()
+        .tips()
+        .iter()
+        .enumerate()
+        .map(|(chain, tip)| {
+            PerChainValidator::new(
+                ChainId::new(chain as u32),
+                pipeline_depth,
+                items,
+                bytes,
+                *tip,
+                1,
+            )
+        })
+        .collect()
+}
+
 struct Replica {
     runner: Runner<Sha256, MinPk>,
+    // The per-chain remote validator planes the runtime tasks own, simulated inline here so the
+    // pure-Core world drives the same DA-vote offers the tasks would.
+    validators: Vec<PerChainValidator<MinPk, Digest>>,
     pending: VecDeque<Capability<MinPk, Digest>>,
     view_timer: Option<Timer>,
     production_timer: Option<ProductionTimer<Digest>>,
@@ -509,6 +533,7 @@ impl<'a> World<'a> {
                 let profile = &fixture.profiles[replica];
                 Replica {
                     runner: Runner::new(profile.clone()),
+                    validators: build_validators(profile),
                     pending: VecDeque::new(),
                     view_timer: None,
                     production_timer: None,
@@ -724,22 +749,6 @@ impl<'a> World<'a> {
                         .map(|job| Capability::Durability(DurabilityCapability::Released(job))),
                 );
                 self.acknowledge(replica, &job)
-            }
-            Action::Validate { order, .. } => {
-                let Capability::Producer(ProducerCapability::Validate(job)) =
-                    self.take(replica, order, is_validation)
-                else {
-                    unreachable!()
-                };
-                self.replicas[replica].validations += 1;
-                self.replicas[replica]
-                    .runner
-                    .submit(Input::BlockValidated(ValidationCompletion::new(
-                        job.id(),
-                        job.generation(),
-                        BlockValidity::Valid,
-                    )))
-                    .unwrap()
             }
             Action::Resolve { .. } => {
                 let Capability::Resolver(ResolverCapability::Resolve(job)) =
@@ -1606,6 +1615,44 @@ impl<'a> World<'a> {
         );
     }
 
+    /// Simulates one remote validator task: stores the routed block, validates it (the world's
+    /// deterministic verdict is valid, as the old harness assumed), and offers the eligible run.
+    fn observe_validator_block(
+        &mut self,
+        replica: usize,
+        id: ArtifactId<Digest>,
+        observation: Observation,
+        block: std::sync::Arc<SignedTransactionBlock<MinPk, Digest>>,
+        custodied: bool,
+    ) {
+        let chain = block.header().chain();
+        self.replicas[replica].validations += 1;
+        {
+            let validator = &mut self.replicas[replica].validators[chain.get() as usize];
+            validator.observe::<Sha256>(id, observation, block, custodied);
+            while let Some(job) = validator.ready_validation() {
+                let completion =
+                    ValidationCompletion::new(job.id(), job.generation(), BlockValidity::Valid);
+                validator.complete_validation(completion);
+            }
+        }
+        self.offer_da_votes(replica, chain);
+    }
+
+    /// Recomputes one chain's eligible run and feeds it to the machine's frontier shadow.
+    fn offer_da_votes(&mut self, replica: usize, chain: ChainId) {
+        let cap = self.replicas[replica]
+            .runner
+            .profile
+            .protocol()
+            .codec_config()
+            .pipeline_depth();
+        let run = self.replicas[replica].validators[chain.get() as usize].eligible_run(cap);
+        self.replicas[replica]
+            .runner
+            .note_da_vote_ready(chain, run.run, run.ready_through);
+    }
+
     fn queue_effects(
         &mut self,
         replica: usize,
@@ -1617,6 +1664,28 @@ impl<'a> World<'a> {
                 self.record_persist_job(replica, job);
             }
             match effect {
+                // The runtime routes these to the per-chain validator tasks; the pure-Core world
+                // drives the same planes inline and offers the resulting run back to the machine.
+                Capability::Producer(ProducerCapability::ObserveBlock {
+                    id,
+                    observation,
+                    block,
+                    custodied,
+                }) => {
+                    self.observe_validator_block(replica, id, observation, block, custodied);
+                    continue;
+                }
+                Capability::Producer(ProducerCapability::ValidatorAnchor(anchor)) => {
+                    let chain = anchor.chain().get() as usize;
+                    self.replicas[replica].validators[chain].advance_anchor(anchor);
+                    self.offer_da_votes(replica, anchor.chain());
+                    continue;
+                }
+                Capability::Producer(ProducerCapability::ValidatorChosen { chain, choices }) => {
+                    self.replicas[replica].validators[chain.get() as usize].note_chosen(choices);
+                    self.offer_da_votes(replica, chain);
+                    continue;
+                }
                 Capability::Durability(
                     DurabilityCapability::Acknowledged { .. } | DurabilityCapability::Retire(_),
                 ) => {
@@ -1818,7 +1887,6 @@ impl<'a> World<'a> {
                 empty: true,
             }),
             b'u' if self.has(replica, is_custody) => Some(Action::Custody { replica, order }),
-            b'V' if self.has(replica, is_validation) => Some(Action::Validate { replica, order }),
             b'r'
                 if self.replicas[replica].pending.iter().any(|effect| {
                     matches!(effect, Capability::Resolver(ResolverCapability::Resolve(job)) if self.fixture.resolution(job.view()).is_some())
@@ -1967,12 +2035,6 @@ impl<'a> World<'a> {
         }
         if self.has(replica, is_custody) {
             return Some(Action::Custody {
-                replica,
-                order: validation,
-            });
-        }
-        if self.has(replica, is_validation) {
-            return Some(Action::Validate {
                 replica,
                 order: validation,
             });
@@ -2174,7 +2236,6 @@ impl Action {
             | Self::Build { replica, .. }
             | Self::Custody { replica, .. }
             | Self::HandleResolutionEffect { replica }
-            | Self::Validate { replica, .. }
             | Self::Resolve { replica }
             | Self::AggregateVqc { replica, .. }
             | Self::AggregateLqc { replica, .. }
@@ -2321,13 +2382,6 @@ const fn is_persist(effect: &Capability<MinPk, Digest>) -> bool {
     matches!(
         effect,
         Capability::Durability(DurabilityCapability::Persist(_))
-    )
-}
-
-const fn is_validation(effect: &Capability<MinPk, Digest>) -> bool {
-    matches!(
-        effect,
-        Capability::Producer(ProducerCapability::Validate(_))
     )
 }
 

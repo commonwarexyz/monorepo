@@ -8,11 +8,11 @@ use crate::{
     multimmit::{
         config::{Config, Limits},
         machine::{
-            Artifact, BarrierAck, BlockValidity, Capabilities, Capability, DurabilityCapability,
-            DurableEffect, EffectCompletion, EffectId, Input, LeaderCapability, Machine,
-            PersistJob, ProducerCapability, Profile, ResolutionCompletion, ResolutionJob,
-            ResolverCapability, Role, Tuning, ValidationCompletion, Verdict,
-            VerificationCapability, VerificationCompletion, VerifyJob, ViewProof,
+            Artifact, BarrierAck, Capabilities, Capability, DurabilityCapability, DurableEffect,
+            EffectCompletion, EffectId, Input, LeaderCapability, Machine, PersistJob,
+            ProducerCapability, Profile, ResolutionCompletion, ResolutionJob, ResolverCapability,
+            Role, Tuning, Verdict, VerificationCapability, VerificationCompletion, VerifyJob,
+            ViewProof,
         },
         mocks::Committee,
         types::{
@@ -341,16 +341,13 @@ pub(super) fn drain_with<F, P>(
                         }
                     }
                 }
-                Capability::Producer(ProducerCapability::Validate(job)) => {
-                    let step = machine
-                        .step(Input::BlockValidated(ValidationCompletion::new(
-                            job.id(),
-                            job.generation(),
-                            BlockValidity::Valid,
-                        )))
-                        .unwrap();
-                    queue.extend(step.into_capabilities());
-                }
+                // Observers never run a validator plane or cast DA votes, so blocks routed for
+                // validation and the plane's anchor and choice syncs are inert in this workload.
+                Capability::Producer(
+                    ProducerCapability::ObserveBlock { .. }
+                    | ProducerCapability::ValidatorAnchor(_)
+                    | ProducerCapability::ValidatorChosen { .. },
+                ) => {}
                 Capability::Leader(LeaderCapability::ArmTimer(_))
                 | Capability::Producer(ProducerCapability::ArmTimer(_))
                 | Capability::Durability(DurabilityCapability::Acknowledged { .. })
@@ -664,8 +661,7 @@ fn schedule_capabilities(
     for capability in capabilities {
         let delay = match &capability {
             Capability::Durability(DurabilityCapability::Persist(_)) => profile.storage_ticks,
-            Capability::Verification(VerificationCapability::Verify(_))
-            | Capability::Producer(ProducerCapability::Validate(_)) => profile.cpu_ticks,
+            Capability::Verification(VerificationCapability::Verify(_)) => profile.cpu_ticks,
             Capability::Resolver(ResolverCapability::Resolve(_)) => profile.network_ticks,
             Capability::Durability(DurabilityCapability::Released(job)) => match job.request() {
                 DurableEffect::Broadcast(_)
@@ -747,13 +743,6 @@ where
                 id: job.id(),
                 generation: job.generation(),
             }))
-        }
-        Capability::Producer(ProducerCapability::Validate(job)) => {
-            machine.step(Input::BlockValidated(ValidationCompletion::new(
-                job.id(),
-                job.generation(),
-                BlockValidity::Valid,
-            )))
         }
         other => unreachable!("unscheduled capability reached completion: {other:?}"),
     }

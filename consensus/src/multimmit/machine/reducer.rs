@@ -1,17 +1,16 @@
 //! Deterministic input reduction and capability emission.
 
 use super::{
-    Artifact, ArtifactEntry, ArtifactId, ArtifactState, BarrierAck, BarrierId,
-    BlockValidationOutcome, BuildCompletion, BuildJob, BuildOutcome, ChainEffect, ChainError,
-    Change, CustodyCancellation, CustodyCompletion, CustodyJob, DaVoteRequest, Dependency,
-    DomainEvent, DurableEffect, DurableJob, DurableState, EffectCompletion, EffectId,
-    FrozenAcknowledgement, IdentifiedArtifact, JobId, Lifecycle, LqcAggregateCompletion,
-    LqcAggregateJob, Machine, NullificationRecoveryCompletion, NullificationRecoveryJob,
-    Observation, PendingPersistence, PendingSigningCompletion, PersistDirective, PersistJob,
-    ProductionTimer, ProtocolComponent, ReplayError, Replayed, ResolutionCompletion, ResolutionJob,
-    Role, SelfAdmission, SendRequest, SignRequest, Timer, ValidationCompletion, ValidationJob,
-    Verdict, VerificationCompletion, VerificationItem, VerificationTicket, VerifyJob,
-    VqcAggregateCompletion, VqcAggregateJob, WorkKey,
+    Artifact, ArtifactEntry, ArtifactId, ArtifactState, BarrierAck, BarrierId, BuildCompletion,
+    BuildJob, BuildOutcome, ChainEffect, ChainError, Change, CustodyCancellation,
+    CustodyCompletion, CustodyJob, DaChoice, DaVoteRequest, Dependency, DomainEvent, DurableEffect,
+    DurableJob, DurableState, EffectCompletion, EffectId, FrozenAcknowledgement,
+    IdentifiedArtifact, JobId, Lifecycle, LqcAggregateCompletion, LqcAggregateJob, Machine,
+    NullificationRecoveryCompletion, NullificationRecoveryJob, Observation, PendingPersistence,
+    PendingSigningCompletion, PersistDirective, PersistJob, ProductionTimer, ProtocolComponent,
+    ReplayError, Replayed, ResolutionCompletion, ResolutionJob, Role, SelfAdmission, SendRequest,
+    SignRequest, Timer, Verdict, VerificationCompletion, VerificationItem, VerificationTicket,
+    VerifyJob, VqcAggregateCompletion, VqcAggregateJob, WorkKey,
     algebra::{ValidatedLqc, ValidatedVqc},
     contracts::{DA_VOTE_RUN, Lane, ServiceCycle, ServiceError, TransitionCost},
     emission::ViewProof,
@@ -26,7 +25,7 @@ use crate::{
     Epochable, Viewable,
     multimmit::types::{
         Activity, Anchor, BlockRef, CertificateId, ChainId, DaCertificate, DaVote, Lqc,
-        ProposalParent, SignedLeaderBlock,
+        ProposalParent, SignedLeaderBlock, SignedTransactionBlock,
     },
     types::{Attributable, Height, Participant, Round, View, ViewDelta},
 };
@@ -81,7 +80,6 @@ pub(super) enum Input<V: Variant, D: Digest> {
     /// Complete cancellation of custody for one superseded prepared block.
     CustodyCancelled(CustodyCancellation),
     /// Complete deterministic validation of one authenticated block payload.
-    BlockValidated(ValidationCompletion),
     /// Complete one exact machine-issued immutable-object resolution request.
     ResolutionCompleted(ResolutionCompletion<V, D>),
     /// Fire one producer deadline bound to an exact parent.
@@ -235,17 +233,28 @@ pub(crate) enum ProducerCapability<V: Variant, D: Digest> {
     Custody(CustodyJob<D>),
     /// Stop custody work for one superseded prepared block.
     CancelCustody(CustodyCancellation),
-    /// Validate an authenticated block whose payload is locally available.
-    Validate(ValidationJob<V, D>),
-    /// Stop application validation made obsolete by a certified producer-chain frontier.
-    CancelValidations {
-        /// Producer chain whose earlier validations are obsolete.
-        chain: ChainId,
-        /// Greatest obsolete height on the producer chain.
-        through: Height,
-    },
     /// Forward an authenticated own-chain data-availability share to the own-chain DA task.
     ForwardShare(Arc<DaVote<V, D>>),
+    /// Route an authenticated block to its producer chain's remote validator plane.
+    ObserveBlock {
+        /// The observation identity central assigned.
+        id: ArtifactId<D>,
+        /// The observation order central assigned.
+        observation: Observation,
+        /// The authenticated block.
+        block: Arc<SignedTransactionBlock<V, D>>,
+        /// Whether this is the local producer's own custodied block.
+        custodied: bool,
+    },
+    /// Tell a chain's remote validator plane its certified anchor advanced to this block.
+    ValidatorAnchor(BlockRef<D>),
+    /// Replace a chain's validator-plane read-copy of central's durable DA choices.
+    ValidatorChosen {
+        /// The producer chain.
+        chain: ChainId,
+        /// The retained DA choices above the anchor.
+        choices: Vec<DaChoice<D>>,
+    },
     /// Tell the own-chain DA task its certified anchor advanced to this height.
     AnchorAdvanced(Height),
 }
@@ -678,8 +687,6 @@ pub enum StepStatus<D: Digest> {
     BlockCustodied,
     /// A matched superseded-custody cancellation was accepted.
     CustodyCancelled,
-    /// A matched deterministic block-validation completion was accepted.
-    BlockValidated,
     /// A matched immutable-object resolution attempt was classified for verification.
     ResolutionCompleted {
         /// The proof's pre-verification disposition.
@@ -1002,10 +1009,6 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             Input::CustodyCancelled(cancellation) => {
                 self.ensure_live()?;
                 self.complete_custody_cancellation(cancellation)
-            }
-            Input::BlockValidated(completion) => {
-                self.ensure_live()?;
-                self.complete_block_validation(completion)
             }
             Input::ResolutionCompleted(completion) => {
                 self.ensure_live()?;
@@ -1620,26 +1623,6 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         Ok(Step::new(StepStatus::CustodyCancelled, Vec::new()))
     }
 
-    fn complete_block_validation(
-        &mut self,
-        completion: ValidationCompletion,
-    ) -> Result<Step<V, H::Digest>, StepError> {
-        let outcome = self
-            .chain
-            .complete_validation::<H>(completion, self.durable.generation)?;
-        match outcome {
-            BlockValidationOutcome::Stale => {
-                return Ok(Step::new(StepStatus::StaleCompletion, Vec::new()));
-            }
-            BlockValidationOutcome::Retained | BlockValidationOutcome::Deferred => {}
-            BlockValidationOutcome::Invalid(artifact) => {
-                self.remove_terminal_artifact(artifact)?;
-            }
-        }
-        self.wake_components();
-        Ok(Step::new(StepStatus::BlockValidated, Vec::new()))
-    }
-
     fn complete_resolution(
         &mut self,
         completion: ResolutionCompletion<V, H::Digest>,
@@ -1869,9 +1852,9 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         let available = resource_slots
             .min(cycle.remaining_core() as usize)
             .min(encodable);
-        let blocks =
-            self.chain
-                .ready_da_votes::<H>(&self.profile, available.max(1), DA_VOTE_RUN)?;
+        let blocks = self
+            .chain
+            .ready_da_votes(&self.profile, available.max(1), DA_VOTE_RUN)?;
         if blocks.is_empty() {
             return Ok((WorkStatus::Complete, Capabilities::None));
         }
@@ -2070,7 +2053,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                 // One vote per chain here: the pre-vote reservation freezes the frontier the
                 // ordinary vote endorses, and stays bounded so vote construction never absorbs
                 // a chain's DA backlog (background passes own that work).
-                let blocks = self.chain.ready_da_votes::<H>(
+                let blocks = self.chain.ready_da_votes(
                     &self.profile,
                     self.profile.protocol().codec_config().chains(),
                     1,
@@ -2422,7 +2405,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         }
         let preferred = self
             .chain
-            .selected_da_chain::<H>(&self.profile, |chain, height| {
+            .selected_da_chain(&self.profile, |chain, height| {
                 !self.da_vote_extends_durable_safety(chain, height)
             })?;
         let Some(artifact) = self.next_durable_da_certificate(preferred) else {
@@ -2642,13 +2625,29 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                         cancellation,
                     )));
                 }
-                ChainEffect::Validate(job) => {
-                    capabilities.push(Capability::Producer(ProducerCapability::Validate(job)));
+                ChainEffect::ObserveBlock {
+                    id,
+                    observation,
+                    block,
+                    custodied,
+                } => {
+                    capabilities.push(Capability::Producer(ProducerCapability::ObserveBlock {
+                        id,
+                        observation,
+                        block,
+                        custodied,
+                    }));
                 }
-                ChainEffect::CancelValidations { chain, through } => {
-                    capabilities.push(Capability::Producer(
-                        ProducerCapability::CancelValidations { chain, through },
-                    ));
+                ChainEffect::ValidatorAnchor(anchor) => {
+                    capabilities.push(Capability::Producer(ProducerCapability::ValidatorAnchor(
+                        anchor,
+                    )));
+                }
+                ChainEffect::ValidatorChosen { chain, choices } => {
+                    capabilities.push(Capability::Producer(ProducerCapability::ValidatorChosen {
+                        chain,
+                        choices,
+                    }));
                 }
                 ChainEffect::ArmTimer(timer) => {
                     capabilities.push(Capability::Producer(ProducerCapability::ArmTimer(timer)));
@@ -3116,10 +3115,6 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             );
             if let Some(view) = future_view {
                 self.future.insert((view, id));
-            }
-            if let Artifact::TransactionBlock(block) = artifact.as_ref() {
-                self.chain
-                    .register_transaction_block::<H>(id, observation, block)?;
             }
             // A certificate over messages this node already verified needs no pairings: the
             // executor discharges every transcript term a known signature reproduces. A leader
@@ -3645,8 +3640,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                     }
                     _ => {}
                 }
-                self.chain
-                    .observe::<H>(id, observation, &artifact, self.durable.generation)?;
+                self.chain.observe::<H>(id, observation, &artifact)?;
                 if matches!(artifact.as_ref(), Artifact::TransactionBlock(_)) {
                     self.views.observe_attested_header(self.durable.view);
                 }
@@ -4121,8 +4115,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         for (observation, id, artifact) in &ready {
             self.claim_finality(*id, *observation, Arc::clone(artifact))?;
             self.validate_finality(*id, *observation, artifact, None)?;
-            self.chain
-                .observe::<H>(*id, *observation, artifact, self.durable.generation)?;
+            self.chain.observe::<H>(*id, *observation, artifact)?;
             self.views
                 .observe::<H>(*id, *observation, artifact, None, &self.profile)
                 .map_err(|_| StepError::ViewInvariant)?;
@@ -5649,6 +5642,15 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
 
     fn wake_components(&mut self) {
         self.scheduler.enqueue_components();
+    }
+
+    /// Wakes every protocol component, exactly as servicing an external input does.
+    ///
+    /// A validator plane offers its eligible run through
+    /// [`note_da_vote_ready`](Self::note_da_vote_ready), which records the offer; this schedules the
+    /// work that drains it so the reservation does not wait for the next unrelated input.
+    pub(crate) fn wake(&mut self) {
+        self.wake_components();
     }
 
     fn restore_durable_artifacts(&mut self) -> Result<(), StepError> {

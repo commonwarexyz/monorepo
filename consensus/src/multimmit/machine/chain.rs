@@ -11,11 +11,10 @@ use crate::{
     },
     types::Height,
 };
-use commonware_codec::EncodeSize as _;
 use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
 use core::{ops::Bound, time::Duration};
 use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::{BTreeMap, VecDeque},
     sync::Arc,
 };
 
@@ -223,6 +222,13 @@ impl CustodyCancellation {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct ValidationId(u64);
 
+impl ValidationId {
+    /// Creates a validation identity.
+    pub(crate) const fn new(id: u64) -> Self {
+        Self(id)
+    }
+}
+
 /// Exact immutable block metadata whose payload must be validated.
 #[derive(Clone, Debug)]
 pub(crate) struct ValidationJob<V: Variant, D: Digest> {
@@ -242,8 +248,21 @@ impl<V: Variant, D: Digest> ValidationJob<V, D> {
         self.generation
     }
 
-    /// Returns the exact authenticated block header.
-    pub fn block(&self) -> &SignedTransactionBlock<V, D> {
+    /// Creates a validation job.
+    pub(crate) const fn new(
+        id: ValidationId,
+        generation: u64,
+        block: Arc<SignedTransactionBlock<V, D>>,
+    ) -> Self {
+        Self {
+            id,
+            generation,
+            block,
+        }
+    }
+
+    /// Returns the shared authenticated block.
+    pub(crate) const fn block_arc(&self) -> &Arc<SignedTransactionBlock<V, D>> {
         &self.block
     }
 }
@@ -276,6 +295,21 @@ impl ValidationCompletion {
             generation,
             validity,
         }
+    }
+
+    /// Returns the validation identity.
+    pub(crate) const fn id(&self) -> ValidationId {
+        self.id
+    }
+
+    /// Returns the process generation that issued the validation.
+    pub(crate) const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Returns the application verdict.
+    pub(crate) const fn validity(&self) -> BlockValidity {
+        self.validity
     }
 }
 
@@ -310,68 +344,57 @@ pub(crate) enum ChainEffect<V: Variant, D: Digest> {
     Build(BuildJob<D>),
     Custody(CustodyJob<D>),
     CancelCustody(CustodyCancellation),
-    Validate(ValidationJob<V, D>),
-    CancelValidations {
-        chain: ChainId,
-        through: Height,
-    },
     ArmTimer(ProductionTimer<D>),
     /// Forward an authenticated own-chain data-availability share to the own-chain DA task.
     ForwardShare(Arc<DaVote<V, D>>),
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub(crate) enum BlockValidationOutcome<D: Digest> {
-    Stale,
-    Retained,
-    Invalid(ArtifactId<D>),
-    /// The application reached no verdict; the block returned to the ready state.
-    Deferred,
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum ValidationState {
-    Authenticating,
-    Ready,
-    Pending(ValidationId),
-    Valid,
-}
-
-#[derive(Copy, Clone, Debug)]
-struct ValidationLimits {
-    items: usize,
-    items_per_chain: usize,
-    bytes: usize,
-    bytes_per_chain: usize,
+    /// Route an authenticated block to its producer chain's remote validator plane. Central minted
+    /// the observation identity and recorded producer ancestry before emitting this.
+    ObserveBlock {
+        /// The observation identity central assigned.
+        id: ArtifactId<D>,
+        /// The observation order central assigned.
+        observation: Observation,
+        /// The authenticated block.
+        block: Arc<SignedTransactionBlock<V, D>>,
+        /// Whether this is the local producer's own custodied block.
+        custodied: bool,
+    },
+    /// Tell a chain's validator plane its certified anchor advanced to this block.
+    ValidatorAnchor(BlockRef<D>),
+    /// Replace a chain's validator-plane read-copy of central's durable DA choices above the anchor.
+    ValidatorChosen {
+        /// The producer chain.
+        chain: ChainId,
+        /// The retained DA choices above the anchor.
+        choices: Vec<DaChoice<D>>,
+    },
 }
 
 #[derive(Clone, Debug)]
-struct ValidationReservations {
-    items: usize,
-    bytes: usize,
-}
-
-#[derive(Clone, Debug)]
-struct BlockRecord<V: Variant, D: Digest> {
-    artifact: ArtifactId<D>,
-    observation: Observation,
-    block: Arc<SignedTransactionBlock<V, D>>,
-    block_ref: BlockRef<D>,
-    state: ValidationState,
-}
-
-#[derive(Clone, Debug)]
-struct DaChoice<D: Digest> {
+pub(crate) struct DaChoice<D: Digest> {
     header: TransactionBlockHeader<D>,
     block_ref: BlockRef<D>,
 }
 
-#[derive(Copy, Clone, Debug)]
-struct ValidationRecord<D: Digest> {
-    chain: ChainId,
-    height: Height,
-    artifact: ArtifactId<D>,
-    bytes: usize,
+impl<D: Digest> DaChoice<D> {
+    /// Returns the voted header.
+    pub(crate) const fn header(&self) -> &TransactionBlockHeader<D> {
+        &self.header
+    }
+
+    /// Returns the voted block reference.
+    pub(crate) const fn block_ref(&self) -> BlockRef<D> {
+        self.block_ref
+    }
+
+    /// Builds a choice directly, for validator-plane unit tests that seed the read-copy.
+    #[cfg(test)]
+    pub(crate) const fn for_test(
+        header: TransactionBlockHeader<D>,
+        block_ref: BlockRef<D>,
+    ) -> Self {
+        Self { header, block_ref }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -394,9 +417,6 @@ struct Certified<V: Variant, D: Digest> {
     block: BlockRef<D>,
     certificate: Option<DaCertificate<V, D>>,
 }
-
-/// One chain's lowest eligible data-availability vote and the certificate anchor it extends.
-type DaHead<'a, V, D> = (Height, &'a BlockRecord<V, D>);
 
 #[derive(Clone, Debug)]
 struct CertificateCandidate<V: Variant, D: Digest> {
@@ -433,7 +453,6 @@ pub(crate) enum BuildOutcome {
 /// Every field is derived from admitted artifacts and durable anchors, so it can be dropped and
 /// rebuilt without changing normalized protocol state.
 struct PerChainDa<V: Variant, D: Digest> {
-    blocks: BTreeMap<Height, Vec<BlockRecord<V, D>>>,
     local_da_votes: BTreeMap<Height, DaChoice<D>>,
     /// A height through which every integer height above `data_retired_through` is already a local
     /// DA choice.
@@ -450,8 +469,13 @@ struct PerChainDa<V: Variant, D: Digest> {
     /// order, so the queue is also the expected application sequence.
     pending_da_votes: VecDeque<TransactionBlockHeader<D>>,
     certified: BTreeMap<Height, Certified<V, D>>,
-    validation_items: usize,
-    validation_bytes: usize,
+    /// The contiguous eligible DA-vote run this chain's validator plane last offered, lowest height
+    /// first. Central drains it in its reservation loop; it is the frontier shadow the plane feeds
+    /// and reads synchronously at vote and proposal time.
+    offered: Vec<Arc<SignedTransactionBlock<V, D>>>,
+    /// The greatest height `offered` reaches, or the certified anchor when empty. A safe lower bound
+    /// on the plane's true frontier, since central mints every durable choice.
+    ready_through: Height,
 }
 
 /// Volatile, rebuildable chain indexes owned by the deterministic machine.
@@ -467,10 +491,6 @@ pub(crate) struct ChainState<V: Variant, D: Digest> {
     certificate_candidates: BTreeMap<BlockRef<D>, Vec<CertificateCandidate<V, D>>>,
     discarded_certificates: Vec<ArtifactId<D>>,
     ancestry: BTreeMap<BlockRef<D>, BlockRef<D>>,
-    validation_jobs: BTreeMap<ValidationId, ValidationRecord<D>>,
-    validation_limits: ValidationLimits,
-    validation_reservations: ValidationReservations,
-    next_validation_chain: usize,
     next_job: u64,
     producer_wake: bool,
     deadline: Option<ProductionTimer<D>>,
@@ -480,7 +500,6 @@ pub(crate) struct ChainState<V: Variant, D: Digest> {
     signing: ReservationBook<SigningSubject<V, D>>,
     production_credit: bool,
     capabilities: Vec<ChainEffect<V, D>>,
-    processed: BTreeSet<ArtifactId<D>>,
 }
 
 impl<V: Variant, D: Digest> ChainState<V, D> {
@@ -494,7 +513,6 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         let chains = genesis
             .iter()
             .map(|block| PerChainDa {
-                blocks: BTreeMap::new(),
                 local_da_votes: BTreeMap::new(),
                 da_voted_run: block.height(),
                 da_safe_through: block.height(),
@@ -507,23 +525,12 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
                         certificate: None,
                     },
                 )]),
-                validation_items: 0,
-                validation_bytes: 0,
+                offered: Vec::new(),
+                ready_through: block.height(),
             })
             .collect();
         let pipeline_depth = profile.protocol().codec_config().pipeline_depth() as u64;
         let resources = profile.resources();
-        let validation_limits = ValidationLimits {
-            items: resources.max_cached_artifacts(),
-            items_per_chain: profile.validation_parallelism(),
-            bytes: resources
-                .max_cached_artifacts()
-                .saturating_mul(resources.max_artifact_bytes()),
-            bytes_per_chain: profile
-                .validation_parallelism()
-                .saturating_mul(resources.max_artifact_bytes()),
-        };
-        let validation_reservations = ValidationReservations { items: 0, bytes: 0 };
         Self {
             own_chain,
             da_quorum: profile.protocol().codec_config().da_quorum(),
@@ -536,10 +543,6 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             certificate_candidates: BTreeMap::new(),
             discarded_certificates: Vec::new(),
             ancestry: BTreeMap::new(),
-            validation_jobs: BTreeMap::new(),
-            validation_limits,
-            validation_reservations,
-            next_validation_chain: 0,
             next_job: 0,
             producer_wake: false,
             deadline: None,
@@ -549,7 +552,6 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             signing: ReservationBook::new(resources.max_outbox_effects()),
             production_credit: false,
             capabilities: Vec::new(),
-            processed: BTreeSet::new(),
         }
     }
 
@@ -720,41 +722,9 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         }
 
         self.install_certificate(block, certificate.clone())?;
-        let retired_validations = self
-            .validation_jobs
-            .iter()
-            .filter_map(|(id, job)| {
-                (job.chain == block.chain() && job.height <= retired).then_some(*id)
-            })
-            .collect::<Vec<_>>();
-        for id in &retired_validations {
-            let job = self
-                .validation_jobs
-                .remove(id)
-                .expect("selected validation job remains retained");
-            self.release_validation(job)?;
-        }
-        if !retired_validations.is_empty() {
-            self.capabilities.push(ChainEffect::CancelValidations {
-                chain: block.chain(),
-                through: retired,
-            });
-        }
         self.chains[index].certified.retain(|height, certified| {
             *height == self.genesis[index].height() || *height > retired || certified.block == block
         });
-
-        let mut removed = Vec::new();
-        self.chains[index].blocks.retain(|height, records| {
-            if *height > retired {
-                return true;
-            }
-            removed.extend(records.iter().map(|record| record.artifact));
-            false
-        });
-        for artifact in removed {
-            self.processed.remove(&artifact);
-        }
         self.chains[index]
             .local_da_votes
             .retain(|height, _| *height > retired);
@@ -781,7 +751,26 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         // longer add availability, so retiring them keeps the exact local suffix pipeline-bounded.
         self.chains[index].da_safe_through = self.chains[index].da_safe_through.max(block.height());
         self.chains[index].data_retired_through = retired;
+        // The block store and its validations live in the chain's validator plane: route the new
+        // certified anchor so the plane settles them, and the surviving DA choices so its
+        // eligibility read-copy tracks this durable retirement.
+        self.capabilities.push(ChainEffect::ValidatorAnchor(block));
+        self.emit_validator_chosen(index);
         Ok(())
+    }
+
+    /// Routes a chain's current durable DA choices above the anchor to its validator plane so the
+    /// plane's eligibility read-copy stays a lower-bound mirror of central's durable record.
+    fn emit_validator_chosen(&mut self, chain: usize) {
+        let choices = self.chains[chain]
+            .local_da_votes
+            .values()
+            .cloned()
+            .collect();
+        self.capabilities.push(ChainEffect::ValidatorChosen {
+            chain: ChainId::new(chain as u32),
+            choices,
+        });
     }
 
     /// Returns the greatest locally usable, DA-certified, and locally DA-voted height on every
@@ -798,16 +787,9 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
                     .find(|(_, certified)| certified.certificate.is_some())
                     .map_or(Height::zero(), |(height, _)| *height);
 
-                let locally_valid = self.chains[index]
-                    .blocks
-                    .iter()
-                    .rev()
-                    .find(|(_, records)| {
-                        records
-                            .iter()
-                            .any(|record| record.state == ValidationState::Valid)
-                    })
-                    .map(|(height, _)| *height);
+                // The validator plane owns the block store; its offered run's reach is the
+                // highest locally validated height central still tracks for this chain.
+                let locally_valid = Some(self.chains[index].ready_through);
                 let da_voted = self.chains[index]
                     .local_da_votes
                     .last_key_value()
@@ -914,7 +896,6 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         id: ArtifactId<D>,
         observation: Observation,
         artifact: &Artifact<V, D>,
-        generation: u64,
     ) -> Result<(), ChainError> {
         let block_ref = match artifact {
             Artifact::TransactionBlock(block) => Some(block.header().block_ref::<H>()),
@@ -929,50 +910,23 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         }) {
             return Ok(());
         }
-        if matches!(artifact, Artifact::TransactionBlock(_)) && self.processed.contains(&id) {
-            return Ok(());
-        }
         match artifact {
             Artifact::TransactionBlock(block) => {
-                let block_ref = block_ref.ok_or(ChainError::Context)?;
-                let locally_custodied = self.is_producer_header(block.header());
-                let state = if locally_custodied {
-                    ValidationState::Valid
-                } else {
-                    ValidationState::Ready
-                };
-                let chain = block.header().chain();
-                let records = &mut self
-                    .chains
-                    .get_mut(chain.get() as usize)
-                    .ok_or(ChainError::Context)?
-                    .blocks;
-                let block = Arc::new(block.clone());
-                let records = records.entry(block.header().height()).or_default();
-                if let Some(record) = records.iter_mut().find(|record| record.artifact == id) {
-                    if record.block.as_ref() != block.as_ref()
-                        || record.block_ref != block_ref
-                        || record.state != ValidationState::Authenticating
-                    {
-                        return Err(ChainError::Context);
-                    }
-                    record.state = state;
-                } else {
-                    let index = records.partition_point(|record| record.observation < observation);
-                    records.insert(
-                        index,
-                        BlockRecord {
-                            artifact: id,
-                            observation,
-                            block: Arc::clone(&block),
-                            block_ref,
-                            state,
-                        },
-                    );
+                let _ = block_ref.ok_or(ChainError::Context)?;
+                // Central records producer ancestry and detects forks before the block leaves for
+                // its chain's remote validator plane, keeping observation identity, order, and fork
+                // detection central (invariant 1). The block store and application validation live
+                // in the plane; a fork is rejected here rather than routed.
+                if !self.record_header::<H>(block.header())? {
+                    return Err(ChainError::ProducerConflict);
                 }
-                if !locally_custodied {
-                    self.schedule_ready_validations(generation)?;
-                }
+                let custodied = self.is_producer_header(block.header());
+                self.capabilities.push(ChainEffect::ObserveBlock {
+                    id,
+                    observation,
+                    block: Arc::new(block.clone()),
+                    custodied,
+                });
             }
             Artifact::DaVote(vote) => {
                 // Shares are only useful to the chain's producer; the own-chain task pools them
@@ -990,39 +944,6 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             }
             _ => return Ok(()),
         }
-        if matches!(artifact, Artifact::TransactionBlock(_)) {
-            self.processed.insert(id);
-        }
-        Ok(())
-    }
-
-    pub(crate) fn register_transaction_block<H: Hasher<Digest = D>>(
-        &mut self,
-        id: ArtifactId<D>,
-        observation: Observation,
-        block: &SignedTransactionBlock<V, D>,
-    ) -> Result<(), ChainError> {
-        let records = self
-            .chains
-            .get_mut(block.header().chain().get() as usize)
-            .ok_or(ChainError::Context)?
-            .blocks
-            .entry(block.header().height())
-            .or_default();
-        if records.iter().any(|record| record.artifact == id) {
-            return Ok(());
-        }
-        let index = records.partition_point(|record| record.observation < observation);
-        records.insert(
-            index,
-            BlockRecord {
-                artifact: id,
-                observation,
-                block: Arc::new(block.clone()),
-                block_ref: block.header().block_ref::<H>(),
-                state: ValidationState::Authenticating,
-            },
-        );
         Ok(())
     }
 
@@ -1066,28 +987,9 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         artifact: &Artifact<V, D>,
     ) -> Result<(), ChainError> {
         match artifact {
-            Artifact::TransactionBlock(block) => {
-                let blocks = &mut self
-                    .chains
-                    .get_mut(block.header().chain().get() as usize)
-                    .ok_or(ChainError::Context)?
-                    .blocks;
-                let records = blocks
-                    .get_mut(&block.header().height())
-                    .ok_or(ChainError::Context)?;
-                let index = records
-                    .iter()
-                    .position(|record| record.artifact == id)
-                    .ok_or(ChainError::Context)?;
-                if records[index].state != ValidationState::Authenticating {
-                    return Err(ChainError::Context);
-                }
-                records.remove(index);
-                if records.is_empty() {
-                    blocks.remove(&block.header().height());
-                }
-                self.processed.remove(&id);
-            }
+            // A block is routed to its validator plane only after producer-signature verification,
+            // so a rejected-unverified block was never stored centrally nor routed: nothing to drop.
+            Artifact::TransactionBlock(_) => {}
             Artifact::DaCertificate(certificate) => {
                 let block = certificate.block_ref::<H>();
                 if let Some(candidates) = self.certificate_candidates.get_mut(&block) {
@@ -1162,7 +1064,6 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             if candidate.artifact == selected {
                 continue;
             }
-            self.processed.remove(&candidate.artifact);
             self.discarded_certificates.push(candidate.artifact);
         }
 
@@ -1334,291 +1235,6 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
                 .iter()
                 .filter(|prepared| prepared.state != PreparedState::Reserved)
                 .count()
-    }
-
-    pub(crate) fn complete_validation<H: Hasher<Digest = D>>(
-        &mut self,
-        completion: ValidationCompletion,
-        generation: u64,
-    ) -> Result<BlockValidationOutcome<D>, ChainError> {
-        if completion.generation != generation {
-            return Ok(BlockValidationOutcome::Stale);
-        }
-        let Some(job) = self.validation_jobs.remove(&completion.id) else {
-            return Ok(BlockValidationOutcome::Stale);
-        };
-        self.release_validation(job)?;
-        let Some(blocks) = self
-            .chains
-            .get_mut(job.chain.get() as usize)
-            .map(|chain| &mut chain.blocks)
-        else {
-            return Err(ChainError::Context);
-        };
-        let Some(records) = blocks.get_mut(&job.height) else {
-            self.schedule_ready_validations(generation)?;
-            return Ok(BlockValidationOutcome::Stale);
-        };
-        let Some(index) = records
-            .iter()
-            .position(|record| record.artifact == job.artifact)
-        else {
-            self.schedule_ready_validations(generation)?;
-            return Ok(BlockValidationOutcome::Stale);
-        };
-        if records[index].state != ValidationState::Pending(completion.id) {
-            self.schedule_ready_validations(generation)?;
-            return Ok(BlockValidationOutcome::Stale);
-        }
-        if completion.validity == BlockValidity::Unavailable {
-            records[index].state = ValidationState::Ready;
-            self.schedule_ready_validations(generation)?;
-            return Ok(BlockValidationOutcome::Deferred);
-        }
-        let header = records[index].block.header().clone();
-        if completion.validity == BlockValidity::Invalid || !self.record_header::<H>(&header)? {
-            self.discard_validation(job, generation)?;
-            return Ok(BlockValidationOutcome::Invalid(job.artifact));
-        }
-        let record = self
-            .chains
-            .get_mut(job.chain.get() as usize)
-            .and_then(|chain| chain.blocks.get_mut(&job.height))
-            .and_then(|records| {
-                records
-                    .iter_mut()
-                    .find(|record| record.artifact == job.artifact)
-            })
-            .ok_or(ChainError::Context)?;
-        if record.state != ValidationState::Pending(completion.id) {
-            return Err(ChainError::Context);
-        }
-        record.state = ValidationState::Valid;
-        self.schedule_ready_validations(generation)?;
-        Ok(BlockValidationOutcome::Retained)
-    }
-
-    fn discard_validation(
-        &mut self,
-        job: ValidationRecord<D>,
-        generation: u64,
-    ) -> Result<(), ChainError> {
-        let blocks = &mut self
-            .chains
-            .get_mut(job.chain.get() as usize)
-            .ok_or(ChainError::Context)?
-            .blocks;
-        let records = blocks.get_mut(&job.height).ok_or(ChainError::Context)?;
-        let index = records
-            .iter()
-            .position(|record| record.artifact == job.artifact)
-            .ok_or(ChainError::Context)?;
-        records.remove(index);
-        if records.is_empty() {
-            blocks.remove(&job.height);
-        }
-        self.processed.remove(&job.artifact);
-        self.schedule_ready_validations(generation)?;
-        Ok(())
-    }
-
-    /// Fills the bounded application pipeline with parent-anchored validation jobs.
-    ///
-    /// A candidate is dispatched only after its exact parent is certified or has entered the
-    /// application pipeline. This lets dependent requests overlap without allowing descendants
-    /// that arrive first to occupy every slot needed to execute their missing parent.
-    ///
-    /// Saturated producers retain their authenticated block in the existing artifact-cache slot.
-    /// The rotating cursor continues across other chains, so one producer cannot turn local
-    /// application pressure into a fatal error or global validation head-of-line blocking.
-    fn schedule_ready_validations(&mut self, generation: u64) -> Result<(), ChainError> {
-        loop {
-            if self.validation_reservations.items >= self.validation_limits.items {
-                return Ok(());
-            }
-
-            let mut scheduled = false;
-            for offset in 0..self.chains.len() {
-                let chain_index = (self.next_validation_chain + offset) % self.chains.len();
-                let chain = ChainId::new(chain_index as u32);
-                if self.chains[chain_index].validation_items
-                    >= self.validation_limits.items_per_chain
-                {
-                    continue;
-                }
-
-                let candidate =
-                    self.chains[chain_index]
-                        .blocks
-                        .iter()
-                        .find_map(|(height, records)| {
-                            records
-                                .iter()
-                                .enumerate()
-                                .find(|(_, record)| {
-                                    record.state == ValidationState::Ready
-                                        && self.validation_parent_available(
-                                            chain_index,
-                                            record.block.header(),
-                                        )
-                                })
-                                .map(|(index, record)| (*height, index, record.artifact))
-                        });
-                let Some((height, record_index, artifact)) = candidate else {
-                    continue;
-                };
-                let block =
-                    Arc::clone(&self.chains[chain_index].blocks[&height][record_index].block);
-                let block_bytes = block.encode_size();
-                if self
-                    .validation_reservations
-                    .bytes
-                    .checked_add(block_bytes)
-                    .is_none_or(|bytes| bytes > self.validation_limits.bytes)
-                    || self.chains[chain_index]
-                        .validation_bytes
-                        .checked_add(block_bytes)
-                        .is_none_or(|bytes| bytes > self.validation_limits.bytes_per_chain)
-                {
-                    continue;
-                }
-
-                let validation = ValidationId(self.next_job);
-                self.next_job = self
-                    .next_job
-                    .checked_add(1)
-                    .ok_or(ChainError::IdentifierExhausted)?;
-                self.reserve_validation(chain_index, block_bytes)?;
-                self.chains
-                    .get_mut(chain_index)
-                    .and_then(|chain| chain.blocks.get_mut(&height))
-                    .and_then(|records| records.get_mut(record_index))
-                    .expect("the selected validation block remains retained")
-                    .state = ValidationState::Pending(validation);
-                let previous = self.validation_jobs.insert(
-                    validation,
-                    ValidationRecord {
-                        chain,
-                        height,
-                        artifact,
-                        bytes: block_bytes,
-                    },
-                );
-                assert!(previous.is_none(), "validation identifiers are unique");
-                self.capabilities.push(ChainEffect::Validate(ValidationJob {
-                    id: validation,
-                    generation,
-                    block,
-                }));
-                self.next_validation_chain = (chain_index + 1) % self.chains.len();
-                scheduled = true;
-                break;
-            }
-            if !scheduled {
-                return Ok(());
-            }
-        }
-    }
-
-    fn validation_parent_available(
-        &self,
-        chain: usize,
-        header: &TransactionBlockHeader<D>,
-    ) -> bool {
-        let Some(parent_height) = header.height().get().checked_sub(1).map(Height::new) else {
-            return false;
-        };
-        if self.chains[chain]
-            .certified
-            .get(&parent_height)
-            .is_some_and(|parent| parent.block.digest() == header.parent())
-        {
-            return true;
-        }
-        // Every record stores the digest it was registered with, so no header is rehashed on
-        // the per-poll scheduling pass.
-        self.chains[chain]
-            .blocks
-            .get(&parent_height)
-            .is_some_and(|records| {
-                records.iter().any(|parent| {
-                    matches!(
-                        parent.state,
-                        ValidationState::Pending(_) | ValidationState::Valid
-                    ) && parent.block_ref.digest() == header.parent()
-                })
-            })
-    }
-
-    fn reserve_validation(&mut self, chain: usize, bytes: usize) -> Result<(), ChainError> {
-        let items = self
-            .validation_reservations
-            .items
-            .checked_add(1)
-            .ok_or(ChainError::IdentifierExhausted)?;
-        let total_bytes = self
-            .validation_reservations
-            .bytes
-            .checked_add(bytes)
-            .ok_or(ChainError::IdentifierExhausted)?;
-        let chain_items = self.chains[chain]
-            .validation_items
-            .checked_add(1)
-            .ok_or(ChainError::IdentifierExhausted)?;
-        let chain_bytes = self.chains[chain]
-            .validation_bytes
-            .checked_add(bytes)
-            .ok_or(ChainError::IdentifierExhausted)?;
-
-        self.validation_reservations.items = items;
-        self.validation_reservations.bytes = total_bytes;
-        self.chains[chain].validation_items = chain_items;
-        self.chains[chain].validation_bytes = chain_bytes;
-        Ok(())
-    }
-
-    fn release_validation(&mut self, job: ValidationRecord<D>) -> Result<(), ChainError> {
-        let chain = job.chain.get() as usize;
-        let items = self
-            .validation_reservations
-            .items
-            .checked_sub(1)
-            .ok_or(ChainError::Context)?;
-        let total_bytes = self
-            .validation_reservations
-            .bytes
-            .checked_sub(job.bytes)
-            .ok_or(ChainError::Context)?;
-        let chain_items = self.chains[chain]
-            .validation_items
-            .checked_sub(1)
-            .ok_or(ChainError::Context)?;
-        let chain_bytes = self.chains[chain]
-            .validation_bytes
-            .checked_sub(job.bytes)
-            .ok_or(ChainError::Context)?;
-
-        self.validation_reservations.items = items;
-        self.validation_reservations.bytes = total_bytes;
-        self.chains[chain].validation_items = chain_items;
-        self.chains[chain].validation_bytes = chain_bytes;
-        Ok(())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn validation_usage(&self) -> (usize, usize, Vec<usize>, Vec<usize>) {
-        (
-            self.validation_reservations.items,
-            self.validation_reservations.bytes,
-            self.chains
-                .iter()
-                .map(|chain| chain.validation_items)
-                .collect(),
-            self.chains
-                .iter()
-                .map(|chain| chain.validation_bytes)
-                .collect(),
-        )
     }
 
     fn record_header<H: Hasher<Digest = D>>(
@@ -1821,6 +1437,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         if self.chains[chain].pending_da_votes.front() == Some(header) {
             self.chains[chain].pending_da_votes.pop_front();
         }
+        self.emit_validator_chosen(chain);
         Ok(())
     }
 
@@ -1861,43 +1478,6 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         }
     }
 
-    /// Lowers every DA-choice prefix cursor to its retirement floor.
-    #[cfg(test)]
-    pub(crate) fn clear_da_voted_run(&mut self) {
-        for chain in 0..self.chains.len() {
-            self.chains[chain].da_voted_run = self.chains[chain].data_retired_through;
-        }
-    }
-
-    /// Rebuilds every DA-choice prefix cursor from the retained choices alone.
-    #[cfg(test)]
-    pub(crate) fn rebuilt_da_voted_run(&self) -> Vec<Height> {
-        let mut rebuilt = self
-            .chains
-            .iter()
-            .map(|chain| chain.data_retired_through)
-            .collect::<Vec<_>>();
-        for (chain, run) in rebuilt.iter_mut().enumerate() {
-            while let Some(next) = run.get().checked_add(1).map(Height::new) {
-                if !self.chains[chain].local_da_votes.contains_key(&next) {
-                    break;
-                }
-                *run = next;
-            }
-        }
-        rebuilt
-    }
-
-    #[cfg(test)]
-    pub(crate) fn da_voted_run(&self) -> Vec<Height> {
-        self.chains.iter().map(|chain| chain.da_voted_run).collect()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn chase_da_voted_run_for_test(&mut self, chain: usize) {
-        self.chase_da_voted_run(chain);
-    }
-
     /// Extends a chain's contiguous DA-choice prefix over every height it now covers.
     fn chase_da_voted_run(&mut self, chain: usize) {
         let chain = &mut self.chains[chain];
@@ -1918,9 +1498,52 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
     /// Each chain contributes at most one run of up to `run_limit` consecutive blocks; the spec
     /// admits DA-voting a path of blocks in one timeslot, with each vote counting as sent for
     /// the eligibility of the next. `limit` bounds the total across chains.
-    pub(crate) fn ready_da_votes<H: Hasher<Digest = D>>(
+    /// Records one chain's offered eligible run and frontier reach from its validator plane.
+    ///
+    /// This is the sole writer of the frontier shadow central reads at vote and proposal time. A
+    /// plane's messages are FIFO, so central applies every queued offer before the read; the shadow
+    /// can only lag a plane, never lead it, because central alone mints the durable choice.
+    pub(crate) fn note_da_vote_ready(
+        &mut self,
+        chain: ChainId,
+        candidates: Vec<Arc<SignedTransactionBlock<V, D>>>,
+        ready_through: Height,
+    ) {
+        if let Some(state) = self.chains.get_mut(chain.get() as usize) {
+            state.offered = candidates;
+            state.ready_through = ready_through;
+        }
+    }
+
+    /// Returns one chain's certified anchor: its highest retained certified block, else its genesis
+    /// tip. A validator plane anchors its eligibility here and is re-seeded with it after a restart.
+    pub(crate) fn certified_anchor(&self, chain: ChainId) -> BlockRef<D> {
+        let index = chain.get() as usize;
+        self.chains
+            .get(index)
+            .and_then(|state| state.certified.last_key_value())
+            .map(|(_, certified)| certified.block)
+            .unwrap_or_else(|| self.genesis[index])
+    }
+
+    /// Returns one chain's durable DA choices above the anchor, to re-seed a validator plane's
+    /// eligibility read-copy after a restart.
+    pub(crate) fn chosen_choices(&self, chain: ChainId) -> Vec<DaChoice<D>> {
+        self.chains
+            .get(chain.get() as usize)
+            .map(|state| state.local_da_votes.values().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Returns the eligible data-availability-vote frontier in round-robin chain order.
+    ///
+    /// Each chain's validator plane pre-computes its contiguous eligible run off-thread and offers
+    /// it through `note_da_vote_ready`; this drains those offers instead of scanning a block store.
+    /// A chain with a reservation in flight is skipped (one unacknowledged run at a time), and the
+    /// already-voted prefix is filtered so a lagging offer never re-proposes a durable choice.
+    pub(crate) fn ready_da_votes(
         &self,
-        profile: &Profile<H, V>,
+        profile: &Profile<impl Hasher<Digest = D>, V>,
         limit: usize,
         run_limit: usize,
     ) -> Result<Vec<Arc<SignedTransactionBlock<V, D>>>, ChainError> {
@@ -1934,7 +1557,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
                 continue;
             }
             let remaining = limit - ready.len();
-            ready.extend(self.eligible_da_run::<H>(profile, index, run_limit.min(remaining))?);
+            ready.extend(self.eligible_offered(index, run_limit.min(remaining)));
             if ready.len() == limit {
                 break;
             }
@@ -1942,23 +1565,27 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         Ok(ready)
     }
 
-    /// Returns the next eligible data-availability vote in round-robin chain order.
-    #[cfg(test)]
-    pub(crate) fn next_ready_da_vote<H: Hasher<Digest = D>>(
-        &self,
-        profile: &Profile<H, V>,
-    ) -> Result<Option<Arc<SignedTransactionBlock<V, D>>>, ChainError> {
-        Ok(self.ready_da_votes(profile, 1, 1)?.pop())
+    /// Returns one chain's offered eligible run above its durable DA-vote frontier, up to `cap`.
+    ///
+    /// The offer is a contiguous validated run above the plane's anchor; filtering to heights above
+    /// the durable `da_voted_run` drops any prefix a not-yet-synced plane still lists as unvoted, so
+    /// central never re-proposes a height it already chose. The reducer's safety-extension check is
+    /// the final authority on which prefix it reserves.
+    fn eligible_offered(&self, chain: usize, cap: usize) -> Vec<Arc<SignedTransactionBlock<V, D>>> {
+        let voted = self.chains[chain].da_voted_run;
+        self.chains[chain]
+            .offered
+            .iter()
+            .filter(|block| block.header().height() > voted)
+            .take(cap)
+            .cloned()
+            .collect()
     }
 
-    /// Returns the chain of the first eligible data-availability vote `select` accepts, in
-    /// round-robin chain order.
-    ///
-    /// This answers the same question as scanning [`Self::ready_da_votes`] for a matching entry,
-    /// without materializing the frontier or scanning past the first match.
-    pub(crate) fn selected_da_chain<H: Hasher<Digest = D>>(
+    /// Returns the chain of the first offered eligible vote `select` accepts, in round-robin order.
+    pub(crate) fn selected_da_chain(
         &self,
-        profile: &Profile<H, V>,
+        profile: &Profile<impl Hasher<Digest = D>, V>,
         mut select: impl FnMut(ChainId, Height) -> bool,
     ) -> Result<Option<ChainId>, ChainError> {
         if !matches!(profile.role(), Role::Validator(_)) {
@@ -1969,135 +1596,13 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             if !self.chains[index].pending_da_votes.is_empty() {
                 continue;
             }
-            let Some((_, record)) = self.eligible_da_head::<H>(profile, index)? else {
+            let Some(block) = self.eligible_offered(index, 1).into_iter().next() else {
                 continue;
             };
-            let header = record.block.header();
+            let header = block.header();
             if select(header.chain(), header.height()) {
                 return Ok(Some(header.chain()));
             }
-        }
-        Ok(None)
-    }
-
-    /// Returns up to `cap` consecutive eligible data-availability votes on one chain, starting
-    /// at its lowest unvoted eligible height.
-    fn eligible_da_run<H: Hasher<Digest = D>>(
-        &self,
-        profile: &Profile<H, V>,
-        chain: usize,
-        cap: usize,
-    ) -> Result<Vec<Arc<SignedTransactionBlock<V, D>>>, ChainError> {
-        let Some((certified_height, record)) = self.eligible_da_head::<H>(profile, chain)? else {
-            return Ok(Vec::new());
-        };
-
-        // Extend the run with consecutive valid children while they stay within the pipeline
-        // distance of the run's certificate anchor: every earlier run entry counts as sent for
-        // the next one's eligibility.
-        let mut run = vec![Arc::clone(&record.block)];
-        let mut parent = record.block_ref;
-        while run.len() < cap {
-            let Some(next) = parent.height().get().checked_add(1).map(Height::new) else {
-                break;
-            };
-            if next.get().saturating_sub(certified_height.get())
-                > profile.protocol().codec_config().pipeline_depth() as u64
-            {
-                break;
-            }
-            let Some(records) = self.chains[chain].blocks.get(&next) else {
-                break;
-            };
-            let Some(record) = records.iter().find(|record| {
-                record.state == ValidationState::Valid
-                    && record.block.header().parent() == parent.digest()
-            }) else {
-                break;
-            };
-            run.push(Arc::clone(&record.block));
-            parent = record.block_ref;
-        }
-        Ok(run)
-    }
-
-    /// Returns one chain's lowest eligible data-availability vote and its certificate anchor.
-    fn eligible_da_head<H: Hasher<Digest = D>>(
-        &self,
-        profile: &Profile<H, V>,
-        chain: usize,
-    ) -> Result<Option<DaHead<'_, V, D>>, ChainError> {
-        // Candidates derive from the retained block records on every pass rather than from an
-        // event-maintained set. A valid block observed while the local certified floor lags the
-        // cluster becomes votable the moment the floor catches up; there is no insertion event
-        // whose loss could silence this chain's DA votes.
-        let (floor, _) = self.chains[chain]
-            .certified
-            .last_key_value()
-            .ok_or(ChainError::Context)?;
-        let start = (*floor).max(self.chains[chain].data_retired_through);
-        // Every height in `(data_retired_through, da_voted_run]` is already a local choice, so
-        // resuming above the cursor skips the voted prefix without probing it height by height.
-        let scanned = start.max(self.chains[chain].da_voted_run);
-        debug_assert!(
-            (start.get()..scanned.get()).all(|height| self.chains[chain]
-                .local_da_votes
-                .contains_key(&Height::new(height + 1))),
-            "the skipped prefix is fully voted"
-        );
-        for height in self.chains[chain]
-            .blocks
-            .range((Bound::Excluded(scanned), Bound::Unbounded))
-            .map(|(height, _)| height)
-        {
-            if self.chains[chain].local_da_votes.contains_key(height) {
-                continue;
-            }
-            let Some((certified_height, certified)) =
-                self.chains[chain].certified.range(..height).next_back()
-            else {
-                return Err(ChainError::Context);
-            };
-            if height.get().saturating_sub(certified_height.get())
-                > profile.protocol().codec_config().pipeline_depth() as u64
-            {
-                continue;
-            }
-
-            let mut parent = certified.block;
-            let mut next = certified_height
-                .get()
-                .checked_add(1)
-                .ok_or(ChainError::HeightOverflow)?;
-            while next < height.get() {
-                let Some(choice) = self.chains[chain].local_da_votes.get(&Height::new(next)) else {
-                    break;
-                };
-                if choice.header.parent() != parent.digest()
-                    || !self.has_valid_block(&choice.header)
-                {
-                    break;
-                }
-                parent = choice.block_ref;
-                next = next.checked_add(1).ok_or(ChainError::HeightOverflow)?;
-            }
-            if next != height.get() {
-                continue;
-            }
-
-            let Some(records) = self.chains[chain].blocks.get(height) else {
-                continue;
-            };
-            let Some(record) = records
-                .iter()
-                .find(|record| record.block.header().parent() == parent.digest())
-            else {
-                continue;
-            };
-            if record.state != ValidationState::Valid {
-                continue;
-            }
-            return Ok(Some((*certified_height, record)));
         }
         Ok(None)
     }
@@ -2350,7 +1855,6 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
                 if header.chain().get() as usize != pass.chain
                     || header.parent() != parent.digest()
                     || header.body_digest() != *payload
-                    || !self.has_valid_block(header)
                 {
                     pass.phase = VoteBodyPhase::Extension;
                     return Ok(VoteBodyProgress::Pending);
@@ -2377,7 +1881,6 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
                     let header = &choice.header;
                     if header.chain().get() as usize != pass.chain
                         || header.parent() != parent.digest()
-                        || !self.has_valid_block(header)
                     {
                         pass.extension_index = pass.extension_bound;
                         return Ok(VoteBodyProgress::Pending);
@@ -2435,7 +1938,6 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
                 if header.chain() != chain
                     || header.parent() != parent.digest()
                     || header.body_digest() != *payload
-                    || !self.has_valid_block(header)
                 {
                     break;
                 }
@@ -2452,10 +1954,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
                     break;
                 };
                 let header = &choice.header;
-                if header.chain() != chain
-                    || header.parent() != parent.digest()
-                    || !self.has_valid_block(header)
-                {
+                if header.chain() != chain || header.parent() != parent.digest() {
                     break;
                 }
                 payloads.push(header.body_digest());
@@ -2474,17 +1973,6 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             .map_err(|_| ChainError::Context)
     }
 
-    fn has_valid_block(&self, header: &TransactionBlockHeader<D>) -> bool {
-        self.chains
-            .get(header.chain().get() as usize)
-            .and_then(|chain| chain.blocks.get(&header.height()))
-            .is_some_and(|records| {
-                records.iter().any(|record| {
-                    record.block.header() == header && record.state == ValidationState::Valid
-                })
-            })
-    }
-
     pub(crate) fn drive<H: Hasher<Digest = D>>(
         &mut self,
         profile: &Profile<H, V>,
@@ -2492,7 +1980,6 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         production_credit: bool,
     ) -> Result<(), ChainError> {
         self.production_credit = production_credit;
-        self.schedule_ready_validations(generation)?;
         let Some(parent) = self.planned_tip::<H>() else {
             return Ok(());
         };

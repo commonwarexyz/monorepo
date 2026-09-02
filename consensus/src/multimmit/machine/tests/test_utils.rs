@@ -7,6 +7,7 @@ use super::super::{
 };
 #[cfg(test)]
 use super::super::{DurableEffect, VerificationCapability};
+use crate::multimmit::types::{ChainId, SignedTransactionBlock};
 use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
 #[cfg(test)]
 use std::collections::VecDeque;
@@ -175,6 +176,18 @@ impl<H: Hasher, V: Variant> Runner<H, V> {
     #[cfg(test)]
     pub(super) const fn machine(&self) -> &Machine<H, V> {
         &self.machine
+    }
+
+    /// Feeds one chain's offered eligible run into the machine's frontier shadow, mirroring the
+    /// per-chain validator plane the runtime tasks own.
+    pub fn note_da_vote_ready(
+        &mut self,
+        chain: ChainId,
+        candidates: Vec<std::sync::Arc<SignedTransactionBlock<V, H::Digest>>>,
+        ready_through: crate::types::Height,
+    ) {
+        self.machine
+            .note_da_vote_ready(chain, candidates, ready_through);
     }
 
     /// Submits one input through the production reducer.
