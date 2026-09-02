@@ -4,20 +4,20 @@ use super::{
     Artifact, ArtifactEntry, ArtifactId, ArtifactState, BarrierAck, BarrierId,
     BlockValidationOutcome, BuildCompletion, BuildJob, BuildOutcome, ChainEffect, ChainError,
     Change, CustodyCancellation, CustodyCompletion, CustodyJob, DaRecoveryCompletion,
-    DaRecoveryRejection,
-    DaRecoveryJob, DaVoteRequest, Dependency, DomainEvent, DurableEffect, DurableJob, DurableState,
-    EffectCompletion, EffectId, FrozenAcknowledgement, IdentifiedArtifact, JobId, Lifecycle,
-    LqcAggregateCompletion, LqcAggregateJob, Machine, NullificationRecoveryCompletion,
-    NullificationRecoveryJob, Observation, PendingPersistence, PendingSigningCompletion,
-    PersistDirective, PersistJob, ProductionTimer, ProtocolComponent, ReplayError, Replayed,
-    ResolutionCompletion, ResolutionJob, Role, SelfAdmission, SendRequest, SignRequest, Timer,
-    ValidationCompletion, ValidationJob, Verdict, VerificationCompletion, VerificationItem,
-    VerificationTicket, VerifyJob, VqcAggregateCompletion, VqcAggregateJob, WorkKey,
+    DaRecoveryJob, DaRecoveryRejection, DaVoteRequest, Dependency, DomainEvent, DurableEffect,
+    DurableJob, DurableState, EffectCompletion, EffectId, FrozenAcknowledgement,
+    IdentifiedArtifact, JobId, Lifecycle, LqcAggregateCompletion, LqcAggregateJob, Machine,
+    NullificationRecoveryCompletion, NullificationRecoveryJob, Observation, PendingPersistence,
+    PendingSigningCompletion, PersistDirective, PersistJob, ProductionTimer, ProtocolComponent,
+    ReplayError, Replayed, ResolutionCompletion, ResolutionJob, Role, SelfAdmission, SendRequest,
+    SignRequest, Timer, ValidationCompletion, ValidationJob, Verdict, VerificationCompletion,
+    VerificationItem, VerificationTicket, VerifyJob, VqcAggregateCompletion, VqcAggregateJob,
+    WorkKey,
     algebra::{ValidatedLqc, ValidatedVqc},
     contracts::{DA_VOTE_RUN, Lane, ServiceCycle, ServiceError, TransitionCost},
     emission::ViewProof,
     finality::{
-        FinalityEffect, FinalityError, FinalityOutput, FinalityUpdate, CertificateDerivations,
+        CertificateDerivations, FinalityEffect, FinalityError, FinalityOutput, FinalityUpdate,
         PreparedLqc,
     },
     state::PendingVoteDa,
@@ -49,7 +49,6 @@ use std::{
 /// full credit made pass completion scale with `pipeline_depth * chains` service cycles, which
 /// dominated view latency once deep pipelines ran many entries per view.
 const SIGN_PASS_ENTRIES_PER_CREDIT: usize = 16;
-
 
 /// A serialized input to the local state machine.
 #[derive(Clone, Debug)]
@@ -2414,12 +2413,17 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     ) -> Result<bool, StepError> {
         // The frontier only picks between advanceable chains, so a floor no certificate exceeds
         // makes the sweep pure overhead.
-        if !self.chain.has_certificate_above(&self.durable.certified_tips) {
+        if !self
+            .chain
+            .has_certificate_above(&self.durable.certified_tips)
+        {
             return Ok(false);
         }
-        let preferred = self.chain.selected_da_chain::<H>(&self.profile, |chain, height| {
-            !self.da_vote_extends_durable_safety(chain, height)
-        })?;
+        let preferred = self
+            .chain
+            .selected_da_chain::<H>(&self.profile, |chain, height| {
+                !self.da_vote_extends_durable_safety(chain, height)
+            })?;
         let Some(artifact) = self.next_durable_da_certificate(preferred) else {
             return Ok(false);
         };
@@ -2682,13 +2686,15 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
 
     fn has_exit_for(&self, view: View) -> bool {
         self.artifacts_by_view.get(&view).is_some_and(|ids| {
-            ids.iter().filter_map(|id| self.artifacts.get(id)).any(|entry| {
-                matches!(entry.state, ArtifactState::Ready)
-                    && matches!(
-                        entry.artifact.as_ref(),
-                        Artifact::Nullification(_) | Artifact::Vqc(_)
-                    )
-            })
+            ids.iter()
+                .filter_map(|id| self.artifacts.get(id))
+                .any(|entry| {
+                    matches!(entry.state, ArtifactState::Ready)
+                        && matches!(
+                            entry.artifact.as_ref(),
+                            Artifact::Nullification(_) | Artifact::Vqc(_)
+                        )
+                })
         })
     }
 
@@ -4179,8 +4185,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         // slice itself stays cheaper than building a set for a handful of identifiers.
         let mut added = 0usize;
         for (index, id) in artifacts.iter().enumerate() {
-            if self.durable_artifact_references.contains_key(id)
-                || artifacts[..index].contains(id)
+            if self.durable_artifact_references.contains_key(id) || artifacts[..index].contains(id)
             {
                 continue;
             }
@@ -4545,7 +4550,10 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     /// Appends the retained artifacts of every view retired since the last sweep.
     fn sweep_retired_views(&mut self, candidates: &mut Vec<ArtifactId<H::Digest>>) {
         let retired = self.durable.retired_view;
-        if self.retirement_swept_view.is_some_and(|swept| swept >= retired) {
+        if self
+            .retirement_swept_view
+            .is_some_and(|swept| swept >= retired)
+        {
             return;
         }
         let lower = self
@@ -4683,11 +4691,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                     || self.contains_durable_effect(*id)
                     || self.durable_effect_count() >= self.profile.resources().max_outbox_effects()
                     || self
-                        .durable_occupancy_after(
-                            &ids,
-                            0,
-                            DurableState::effect_reservations(effect),
-                        )
+                        .durable_occupancy_after(&ids, 0, DurableState::effect_reservations(effect))
                         .is_none_or(|occupancy| {
                             occupancy > self.profile.resources().max_cached_artifacts()
                         })

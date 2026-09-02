@@ -67,12 +67,16 @@ impl Metrics {
         let certificate_transcript_messages = context.histogram(
             "certificate_transcript_messages",
             "transcript messages of one verified certificate",
-            [0.0, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 48.0, 64.0, 128.0, 256.0],
+            [
+                0.0, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 48.0, 64.0, 128.0, 256.0,
+            ],
         );
         let certificate_known_messages = context.histogram(
             "certificate_known_messages",
             "transcript messages of one verified certificate discharged by known votes",
-            [0.0, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 48.0, 64.0, 128.0, 256.0],
+            [
+                0.0, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 48.0, 64.0, 128.0, 256.0,
+            ],
         );
         let ingress_dwell = context.histogram(
             "ingress_dwell",

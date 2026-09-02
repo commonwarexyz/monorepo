@@ -569,7 +569,9 @@ mod tests {
         for view in [5u64, 9, 7] {
             let retained = <TestCommand as UnreliablePolicy>::handle(
                 &mut overflow,
-                TestCommand::new(Request::Hint(Activity::LeaderFinalized { fact: fact(view) })),
+                TestCommand::new(Request::Hint(Activity::LeaderFinalized {
+                    fact: fact(view),
+                })),
             );
             assert!(retained);
         }

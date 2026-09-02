@@ -1,8 +1,6 @@
 //! Deterministic batcher tests over the simulated network.
 
-use super::{
-    Actor, Completed, Config, IngressLimits, Message, Observed, lanes::VIEW_COHORT_ITEMS,
-};
+use super::{Actor, Completed, Config, IngressLimits, Message, Observed, lanes::VIEW_COHORT_ITEMS};
 use crate::{
     multimmit::{
         actors::wire::{CertificateMessage, ConsensusMessage, DataMessage, Envelope},
@@ -1106,7 +1104,10 @@ fn machine_issued_jobs(
 
 fn machine_issued_jobs_for(
     committee: &Committee<MinPk>,
-    identified: Vec<(crate::multimmit::machine::ArtifactId<Sha256Digest>, Artifact<MinPk, Sha256Digest>)>,
+    identified: Vec<(
+        crate::multimmit::machine::ArtifactId<Sha256Digest>,
+        Artifact<MinPk, Sha256Digest>,
+    )>,
     resident_bytes: usize,
 ) -> (
     CoreState<Sha256, MinPk>,
@@ -1300,7 +1301,10 @@ fn an_invalid_da_share_is_admitted_and_keeps_its_sender() {
         // A share signed over a different header is structurally perfect and cryptographically
         // wrong. Admission must not pay a pairing to discover that: threshold recovery checks
         // the whole quorum with one, and only then attributes the shares.
-        let elsewhere = committee.da_vote(1, committee.transaction_header(0, Sha256::hash(&[b"elsewhere"])));
+        let elsewhere = committee.da_vote(
+            1,
+            committee.transaction_header(0, Sha256::hash(&[b"elsewhere"])),
+        );
         let invalid = DaVote::new(
             committee.transaction_header(0, Sha256::hash(&[b"subject"])),
             elsewhere.share().clone(),

@@ -37,9 +37,9 @@ use commonware_cryptography::{
 };
 use commonware_math::algebra::Additive;
 use commonware_utils::{N5f1, sync::Mutex, test_rng};
-use rand::TryRng as _;
 use core::{num::NonZeroUsize, time::Duration};
 use proptest::{collection::vec as prop_vec, prelude::*};
+use rand::TryRng as _;
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{
@@ -5524,9 +5524,10 @@ fn floor_pull_retries_once_per_view_until_lqc_advances_the_floor() {
         last_view = view + 1;
         assert_eq!(machine.inspect().view(), View::new(last_view));
         assert!(
-            effects.iter().all(
-                |effect| !matches!(effect, Capability::Resolver(ResolverCapability::Resolve(_)))
-            ),
+            effects.iter().all(|effect| !matches!(
+                effect,
+                Capability::Resolver(ResolverCapability::Resolve(_))
+            )),
             "a floor within the horizon does not pull"
         );
     }
@@ -5650,7 +5651,10 @@ fn drive_unanimous_votes(
         }
     }
     for signer in 0..5 {
-        let vote = observe(machine, Artifact::Vote(view_vote(machine, proposed, signer)));
+        let vote = observe(
+            machine,
+            Artifact::Vote(view_vote(machine, proposed, signer)),
+        );
         let step = complete_with_step(machine, &vote, true);
         collect(step.capabilities(), &mut vqc_aggregate, &mut lqc_aggregate);
         let (effects, _) = drive_poll_and_persist(machine, step);
@@ -5714,11 +5718,9 @@ fn aggregated_lqc_is_retained_without_a_publication() {
         "no aggregate occupies a publication slot"
     );
     assert!(
-        machine
-            .durable
-            .local
-            .values()
-            .any(|artifact| matches!(artifact.as_ref(), Artifact::Lqc(held) if held == &certificate)),
+        machine.durable.local.values().any(
+            |artifact| matches!(artifact.as_ref(), Artifact::Lqc(held) if held == &certificate)
+        ),
         "the aggregate stays durable so local finality and peer requests both read it"
     );
 }
@@ -5857,9 +5859,10 @@ fn floor_pull_accepts_a_resolved_lqc() {
         let advanced = complete_with_step(&mut machine, &verification, true);
         let (effects, _) = drive_poll_and_persist(&mut machine, advanced);
         assert!(
-            effects.iter().all(
-                |effect| !matches!(effect, Capability::Resolver(ResolverCapability::Resolve(_)))
-            ),
+            effects.iter().all(|effect| !matches!(
+                effect,
+                Capability::Resolver(ResolverCapability::Resolve(_))
+            )),
             "a floor within the horizon does not pull"
         );
     }
@@ -5899,11 +5902,10 @@ fn floor_pull_accepts_a_resolved_lqc() {
     };
     let job = job.clone();
     let admitted = complete_with_step(&mut machine, &job, true);
-    let accepted = admitted
-        .activities()
-        .iter()
-        .any(|activity| matches!(activity, Activity::ProtocolAccepted { artifact, .. }
-            if artifact.as_ref() == &Artifact::Lqc(certificate.clone())));
+    let accepted = admitted.activities().iter().any(|activity| {
+        matches!(activity, Activity::ProtocolAccepted { artifact, .. }
+            if artifact.as_ref() == &Artifact::Lqc(certificate.clone()))
+    });
     let (effects, _) = drive_poll_and_persist(&mut machine, admitted);
     assert!(
         accepted,
@@ -10363,10 +10365,7 @@ fn rejected_da_shares_re_arm_a_quorum_that_excludes_them() {
         })
         .expect("an unattributed rejection re-arms the same pool");
     assert!(
-        !next
-            .votes()
-            .iter()
-            .any(|vote| vote.signer() == culprit),
+        !next.votes().iter().any(|vote| vote.signer() == culprit),
         "a rejected signer re-entered the pool"
     );
 }

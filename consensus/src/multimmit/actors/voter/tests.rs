@@ -4773,11 +4773,11 @@ fn updated_broadcast_parent_is_attached_to_a_live_proposal() {
                 "the attached parent lost votes the broadcast certificate carried"
             );
             assert!(
-                published
+                published.tally().signers().iter().all(|signer| parent
                     .tally()
                     .signers()
                     .iter()
-                    .all(|signer| parent.tally().signers().iter().any(|s| s == signer)),
+                    .any(|s| s == signer)),
                 "the attached parent is not a superset of the broadcast certificate"
             );
             break;

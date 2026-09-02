@@ -88,7 +88,6 @@ const DURABILITY_STORAGE_NAMESPACE: &str = "multimmit-machine";
 /// Bytes buffered before a store writes to a blob.
 const WRITE_BUFFER: NonZeroUsize = NZUsize!(1024 * 1024);
 
-
 /// Derives the storage sizing every durable store uses from the machine's own bounds.
 ///
 /// The machine's artifact cache is itself derived from the view-retention window, so every store
@@ -1187,9 +1186,13 @@ mod tests {
     #[test]
     fn ingress_peer_share_holds_two_maximum_groups_at_every_shape() {
         // The deployed shape first, then the shapes the behavioural tests run at.
-        for (participants, pipeline_depth, extension_bound) in
-            [(50u32, 32u32, 16u32), (11, 3, 2), (7, 2, 1), (6, 2, 1), (1, 1, 0)]
-        {
+        for (participants, pipeline_depth, extension_bound) in [
+            (50u32, 32u32, 16u32),
+            (11, 3, 2),
+            (7, 2, 1),
+            (6, 2, 1),
+            (1, 1, 0),
+        ] {
             let protocol = ingress_protocol(
                 participants,
                 Limits::new(pipeline_depth, extension_bound).unwrap(),

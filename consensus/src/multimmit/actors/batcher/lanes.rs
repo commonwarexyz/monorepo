@@ -101,7 +101,6 @@ pub(super) struct Selected<P: PublicKey, V: Variant, D: Digest> {
     pub(super) received_at: SystemTime,
 }
 
-
 #[cfg(test)]
 impl<P: PublicKey, V: Variant, D: Digest> PartialEq<Artifact<V, D>> for Selected<P, V, D> {
     fn eq(&self, other: &Artifact<V, D>) -> bool {
@@ -607,7 +606,11 @@ mod tests {
         // Draining the lane restores peer budgets exactly.
         assert_eq!(lanes.flush(16).len(), 2);
         lanes
-            .push_group(LaneId::Consensus, peer(0), Group::one(identified(novote), EPOCH))
+            .push_group(
+                LaneId::Consensus,
+                peer(0),
+                Group::one(identified(novote), EPOCH),
+            )
             .unwrap();
     }
 
@@ -635,7 +638,11 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            lanes.push_group(LaneId::Consensus, peer(0), Group::one(identified(replay), EPOCH),),
+            lanes.push_group(
+                LaneId::Consensus,
+                peer(0),
+                Group::one(identified(replay), EPOCH),
+            ),
             Err(Drop::Peer),
             "one of at most f faulty identities exhausted its lane share",
         );
@@ -667,7 +674,10 @@ mod tests {
             .push_group(
                 LaneId::Consensus,
                 peer(0),
-                Group::pair([identified(first.clone()), identified(second.clone())], EPOCH),
+                Group::pair(
+                    [identified(first.clone()), identified(second.clone())],
+                    EPOCH,
+                ),
             )
             .unwrap();
         assert_eq!(ordered.flush(2), vec![first.clone(), second.clone()]);
@@ -705,7 +715,10 @@ mod tests {
                 lanes.push_group(
                     LaneId::Consensus,
                     peer(0),
-                    Group::pair([identified(first.clone()), identified(second.clone())], EPOCH),
+                    Group::pair(
+                        [identified(first.clone()), identified(second.clone())],
+                        EPOCH
+                    ),
                 ),
                 Err(expected),
             );
@@ -730,7 +743,10 @@ mod tests {
             .push_group(
                 LaneId::Consensus,
                 peer(0),
-                Group::pair([identified(parent.clone()), identified(block.clone())], EPOCH),
+                Group::pair(
+                    [identified(parent.clone()), identified(block.clone())],
+                    EPOCH,
+                ),
             )
             .unwrap();
         assert_eq!(lanes.flush(2), vec![parent, block]);
