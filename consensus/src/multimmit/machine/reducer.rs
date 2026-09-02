@@ -2280,24 +2280,33 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         beyond(&self.durable.forwarded_vqcs) || beyond(&self.durable.forwarded_nullifications)
     }
 
-    /// Returns the oldest certificate view that could raise a lagging finality floor.
+    /// Returns the view whose resolution could raise a lagging finality floor.
     ///
     /// No peer pushes an L-QC, so this is the only way a node without finality for a leader
-    /// learns the outcome. Two shapes need one. A node that entered a view beyond the one after
-    /// the floor exited that view on an authenticated V-QC or nullification and still holds no
-    /// covering L-QC; it probes once per view because the next view re-arms the probe. A stranded
-    /// node cannot advance at all, so nothing would re-arm it and it probes until the resolution
-    /// lands. A pool that already reached finality is excluded because its own aggregate settles
-    /// the same view without a round trip. One request per view is outstanding at a time because
-    /// the resolution index admits one job per view.
+    /// learns the outcome. A stranded node holds exits above the view it can act in and none for
+    /// that view, so it asks for the current view: its own store cannot answer, and any peer whose
+    /// finality passed that view serves a covering L-QC. It probes until the resolution lands,
+    /// even while a local aggregate is pending, because that aggregate may wait on verification
+    /// work the node cannot complete while stranded. A node whose finality floor trails its view
+    /// by more than the future-view horizon exited those views on V-QCs or nullifications without
+    /// settling their leaders; it asks for the view after the floor once per view advance, and
+    /// skips the probe while a pool of its own already reached finality above the floor, since
+    /// that aggregate settles the same view without a round trip. One request per view is
+    /// outstanding at a time because the resolution index admits one job per view.
     fn floor_resolution_view(&self) -> Option<View> {
         let floor = self.signing_floor_view();
+        if self.views.signing_floor_candidate(floor).is_some() {
+            return None;
+        }
+        if self.stranded() {
+            return Some(self.durable.view);
+        }
         let next = floor.get().checked_add(1).map(View::new)?;
-        let lagging = self.durable.view > next && self.floor_probe_view < self.durable.view;
-        ((lagging || self.stranded())
-            && self.views.signing_floor_candidate(floor).is_none()
-            && !self.finality.assembling_above(floor))
-        .then_some(next)
+        let horizon = self.profile.resources().max_future_view_distance();
+        let lagging = self.durable.view.get().saturating_sub(floor.get()) > horizon
+            && self.floor_probe_view < self.durable.view
+            && !self.finality.assembling_above(floor);
+        lagging.then_some(next)
     }
 
     fn next_finality_floor_change(&self) -> Option<Change<V, H::Digest>> {
