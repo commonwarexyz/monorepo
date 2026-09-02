@@ -1625,7 +1625,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             BlockValidationOutcome::Stale => {
                 return Ok(Step::new(StepStatus::StaleCompletion, Vec::new()));
             }
-            BlockValidationOutcome::Retained => {}
+            BlockValidationOutcome::Retained | BlockValidationOutcome::Deferred => {}
             BlockValidationOutcome::Invalid(artifact) => {
                 self.remove_terminal_artifact(artifact)?;
             }

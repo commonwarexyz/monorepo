@@ -1035,12 +1035,21 @@ where
                     .observe_between(started_at, completed_at);
                 self.validation_finished(block.header().chain(), id)?;
 
-                let verdict = verdict.ok_or(Fatal::Automaton)?;
-                let validity = if verdict {
-                    BlockValidity::Valid
-                } else {
-                    self.metrics.invalid_blocks.inc();
-                    BlockValidity::Invalid
+                let validity = match verdict {
+                    Some(true) => BlockValidity::Valid,
+                    Some(false) => {
+                        self.metrics.invalid_blocks.inc();
+                        BlockValidity::Invalid
+                    }
+                    None => {
+                        self.metrics.unavailable_validations.inc();
+                        warn!(
+                            chain = block.header().chain().get(),
+                            height = block.header().height().get(),
+                            "application reached no validation verdict; retrying"
+                        );
+                        BlockValidity::Unavailable
+                    }
                 };
                 let application = (validity == BlockValidity::Valid).then_some((
                     AppCompletionKey::Verify(block.header().digest::<H>()),

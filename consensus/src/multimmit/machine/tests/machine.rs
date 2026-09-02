@@ -7988,6 +7988,53 @@ fn invalid_block_can_be_revalidated() {
 }
 
 #[test]
+fn a_validation_without_a_verdict_is_scheduled_again() {
+    let mut machine = active_machine(Role::Observer);
+    let genesis = machine.profile().protocol().genesis().tips()[0];
+    let header = TransactionBlockHeader::new(
+        machine.profile().protocol().epoch(),
+        ChainId::new(0),
+        Height::new(1),
+        genesis.digest(),
+        digest(b"unavailable block"),
+    )
+    .unwrap();
+    let artifact = Artifact::TransactionBlock(SignedTransactionBlock::new(header, attestation(0)));
+
+    let verification = observe(&mut machine, artifact);
+    let verified = complete_with_step(&mut machine, &verification, true);
+    let validation = verified
+        .capabilities()
+        .iter()
+        .find_map(|effect| match effect {
+            Capability::Producer(ProducerCapability::Validate(job)) => Some(job.clone()),
+            _ => None,
+        })
+        .unwrap();
+
+    // The application reached no verdict: the block stays retained and is dispatched again.
+    let step = machine
+        .step(Input::BlockValidated(ValidationCompletion::new(
+            validation.id(),
+            validation.generation(),
+            BlockValidity::Unavailable,
+        )))
+        .unwrap();
+    let settled = settle(&mut machine, step);
+    assert_eq!(machine.inspect().cached_artifacts(), 1);
+    let retried = settled
+        .capabilities()
+        .iter()
+        .find_map(|effect| match effect {
+            Capability::Producer(ProducerCapability::Validate(job)) => Some(job.clone()),
+            _ => None,
+        })
+        .expect("the block is validated again");
+    assert_ne!(retried.id(), validation.id());
+    assert_eq!(retried.block().header(), validation.block().header());
+}
+
+#[test]
 fn producer_window_stops_before_the_third_uncertified_block() {
     let mut machine = active_machine(Role::Validator(Participant::new(0)));
 

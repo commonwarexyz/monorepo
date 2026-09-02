@@ -8,7 +8,7 @@ use commonware_consensus::{
     Automaton, Epochable as _, Heightable as _, Relay, Reporter,
     multimmit::{
         Artifact,
-        marshal::{Custody, Mailbox, Update},
+        marshal::{Custody, Error as MarshalError, Mailbox, Update},
         types::{Activity, BlockRef, ChainId, Context, TransactionBlock, TransactionBlockHeader},
     },
 };
@@ -28,11 +28,15 @@ use std::{
     future::{Future, ready},
     num::NonZeroUsize,
     sync::Arc,
-    time::SystemTime,
+    time::{Duration, SystemTime},
 };
 use tracing::{info, warn};
 
 const BODY_NAMESPACE: &[u8] = b"_COMMONWARE_LOG_MULTIMMIT_BODY";
+/// Attempts to subscribe to a block body while the marshal reports a full mailbox.
+const BUSY_RETRIES: u32 = 8;
+/// Base delay between busy retries; attempt `n` waits `n` times this.
+const BUSY_BACKOFF: Duration = Duration::from_millis(25);
 
 /// Opaque junk data carried by one producer block.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -410,7 +414,7 @@ impl<E: Clock + Spawner> Automaton for Application<E> {
         let producer_chain = self.producer_chain;
         let body_wait = self.metrics.body_wait.clone();
         let (mut sender, receiver) = oneshot::channel();
-        self.context.child("verify").spawn(move |_| async move {
+        self.context.child("verify").spawn(move |runtime| async move {
             if let Some(custody) = staged.take_custody(reference) {
                 let result = select! {
                     _ = sender.closed() => return,
@@ -432,9 +436,24 @@ impl<E: Clock + Spawner> Automaton for Application<E> {
                 return;
             }
             let requested_at = SystemTime::now();
-            let subscription = select! {
-                _ = sender.closed() => return,
-                result = marshal.subscribe_block(reference) => result,
+            // A full marshal mailbox rejects the request outright; back off briefly and retry
+            // before reporting no verdict, which consensus answers by validating again later.
+            let mut attempt = 0u32;
+            let subscription = loop {
+                let result = select! {
+                    _ = sender.closed() => return,
+                    result = marshal.subscribe_block(reference) => result,
+                };
+                match result {
+                    Err(MarshalError::Busy) if attempt < BUSY_RETRIES => {
+                        attempt += 1;
+                        select! {
+                            _ = sender.closed() => return,
+                            _ = runtime.sleep(BUSY_BACKOFF * attempt) => {}
+                        }
+                    }
+                    result => break result,
+                }
             };
             match subscription {
                 Ok(block) => {
