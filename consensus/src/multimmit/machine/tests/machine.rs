@@ -5510,11 +5510,31 @@ fn floor_pull_retries_once_per_view_until_lqc_advances_the_floor() {
         Some(Artifact::Lqc(certificate)) if certificate.view() == View::new(1)
     ));
 
+    // Finality trails the view by a few views in healthy operation, so the pull waits until the
+    // floor lags by more than the future-view horizon.
+    let horizon = machine.profile.resources().max_future_view_distance();
     let exit = symbolic_nullification(&machine, View::new(2), 2);
-    let verification = observe(&mut machine, Artifact::Nullification(exit.clone()));
+    let mut last_view = 2;
+    for view in 2..=horizon {
+        let nullification = symbolic_nullification(&machine, View::new(view), view);
+        let verification = observe(&mut machine, Artifact::Nullification(nullification));
+        let advanced = complete_with_step(&mut machine, &verification, true);
+        let (effects, _) = drive_poll_and_persist(&mut machine, advanced);
+        last_view = view + 1;
+        assert_eq!(machine.inspect().view(), View::new(last_view));
+        assert!(
+            effects.iter().all(
+                |effect| !matches!(effect, Capability::Resolver(ResolverCapability::Resolve(_)))
+            ),
+            "a floor within the horizon does not pull"
+        );
+    }
+    let nullification = symbolic_nullification(&machine, View::new(last_view), last_view);
+    let verification = observe(&mut machine, Artifact::Nullification(nullification));
     let advanced = complete_with_step(&mut machine, &verification, true);
     let (effects, _) = drive_poll_and_persist(&mut machine, advanced);
-    assert_eq!(machine.inspect().view(), View::new(3));
+    last_view += 1;
+    assert_eq!(machine.inspect().view(), View::new(last_view));
     let pulls = effects
         .iter()
         .filter_map(|effect| match effect {
@@ -5548,11 +5568,11 @@ fn floor_pull_retries_once_per_view_until_lqc_advances_the_floor() {
     );
     assert_eq!(machine.inspect().resolution_jobs(), 0);
 
-    let next_exit = symbolic_nullification(&machine, View::new(3), 3);
+    let next_exit = symbolic_nullification(&machine, View::new(last_view), last_view);
     let verification = observe(&mut machine, Artifact::Nullification(next_exit));
     let advanced = complete_with_step(&mut machine, &verification, true);
     let (effects, _) = drive_poll_and_persist(&mut machine, advanced);
-    assert_eq!(machine.inspect().view(), View::new(4));
+    assert_eq!(machine.inspect().view(), View::new(last_view + 1));
     let rearmed = effects
         .iter()
         .filter_map(|effect| match effect {
@@ -5827,12 +5847,26 @@ fn floor_pull_accepts_a_resolved_lqc() {
     let profile = profile_for(Role::Observer, 6, 2);
     let (mut machine, _) = start_profile(profile);
 
-    // Leaving view 1 on a nullification settles no leader, so the floor stays at zero.
-    let exit = symbolic_nullification(&machine, View::new(1), 1);
+    // Leaving views on nullifications settles no leader, so the floor stays at zero; once the
+    // view is more than the future-view horizon past it, the machine asks for the L-QC.
+    let horizon = machine.profile.resources().max_future_view_distance();
+    for view in 1..horizon {
+        let exit = symbolic_nullification(&machine, View::new(view), view);
+        let verification = observe(&mut machine, Artifact::Nullification(exit));
+        let advanced = complete_with_step(&mut machine, &verification, true);
+        let (effects, _) = drive_poll_and_persist(&mut machine, advanced);
+        assert!(
+            effects.iter().all(
+                |effect| !matches!(effect, Capability::Resolver(ResolverCapability::Resolve(_)))
+            ),
+            "a floor within the horizon does not pull"
+        );
+    }
+    let exit = symbolic_nullification(&machine, View::new(horizon), horizon);
     let verification = observe(&mut machine, Artifact::Nullification(exit));
     let advanced = complete_with_step(&mut machine, &verification, true);
     let (effects, _) = drive_poll_and_persist(&mut machine, advanced);
-    assert_eq!(machine.inspect().view(), View::new(2));
+    assert_eq!(machine.inspect().view(), View::new(horizon + 1));
     let pulls = effects
         .iter()
         .filter_map(|effect| match effect {
@@ -15320,8 +15354,8 @@ fn invalid_resolved_exit_rearms_exact_want_and_accepts_retry() {
     assert_eq!(restored.inspect().view(), View::new(2));
     assert_eq!(
         restored.inspect().resolution_jobs(),
-        1,
-        "the exact exit is complete while the independent finality-floor probe remains"
+        0,
+        "the exact exit is complete and a floor within the horizon opens no probe"
     );
 }
 
