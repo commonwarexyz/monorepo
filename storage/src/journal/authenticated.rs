@@ -687,6 +687,30 @@ where
             .map_err(Error::Merkle)
     }
 
+    /// Merkle frontier at the first item `batch` appends ([`Family::nodes_to_pin`]).
+    ///
+    /// Nodes below the batch chain are read from this journal's
+    /// [Merkle store][crate::merkle::mem::Mem], which retains them at least until
+    /// the batch's changes are flushed.
+    pub fn speculative_pinned_nodes(
+        &self,
+        batch: &MerkleizedBatch<F, H::Digest, C::Item, S>,
+    ) -> Result<Vec<H::Digest>, Error<F>> {
+        let start = Location::new(batch.size() - batch.items().len() as u64);
+        self.merkle
+            .with_mem(|mem| {
+                F::nodes_to_pin(start)
+                    .map(|pos| {
+                        batch
+                            .get_node(pos)
+                            .or_else(|| mem.get_node(pos))
+                            .ok_or(merkle::Error::ElementPruned(pos))
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .map_err(Error::Merkle)
+    }
+
     /// Generate a historical proof with respect to the state of the Merkle structure when it had
     /// `historical_leaves` leaves.
     ///

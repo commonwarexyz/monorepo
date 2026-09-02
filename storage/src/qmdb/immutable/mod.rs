@@ -872,7 +872,7 @@ pub(super) mod tests {
     use super::*;
     use crate::{
         merkle::{Family, Location},
-        qmdb::verify_proof,
+        qmdb::{verify_proof, verify_proof_and_pinned_nodes},
         translator::TwoCap,
     };
     use commonware_codec::EncodeShared;
@@ -1240,6 +1240,7 @@ pub(super) mod tests {
         let (seed_start, seed_ops) = seed.operations();
         let seed_root = seed.root();
         let seed_proof = seed.proof(&db).unwrap();
+        let seed_pins = seed.pinned_nodes(&db).unwrap();
         let (db, seed_range) = db.apply_batch(seed).await.unwrap();
         assert_eq!(seed_start, seed_range.start);
         assert_eq!(*seed_start + seed_ops.len() as u64, *seed_range.end);
@@ -1258,6 +1259,10 @@ pub(super) mod tests {
         let (parent_start, parent_ops) = parent.operations();
         let (child_start, child_ops) = child.operations();
         let (parent_root, child_root) = (parent.root(), child.root());
+        let (parent_pins, child_pins) = (
+            parent.pinned_nodes(&db).unwrap(),
+            child.pinned_nodes(&db).unwrap(),
+        );
         let (parent_proof, child_proof) = (parent.proof(&db).unwrap(), child.proof(&db).unwrap());
         let (db, parent_range) = db.apply_batch(parent).await.unwrap();
         let (db, child_range) = db.apply_batch(child).await.unwrap();
@@ -1273,17 +1278,24 @@ pub(super) mod tests {
             .await;
         let (empty_start, empty_ops) = empty.operations();
         let (empty_root, empty_proof) = (empty.root(), empty.proof(&db).unwrap());
+        let empty_pins = empty.pinned_nodes(&db).unwrap();
         let (db, empty_range) = db.apply_batch(empty).await.unwrap();
         assert_eq!(empty_start, empty_range.start);
         assert_eq!(*empty_start + empty_ops.len() as u64, *empty_range.end);
 
         // Every captured delta and proof must match what the log recovers for its
-        // range, and verify against the batch's own root.
-        for (start, ops, proof, root) in [
-            (seed_start, seed_ops, seed_proof, seed_root),
-            (parent_start, parent_ops, parent_proof, parent_root),
-            (child_start, child_ops, child_proof, child_root),
-            (empty_start, empty_ops, empty_proof, empty_root),
+        // range, and verify against the batch's own root with and without the pins.
+        for (start, ops, proof, pins, root) in [
+            (seed_start, seed_ops, seed_proof, seed_pins, seed_root),
+            (
+                parent_start,
+                parent_ops,
+                parent_proof,
+                parent_pins,
+                parent_root,
+            ),
+            (child_start, child_ops, child_proof, child_pins, child_root),
+            (empty_start, empty_ops, empty_proof, empty_pins, empty_root),
         ] {
             let len = core::num::NonZeroU64::new(ops.len() as u64).unwrap();
             let end = Location::new(*start + ops.len() as u64);
@@ -1291,24 +1303,56 @@ pub(super) mod tests {
             assert_eq!(log_ops, *ops);
             assert_eq!(log_proof, proof);
             assert!(verify_proof::<Sha256, _, _>(&proof, start, &ops, &root));
+            assert!(verify_proof_and_pinned_nodes::<Sha256, _, _>(
+                &proof, start, &ops, &pins, &root
+            ));
         }
 
-        // After the batch's changes are flushed, proof is a verifying proof or an
-        // error, never a wrong proof.
+        // Flushing the applied batch prunes the store to its peaks. The late batch's base is
+        // mid-mountain, so its artifacts are refused rather than returned unverifiable.
         let late = db
             .new_batch()
             .set(Sha256::fill(5u8), Sha256::fill(15u8))
             .merkleize(&db, None, db.inactivity_floor_loc())
             .await;
-        let (late_start, late_ops) = late.operations();
-        let late_root = late.root();
         let (db, _) = db.apply_batch(Arc::clone(&late)).await.unwrap();
         let db = db.commit().await.unwrap();
-        if let Ok(proof) = late.proof(&db) {
-            assert!(verify_proof::<Sha256, _, _>(
-                &proof, late_start, &late_ops, &late_root
-            ));
-        }
+        assert!(matches!(
+            late.proof(&db),
+            Err(crate::qmdb::Error::Merkle(
+                crate::merkle::Error::ElementPruned(_)
+            ))
+        ));
+        assert!(matches!(
+            late.pinned_nodes(&db),
+            Err(crate::qmdb::Error::Merkle(
+                crate::merkle::Error::ElementPruned(_)
+            ))
+        ));
+
+        // A batch built on the flushed store reads every node below it from the pinned peaks.
+        let flushed = db
+            .new_batch()
+            .set(Sha256::fill(6u8), Sha256::fill(16u8))
+            .merkleize(&db, None, db.inactivity_floor_loc())
+            .await;
+        let (flushed_start, flushed_ops) = flushed.operations();
+        let flushed_root = flushed.root();
+        let flushed_proof = flushed.proof(&db).unwrap();
+        let flushed_pins = flushed.pinned_nodes(&db).unwrap();
+        assert!(verify_proof_and_pinned_nodes::<Sha256, _, _>(
+            &flushed_proof,
+            flushed_start,
+            &flushed_ops,
+            &flushed_pins,
+            &flushed_root
+        ));
+        let (db, flushed_range) = db.apply_batch(flushed).await.unwrap();
+        assert_eq!(flushed_start, flushed_range.start);
+        assert_eq!(
+            *flushed_start + flushed_ops.len() as u64,
+            *flushed_range.end
+        );
 
         db.destroy().await.unwrap();
     }

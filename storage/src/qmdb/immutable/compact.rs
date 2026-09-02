@@ -4,7 +4,8 @@
 //! Mirrors the API of [`crate::qmdb::immutable::Immutable`] (`new_batch -> merkleize ->
 //! apply_batch -> commit / sync / start_sync`, pipelined batch chains, `StaleBatch` validation)
 //! but is backed by the peak-only [`crate::merkle::compact`]. Because history is discarded,
-//! there are no `get` / `proof` / `bounds` methods. Use the full variant if you need them.
+//! the db has no `get` / `proof` / `bounds` methods. A merkleized batch can prove only its own
+//! operations, and only until it is applied. Use the full variant for historical proofs.
 //!
 //! # Witness journal
 //!
@@ -28,7 +29,7 @@ pub use crate::qmdb::compact::Config;
 use crate::{
     Context,
     journal::contiguous::variable::{self, Config as JournalConfig},
-    merkle::{Family, Location, batch, compact as compact_merkle},
+    merkle::{Family, Location, Proof, batch, compact as compact_merkle},
     qmdb::{
         self, Error,
         any::value::ValueEncoding,
@@ -117,6 +118,7 @@ where
     Operation<F, K, V>: EncodeShared,
 {
     pub(super) merkle_batch: Arc<batch::MerkleizedBatch<F, D, S>>,
+    operations: Arc<Vec<Operation<F, K, V>>>,
     pub(super) commit_metadata: Option<V::Value>,
     pub(super) parent: Option<Weak<Self>>,
     pub(super) bounds: batch_chain::Bounds<F, D>,
@@ -144,6 +146,83 @@ where
     /// Return the [`Bounds`] of the batch.
     pub const fn bounds(&self) -> &Bounds<F, D> {
         &self.bounds
+    }
+
+    /// Return the operations this batch appends to the log and the location of the first.
+    #[allow(clippy::type_complexity)]
+    pub fn operations(&self) -> (Location<F>, Arc<Vec<Operation<F, K, V>>>) {
+        (self.bounds.base.size, Arc::clone(&self.operations))
+    }
+
+    /// Inclusion proof for the operations returned by [`Self::operations`], anchored at
+    /// this batch's tip. The pair verifies against [`Self::root`] via
+    /// [`crate::qmdb::verify_proof`]. Together with [`Self::pinned_nodes`] they verify via
+    /// [`crate::qmdb::verify_proof_and_pinned_nodes`].
+    ///
+    /// Nodes of unapplied ancestors are read through the chain, so those ancestors must still be
+    /// alive. Nodes below the chain are read from `db`'s
+    /// [Merkle store][crate::merkle::mem::Mem], which retains them at least until this batch's
+    /// changes are applied (applying it or a descendant prunes the store to its frontier).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or
+    /// belongs to a dropped unapplied ancestor, and [`crate::merkle::Error::Empty`] if the batch
+    /// has no operations (a [`Db::to_batch`] snapshot).
+    pub fn proof<E, C, H>(&self, db: &Db<F, E, K, V, H, C, S>) -> Result<Proof<F, D>, Error<F>>
+    where
+        E: Context,
+        H: Hasher<Digest = D>,
+        C: Clone + Send + Sync + 'static,
+        Operation<F, K, V>: Read<Cfg = C>,
+    {
+        let inactive_peaks = F::inactive_peaks(self.bounds.tip.size, self.bounds.inactivity_floor);
+        let hasher = qmdb::hasher::<H>();
+        db.merkle
+            .with_mem(|base| {
+                self.merkle_batch.range_proof(
+                    base,
+                    &hasher,
+                    self.bounds.base.size..self.bounds.tip.size,
+                    inactive_peaks,
+                )
+            })
+            .map_err(Into::into)
+    }
+
+    /// The Merkle frontier at the first operation returned by [`Self::operations`]
+    /// ([`Family::nodes_to_pin`]), which lets a consumer holding only this batch's base rebuild
+    /// compact state and replay the operations. The operations, [`Self::proof`], and pinned
+    /// nodes verify against [`Self::root`] via [`crate::qmdb::verify_proof_and_pinned_nodes`].
+    ///
+    /// Nodes of unapplied ancestors are read through the chain, so those ancestors must still be
+    /// alive. Nodes below the chain are read from `db`'s
+    /// [Merkle store][crate::merkle::mem::Mem], which retains them at least until this batch's
+    /// changes are applied (applying it or a descendant prunes the store to its frontier).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or
+    /// belongs to a dropped unapplied ancestor.
+    pub fn pinned_nodes<E, C, H>(&self, db: &Db<F, E, K, V, H, C, S>) -> Result<Vec<D>, Error<F>>
+    where
+        E: Context,
+        H: Hasher<Digest = D>,
+        C: Clone + Send + Sync + 'static,
+        Operation<F, K, V>: Read<Cfg = C>,
+    {
+        db.merkle
+            .with_mem(|base| {
+                F::nodes_to_pin(self.bounds.base.size)
+                    .map(|pos| {
+                        self.merkle_batch
+                            .get_node(pos)
+                            .or_else(|| base.get_node(pos))
+                            .ok_or(crate::merkle::Error::ElementPruned(pos))
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .map_err(Into::into)
     }
 
     /// Create a new speculative batch with this one as its parent.
@@ -238,12 +317,13 @@ where
         }
         ops.push(Operation::Commit(metadata.clone(), inactivity_floor));
 
-        let total_size = self.base.size + ops.len() as u64;
+        let operations = Arc::new(ops);
+        let total_size = self.base.size + operations.len() as u64;
         let inactive_peaks = F::inactive_peaks(total_size, inactivity_floor);
         let (merkle, root) = compact_batch::merkleize_ops::<F, H, S, _>(
             &db.merkle,
             self.merkle_batch,
-            ops,
+            Arc::clone(&operations),
             inactive_peaks,
         )
         .await
@@ -257,6 +337,7 @@ where
 
         Arc::new(MerkleizedBatch {
             merkle_batch: merkle,
+            operations,
             commit_metadata: metadata,
             parent: self.parent.as_ref().map(Arc::downgrade),
             bounds: batch_chain::Bounds {
@@ -430,6 +511,7 @@ where
     {
         Arc::new(MerkleizedBatch {
             merkle_batch: self.merkle.to_batch(),
+            operations: Arc::new(Vec::new()),
             commit_metadata: self.last_commit_metadata.clone(),
             parent: None,
             bounds: batch_chain::Bounds::from_db(self.commitment(), self.inactivity_floor_loc),
@@ -641,8 +723,11 @@ where
 mod tests {
     use super::*;
     use crate::{
-        merkle::mmr,
-        qmdb::{any::value::FixedEncoding, compact::witness},
+        merkle::{mmb, mmr},
+        qmdb::{
+            any::value::FixedEncoding, compact::witness, verify_proof,
+            verify_proof_and_pinned_nodes,
+        },
     };
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::test_traced;
@@ -682,6 +767,197 @@ mod tests {
         Db::init_from_merkle(merkle, context.child("witness"), witness_cfg, ())
             .await
             .unwrap()
+    }
+
+    /// Batch artifacts (operations, range proof, pinned frontier) verify against the batch root,
+    /// survive applying and dropping ancestors, and are refused once the batch itself is applied
+    /// and the compact store is pruned past them.
+    async fn compact_operations_and_proof_inner<F: Family>(context: deterministic::Context) {
+        let db = open_db::<F>(context.child("db"), "immutable-operations-and-proof").await;
+        let value = |key: u8| Sha256::fill(key.wrapping_add(100));
+
+        // Seed committed state so the chain below forks above a pruned frontier.
+        let mut seed = db.new_batch();
+        for key in 1u8..=6 {
+            seed = seed.set(Sha256::fill(key), value(key));
+        }
+        let seed = seed
+            .merkleize(&db, Some(Sha256::fill(7)), Location::new(0))
+            .await;
+        let (db, _) = db.apply_batch(seed).await.unwrap();
+        let db = db.sync().await.unwrap();
+        let floor = db.size();
+        assert_eq!(floor, Location::new(8));
+
+        // A snapshot batch has no operations to prove.
+        assert!(matches!(
+            db.to_batch().proof(&db),
+            Err(Error::Merkle(crate::merkle::Error::Empty))
+        ));
+
+        // A two-deep unapplied chain: the child's artifacts read the parent's nodes through the
+        // live chain.
+        let mut parent = db.new_batch();
+        for key in 8u8..=12 {
+            parent = parent.set(Sha256::fill(key), value(key));
+        }
+        let parent = parent.merkleize(&db, Some(Sha256::fill(13)), floor).await;
+        let child = parent
+            .new_batch::<Sha256>()
+            .set(Sha256::fill(14), value(14))
+            .merkleize(&db, Some(Sha256::fill(15)), floor)
+            .await;
+
+        // The operation suffix is the batch's own sets plus its commit, handed out zero-copy.
+        let (child_start, child_ops) = child.operations();
+        let (_, child_ops_again) = child.operations();
+        let child_end = child.bounds().tip.size;
+        assert!(Arc::ptr_eq(&child_ops, &child_ops_again));
+        assert_eq!(child_start, parent.bounds().tip.size);
+        assert_eq!(*child_start + child_ops.len() as u64, *child_end);
+        assert_eq!(child_end, Location::new(16));
+        assert!(matches!(
+            child_ops.as_slice(),
+            [Operation::Set(key, set_value), Operation::Commit(Some(metadata), operation_floor)]
+                if key == &Sha256::fill(14)
+                    && set_value == &value(14)
+                    && metadata == &Sha256::fill(15)
+                    && operation_floor == &floor
+        ));
+
+        // The proof is anchored at the batch tip and verifies with or without the pins.
+        let child_root = child.root();
+        let child_proof = child.proof(&db).unwrap();
+        let child_pins = child.pinned_nodes(&db).unwrap();
+        assert_eq!(child_proof.leaves, child_end);
+        assert_eq!(
+            child_proof.inactive_peaks,
+            F::inactive_peaks(child_end, floor),
+        );
+        assert!(verify_proof::<Sha256, _, _>(
+            &child_proof,
+            child_start,
+            &child_ops,
+            &child_root
+        ));
+        assert!(verify_proof_and_pinned_nodes::<Sha256, _, _>(
+            &child_proof,
+            child_start,
+            &child_ops,
+            &child_pins,
+            &child_root
+        ));
+
+        // The pins are order-sensitive.
+        assert!(child_pins.len() > 1);
+        let mut reordered_child_pins = child_pins.clone();
+        reordered_child_pins.swap(0, 1);
+        assert!(!verify_proof_and_pinned_nodes::<Sha256, _, _>(
+            &child_proof,
+            child_start,
+            &child_ops,
+            &reordered_child_pins,
+            &child_root
+        ));
+
+        // Pipelined consumer: applying the parent prunes the store to the parent's tip, which is
+        // exactly the frontier the child's base pins, so the artifacts survive dropping the
+        // parent.
+        let (db, _) = db.apply_batch(parent).await.unwrap();
+        let child_proof_after = child.proof(&db).unwrap();
+        assert_eq!(child.pinned_nodes(&db).unwrap(), child_pins);
+        assert!(verify_proof_and_pinned_nodes::<Sha256, _, _>(
+            &child_proof_after,
+            child_start,
+            &child_ops,
+            &child_pins,
+            &child_root
+        ));
+        let (db, child_range) = db.apply_batch(child).await.unwrap();
+        assert_eq!(child_range, child_start..child_end);
+
+        // A commit-only batch proves exactly its commit operation.
+        let commit_floor = db.size();
+        let commit_only = db
+            .new_batch()
+            .merkleize(&db, Some(Sha256::fill(16)), commit_floor)
+            .await;
+        let (commit_start, commit_ops) = commit_only.operations();
+        let commit_end = commit_only.bounds().tip.size;
+        let commit_root = commit_only.root();
+        let commit_proof = commit_only.proof(&db).unwrap();
+        let commit_pins = commit_only.pinned_nodes(&db).unwrap();
+        assert_eq!(commit_start, commit_floor);
+        assert!(matches!(
+            commit_ops.as_slice(),
+            [Operation::Commit(Some(metadata), operation_floor)]
+                if metadata == &Sha256::fill(16) && operation_floor == &commit_floor
+        ));
+        assert_eq!(*commit_start + commit_ops.len() as u64, *commit_end);
+        assert_eq!(commit_proof.leaves, commit_end);
+        assert_eq!(
+            commit_proof.inactive_peaks,
+            F::inactive_peaks(commit_end, commit_floor)
+        );
+        assert!(verify_proof_and_pinned_nodes::<Sha256, _, _>(
+            &commit_proof,
+            commit_start,
+            &commit_ops,
+            &commit_pins,
+            &commit_root
+        ));
+        let (db, commit_range) = db.apply_batch(commit_only).await.unwrap();
+        assert_eq!(commit_range, commit_start..commit_end);
+        let db = db.sync().await.unwrap();
+
+        // Applying a batch that forked mid-mountain prunes its own artifacts. The accessors
+        // refuse rather than returning a proof that fails to verify, while a child merkleized
+        // before the apply still finds its base frontier in the store.
+        let late_parent = db
+            .new_batch()
+            .set(Sha256::fill(17), value(17))
+            .merkleize(&db, Some(Sha256::fill(18)), db.size())
+            .await;
+        let late = late_parent
+            .new_batch::<Sha256>()
+            .set(Sha256::fill(19), value(19))
+            .merkleize(&db, Some(Sha256::fill(20)), db.size())
+            .await;
+        let (db, _) = db.apply_batch(Arc::clone(&late_parent)).await.unwrap();
+        assert!(matches!(
+            late_parent.proof(&db),
+            Err(Error::Merkle(crate::merkle::Error::ElementPruned(_)))
+        ));
+        assert!(matches!(
+            late_parent.pinned_nodes(&db),
+            Err(Error::Merkle(crate::merkle::Error::ElementPruned(_)))
+        ));
+        drop(late_parent);
+
+        let (late_start, late_ops) = late.operations();
+        let late_root = late.root();
+        let late_proof = late.proof(&db).unwrap();
+        let late_pins = late.pinned_nodes(&db).unwrap();
+        assert!(verify_proof_and_pinned_nodes::<Sha256, _, _>(
+            &late_proof,
+            late_start,
+            &late_ops,
+            &late_pins,
+            &late_root
+        ));
+        let (db, _) = db.apply_batch(late).await.unwrap();
+
+        db.destroy().await.unwrap();
+    }
+
+    #[test_traced]
+    fn test_compact_operations_and_proof_mmr() {
+        deterministic::Runner::default().start(compact_operations_and_proof_inner::<mmr::Family>);
+    }
+
+    #[test_traced]
+    fn test_compact_operations_and_proof_mmb() {
+        deterministic::Runner::default().start(compact_operations_and_proof_inner::<mmb::Family>);
     }
 
     /// Open the persisted witness journal directly so tests can corrupt the tip entry.
