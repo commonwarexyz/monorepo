@@ -662,7 +662,9 @@ impl<V: Variant, D: Digest> Read for DurableEffect<V, D> {
                 artifact: Arc::new(Artifact::read_cfg(buf, config)?),
             })),
             7 => {
-                let count = usize::read_cfg(buf, &RangeCfg::from(1..=config.protocol.chains()))?;
+                // A send batch publishes the votes of one DA-vote signing batch, so it carries a
+                // run of consecutive heights per producer chain, not a single vote per chain.
+                let count = usize::read_cfg(buf, &RangeCfg::from(1..=config.max_artifacts))?;
                 let mut requests = Vec::with_capacity(count);
                 for _ in 0..count {
                     requests.push(SendRequest {

@@ -620,6 +620,13 @@ pub(super) struct Machine<H: Hasher, V: Variant> {
     /// kilobyte certificates on every durable transition.
     pub(crate) durable_effect_ids: BTreeMap<EffectId, Vec<ArtifactId<H::Digest>>>,
     pub(crate) durable_signing_reservations: usize,
+    /// Cursor of the newest staged data-availability vote reservation.
+    ///
+    /// The DA component keeps at most one unacknowledged reservation, so blocks that become
+    /// eligible while that barrier is in flight join the next one instead of each reserving
+    /// its own signing action, durable event, and barrier. A reservation therefore waits at
+    /// most one barrier, and a cursor at or below `acked` never defers.
+    pub(crate) da_vote_reserved_through: Cursor,
     pub(crate) lifecycle: Lifecycle,
     pub(crate) next_cohort: u64,
     pub(crate) next_job: u64,
@@ -738,6 +745,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             durable_artifact_references: BTreeMap::new(),
             durable_effect_ids: BTreeMap::new(),
             durable_signing_reservations: 0,
+            da_vote_reserved_through: Cursor::zero(),
             lifecycle: Lifecycle::Fresh,
             next_cohort: 0,
             next_job: 0,

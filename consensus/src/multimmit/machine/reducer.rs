@@ -1855,10 +1855,31 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         if cycle.remaining_core() == 0 {
             return Ok((WorkStatus::Requeue, Capabilities::None));
         }
-        let resource_slots = self
-            .certificate_artifact_slots()
-            .min(self.certificate_outbox_slots());
-        let available = resource_slots.min(cycle.remaining_core() as usize);
+        // One DA-vote reservation is unacknowledged at a time. Blocks that become eligible while
+        // its barrier is in flight join the next reservation instead of each staging its own
+        // signing action, durable event, and barrier; the acknowledgement wakes this component,
+        // so the window is the journal's own group-commit rhythm rather than a timer, and a vote
+        // waits at most one barrier. An idle machine acknowledges immediately and never waits.
+        if self.da_vote_reserved_through > self.acked {
+            return Ok((WorkStatus::Complete, Capabilities::None));
+        }
+        // A run is one outbox action whose completion replaces the signing reservation with one
+        // publication, so the outbox funds the action while the artifact cache funds the votes.
+        if self.certificate_outbox_slots() == 0 {
+            return Ok((WorkStatus::Blocked, Capabilities::None));
+        }
+        let resource_slots = self.certificate_artifact_slots();
+        // The journal decodes one signing batch and its publication as at most one DA-vote run
+        // per producer chain, so a reservation may never exceed that ceiling.
+        let encodable = self
+            .profile
+            .protocol()
+            .codec_config()
+            .chains()
+            .saturating_mul(DA_VOTE_RUN);
+        let available = resource_slots
+            .min(cycle.remaining_core() as usize)
+            .min(encodable);
         let blocks =
             self.chain
                 .ready_da_votes::<H>(&self.profile, available.max(1), DA_VOTE_RUN)?;
@@ -1916,6 +1937,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             self.chain.mark_da_vote_reserved(block.header().clone());
         }
         let step = self.reserve_effect_prechecked(effect)?;
+        self.da_vote_reserved_through = self.durable.cursor;
         Ok((WorkStatus::Requeue, step.into_capabilities()))
     }
 
