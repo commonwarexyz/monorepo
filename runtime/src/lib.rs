@@ -667,6 +667,15 @@ stability_scope!(BETA {
     /// recovery: data read at initialization can be assumed to survive a
     /// subsequent crash without an explicit [`Blob::sync`].
     ///
+    /// # Cancellation
+    ///
+    /// Dropping an operation's future does not guarantee cancellation: the
+    /// operation may still complete, and later operations may observe its
+    /// effect.
+    ///
+    /// Runtimes must ensure that no operation issued by a previous run against
+    /// the same storage is still in flight when a new run begins.
+    ///
     /// # Partition Names
     ///
     /// Partition names must be non-empty and contain only ASCII alphanumeric
