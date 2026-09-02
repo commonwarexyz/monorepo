@@ -507,6 +507,8 @@ struct ObservedBatch<P: PublicKey, V: Variant, D: Digest> {
     cohorts: usize,
     /// The earliest hand-off among the merged cohorts.
     forwarded_at: SystemTime,
+    /// The encoded weight of every merged artifact, measured at admission.
+    bytes: usize,
 }
 
 impl<P: PublicKey, V: Variant, D: Digest> ObservedBatch<P, V, D> {
@@ -520,6 +522,7 @@ impl<P: PublicKey, V: Variant, D: Digest> ObservedBatch<P, V, D> {
         let Observed {
             artifacts,
             span,
+            bytes,
             forwarded_at,
         } = first;
         let mut batch = Self {
@@ -527,6 +530,7 @@ impl<P: PublicKey, V: Variant, D: Digest> ObservedBatch<P, V, D> {
             spans: vec![span],
             cohorts: 1,
             forwarded_at,
+            bytes,
         };
         while batch.artifacts.len() < max_items {
             let Ok(next) = observations.try_recv() else {
@@ -539,6 +543,7 @@ impl<P: PublicKey, V: Variant, D: Digest> ObservedBatch<P, V, D> {
             batch.spans.push(next.span);
             batch.cohorts += 1;
             batch.forwarded_at = batch.forwarded_at.min(next.forwarded_at);
+            batch.bytes = batch.bytes.saturating_add(next.bytes);
         }
         (batch, None)
     }
@@ -2384,6 +2389,7 @@ where
         &mut self,
         artifacts: Vec<IdentifiedArtifact<V, H::Digest>>,
         sources: Vec<P>,
+        artifact_bytes: usize,
     ) -> Result<(), Fatal> {
         if artifacts.len() != sources.len() {
             return Err(StepError::CompletionMismatch.into());
@@ -2403,14 +2409,23 @@ where
                     .map(|(_, artifact)| view_proof_kind(artifact)),
             )
             .collect::<Vec<_>>();
-        let resident_bytes = artifacts.iter().try_fold(0usize, |total, (id, artifact)| {
-            total
-                .checked_add(id.encode_size())?
-                .checked_add(artifact.encode_size())
-        });
-        let resident_bytes = resident_bytes
+        // The cohort arrives with its artifacts' encoded weight already measured at admission;
+        // re-deriving it here would walk every decoded certificate a second time.
+        let resident_bytes = artifacts
+            .iter()
+            .try_fold(artifact_bytes, |total, (id, _)| {
+                total.checked_add(id.encode_size())
+            })
             .and_then(|bytes| bytes.checked_add(size_of_val(sources.as_slice())))
             .ok_or(CoreError::CapacityOverflow)?;
+        debug_assert_eq!(
+            artifact_bytes,
+            artifacts
+                .iter()
+                .map(|(_, artifact)| artifact.encoded_len())
+                .sum::<usize>(),
+            "the cohort's measured weight matches its artifacts"
+        );
         sources.reverse();
         let ticket = self.track_transition(|core| core.observe(artifacts, resident_bytes))?;
         if self
@@ -2430,6 +2445,7 @@ where
             spans,
             cohorts,
             forwarded_at,
+            bytes,
         } = batch;
         self.metrics
             .observation_wait
@@ -2445,7 +2461,7 @@ where
         for span in &spans {
             observe.follows_from(span.id());
         }
-        observe.in_scope(|| self.observe_network(artifacts, sources))?;
+        observe.in_scope(|| self.observe_network(artifacts, sources, bytes))?;
         for _ in 0..cohorts {
             if !self
                 .batcher

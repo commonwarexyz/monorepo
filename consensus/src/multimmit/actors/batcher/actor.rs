@@ -856,9 +856,13 @@ where
         let items = selected.len() as u64;
         let span = debug_span!("multimmit.batcher.observe", items);
         let now = self.context.current();
+        // Admission already measured every artifact, so the cohort carries its encoded weight
+        // and the voter never re-walks a decoded certificate to account for it.
+        let mut bytes = 0usize;
         let cohort = selected
             .into_iter()
             .map(|selected| {
+                bytes = bytes.saturating_add(selected.bytes);
                 self.metrics
                     .ingress_dwell
                     .observe_between(selected.received_at, now);
@@ -868,6 +872,7 @@ where
         match observations.enqueue(Observed {
             span,
             artifacts: cohort,
+            bytes,
             forwarded_at: now,
         }) {
             Unreliable::Rejected => {
