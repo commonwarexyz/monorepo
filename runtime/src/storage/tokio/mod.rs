@@ -2,6 +2,7 @@ use super::{Header, Layout, hold::Hold, resolve_header, sync_dir};
 use crate::{BlobVersion, BufferPool, Error};
 use commonware_formatting::{from_hex, hex};
 use std::{
+    fs,
     io::{Seek as _, SeekFrom, Write as _},
     ops::RangeInclusive,
     path::PathBuf,
@@ -38,11 +39,9 @@ pub struct Storage {
 }
 
 impl Storage {
-    /// Create a storage instance rooted at `cfg.storage_directory`, creating
-    /// the directory if missing.
-    ///
-    /// Acquires the directory hold, blocking until any previous holder,
-    /// including operations still finishing from a previous run, releases it.
+    /// Create a storage instance rooted at `cfg.storage_directory`, creating the
+    /// directory if missing and holding it until every operation of this
+    /// instance has finished. Blocks while a previous instance still holds it.
     ///
     /// # Panics
     ///
@@ -97,11 +96,7 @@ impl crate::Storage for Storage {
     ) -> Result<(Self::Blob, u64, BlobVersion), Error> {
         super::validate_partition_name(partition)?;
 
-        // The open mutates the partition directory and the blob (create,
-        // truncate, header write, syncs). Dropping this future must not abandon
-        // that sequence half-done (a straggling truncate could clobber a
-        // successor's blob) or leave a later open trusting a header whose syncs
-        // never ran.
+        // Construct the full path
         let path = self.cfg.storage_directory.join(partition).join(hex(name));
         let storage_directory = self.cfg.storage_directory.clone();
         let partition = partition.to_string();
@@ -109,6 +104,12 @@ impl crate::Storage for Storage {
         let blob_layouts = self.cfg.blob_layouts.clone();
         let pool = self.pool.clone();
         let hold = self.hold.clone();
+
+        // Run the open to completion: it mutates the partition directory and the
+        // blob (create, truncate, header write, syncs), and dropping this future
+        // must not abandon that sequence half-done (a straggling truncate could
+        // clobber a successor's blob) or leave a later open trusting a header
+        // whose syncs never ran.
         self.dispatch(move || {
             let parent = match path.parent() {
                 Some(parent) => parent,
@@ -116,11 +117,11 @@ impl crate::Storage for Storage {
             };
 
             // Create the partition directory, if it does not exist
-            std::fs::create_dir_all(parent)
+            fs::create_dir_all(parent)
                 .map_err(|_| Error::PartitionCreationFailed(partition.clone()))?;
 
             // Open the file, creating it if it doesn't exist
-            let mut file = std::fs::OpenOptions::new()
+            let mut file = fs::OpenOptions::new()
                 .read(true)
                 .write(true)
                 .create(true)
@@ -167,6 +168,7 @@ impl crate::Storage for Storage {
                 }
             };
 
+            // Construct the blob while still holding the filesystem lock.
             let blob = Self::Blob::new(partition, &name, file, pool, data_offset, hold);
             Ok((blob, logical_size, blob_version))
         })
@@ -176,22 +178,25 @@ impl crate::Storage for Storage {
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
         super::validate_partition_name(partition)?;
 
-        // Dropping this future must not abandon the sequence between an unlink
-        // and the directory sync that makes it durable.
         let path = self.cfg.storage_directory.join(partition);
         let storage_directory = self.cfg.storage_directory.clone();
         let partition = partition.to_string();
         let name = name.map(<[u8]>::to_vec);
+
+        // Run the removal to completion: dropping this future must not abandon
+        // the sequence between an unlink and the directory sync that makes it
+        // durable.
         self.dispatch(move || {
+            // Remove all related files
             if let Some(name) = name {
                 let blob_path = path.join(hex(&name));
-                std::fs::remove_file(blob_path)
+                fs::remove_file(blob_path)
                     .map_err(|_| Error::BlobMissing(partition, hex(&name)))?;
 
                 // Sync the partition directory to ensure the removal is durable.
                 sync_dir(&path)?;
             } else {
-                std::fs::remove_dir_all(&path).map_err(|_| Error::PartitionMissing(partition))?;
+                fs::remove_dir_all(&path).map_err(|_| Error::PartitionMissing(partition))?;
 
                 // Sync the storage directory to ensure the removal is durable.
                 sync_dir(&storage_directory)?;
@@ -207,8 +212,9 @@ impl crate::Storage for Storage {
         let path = self.cfg.storage_directory.join(partition);
         let partition = partition.to_string();
         self.dispatch(move || {
+            // Scan the partition directory
             let entries =
-                std::fs::read_dir(path).map_err(|_| Error::PartitionMissing(partition.clone()))?;
+                fs::read_dir(path).map_err(|_| Error::PartitionMissing(partition.clone()))?;
             let mut blobs = Vec::new();
             for entry in entries {
                 let entry = entry.map_err(|_| Error::ReadFailed)?;
