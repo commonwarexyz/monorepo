@@ -127,6 +127,8 @@ pub(super) struct Metrics {
     pub builds: Counter,
     pub build_declines: Counter,
     pub invalid_blocks: Counter,
+    /// Block validations the application ended without a verdict; each is scheduled again.
+    pub unavailable_validations: Counter,
     pub forwarded_nullifications: Counter,
     pub relay_attempts: Counter,
     pub relay_closed: Counter,
@@ -295,6 +297,10 @@ impl Metrics {
         let builds = context.counter("builds", "application blocks produced");
         let build_declines = context.counter("build_declines", "application builds declined");
         let invalid_blocks = context.counter("invalid_blocks", "application blocks rejected");
+        let unavailable_validations = context.counter(
+            "unavailable_validations",
+            "block validations the application ended without a verdict",
+        );
         let forwarded_nullifications = context.counter(
             "nullifications",
             "nullification certificates durably selected for forwarding",
@@ -496,6 +502,7 @@ impl Metrics {
             builds,
             build_declines,
             invalid_blocks,
+            unavailable_validations,
             forwarded_nullifications,
             relay_attempts,
             relay_closed,

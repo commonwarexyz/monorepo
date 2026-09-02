@@ -264,6 +264,9 @@ pub(crate) enum BlockValidity {
     Valid,
     /// The available payload is invalid.
     Invalid,
+    /// The application reached no verdict: the payload could not be fetched or the application
+    /// was unavailable. The block stays ready and its validation is scheduled again.
+    Unavailable,
 }
 
 /// Completion of one exact block-validation request.
@@ -387,6 +390,8 @@ pub(crate) enum BlockValidationOutcome<D: Digest> {
     Stale,
     Retained,
     Invalid(ArtifactId<D>),
+    /// The application reached no verdict; the block returned to the ready state.
+    Deferred,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -1444,6 +1449,11 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         if records[index].state != ValidationState::Pending(completion.id) {
             self.schedule_ready_validations(generation)?;
             return Ok(BlockValidationOutcome::Stale);
+        }
+        if completion.validity == BlockValidity::Unavailable {
+            records[index].state = ValidationState::Ready;
+            self.schedule_ready_validations(generation)?;
+            return Ok(BlockValidationOutcome::Deferred);
         }
         let header = records[index].block.header().clone();
         if completion.validity == BlockValidity::Invalid || !self.record_header::<H>(&header)? {
