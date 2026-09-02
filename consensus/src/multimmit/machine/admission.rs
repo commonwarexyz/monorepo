@@ -1,6 +1,6 @@
 //! Untrusted artifact admission and exact verification correlation.
 
-use super::algebra::{ValidatedVqc, validate_lqc, validate_vqc};
+use super::algebra::{ValidatedLqc, ValidatedVqc, validate_lqc, validate_vqc_with_votes};
 use crate::{
     Epochable, Viewable,
     multimmit::{
@@ -25,6 +25,7 @@ use std::sync::Arc;
 const ARTIFACT_NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_MULTIMMIT_ARTIFACT";
 
 type ValidatedVqcs<D> = Vec<(usize, ValidatedVqc<D>)>;
+type ValidatedLqcs<D> = Vec<(usize, ValidatedLqc<D>)>;
 
 /// The decoded Multimmit wire objects accepted by the local machine.
 ///
@@ -612,6 +613,7 @@ impl<V: Variant, D: Digest> VerifyJob<V, D> {
             .collect::<Vec<_>>();
         let known = known.iter().map(Vec::as_slice).collect::<Vec<_>>();
         let mut validated_vqcs = Vec::new();
+        let mut validated_lqcs = Vec::new();
         let verdicts = scheme
             .verify_artifacts_with_known::<R, H, D>(rng, &artifacts, &known, strategy)
             .into_iter()
@@ -623,7 +625,8 @@ impl<V: Variant, D: Digest> VerifyJob<V, D> {
                 }
                 match item.artifact() {
                     Artifact::Vqc(certificate) => {
-                        validate_vqc::<H, V, D>(certificate, scheme.codec_config()).map_or_else(
+                        validate_vqc_with_votes::<H, V, D>(certificate, scheme.codec_config())
+                            .map_or_else(
                             |_| Verdict::new(item.ticket(), false),
                             |validated| {
                                 validated_vqcs.push((index, validated));
@@ -631,19 +634,25 @@ impl<V: Variant, D: Digest> VerifyJob<V, D> {
                             },
                         )
                     }
-                    Artifact::Lqc(certificate) => Verdict::new(
-                        item.ticket(),
-                        validate_lqc::<H, V, D>(certificate, scheme.codec_config()).is_ok(),
-                    ),
+                    Artifact::Lqc(certificate) => {
+                        validate_lqc::<H, V, D>(certificate, scheme.codec_config()).map_or_else(
+                            |_| Verdict::new(item.ticket(), false),
+                            |validated| {
+                                validated_lqcs.push((index, validated));
+                                Verdict::new(item.ticket(), true)
+                            },
+                        )
+                    }
                     _ => Verdict::new(item.ticket(), true),
                 }
             })
             .collect();
-        VerificationCompletion::with_validated_vqcs(
+        VerificationCompletion::with_validated(
             self.id,
             self.generation,
             verdicts,
             validated_vqcs,
+            validated_lqcs,
         )
     }
 }
@@ -679,6 +688,7 @@ pub struct VerificationCompletion<D: Digest> {
     generation: u64,
     verdicts: Vec<Verdict<D>>,
     validated_vqcs: ValidatedVqcs<D>,
+    validated_lqcs: ValidatedLqcs<D>,
 }
 
 impl<D: Digest> VerificationCompletion<D> {
@@ -696,26 +706,31 @@ impl<D: Digest> VerificationCompletion<D> {
             generation,
             verdicts,
             validated_vqcs: Vec::new(),
+            validated_lqcs: Vec::new(),
         }
     }
 
-    fn with_validated_vqcs(
+    fn with_validated(
         job: JobId,
         generation: u64,
         verdicts: Vec<Verdict<D>>,
         validated_vqcs: ValidatedVqcs<D>,
+        validated_lqcs: ValidatedLqcs<D>,
     ) -> Self {
         debug_assert!(
             validated_vqcs
                 .iter()
                 .all(|(index, _)| *index < verdicts.len())
         );
+        debug_assert!(validated_lqcs.iter().all(|(index, _)| *index < verdicts.len()));
         debug_assert!(validated_vqcs.windows(2).all(|pair| pair[0].0 < pair[1].0));
+        debug_assert!(validated_lqcs.windows(2).all(|pair| pair[0].0 < pair[1].0));
         Self {
             job,
             generation,
             verdicts,
             validated_vqcs,
+            validated_lqcs,
         }
     }
 
@@ -741,12 +756,27 @@ impl<D: Digest> VerificationCompletion<D> {
             .find_map(|(candidate, validated)| (*candidate == index).then_some(validated))
     }
 
+    #[cfg(test)]
+    pub(crate) fn validated_lqc(&self, index: usize) -> Option<&ValidatedLqc<D>> {
+        self.validated_lqcs
+            .iter()
+            .find_map(|(candidate, validated)| (*candidate == index).then_some(validated))
+    }
+
     pub(crate) fn take_validated_vqc(&mut self, index: usize) -> Option<ValidatedVqc<D>> {
         let position = self
             .validated_vqcs
             .iter()
             .position(|(candidate, _)| *candidate == index)?;
         Some(self.validated_vqcs.swap_remove(position).1)
+    }
+
+    pub(crate) fn take_validated_lqc(&mut self, index: usize) -> Option<ValidatedLqc<D>> {
+        let position = self
+            .validated_lqcs
+            .iter()
+            .position(|(candidate, _)| *candidate == index)?;
+        Some(self.validated_lqcs.swap_remove(position).1)
     }
 
     pub(crate) fn resident_bytes(&self) -> Option<usize> {
@@ -757,13 +787,23 @@ impl<D: Digest> VerificationCompletion<D> {
         let derivations = self
             .validated_vqcs
             .capacity()
-            .checked_mul(size_of::<(usize, ValidatedVqc<D>)>())?;
-        self.validated_vqcs.iter().try_fold(
+            .checked_mul(size_of::<(usize, ValidatedVqc<D>)>())?
+            .checked_add(
+                self.validated_lqcs
+                    .capacity()
+                    .checked_mul(size_of::<(usize, ValidatedLqc<D>)>())?,
+            )?;
+        let total = self.validated_vqcs.iter().try_fold(
             size_of_val(self)
                 .checked_add(verdicts)?
                 .checked_add(derivations)?,
             |total, (_, validated)| total.checked_add(validated.owned_bytes()?),
-        )
+        )?;
+        self.validated_lqcs
+            .iter()
+            .try_fold(total, |total, (_, validated)| {
+                total.checked_add(validated.owned_bytes()?)
+            })
     }
 }
 

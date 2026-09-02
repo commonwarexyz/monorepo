@@ -968,8 +968,10 @@ fn assert_reused_application_digest_is_accepted(
         &Sequential,
     );
     assert_eq!(completion.validated_vqc(0).is_some(), is_vqc);
+    assert_eq!(completion.validated_lqc(0).is_some(), !is_vqc);
+    // Both certificate kinds carry compute-pool derivations beyond their verdicts.
     let verdict_bytes = size_of_val(&completion) + size_of_val(completion.verdicts());
-    assert_eq!(completion.resident_bytes().unwrap() > verdict_bytes, is_vqc);
+    assert!(completion.resident_bytes().unwrap() > verdict_bytes);
     let accepted = machine.step(Input::Verified(completion)).unwrap();
     assert!(matches!(
         accepted.status(),

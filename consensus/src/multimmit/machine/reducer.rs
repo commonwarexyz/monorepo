@@ -12,10 +12,13 @@ use super::{
     ResolutionCompletion, ResolutionJob, Role, SelfAdmission, SendRequest, SignRequest, Timer,
     ValidationCompletion, ValidationJob, Verdict, VerificationCompletion, VerificationItem,
     VerificationTicket, VerifyJob, VqcAggregateCompletion, VqcAggregateJob, WorkKey,
-    algebra::ValidatedVqc,
+    algebra::{ValidatedLqc, ValidatedVqc},
     contracts::{DA_VOTE_RUN, Lane, ServiceCycle, ServiceError, TransitionCost},
     emission::ViewProof,
-    finality::{FinalityEffect, FinalityError, FinalityOutput, FinalityUpdate, PreparedLqc},
+    finality::{
+        FinalityEffect, FinalityError, FinalityOutput, FinalityUpdate, CertificateDerivations,
+        PreparedLqc,
+    },
     state::PendingVoteDa,
     view::{ViewEffect, ViewError},
 };
@@ -1106,8 +1109,9 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                 VerificationPassPhase::Apply => {
                     let verdict = pass.completion.verdicts()[pass.position];
                     let validated_vqc = pass.completion.take_validated_vqc(pass.position);
+                    let validated_lqc = pass.completion.take_validated_lqc(pass.position);
                     if let Some(verdict_valid) =
-                        self.apply_verification_verdict(verdict, validated_vqc)?
+                        self.apply_verification_verdict(verdict, validated_vqc, validated_lqc)?
                     {
                         valid += usize::from(verdict_valid);
                         invalid += usize::from(!verdict_valid);
@@ -1439,12 +1443,14 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         artifact_id: ArtifactId<H::Digest>,
         observation: Observation,
         artifact: &Arc<Artifact<V, H::Digest>>,
+        prepared: Option<CertificateDerivations<H::Digest>>,
     ) -> Result<(), StepError> {
         let outputs = self.finality.validate_finality_claim::<H>(
             artifact_id,
             observation,
             artifact,
             &self.profile,
+            prepared,
         )?;
         for output in outputs {
             let FinalityOutput::Finality(artifact_id, observation, certificate) = output;
@@ -3228,7 +3234,8 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     fn apply_verification_verdict(
         &mut self,
         verdict: Verdict<H::Digest>,
-        validated_vqc: Option<ValidatedVqc<H::Digest>>,
+        mut validated_vqc: Option<ValidatedVqc<H::Digest>>,
+        validated_lqc: Option<ValidatedLqc<H::Digest>>,
     ) -> Result<Option<bool>, StepError> {
         let ticket = verdict.ticket();
         let current = matches!(
@@ -3243,7 +3250,24 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                 let entry = &self.artifacts[&ticket.artifact()];
                 (entry.observation, Arc::clone(&entry.artifact))
             };
-            self.validate_finality(ticket.artifact(), observation, &artifact)?;
+            // The compute pool already expanded and hashed every attested vote; hand the finality
+            // pool those derivations instead of recomputing them on this thread.
+            let prepared = match (validated_vqc.as_mut(), validated_lqc) {
+                (Some(vqc), _) => Some(CertificateDerivations::Vqc {
+                    leader: vqc.leader(),
+                    votes: vqc.take_votes(),
+                }),
+                (None, Some(lqc)) => {
+                    let (leader, tips, votes) = lqc.into_parts();
+                    Some(CertificateDerivations::Lqc {
+                        leader,
+                        tips,
+                        votes,
+                    })
+                }
+                (None, None) => None,
+            };
+            self.validate_finality(ticket.artifact(), observation, &artifact, prepared)?;
             if matches!(artifact.as_ref(), Artifact::Vote(_)) {
                 self.views.observe::<H>(
                     ticket.artifact(),
@@ -4031,7 +4055,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         ready.sort_unstable_by_key(|(observation, id, _)| (*observation, *id));
         for (observation, id, artifact) in &ready {
             self.claim_finality(*id, *observation, Arc::clone(artifact))?;
-            self.validate_finality(*id, *observation, artifact)?;
+            self.validate_finality(*id, *observation, artifact, None)?;
             self.chain
                 .observe::<H>(*id, *observation, artifact, self.durable.generation)?;
             self.views
@@ -5725,7 +5749,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                 self.dependency_slots -= 1;
             }
             let observation = self.artifacts[&id].observation;
-            self.validate_finality(id, observation, &artifact)?;
+            self.validate_finality(id, observation, &artifact, None)?;
             if matches!(state, ArtifactState::Ready | ArtifactState::Waiting(_)) {
                 return Ok(());
             }
@@ -5734,7 +5758,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         let future_view = artifact.view().filter(|view| *view > self.durable.view);
         let future = future_view.is_some();
         self.claim_finality(id, observation, Arc::clone(&artifact))?;
-        self.validate_finality(id, observation, &artifact)?;
+        self.validate_finality(id, observation, &artifact, None)?;
         let provisions = self.retain_provider_index(id, &artifact);
         self.index_artifact(id, &artifact);
         self.artifacts.insert(

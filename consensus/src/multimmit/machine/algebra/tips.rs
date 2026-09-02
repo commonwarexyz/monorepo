@@ -6,7 +6,7 @@ use super::{
 };
 use crate::multimmit::{
     config::CodecConfig,
-    types::{BlockRef, ChainId, LeaderBlock, Lqc, Position, VoteBody, Vqc},
+    types::{BlockRef, ChainId, LeaderBlock, Lqc, Position, VoteBody},
 };
 use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
 use commonware_utils::{Faults, N5f1, Participant};
@@ -210,7 +210,10 @@ impl<D: Digest> VqcExtraction<D> {
     /// Production extraction flows through [`validate_vqc`], which reuses the leader digest
     /// across derivations; this convenience wrapper serves tests and mocks.
     #[cfg(any(test, feature = "mocks"))]
-    pub(crate) fn new<H, V>(certificate: &Vqc<V, D>, config: CodecConfig) -> Result<Self, Error>
+    pub(crate) fn new<H, V>(
+        certificate: &crate::multimmit::types::Vqc<V, D>,
+        config: CodecConfig,
+    ) -> Result<Self, Error>
     where
         H: Hasher<Digest = D>,
         V: Variant,
@@ -222,8 +225,9 @@ impl<D: Digest> VqcExtraction<D> {
         )
     }
 
+    #[cfg(any(test, feature = "mocks"))]
     pub(crate) fn new_with_leader_digest<H, V>(
-        certificate: &Vqc<V, D>,
+        certificate: &crate::multimmit::types::Vqc<V, D>,
         leader_digest: D,
         config: CodecConfig,
     ) -> Result<Self, Error>
@@ -240,12 +244,28 @@ impl<D: Digest> VqcExtraction<D> {
                 .map_err(|_| Error::Vote)?;
             expanded.push((signer, body));
         }
-        let prepared = PreparedVotes::new_with_leader_digest::<H, V, _>(
+        Self::from_votes::<H, V>(
             leader,
             leader_digest,
             expanded.iter().map(|(signer, body)| (*signer, body)),
             config,
-        )?;
+        )
+    }
+
+    /// Extracts ordering data from the already expanded votes of one authenticated V-QC.
+    pub(crate) fn from_votes<'a, H, V>(
+        leader: &LeaderBlock<V, D>,
+        leader_digest: D,
+        votes: impl IntoIterator<Item = (Participant, &'a VoteBody<D>)>,
+        config: CodecConfig,
+    ) -> Result<Self, Error>
+    where
+        H: Hasher<Digest = D>,
+        V: Variant,
+        D: 'a,
+    {
+        let prepared =
+            PreparedVotes::new_with_leader_digest::<H, V, _>(leader, leader_digest, votes, config)?;
         if prepared.len() < config.designation_quorum()
             || prepared.len() > config.vqc_max_messages()
         {
@@ -336,6 +356,15 @@ pub(crate) struct FinalTips<D: Digest> {
 }
 
 impl<D: Digest> FinalTips<D> {
+    /// Returns the heap bytes these tips own.
+    pub(crate) fn owned_bytes(&self) -> Option<usize> {
+        self.blocks
+            .capacity()
+            .checked_mul(size_of::<BlockRef<D>>())?
+            .checked_add(self.positions.capacity().checked_mul(size_of::<Position>())?)?
+            .checked_add(self.settled.capacity())
+    }
+
     /// Creates final-tip facts in canonical chain order.
     pub(crate) fn new(
         blocks: Vec<BlockRef<D>>,
