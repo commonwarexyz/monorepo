@@ -313,44 +313,17 @@ where
             ProducerCapability::CancelValidations { chain, through } => {
                 self.cancel_validations(chain, through);
             }
-            // DA assembly runs on the bulk pool and returns through a reserved completion.
-            ProducerCapability::RecoverDa(job) => {
-                let header = job
-                    .votes()
-                    .first()
-                    .expect("DA recovery jobs contain a quorum")
-                    .header();
-                let span = info_span!(
-                    "multimmit.voter.recover.da",
-                    epoch = header.epoch().get().traced(),
-                    chain = header.chain().get().traced(),
-                    height = header.height().get().traced(),
-                    job = job.id().get().traced(),
-                    generation = job.generation().traced()
-                );
-                let scheme = Arc::clone(&self.scheme);
-                // A data-availability certificate is paced by block production rather than by the
-                // view, and its shares were admitted by the same bulk lane, so recovery runs with
-                // that work instead of ahead of the round.
-                let bulk = self.strategy.clone();
-                let started_at = self.context.current();
-                let (id, generation) = (job.id(), job.generation());
-                // Shares are admitted on structural checks alone, so this recovery's group
-                // check is where an invalid one surfaces.
-                let operation = move |strategy: T| match scheme
-                    .assemble_da_certificate_optimistic(job.votes(), &strategy)
-                {
-                    Ok(certificate) => Ok(CryptoOutcome::DaRecovered {
-                        started_at,
-                        completion: DaRecoveryCompletion::new(id, generation, certificate),
-                    }),
-                    Err(DaRecoveryError::InvalidShares(invalid)) => Ok(CryptoOutcome::DaRejected {
-                        started_at,
-                        rejection: DaRecoveryRejection::new(id, generation, invalid),
-                    }),
-                    Err(DaRecoveryError::Scheme(error)) => Err(error),
-                };
-                self.spawn_crypto(bulk, TaskClass::CriticalAggregation, span, operation)?;
+            // The own-chain DA plane runs on its own task: central just routes authenticated
+            // shares and anchor advances to it and never blocks on it.
+            ProducerCapability::ForwardShare(share) => {
+                if let Some(command) = &self.da_command {
+                    let _ = command.enqueue(ChainCommand::Observe(share));
+                }
+            }
+            ProducerCapability::AnchorAdvanced(height) => {
+                if let Some(command) = &self.da_command {
+                    let _ = command.enqueue(ChainCommand::AnchorAdvanced(height));
+                }
             }
         }
         Ok(())
@@ -515,7 +488,7 @@ where
     /// Ingress rejects a share whose signer is not the peer that sent it, so a share's signer
     /// index names its authenticated source. The batcher owns peer blocking, so the attribution
     /// is routed there rather than duplicating that authority in the voter.
-    fn block_da_signers(&mut self, invalid: &[Participant]) -> Result<(), Fatal> {
+    pub(super) fn block_da_signers(&mut self, invalid: &[Participant]) -> Result<(), Fatal> {
         let peers = invalid
             .iter()
             .filter_map(|signer| self.scheme.participants().get((*signer).into()).cloned())
@@ -1102,28 +1075,6 @@ where
                 self.track_transition(|core| {
                     core.signing_batch_completed(id, generation, artifacts)
                 })?;
-                Ok(())
-            }
-            CryptoOutcome::DaRecovered {
-                started_at,
-                completion,
-            } => {
-                self.metrics
-                    .da_recovery_latency
-                    .observe_between(started_at, self.context.current());
-                self.track_transition(|core| core.producer_da_recovered(completion))?;
-                Ok(())
-            }
-            CryptoOutcome::DaRejected {
-                started_at,
-                rejection,
-            } => {
-                self.metrics
-                    .da_recovery_latency
-                    .observe_between(started_at, self.context.current());
-                self.metrics.da_recovery_fallbacks.inc();
-                self.block_da_signers(rejection.invalid())?;
-                self.track_transition(|core| core.producer_da_rejected(rejection))?;
                 Ok(())
             }
             CryptoOutcome::NullificationRecovered {

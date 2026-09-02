@@ -3,16 +3,15 @@
 use super::{
     Artifact, ArtifactEntry, ArtifactId, ArtifactState, BarrierAck, BarrierId,
     BlockValidationOutcome, BuildCompletion, BuildJob, BuildOutcome, ChainEffect, ChainError,
-    Change, CustodyCancellation, CustodyCompletion, CustodyJob, DaRecoveryCompletion,
-    DaRecoveryJob, DaRecoveryRejection, DaVoteRequest, Dependency, DomainEvent, DurableEffect,
-    DurableJob, DurableState, EffectCompletion, EffectId, FrozenAcknowledgement,
-    IdentifiedArtifact, JobId, Lifecycle, LqcAggregateCompletion, LqcAggregateJob, Machine,
-    NullificationRecoveryCompletion, NullificationRecoveryJob, Observation, PendingPersistence,
-    PendingSigningCompletion, PersistDirective, PersistJob, ProductionTimer, ProtocolComponent,
-    ReplayError, Replayed, ResolutionCompletion, ResolutionJob, Role, SelfAdmission, SendRequest,
-    SignRequest, Timer, ValidationCompletion, ValidationJob, Verdict, VerificationCompletion,
-    VerificationItem, VerificationTicket, VerifyJob, VqcAggregateCompletion, VqcAggregateJob,
-    WorkKey,
+    Change, CustodyCancellation, CustodyCompletion, CustodyJob, DaVoteRequest, Dependency,
+    DomainEvent, DurableEffect, DurableJob, DurableState, EffectCompletion, EffectId,
+    FrozenAcknowledgement, IdentifiedArtifact, JobId, Lifecycle, LqcAggregateCompletion,
+    LqcAggregateJob, Machine, NullificationRecoveryCompletion, NullificationRecoveryJob,
+    Observation, PendingPersistence, PendingSigningCompletion, PersistDirective, PersistJob,
+    ProductionTimer, ProtocolComponent, ReplayError, Replayed, ResolutionCompletion, ResolutionJob,
+    Role, SelfAdmission, SendRequest, SignRequest, Timer, ValidationCompletion, ValidationJob,
+    Verdict, VerificationCompletion, VerificationItem, VerificationTicket, VerifyJob,
+    VqcAggregateCompletion, VqcAggregateJob, WorkKey,
     algebra::{ValidatedLqc, ValidatedVqc},
     contracts::{DA_VOTE_RUN, Lane, ServiceCycle, ServiceError, TransitionCost},
     emission::ViewProof,
@@ -26,7 +25,8 @@ use super::{
 use crate::{
     Epochable, Viewable,
     multimmit::types::{
-        Activity, Anchor, BlockRef, CertificateId, ChainId, Lqc, ProposalParent, SignedLeaderBlock,
+        Activity, Anchor, BlockRef, CertificateId, ChainId, DaCertificate, DaVote, Lqc,
+        ProposalParent, SignedLeaderBlock,
     },
     types::{Attributable, Height, Participant, Round, View, ViewDelta},
 };
@@ -86,10 +86,13 @@ pub(super) enum Input<V: Variant, D: Digest> {
     ResolutionCompleted(ResolutionCompletion<V, D>),
     /// Fire one producer deadline bound to an exact parent.
     ProductionTimerFired(ProductionTimer<D>),
-    /// Complete one exact data-availability recovery request.
-    DaRecovered(DaRecoveryCompletion<V, D>),
-    /// Reject one exact data-availability recovery request whose shares did not interpolate.
-    DaRejected(DaRecoveryRejection),
+    /// Durably admit and publish a certificate the own-chain DA task recovered off-thread.
+    RecoveredCertificate {
+        /// The certified block.
+        block: BlockRef<D>,
+        /// The recovered certificate.
+        certificate: DaCertificate<V, D>,
+    },
     /// Complete one exact nullification recovery request.
     NullificationRecovered(NullificationRecoveryCompletion<V>),
     /// Complete one exact V-QC aggregation request.
@@ -241,8 +244,10 @@ pub(crate) enum ProducerCapability<V: Variant, D: Digest> {
         /// Greatest obsolete height on the producer chain.
         through: Height,
     },
-    /// Recover a certificate from one exact canonical subset of verified DA shares.
-    RecoverDa(DaRecoveryJob<V, D>),
+    /// Forward an authenticated own-chain data-availability share to the own-chain DA task.
+    ForwardShare(Arc<DaVote<V, D>>),
+    /// Tell the own-chain DA task its certified anchor advanced to this height.
+    AnchorAdvanced(Height),
 }
 
 /// Timer and certificate work for the protocol-owned leader chain.
@@ -687,8 +692,6 @@ pub enum StepStatus<D: Digest> {
         /// The constructed certificate admitted through the canonical artifact store.
         admission: SelfAdmission<D>,
     },
-    /// A matched data-availability recovery rejected its shares without a certificate.
-    DaRejected,
     /// A matched nullification recovery completion was accepted.
     NullificationRecovered {
         /// The constructed certificate admitted through the canonical artifact store.
@@ -939,8 +942,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         // transition, whether or not a barrier sync happens to be in flight.
         if matches!(
             input,
-            Input::DaRecovered(_)
-                | Input::DaRejected(_)
+            Input::RecoveredCertificate { .. }
                 | Input::NullificationRecovered(_)
                 | Input::VqcAggregated(_)
                 | Input::LqcAggregated(_)
@@ -1013,8 +1015,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                 self.ensure_live()?;
                 self.fire_production_timer(timer)
             }
-            Input::DaRecovered(_)
-            | Input::DaRejected(_)
+            Input::RecoveredCertificate { .. }
             | Input::NullificationRecovered(_)
             | Input::VqcAggregated(_)
             | Input::LqcAggregated(_) => {
@@ -1810,26 +1811,15 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         let deferred = (self.view_proof_slots() > 0)
             .then(|| self.views.deferred_certificate_view(self.durable.view))
             .flatten();
-        let reserve_deferred = self.prefer_deferred_view_certificate && deferred.is_some();
-        let da_recovery_slots = self
-            .da_recovery_slots()
-            .saturating_sub(usize::from(reserve_deferred));
-        self.chain.drive(
-            &self.profile,
-            self.durable.generation,
-            da_recovery_slots.min(1),
-            false,
-        )?;
         if deferred.is_some() {
             self.prefer_deferred_view_certificate = true;
             self.scheduler
                 .enqueue(WorkKey::Drive(ProtocolComponent::View));
         }
-        capabilities.extend(self.take_chain_capabilities()?);
 
         let production_credit = self.can_reserve_build_credit();
         self.chain
-            .drive(&self.profile, self.durable.generation, 0, production_credit)?;
+            .drive(&self.profile, self.durable.generation, production_credit)?;
         capabilities.extend(self.take_chain_capabilities()?);
 
         if deferred_da && self.advance_da_certificate(&mut capabilities)? {
@@ -1847,14 +1837,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                 self.reserve_ready_da_votes(cycle)?
             };
         capabilities.extend(da_capabilities);
-        let recovery_slots = self.da_recovery_slots().saturating_sub(usize::from(
-            self.prefer_deferred_view_certificate && deferred.is_some(),
-        ));
-        let recovery_ready = recovery_slots > 0 && self.chain.has_ready_recovery();
-        Ok((
-            recovery_ready || da_status == WorkStatus::Requeue,
-            capabilities,
-        ))
+        Ok((da_status == WorkStatus::Requeue, capabilities))
     }
 
     fn reserve_ready_da_votes(&mut self, cycle: &mut ServiceCycle) -> WorkResult<V, H::Digest> {
@@ -2456,6 +2439,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                 if self.profile.protocol().producer(certificate.header().chain())
                     == Some(participant)
         );
+        let anchor = owns_chain.then(|| certificate.header().height());
         let publication = if retired.is_empty() || !owns_chain {
             None
         } else {
@@ -2474,6 +2458,13 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         let step = self.reserve_change(change)?;
         self.defer_da_certificate = true;
         capabilities.extend(step.into_capabilities());
+        // A remote or leader-carried certificate can advance the own anchor; tell the task so it
+        // prunes the settled pool.
+        if let Some(height) = anchor {
+            capabilities.push(Capability::Producer(ProducerCapability::AnchorAdvanced(
+                height,
+            )));
+        }
         Ok(true)
     }
 
@@ -2592,33 +2583,6 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             .min(self.certificate_outbox_slots())
     }
 
-    fn da_recovery_slots(&self) -> usize {
-        let mut outbox_slots = self.certificate_outbox_slots();
-        // A recovered own-chain certificate sits strictly above the durable certified tip, so
-        // it supersedes the tip certificate's broadcast and the completion retires that
-        // publication before its own capacity check. An outstanding own-chain certificate
-        // broadcast therefore funds one recovery slot even when the outbox is otherwise full,
-        // keeping certificate formation decoupled from unrelated egress pressure.
-        if outbox_slots == 0 && self.own_certificate_publication_outstanding() {
-            outbox_slots = 1;
-        }
-        self.certificate_artifact_slots().min(outbox_slots)
-    }
-
-    fn own_certificate_publication_outstanding(&self) -> bool {
-        let Role::Validator(me) = self.profile.role() else {
-            return false;
-        };
-        let Some(chain) = self.profile.protocol().producer_chain(me) else {
-            return false;
-        };
-        self.durable.outbox.values().any(|effect| {
-            matches!(effect, DurableEffect::Broadcast(artifact)
-                if matches!(artifact.as_ref(), Artifact::DaCertificate(certificate)
-                    if certificate.header().chain() == chain))
-        })
-    }
-
     fn certificate_artifact_slots(&self) -> usize {
         let resources = self.profile.resources();
         let volatile_slots = resources
@@ -2689,8 +2653,10 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                 ChainEffect::ArmTimer(timer) => {
                     capabilities.push(Capability::Producer(ProducerCapability::ArmTimer(timer)));
                 }
-                ChainEffect::Recover(job) => {
-                    capabilities.push(Capability::Producer(ProducerCapability::RecoverDa(job)));
+                ChainEffect::ForwardShare(share) => {
+                    capabilities.push(Capability::Producer(ProducerCapability::ForwardShare(
+                        share,
+                    )));
                 }
             }
         }
@@ -2804,52 +2770,38 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             .collect()
     }
 
-    /// Drops the shares a failed recovery attributed and re-arms the block's recovery.
+    /// Durably admits and publishes a certificate the own-chain DA task recovered.
     ///
-    /// A rejection stages no durable change: the certificate was never constructed. The pool
-    /// loses exactly the attributed signers, so the next attempt selects a different quorum and
-    /// the block certifies as soon as enough unrejected shares remain.
-    fn complete_da_rejection(
+    /// The task assembles the certificate from admitted shares, so its cryptography is valid;
+    /// central still owns the subject. A certificate whose block is no longer the current
+    /// uncertified producer header (already certified, or retired while the recovery was in
+    /// flight) is stale rather than fatal, exactly as an in-flight recovery completion was before
+    /// the plane moved off-thread. The durable admit and publish path is unchanged.
+    fn recovered_certificate(
         &mut self,
-        rejection: &DaRecoveryRejection,
+        block: BlockRef<H::Digest>,
+        certificate: &DaCertificate<V, H::Digest>,
     ) -> Result<Step<V, H::Digest>, StepError> {
-        if !self
-            .chain
-            .reject_recovery::<H>(rejection, self.durable.generation)?
+        let chain = block.chain().get() as usize;
+        let above_tip = self
+            .durable
+            .certified_tips
+            .get(chain)
+            .is_some_and(|tip| block.height() > tip.height());
+        if certificate.block_ref::<H>() != block
+            || !above_tip
+            || !self.chain.is_producer_header(certificate.header())
         {
             return Ok(Step::new(StepStatus::StaleCompletion, Vec::new()));
         }
-        self.scheduler
-            .enqueue(WorkKey::Drive(ProtocolComponent::Da));
-        let capabilities = self.take_chain_capabilities()?;
-        Ok(Step::new(StepStatus::DaRejected, capabilities))
-    }
-
-    fn complete_da_recovery(
-        &mut self,
-        completion: &DaRecoveryCompletion<V, H::Digest>,
-    ) -> Result<Step<V, H::Digest>, StepError> {
-        let Some(artifact) = self
-            .chain
-            .prepare_recovery::<H>(completion, self.durable.generation)?
-        else {
-            return Ok(Step::new(StepStatus::StaleCompletion, Vec::new()));
-        };
-        // Retirement can drop the producer header a recovery belongs to while that recovery is in
-        // flight. Journaling the certificate anyway would record an event that neither this
-        // machine nor a replay of its journal can re-derive, so a retired subject makes the
-        // completion stale rather than fatal.
-        if !matches!(
-            artifact.as_ref(),
-            Artifact::DaCertificate(certificate)
-                if self.chain.is_producer_header(certificate.header())
-        ) {
-            // Release the job as well: a reservation nobody will complete holds a recovery slot
-            // for the rest of the epoch.
-            self.chain.abandon_recovery::<H>(completion.id());
+        let artifact = Arc::new(Artifact::DaCertificate(certificate.clone()));
+        let id = self.validate_self_admission(&artifact)?;
+        // apply_event rejects a second creation of an artifact the durable set already holds, and
+        // it is also the replay path, so re-admitting a held certificate would journal an event no
+        // restart could re-derive. A duplicate recovery is redundant, not a fault.
+        if self.durable.local.contains_key(&id) {
             return Ok(Step::new(StepStatus::StaleCompletion, Vec::new()));
         }
-        let id = self.validate_self_admission(&artifact)?;
         let cursor = self
             .durable
             .cursor
@@ -2859,6 +2811,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         let Artifact::DaCertificate(certificate) = artifact.as_ref() else {
             return Err(StepError::ChainInvariant);
         };
+        let height = certificate.header().height();
         let retired = self
             .obligations_retired_by_da(certificate.header().chain(), certificate.header().height());
         let remaining = self.durable_effect_count().saturating_sub(retired.len());
@@ -2871,7 +2824,11 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             artifact: Arc::clone(&artifact),
         })?;
         self.self_admit(artifact, id)?;
-        self.chain.finish_recovery::<H>(completion.id());
+        // Confirm the advanced anchor to the task so it prunes the settled pool.
+        step.capabilities
+            .push(Capability::Producer(ProducerCapability::AnchorAdvanced(
+                height,
+            )));
         step.status = StepStatus::DaRecovered {
             admission: SelfAdmission::new(id),
         };
@@ -3322,14 +3279,12 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     pub(crate) fn local_artifact_reservations(&self) -> usize {
         self.durable_signing_reservations
             + self.chain.build_reservations()
-            + self.chain.recovery_reservations()
             + self.views.certificate_reservations()
             + self.finality.aggregate_reservations()
     }
 
     fn pending_artifact_reservations(&self) -> usize {
         self.chain.build_reservations()
-            + self.chain.recovery_reservations()
             + self.views.certificate_reservations()
             + self.finality.aggregate_reservations()
     }
@@ -5571,8 +5526,9 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             return Ok((WorkStatus::Complete, Capabilities::None));
         };
         let step = match &input {
-            Input::DaRecovered(completion) => self.complete_da_recovery(completion),
-            Input::DaRejected(rejection) => self.complete_da_rejection(rejection),
+            Input::RecoveredCertificate { block, certificate } => {
+                self.recovered_certificate(*block, certificate)
+            }
             Input::NullificationRecovered(completion) => {
                 self.complete_nullification_recovery(completion)
             }

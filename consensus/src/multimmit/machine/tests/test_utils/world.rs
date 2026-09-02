@@ -1632,6 +1632,15 @@ impl<'a> World<'a> {
                     self.replicas[replica].production_timer = Some(timer);
                     continue;
                 }
+                // The own-chain data-availability plane runs on a task the pure-Core world does
+                // not host, so forwarded shares and anchor confirmations have no collaborator
+                // here. Dropping them matches the pre-sharding machine, which pooled shares
+                // silently; these scenarios certify own blocks through observed certificates.
+                Capability::Producer(
+                    ProducerCapability::ForwardShare(_) | ProducerCapability::AnchorAdvanced(_),
+                ) => {
+                    continue;
+                }
                 _ => {}
             }
             if is_delivery(&effect) {

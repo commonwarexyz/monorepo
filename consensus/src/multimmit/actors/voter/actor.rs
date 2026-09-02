@@ -23,14 +23,13 @@ use crate::{
         machine::{
             Artifact, BlockValidity, BuildCompletion, BuildId, BuildJob, Capabilities, Capability,
             CoreError, CoreState, CoreTransition, CoreTurn, CoreWork, Cursor, CustodyCancellation,
-            CustodyCompletion, CustodyJob, DaRecoveryCompletion, DaRecoveryRejection,
-            DurabilityCapability, DurableEffect, EffectId, IdentifiedArtifact, InputTicket, JobId,
-            LeaderCapability, LqcAggregateCompletion, NullificationRecoveryCompletion, Observation,
-            ObservationStatus, PersistDirective, ProducerCapability, ProducerProgress,
-            ProductionTimer, Profile, Rejection, ResolverCapability, Role, SignRequest, StepError,
-            StepStatus, TaskClass, TaskError, TaskPermit, TaskTerminal, Timer,
-            ValidationCompletion, ValidationId, ValidationJob, VerificationCapability, ViewProof,
-            VqcAggregateCompletion, contracts::Lane,
+            CustodyCompletion, CustodyJob, DurabilityCapability, DurableEffect, EffectId,
+            IdentifiedArtifact, InputTicket, JobId, LeaderCapability, LqcAggregateCompletion,
+            NullificationRecoveryCompletion, Observation, ObservationStatus, PersistDirective,
+            ProducerCapability, ProducerProgress, ProductionTimer, Profile, Rejection,
+            ResolverCapability, Role, SignRequest, StepError, StepStatus, TaskClass, TaskError,
+            TaskPermit, TaskTerminal, Timer, ValidationCompletion, ValidationId, ValidationJob,
+            VerificationCapability, ViewProof, VqcAggregateCompletion, contracts::Lane,
         },
         scheme::bls12381_threshold::{DaRecoveryError, Error as SchemeError, Scheme},
         storage::{CheckpointError, CheckpointStore},
@@ -72,8 +71,12 @@ use std::{
 };
 use tracing::{Instrument as _, Span, debug, debug_span, error, info, info_span, warn};
 
+#[path = "da.rs"]
+mod da;
 #[path = "executor.rs"]
 mod executor;
+
+use da::{ChainCommand, DaPlane, DaTaskUpdate};
 
 /// One reconciled worker result for a bulk-cryptography task.
 type CryptoTaskOutcome<V, D> = (
@@ -357,14 +360,6 @@ enum CryptoOutcome<V: Variant, D: Digest> {
         generation: u64,
         artifacts: Vec<Artifact<V, D>>,
     },
-    DaRecovered {
-        started_at: SystemTime,
-        completion: DaRecoveryCompletion<V, D>,
-    },
-    DaRejected {
-        started_at: SystemTime,
-        rejection: DaRecoveryRejection,
-    },
     NullificationRecovered {
         started_at: SystemTime,
         completion: NullificationRecoveryCompletion<V>,
@@ -564,6 +559,7 @@ enum RuntimeEvent<P: PublicKey, V: Variant, D: Digest> {
     Prune(Result<(), JournalFailure>),
     Application(AppResult<V, D>),
     Crypto(CryptoResult<V, D>),
+    DaTask(DaTaskUpdate<V, D>),
     ViewTimer,
     ProductionTimer,
     Publication,
@@ -579,7 +575,7 @@ impl<P: PublicKey, V: Variant, D: Digest> RuntimeEvent<P, V, D> {
     const fn core_lane(&self) -> Option<Lane> {
         match self {
             Self::Persistence(_) => Some(Lane::PersistenceCompletion),
-            Self::Application(_) | Self::Crypto(_) | Self::Verification(_) => {
+            Self::Application(_) | Self::Crypto(_) | Self::Verification(_) | Self::DaTask(_) => {
                 Some(Lane::LocalCompletion)
             }
             Self::ViewTimer | Self::ProductionTimer => Some(Lane::Timer),
@@ -881,6 +877,22 @@ where
             self.journal_gates.clone(),
         );
 
+        let da_own_chain = participant.and_then(|p| protocol.producer_chain(p));
+        let (da_update_sender, da_updates, da_command, da_command_receiver) =
+            if da_own_chain.is_some() {
+                let (update_sender, update_receiver) =
+                    mailbox::new(driver_context.child("da_updates"), config.mailbox_size);
+                let (command_sender, command_receiver) =
+                    mailbox::new(driver_context.child("da_commands"), config.mailbox_size);
+                (
+                    Some(update_sender),
+                    Some(update_receiver),
+                    Some(command_sender),
+                    Some(command_receiver),
+                )
+            } else {
+                (None, None, None, None)
+            };
         let mut driver = Driver {
             context: driver_context,
             protocol_epoch: epoch,
@@ -935,6 +947,12 @@ where
             last_producer_progress: None,
             producer_blocked_since: None,
             producer_stall_reported: false,
+            da_own_chain,
+            da_updates,
+            da_update_sender,
+            da_command,
+            da_command_receiver,
+            da_handle: None,
             metrics: self.metrics.clone(),
             #[cfg(test)]
             test_hooks: self.test_hooks.clone(),
@@ -1200,7 +1218,8 @@ impl ReadinessCursor {
         match event {
             RuntimeEvent::Verification(_) => self.completion_cursor = 1,
             RuntimeEvent::Application(_) => self.completion_cursor = 2,
-            RuntimeEvent::Crypto(_) => self.completion_cursor = 0,
+            RuntimeEvent::Crypto(_) => self.completion_cursor = 3,
+            RuntimeEvent::DaTask(_) => self.completion_cursor = 0,
             RuntimeEvent::ViewTimer => self.timer_cursor = 1,
             RuntimeEvent::ProductionTimer => self.timer_cursor = 0,
             _ => {}
@@ -1296,6 +1315,18 @@ where
     last_producer_progress: Option<ProducerProgress>,
     producer_blocked_since: Option<SystemTime>,
     producer_stall_reported: bool,
+    /// The own producer chain, if this validator produces one; gates the DA task.
+    da_own_chain: Option<ChainId>,
+    /// Recovered certificates and block-signer reports returned by the own-chain DA task.
+    da_updates: Option<mailbox::Receiver<DaTaskUpdate<V, H::Digest>>>,
+    /// Template sender cloned into each spawned DA task.
+    da_update_sender: Option<mailbox::Sender<DaTaskUpdate<V, H::Digest>>>,
+    /// Command endpoint of the current-generation DA task.
+    da_command: Option<mailbox::Sender<ChainCommand<V, H::Digest>>>,
+    /// Command receiver moved into the DA task on first spawn.
+    da_command_receiver: Option<mailbox::Receiver<ChainCommand<V, H::Digest>>>,
+    /// Handle to the current-generation DA task, aborted when the generation advances.
+    da_handle: Option<Handle<()>>,
     metrics: ActorMetrics,
     #[cfg(test)]
     test_hooks: TestHooks<V, H::Digest>,
@@ -1423,6 +1454,18 @@ where
                 }
                 self.crypto.next_completed().await
             } => (ReadinessCursor::COMPLETION, RuntimeEvent::Crypto(result)),
+            update = async {
+                if !admission.allows(ReadinessCursor::COMPLETION, None) {
+                    return pending_forever().await;
+                }
+                match self.da_updates.as_mut() {
+                    Some(updates) => updates.recv().await,
+                    None => pending_forever().await,
+                }
+            } => (
+                ReadinessCursor::COMPLETION,
+                update.map_or(RuntimeEvent::InputClosed, RuntimeEvent::DaTask),
+            ),
             () = wait_until(
                 &self.context,
                 admission
@@ -1536,8 +1579,8 @@ where
                 }
                 ReadinessCursor::COMPLETION => {
                     let mut completion = None;
-                    for inner in 0..3 {
-                        let source = (readiness.completion_cursor + inner) % 3;
+                    for inner in 0..4 {
+                        let source = (readiness.completion_cursor + inner) % 4;
                         completion = match source {
                             0 => completions.try_recv().ok().map(RuntimeEvent::Verification),
                             1 => self
@@ -1545,11 +1588,16 @@ where
                                 .next_completed()
                                 .now_or_never()
                                 .map(RuntimeEvent::Application),
-                            _ => self
+                            2 => self
                                 .crypto
                                 .next_completed()
                                 .now_or_never()
                                 .map(RuntimeEvent::Crypto),
+                            _ => self
+                                .da_updates
+                                .as_mut()
+                                .and_then(|updates| updates.try_recv().ok())
+                                .map(RuntimeEvent::DaTask),
                         };
                         if completion.is_some() {
                             break;
@@ -1676,6 +1724,7 @@ where
                     return Ok(RuntimeDisposition::Stop);
                 }
             }
+            RuntimeEvent::DaTask(update) => self.da_task_update(update)?,
             RuntimeEvent::ViewTimer => {
                 let (timer, _) = self.view_timer.take().expect("armed timer fired");
                 self.submit_view_timeout(timer)?;
@@ -2029,6 +2078,7 @@ where
             self.view_timer = None;
             self.production_timer = None;
             self.core_mut().advance_task_generation(generation)?;
+            self.spawn_da_task(generation);
         }
         if matches!(transition.status(), StepStatus::StaleCompletion) {
             self.metrics.stale.inc();
@@ -2053,6 +2103,96 @@ where
         self.active_custody.clear();
         self.active_validations.clear();
         self.verification_sources.clear();
+    }
+
+    /// Spawns the own-chain data-availability task on first entry to a generation, or reconfigures
+    /// the long-lived task for a later generation.
+    ///
+    /// The task is spawned once and lives until the runtime stops; a generation advance is a
+    /// message so no mailbox is re-registered and no in-flight recovery survives a generation.
+    fn spawn_da_task(&mut self, generation: u64) {
+        let Some(own_chain) = self.da_own_chain else {
+            return;
+        };
+        let certified = self
+            .machine
+            .own_certified_height()
+            .unwrap_or_else(Height::zero);
+        if self.da_handle.is_some() {
+            if let Some(command) = &self.da_command {
+                let _ = command.enqueue(ChainCommand::Reconfigure {
+                    generation,
+                    certified,
+                });
+            }
+            return;
+        }
+        let (Some(receiver), Some(update_sender)) = (
+            self.da_command_receiver.take(),
+            self.da_update_sender.clone(),
+        ) else {
+            return;
+        };
+        let codec = self.machine.profile().protocol().codec_config();
+        let da_quorum = codec.da_quorum();
+        // At most `d` own-chain headers are uncertified above the anchor, so `d` concurrent
+        // recoveries cannot exceed central's certificate capacity for the one chain.
+        let recovery_slots = codec.pipeline_depth();
+        let scheme = Arc::clone(&self.scheme);
+        let strategy = self.strategy.clone();
+        let latency = self.metrics.da_recovery_latency.clone();
+        let fallbacks = self.metrics.da_recovery_fallbacks.clone();
+        let handle = self.context.child("da_task").spawn(move |context| {
+            DaPlane::<_, H, P, V, _>::new(
+                context,
+                scheme,
+                strategy,
+                update_sender,
+                own_chain,
+                da_quorum,
+                recovery_slots,
+                generation,
+                certified,
+                latency,
+                fallbacks,
+            )
+            .run(receiver)
+        });
+        if let Some(command) = &self.da_command {
+            let _ = command.enqueue(ChainCommand::AnchorAdvanced(certified));
+        }
+        self.da_handle = Some(handle);
+    }
+
+    /// Applies one result returned by the own-chain data-availability task.
+    ///
+    /// Results from a superseded generation are dropped, mirroring how stale async completions are
+    /// dropped elsewhere.
+    fn da_task_update(&mut self, update: DaTaskUpdate<V, H::Digest>) -> Result<(), Fatal> {
+        match update {
+            DaTaskUpdate::Recovered {
+                generation,
+                block,
+                certificate,
+            } => {
+                if generation != self.core().task_generation() {
+                    self.metrics.stale.inc();
+                    return Ok(());
+                }
+                self.track_transition(|core| core.recovered_certificate(block, certificate))?;
+                Ok(())
+            }
+            DaTaskUpdate::BlockSigners {
+                generation,
+                signers,
+            } => {
+                if generation != self.core().task_generation() {
+                    self.metrics.stale.inc();
+                    return Ok(());
+                }
+                self.block_da_signers(&signers)
+            }
+        }
     }
 
     fn update_progress_gauges(&mut self) -> View {
@@ -2227,11 +2367,7 @@ where
             chain = progress.chain().get(),
             produced = progress.produced().get(),
             certified = progress.certified().get(),
-            vote_shares = progress.vote_shares(),
             da_quorum = progress.da_quorum(),
-            recovery_ready = progress.ready_recovery(),
-            recovery_pending = progress.pending_recovery(),
-            recovery_active = progress.active_recovery(),
             wake = progress.wake(),
             timer_armed = progress.timer_armed(),
             build_pending = progress.build_pending(),
@@ -2267,11 +2403,7 @@ where
             chain = progress.chain().get(),
             produced = progress.produced().get(),
             certified = progress.certified().get(),
-            vote_shares = progress.vote_shares(),
             da_quorum = progress.da_quorum(),
-            recovery_ready = progress.ready_recovery(),
-            recovery_pending = progress.pending_recovery(),
-            recovery_active = progress.active_recovery(),
             production_credit = progress.production_credit(),
             blocked_for_ms = blocked_for.as_millis(),
             "local producer stalled at DA pipeline limit"

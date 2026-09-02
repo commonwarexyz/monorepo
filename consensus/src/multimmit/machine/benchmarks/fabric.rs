@@ -366,7 +366,9 @@ pub(super) fn drain_with<F, P>(
                 Capability::Leader(
                     LeaderCapability::AggregateVqc(_) | LeaderCapability::AggregateLqc(_),
                 ) => {}
-                Capability::Producer(ProducerCapability::RecoverDa(_))
+                Capability::Producer(
+                    ProducerCapability::ForwardShare(_) | ProducerCapability::AnchorAdvanced(_),
+                )
                 | Capability::Leader(LeaderCapability::RecoverNullification(_)) => {}
                 other => panic!("unexpected capability in bench drive: {other:?}"),
             }
@@ -682,7 +684,9 @@ fn schedule_capabilities(
                 | LeaderCapability::RecoverNullification(_),
             )
             | Capability::Producer(
-                ProducerCapability::ArmTimer(_) | ProducerCapability::RecoverDa(_),
+                ProducerCapability::ArmTimer(_)
+                | ProducerCapability::ForwardShare(_)
+                | ProducerCapability::AnchorAdvanced(_),
             )
             | Capability::Durability(DurabilityCapability::Acknowledged { .. })
             | Capability::Durability(DurabilityCapability::Retire(_))

@@ -72,12 +72,8 @@ struct EngineProducerProgress {
     chain: u32,
     produced: u64,
     certified: u64,
-    vote_shares: usize,
     da_quorum: usize,
     pipeline_blocked: bool,
-    recovery_ready: bool,
-    recovery_pending: bool,
-    recovery_active: bool,
     production_credit: bool,
 }
 
@@ -127,12 +123,8 @@ impl EngineStatus {
                         chain: producer.chain().get(),
                         produced: producer.produced().get(),
                         certified: producer.certified().get(),
-                        vote_shares: producer.vote_shares(),
                         da_quorum: producer.da_quorum(),
                         pipeline_blocked: producer.pipeline_blocked(),
-                        recovery_ready: producer.ready_recovery(),
-                        recovery_pending: producer.pending_recovery(),
-                        recovery_active: producer.active_recovery(),
                         production_credit: producer.production_credit(),
                     }),
                 chains: inspection

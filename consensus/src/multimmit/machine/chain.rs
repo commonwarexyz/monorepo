@@ -9,7 +9,7 @@ use crate::{
         Anchor, BlockRef, ChainId, ChainProposal, Context, DaCertificate, DaVote, Extension,
         LeaderBlock, Position, SignedTransactionBlock, TransactionBlockHeader, VoteBody,
     },
-    types::{Attributable, Height, Participant},
+    types::Height,
 };
 use commonware_codec::EncodeSize as _;
 use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
@@ -289,90 +289,6 @@ impl ValidationCompletion {
     }
 }
 
-/// Identifies one exact data-availability recovery request.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct DaRecoveryId(u64);
-
-impl DaRecoveryId {
-    /// Returns the generation-local sequence.
-    pub const fn get(self) -> u64 {
-        self.0
-    }
-}
-
-/// Exact verified shares selected for one data-availability certificate.
-#[derive(Clone, Debug)]
-pub(crate) struct DaRecoveryJob<V: Variant, D: Digest> {
-    id: DaRecoveryId,
-    generation: u64,
-    votes: Arc<[DaVote<V, D>]>,
-}
-
-impl<V: Variant, D: Digest> DaRecoveryJob<V, D> {
-    /// Returns the job identifier.
-    pub const fn id(&self) -> DaRecoveryId {
-        self.id
-    }
-
-    /// Returns the process generation issuing the job.
-    pub const fn generation(&self) -> u64 {
-        self.generation
-    }
-
-    /// Returns the exact canonical signer subset in participant order.
-    pub fn votes(&self) -> &[DaVote<V, D>] {
-        &self.votes
-    }
-}
-
-/// Completion of one exact data-availability recovery request.
-#[derive(Clone, Debug)]
-pub(crate) struct DaRecoveryCompletion<V: Variant, D: Digest> {
-    id: DaRecoveryId,
-    generation: u64,
-    certificate: DaCertificate<V, D>,
-}
-
-impl<V: Variant, D: Digest> DaRecoveryCompletion<V, D> {
-    /// Creates a matched recovery completion.
-    pub const fn new(id: DaRecoveryId, generation: u64, certificate: DaCertificate<V, D>) -> Self {
-        Self {
-            id,
-            generation,
-            certificate,
-        }
-    }
-
-    /// Returns the completed job identifier.
-    pub const fn id(&self) -> DaRecoveryId {
-        self.id
-    }
-}
-
-/// The signers a failed data-availability recovery attributed its invalid shares to.
-#[derive(Clone, Debug)]
-pub(crate) struct DaRecoveryRejection {
-    id: DaRecoveryId,
-    generation: u64,
-    invalid: Vec<Participant>,
-}
-
-impl DaRecoveryRejection {
-    /// Creates a matched recovery rejection.
-    pub const fn new(id: DaRecoveryId, generation: u64, invalid: Vec<Participant>) -> Self {
-        Self {
-            id,
-            generation,
-            invalid,
-        }
-    }
-
-    /// Returns the signers whose shares failed against their partial public keys.
-    pub fn invalid(&self) -> &[Participant] {
-        &self.invalid
-    }
-}
-
 /// A production deadline bound to one exact local parent.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ProductionTimer<D: Digest> {
@@ -405,9 +321,13 @@ pub(crate) enum ChainEffect<V: Variant, D: Digest> {
     Custody(CustodyJob<D>),
     CancelCustody(CustodyCancellation),
     Validate(ValidationJob<V, D>),
-    CancelValidations { chain: ChainId, through: Height },
+    CancelValidations {
+        chain: ChainId,
+        through: Height,
+    },
     ArmTimer(ProductionTimer<D>),
-    Recover(DaRecoveryJob<V, D>),
+    /// Forward an authenticated own-chain data-availability share to the own-chain DA task.
+    ForwardShare(Arc<DaVote<V, D>>),
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -480,18 +400,6 @@ enum PreparedState {
 }
 
 #[derive(Clone, Debug)]
-struct VotePool<V: Variant, D: Digest> {
-    header: TransactionBlockHeader<D>,
-    shares: BTreeMap<Participant, Arc<DaVote<V, D>>>,
-    /// Signers a failed recovery attributed an invalid share for this header to.
-    ///
-    /// Shares enter the pool on structural checks alone, so recovery is where an invalid one is
-    /// discovered. Remembering the signer keeps a rejected share out of every later selection,
-    /// including one a re-observation would otherwise pool again. Bounded by the committee.
-    rejected: BTreeSet<Participant>,
-}
-
-#[derive(Clone, Debug)]
 struct Certified<V: Variant, D: Digest> {
     block: BlockRef<D>,
     certificate: Option<DaCertificate<V, D>>,
@@ -513,14 +421,10 @@ pub(crate) struct ProducerStatus {
     pub chain: ChainId,
     pub produced: Height,
     pub certified: Height,
-    pub vote_shares: usize,
     pub da_quorum: usize,
     pub pipeline_depth: u64,
     pub prepared: usize,
     pub pipeline_blocked: bool,
-    pub ready_recovery: bool,
-    pub pending_recovery: bool,
-    pub active_recovery: bool,
     pub wake: bool,
     pub timer_armed: bool,
     pub build_pending: bool,
@@ -570,10 +474,6 @@ pub(crate) struct ChainState<V: Variant, D: Digest> {
     producer_headers: BTreeMap<Height, TransactionBlockHeader<D>>,
     chains: Vec<PerChainDa<V, D>>,
     next_da_chain: usize,
-    vote_pools: BTreeMap<D, VotePool<V, D>>,
-    ready_recoveries: BTreeSet<BlockRef<D>>,
-    recovery_jobs: BTreeMap<DaRecoveryId, DaRecoveryJob<V, D>>,
-    pending_recoveries: BTreeSet<BlockRef<D>>,
     certificate_candidates: BTreeMap<BlockRef<D>, Vec<CertificateCandidate<V, D>>>,
     discarded_certificates: Vec<ArtifactId<D>>,
     ancestry: BTreeMap<BlockRef<D>, BlockRef<D>>,
@@ -643,10 +543,6 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             producer_headers: BTreeMap::new(),
             chains,
             next_da_chain: 0,
-            vote_pools: BTreeMap::new(),
-            ready_recoveries: BTreeSet::new(),
-            recovery_jobs: BTreeMap::new(),
-            pending_recoveries: BTreeSet::new(),
             certificate_candidates: BTreeMap::new(),
             discarded_certificates: Vec::new(),
             ancestry: BTreeMap::new(),
@@ -685,7 +581,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
                     continue;
                 }
             }
-            self.install_certificate::<H>(block, certificate)?;
+            self.install_certificate(block, certificate)?;
         }
         Ok(())
     }
@@ -833,7 +729,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             return Err(ChainError::Context);
         }
 
-        self.install_certificate::<H>(block, certificate.clone())?;
+        self.install_certificate(block, certificate.clone())?;
         let retired_validations = self
             .validation_jobs
             .iter()
@@ -875,22 +771,6 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         // Retirement only drops choices at or below the new floor, so the surviving prefix stays
         // contiguous; raising the cursor to the floor keeps it a valid lower bound.
         self.chains[index].da_voted_run = self.chains[index].da_voted_run.max(retired);
-        self.vote_pools.retain(|_, pool| {
-            let candidate = pool.header.block_ref::<H>();
-            candidate.chain() != block.chain() || candidate.height() > block.height()
-        });
-        self.ready_recoveries.retain(|candidate| {
-            candidate.chain() != block.chain() || candidate.height() > block.height()
-        });
-        self.pending_recoveries.retain(|candidate| {
-            candidate.chain() != block.chain() || candidate.height() > block.height()
-        });
-        self.recovery_jobs.retain(|_, job| {
-            job.votes.first().is_none_or(|vote| {
-                let candidate = vote.header().block_ref::<H>();
-                candidate.chain() != block.chain() || candidate.height() > block.height()
-            })
-        });
         self.certificate_candidates.retain(|candidate, _| {
             candidate.chain() != block.chain() || candidate.height() > retired
         });
@@ -977,32 +857,17 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             .rev()
             .find(|(_, certified)| certified.certificate.is_some())
             .map_or(Height::zero(), |(height, _)| *height);
-        let vote_shares = self
-            .producer_headers
-            .get(&produced.height())
-            .filter(|header| header.block_ref::<H>() == produced)
-            .and_then(|header| self.vote_pools.get(&header.digest::<H>()))
-            .map_or(0, |pool| pool.shares.len());
-        let active_recovery = self.recovery_jobs.values().any(|job| {
-            job.votes
-                .first()
-                .is_some_and(|vote| vote.header().block_ref::<H>() == produced)
-        });
 
         Some(ProducerStatus {
             chain,
             produced: produced.height(),
             certified,
-            vote_shares,
             da_quorum: self.da_quorum,
             pipeline_depth: self.pipeline_depth,
             prepared: self.prepared.len(),
             pipeline_blocked: self.planned_tip::<H>().is_some_and(|tip| {
                 tip.height().get().saturating_sub(certified.get()) >= self.pipeline_depth
             }),
-            ready_recovery: self.ready_recoveries.contains(&produced),
-            pending_recovery: self.pending_recoveries.contains(&produced),
-            active_recovery,
             wake: self.producer_wake,
             timer_armed: self.deadline.is_some(),
             build_pending: self.pending_build.is_some(),
@@ -1119,7 +984,14 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
                     self.schedule_ready_validations(generation)?;
                 }
             }
-            Artifact::DaVote(vote) => self.observe_da_vote::<H>(vote)?,
+            Artifact::DaVote(vote) => {
+                // Shares are only useful to the chain's producer; the own-chain task pools them
+                // and decides recovery. Central keeps minting their observation identity.
+                if self.own_chain == Some(vote.header().chain()) {
+                    self.capabilities
+                        .push(ChainEffect::ForwardShare(Arc::new(vote.clone())));
+                }
+            }
             Artifact::DaCertificate(certificate) => {
                 if !self.record_header::<H>(certificate.header())? {
                     return Err(ChainError::CertifiedConflict);
@@ -1234,31 +1106,10 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
                         self.certificate_candidates.remove(&block);
                     }
                 }
-                self.promote_certificate::<H>(block)?;
+                self.promote_certificate(block)?;
             }
             _ => {}
         }
-        Ok(())
-    }
-
-    fn observe_da_vote<H: Hasher<Digest = D>>(
-        &mut self,
-        vote: &DaVote<V, D>,
-    ) -> Result<(), ChainError> {
-        let block = vote.header().block_ref::<H>();
-        let header = vote.header().digest::<H>();
-        let pool = self.vote_pools.entry(header).or_insert_with(|| VotePool {
-            header: vote.header().clone(),
-            shares: BTreeMap::new(),
-            rejected: BTreeSet::new(),
-        });
-        debug_assert_eq!(pool.header, *vote.header());
-        if !pool.rejected.contains(&vote.signer()) {
-            pool.shares
-                .entry(vote.signer())
-                .or_insert_with(|| Arc::new(vote.clone()));
-        }
-        self.refresh_recovery::<H>(block);
         Ok(())
     }
 
@@ -1297,13 +1148,10 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
                 },
             );
         }
-        self.promote_certificate::<H>(block)
+        self.promote_certificate(block)
     }
 
-    fn promote_certificate<H: Hasher<Digest = D>>(
-        &mut self,
-        block: BlockRef<D>,
-    ) -> Result<(), ChainError> {
+    fn promote_certificate(&mut self, block: BlockRef<D>) -> Result<(), ChainError> {
         let Some(candidates) = self.certificate_candidates.get(&block) else {
             return Ok(());
         };
@@ -1328,10 +1176,10 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             self.discarded_certificates.push(candidate.artifact);
         }
 
-        self.install_certificate::<H>(block, certificate)
+        self.install_certificate(block, certificate)
     }
 
-    fn install_certificate<H: Hasher<Digest = D>>(
+    fn install_certificate(
         &mut self,
         block: BlockRef<D>,
         certificate: DaCertificate<V, D>,
@@ -1357,13 +1205,6 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
                 });
             }
         }
-        self.pending_recoveries.remove(&block);
-        self.ready_recoveries.remove(&block);
-        self.recovery_jobs.retain(|_, job| {
-            job.votes
-                .first()
-                .is_none_or(|vote| vote.header().block_ref::<H>() != block)
-        });
         Ok(())
     }
 
@@ -1900,7 +1741,6 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         }
         self.producer_headers
             .insert(header.height(), header.clone());
-        self.refresh_recovery::<H>(header.block_ref::<H>());
         self.advance_produced::<H>(block);
         Ok(())
     }
@@ -2276,114 +2116,6 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         let chain = header.chain().get() as usize;
         self.next_da_chain = (chain + 1) % self.chains.len();
         self.chains[chain].pending_da_votes.push_back(header);
-    }
-
-    /// Prepares a recovery completion's certificate, or consumes a stale completion.
-    ///
-    /// Returning `None` releases a matching reservation whose dispatch generation is no longer
-    /// current and re-derives the block's recovery readiness, so a completion that cannot
-    /// commit can never strand its job.
-    pub(crate) fn prepare_recovery<H: Hasher<Digest = D>>(
-        &mut self,
-        completion: &DaRecoveryCompletion<V, D>,
-        generation: u64,
-    ) -> Result<Option<Arc<Artifact<V, D>>>, ChainError> {
-        if self
-            .recovery_jobs
-            .get(&completion.id)
-            .is_some_and(|job| job.generation != generation)
-        {
-            self.abandon_recovery::<H>(completion.id);
-            return Ok(None);
-        }
-        if completion.generation != generation {
-            return Ok(None);
-        }
-        let Some(job) = self.recovery_jobs.get(&completion.id) else {
-            return Ok(None);
-        };
-        let certificate = &completion.certificate;
-        let Some(first) = job.votes.first() else {
-            return Err(ChainError::CompletionMismatch);
-        };
-        if certificate.header() != first.header() || certificate.certificate().get().is_none() {
-            return Err(ChainError::CompletionMismatch);
-        }
-        Ok(Some(Arc::new(Artifact::DaCertificate(certificate.clone()))))
-    }
-
-    /// Drops the attributed shares of a failed recovery and releases its reservation.
-    ///
-    /// Returns whether the rejection was applied; a stale dispatch generation is consumed the
-    /// same way [`Self::prepare_recovery`] consumes a stale completion, so a rejection that
-    /// cannot commit never strands its job.
-    ///
-    /// Every rejected signer is remembered, so the block re-readies against a strictly smaller
-    /// pool and the same invalid share can never be selected again. Recovery therefore makes
-    /// progress on every attempt: one adversarial share costs one extra attempt, and a pool that
-    /// keeps a quorum of unrejected shares certifies on that attempt.
-    pub(crate) fn reject_recovery<H: Hasher<Digest = D>>(
-        &mut self,
-        rejection: &DaRecoveryRejection,
-        generation: u64,
-    ) -> Result<bool, ChainError> {
-        if self
-            .recovery_jobs
-            .get(&rejection.id)
-            .is_some_and(|job| job.generation != generation)
-        {
-            self.abandon_recovery::<H>(rejection.id);
-            return Ok(false);
-        }
-        if rejection.generation != generation {
-            return Ok(false);
-        }
-        let Some(job) = self.recovery_jobs.get(&rejection.id) else {
-            return Ok(false);
-        };
-        let header = job
-            .votes
-            .first()
-            .ok_or(ChainError::CompletionMismatch)?
-            .header()
-            .digest::<H>();
-        if let Some(pool) = self.vote_pools.get_mut(&header) {
-            for signer in &rejection.invalid {
-                pool.shares.remove(signer);
-                pool.rejected.insert(*signer);
-            }
-        }
-        self.abandon_recovery::<H>(rejection.id);
-        Ok(true)
-    }
-
-    /// Releases a recovery reservation without a certificate and re-derives readiness.
-    ///
-    /// The vote pool survives the job, so a block whose recovery was abandoned re-readies
-    /// immediately when its pool still satisfies the quorum and producer-header rules.
-    pub(crate) fn abandon_recovery<H: Hasher<Digest = D>>(&mut self, id: DaRecoveryId) {
-        let Some(job) = self.recovery_jobs.remove(&id) else {
-            return;
-        };
-        if let Some(vote) = job.votes.first() {
-            let block = vote.header().block_ref::<H>();
-            self.pending_recoveries.remove(&block);
-            self.refresh_recovery::<H>(block);
-        }
-    }
-
-    pub(crate) fn finish_recovery<H: Hasher<Digest = D>>(&mut self, id: DaRecoveryId) {
-        let Some(job) = self.recovery_jobs.remove(&id) else {
-            return;
-        };
-        if let Some(vote) = job.votes.first() {
-            self.pending_recoveries
-                .remove(&vote.header().block_ref::<H>());
-        }
-    }
-
-    pub(crate) fn recovery_reservations(&self) -> usize {
-        self.recovery_jobs.len()
     }
 
     pub(crate) fn is_producer_header(&self, header: &TransactionBlockHeader<D>) -> bool {
@@ -2812,16 +2544,10 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         &mut self,
         profile: &Profile<H, V>,
         generation: u64,
-        recovery_slots: usize,
         production_credit: bool,
     ) -> Result<(), ChainError> {
         self.production_credit = production_credit;
         self.schedule_ready_validations(generation)?;
-        let recoveries_before = self.recovery_jobs.len();
-        self.drive_recoveries::<H>(profile, generation, recovery_slots)?;
-        if self.recovery_jobs.len() > recoveries_before {
-            return Ok(());
-        }
         let Some(parent) = self.planned_tip::<H>() else {
             return Ok(());
         };
@@ -2862,110 +2588,6 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         self.pending_build = Some(job.clone());
         self.capabilities.push(ChainEffect::Build(job));
         Ok(())
-    }
-
-    fn drive_recoveries<H: Hasher<Digest = D>>(
-        &mut self,
-        profile: &Profile<H, V>,
-        generation: u64,
-        mut slots: usize,
-    ) -> Result<(), ChainError> {
-        if slots == 0 {
-            return Ok(());
-        }
-        let Some(own_chain) = self.own_chain else {
-            return Ok(());
-        };
-        debug_assert_eq!(
-            self.da_quorum,
-            profile.protocol().codec_config().da_quorum()
-        );
-
-        while slots > 0 {
-            let Some(block) = self.ready_recoveries.pop_first() else {
-                break;
-            };
-            slots -= 1;
-            debug_assert_eq!(
-                block.chain(),
-                own_chain,
-                "refresh_recovery only readies own-chain blocks"
-            );
-            let Some(header) = self.producer_headers.get(&block.height()) else {
-                continue;
-            };
-            if header.block_ref::<H>() != block {
-                continue;
-            }
-            let Some(pool) = self.vote_pools.get(&header.digest::<H>()) else {
-                continue;
-            };
-            let certified = self.chains[own_chain.get() as usize]
-                .certified
-                .get(&block.height())
-                .is_some_and(|certified| certified.block == block);
-            if certified {
-                continue;
-            }
-            if pool.shares.len() < self.da_quorum
-                || self.pending_recoveries.contains(&block)
-                || self.producer_headers.get(&block.height()) != Some(&pool.header)
-            {
-                continue;
-            }
-            let id = DaRecoveryId(self.next_job);
-            self.next_job = self
-                .next_job
-                .checked_add(1)
-                .ok_or(ChainError::IdentifierExhausted)?;
-            let votes = pool
-                .shares
-                .values()
-                .take(self.da_quorum)
-                .map(|vote| vote.as_ref().clone())
-                .collect::<Arc<[_]>>();
-            let job = DaRecoveryJob {
-                id,
-                generation,
-                votes,
-            };
-            self.recovery_jobs.insert(id, job.clone());
-            self.pending_recoveries.insert(block);
-            self.capabilities.push(ChainEffect::Recover(job));
-        }
-        Ok(())
-    }
-
-    pub(crate) fn has_ready_recovery(&self) -> bool {
-        !self.ready_recoveries.is_empty()
-    }
-
-    fn refresh_recovery<H: Hasher<Digest = D>>(&mut self, block: BlockRef<D>) {
-        let pool = self
-            .producer_headers
-            .get(&block.height())
-            .filter(|header| header.block_ref::<H>() == block)
-            .and_then(|header| self.vote_pools.get(&header.digest::<H>()));
-        let ready = Some(block.chain()) == self.own_chain
-            && !self.pending_recoveries.contains(&block)
-            && self
-                .chains
-                .get(block.chain().get() as usize)
-                .is_some_and(|chain| {
-                    chain
-                        .certified
-                        .get(&block.height())
-                        .is_none_or(|certificate| certificate.block != block)
-                })
-            && pool.is_some_and(|pool| {
-                pool.shares.len() >= self.da_quorum
-                    && self.producer_headers.get(&block.height()) == Some(&pool.header)
-            });
-        if ready {
-            self.ready_recoveries.insert(block);
-        } else {
-            self.ready_recoveries.remove(&block);
-        }
     }
 
     pub(crate) fn take_effects(&mut self) -> Vec<ChainEffect<V, D>> {

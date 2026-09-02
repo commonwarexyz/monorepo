@@ -96,16 +96,16 @@
 use super::contracts::CORE_BUDGET;
 use super::{
     Artifact, BarrierAck, BuildCompletion, Capabilities, ChainProgress, CheckpointCut,
-    CustodyCancellation, CustodyCompletion, DaRecoveryCompletion, DaRecoveryRejection, DomainEvent,
-    EffectCompletion, EffectId, IdentifiedArtifact, Input, Inspection, LqcAggregateCompletion,
-    Machine, NullificationRecoveryCompletion, PollResult, ProductionTimer, Profile, Progress,
-    ReplayError, ResolutionCompletion, SigningBatchPass, Snapshot, Step, StepError, StepStatus,
-    Timer, ValidationCompletion, ValidationId, ValidationJob, VerificationCompletion,
-    VerificationPass, ViewProof, VqcAggregateCompletion,
+    CustodyCancellation, CustodyCompletion, DomainEvent, EffectCompletion, EffectId,
+    IdentifiedArtifact, Input, Inspection, LqcAggregateCompletion, Machine,
+    NullificationRecoveryCompletion, PollResult, ProductionTimer, Profile, Progress, ReplayError,
+    ResolutionCompletion, SigningBatchPass, Snapshot, Step, StepError, StepStatus, Timer,
+    ValidationCompletion, ValidationId, ValidationJob, VerificationCompletion, VerificationPass,
+    ViewProof, VqcAggregateCompletion,
     contracts::{FairCursor, LANE_WEIGHTS, Lane, ServiceCycle, ServiceError, TransitionCost},
 };
 use crate::{
-    multimmit::types::{Activity, ChainId, Context},
+    multimmit::types::{Activity, BlockRef, ChainId, Context, DaCertificate},
     types::{Height, View},
 };
 use commonware_codec::EncodeSize as _;
@@ -595,18 +595,12 @@ impl<H: Hasher, V: Variant> CoreState<H, V> {
         self.enqueue(Input::ProductionTimerFired(timer), 1)
     }
 
-    pub(crate) fn producer_da_recovered(
+    pub(crate) fn recovered_certificate(
         &mut self,
-        completion: DaRecoveryCompletion<V, H::Digest>,
+        block: BlockRef<H::Digest>,
+        certificate: DaCertificate<V, H::Digest>,
     ) -> Result<InputTicket, CoreError> {
-        self.enqueue(Input::DaRecovered(completion), 1)
-    }
-
-    pub(crate) fn producer_da_rejected(
-        &mut self,
-        rejection: DaRecoveryRejection,
-    ) -> Result<InputTicket, CoreError> {
-        self.enqueue(Input::DaRejected(rejection), 1)
+        self.enqueue(Input::RecoveredCertificate { block, certificate }, 1)
     }
 
     pub(crate) fn leader_resolution_completed(
@@ -1000,6 +994,11 @@ impl<H: Hasher, V: Variant> CoreState<H, V> {
         self.machine.progress()
     }
 
+    /// Returns the own producer chain's certified tip height, if this validator produces one.
+    pub(crate) fn own_certified_height(&self) -> Option<Height> {
+        self.machine.own_certified_height()
+    }
+
     /// Projects per-producer-chain progress for periodic metrics refresh.
     pub(crate) fn chain_progress(&self) -> Vec<ChainProgress> {
         self.machine.chain_progress()
@@ -1228,8 +1227,7 @@ const fn input_lane<V: Variant, D: Digest>(input: &Input<V, D>) -> Lane {
         | Input::BlockCustodied(_)
         | Input::CustodyCancelled(_)
         | Input::BlockValidated(_)
-        | Input::DaRecovered(_)
-        | Input::DaRejected(_)
+        | Input::RecoveredCertificate { .. }
         | Input::NullificationRecovered(_)
         | Input::VqcAggregated(_)
         | Input::LqcAggregated(_) => Lane::LocalCompletion,
@@ -1248,8 +1246,7 @@ fn input_cost<V: Variant, D: Digest>(input: &Input<V, D>) -> TransitionCost {
         Input::ResolutionCompleted(_) => TransitionCost::Constant,
         // Recovery and aggregate completions only enter the machine-owned completion FIFO here.
         // Their committee work is charged by the component scheduler when that FIFO is serviced.
-        Input::DaRecovered(_)
-        | Input::DaRejected(_)
+        Input::RecoveredCertificate { .. }
         | Input::NullificationRecovered(_)
         | Input::VqcAggregated(_)
         | Input::LqcAggregated(_) => TransitionCost::Constant,
@@ -1291,8 +1288,7 @@ fn input_bytes<V: Variant, D: Digest>(
             })
             .ok_or(CoreError::CapacityOverflow)?,
         Input::ResolutionCompleted(_)
-        | Input::DaRecovered(_)
-        | Input::DaRejected(_)
+        | Input::RecoveredCertificate { .. }
         | Input::NullificationRecovered(_)
         | Input::VqcAggregated(_)
         | Input::LqcAggregated(_) => per_item_limit,
