@@ -1899,7 +1899,6 @@ impl TestHarness for StandardHarness {
             peer_provider: oracle.manager(),
             blocker: oracle.control(validator.clone()),
             mailbox_size: config.mailbox_size,
-            initial: Duration::from_secs(1),
             timeout: Duration::from_secs(2),
             fetch_retry_timeout: Duration::from_millis(100),
             priority_requests: false,
@@ -2132,7 +2131,6 @@ impl TestHarness for StandardHarness {
             peer_provider: oracle.manager(),
             blocker: control.clone(),
             mailbox_size: config.mailbox_size,
-            initial: Duration::from_secs(1),
             timeout: Duration::from_secs(2),
             fetch_retry_timeout: Duration::from_millis(100),
             priority_requests: false,
@@ -2157,6 +2155,10 @@ impl TestHarness for StandardHarness {
             context.child("finalizations_by_height"),
             prunable::Config {
                 translator: EightCap,
+                metadata_partition: format!(
+                    "{}-finalizations-by-height-metadata",
+                    partition_prefix
+                ),
                 key_partition: format!("{}-finalizations-by-height-key", partition_prefix),
                 key_page_cache: page_cache.clone(),
                 value_partition: format!("{}-finalizations-by-height-value", partition_prefix),
@@ -2175,6 +2177,7 @@ impl TestHarness for StandardHarness {
             context.child("finalized_blocks"),
             prunable::Config {
                 translator: EightCap,
+                metadata_partition: format!("{}-finalized-blocks-metadata", partition_prefix),
                 key_partition: format!("{}-finalized-blocks-key", partition_prefix),
                 key_page_cache: page_cache.clone(),
                 value_partition: format!("{}-finalized-blocks-value", partition_prefix),
@@ -2689,7 +2692,6 @@ impl TestHarness for CodingHarness {
             peer_provider: oracle.manager(),
             blocker: oracle.control(validator.clone()),
             mailbox_size: config.mailbox_size,
-            initial: Duration::from_secs(1),
             timeout: Duration::from_secs(2),
             fetch_retry_timeout: Duration::from_millis(100),
             priority_requests: false,
@@ -2961,7 +2963,6 @@ impl TestHarness for CodingHarness {
             peer_provider: oracle.manager(),
             blocker: control.clone(),
             mailbox_size: config.mailbox_size,
-            initial: Duration::from_secs(1),
             timeout: Duration::from_secs(2),
             fetch_retry_timeout: Duration::from_millis(100),
             priority_requests: false,
@@ -2991,6 +2992,10 @@ impl TestHarness for CodingHarness {
             context.child("finalizations_by_height"),
             prunable::Config {
                 translator: EightCap,
+                metadata_partition: format!(
+                    "{}-finalizations-by-height-metadata",
+                    partition_prefix
+                ),
                 key_partition: format!("{}-finalizations-by-height-key", partition_prefix),
                 key_page_cache: page_cache.clone(),
                 value_partition: format!("{}-finalizations-by-height-value", partition_prefix),
@@ -3009,6 +3014,7 @@ impl TestHarness for CodingHarness {
             context.child("finalized_blocks"),
             prunable::Config {
                 translator: EightCap,
+                metadata_partition: format!("{}-finalized-blocks-metadata", partition_prefix),
                 key_partition: format!("{}-finalized-blocks-key", partition_prefix),
                 key_page_cache: page_cache.clone(),
                 value_partition: format!("{}-finalized-blocks-value", partition_prefix),

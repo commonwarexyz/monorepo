@@ -57,14 +57,7 @@ impl<F: Family, E: Context, K: Key, V: VariableValue, H: Hasher, T: Translator, 
             ROOT_BAGGING,
         )
         .await?;
-        Self::init_from_journal(
-            journal,
-            context,
-            cfg.translator,
-            cfg.init_buffer,
-            cfg.init_cache_size,
-        )
-        .await
+        Self::init_from_journal(journal, context, cfg.translator, cfg.init_buffer).await
     }
 }
 
@@ -98,6 +91,7 @@ mod tests {
                 metadata_partition: format!("metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
@@ -108,9 +102,9 @@ mod tests {
                 codec_config: ((), ()),
                 page_cache,
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
             },
             translator: TwoCap,
-            init_cache_size: Some(NZUsize!(1024)),
             init_buffer: NZUsize!(1 << 21),
         }
     }
@@ -134,6 +128,7 @@ mod tests {
                 codec_config: ((), ()),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
             },
         };
         CompactDb::init(context, cfg).await.unwrap()
@@ -225,6 +220,7 @@ mod tests {
         test_variable_proof_verify => run_proof_verify, open;
         test_variable_prune => run_prune, open;
         test_variable_batch_chain => run_batch_chain, open;
+        test_variable_operations_match_applied_log => run_operations_match_applied_log, open;
         test_variable_build_and_authenticate => run_build_and_authenticate, open;
         test_variable_recovery_from_failed_merkle_sync => run_recovery_from_failed_merkle_sync, open;
         test_variable_recovery_from_failed_log_sync => run_recovery_from_failed_log_sync, open;
@@ -270,6 +266,8 @@ mod tests {
         test_variable_rewind_preserves_collision_bucket => run_rewind_preserves_collision_bucket, open;
         test_variable_rewind_after_reopen_repeated_key_gap => run_rewind_after_reopen_repeated_key_gap, open;
         test_variable_rewind_after_reopen_mixed_gap_retained => run_rewind_after_reopen_mixed_gap_retained, open;
+        test_variable_rewind_repeated_key_live => run_rewind_repeated_key_live, open;
+        test_variable_rewind_after_reopen_repeated_key_retained => run_rewind_after_reopen_repeated_key_retained, open;
     }
 
     #[boxed]

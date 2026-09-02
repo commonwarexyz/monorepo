@@ -698,10 +698,12 @@ where
         let mut marshaled = self.clone();
         let round = context.round;
 
-        // Register the certification gate task synchronously so `certify` finds a pending
-        // entry even while the optimistic block subscription is still waiting locally.
-        // This lets `certify` take the task and bump a round-bound notarized fetch
-        // via `hint_notarized`.
+        // Verification needs the full block but waits only for local delivery. Certification starts
+        // recovery only when the block is not buffered. If a buffered block is evicted before
+        // verification registers its wait, verification is left with neither the block nor an
+        // active fetch. Register the wait before publishing the gate so it receives the buffered
+        // block or is waiting when recovery delivers it.
+        let block_request = marshal.subscribe_by_digest(digest, DigestFallback::Wait);
         let (task_tx, task_rx) = oneshot::channel();
         self.gates.insert(round, digest, task_rx);
 
@@ -730,7 +732,7 @@ where
                     )
                 });
 
-                let block_request = marshal.subscribe_by_digest(digest, DigestFallback::Wait);
+                // Stop waiting for the block if consensus drops the verification request.
                 let block = select! {
                     _ = tx.closed() => {
                         debug!(

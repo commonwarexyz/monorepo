@@ -103,6 +103,7 @@ mod tests {
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(context, NZU16!(101), NZUsize!(11)),
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
             },
         }
     }
@@ -118,6 +119,7 @@ mod tests {
                 metadata_partition: format!("stateful-keyless-full-metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
@@ -126,6 +128,7 @@ mod tests {
                 items_per_blob: NZU64!(7),
                 page_cache,
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
             },
         }
     }

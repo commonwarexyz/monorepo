@@ -87,6 +87,7 @@ mod tests {
                 metadata_partition: format!("fixed-metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
                 strategy,
                 page_cache: page_cache.clone(),
             },
@@ -95,6 +96,7 @@ mod tests {
                 items_per_blob: NZU64!(7),
                 page_cache,
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
             },
         }
     }
@@ -136,6 +138,7 @@ mod tests {
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
             },
         };
         TestCompactDb::init(context, cfg).await.unwrap()
@@ -449,6 +452,7 @@ mod tests {
         test_keyless_fixed_batch_speculative_root => run_batch_speculative_root, db;
         test_keyless_fixed_merkleized_batch_get => run_merkleized_batch_get, db;
         test_keyless_fixed_batch_chained => run_batch_chained, db;
+        test_keyless_fixed_operations_match_applied_log => run_operations_match_applied_log, db;
         test_keyless_fixed_batch_chained_apply_sequential => run_batch_chained_apply_sequential, db;
         test_keyless_fixed_batch_many_sequential => run_batch_many_sequential, db;
         test_keyless_fixed_batch_empty => run_batch_empty, db;

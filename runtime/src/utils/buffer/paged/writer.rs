@@ -25,9 +25,9 @@
 //! # Checksums
 //!
 //! Each physical page ends in a two-slot CRC record. The slots let a partial page be rewritten
-//! without clobbering its previously committed contents, so an interrupted write loses at most
-//! the bytes it was writing. [Writer::new] backs up over any trailing bytes not covered by a
-//! valid checksum, treating them as an incomplete write.
+//! without clobbering its last durable contents, so an interrupted write loses at most unsynced
+//! bytes. [Writer::new] backs up over any trailing bytes not covered by a valid checksum,
+//! treating them as an incomplete write.
 //!
 //! # Raw [Blob] handles
 //!
@@ -51,6 +51,7 @@ use crate::{
 };
 use bytes::BufMut;
 use commonware_cryptography::Crc32;
+use commonware_utils::Widen;
 use std::num::{NonZeroU16, NonZeroUsize};
 use tracing::warn;
 
@@ -105,6 +106,15 @@ pub struct Writer<B: Blob> {
     /// The active checksum of the partial page in the blob, if any.
     partial_page_state: Option<ActiveChecksum>,
 
+    /// The durable checksum of the page a partial-page flush would rewrite, if any.
+    ///
+    /// Rewrites preserve this slot byte-identically so a torn rewrite can never lose the page's
+    /// last durable contents. It trails [Self::partial_page_state] until a completed sync proves
+    /// the flushed state durable: an unsynced flush ([Self::replay], [Self::snapshot]) must not
+    /// advance it, or a later rewrite would evict the durable checksum and a crash cutting both
+    /// writes could leave no slot covering the synced prefix.
+    durable_page_state: Option<ActiveChecksum>,
+
     /// Durability state for plain writes, resizes, and range-sync writes.
     sync_state: SyncState,
 
@@ -123,17 +133,23 @@ impl<B: Blob> Writer<B> {
     /// Wrap `blob` in a [Writer]. `blob` must already hold `original_blob_size` physical bytes;
     /// reads are cached through `cache_ref` and appends stage in a write buffer of capacity
     /// `capacity`. Rewinds the blob if necessary so it only contains checksum-validated data.
+    ///
+    /// The blob's tail-page contents must be durable (freshly opened after a crash, or synced
+    /// since the last partial-page rewrite): the discovered checksum slot seeds the writer's
+    /// durable-slot tracking, so wrapping a blob whose tail rewrite is still volatile would
+    /// let a later unsynced flush overwrite the only durable slot.
     pub async fn new(
         blob: B,
         original_blob_size: u64,
         capacity: usize,
         cache_ref: CacheRef,
     ) -> Result<Self, Error> {
+        let page_size: u64 = cache_ref.page_size().widen();
         let (partial_page_state, pages, invalid_data_found) =
-            Self::read_last_valid_page(&blob, original_blob_size, cache_ref.page_size()).await?;
+            Self::read_last_valid_page(&blob, original_blob_size, page_size).await?;
         if invalid_data_found {
             // Invalid data was detected, trim it from the blob.
-            let new_blob_size = pages * (cache_ref.page_size() + CHECKSUM_SIZE);
+            let new_blob_size = pages * (page_size + CHECKSUM_SIZE);
             warn!(
                 original_blob_size,
                 new_blob_size, "truncating blob to remove invalid data"
@@ -142,7 +158,7 @@ impl<B: Blob> Writer<B> {
             blob.sync().await?;
         }
 
-        let capacity = adjusted_capacity(capacity, cache_ref.page_size());
+        let capacity = adjusted_capacity(capacity, page_size);
         let needs_sync = !invalid_data_found; // ensure pending writes on the wrapped blob are synced
 
         let (current_page, partial_page_state, partial_data) = match partial_page_state {
@@ -151,7 +167,7 @@ impl<B: Blob> Writer<B> {
         };
 
         let buffer = Buffer::from(
-            current_page * cache_ref.page_size(),
+            current_page * page_size,
             partial_data.unwrap_or_default(),
             capacity,
             cache_ref.pool().clone(),
@@ -161,6 +177,7 @@ impl<B: Blob> Writer<B> {
             blob,
             current_page,
             partial_page_state,
+            durable_page_state: partial_page_state,
             sync_state: if needs_sync {
                 SyncState::Dirty
             } else {
@@ -248,7 +265,7 @@ impl<B: Blob> Writer<B> {
     /// Append all bytes in `buf` to the tip of the blob, returning the logical offset at which
     /// the first byte was written.
     pub async fn append(&mut self, buf: &[u8]) -> Result<u64, Error> {
-        let page_size = self.cache_ref.page_size() as usize;
+        let page_size: usize = self.cache_ref.page_size().widen();
 
         // Bypass the write buffer and write whole pages directly when `buf` is large.
         if too_big_for_buffer(
@@ -273,7 +290,7 @@ impl<B: Blob> Writer<B> {
     /// blob, and leave only a sub-page suffix in the write buffer. This avoids copying full-page
     /// payloads while preserving the invariant that the buffer starts at `current_page`.
     pub async fn append_owned(&mut self, buf: IoBuf) -> Result<u64, Error> {
-        let page_size = self.cache_ref.page_size() as usize;
+        let page_size: usize = self.cache_ref.page_size().widen();
         let offset = self.buffer.size();
 
         // Buffer the append unless `buf` is too big for the buffer.
@@ -349,13 +366,11 @@ impl<B: Blob> Writer<B> {
         self.buffer.replace(boundary + bulk_len as u64, suffix);
 
         // Make sure the buffer offset and underlying blob agree on the state of the tip.
-        assert_eq!(
-            self.current_page * self.cache_ref.page_size(),
-            self.buffer.offset
-        );
+        let page_size: u64 = self.cache_ref.page_size().widen();
+        assert_eq!(self.current_page * page_size, self.buffer.offset);
 
-        let physical_page_size = page_size as u64 + CHECKSUM_SIZE;
-        let write_at_offset = boundary / page_size as u64 * physical_page_size;
+        let physical_page_size = page_size + CHECKSUM_SIZE;
+        let write_at_offset = boundary / page_size * physical_page_size;
         self.sync_state
             .write_at(
                 &self.blob,
@@ -368,14 +383,42 @@ impl<B: Blob> Writer<B> {
         Ok(offset)
     }
 
+    /// Whether a partial page of `partial_len` bytes needs a write when `full_pages` full
+    /// pages precede it in the same flush and `flushed` is the last flushed partial state: an
+    /// empty tip never writes, a moved tip always writes, and an unmoved tip writes only when
+    /// its length changed.
+    fn partial_page_dirty(
+        full_pages: usize,
+        partial_len: usize,
+        flushed: Option<&ActiveChecksum>,
+    ) -> bool {
+        partial_len != 0
+            && (full_pages > 0 || flushed.is_none_or(|state| state.len as usize != partial_len))
+    }
+
+    /// Whether a flush would emit any physical page write.
+    fn has_flush_work(&self, write_partial_page: bool) -> bool {
+        let page_size: usize = self.cache_ref.page_size().widen();
+        let full_pages = self.buffer.len() / page_size;
+        if full_pages > 0 {
+            return true;
+        }
+        write_partial_page
+            && Self::partial_page_dirty(
+                full_pages,
+                self.buffer.len() % page_size,
+                self.partial_page_state.as_ref(),
+            )
+    }
+
     /// Flush all full pages from the buffer to disk, resetting the buffer to contain only the bytes
     /// in any final partial page.
     ///
     /// If `write_partial_page` is true, the partial page will be written to the blob as well along
     /// with a CRC record.
     ///
-    /// A flush emits one write covering whole physical pages. A previously committed partial page
-    /// is rewritten in full, preserving its committed bytes and protected checksum slot.
+    /// A flush emits one write covering whole physical pages. A previously written partial page
+    /// is rewritten in full, preserving its durable bytes and protected checksum slot.
     ///
     /// If `sync` is true, the emitted write is made durable immediately. When an earlier mutation
     /// is pending, the write is followed by a blob sync instead of relying on per-write durability.
@@ -386,25 +429,38 @@ impl<B: Blob> Writer<B> {
         write_partial_page: bool,
         sync: bool,
     ) -> Result<bool, Error> {
-        // Prepare the *physical* pages corresponding to the data in the buffer.
-        // Pass the old partial page state so the CRC record is constructed correctly.
+        // If there's nothing to write, return early without observing any pending barrier (an
+        // empty start_sync must remain a cheap re-observation of the in-flight sync).
+        if !self.has_flush_work(write_partial_page) {
+            return Ok(false);
+        }
+
+        // A flush mutates the blob, so first resolve any outstanding start_sync barrier. Once
+        // no unsynced mutation remains, the last flushed partial state is durable and becomes
+        // the checksum the rewrite below must preserve.
+        self.sync_state.wait_for_pending().await?;
+        if self.sync_state.is_clean() {
+            self.durable_page_state = self.partial_page_state;
+        }
+
+        // Prepare the *physical* pages corresponding to the data in the buffer. Rewrites
+        // preserve the durable checksum, not merely the last flushed one: an unsynced flush
+        // (replay, snapshot) may have rewritten the partial page with no barrier, and a torn
+        // later rewrite must still leave the durable contents recoverable.
         let (physical_pages, partial_page_state) = self.to_physical_pages(
             &self.buffer,
             write_partial_page,
             self.partial_page_state.as_ref(),
+            self.durable_page_state.as_ref(),
         );
-
-        // If there's nothing to write, return early.
-        if physical_pages.is_empty() {
-            return Ok(false);
-        }
-
-        // A flush mutates the blob, so first resolve any outstanding start_sync barrier.
-        self.sync_state.wait_for_pending().await?;
+        assert!(
+            !physical_pages.is_empty(),
+            "flush work predicate must match physical page construction"
+        );
 
         // Split buffered bytes into full logical pages to hand off now, leaving any trailing
         // partial page in tip for continued buffering.
-        let page_size = self.cache_ref.page_size() as usize;
+        let page_size: usize = self.cache_ref.page_size().widen();
         let pages_to_cache = self.buffer.len() / page_size;
         let bytes_to_drain = pages_to_cache * page_size;
 
@@ -443,12 +499,22 @@ impl<B: Blob> Writer<B> {
         // the blob after any mutable method returns an error.
         self.current_page += pages_to_cache as u64;
         self.partial_page_state = partial_page_state;
+        self.durable_page_state = if sync {
+            // The write below is made durable before this flush returns.
+            partial_page_state
+        } else if pages_to_cache > 0 {
+            // The tip moved to a page with no durable contents to preserve yet.
+            None
+        } else {
+            self.durable_page_state
+        };
 
         // Make sure the buffer offset and underlying blob agree on the state of the tip.
-        assert_eq!(self.current_page * self.cache_ref.page_size(), new_offset);
+        let page_size: u64 = self.cache_ref.page_size().widen();
+        assert_eq!(self.current_page * page_size, new_offset);
 
-        // Rewriting a physical page resubmits its committed bytes and protected checksum
-        // unchanged, so a torn write leaves the previous state recoverable.
+        // Rewriting a physical page resubmits its durable bytes and protected checksum
+        // unchanged, so a torn write leaves the durable state recoverable.
         if sync {
             self.sync_state
                 .write_at(
@@ -560,19 +626,22 @@ impl<B: Blob> Writer<B> {
     ///
     /// * `buffer` - The buffer containing logical page data
     /// * `include_partial_page` - Whether to include a partial page if one exists
-    /// * `old_checksum` - The active checksum from a previously committed partial page, if any.
-    ///   When present, the first page's CRC record will preserve it in its original slot and place
-    ///   the new checksum in the other slot.
+    /// * `flushed` - The active checksum of the last flushed partial page, if any. Used only to
+    ///   detect a partial page with nothing new to write.
+    /// * `durable` - The durable checksum of the page being rewritten, if any. When present, the
+    ///   first page's CRC record preserves it in its original slot and places the new checksum
+    ///   in the other slot.
     ///
-    /// Returns the physical pages to write and, for any included partial page, the active
-    /// checksum future flushes must protect.
+    /// Returns the physical pages to write and, for any included partial page, its new active
+    /// checksum.
     fn to_physical_pages(
         &self,
         buffer: &Buffer,
         include_partial_page: bool,
-        old_checksum: Option<&ActiveChecksum>,
+        flushed: Option<&ActiveChecksum>,
+        durable: Option<&ActiveChecksum>,
     ) -> (IoBufs, Option<ActiveChecksum>) {
-        let page_size = self.cache_ref.page_size() as usize;
+        let page_size: usize = self.cache_ref.page_size().widen();
         let physical_page_size = page_size + CHECKSUM_SIZE as usize;
         let pages_to_write = buffer.len() / page_size;
         let mut write_buffer = IoBufs::default();
@@ -581,7 +650,7 @@ impl<B: Blob> Writer<B> {
         if pages_to_write > 0 {
             self.append_full_pages(
                 &buffer.slice(..pages_to_write * page_size),
-                old_checksum,
+                durable,
                 &mut write_buffer,
             );
         }
@@ -591,31 +660,17 @@ impl<B: Blob> Writer<B> {
         }
 
         let partial_page = &buffer_data[pages_to_write * page_size..];
-        if partial_page.is_empty() {
-            // No partial page data to write.
-            return (write_buffer, None);
-        }
-
-        // If there are no full pages and the partial page length matches what was already
-        // written, there's nothing new to write.
-        if pages_to_write == 0
-            && let Some(old_checksum) = old_checksum
-            && partial_page.len() == old_checksum.len as usize
-        {
+        if !Self::partial_page_dirty(pages_to_write, partial_page.len(), flushed) {
             return (write_buffer, None);
         }
         let partial_len = partial_page.len();
         let crc = Crc32::checksum(partial_page);
 
-        // For partial pages: if this is the first page and there's an old CRC, preserve it.
+        // For partial pages: if this is the first page and there's a durable CRC, preserve it.
         // Otherwise just use the new CRC in slot 0.
-        let old_checksum = if pages_to_write == 0 {
-            old_checksum
-        } else {
-            None
-        };
+        let durable = if pages_to_write == 0 { durable } else { None };
         let (crc_record, active_checksum) =
-            Self::build_crc_record(partial_len as u16, crc, old_checksum);
+            Self::build_crc_record(partial_len as u16, crc, durable);
 
         // A persisted partial page still occupies one full physical page:
         // [partial logical bytes, zero padding, crc record].
@@ -642,7 +697,7 @@ impl<B: Blob> Writer<B> {
         old_checksum: Option<&ActiveChecksum>,
         write_buffer: &mut IoBufs,
     ) {
-        let page_size = self.cache_ref.page_size() as usize;
+        let page_size: usize = self.cache_ref.page_size().widen();
         let pages = data.len() / page_size;
         debug_assert!(pages > 0);
         debug_assert_eq!(data.len() % page_size, 0);
@@ -760,9 +815,10 @@ impl<B: Blob> Writer<B> {
             )
             .await?;
 
-        // Clear only the old slot's length bytes. Rewriting the whole footer here could tear across
-        // both slots and lose the already-durable shorter checksum. Once this lands, length 0 is
-        // never authoritative, so the shrunken slot wins.
+        // Clear the old slot entirely. The write stays within the old slot, so it cannot damage
+        // the already-durable shorter checksum, and zeroing the CRC alongside the length keeps a
+        // later torn rewrite of this page from reassembling the retired longer checksum over the
+        // pre-shrink bytes still on the page. Once this lands, the shrunken slot wins.
         let old_slot_offset = crc_start
             .checked_add(old_slot.offset() as u64)
             .ok_or(Error::OffsetOverflow)?;
@@ -770,7 +826,7 @@ impl<B: Blob> Writer<B> {
             .write_at(
                 &self.blob,
                 old_slot_offset,
-                Checksum::slot_len_bytes(0).to_vec(),
+                Checksum::slot_bytes(0, 0).to_vec(),
                 WriteOptions::SYNC | WriteOptions::DONT_CACHE,
             )
             .await?;
@@ -792,8 +848,8 @@ impl<B: Blob> Writer<B> {
         buffer_size: NonZeroUsize,
         read_options: ReadOptions,
     ) -> Result<Replay<B>, Error> {
-        let page_size = self.cache_ref.page_size();
-        let page_size_nz = NonZeroU16::new(page_size as u16).expect("page_size is non-zero");
+        let page_size_nz = self.cache_ref.page_size();
+        let page_size: u64 = page_size_nz.widen();
 
         // Flush any buffered data (without fsync) so the reader sees all written data.
         self.flush_internal(true, false).await?;
@@ -858,7 +914,10 @@ impl<B: Blob> Writer<B> {
         }
 
         // The flush had nothing to write. Sync only if a durability barrier is still pending.
-        self.sync_state.sync(&self.blob).await
+        // Everything flushed is durable once it completes.
+        self.sync_state.sync(&self.blob).await?;
+        self.durable_page_state = self.partial_page_state;
+        Ok(())
     }
 
     /// Flushes buffered data and begins making all pending mutations durable, returning a
@@ -881,36 +940,188 @@ impl<B: Blob> Writer<B> {
     /// at the first invalid or short page.
     ///
     /// Expects all appended bytes to have reached the blob (as after recovery): a partial page
-    /// still buffered in this writer is unreadable from the blob and fails the scan.
-    pub async fn recoverable_prefix_len(&self) -> Result<u64, Error> {
-        let logical_page_size = self.cache_ref.page_size();
+    /// still buffered in this writer is unreadable from the blob and fails the scan. `buffer_size`
+    /// bounds each blob read, with a minimum of one physical page. Applies `read_options` to
+    /// every blob read.
+    ///
+    /// `proven` is a logical byte offset already known valid (a durability watermark or a
+    /// replay-validated prefix). Pages wholly below it are accepted without reading, and the
+    /// scan starts at the page containing it. A proof past the blob's content clamps to the
+    /// full pages that exist, so a partial tail is still read rather than credited as full.
+    pub async fn recoverable_prefix_len(
+        &self,
+        proven: u64,
+        buffer_size: NonZeroUsize,
+        read_options: ReadOptions,
+    ) -> Result<u64, Error> {
+        let logical_page_size: u64 = self.cache_ref.page_size().widen();
         let total_pages = self.current_page + u64::from(self.partial_page_state.is_some());
-        let mut valid_len = 0u64;
-        for page in 0..total_pages {
-            // Recovery may replay the validated prefix immediately, so use the
-            // default cache policy.
-            match super::get_page_with_checksum_from_blob(
-                &self.blob,
-                page,
-                logical_page_size,
-                ReadOptions::default(),
-            )
-            .await
-            {
-                Ok((logical, _)) => {
-                    let len = logical.len() as u64;
-                    valid_len += len;
-                    // A partial page can only legitimately be the last one, so stop here.
-                    if len < logical_page_size {
-                        break;
-                    }
+        let physical_page_size = logical_page_size
+            .checked_add(CHECKSUM_SIZE)
+            .ok_or(Error::OffsetOverflow)?;
+        let physical_page_size_usize =
+            usize::try_from(physical_page_size).map_err(|_| Error::OffsetOverflow)?;
+        let max_batch_pages = u64::try_from((buffer_size.get() / physical_page_size_usize).max(1))
+            .map_err(|_| Error::OffsetOverflow)?;
+
+        // Pages below the proof are accepted without reading. An overshooting proof clamps to
+        // the full pages: a partial tail backs fewer logical bytes than a skipped page would
+        // credit, so it must always be read.
+        let start_page = (proven / logical_page_size).min(self.current_page);
+        let mut valid_len = start_page
+            .checked_mul(logical_page_size)
+            .ok_or(Error::OffsetOverflow)?;
+        let mut page = start_page;
+        while page < total_pages {
+            // Bound each read while deriving its physical range with checked arithmetic.
+            let batch_pages = max_batch_pages.min(total_pages - page);
+            let batch_end = page.checked_add(batch_pages).ok_or(Error::OffsetOverflow)?;
+            let physical_offset = page
+                .checked_mul(physical_page_size)
+                .ok_or(Error::OffsetOverflow)?;
+            let physical_len = batch_pages
+                .checked_mul(physical_page_size)
+                .ok_or(Error::OffsetOverflow)?;
+            let physical_len = usize::try_from(physical_len).map_err(|_| Error::OffsetOverflow)?;
+
+            // Coalesce once so each physical page can be checksum-validated in place.
+            let physical = self
+                .blob
+                .read_at(physical_offset, physical_len, read_options)
+                .await?
+                .coalesce();
+
+            // The first invalid page terminates the only recoverable contiguous prefix.
+            for physical_page in physical.as_ref().chunks_exact(physical_page_size_usize) {
+                let Some(checksum) = Checksum::validate_page(physical_page) else {
+                    return Ok(valid_len);
+                };
+                let len = u64::from(checksum.len);
+                valid_len = valid_len.checked_add(len).ok_or(Error::OffsetOverflow)?;
+
+                // A valid partial logical page ends the contiguous prefix wherever it appears.
+                if len < logical_page_size {
+                    return Ok(valid_len);
                 }
-                // First torn/invalid page: the contiguous valid prefix ends here.
-                Err(Error::InvalidChecksum) => break,
-                Err(err) => return Err(err),
             }
+            page = batch_end;
         }
         Ok(valid_len)
+    }
+
+    /// Read and validate one page, returning its logical bytes and the range they cover.
+    async fn read_page(
+        blob: &B,
+        page: u64,
+        page_size: u64,
+        read_options: ReadOptions,
+    ) -> Result<(IoBuf, u64, u64), Error> {
+        let (logical, _) =
+            super::get_page_with_checksum_from_blob(blob, page, page_size, read_options).await?;
+        let start = page.checked_mul(page_size).ok_or(Error::OffsetOverflow)?;
+        let len = u64::try_from(logical.len()).map_err(|_| Error::OffsetOverflow)?;
+        let end = start.checked_add(len).ok_or(Error::OffsetOverflow)?;
+        Ok((logical, start, end))
+    }
+
+    /// Read a logical range directly from a raw paged blob, validating every page it spans.
+    ///
+    /// Returns [Error::BlobInsufficientLength] when valid page contents do not cover the whole
+    /// range, and [Error::OffsetOverflow] when its end or page offsets overflow.
+    pub async fn read_range(
+        blob: &B,
+        logical_page_size: NonZeroU16,
+        offset: u64,
+        len: usize,
+        read_options: ReadOptions,
+    ) -> Result<IoBufs, Error> {
+        // Resolve the requested range before allocating or reading any pages.
+        let len_u64 = u64::try_from(len).map_err(|_| Error::OffsetOverflow)?;
+        let end = offset.checked_add(len_u64).ok_or(Error::OffsetOverflow)?;
+        if len == 0 {
+            return Ok(IoBufs::default());
+        }
+
+        // Identify the inclusive logical page range spanning the requested bytes.
+        let logical_page_size: u64 = logical_page_size.widen();
+        let first_page = offset / logical_page_size;
+        let last_page = (end - 1) / logical_page_size;
+        let mut out = IoBufs::default();
+
+        // Validate every spanning page and append only its intersection with the requested range.
+        for page in first_page..=last_page {
+            let (logical, page_start, page_end) =
+                Self::read_page(blob, page, logical_page_size, read_options).await?;
+            let overlap_start = offset.max(page_start);
+            let overlap_end = end.min(page_end);
+            if overlap_start >= overlap_end {
+                return Err(Error::BlobInsufficientLength);
+            }
+            let start = (overlap_start - page_start) as usize;
+            let end = (overlap_end - page_start) as usize;
+            out.append(logical.slice(start..end));
+        }
+
+        // A short terminal page can leave the requested range only partially covered.
+        if out.len() != len {
+            return Err(Error::BlobInsufficientLength);
+        }
+        Ok(out)
+    }
+
+    /// Read the terminal logical range of a raw paged blob and return its logical size.
+    ///
+    /// The blob must contain only complete physical pages. The last page is validated first to
+    /// determine the logical end. If `len` crosses a page boundary, preceding pages are validated
+    /// with [Self::read_range].
+    pub async fn read_tail(
+        blob: &B,
+        physical_size: u64,
+        logical_page_size: NonZeroU16,
+        len: usize,
+        read_options: ReadOptions,
+    ) -> Result<(u64, IoBufs), Error> {
+        if physical_size == 0 {
+            return if len == 0 {
+                Ok((0, IoBufs::default()))
+            } else {
+                Err(Error::BlobInsufficientLength)
+            };
+        }
+
+        // A trailing partial page means the caller did not size the blob to complete physical
+        // pages, so there is no trusted terminal page to read the logical end from.
+        let page_size: u64 = logical_page_size.widen();
+        let physical_page_size = page_size
+            .checked_add(CHECKSUM_SIZE)
+            .ok_or(Error::OffsetOverflow)?;
+        if !physical_size.is_multiple_of(physical_page_size) {
+            return Err(Error::BlobInsufficientLength);
+        }
+
+        // The checksum length on the terminal page determines the blob's logical end.
+        let page = physical_size / physical_page_size - 1;
+        let (tail, page_start, logical_size) =
+            Self::read_page(blob, page, page_size, read_options).await?;
+        let len_u64 = u64::try_from(len).map_err(|_| Error::OffsetOverflow)?;
+        let offset = logical_size
+            .checked_sub(len_u64)
+            .ok_or(Error::BlobInsufficientLength)?;
+
+        // Read only the portion preceding the terminal page, then append its already-validated
+        // suffix. This keeps a terminal item wholly within the last page to one blob read.
+        let mut out = if offset < page_start {
+            let prefix_len =
+                usize::try_from(page_start - offset).map_err(|_| Error::OffsetOverflow)?;
+            Self::read_range(blob, logical_page_size, offset, prefix_len, read_options).await?
+        } else {
+            IoBufs::default()
+        };
+        let tail_start = usize::try_from(offset.max(page_start) - page_start)
+            .map_err(|_| Error::OffsetOverflow)?;
+        out.append(tail.slice(tail_start..));
+        assert_eq!(out.len(), len);
+        Ok((logical_size, out))
     }
 
     /// Wait for any started sync to complete without starting a new sync.
@@ -948,7 +1159,7 @@ impl<B: Blob> Writer<B> {
 
     /// Coordinate the dispatch logic for shrinking the blob.
     async fn shrink(&mut self, target_size: u64) -> Result<(), Error> {
-        let page_size = self.cache_ref.page_size();
+        let page_size: u64 = self.cache_ref.page_size().widen();
         let physical_page_size = page_size
             .checked_add(CHECKSUM_SIZE)
             .ok_or(Error::OffsetOverflow)?;
@@ -1003,6 +1214,7 @@ impl<B: Blob> Writer<B> {
 
         // Shrink the blob to a page boundary, which requires no CRC-slot rewrite.
         self.partial_page_state = None;
+        self.durable_page_state = None;
         self.current_page = full_pages;
         self.buffer.offset = tail_offset;
         self.buffer.clear();
@@ -1052,7 +1264,10 @@ impl<B: Blob> Writer<B> {
                 &old_checksum,
             )
             .await?;
+
+        // The shrink surgery above made the new record durable.
         self.partial_page_state = Some(final_record);
+        self.durable_page_state = Some(final_record);
 
         Ok(())
     }
@@ -1065,7 +1280,7 @@ impl<B: Blob> Writer<B> {
 
     /// Construct an immutable read handle for the current blob state.
     fn sealed_handle(&self, id: u64) -> super::Sealed<B> {
-        let page_size = self.cache_ref.page_size();
+        let page_size: u64 = self.cache_ref.page_size().widen();
         let full_pages = self.current_page;
         assert_eq!(
             full_pages.checked_mul(page_size),
@@ -1105,10 +1320,7 @@ mod tests {
     use crate::{
         Buf, BufferPool, BufferPoolConfig, Handle, IoBufsMut, Runner as _, Spawner as _,
         Storage as _, Supervisor as _,
-        buffer::{
-            paged::{CHECKSUM_SLOT_LEN_SIZE, CHECKSUM_SLOT_SIZE},
-            tests::SyncTrackingBlob,
-        },
+        buffer::{paged::CHECKSUM_SLOT_SIZE, tests::SyncTrackingBlob},
         deterministic,
         mocks::{DelayedSyncBlob, RecordingContext, next_pending_sync},
         telemetry::metrics::Registry,
@@ -1150,6 +1362,70 @@ mod tests {
         });
     }
 
+    /// Unsynced partial-page flushes ([Writer::snapshot], [Writer::replay]) rewrite the tail
+    /// page without a durability barrier. Every rewrite must keep the page's durable checksum
+    /// slot byte-identical: a crash can cut the unsynced rewrites per byte, and whichever bytes
+    /// land, the footer must still validate the synced prefix.
+    #[test_traced("DEBUG")]
+    fn test_unsynced_flushes_preserve_durable_checksum_slot() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let page_size = PAGE_SIZE.get() as usize;
+            let physical_page = page_size + CHECKSUM_SIZE as usize;
+            let (blob, blob_size) = context
+                .open("test_partition", b"snapshot_torn")
+                .await
+                .unwrap();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob.clone(), blob_size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+
+            // Make a mid-page prefix durable and capture the page's durable image.
+            let synced: Vec<u8> = (1u8..=24).collect();
+            writer.append(&synced).await.unwrap();
+            writer.sync().await.unwrap();
+            let durable_image = blob
+                .read_at(0, physical_page, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce();
+
+            // Two unsynced rewrites of the same page.
+            writer.append(&[25u8; 8]).await.unwrap();
+            drop(writer.snapshot().await.unwrap());
+            writer.append(&[26u8; 8]).await.unwrap();
+            drop(writer.snapshot().await.unwrap());
+            let torn_image = blob
+                .read_at(0, physical_page, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce();
+
+            // Crash: of the unsynced rewrites, only the final one's footer bytes land, while
+            // the logical region keeps its durable bytes.
+            let mut crash = durable_image.as_ref().to_vec();
+            crash[page_size..].copy_from_slice(&torn_image.as_ref()[page_size..]);
+            let (crashed, _) = context
+                .open("test_partition", b"snapshot_crash")
+                .await
+                .unwrap();
+            crashed
+                .write_at(0, crash, WriteOptions::default())
+                .await
+                .unwrap();
+            crashed.sync().await.unwrap();
+
+            // The synced prefix must recover through the preserved durable slot.
+            let recovered = Writer::new(crashed, physical_page as u64, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            assert_eq!(recovered.size(), synced.len() as u64);
+            let read = recovered.read_at(0, synced.len()).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), synced.as_slice());
+        });
+    }
+
     /// `recoverable_prefix_len` returns the full logical size when every page is well-formed.
     #[test_traced("DEBUG")]
     fn test_recoverable_prefix_len_clean() {
@@ -1164,7 +1440,13 @@ mod tests {
             let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
-            assert_eq!(writer.recoverable_prefix_len().await.unwrap(), 0);
+            assert_eq!(
+                writer
+                    .recoverable_prefix_len(0, NZUsize!(BUFFER_SIZE), ReadOptions::default())
+                    .await
+                    .unwrap(),
+                0
+            );
 
             let total = PAGE_SIZE.get() as usize * 2 + 50;
             let data: Vec<u8> = (0u8..=255).cycle().take(total).collect();
@@ -1173,7 +1455,13 @@ mod tests {
 
             // Prefix validation uses the default options so recovery can reuse the validated pages.
             recordings.clear();
-            assert_eq!(writer.recoverable_prefix_len().await.unwrap(), total as u64);
+            assert_eq!(
+                writer
+                    .recoverable_prefix_len(0, NZUsize!(BUFFER_SIZE), ReadOptions::default())
+                    .await
+                    .unwrap(),
+                total as u64
+            );
             let reads = recordings.snapshot().reads;
             assert!(!reads.is_empty());
             assert!(
@@ -1240,9 +1528,107 @@ mod tests {
             blob.sync().await.unwrap();
 
             assert_eq!(
-                writer.recoverable_prefix_len().await.unwrap(),
+                writer
+                    .recoverable_prefix_len(0, NZUsize!(BUFFER_SIZE), ReadOptions::default())
+                    .await
+                    .unwrap(),
                 PAGE_SIZE.get() as u64
             );
+        });
+    }
+
+    /// A proven prefix skips its pages without reading them: a scan started past a torn page
+    /// accepts the caller's proof, and a proof past the blob's end clamps without panicking.
+    #[test_traced("DEBUG")]
+    fn test_recoverable_prefix_len_proven_prefix() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context
+                .open("test_partition", b"prefix_proven")
+                .await
+                .unwrap();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob.clone(), blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            let total = PAGE_SIZE.get() as usize * 4;
+            let data: Vec<u8> = (0u8..=255).cycle().take(total).collect();
+            writer.append(&data).await.unwrap();
+            writer.sync().await.unwrap();
+
+            // Tear page 1, leaving pages 0 and 2+ valid.
+            let physical_page_size = PAGE_SIZE.get() as u64 + CHECKSUM_SIZE;
+            let offset = physical_page_size + 7;
+            let byte = blob
+                .read_at(offset, 1, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce();
+            blob.write_at(
+                offset,
+                vec![byte.as_ref()[0] ^ 0xFF],
+                WriteOptions::default(),
+            )
+            .await
+            .unwrap();
+            blob.sync().await.unwrap();
+
+            // An unproven scan stops at the torn page. A proof past it skips the damage and
+            // scans the remainder, and a mid-page proof rescans the page containing it.
+            let page = u64::from(PAGE_SIZE.get());
+            for (proven, expected) in [
+                (0, page),
+                (page, page),
+                (2 * page, 4 * page),
+                (2 * page + 3, 4 * page),
+                (total as u64, 4 * page),
+            ] {
+                assert_eq!(
+                    writer
+                        .recoverable_prefix_len(
+                            proven,
+                            NZUsize!(BUFFER_SIZE),
+                            ReadOptions::default()
+                        )
+                        .await
+                        .unwrap(),
+                    expected,
+                    "proven {proven}"
+                );
+            }
+
+            // A proof past the blob clamps to the pages that exist. Callers only pass proven
+            // prefixes, and storage-level guards reject a prefix the blob cannot back.
+            assert_eq!(
+                writer
+                    .recoverable_prefix_len(
+                        100 * page,
+                        NZUsize!(BUFFER_SIZE),
+                        ReadOptions::default()
+                    )
+                    .await
+                    .unwrap(),
+                4 * page
+            );
+
+            // A partial tail is still read when the proof overshoots the blob: the clamp stops
+            // at the full pages, so the tail contributes its logical length, not a full page.
+            writer.append(&data[..20]).await.unwrap();
+            writer.sync().await.unwrap();
+            for proven in [4 * page + 20, 5 * page, 100 * page] {
+                assert_eq!(
+                    writer
+                        .recoverable_prefix_len(
+                            proven,
+                            NZUsize!(BUFFER_SIZE),
+                            ReadOptions::default()
+                        )
+                        .await
+                        .unwrap(),
+                    4 * page + 20,
+                    "proven {proven}"
+                );
+            }
         });
     }
 
@@ -1283,7 +1669,61 @@ mod tests {
                 .unwrap();
             blob.sync().await.unwrap();
 
-            assert_eq!(writer.recoverable_prefix_len().await.unwrap(), 20);
+            assert_eq!(
+                writer
+                    .recoverable_prefix_len(0, NZUsize!(BUFFER_SIZE), ReadOptions::default())
+                    .await
+                    .unwrap(),
+                20
+            );
+        });
+    }
+
+    /// A clean scan derives its read batches from the supplied byte budget while always making
+    /// progress by at least one page.
+    #[test_traced("DEBUG")]
+    fn test_recoverable_prefix_len_batches_reads() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (context, recordings) = RecordingContext::new(context);
+            let (blob, blob_size) = context
+                .open("test_partition", b"prefix_batches")
+                .await
+                .unwrap();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob.clone(), blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            // Eight full pages plus a partial tail span three batches under a three-page budget.
+            let total = PAGE_SIZE.get() as usize * 8 + 10;
+            let data: Vec<u8> = (0u8..=255).cycle().take(total).collect();
+            writer.append(&data).await.unwrap();
+            writer.sync().await.unwrap();
+
+            // A sub-page budget falls back to one page per read.
+            recordings.clear();
+            assert_eq!(
+                writer
+                    .recoverable_prefix_len(0, NZUsize!(1), ReadOptions::default())
+                    .await
+                    .unwrap(),
+                total as u64
+            );
+            assert_eq!(recordings.snapshot().reads.len(), 9);
+
+            // A three-page budget coalesces the same scan into three reads.
+            recordings.clear();
+            let physical_page_size = PAGE_SIZE.get() as usize + CHECKSUM_SIZE as usize;
+            let scan_buffer = NonZeroUsize::new(physical_page_size * 3).unwrap();
+            assert_eq!(
+                writer
+                    .recoverable_prefix_len(0, scan_buffer, ReadOptions::default())
+                    .await
+                    .unwrap(),
+                total as u64
+            );
+            assert_eq!(recordings.snapshot().reads.len(), 3);
         });
     }
 
@@ -3276,6 +3716,16 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(recovered.size(), 3);
+
+            // The protected slot proves exactly the previously committed boundary: the torn
+            // extension cannot make any later byte part of the recoverable prefix.
+            assert_eq!(
+                recovered
+                    .recoverable_prefix_len(0, NZUsize!(BUFFER_SIZE), ReadOptions::default())
+                    .await
+                    .unwrap(),
+                3
+            );
             let data = recovered.read_at(0, 3).await.unwrap().coalesce();
             assert_eq!(data.as_ref(), b"abc");
         });
@@ -3445,7 +3895,7 @@ mod tests {
 
             // Convert buffered logical bytes into physical-page writes.
             let (physical_pages, partial_page_state) =
-                append.to_physical_pages(&buffer, true, None);
+                append.to_physical_pages(&buffer, true, None, None);
 
             // Two full pages should each contribute a logical slice and a CRC slice, and the
             // trailing partial page should contribute one materialized padded physical page.
@@ -4641,6 +5091,55 @@ mod tests {
         });
     }
 
+    /// A torn tail-page rewrite after a durable shrink must not resurrect the retired slot:
+    /// the shrink zeroes the whole slot, so stale length bytes alone cannot reassemble a valid
+    /// checksum over the pre-shrink bytes still on the page.
+    #[test_traced("DEBUG")]
+    fn test_shrink_then_torn_rewrite_does_not_resurrect() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context
+                .open("test_partition", b"shrink_torn")
+                .await
+                .unwrap();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob.clone(), blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            // Commit 80 bytes into the first slot, then durably shrink the tail page to 50.
+            let data: Vec<u8> = (1u8..=80).collect();
+            writer.append(&data).await.unwrap();
+            writer.sync().await.unwrap();
+            writer.resize(50).await.unwrap();
+            drop(writer);
+
+            // Model a rewrite of the tail page back to 80 bytes torn down to only the retired
+            // slot's length bytes: the pre-shrink data still on the page must not revalidate.
+            let page_size = u64::from(PAGE_SIZE.get());
+            blob.write_at(
+                page_size,
+                80u16.to_be_bytes().to_vec(),
+                WriteOptions::default(),
+            )
+            .await
+            .unwrap();
+            blob.sync().await.unwrap();
+
+            let (blob, blob_size) = context
+                .open("test_partition", b"shrink_torn")
+                .await
+                .unwrap();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let recovered = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            assert_eq!(recovered.size(), 50);
+            let read = recovered.read_at(0, 50).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), &data[..50]);
+        });
+    }
+
     #[test]
     fn test_resize_same_page_shrink_survives_interrupted_crc_stage() {
         let executor = deterministic::Runner::default();
@@ -4954,10 +5453,7 @@ mod tests {
                 "old-slot length invalidation should fail"
             );
             assert_eq!(write_count.load(Ordering::SeqCst), 3);
-            assert_eq!(
-                failed_write_len.load(Ordering::SeqCst),
-                CHECKSUM_SLOT_LEN_SIZE
-            );
+            assert_eq!(failed_write_len.load(Ordering::SeqCst), CHECKSUM_SLOT_SIZE);
             drop(append);
 
             let (blob, size) = context

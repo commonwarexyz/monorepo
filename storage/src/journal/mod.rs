@@ -9,6 +9,7 @@ use thiserror::Error;
 
 commonware_macros::stability_mod!(ALPHA, pub mod authenticated);
 pub mod contiguous;
+pub(crate) mod durability;
 mod frame;
 pub mod segmented;
 
@@ -36,8 +37,6 @@ pub enum Error {
     AlreadyPrunedToSection(u64),
     #[error("section out of range: {0}")]
     SectionOutOfRange(u64),
-    #[error("usize too small")]
-    UsizeTooSmall,
     #[error("offset overflow")]
     OffsetOverflow,
     #[error("replay interrupted during repair")]
@@ -46,8 +45,6 @@ pub enum Error {
     ReplayFailed,
     #[error("size overflow")]
     SizeOverflow,
-    #[error("missing blob: {0}")]
-    MissingBlob(u64),
     #[error("item out of range: {0}")]
     ItemOutOfRange(u64),
     #[error("item pruned: {0}")]
