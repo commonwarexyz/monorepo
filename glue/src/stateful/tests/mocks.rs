@@ -1,6 +1,9 @@
 use crate::stateful::{
-    Application, Input, Proposed,
-    db::{BatchContext, DatabaseSet, ManagedDb, Merkleized, Shared, Unmerkleized},
+    Application, ExecutionError, Input, Proposed,
+    db::{
+        DatabaseSet, ManagedDb, Merkleized, MerkleizedOf, Reader, Single, Unmerkleized,
+        UnmerkleizedOf, Writer,
+    },
 };
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_consensus::{
@@ -12,7 +15,7 @@ use commonware_consensus::{
 use commonware_cryptography::{
     Digest as _, Digestible, Signer as _, ed25519, sha256::Digest as Sha256Digest,
 };
-use commonware_runtime::{Buf, BufMut, Error as RuntimeError, Handle};
+use commonware_runtime::{Buf, BufMut, Error as RuntimeError, Handle, deterministic};
 use commonware_utils::{channel::oneshot, sync::Mutex};
 use std::{
     cell::RefCell,
@@ -23,7 +26,7 @@ use std::{
     },
 };
 
-pub(crate) type TestDatabases = Shared<TestDb>;
+pub(crate) type TestDatabases = Single<TestDb>;
 pub(crate) type TestScheme = scheme_mocks::Scheme<ed25519::PublicKey>;
 pub(crate) type TestVariant = Standard<TestBlock>;
 
@@ -177,7 +180,7 @@ impl<E: Send> ManagedDb<E> for TestDb {
         Ok(Self::default())
     }
 
-    fn new_batch(_database: BatchContext<'_, Self>) -> Self::Unmerkleized {
+    async fn new_batch(_reader: Reader<Self>) -> Self::Unmerkleized {
         TestUnmerkleized
     }
 
@@ -355,33 +358,52 @@ impl<
         &mut self,
         _context: (E, Self::Context),
         _ancestry: impl Ancestry<Self::Block>,
-        _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
+        _batches: UnmerkleizedOf<Self::Databases, E>,
         _input: Input<Self::Input, Self::Provider>,
-    ) -> Option<Proposed<Self, E>> {
-        None
+    ) -> Result<Option<Proposed<Self, E>>, ExecutionError> {
+        Ok(None)
     }
 
     async fn verify(
         &mut self,
         _context: (E, Self::Context),
         _ancestry: impl Ancestry<Self::Block>,
-        _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
-        None
+        _batches: UnmerkleizedOf<Self::Databases, E>,
+    ) -> Result<Option<MerkleizedOf<Self::Databases, E>>, ExecutionError> {
+        Ok(None)
     }
 
     async fn apply(
         &mut self,
         _context: (E, Self::Context),
         _block: &Self::Block,
-        _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> <Self::Databases as DatabaseSet<E>>::Merkleized {
-        TestMerkleized
+        _batches: UnmerkleizedOf<Self::Databases, E>,
+    ) -> Result<MerkleizedOf<Self::Databases, E>, ExecutionError> {
+        Ok(TestMerkleized)
     }
 }
 
 pub(crate) fn test_databases() -> TestDatabases {
-    Shared::new("test", TestDb::default())
+    TestDb::default().into()
+}
+
+/// Finalize `batch` through the cell, returning the snapshot and flush handle.
+pub(crate) async fn apply_and_finalize<D: ManagedDb<deterministic::Context>>(
+    writer: Writer<D>,
+    batch: D::Merkleized,
+) -> (Writer<D>, D::Snapshot, Handle<()>) {
+    let (writer, (snapshot, handle)) = writer
+        .mutate(|db| async move {
+            let db = D::apply(db, batch)
+                .await
+                .unwrap_or_else(|err| panic!("apply failed: {err:?}"));
+            let (db, snapshot, handle) = D::finalize(db)
+                .await
+                .unwrap_or_else(|err| panic!("finalize failed: {err:?}"));
+            (db, (snapshot, handle))
+        })
+        .await;
+    (writer, snapshot, handle)
 }
 
 pub(crate) fn anchor(height: u64, digest_byte: u8) -> crate::stateful::db::Anchor<Sha256Digest> {

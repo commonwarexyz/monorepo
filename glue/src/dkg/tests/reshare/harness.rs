@@ -20,11 +20,11 @@ use crate::{
         reporter::MonitorReporter,
     },
     stateful::{
-        Application, Config as StatefulConfig, Input, Proposed, Stateful as StatefulActor,
-        SyncPlan,
+        Application, Config as StatefulConfig, ExecutionError, Input, Proposed,
+        Stateful as StatefulActor, SyncPlan,
         db::{
-            DatabaseSet, Merkleized as _, Shared, SyncEngineConfig, Unmerkleized as _,
-            p2p as qmdb_resolver,
+            DatabaseSet, Merkleized as _, MerkleizedOf, ReadersOf, Single, SyncEngineConfig,
+            Unmerkleized as _, UnmerkleizedOf, p2p as qmdb_resolver,
         },
     },
 };
@@ -97,7 +97,7 @@ use std::{
 
 type Qmdb<E> =
     fixed::Db<mmr::Family, E, sha256::Digest, sha256::Digest, Sha256, TwoCap, Sequential>;
-type Database<E> = Shared<Qmdb<E>>;
+type Database<E> = Single<Qmdb<E>>;
 type Scheme = simplex::scheme::bls12381_threshold::vrf::Scheme<ed25519::PublicKey, MinPk>;
 type MarshalVariant = Standard<Block>;
 type Marshal = MarshalMailbox<Scheme, MarshalVariant>;
@@ -362,11 +362,11 @@ struct App {
 impl App {
     async fn execute<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler>(
         height: Height,
-        mut batches: <Database<E> as DatabaseSet<E>>::Unmerkleized,
-    ) -> <Database<E> as DatabaseSet<E>>::Merkleized {
+        mut batches: UnmerkleizedOf<Database<E>, E>,
+    ) -> Result<MerkleizedOf<Database<E>, E>, ExecutionError> {
         let key = Sha256::hash(&[b"height"]);
         batches = batches.write(key, Some(u64_to_digest(height.get())));
-        batches.merkleize().await.unwrap()
+        Ok(batches.merkleize().await?)
     }
 }
 
@@ -386,14 +386,16 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E>
         &mut self,
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
-        batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
+        batches: UnmerkleizedOf<Self::Databases, E>,
         input: Input<Self::Input, Self::Provider>,
-    ) -> Option<Proposed<Self, E>> {
-        let parent = ancestry.peek()?.clone();
+    ) -> Result<Option<Proposed<Self, E>>, ExecutionError> {
+        let Some(parent) = ancestry.peek().cloned() else {
+            return Ok(None);
+        };
         let height = Height::new(parent.height().get() + 1);
         // The reshare::Application wrapper selected and fetched the payload.
         let payload = input.upstream.payload;
-        let merkleized = Self::execute(height, batches).await;
+        let merkleized = Self::execute(height, batches).await?;
         let bounds = merkleized.bounds();
         let block = Block {
             context: context.1,
@@ -403,28 +405,30 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E>
             range: non_empty_range!(bounds.inactivity_floor, bounds.tip.size),
             payload,
         };
-        Some(Proposed { block, merkleized })
+        Ok(Some(Proposed { block, merkleized }))
     }
 
     async fn verify(
         &mut self,
         _context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
-        batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
+        batches: UnmerkleizedOf<Self::Databases, E>,
+    ) -> Result<Option<MerkleizedOf<Self::Databases, E>>, ExecutionError> {
         // Reshare final-block payload validation is enforced by the surrounding
         // reshare::Application wrapper; this inner app only executes state.
-        let tip = ancestry.peek()?.clone();
-        let merkleized = Self::execute(tip.height(), batches).await;
-        Some(merkleized)
+        let Some(tip) = ancestry.peek().cloned() else {
+            return Ok(None);
+        };
+        let merkleized = Self::execute(tip.height(), batches).await?;
+        Ok(Some(merkleized))
     }
 
     async fn apply(
         &mut self,
         _context: (E, Self::Context),
         block: &Self::Block,
-        batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> <Self::Databases as DatabaseSet<E>>::Merkleized {
+        batches: UnmerkleizedOf<Self::Databases, E>,
+    ) -> Result<MerkleizedOf<Self::Databases, E>, ExecutionError> {
         Self::execute(block.height(), batches).await
     }
 
@@ -432,7 +436,7 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E>
         &mut self,
         context: (E, Self::Context),
         block: &Self::Block,
-        _readers: <Self::Databases as DatabaseSet<E>>::Readers,
+        _readers: ReadersOf<Self::Databases, E>,
     ) {
         self.processed
             .lock()

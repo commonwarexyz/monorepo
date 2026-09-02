@@ -5,7 +5,7 @@
 //! adapters expose set and merkleization operations but no historical reads.
 
 use crate::stateful::db::{
-    BatchContext, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb, SyncEngineConfig,
+    ManagedDb, Merkleized as MerkleizedTrait, Reader, StateSyncDb, SyncEngineConfig,
     Unmerkleized as UnmerkleizedTrait, sync_compact_db,
 };
 use commonware_codec::{EncodeShared, Read as CodecRead};
@@ -24,7 +24,7 @@ use commonware_storage::{
             initial_root, variable,
         },
         operation::Key,
-        sync::{self},
+        sync,
     },
 };
 use commonware_utils::{Array, channel::mpsc};
@@ -44,7 +44,7 @@ where
     S: Strategy,
 {
     batch: CompactUnmerkleizedBatch<F, H, K, V, S>,
-    db: Shared<CompactDb<F, E, K, V, H, C, S>>,
+    db: Reader<CompactDb<F, E, K, V, H, C, S>>,
     metadata: Option<V::Value>,
     inactivity_floor: Location<F>,
 }
@@ -113,7 +113,7 @@ where
     S: Strategy,
 {
     inner: Arc<CompactMerkleizedBatch<F, H::Digest, K, V, S>>,
-    db: Shared<CompactDb<F, E, K, V, H, C, S>>,
+    db: Reader<CompactDb<F, E, K, V, H, C, S>>,
 }
 
 impl<F, E, K, V, H, S, C> Clone for ImmutableUnjournaledMerkleized<F, E, K, V, H, S, C>
@@ -223,8 +223,8 @@ where
     S: Strategy,
     Operation<F, K, FixedEncoding<V>>: EncodeShared + CodecRead<Cfg = ()>,
 {
-    type Unmerkleized = ImmutableUnjournaledUnmerkleized<F, E, K, FixedEncoding<V>, H, S, ()>;
-    type Merkleized = ImmutableUnjournaledMerkleized<F, E, K, FixedEncoding<V>, H, S, ()>;
+    type Unmerkleized = ImmutableUnjournaledUnmerkleized<F, E, K, FixedEncoding<V>, H, S>;
+    type Merkleized = ImmutableUnjournaledMerkleized<F, E, K, FixedEncoding<V>, H, S>;
     type Error = Error<F>;
     type Config = fixed::CompactConfig<S>;
     type SyncTarget = sync::CompactTarget<F, H::Digest>;
@@ -241,13 +241,16 @@ where
         }
     }
 
-    fn new_batch(database: BatchContext<'_, Self>) -> Self::Unmerkleized {
-        let (database, shared) = database.into_parts();
+    async fn new_batch(db: Reader<Self>) -> Self::Unmerkleized {
+        let (batch, inactivity_floor) = {
+            let guard = db.read().await;
+            (guard.new_batch(), guard.inactivity_floor_loc())
+        };
         ImmutableUnjournaledUnmerkleized {
-            batch: database.new_batch(),
-            db: shared,
+            batch,
+            db,
             metadata: None,
-            inactivity_floor: database.inactivity_floor_loc(),
+            inactivity_floor,
         }
     }
 
@@ -291,14 +294,15 @@ where
     }
 }
 
-impl<F, E, K, V, H, C, S> ManagedDb<E> for variable::CompactDb<F, E, K, V, H, C, S>
+impl<F, E, K, V, H, S, C> ManagedDb<E> for variable::CompactDb<F, E, K, V, H, C, S>
 where
     F: Family,
     E: Context,
     K: Key,
     V: VariableValue + 'static,
     H: Hasher + 'static,
-    Operation<F, K, VariableEncoding<V>>: EncodeShared + CodecRead<Cfg = C>,
+    Operation<F, K, VariableEncoding<V>>: EncodeShared,
+    Operation<F, K, VariableEncoding<V>>: CodecRead<Cfg = C>,
     C: Clone + Send + Sync + 'static,
     S: Strategy,
 {
@@ -320,13 +324,16 @@ where
         }
     }
 
-    fn new_batch(database: BatchContext<'_, Self>) -> Self::Unmerkleized {
-        let (database, shared) = database.into_parts();
+    async fn new_batch(db: Reader<Self>) -> Self::Unmerkleized {
+        let (batch, inactivity_floor) = {
+            let guard = db.read().await;
+            (guard.new_batch(), guard.inactivity_floor_loc())
+        };
         ImmutableUnjournaledUnmerkleized {
-            batch: database.new_batch(),
-            db: shared,
+            batch,
+            db,
             metadata: None,
-            inactivity_floor: database.inactivity_floor_loc(),
+            inactivity_floor,
         }
     }
 
@@ -414,7 +421,8 @@ where
     K: Key,
     V: VariableValue + 'static,
     H: Hasher + 'static,
-    Operation<F, K, VariableEncoding<V>>: EncodeShared + CodecRead<Cfg = C>,
+    Operation<F, K, VariableEncoding<V>>: EncodeShared,
+    Operation<F, K, VariableEncoding<V>>: CodecRead<Cfg = C>,
     C: Clone + Send + Sync + 'static,
     S: Strategy,
     R: sync::SourceFor<Self>,
@@ -448,6 +456,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stateful::{
+        db::{DatabaseSet, Single, SyncEngineConfig, split},
+        tests::mocks::apply_and_finalize,
+    };
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::select;
     use commonware_parallel::Sequential;
@@ -460,7 +472,7 @@ mod tests {
         merkle::{full::Config as MerkleConfig, mmr},
         translator::TwoCap,
     };
-    use commonware_utils::{NZU16, NZU64, NZUsize};
+    use commonware_utils::{NZU16, NZU64, NZUsize, channel::mpsc};
     use futures::pin_mut;
     use std::time::Duration;
 
@@ -584,13 +596,12 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config(&context, "managed-db");
             let db = FixedDb::init(context.child("db"), config).await.unwrap();
-            let db = Shared::new("test", db);
             let key = Sha256::hash(&[&[1]]);
             let value = Sha256::hash(&[&[2]]);
             let metadata = Sha256::hash(&[&[3]]);
 
-            let batch = db
-                .new_batch_for_test::<_>()
+            let db = Single::from(db);
+            let batch = <FixedDb as ManagedDb<_>>::new_batch(db.reader())
                 .await
                 .set(key, value)
                 .with_inactivity_floor(mmr::Location::new(1))
@@ -600,24 +611,24 @@ mod tests {
                 .unwrap();
             let expected_root = merkleized.root();
 
-            {
-                let (slot, database) = db.write().await;
-                let database = <FixedDb as ManagedDb<_>>::apply(database, merkleized)
-                    .await
-                    .unwrap();
-                let (database, _snapshot, sync) =
-                    <FixedDb as ManagedDb<_>>::finalize(database).await.unwrap();
-                slot.put(database);
-                sync.await.expect("database sync failed");
-            }
+            let db = DatabaseSet::apply(db, merkleized).await;
+            let (db, snapshot, barrier) = DatabaseSet::finalize(db).await;
+            assert!(barrier.durable().await, "database sync failed");
 
-            let guard = db.read().await;
-            assert_eq!(guard.root(), expected_root);
-            assert_eq!(guard.get_metadata(), Some(metadata));
+            let db = db.reader();
+            let db = db.read().await;
+            assert_eq!(db.root(), expected_root);
+            assert_eq!(db.get_metadata(), Some(metadata));
 
-            let target = <FixedDb as ManagedDb<_>>::sync_target(&guard);
-            assert_eq!(target.root, guard.root());
+            let target = <FixedDb as ManagedDb<_>>::sync_target(&db);
+            assert_eq!(target.root, db.root());
             assert_eq!(target.size, mmr::Location::new(3));
+            assert_eq!(
+                snapshot.root(),
+                expected_root,
+                "captured snapshot must carry the applied root",
+            );
+            assert_eq!(snapshot.size(), mmr::Location::new(3));
         });
     }
 
@@ -626,10 +637,9 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config(&context, "apply-checkpoints");
             let db = FixedDb::init(context.child("db"), config).await.unwrap();
-            let db = Shared::new("test", db);
+            let (writer, reader) = split(db);
 
-            let first = db
-                .new_batch_for_test::<_>()
+            let first = <FixedDb as ManagedDb<_>>::new_batch(reader.clone())
                 .await
                 .set(Sha256::hash(&[&[1]]), Sha256::hash(&[&[2]]))
                 .with_metadata(Sha256::hash(&[&[11]]));
@@ -640,29 +650,24 @@ mod tests {
                 root: first.root(),
                 size: first.bounds().tip.size,
             };
-            let (slot, database) = db.write().await;
-            let database = <FixedDb as ManagedDb<_>>::apply(database, first)
-                .await
-                .unwrap();
-            slot.put(database);
+            let (writer, ()) = writer
+                .mutate(|db| async move {
+                    let db = <FixedDb as ManagedDb<_>>::apply(db, first).await.unwrap();
+                    (db, ())
+                })
+                .await;
 
-            let second = db
-                .new_batch_for_test::<_>()
+            let second = <FixedDb as ManagedDb<_>>::new_batch(reader.clone())
                 .await
                 .set(Sha256::hash(&[&[3]]), Sha256::hash(&[&[4]]))
                 .with_metadata(Sha256::hash(&[&[22]]));
             let second = crate::stateful::db::Unmerkleized::merkleize(second)
                 .await
                 .unwrap();
-            let (slot, database) = db.write().await;
-            let database = <FixedDb as ManagedDb<_>>::apply(database, second)
-                .await
-                .unwrap();
-            let (database, _snapshot, sync) =
-                <FixedDb as ManagedDb<_>>::finalize(database).await.unwrap();
+            let (writer, _snapshot, sync) = apply_and_finalize(writer, second).await;
             sync.await.expect("database sync failed");
-            slot.put(database);
-            drop(db);
+            drop(writer);
+            drop(reader);
 
             let database = FixedDb::init(
                 context.child("reopen"),
@@ -686,19 +691,19 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config(&context, "aligned-rewind");
             let db = FixedDb::init(context.child("db"), config).await.unwrap();
-            let db = Shared::new("test", db);
+            let db = Single::from(db);
 
-            let batch = db
-                .new_batch_for_test::<_>()
+            let batch = <FixedDb as ManagedDb<_>>::new_batch(DatabaseSet::readers(&db))
                 .await
                 .set(Sha256::hash(&[&[1]]), Sha256::hash(&[&[2]]))
                 .with_metadata(Sha256::hash(&[&[3]]));
             let batch = crate::stateful::db::Unmerkleized::merkleize(batch)
                 .await
                 .unwrap();
-            crate::stateful::db::DatabaseSet::apply(&db, batch).await;
-            let target = crate::stateful::db::DatabaseSet::committed_targets(&db).await;
-            crate::stateful::db::DatabaseSet::rewind_to_targets(&db, target.clone()).await;
+            let db = DatabaseSet::<deterministic::Context>::apply(db, batch).await;
+            let target = DatabaseSet::<deterministic::Context>::committed_targets(&db).await;
+            let db =
+                DatabaseSet::<deterministic::Context>::rewind_to_targets(db, target.clone()).await;
             drop(db);
 
             let database = FixedDb::init(
