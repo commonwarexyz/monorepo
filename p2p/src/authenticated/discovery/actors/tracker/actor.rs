@@ -296,7 +296,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 self.kill_peer(&public_key);
             }
             Message::SubscribeBlocked { sender } => {
-                // Send the current blocked set immediately
+                // Start the subscriber from the current blocked set rather than
+                // the next change.
                 if sender.send_lossy(self.directory.blocked_peers()) {
                     self.blocked_subscribers.push(sender);
                 }
