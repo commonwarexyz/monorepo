@@ -2798,7 +2798,7 @@ mod tests {
                 .await
                 .expect("finalized handoff should start");
             assert_eq!(control.applied.load(Ordering::Relaxed), 1);
-            assert_eq!(applied_finalizations.lock().as_slice(), &[Height::new(1)],);
+            assert_eq!(applied_finalizations.lock().as_slice(), &[Height::new(1)]);
             assert_eq!(control.flushes.lock().len(), 1);
             assert!(poll!(&mut waiter1).is_pending());
 

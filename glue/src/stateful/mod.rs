@@ -322,9 +322,11 @@ where
     /// returned artifact is passed unchanged to [`finalized`](Self::finalized)
     /// after the batches are applied.
     ///
-    /// Finalization of this block and every later block waits for this future.
-    /// Keep it to cheap reads and defer expensive work behind the durable
-    /// handoff. Applications with nothing to capture return `()`.
+    /// This future and [`finalized`](Self::finalized) are awaited on the
+    /// stateful actor's serial mailbox path. The actor cannot process other
+    /// mailbox messages while either is pending. Keep this capture cheap and
+    /// spawn expensive follow-on work from `finalized` instead of awaiting it
+    /// on this path. Applications with nothing to capture return `()`.
     fn capture_finalized(
         &mut self,
         context: (E, Self::Context),

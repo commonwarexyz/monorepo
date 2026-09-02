@@ -1804,14 +1804,14 @@ mod tests {
     struct CapturedArtifact {
         prior_counter: Option<u64>,
         batch_counter: u64,
-        batch_height: u64,
+        batch_view: u64,
     }
 
     #[derive(Debug, PartialEq, Eq)]
     struct FinalizedObservation {
         artifact: CapturedArtifact,
         post_counter: u64,
-        post_height: u64,
+        post_view: u64,
     }
 
     #[derive(Clone)]
@@ -1950,16 +1950,16 @@ mod tests {
                 .expect("batch read should succeed")
                 .map(|value| digest_to_u64(&value))
                 .expect("winning batch should contain a counter");
-            let batch_height = pending
+            let batch_view = pending
                 .get(&height_key(block.height()))
                 .await
                 .expect("batch read should succeed")
                 .map(|value| digest_to_u64(&value))
-                .expect("winning batch should contain its height");
+                .expect("winning batch should contain its view");
             CapturedArtifact {
                 prior_counter,
                 batch_counter,
-                batch_height,
+                batch_view,
             }
         }
 
@@ -1977,12 +1977,12 @@ mod tests {
                 return;
             };
             let db = readers.read().await;
-            let post_height = db
+            let post_view = db
                 .get(&height_key(block.height()))
                 .await
                 .expect("database read should succeed")
                 .map(|value| digest_to_u64(&value))
-                .expect("finalized height should be reflected in the database set");
+                .expect("finalized view should be reflected in the database set");
             let post_counter = db
                 .get(&counter_key())
                 .await
@@ -1993,7 +1993,7 @@ mod tests {
             let observation = FinalizedObservation {
                 artifact,
                 post_counter,
-                post_height,
+                post_view,
             };
             observer.lock().push(observation);
         }
@@ -2203,7 +2203,7 @@ mod tests {
             prune
         }
 
-        async fn height_value(&self, height: Height) -> Option<u64> {
+        async fn view_at_height(&self, height: Height) -> Option<u64> {
             let db = self.processor.databases().read().await;
             db.get(&height_key(height))
                 .await
@@ -2219,7 +2219,7 @@ mod tests {
                 .map(|value| digest_to_u64(&value))
         }
 
-        async fn reopen_height_value(
+        async fn reopen_view_at_height(
             &self,
             context: deterministic::Context,
             height: Height,
@@ -2465,7 +2465,7 @@ mod tests {
                 "losing fork at finalized round should be pruned",
             );
             assert_eq!(harness.processor.last_processed().digest, winner.digest());
-            assert_eq!(harness.height_value(Height::new(2)).await, Some(3));
+            assert_eq!(harness.view_at_height(Height::new(2)).await, Some(3));
         });
     }
 
@@ -2805,7 +2805,7 @@ mod tests {
             assert_durable(barrier).await;
             assert!(matches!(
                 observations.lock().as_slice(),
-                [FinalizedObservation { post_height: 1, .. }]
+                [FinalizedObservation { post_view: 1, .. }]
             ));
 
             retry_release
@@ -3735,7 +3735,7 @@ mod tests {
             assert_eq!(harness.counter_value().await, Some(1));
             assert_eq!(
                 harness
-                    .reopen_height_value(context.child("reopen"), Height::new(1))
+                    .reopen_view_at_height(context.child("reopen"), Height::new(1))
                     .await,
                 Some(1),
                 "height state should survive reopen after finalization",
@@ -3749,16 +3749,23 @@ mod tests {
             let (mut harness, observations) =
                 Harness::new_with_finalized_observer(context).await;
             let genesis = Block::genesis();
-            let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
-            let block2 = harness.stage_pending_child(&block1, View::new(2)).await;
+            let block1 = harness.stage_pending_child(&genesis, View::new(7)).await;
+            let block2 = harness.stage_pending_child(&block1, View::new(11)).await;
 
+            let cached_probe = ApplicationProbe::new(block1.digest(), []);
+            harness.processor.app.apply_probe = Some(cached_probe.clone());
             assert!(harness.finalize(block1).await);
+            assert_eq!(
+                cached_probe.calls(),
+                0,
+                "block1 should use its cached merkleized batch",
+            );
             harness.processor.clear_pending();
-            let probe = ApplicationProbe::new(block2.digest(), []);
-            harness.processor.app.apply_probe = Some(probe.clone());
+            let reconstructed_probe = ApplicationProbe::new(block2.digest(), []);
+            harness.processor.app.apply_probe = Some(reconstructed_probe.clone());
             assert!(harness.finalize(block2).await);
             assert_eq!(
-                probe.calls(),
+                reconstructed_probe.calls(),
                 1,
                 "block2 should be reconstructed through Application::apply",
             );
@@ -3770,19 +3777,19 @@ mod tests {
                         artifact: CapturedArtifact {
                             prior_counter: None,
                             batch_counter: 1,
-                            batch_height: 1,
+                            batch_view: 7,
                         },
                         post_counter: 1,
-                        post_height: 1,
+                        post_view: 7,
                     },
                     FinalizedObservation {
                         artifact: CapturedArtifact {
                             prior_counter: Some(1),
                             batch_counter: 2,
-                            batch_height: 2,
+                            batch_view: 11,
                         },
                         post_counter: 2,
-                        post_height: 2,
+                        post_view: 11,
                     },
                 ],
                 "capture should see pre-apply state and finalized should receive the artifact after apply",
