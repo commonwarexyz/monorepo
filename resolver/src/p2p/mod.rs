@@ -8,15 +8,18 @@
 //!
 //! The peer handles an arbitrarily large number of concurrent fetches by sending requests
 //! to other peers and processing their responses. It selects peers based on performance, retrying
-//! with another peer if one fails or provides invalid data. Fetches persist until pruned,
-//! fulfilled, or reported as no longer needed by the `Consumer`.
+//! with another peer if one fails or provides invalid data. Blocked peers are learned from the
+//! network through [`Blocker::blocked`](commonware_p2p::Blocker::blocked), so a peer becomes eligible
+//! again when its block expires. Fetches persist until pruned, fulfilled, or reported as no longer
+//! needed by the `Consumer`.
 //!
 //! The `Consumer` returns a [`crate::Outcome`], checking data integrity and authenticity unless it
 //! no longer needs the key. A complete response retires its delivered subscribers, an ambiguous
 //! response retries without penalizing the peer, an invalid response retries after blocking the
-//! peer, and an ignored response retires the key without scoring its peer. Pruning a fetch with
-//! in-progress response validation aborts that validation; an invalid outcome produced after
-//! cancellation does not block the peer.
+//! peer, and an ignored response retires the key without scoring its peer. A verdict the consumer
+//! drops without answering hands the response to the remaining subscribers, or retires the key
+//! when none remain. Pruning a fetch with in-progress response validation aborts that validation;
+//! an invalid outcome produced after cancellation does not block the peer.
 //!
 //! The peer also serves data to other peers, forwarding network requests to the `Producer`. The
 //! `Producer` provides data asynchronously (e.g., from storage). If it fails, the peer sends an
@@ -38,8 +41,10 @@
 //! - [`Resolver::fetch`](crate::Resolver::fetch) clears all targets, allowing fallback to any peer
 //!
 //! These modifications only apply to in-progress fetches. Once a fetch succeeds, is pruned, or is
-//! ignored by the consumer, the targets for that key are cleared automatically. Blocking a peer
-//! removes that peer from every target set while leaving other targets available for retries.
+//! ignored by the consumer, the targets for that key are cleared automatically. A blocked peer is
+//! skipped until the network unblocks it, so a fetch whose every target is blocked stays
+//! outstanding and resumes when one of them is unblocked, new targets are added, or targeting is
+//! cleared.
 //!
 //! # Subscribers
 //!
@@ -49,7 +54,8 @@
 //! [`Resolver::retain`](crate::Resolver::retain) predicate. When the fetch resolves, the
 //! key and currently retained subscribers are supplied to
 //! [`Consumer::deliver`](crate::Consumer::deliver). Subscribers added while response validation
-//! is in progress are delivered the same accepted response locally.
+//! is in progress are delivered the same response locally, once it is accepted or when the
+//! consumer drops its verdict without judging it.
 //!
 //! While a response is being validated, its key remains in flight, so no further request is sent.
 //! New fetches for the key only attach subscribers or targets. A complete outcome retires the
@@ -127,13 +133,14 @@ mod tests {
         telemetry::metrics::count_running_tasks,
     };
     use commonware_utils::{
-        NZU32, NZUsize, Probability,
+        NZU32, NZUsize,
         channel::{
             fallible::{FallibleExt, OneshotExt},
             mpsc, oneshot,
         },
         non_empty_vec,
         ordered::Set,
+        probability,
         sync::Mutex,
     };
     use std::{
@@ -145,18 +152,17 @@ mod tests {
 
     const MAILBOX_SIZE: NonZeroUsize = NZUsize!(1024);
     const RATE_LIMIT: NonZeroU32 = NZU32!(10);
-    const INITIAL_DURATION: Duration = Duration::from_millis(100);
     const TIMEOUT: Duration = Duration::from_millis(400);
     const FETCH_RETRY_TIMEOUT: Duration = Duration::from_millis(100);
     const LINK: Link = Link {
         latency: Duration::from_millis(10),
         jitter: Duration::from_millis(1),
-        success_rate: Probability!(1.0),
+        success_rate: probability!(1.0),
     };
     const LINK_UNRELIABLE: Link = Link {
         latency: Duration::from_millis(10),
         jitter: Duration::from_millis(1),
-        success_rate: Probability!(0.5),
+        success_rate: probability!(0.5),
     };
 
     fn status_metric_total(metrics: &str, name: &str, status: &str) -> u64 {
@@ -332,7 +338,6 @@ mod tests {
                 producer,
                 mailbox_size: MAILBOX_SIZE,
                 me: Some(public_key),
-                initial: INITIAL_DURATION,
                 timeout: TIMEOUT,
                 fetch_retry_timeout: FETCH_RETRY_TIMEOUT,
                 priority_requests: false,
@@ -635,6 +640,43 @@ mod tests {
         ) -> oneshot::Receiver<Outcome> {
             let (sender, receiver) = oneshot::channel();
             self.deliveries.send_lossy((delivery.key, sender));
+            receiver
+        }
+    }
+
+    type HeldDelivery = (
+        Delivery<Key, SubscriberTag>,
+        Bytes,
+        oneshot::Sender<Outcome>,
+    );
+
+    /// A consumer that hands each delivery, its value, and its response sender
+    /// to the test, keeping the delivered subscribers visible.
+    #[derive(Clone)]
+    struct HoldingSubscriberConsumer {
+        deliveries: mpsc::UnboundedSender<HeldDelivery>,
+    }
+
+    impl HoldingSubscriberConsumer {
+        fn new() -> (Self, mpsc::UnboundedReceiver<HeldDelivery>) {
+            let (deliveries, receiver) = mpsc::unbounded_channel();
+            (Self { deliveries }, receiver)
+        }
+    }
+
+    impl crate::Consumer for HoldingSubscriberConsumer {
+        type Key = Key;
+        type Value = Bytes;
+        type Subscriber = SubscriberTag;
+        type Outcome = Outcome;
+
+        fn deliver(
+            &mut self,
+            delivery: Delivery<Self::Key, Self::Subscriber>,
+            value: Self::Value,
+        ) -> oneshot::Receiver<Outcome> {
+            let (sender, receiver) = oneshot::channel();
+            self.deliveries.send_lossy((delivery, value, sender));
             receiver
         }
     }
@@ -1033,6 +1075,162 @@ mod tests {
             assert_eq!(
                 status_metric_total(&metrics, "actor_fetch_total", "Ambiguous"),
                 1
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_dropped_verdict_retires_fetch_without_blocking_peer() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2]).await;
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+
+            let key = Key(1);
+            let mut prod2 = Producer::default();
+            prod2.insert(key.clone(), Bytes::from("data for key 1"));
+
+            let (cons1, mut deliveries) = HoldingConsumer::new();
+
+            let scheme = schemes.remove(0);
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            );
+
+            let scheme = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                dummy_consumer(),
+                prod2,
+            );
+
+            mailbox1.fetch(key.clone());
+            let (delivered, verdict) = deliveries.recv().await.unwrap();
+            assert_eq!(delivered, key);
+
+            // Drop the verdict, as a consumer does when it stops with the
+            // delivery still queued. No one is waiting on the key, so the fetch
+            // is retired rather than retried, and the peer stays unblocked
+            // because nothing is known about what it served.
+            drop(verdict);
+            select! {
+                _ = deliveries.recv() => panic!("retired fetch must not be retried"),
+                _ = context.sleep(Duration::from_secs(1)) => {},
+            };
+            assert!(oracle.blocked().await.unwrap().is_empty());
+
+            // The retired key is not deduplicated against, so a fresh fetch runs.
+            mailbox1.fetch(key.clone());
+            let (delivered, verdict) = deliveries.recv().await.unwrap();
+            assert_eq!(delivered, key);
+            verdict.send_lossy(Outcome::Complete);
+
+            let metrics = context.encode();
+            assert_eq!(
+                status_metric_total(&metrics, "actor_fetch_total", "Dropped"),
+                1
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_dropped_verdict_hands_response_to_late_subscriber() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2]).await;
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+
+            let key = Key(1);
+            let data = Bytes::from("data for key 1");
+            let mut prod2 = Producer::default();
+            prod2.insert(key.clone(), data.clone());
+
+            let (cons1, mut deliveries) = HoldingSubscriberConsumer::new();
+
+            let scheme = schemes.remove(0);
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            );
+
+            let scheme = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                dummy_consumer(),
+                prod2,
+            );
+
+            let first = SubscriberTag(1);
+            let late = SubscriberTag(2);
+            mailbox1.fetch(Fetch {
+                key: key.clone(),
+                subscriber: first.clone(),
+                span: tracing::Span::none(),
+            });
+            let (delivery, value, verdict) = deliveries.recv().await.unwrap();
+            assert_eq!(
+                delivery,
+                Delivery {
+                    key: key.clone(),
+                    subscribers: non_empty_vec![(first, tracing::Span::none())],
+                }
+            );
+            assert_eq!(value, data);
+
+            // A late subscriber joins while the first delivery is unjudged, then
+            // that delivery's verdict is dropped. The late subscriber is handed
+            // the same response to judge instead of the key being retired.
+            mailbox1.fetch(Fetch {
+                key: key.clone(),
+                subscriber: late.clone(),
+                span: tracing::Span::none(),
+            });
+            context.sleep(Duration::from_millis(100)).await;
+            drop(verdict);
+            let (delivery, value, verdict) = deliveries.recv().await.unwrap();
+            assert_eq!(
+                delivery,
+                Delivery {
+                    key,
+                    subscribers: non_empty_vec![(late, tracing::Span::none())],
+                }
+            );
+            assert_eq!(value, data);
+            verdict.send_lossy(Outcome::Complete);
+
+            context.sleep(Duration::from_millis(100)).await;
+            assert!(oracle.blocked().await.unwrap().is_empty());
+            let metrics = context.encode();
+            assert_eq!(
+                status_metric_total(&metrics, "actor_fetch_total", "Success"),
+                1
+            );
+            assert_eq!(
+                status_metric_total(&metrics, "actor_fetch_total", "Dropped"),
+                0
             );
         });
     }
@@ -1914,7 +2112,7 @@ mod tests {
             context.sleep(Duration::from_millis(100)).await;
 
             // Start fetch with targets for both peer 2 (invalid data) and peer 3 (valid data)
-            // When peer 2 returns invalid data, only peer 2 should be removed from targets
+            // When peer 2 returns invalid data, only peer 2 should be skipped
             // Peer 3 should still be tried as a target and succeed
             mailbox1.fetch_targeted(
                 key.clone(),
@@ -1938,6 +2136,137 @@ mod tests {
                 status_metric_total(&metrics, "actor_fetch_total", "Success"),
                 1
             );
+        });
+    }
+
+    /// A blocker whose blocked-set subscription closes immediately, as test
+    /// mocks elsewhere in the workspace do.
+    #[derive(Clone)]
+    struct ClosedBlocker;
+
+    impl Blocker for ClosedBlocker {
+        type PublicKey = PublicKey;
+
+        fn block(&mut self, _peer: Self::PublicKey) -> commonware_actor::Feedback {
+            commonware_actor::Feedback::Ok
+        }
+
+        fn blocked(&mut self) -> commonware_p2p::BlockedSubscription<Self::PublicKey> {
+            let (_, receiver) = commonware_utils::channel::ring::channel(NZUsize!(1));
+            receiver
+        }
+    }
+
+    #[test_traced]
+    fn test_closed_blocked_subscription_keeps_fetching() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2]).await;
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+
+            let key = Key(1);
+            let data = Bytes::from("data for key 1");
+            let mut prod2 = Producer::default();
+            prod2.insert(key.clone(), data.clone());
+
+            let (cons1, mut cons_out1) = consumer();
+
+            // The engine keeps serving fetches when the blocked-set stream ends.
+            let scheme = schemes.remove(0);
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                ClosedBlocker,
+                scheme,
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            );
+
+            let scheme = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                dummy_consumer(),
+                prod2,
+            );
+
+            mailbox1.fetch(key.clone());
+            assert_eq!(cons_out1.recv().await.unwrap(), (key, data));
+        });
+    }
+
+    #[test_traced]
+    fn test_unblocked_peer_becomes_eligible_again() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2]).await;
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+
+            let key = Key(1);
+            let data = Bytes::from("data for key 1");
+            let mut prod2 = Producer::default();
+            prod2.insert(key.clone(), data.clone());
+
+            // The first response is judged invalid, the second one is accepted.
+            let (first_gate_sender, first_gate_receiver) = oneshot::channel();
+            let (second_gate_sender, second_gate_receiver) = oneshot::channel();
+            let (cons1, mut cons_out1, mut started) = BlockingConsumer::new(
+                context.child("consumer"),
+                vec![
+                    (first_gate_receiver, Outcome::Invalid),
+                    (second_gate_receiver, Outcome::Complete),
+                ],
+            );
+
+            let scheme = schemes.remove(0);
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            );
+
+            let scheme = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                dummy_consumer(),
+                prod2,
+            );
+
+            mailbox1.fetch_targeted(key.clone(), non_empty_vec![peers[1].clone()]);
+            assert_eq!(started.recv().await.unwrap(), key);
+            first_gate_sender.send(()).unwrap();
+            wait_for_blocked(&context, &oracle, &peers[0], &peers[1]).await;
+
+            // The only target is blocked, so the fetch waits.
+            select! {
+                _ = started.recv() => panic!("blocked target was retried"),
+                _ = context.sleep(Duration::from_secs(1)) => {},
+            };
+
+            // Once the network lifts the block, the same target is tried again.
+            oracle
+                .unblock(peers[0].clone(), peers[1].clone())
+                .await
+                .unwrap();
+            assert_eq!(started.recv().await.unwrap(), key);
+            second_gate_sender.send(()).unwrap();
+            assert_eq!(cons_out1.recv().await.unwrap(), (key, data));
         });
     }
 
@@ -2845,7 +3174,6 @@ mod tests {
                     producer: Producer::<Key, Bytes>::default(),
                     mailbox_size: MAILBOX_SIZE,
                     me: Some(requester_key),
-                    initial: INITIAL_DURATION,
                     timeout: TIMEOUT,
                     fetch_retry_timeout: Duration::ZERO,
                     priority_requests: false,
@@ -3901,7 +4229,6 @@ mod tests {
                     producer: Producer::<Key, Bytes>::default(),
                     mailbox_size: MAILBOX_SIZE,
                     me: Some(public_key),
-                    initial: INITIAL_DURATION,
                     timeout: TIMEOUT,
                     fetch_retry_timeout: FETCH_RETRY_TIMEOUT,
                     priority_requests: false,
@@ -3921,7 +4248,6 @@ mod tests {
                     producer: prod2,
                     mailbox_size: MAILBOX_SIZE,
                     me: Some(public_key),
-                    initial: INITIAL_DURATION,
                     timeout: TIMEOUT,
                     fetch_retry_timeout: FETCH_RETRY_TIMEOUT,
                     priority_requests: false,
@@ -3997,7 +4323,6 @@ mod tests {
                     producer,
                     mailbox_size: MAILBOX_SIZE,
                     me: Some(public_key),
-                    initial: INITIAL_DURATION,
                     timeout: TIMEOUT,
                     fetch_retry_timeout: FETCH_RETRY_TIMEOUT,
                     priority_requests: false,

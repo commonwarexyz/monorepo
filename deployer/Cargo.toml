@@ -22,6 +22,8 @@ aws = [
 	"chrono",
 	"clap",
 	"commonware-cryptography",
+	"commonware-macros/std",
+	"commonware-utils",
 	"futures",
 	"reqwest",
 	"serde_yaml",
@@ -41,6 +43,7 @@ chrono = { workspace = true, optional = true }
 clap = { workspace = true, optional = true }
 commonware-cryptography = { workspace = true, optional = true }
 commonware-macros.workspace = true
+commonware-utils = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
 serde = { workspace = true, features = ["derive"] }
@@ -50,6 +53,13 @@ tokio = { workspace = true, features = ["full"], optional = true }
 tracing = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }
 uuid = { workspace = true, features = ["v4"], optional = true }
+
+[dev-dependencies]
+aws-smithy-runtime-api.workspace = true
+
+[package.metadata.cargo-udeps.ignore]
+# This dependency is exercised only by tests behind the nondefault `aws` feature.
+development = ["aws-smithy-runtime-api"]
 
 [[bin]]
 name = "deployer"

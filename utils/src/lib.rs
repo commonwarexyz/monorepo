@@ -7,11 +7,35 @@
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
 
 commonware_macros::stability_scope!(ALPHA, cfg(feature = "std") {
-    pub use rng::{FuzzRng, ScriptedRng, TestRng, test_rng};
+    pub use rng::{Entropy, FuzzRng, ScriptedRng, TestRng, test_rng};
 });
 commonware_macros::stability_scope!(BETA {
     #[cfg(not(feature = "std"))]
     extern crate alloc;
+
+    /// Lossless widening for nonzero integers, covering the conversions std provides no
+    /// [From] impl for (for example `NonZeroU16` into `u64`).
+    pub trait Widen<T> {
+        /// Convert without loss.
+        fn widen(self) -> T;
+    }
+
+    macro_rules! impl_widen {
+        ($($nz:ty => $($t:ty),+);+ $(;)?) => {$($(
+            impl Widen<$t> for $nz {
+                #[inline]
+                fn widen(self) -> $t {
+                    <$t>::from(self.get())
+                }
+            }
+        )+)+};
+    }
+    impl_widen!(
+        core::num::NonZeroU8 => u16, u32, u64, u128, usize;
+        core::num::NonZeroU16 => u32, u64, u128, usize;
+        core::num::NonZeroU32 => u64, u128;
+        core::num::NonZeroU64 => u128;
+    );
 
     #[cfg(not(feature = "std"))]
     use alloc::{boxed::Box, vec::Vec};
@@ -28,6 +52,7 @@ commonware_macros::stability_scope!(BETA {
 
     pub mod bitmap;
     pub mod cache;
+    pub mod iter;
     pub mod ordered;
     pub mod probability;
     pub use probability::Probability;

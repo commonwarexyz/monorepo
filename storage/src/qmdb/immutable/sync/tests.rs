@@ -878,6 +878,7 @@ pub(crate) mod harnesses {
                 metadata_partition: format!("metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
@@ -888,9 +889,9 @@ pub(crate) mod harnesses {
                 codec_config: ((), ()),
                 page_cache,
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
             },
             translator: TwoCap,
-            init_cache_size: Some(NZUsize!(1024)),
             init_buffer: NZUsize!(1 << 21),
         }
     }
@@ -1270,6 +1271,7 @@ mod compact_variable_mmr {
                 metadata_partition: format!("metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
@@ -1280,9 +1282,9 @@ mod compact_variable_mmr {
                 codec_config: ((), ((0..=10000).into(), ())),
                 page_cache,
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
             },
             translator: TwoCap,
-            init_cache_size: Some(NZUsize!(1024)),
             init_buffer: NZUsize!(1 << 21),
         }
     }
@@ -1301,6 +1303,7 @@ mod compact_variable_mmr {
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
             },
             commit_codec_config: ((), ((0..=10000).into(), ())),
         }
@@ -1662,7 +1665,7 @@ mod compact_variable_mmr {
                 .set(sha256::Digest::from([10; 32]), vec![10, 11])
                 .merkleize(&source, Some(metadata1.clone()), floor1)
                 .await;
-            let (source, _) = source.apply_batch(batch1).unwrap();
+            let (source, _) = source.apply_batch(batch1).await.unwrap();
             let source = source.sync().await.unwrap();
             let target1 = source.target();
             drop(source);
@@ -1695,7 +1698,7 @@ mod compact_variable_mmr {
                 .set(sha256::Digest::from([20; 32]), vec![20, 21])
                 .merkleize(&source, Some(metadata2.clone()), floor2)
                 .await;
-            let (source, _) = source.apply_batch(batch2).unwrap();
+            let (source, _) = source.apply_batch(batch2).await.unwrap();
             let source = source.sync().await.unwrap();
             let target2 = source.target();
             assert_ne!(target2, target1);
@@ -1727,7 +1730,7 @@ mod compact_variable_mmr {
                 .set(sha256::Digest::from([30; 32]), vec![30, 31, 32])
                 .merkleize(&source, Some(metadata3.clone()), floor3)
                 .await;
-            let (source, _) = source.apply_batch(batch3).unwrap();
+            let (source, _) = source.apply_batch(batch3).await.unwrap();
             let source = source.sync().await.unwrap();
             let target3 = source.target();
             assert_ne!(target3, target1);
@@ -1808,7 +1811,7 @@ mod compact_variable_mmr {
                     .set(sha256::Digest::from([i; 32]), vec![i])
                     .merkleize(&seeded, Some(vec![i]), floor)
                     .await;
-                (seeded, _) = seeded.apply_batch(batch).unwrap();
+                (seeded, _) = seeded.apply_batch(batch).await.unwrap();
                 seeded = seeded.sync().await.unwrap();
                 first_size.get_or_insert(seeded.size());
             }
@@ -1876,7 +1879,7 @@ mod compact_variable_mmr {
                 .set(sha256::Digest::from([1; 32]), vec![1])
                 .merkleize(&seeded, Some(vec![1]), Location::new(0))
                 .await;
-            let (seeded, _) = seeded.apply_batch(batch).unwrap();
+            let (seeded, _) = seeded.apply_batch(batch).await.unwrap();
             let seeded = seeded.sync().await.unwrap();
             let target_a = seeded.target();
             drop(seeded);
@@ -2006,6 +2009,7 @@ mod compact_variable_mmb {
                 metadata_partition: format!("metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
@@ -2016,9 +2020,9 @@ mod compact_variable_mmb {
                 codec_config: ((), ((0..=10000).into(), ())),
                 page_cache,
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
             },
             translator: TwoCap,
-            init_cache_size: Some(NZUsize!(1024)),
             init_buffer: NZUsize!(1 << 21),
         }
     }
@@ -2037,6 +2041,7 @@ mod compact_variable_mmb {
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
             },
             commit_codec_config: ((), ((0..=10000).into(), ())),
         }
@@ -2404,7 +2409,7 @@ mod compact_variable_mmb {
                 .set(sha256::Digest::from([10; 32]), vec![10, 11])
                 .merkleize(&source, Some(metadata1.clone()), floor1)
                 .await;
-            let (source, _) = source.apply_batch(batch1).unwrap();
+            let (source, _) = source.apply_batch(batch1).await.unwrap();
             let source = source.sync().await.unwrap();
             let target1 = source.target();
             drop(source);
@@ -2437,7 +2442,7 @@ mod compact_variable_mmb {
                 .set(sha256::Digest::from([20; 32]), vec![20, 21])
                 .merkleize(&source, Some(metadata2.clone()), floor2)
                 .await;
-            let (source, _) = source.apply_batch(batch2).unwrap();
+            let (source, _) = source.apply_batch(batch2).await.unwrap();
             let source = source.sync().await.unwrap();
             let target2 = source.target();
             assert_ne!(target2, target1);
@@ -2469,7 +2474,7 @@ mod compact_variable_mmb {
                 .set(sha256::Digest::from([30; 32]), vec![30, 31, 32])
                 .merkleize(&source, Some(metadata3.clone()), floor3)
                 .await;
-            let (source, _) = source.apply_batch(batch3).unwrap();
+            let (source, _) = source.apply_batch(batch3).await.unwrap();
             let source = source.sync().await.unwrap();
             let target3 = source.target();
             assert_ne!(target3, target1);

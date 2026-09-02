@@ -423,8 +423,8 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         height: u32,
         output: &mut Vec<(Position<F>, D)>,
     ) {
-        let mut pairs = positions.chunks_exact(2);
-        for pair in &mut pairs {
+        let (pairs, remainder) = positions.as_chunks::<2>();
+        for pair in pairs {
             let (left, right) = (pair[0], pair[1]);
             let (ll, lr) = self.child_digests(base, left, height);
             let (rl, rr) = self.child_digests(base, right, height);
@@ -433,7 +433,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
             output.push((left, left_digest));
             output.push((right, right_digest));
         }
-        if let [pos] = pairs.remainder() {
+        if let [pos] = remainder {
             let (left, right) = self.child_digests(base, *pos, height);
             output.push((*pos, hasher.node_digest(*pos, &left, &right)));
         }
@@ -635,6 +635,7 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
     /// `hasher`.
     pub fn proof(
         &self,
+        base: &Mem<F, D>,
         hasher: &impl Hasher<F, Digest = D>,
         loc: Location<F>,
         inactive_peaks: usize,
@@ -642,7 +643,7 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
         if !loc.is_valid_index() {
             return Err(Error::LocationOverflow(loc));
         }
-        self.range_proof(hasher, loc..loc + 1, inactive_peaks)
+        self.range_proof(base, hasher, loc..loc + 1, inactive_peaks)
             .map_err(|e| match e {
                 Error::RangeOutOfBounds(_) => Error::LeafOutOfBounds(loc),
                 _ => e,
@@ -653,6 +654,7 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
     /// by `hasher`.
     pub fn range_proof(
         &self,
+        base: &Mem<F, D>,
         hasher: &impl Hasher<F, Digest = D>,
         range: Range<Location<F>>,
         inactive_peaks: usize,
@@ -662,7 +664,7 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
             self.leaves(),
             inactive_peaks,
             range,
-            |pos| Self::get_node(self, pos),
+            |pos| Self::get_node(self, pos).or_else(|| base.get_node(pos)),
             Error::ElementPruned,
         )
     }

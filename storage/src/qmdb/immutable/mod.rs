@@ -80,8 +80,8 @@ use crate::{
     },
     merkle::{Family, Location, Proof, full::Config as MerkleConfig},
     qmdb::{
-        Error, any::ValueEncoding, batch_chain, build_snapshot_from_log, metrics::Metrics,
-        operation::Key, single_operation_root,
+        Error, any::ValueEncoding, batch_chain, metrics::Metrics, operation::Key,
+        single_operation_root,
     },
     translator::Translator,
 };
@@ -90,8 +90,9 @@ use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
-use commonware_runtime::Handle;
+use commonware_runtime::{Handle, ReadOptions};
 use core::num::{NonZeroU64, NonZeroUsize};
+use futures::{StreamExt, pin_mut};
 use std::{ops::Range, sync::Arc};
 use tracing::warn;
 
@@ -107,6 +108,40 @@ pub use compact::{
     UnmerkleizedBatch as CompactUnmerkleizedBatch,
 };
 pub use operation::Operation;
+
+/// Build the snapshot by replaying the log from `inactivity_floor_loc`, inserting the location of
+/// every retained [Operation::Set] and keeping prior locations of the same key. Assumes the log
+/// is not pruned beyond the inactivity floor.
+///
+/// Repeats of a full key all land in the snapshot, matching a snapshot maintained live, so reads
+/// of a repeated key keep returning one of its written values however the snapshot was built.
+///
+/// `init_buffer` sizes the replay read buffer (in bytes).
+async fn build_snapshot<F, K, V, C, T>(
+    inactivity_floor_loc: Location<F>,
+    log: &C,
+    snapshot: &mut Index<T, Location<F>>,
+    init_buffer: NonZeroUsize,
+) -> Result<(), Error<F>>
+where
+    F: Family,
+    K: Key,
+    V: ValueEncoding,
+    C: Contiguous<Item = Operation<F, K, V>>,
+    T: Translator,
+{
+    let stream = log
+        .replay(*inactivity_floor_loc, init_buffer, ReadOptions::default())
+        .await?;
+    pin_mut!(stream);
+    while let Some(result) = stream.next().await {
+        let (loc, op) = result?;
+        if let Operation::Set(key, _) = op {
+            snapshot.insert(&key, Location::new(loc));
+        }
+    }
+    Ok(())
+}
 
 /// Compute the authenticated root of a newly initialized database without opening storage.
 ///
@@ -133,10 +168,6 @@ pub struct Config<T: Translator, J, S: Strategy> {
 
     /// The translator used by the compressed index.
     pub translator: T,
-
-    /// Capacity (in entries) of the `(location -> key)` cache used during init to resolve snapshot
-    /// collisions without re-reading the log; `None` disables it.
-    pub init_cache_size: Option<NonZeroUsize>,
 
     /// Size (in bytes) of the read buffer used to replay the log during init.
     pub init_buffer: NonZeroUsize,
@@ -230,7 +261,6 @@ where
         context: E,
         translator: T,
         init_buffer: NonZeroUsize,
-        cache_size: Option<NonZeroUsize>,
     ) -> Result<Self, Error<F>> {
         if journal.size() == 0 {
             warn!("Authenticated log is empty, initialized new db.");
@@ -256,14 +286,14 @@ where
                 return Err(Error::DataCorrupted("inactivity floor exceeds last commit"));
             }
 
-            // Replay the log from the inactivity floor to build the snapshot.
-            build_snapshot_from_log::<F, _, _, _>(
+            // Replay the log from the inactivity floor to build the snapshot. Every retained
+            // location is inserted, mirroring the live apply path, so a repeated key keeps
+            // serving one of its written values across restarts and rewinds.
+            build_snapshot(
                 inactivity_floor_loc,
                 &journal.journal,
                 &mut snapshot,
                 init_buffer,
-                cache_size,
-                |_, _| {},
             )
             .await?;
 
@@ -733,9 +763,9 @@ where
     ///
     /// Returns the range of locations written.
     ///
-    /// This publishes the batch to the in-memory database state and appends it to the journal,
-    /// but does not durably commit it. Call [`Immutable::commit`] or [`Immutable::sync`], or await
-    /// the handle returned by [`Immutable::start_sync`], to guarantee durability.
+    /// This publishes the batch to the in-memory database state and appends it to the journal.
+    /// Call [`Immutable::commit`] or [`Immutable::sync`], or await the handle returned by
+    /// [`Immutable::start_sync`], to make the applied state durable.
     #[tracing::instrument(name = "qmdb.immutable.db.apply_batch", level = "info", skip_all)]
     pub async fn apply_batch(
         mut self,
@@ -838,7 +868,7 @@ where
 }
 
 #[cfg(test)]
-pub(super) mod test {
+pub(super) mod tests {
     use super::*;
     use crate::{
         merkle::{Family, Location},
@@ -854,6 +884,32 @@ pub(super) mod test {
 
     const ITEMS_PER_SECTION: u64 = 5;
 
+    /// Emits the named test against `mmr::Family` and `mmb::Family`.
+    macro_rules! immutable_tests {
+        ($($name:ident => $scenario:ident, $open:ident;)*) => {
+            $(
+                #[test_traced]
+                fn $name() {
+                    deterministic::Runner::default().start(|ctx| async move {
+                        tests::$scenario(ctx, $open::<mmr::Family>).await;
+                    });
+                }
+            )*
+            paste::paste! {
+                $(
+                    #[test_traced]
+                    fn [<$name _mmb>]() {
+                        deterministic::Runner::default().start(|ctx| async move {
+                            tests::$scenario(ctx, $open::<mmb::Family>).await;
+                        });
+                    }
+                )*
+            }
+        };
+    }
+
+    pub(super) use immutable_tests;
+
     type TestDb<F, V, C> = Immutable<
         F,
         deterministic::Context,
@@ -866,7 +922,7 @@ pub(super) mod test {
     >;
 
     #[boxed]
-    pub(crate) async fn test_immutable_empty<F: Family, V, C>(
+    pub(crate) async fn run_empty<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -911,7 +967,7 @@ pub(super) mod test {
     }
 
     #[boxed]
-    pub(crate) async fn test_immutable_commit_after_sync_recovery<F: Family, V, C>(
+    pub(crate) async fn run_commit_after_sync_recovery<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -947,7 +1003,7 @@ pub(super) mod test {
     }
 
     #[boxed]
-    pub(crate) async fn test_immutable_build_basic<F: Family, V, C>(
+    pub(crate) async fn run_build_basic<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -1021,7 +1077,7 @@ pub(super) mod test {
     }
 
     #[boxed]
-    pub(crate) async fn test_immutable_proof_verify<F: Family, V, C>(
+    pub(crate) async fn run_proof_verify<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -1056,7 +1112,7 @@ pub(super) mod test {
     }
 
     #[boxed]
-    pub(crate) async fn test_immutable_prune<F: Family, V, C>(
+    pub(crate) async fn run_prune<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -1105,11 +1161,7 @@ pub(super) mod test {
     /// prune is not a durability boundary, recovery may return either the durable baseline or the
     /// buffered state, but never a mixture whose floor references pruned operations.
     #[boxed]
-    pub(crate) async fn test_immutable_prune_after_uncommitted_apply_batch_recovery<
-        F: Family,
-        V,
-        C,
-    >(
+    pub(crate) async fn run_prune_after_uncommitted_apply_batch_recovery<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -1163,8 +1215,106 @@ pub(super) mod test {
         db.destroy().await.unwrap();
     }
 
+    /// `operations()` must cover exactly the batch's own applied range and match the
+    /// operations a post-apply `historical_proof` recovers from the log, for a db-based
+    /// batch and for a chained batch applied after its ancestor.
     #[boxed]
-    pub(crate) async fn test_immutable_batch_chain<F: Family, V, C>(
+    pub(crate) async fn run_operations_match_applied_log<F: Family, V, C>(
+        context: deterministic::Context,
+        open_db: impl Fn(
+            deterministic::Context,
+        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+    ) where
+        V: ValueEncoding<Value = Digest>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
+        C::Item: EncodeShared + PartialEq + core::fmt::Debug,
+    {
+        let db = open_db(context.child("db")).await;
+
+        let seed = db
+            .new_batch()
+            .set(Sha256::fill(1u8), Sha256::fill(11u8))
+            .set(Sha256::fill(2u8), Sha256::fill(12u8))
+            .merkleize(&db, None, db.inactivity_floor_loc())
+            .await;
+        let (seed_start, seed_ops) = seed.operations();
+        let seed_root = seed.root();
+        let seed_proof = seed.proof(&db).unwrap();
+        let (db, seed_range) = db.apply_batch(seed).await.unwrap();
+        assert_eq!(seed_start, seed_range.start);
+        assert_eq!(*seed_start + seed_ops.len() as u64, *seed_range.end);
+
+        // A chained batch's operations are its own suffix only.
+        let parent = db
+            .new_batch()
+            .set(Sha256::fill(3u8), Sha256::fill(13u8))
+            .merkleize(&db, None, db.inactivity_floor_loc())
+            .await;
+        let child = parent
+            .new_batch::<Sha256>()
+            .set(Sha256::fill(4u8), Sha256::fill(14u8))
+            .merkleize(&db, None, db.inactivity_floor_loc())
+            .await;
+        let (parent_start, parent_ops) = parent.operations();
+        let (child_start, child_ops) = child.operations();
+        let (parent_root, child_root) = (parent.root(), child.root());
+        let (parent_proof, child_proof) = (parent.proof(&db).unwrap(), child.proof(&db).unwrap());
+        let (db, parent_range) = db.apply_batch(parent).await.unwrap();
+        let (db, child_range) = db.apply_batch(child).await.unwrap();
+        assert_eq!(parent_start, parent_range.start);
+        assert_eq!(*parent_start + parent_ops.len() as u64, *parent_range.end);
+        assert_eq!(child_start, child_range.start);
+        assert_eq!(*child_start + child_ops.len() as u64, *child_range.end);
+
+        // A write-free batch still captures its commit-only suffix.
+        let empty = db
+            .new_batch()
+            .merkleize(&db, None, db.inactivity_floor_loc())
+            .await;
+        let (empty_start, empty_ops) = empty.operations();
+        let (empty_root, empty_proof) = (empty.root(), empty.proof(&db).unwrap());
+        let (db, empty_range) = db.apply_batch(empty).await.unwrap();
+        assert_eq!(empty_start, empty_range.start);
+        assert_eq!(*empty_start + empty_ops.len() as u64, *empty_range.end);
+
+        // Every captured delta and proof must match what the log recovers for its
+        // range, and verify against the batch's own root.
+        for (start, ops, proof, root) in [
+            (seed_start, seed_ops, seed_proof, seed_root),
+            (parent_start, parent_ops, parent_proof, parent_root),
+            (child_start, child_ops, child_proof, child_root),
+            (empty_start, empty_ops, empty_proof, empty_root),
+        ] {
+            let len = core::num::NonZeroU64::new(ops.len() as u64).unwrap();
+            let end = Location::new(*start + ops.len() as u64);
+            let (log_proof, log_ops) = db.historical_proof(end, start, len).await.unwrap();
+            assert_eq!(log_ops, *ops);
+            assert_eq!(log_proof, proof);
+            assert!(verify_proof::<Sha256, _, _>(&proof, start, &ops, &root));
+        }
+
+        // After the batch's changes are flushed, proof is a verifying proof or an
+        // error, never a wrong proof.
+        let late = db
+            .new_batch()
+            .set(Sha256::fill(5u8), Sha256::fill(15u8))
+            .merkleize(&db, None, db.inactivity_floor_loc())
+            .await;
+        let (late_start, late_ops) = late.operations();
+        let late_root = late.root();
+        let (db, _) = db.apply_batch(Arc::clone(&late)).await.unwrap();
+        let db = db.commit().await.unwrap();
+        if let Ok(proof) = late.proof(&db) {
+            assert!(verify_proof::<Sha256, _, _>(
+                &proof, late_start, &late_ops, &late_root
+            ));
+        }
+
+        db.destroy().await.unwrap();
+    }
+
+    #[boxed]
+    pub(crate) async fn run_batch_chain<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -1217,7 +1367,7 @@ pub(super) mod test {
     }
 
     #[boxed]
-    pub(crate) async fn test_immutable_build_and_authenticate<F: Family, V, C>(
+    pub(crate) async fn run_build_and_authenticate<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -1271,7 +1421,7 @@ pub(super) mod test {
     }
 
     #[boxed]
-    pub(crate) async fn test_immutable_recovery_from_failed_merkle_sync<F: Family, V, C>(
+    pub(crate) async fn run_recovery_from_failed_merkle_sync<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -1326,7 +1476,7 @@ pub(super) mod test {
     }
 
     #[boxed]
-    pub(crate) async fn test_immutable_recovery_from_failed_log_sync<F: Family, V, C>(
+    pub(crate) async fn run_recovery_from_failed_log_sync<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -1364,7 +1514,7 @@ pub(super) mod test {
     }
 
     #[boxed]
-    pub(crate) async fn test_immutable_pruning<F: Family, V, C>(
+    pub(crate) async fn run_pruning<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -1471,7 +1621,7 @@ pub(super) mod test {
     }
 
     #[boxed]
-    pub(crate) async fn test_immutable_prune_beyond_floor<F: Family, V, C>(
+    pub(crate) async fn run_prune_beyond_floor<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -1568,7 +1718,7 @@ pub(super) mod test {
     }
 
     #[boxed]
-    pub(crate) async fn test_immutable_rewind_recovery<F: Family, V, C>(
+    pub(crate) async fn run_rewind_recovery<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -1635,7 +1785,7 @@ pub(super) mod test {
     /// rewound suffix must survive rewind. Earlier the snapshot remove pruned the entire translated
     /// bucket and dropped the retained key.
     #[boxed]
-    pub(crate) async fn test_immutable_rewind_preserves_collision_bucket<F: Family, V, C>(
+    pub(crate) async fn run_rewind_preserves_collision_bucket<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -1678,7 +1828,7 @@ pub(super) mod test {
     }
 
     #[boxed]
-    pub(crate) async fn test_immutable_rewind_pruned_target_errors<F: Family, V, C>(
+    pub(crate) async fn run_rewind_pruned_target_errors<F: Family, V, C>(
         context: deterministic::Context,
         open_small_sections_db: impl Fn(
             deterministic::Context,
@@ -1754,7 +1904,7 @@ pub(super) mod test {
 
     /// batch.get() reads pending mutations and falls through to base DB.
     #[boxed]
-    pub(crate) async fn test_immutable_batch_get_read_through<F: Family, V, C>(
+    pub(crate) async fn run_batch_get_read_through<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -1795,7 +1945,7 @@ pub(super) mod test {
 
     /// Child batch reads parent diff and adds its own mutations.
     #[boxed]
-    pub(crate) async fn test_immutable_batch_stacked_get<F: Family, V, C>(
+    pub(crate) async fn run_batch_stacked_get<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -1832,7 +1982,7 @@ pub(super) mod test {
 
     /// Two-level stacked batch apply works end-to-end.
     #[boxed]
-    pub(crate) async fn test_immutable_batch_stacked_apply<F: Family, V, C>(
+    pub(crate) async fn run_batch_stacked_apply<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -1883,7 +2033,7 @@ pub(super) mod test {
 
     /// MerkleizedBatch::root() matches db.root() after apply_batch().
     #[boxed]
-    pub(crate) async fn test_immutable_batch_speculative_root<F: Family, V, C>(
+    pub(crate) async fn run_batch_speculative_root<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -1921,7 +2071,7 @@ pub(super) mod test {
 
     /// MerkleizedBatch::get() reads from diff and base DB.
     #[boxed]
-    pub(crate) async fn test_immutable_merkleized_batch_get<F: Family, V, C>(
+    pub(crate) async fn run_merkleized_batch_get<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -1967,7 +2117,7 @@ pub(super) mod test {
 
     /// Independent sequential batches applied one at a time.
     #[boxed]
-    pub(crate) async fn test_immutable_batch_sequential_apply<F: Family, V, C>(
+    pub(crate) async fn run_batch_sequential_apply<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -2011,7 +2161,7 @@ pub(super) mod test {
 
     /// Many sequential batches accumulate correctly.
     #[boxed]
-    pub(crate) async fn test_immutable_batch_many_sequential<F: Family, V, C>(
+    pub(crate) async fn run_batch_many_sequential<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -2065,7 +2215,7 @@ pub(super) mod test {
 
     /// Empty batch (zero mutations) produces correct speculative root.
     #[boxed]
-    pub(crate) async fn test_immutable_batch_empty_batch<F: Family, V, C>(
+    pub(crate) async fn run_batch_empty_batch<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -2104,7 +2254,7 @@ pub(super) mod test {
 
     /// MerkleizedBatch::get() works on a chained child's merkleized batch.
     #[boxed]
-    pub(crate) async fn test_immutable_batch_chained_merkleized_get<F: Family, V, C>(
+    pub(crate) async fn run_batch_chained_merkleized_get<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -2160,7 +2310,7 @@ pub(super) mod test {
 
     /// Large single batch, verifying all values and proof.
     #[boxed]
-    pub(crate) async fn test_immutable_batch_large<F: Family, V, C>(
+    pub(crate) async fn run_batch_large<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -2208,7 +2358,7 @@ pub(super) mod test {
 
     /// Child batch overrides same key set by parent.
     #[boxed]
-    pub(crate) async fn test_immutable_batch_chained_key_override<F: Family, V, C>(
+    pub(crate) async fn run_batch_chained_key_override<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -2259,7 +2409,7 @@ pub(super) mod test {
     /// `open_db_small_sections` must return a DB whose log has `items_per_section=1`
     /// so pruning is per-item.
     #[boxed]
-    pub(crate) async fn test_immutable_batch_sequential_key_override<F: Family, V, C>(
+    pub(crate) async fn run_batch_sequential_key_override<F: Family, V, C>(
         context: deterministic::Context,
         open_db_small_sections: impl Fn(
             deterministic::Context,
@@ -2335,7 +2485,7 @@ pub(super) mod test {
 
     /// Metadata propagates through merkleize and clears with None.
     #[boxed]
-    pub(crate) async fn test_immutable_batch_metadata<F: Family, V, C>(
+    pub(crate) async fn run_batch_metadata<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -2367,7 +2517,7 @@ pub(super) mod test {
     }
 
     #[boxed]
-    pub(crate) async fn test_immutable_stale_batch_rejected<F: Family, V, C>(
+    pub(crate) async fn run_stale_batch_rejected<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -2419,7 +2569,7 @@ pub(super) mod test {
     }
 
     #[boxed]
-    pub(crate) async fn test_immutable_stale_batch_chained<F: Family, V, C>(
+    pub(crate) async fn run_stale_batch_chained<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -2482,7 +2632,7 @@ pub(super) mod test {
     }
 
     #[boxed]
-    pub(crate) async fn test_immutable_partial_ancestor_commit<F: Family, V, C>(
+    pub(crate) async fn run_partial_ancestor_commit<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -2533,7 +2683,7 @@ pub(super) mod test {
     }
 
     #[boxed]
-    pub(crate) async fn test_immutable_delayed_merkleize_after_ancestor_apply<F: Family, V, C>(
+    pub(crate) async fn run_delayed_merkleize_after_ancestor_apply<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -2578,7 +2728,7 @@ pub(super) mod test {
     }
 
     #[boxed]
-    pub(crate) async fn test_immutable_sequential_commit_parent_then_child<F: Family, V, C>(
+    pub(crate) async fn run_sequential_commit_parent_then_child<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -2621,7 +2771,7 @@ pub(super) mod test {
     }
 
     #[boxed]
-    pub(crate) async fn test_immutable_child_root_matches_pending_and_committed<F: Family, V, C>(
+    pub(crate) async fn run_child_root_matches_pending_and_committed<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -2665,7 +2815,7 @@ pub(super) mod test {
     }
 
     #[boxed]
-    pub(crate) async fn test_immutable_stale_batch_child_applied_before_parent<F: Family, V, C>(
+    pub(crate) async fn run_stale_batch_child_applied_before_parent<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -2705,7 +2855,7 @@ pub(super) mod test {
     /// to_batch() creates an owned snapshot whose root matches the committed DB.
     /// A child batch chained from it can be applied.
     #[boxed]
-    pub(crate) async fn test_immutable_to_batch<F: Family, V, C>(
+    pub(crate) async fn run_to_batch<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -2750,7 +2900,7 @@ pub(super) mod test {
     /// Regression: applying a batch after its ancestor Arc is dropped (without
     /// committing) must still apply the ancestor's snapshot diffs.
     #[boxed]
-    pub(crate) async fn test_immutable_apply_after_ancestor_dropped<F: Family, V, C>(
+    pub(crate) async fn run_apply_after_ancestor_dropped<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -2804,7 +2954,7 @@ pub(super) mod test {
     /// Verify the inactivity floor is zero for a fresh empty database and is
     /// correctly set after applying batches with specific floor values.
     #[boxed]
-    pub(crate) async fn test_immutable_inactivity_floor_tracking<F: Family, V, C>(
+    pub(crate) async fn run_inactivity_floor_tracking<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -2853,7 +3003,7 @@ pub(super) mod test {
     /// Verify that applying a batch with a floor equal to the current floor succeeds,
     /// and that a higher floor also succeeds.
     #[boxed]
-    pub(crate) async fn test_immutable_floor_monotonicity<F: Family, V, C>(
+    pub(crate) async fn run_floor_monotonicity<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -2904,7 +3054,7 @@ pub(super) mod test {
 
     /// Verify that the inactivity floor is correctly restored after a rewind.
     #[boxed]
-    pub(crate) async fn test_immutable_rewind_restores_floor<F: Family, V, C>(
+    pub(crate) async fn run_rewind_restores_floor<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -2951,7 +3101,7 @@ pub(super) mod test {
     /// Verify that applying a batch with a floor lower than the current floor
     /// returns an error.
     #[boxed]
-    pub(crate) async fn test_immutable_floor_monotonicity_violation<F: Family, V, C>(
+    pub(crate) async fn run_floor_monotonicity_violation<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -2989,7 +3139,7 @@ pub(super) mod test {
     /// Verify that applying a batch with a floor beyond the total operation
     /// count returns an error.
     #[boxed]
-    pub(crate) async fn test_immutable_floor_beyond_size<F: Family, V, C>(
+    pub(crate) async fn run_floor_beyond_size<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -3048,7 +3198,7 @@ pub(super) mod test {
     /// commit's floor at or above the previous commit's floor) from the simpler "every
     /// commit's floor at or above the live floor" rule.
     #[boxed]
-    pub(crate) async fn test_immutable_chained_ancestor_floor_regression<F: Family, V, C>(
+    pub(crate) async fn run_chained_ancestor_floor_regression<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -3109,7 +3259,7 @@ pub(super) mod test {
     /// dangerous variant: monotonicity can still be satisfied while the floor poisons future
     /// `historical_proof` and rewind.
     #[boxed]
-    pub(crate) async fn test_immutable_chained_ancestor_floor_beyond_size<F: Family, V, C>(
+    pub(crate) async fn run_chained_ancestor_floor_beyond_size<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -3164,7 +3314,7 @@ pub(super) mod test {
     /// all keys that were live at the rewind target -- not just the ones that
     /// happened to be in the rebuilt snapshot.
     #[boxed]
-    pub(crate) async fn test_immutable_rewind_after_reopen_with_floor_change<F: Family, V, C>(
+    pub(crate) async fn run_rewind_after_reopen_with_floor_change<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -3225,7 +3375,7 @@ pub(super) mod test {
     /// immediate predecessor. This ensures the snapshot gap fill only covers
     /// [rewind_floor, old_floor) and does not re-insert keys already present.
     #[boxed]
-    pub(crate) async fn test_immutable_rewind_after_reopen_partial_floor_gap<F: Family, V, C>(
+    pub(crate) async fn run_rewind_after_reopen_partial_floor_gap<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -3285,7 +3435,7 @@ pub(super) mod test {
     /// Rewind-after-reopen with a repeated key in the floor gap. The gap fill
     /// must restore the key, and reads may return any of its written values.
     #[boxed]
-    pub(crate) async fn test_immutable_rewind_after_reopen_repeated_key_gap<F: Family, V, C>(
+    pub(crate) async fn run_rewind_after_reopen_repeated_key_gap<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -3339,7 +3489,7 @@ pub(super) mod test {
     /// repeated key. Rewind restores the older write's snapshot entry, and
     /// reads may return any of the written values.
     #[boxed]
-    pub(crate) async fn test_immutable_rewind_after_reopen_mixed_gap_retained<F: Family, V, C>(
+    pub(crate) async fn run_rewind_after_reopen_mixed_gap_retained<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -3391,6 +3541,83 @@ pub(super) mod test {
         db.destroy().await.unwrap();
     }
 
+    /// A live db retains every location of a repeated key, so rewinding across the newer
+    /// write keeps serving the older retained one with no reopen involved.
+    #[boxed]
+    pub(crate) async fn run_rewind_repeated_key_live<F: Family, V, C>(
+        context: deterministic::Context,
+        open_db: impl Fn(
+            deterministic::Context,
+        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+    ) where
+        V: ValueEncoding<Value = Digest>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
+        C::Item: EncodeShared,
+    {
+        let db = open_db(context.child("first")).await;
+
+        let key = Sha256::fill(7u8);
+        let v1 = Sha256::fill(17u8);
+        let v2 = Sha256::fill(18u8);
+
+        // Commit A: Set(key, v1) with floor=0.
+        let (db, _) = commit_sets(db, [(key, v1)], None).await;
+        let first_size = db.bounds().end;
+
+        // Commit B: Set(key, v2) with floor=0. Either written value may be served.
+        let (db, _) = commit_sets(db, [(key, v2)], None).await;
+        let live = db.get(&key).await.unwrap().unwrap();
+        assert!(live == v1 || live == v2);
+
+        // Rewind to commit A: the v2 location is dropped and the retained v1
+        // location keeps serving the key.
+        let db = db.rewind(first_size).await.unwrap();
+        assert_eq!(db.get(&key).await.unwrap(), Some(v1));
+
+        db.destroy().await.unwrap();
+    }
+
+    /// Replay keeps only a repeated key's newest location, so a reopened db must still honor
+    /// the repeated-key read contract after a rewind that crosses the newer write: the older
+    /// write stays retained at an unchanged floor, and reads of the key may return any of its
+    /// written values, never `None`.
+    #[boxed]
+    pub(crate) async fn run_rewind_after_reopen_repeated_key_retained<F: Family, V, C>(
+        context: deterministic::Context,
+        open_db: impl Fn(
+            deterministic::Context,
+        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+    ) where
+        V: ValueEncoding<Value = Digest>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
+        C::Item: EncodeShared,
+    {
+        let db = open_db(context.child("first")).await;
+
+        let key = Sha256::fill(7u8);
+        let v1 = Sha256::fill(17u8);
+        let v2 = Sha256::fill(18u8);
+
+        // Commit A: Set(key, v1) with floor=0.
+        let (db, _) = commit_sets(db, [(key, v1)], None).await;
+        let first_size = db.bounds().end;
+
+        // Commit B: Set(key, v2) with floor=0, then persist for the reopen.
+        let (db, _) = commit_sets(db, [(key, v2)], None).await;
+        db.sync().await.unwrap();
+
+        // Reopen: replay visits both writes and keeps only the newer location.
+        let db = open_db(context.child("second")).await;
+        assert_eq!(db.get(&key).await.unwrap(), Some(v2));
+
+        // Rewind to commit A with an unchanged floor: the newer location is dropped, and the
+        // older write, still retained in the restored journal, must keep the key readable.
+        let db = db.rewind(first_size).await.unwrap();
+        assert_eq!(db.get(&key).await.unwrap(), Some(v1));
+
+        db.destroy().await.unwrap();
+    }
+
     /// After committing with `floor = commit_loc` and pruning down to it, the live set is
     /// exactly one operation — the commit itself. This is the minimum non-empty live set
     /// achievable under the per-commit bound. The DB must remain fully usable:
@@ -3401,7 +3628,7 @@ pub(super) mod test {
     ///   in-memory snapshot is empty (all Sets were below the floor).
     /// - A follow-on batch applies cleanly on top from the floor-at-max state.
     #[boxed]
-    pub(crate) async fn test_immutable_single_commit_live_set<F: Family, V, C>(
+    pub(crate) async fn run_single_commit_live_set<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -3513,7 +3740,7 @@ pub(super) mod test {
     /// `get_many` on the DB and on unmerkleized/merkleized batches returns results
     /// that match individual `get` calls.
     #[boxed]
-    pub(crate) async fn test_immutable_get_many<F: Family, V, C>(
+    pub(crate) async fn run_get_many<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -3577,7 +3804,7 @@ pub(super) mod test {
 
     /// `get_many` reports unexpected data when the snapshot points at a non-`Set` operation.
     #[boxed]
-    pub(crate) async fn test_immutable_get_many_unexpected_data<F: Family, V, C>(
+    pub(crate) async fn run_get_many_unexpected_data<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,

@@ -4,8 +4,10 @@
 //! requires asking an application-provided source for raw bytes or objects.
 //! Implementations provide [`Fetcher::fetch`]; this module handles request
 //! coalescing, retain pruning, retry scheduling, consumer delivery, and
-//! accepted-response redelivery. An ignored consumer outcome retires the key
-//! without accepting the value or retrying the source.
+//! cached-response redelivery. An ignored consumer outcome retires the key
+//! without accepting the value or retrying the source. A verdict the consumer
+//! drops without answering hands the response to the remaining subscribers, or
+//! retires the key when none remain.
 //!
 //! Target hints supplied through [`crate::TargetedResolver::fetch_targeted`] and
 //! [`crate::TargetedResolver::fetch_all_targeted`] are ignored because opaque
@@ -203,7 +205,7 @@ where
     context: ContextCell<E>,
     fetcher: F,
     mailbox: mailbox::Receiver<Message<F::Key, Con::Subscriber>>,
-    fetches: AbortablePool<FetchCompletion<F::Key, F::Value>>,
+    fetches: AbortablePool<'static, FetchCompletion<F::Key, F::Value>>,
     deliveries: DeliveryTracker<Con, u64>,
     requests: BTreeMap<F::Key, Attempt>,
     subscribers: subscribers::Tracker<F::Key, Con::Subscriber>,
@@ -371,7 +373,7 @@ where
         self.requests.insert(key, Attempt::Delivering { id });
     }
 
-    /// Deliver an already accepted response to subscribers that arrived later.
+    /// Deliver the cached response to subscribers that arrived later.
     fn redeliver(&mut self, key: F::Key, delivered: NonEmptyVec<(Con::Subscriber, tracing::Span)>) {
         self.deliveries.redeliver(Delivery {
             key,
@@ -501,9 +503,28 @@ where
         &mut self,
         key: F::Key,
         delivered: NonEmptyVec<(Con::Subscriber, tracing::Span)>,
-        outcome: Outcome,
+        outcome: Option<Outcome>,
     ) {
         let accepted = self.deliveries.response_accepted(&key);
+
+        // A dropped verdict says nothing about the response, only that the consumer
+        // did not judge it for these subscribers. Hand the response to the
+        // remaining subscribers, or retire the key when none remain.
+        let Some(outcome) = outcome else {
+            let remaining = self
+                .subscribers
+                .remove_delivered(&key, delivered.map_into(|(subscriber, _)| subscriber));
+            if let Some(subscribers) = remaining {
+                self.redeliver(key, subscribers);
+                return;
+            }
+            if !accepted {
+                self.fetch.inc(Status::Dropped);
+            }
+            self.requests.remove(&key);
+            self.deliveries.remove(&key);
+            return;
+        };
 
         match outcome {
             Outcome::Complete => {
@@ -983,6 +1004,123 @@ mod tests {
                 .send(Outcome::Complete)
                 .expect("response dropped");
             assert_eq!(fetcher.calls(), 2);
+        });
+    }
+
+    #[test]
+    fn dropped_verdict_retires_without_retry() {
+        Runner::default().start(|context| async move {
+            let fetcher = MockFetcher::default();
+            fetcher.push(1, Some(Bytes::from_static(b"unjudged")));
+            fetcher.push(1, Some(Bytes::from_static(b"fresh")));
+            let consumer = MockConsumer::default();
+            let mut resolver =
+                start_resolver(context.child("resolver"), fetcher.clone(), consumer.clone());
+
+            assert!(
+                resolver
+                    .fetch(Fetch {
+                        key: 1,
+                        subscriber: 10,
+                        span: tracing::Span::none(),
+                    })
+                    .accepted()
+            );
+            let delivery = wait_for_delivery(&context, &consumer).await;
+            assert_eq!(delivery.value, Bytes::from_static(b"unjudged"));
+
+            // Drop the verdict, as a consumer does when it stops with the delivery
+            // still queued. No one is waiting on the key, so the fetch is retired
+            // rather than retried.
+            drop(delivery);
+
+            context
+                .sleep(RETRY_TIMEOUT + Duration::from_millis(10))
+                .await;
+            assert_eq!(fetcher.calls(), 1);
+            assert_eq!(consumer.len(), 0);
+            assert!(
+                context
+                    .encode()
+                    .contains("resolver_actor_fetch_total{status=\"Dropped\"} 1")
+            );
+
+            // The retired key is not deduplicated against, so a fresh fetch runs.
+            assert!(
+                resolver
+                    .fetch(Fetch {
+                        key: 1,
+                        subscriber: 10,
+                        span: tracing::Span::none(),
+                    })
+                    .accepted()
+            );
+            let delivery = wait_for_delivery(&context, &consumer).await;
+            assert_eq!(delivery.value, Bytes::from_static(b"fresh"));
+            delivery
+                .response
+                .send(Outcome::Complete)
+                .expect("response dropped");
+            assert_eq!(fetcher.calls(), 2);
+        });
+    }
+
+    #[test]
+    fn dropped_verdict_hands_response_to_late_subscriber() {
+        Runner::default().start(|context| async move {
+            let fetcher = MockFetcher::default();
+            fetcher.push(1, Some(Bytes::from_static(b"unjudged")));
+            let consumer = MockConsumer::default();
+            let mut resolver =
+                start_resolver(context.child("resolver"), fetcher.clone(), consumer.clone());
+
+            assert!(
+                resolver
+                    .fetch(Fetch {
+                        key: 1,
+                        subscriber: 10,
+                        span: tracing::Span::none(),
+                    })
+                    .accepted()
+            );
+            let first = wait_for_delivery(&context, &consumer).await;
+            assert_eq!(first.value, Bytes::from_static(b"unjudged"));
+
+            // A late subscriber joins while the first delivery is unjudged, then
+            // that delivery's verdict is dropped. The late subscriber is handed
+            // the same response without another source fetch.
+            assert!(
+                resolver
+                    .fetch(Fetch {
+                        key: 1,
+                        subscriber: 11,
+                        span: tracing::Span::none(),
+                    })
+                    .accepted()
+            );
+            context.sleep(Duration::from_millis(10)).await;
+            drop(first);
+            let second = wait_for_delivery(&context, &consumer).await;
+            assert_eq!(
+                second
+                    .delivery
+                    .subscribers
+                    .iter()
+                    .map(|(subscriber, _)| *subscriber)
+                    .collect::<Vec<_>>(),
+                vec![11]
+            );
+            assert_eq!(second.value, Bytes::from_static(b"unjudged"));
+            second
+                .response
+                .send(Outcome::Complete)
+                .expect("response dropped");
+
+            context
+                .sleep(RETRY_TIMEOUT + Duration::from_millis(10))
+                .await;
+            assert_eq!(fetcher.calls(), 1);
+            assert_eq!(consumer.len(), 0);
         });
     }
 

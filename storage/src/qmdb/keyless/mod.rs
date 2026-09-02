@@ -561,9 +561,9 @@ where
     ///
     /// Returns the range of locations written.
     ///
-    /// This publishes the batch to the in-memory database state and appends it to the journal,
-    /// but does not durably commit it. Call [`Keyless::commit`] or [`Keyless::sync`], or await the
-    /// handle returned by [`Keyless::start_sync`], to guarantee durability.
+    /// This publishes the batch to the in-memory database state and appends it to the journal.
+    /// Call [`Keyless::commit`] or [`Keyless::sync`], or await the handle returned by
+    /// [`Keyless::start_sync`], to make the applied state durable.
     #[tracing::instrument(name = "qmdb.keyless.db.apply_batch", level = "info", skip_all)]
     pub async fn apply_batch(
         mut self,
@@ -651,8 +651,47 @@ pub(crate) mod tests {
         }
     }
 
+    /// Emits the named test against `mmr::Family` and `mmb::Family`.
+    macro_rules! keyless_tests {
+        ($($name:ident => $scenario:ident, $fixture:ident;)*) => {
+            $(
+                #[test_traced]
+                fn $name() {
+                    deterministic::Runner::default().start(|ctx| async move {
+                        keyless_tests!(@fixture $fixture, $scenario, mmr, ctx);
+                    });
+                }
+            )*
+            paste::paste! {
+                $(
+                    #[test_traced]
+                    fn [<$name _mmb>]() {
+                        deterministic::Runner::default().start(|ctx| async move {
+                            keyless_tests!(@fixture $fixture, $scenario, mmb, ctx);
+                        });
+                    }
+                )*
+            }
+        };
+        (@fixture db, $scenario:ident, $family:ident, $ctx:ident) => {
+            let db = open_db::<$family::Family>($ctx.child("db")).await;
+            tests::$scenario(db).await;
+        };
+        (@fixture reopen, $scenario:ident, $family:ident, $ctx:ident) => {
+            let db = open_db::<$family::Family>($ctx.child("db")).await;
+            tests::$scenario($ctx, db, reopen::<$family::Family>()).await;
+        };
+        (@fixture reopen_indexed, $scenario:ident, $family:ident, $ctx:ident) => {
+            let db =
+                open_db::<$family::Family>($ctx.child("db").with_attribute("index", 1)).await;
+            tests::$scenario($ctx, db, reopen::<$family::Family>()).await;
+        };
+    }
+
+    pub(super) use keyless_tests;
+
     #[boxed]
-    pub(crate) async fn test_keyless_db_empty<F: Family, V, C, H, S: Strategy>(
+    pub(crate) async fn run_empty<F: Family, V, C, H, S: Strategy>(
         context: deterministic::Context,
         db: TestKeyless<F, V, C, H, S>,
         reopen: Reopen<TestKeyless<F, V, C, H, S>>,
@@ -707,14 +746,102 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
+    /// `operations()` must cover exactly the batch's own applied range and match the
+    /// operations a post-apply `historical_proof` recovers from the log, for a db-based
+    /// batch and for a chained batch applied after its ancestor.
     #[boxed]
-    pub(crate) async fn test_keyless_db_commit_after_sync_recovery<
-        F: Family,
-        V,
-        C,
-        H,
-        S: Strategy,
-    >(
+    pub(crate) async fn run_operations_match_applied_log<F: Family, V, C, H, S: Strategy>(
+        db: TestKeyless<F, V, C, H, S>,
+    ) where
+        V: ValueEncoding<Value: TestValue>,
+        C: Mutable<Item = Operation<F, V>>,
+        H: Hasher,
+        Operation<F, V>: EncodeShared + PartialEq + core::fmt::Debug,
+    {
+        let seed = db
+            .new_batch()
+            .append(V::Value::make(1))
+            .append(V::Value::make(2))
+            .merkleize(&db, None, db.inactivity_floor_loc())
+            .await;
+        let (seed_start, seed_ops) = seed.operations();
+        let seed_root = seed.root();
+        let seed_proof = seed.proof(&db).unwrap();
+        let (db, seed_range) = db.apply_batch(seed).await.unwrap();
+        assert_eq!(seed_start, seed_range.start);
+        assert_eq!(*seed_start + seed_ops.len() as u64, *seed_range.end);
+
+        // A chained batch's operations are its own suffix only.
+        let parent = db
+            .new_batch()
+            .append(V::Value::make(3))
+            .merkleize(&db, None, db.inactivity_floor_loc())
+            .await;
+        let child = parent
+            .new_batch::<H>()
+            .append(V::Value::make(4))
+            .merkleize(&db, None, db.inactivity_floor_loc())
+            .await;
+        let (parent_start, parent_ops) = parent.operations();
+        let (child_start, child_ops) = child.operations();
+        let (parent_root, child_root) = (parent.root(), child.root());
+        let (parent_proof, child_proof) = (parent.proof(&db).unwrap(), child.proof(&db).unwrap());
+        let (db, parent_range) = db.apply_batch(parent).await.unwrap();
+        let (db, child_range) = db.apply_batch(child).await.unwrap();
+        assert_eq!(parent_start, parent_range.start);
+        assert_eq!(*parent_start + parent_ops.len() as u64, *parent_range.end);
+        assert_eq!(child_start, child_range.start);
+        assert_eq!(*child_start + child_ops.len() as u64, *child_range.end);
+
+        // A write-free batch still captures its commit-only suffix.
+        let empty = db
+            .new_batch()
+            .merkleize(&db, None, db.inactivity_floor_loc())
+            .await;
+        let (empty_start, empty_ops) = empty.operations();
+        let (empty_root, empty_proof) = (empty.root(), empty.proof(&db).unwrap());
+        let (db, empty_range) = db.apply_batch(empty).await.unwrap();
+        assert_eq!(empty_start, empty_range.start);
+        assert_eq!(*empty_start + empty_ops.len() as u64, *empty_range.end);
+
+        // Every captured delta and proof must match what the log recovers for its
+        // range, and verify against the batch's own root.
+        for (start, ops, proof, root) in [
+            (seed_start, seed_ops, seed_proof, seed_root),
+            (parent_start, parent_ops, parent_proof, parent_root),
+            (child_start, child_ops, child_proof, child_root),
+            (empty_start, empty_ops, empty_proof, empty_root),
+        ] {
+            let len = core::num::NonZeroU64::new(ops.len() as u64).unwrap();
+            let end = Location::new(*start + ops.len() as u64);
+            let (log_proof, log_ops) = db.historical_proof(end, start, len).await.unwrap();
+            assert_eq!(log_ops, *ops);
+            assert_eq!(log_proof, proof);
+            assert!(verify_proof::<H, _, _>(&proof, start, &ops, &root));
+        }
+
+        // After the batch's changes are flushed, proof is a verifying proof or an
+        // error, never a wrong proof.
+        let late = db
+            .new_batch()
+            .append(V::Value::make(5))
+            .merkleize(&db, None, db.inactivity_floor_loc())
+            .await;
+        let (late_start, late_ops) = late.operations();
+        let late_root = late.root();
+        let (db, _) = db.apply_batch(Arc::clone(&late)).await.unwrap();
+        let db = db.commit().await.unwrap();
+        if let Ok(proof) = late.proof(&db) {
+            assert!(verify_proof::<H, _, _>(
+                &proof, late_start, &late_ops, &late_root
+            ));
+        }
+
+        db.destroy().await.unwrap();
+    }
+
+    #[boxed]
+    pub(crate) async fn run_commit_after_sync_recovery<F: Family, V, C, H, S: Strategy>(
         context: deterministic::Context,
         db: TestKeyless<F, V, C, H, S>,
         reopen: Reopen<TestKeyless<F, V, C, H, S>>,
@@ -761,7 +888,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_db_build_basic<F: Family, V, C, H, S: Strategy>(
+    pub(crate) async fn run_build_basic<F: Family, V, C, H, S: Strategy>(
         context: deterministic::Context,
         mut db: TestKeyless<F, V, C, H, S>,
         reopen: Reopen<TestKeyless<F, V, C, H, S>>,
@@ -810,7 +937,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_db_recovery<F: Family, V, C, H, S: Strategy>(
+    pub(crate) async fn run_recovery<F: Family, V, C, H, S: Strategy>(
         context: deterministic::Context,
         db: TestKeyless<F, V, C, H, S>,
         reopen: Reopen<TestKeyless<F, V, C, H, S>>,
@@ -883,7 +1010,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_db_proof<F: Family, V, C, S: Strategy>(
+    pub(crate) async fn run_proof<F: Family, V, C, S: Strategy>(
         mut db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -924,7 +1051,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_db_metadata<F: Family, V, C, H, S: Strategy>(
+    pub(crate) async fn run_metadata<F: Family, V, C, H, S: Strategy>(
         db: TestKeyless<F, V, C, H, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -952,7 +1079,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_db_pruning<F: Family, V, C, H, S: Strategy>(
+    pub(crate) async fn run_pruning<F: Family, V, C, H, S: Strategy>(
         context: deterministic::Context,
         db: TestKeyless<F, V, C, H, S>,
         reopen: Reopen<TestKeyless<F, V, C, H, S>>,
@@ -1009,7 +1136,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_db_empty_db_recovery<F: Family, V, C, H, S: Strategy>(
+    pub(crate) async fn run_empty_db_recovery<F: Family, V, C, H, S: Strategy>(
         context: deterministic::Context,
         db: TestKeyless<F, V, C, H, S>,
         reopen: Reopen<TestKeyless<F, V, C, H, S>>,
@@ -1085,13 +1212,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_db_replay_with_trailing_appends<
-        F: Family,
-        V,
-        C,
-        H,
-        S: Strategy,
-    >(
+    pub(crate) async fn run_replay_with_trailing_appends<F: Family, V, C, H, S: Strategy>(
         context: deterministic::Context,
         mut db: TestKeyless<F, V, C, H, S>,
         reopen: Reopen<TestKeyless<F, V, C, H, S>>,
@@ -1189,7 +1310,7 @@ pub(crate) mod tests {
     /// `get_many` on the DB and on unmerkleized/merkleized batches returns
     /// results consistent with individual `get` calls.
     #[boxed]
-    pub(crate) async fn test_keyless_get_many<F: Family, V, C, S: Strategy>(
+    pub(crate) async fn run_get_many<F: Family, V, C, S: Strategy>(
         db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -1239,7 +1360,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_batch_chained<F: Family, V, C, S: Strategy>(
+    pub(crate) async fn run_batch_chained<F: Family, V, C, S: Strategy>(
         db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -1275,7 +1396,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_stale_batch<F: Family, V, C, H, S: Strategy>(
+    pub(crate) async fn run_stale_batch<F: Family, V, C, H, S: Strategy>(
         context: deterministic::Context,
         db: TestKeyless<F, V, C, H, S>,
         reopen: Reopen<TestKeyless<F, V, C, H, S>>,
@@ -1312,7 +1433,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_partial_ancestor_commit<F: Family, V, C, H, S: Strategy>(
+    pub(crate) async fn run_partial_ancestor_commit<F: Family, V, C, H, S: Strategy>(
         db: TestKeyless<F, V, C, H, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -1350,7 +1471,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_delayed_merkleize_after_ancestor_apply<
+    pub(crate) async fn run_delayed_merkleize_after_ancestor_apply<
         F: Family,
         V,
         C,
@@ -1387,7 +1508,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_to_batch<F: Family, V, C, S: Strategy>(
+    pub(crate) async fn run_to_batch<F: Family, V, C, S: Strategy>(
         db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -1418,7 +1539,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_db_non_empty_recovery<F: Family, V, C, H, S: Strategy>(
+    pub(crate) async fn run_non_empty_recovery<F: Family, V, C, H, S: Strategy>(
         context: deterministic::Context,
         mut db: TestKeyless<F, V, C, H, S>,
         reopen: Reopen<TestKeyless<F, V, C, H, S>>,
@@ -1508,7 +1629,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_db_proof_comprehensive<F: Family, V, C, S: Strategy>(
+    pub(crate) async fn run_proof_comprehensive<F: Family, V, C, S: Strategy>(
         mut db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -1578,7 +1699,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_db_proof_with_pruning<F: Family, V, C, S: Strategy>(
+    pub(crate) async fn run_proof_with_pruning<F: Family, V, C, S: Strategy>(
         context: deterministic::Context,
         mut db: TestKeyless<F, V, C, Sha256, S>,
         reopen: Reopen<TestKeyless<F, V, C, Sha256, S>>,
@@ -1657,7 +1778,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_db_get_out_of_bounds<F: Family, V, C, H, S: Strategy>(
+    pub(crate) async fn run_get_out_of_bounds<F: Family, V, C, H, S: Strategy>(
         db: TestKeyless<F, V, C, H, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -1690,7 +1811,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_batch_get<F: Family, V, C, H, S: Strategy>(
+    pub(crate) async fn run_batch_get<F: Family, V, C, H, S: Strategy>(
         mut db: TestKeyless<F, V, C, H, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -1729,7 +1850,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_batch_stacked_get<F: Family, V, C, S: Strategy>(
+    pub(crate) async fn run_batch_stacked_get<F: Family, V, C, S: Strategy>(
         db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -1756,7 +1877,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_batch_speculative_root<F: Family, V, C, H, S: Strategy>(
+    pub(crate) async fn run_batch_speculative_root<F: Family, V, C, H, S: Strategy>(
         db: TestKeyless<F, V, C, H, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -1786,7 +1907,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_merkleized_batch_get<F: Family, V, C, S: Strategy>(
+    pub(crate) async fn run_merkleized_batch_get<F: Family, V, C, S: Strategy>(
         db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -1822,13 +1943,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_batch_chained_apply_sequential<
-        F: Family,
-        V,
-        C,
-        H,
-        S: Strategy,
-    >(
+    pub(crate) async fn run_batch_chained_apply_sequential<F: Family, V, C, H, S: Strategy>(
         db: TestKeyless<F, V, C, H, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -1862,7 +1977,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_batch_many_sequential<F: Family, V, C, S: Strategy>(
+    pub(crate) async fn run_batch_many_sequential<F: Family, V, C, S: Strategy>(
         mut db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -1905,7 +2020,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_batch_empty<F: Family, V, C, H, S: Strategy>(
+    pub(crate) async fn run_batch_empty<F: Family, V, C, H, S: Strategy>(
         db: TestKeyless<F, V, C, H, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -1937,7 +2052,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_batch_chained_merkleized_get<F: Family, V, C, S: Strategy>(
+    pub(crate) async fn run_batch_chained_merkleized_get<F: Family, V, C, S: Strategy>(
         db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -1980,7 +2095,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_batch_large<F: Family, V, C, S: Strategy>(
+    pub(crate) async fn run_batch_large<F: Family, V, C, S: Strategy>(
         db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -2019,7 +2134,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_stale_batch_chained<F: Family, V, C, S: Strategy>(
+    pub(crate) async fn run_stale_batch_chained<F: Family, V, C, S: Strategy>(
         db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -2072,12 +2187,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_sequential_commit_parent_then_child<
-        F: Family,
-        V,
-        C,
-        S: Strategy,
-    >(
+    pub(crate) async fn run_sequential_commit_parent_then_child<F: Family, V, C, S: Strategy>(
         db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -2102,7 +2212,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_stale_batch_child_before_parent<F: Family, V, C, S: Strategy>(
+    pub(crate) async fn run_stale_batch_child_before_parent<F: Family, V, C, S: Strategy>(
         db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -2128,12 +2238,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_child_root_matches_pending_and_committed<
-        F: Family,
-        V,
-        C,
-        S: Strategy,
-    >(
+    pub(crate) async fn run_child_root_matches_pending_and_committed<F: Family, V, C, S: Strategy>(
         db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -2196,7 +2301,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_db_rewind_recovery<F: Family, V, C, H, S: Strategy>(
+    pub(crate) async fn run_rewind_recovery<F: Family, V, C, H, S: Strategy>(
         context: deterministic::Context,
         db: TestKeyless<F, V, C, H, S>,
         reopen: Reopen<TestKeyless<F, V, C, H, S>>,
@@ -2295,13 +2400,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_db_rewind_pruned_target_errors<
-        F: Family,
-        V,
-        C,
-        H,
-        S: Strategy,
-    >(
+    pub(crate) async fn run_rewind_pruned_target_errors<F: Family, V, C, H, S: Strategy>(
         context: deterministic::Context,
         db: TestKeyless<F, V, C, H, S>,
         reopen: Reopen<TestKeyless<F, V, C, H, S>>,
@@ -2354,7 +2453,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_db_floor_tracking<F: Family, V, C, H, S: Strategy>(
+    pub(crate) async fn run_floor_tracking<F: Family, V, C, H, S: Strategy>(
         context: deterministic::Context,
         db: TestKeyless<F, V, C, H, S>,
         reopen: Reopen<TestKeyless<F, V, C, H, S>>,
@@ -2407,7 +2506,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_db_floor_regression_rejected<F: Family, V, C, H, S: Strategy>(
+    pub(crate) async fn run_floor_regression_rejected<F: Family, V, C, H, S: Strategy>(
         context: deterministic::Context,
         db: TestKeyless<F, V, C, H, S>,
         reopen: Reopen<TestKeyless<F, V, C, H, S>>,
@@ -2454,13 +2553,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_db_floor_beyond_commit_loc_rejected<
-        F: Family,
-        V,
-        C,
-        H,
-        S: Strategy,
-    >(
+    pub(crate) async fn run_floor_beyond_commit_loc_rejected<F: Family, V, C, H, S: Strategy>(
         context: deterministic::Context,
         db: TestKeyless<F, V, C, H, S>,
         reopen: Reopen<TestKeyless<F, V, C, H, S>>,
@@ -2513,7 +2606,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_db_rewind_restores_floor<F: Family, V, C, H, S: Strategy>(
+    pub(crate) async fn run_rewind_restores_floor<F: Family, V, C, H, S: Strategy>(
         db: TestKeyless<F, V, C, H, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -2563,7 +2656,7 @@ pub(crate) mod tests {
     /// Floor is embedded in the Commit operation and therefore in the Merkle root: two databases
     /// with identical appends but different floors must produce different roots.
     #[boxed]
-    pub(crate) async fn test_keyless_db_floor_changes_root<F: Family, V, C, H, S: Strategy>(
+    pub(crate) async fn run_floor_changes_root<F: Family, V, C, H, S: Strategy>(
         db_a: TestKeyless<F, V, C, H, S>,
         db_b: TestKeyless<F, V, C, H, S>,
     ) where
@@ -2598,13 +2691,7 @@ pub(crate) mod tests {
 
     /// A floor equal to the commit operation's location is on the tight boundary of acceptance.
     #[boxed]
-    pub(crate) async fn test_keyless_db_floor_at_commit_loc_accepted<
-        F: Family,
-        V,
-        C,
-        H,
-        S: Strategy,
-    >(
+    pub(crate) async fn run_floor_at_commit_loc_accepted<F: Family, V, C, H, S: Strategy>(
         db: TestKeyless<F, V, C, H, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -2629,13 +2716,7 @@ pub(crate) mod tests {
 
     /// End-to-end: commit → drop → reopen → rewind → verify floor restored after a crash.
     #[boxed]
-    pub(crate) async fn test_keyless_db_rewind_after_reopen_with_floor<
-        F: Family,
-        V,
-        C,
-        H,
-        S: Strategy,
-    >(
+    pub(crate) async fn run_rewind_after_reopen_with_floor<F: Family, V, C, H, S: Strategy>(
         context: deterministic::Context,
         db: TestKeyless<F, V, C, H, S>,
         reopen: Reopen<TestKeyless<F, V, C, H, S>>,
@@ -2690,13 +2771,7 @@ pub(crate) mod tests {
     /// `journal.apply_batch` call, so its floor participates in the per-commit monotonicity
     /// invariant.
     #[boxed]
-    pub(crate) async fn test_keyless_db_ancestor_floor_regression_rejected<
-        F,
-        V,
-        C,
-        H,
-        S: Strategy,
-    >(
+    pub(crate) async fn run_ancestor_floor_regression_rejected<F, V, C, H, S: Strategy>(
         context: deterministic::Context,
         db: TestKeyless<F, V, C, H, S>,
         reopen: Reopen<TestKeyless<F, V, C, H, S>>,
@@ -2744,13 +2819,7 @@ pub(crate) mod tests {
     /// A chained batch where an *ancestor's* floor exceeds its own commit location must be
     /// rejected — identifying the ancestor's bound, not the tip's.
     #[boxed]
-    pub(crate) async fn test_keyless_db_ancestor_floor_beyond_commit_loc_rejected<
-        F,
-        V,
-        C,
-        H,
-        S: Strategy,
-    >(
+    pub(crate) async fn run_ancestor_floor_beyond_commit_loc_rejected<F, V, C, H, S: Strategy>(
         db: TestKeyless<F, V, C, H, S>,
     ) where
         F: Family,
@@ -2788,7 +2857,7 @@ pub(crate) mod tests {
     /// readable, the root is preserved, reopen recovers `inactivity_floor_loc` from the sole
     /// remaining op, and a follow-on batch applies cleanly on top.
     #[boxed]
-    pub(crate) async fn test_keyless_db_single_commit_live_set<F, V, C, H, S: Strategy>(
+    pub(crate) async fn run_single_commit_live_set<F, V, C, H, S: Strategy>(
         context: deterministic::Context,
         db: TestKeyless<F, V, C, H, S>,
         reopen: Reopen<TestKeyless<F, V, C, H, S>>,
@@ -2882,13 +2951,7 @@ pub(crate) mod tests {
 
     /// A multi-level chain with strictly-monotonic, within-bounds floors applies cleanly.
     #[boxed]
-    pub(crate) async fn test_keyless_db_chained_apply_with_valid_floors_succeeds<
-        F,
-        V,
-        C,
-        H,
-        S: Strategy,
-    >(
+    pub(crate) async fn run_chained_apply_with_valid_floors_succeeds<F, V, C, H, S: Strategy>(
         db: TestKeyless<F, V, C, H, S>,
     ) where
         F: Family,

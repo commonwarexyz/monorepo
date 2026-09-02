@@ -272,7 +272,8 @@ pub enum CommitmentFallback {
     ///
     /// The height is not sent to peers. It is a local hint for request retention.
     /// It is not part of response validity. A fetched block is delivered if its
-    /// commitment matches. Certified storage uses the decoded block height.
+    /// commitment matches. A matching block above this bound is delivered but
+    /// not cached.
     FetchByCommitment { height: Height },
 }
 
@@ -572,6 +573,8 @@ impl<S: Scheme, V: Variant> Overflow<Message<S, V>> for Pending<S, V> {
     }
 }
 
+/// Coalesces `HintFinalized`, `SetFloor`, and `Prune`. Other overflowed messages
+/// retain FIFO order.
 impl<S: Scheme, V: Variant> Policy for Message<S, V> {
     type Overflow = Pending<S, V>;
 
@@ -597,7 +600,6 @@ impl<S: Scheme, V: Variant> Policy for Message<S, V> {
             Self::Prune { span, height } => {
                 overflow.prune(span, height);
             }
-            // Queue if the new message is still useful
             message => {
                 if message.stale(overflow.height()) {
                     return;
@@ -634,11 +636,10 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
 
     /// Create an ancestor stream that fetches missing parents by commitment.
     ///
-    /// This stream is always a fetching stream. Callers must only use it after
-    /// they already have a block that is safe to verify, certify, build on, or
-    /// repair from. From that point, every parent walked by the stream is part of
-    /// a certified ancestry chain, and the stream can derive each missing
-    /// parent's height from its child before issuing a height-bound request.
+    /// This stream is always a fetching stream. Callers must already have a block
+    /// that is safe to verify, certify, build on, or repair from. The stream derives
+    /// each missing parent's height and digest from its child and terminates if a
+    /// fetched block does not match that relationship.
     ///
     /// Do not use this to wait for pending candidate proposal data.
     pub(crate) fn ancestor_stream<I, C>(
@@ -1175,6 +1176,14 @@ mod tests {
         }
     }
 
+    fn hint_notarized(height: u64) -> TestMessage {
+        TestMessage::HintNotarized {
+            span: Span::none(),
+            round: round(height),
+            commitment: commitment(height),
+        }
+    }
+
     fn set_floor(height: u64) -> TestMessage {
         TestMessage::SetFloor {
             span: Span::none(),
@@ -1454,33 +1463,38 @@ mod tests {
     }
 
     #[test]
-    fn policy_keeps_coalesced_hints_in_fifo_position() {
+    fn policy_drains_fifo() {
         let mut overflow = pending();
         let first = public_key(1);
         let second = public_key(2);
-        let (get_block_9, _get_block_9_rx) = get_block(9);
-        let (get_info_11, _get_info_11_rx) = get_info(11);
+        let (response, _subscribe_rx) = oneshot::channel();
+        let subscribe = TestMessage::SubscribeByDigest {
+            span: Span::none(),
+            digest: block(1).digest(),
+            fallback: DigestFallback::Wait,
+            response,
+        };
+        let (response, _processed_rx) = oneshot::channel();
+        let processed = TestMessage::GetProcessedHeight {
+            span: Span::none(),
+            response,
+        };
 
-        <TestMessage as Policy>::handle(&mut overflow, get_block_9);
+        <TestMessage as Policy>::handle(&mut overflow, subscribe);
         <TestMessage as Policy>::handle(&mut overflow, hint_finalized(10, first.clone()));
-        <TestMessage as Policy>::handle(&mut overflow, get_info_11);
+        <TestMessage as Policy>::handle(&mut overflow, hint_notarized(1));
         <TestMessage as Policy>::handle(&mut overflow, hint_finalized(10, second.clone()));
+        <TestMessage as Policy>::handle(&mut overflow, processed);
 
         let drained = drain(&mut overflow);
-        assert_eq!(drained.len(), 3);
+        assert_eq!(drained.len(), 4);
         assert!(matches!(
             &drained[0],
-            TestMessage::GetBlock {
-                identifier: Identifier::Height(height),
+            TestMessage::SubscribeByDigest {
+                digest,
+                fallback: DigestFallback::Wait,
                 ..
-            } if *height == Height::new(9)
-        ));
-        assert!(matches!(
-            &drained[2],
-            TestMessage::GetInfo {
-                identifier: Identifier::Height(height),
-                ..
-            } if *height == Height::new(11)
+            } if *digest == block(1).digest()
         ));
         let TestMessage::HintFinalized {
             height, targets, ..
@@ -1492,6 +1506,14 @@ mod tests {
         assert_eq!(targets.len().get(), 2);
         assert!(targets.contains(&first));
         assert!(targets.contains(&second));
+        assert!(matches!(
+            &drained[2],
+            TestMessage::HintNotarized { round: hinted, .. } if *hinted == round(1)
+        ));
+        assert!(matches!(
+            &drained[3],
+            TestMessage::GetProcessedHeight { .. }
+        ));
     }
 
     #[test]

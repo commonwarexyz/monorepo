@@ -12,21 +12,16 @@ use commonware_storage::journal::{
         fixed::{Config as JournalConfig, Journal},
     },
 };
+use commonware_storage_fuzz::bounded_buffer;
 use commonware_utils::{NZU16, NZU64, NZUsize};
 use futures::{StreamExt, pin_mut};
 use libfuzzer_sys::fuzz_target;
 use std::num::NonZeroU16;
 
-const MAX_REPLAY_BUF: usize = 2048;
 const MAX_WRITE_BUF: usize = 2048;
 const MAX_OPERATIONS: usize = 50;
 const MAX_APPEND_MANY: u8 = 20;
 const MAX_READ_MANY: usize = 16;
-
-fn bounded_non_zero(u: &mut Unstructured<'_>) -> Result<usize> {
-    let v = u.int_in_range(1..=MAX_REPLAY_BUF)?;
-    Ok(v)
-}
 
 fn bounded_append_count(u: &mut Unstructured<'_>) -> Result<u8> {
     u.int_in_range(0..=MAX_APPEND_MANY)
@@ -68,7 +63,7 @@ enum JournalOperation {
         min_pos: u64,
     },
     Replay {
-        #[arbitrary(with = bounded_non_zero)]
+        #[arbitrary(with = bounded_buffer)]
         buffer: usize,
         start_pos: u64,
     },
@@ -154,6 +149,7 @@ fn fuzz(input: FuzzInput) {
             partition: "fixed-journal-operations-fuzz-test".into(),
             items_per_blob: NZU64!(3),
             write_buffer: NZUsize!(MAX_WRITE_BUF),
+            replay_buffer: NZUsize!(MAX_WRITE_BUF),
             page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
         };
 

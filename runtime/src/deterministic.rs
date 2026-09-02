@@ -45,10 +45,8 @@
 pub use crate::storage::faulty::{
     Config as FaultConfig, PartialWriteMode, ResizeConfig, WriteConfig,
 };
-#[cfg(feature = "external")]
-use crate::{Blocker, Pacer};
 use crate::{
-    BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, IoBufs, ListenerOf,
+    BlobVersion, BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, IoBufs, ListenerOf,
     METRICS_PREFIX, Name, Panicked, child_label,
     network::{
         audited::Network as AuditedNetwork, deterministic::Network as DeterministicNetwork,
@@ -71,6 +69,8 @@ use crate::{
         supervision::Tree,
     },
 };
+#[cfg(feature = "external")]
+use crate::{Blocker, Pacer};
 use commonware_codec::Encode;
 use commonware_formatting::hex;
 use commonware_macros::select;
@@ -283,7 +283,8 @@ impl Config {
     // Setters
     /// See [Config]
     pub fn with_seed(self, seed: u64) -> Self {
-        self.with_rng(Box::new(StdRng::seed_from_u64(seed)))
+        let rng: BoxDynRng = Box::new(StdRng::seed_from_u64(seed));
+        self.with_rng(rng)
     }
 
     /// Provide the config with a dynamic RNG directly.
@@ -291,8 +292,8 @@ impl Config {
     /// This can be useful for, e.g. fuzzing, where beyond just having randomness,
     /// you might want to control specific bytes of the RNG. By taking in a dynamic
     /// RNG object, any behavior is possible.
-    pub fn with_rng(mut self, rng: BoxDynRng) -> Self {
-        self.rng = rng;
+    pub fn with_rng(mut self, rng: impl Into<BoxDynRng>) -> Self {
+        self.rng = rng.into();
         self
     }
 
@@ -1613,8 +1614,8 @@ impl crate::Storage for Context {
         &self,
         partition: &str,
         name: &[u8],
-        versions: std::ops::RangeInclusive<u16>,
-    ) -> Result<(Self::Blob, u64, u16), Error> {
+        versions: std::ops::RangeInclusive<BlobVersion>,
+    ) -> Result<(Self::Blob, u64, BlobVersion), Error> {
         self.storage.open_versioned(partition, name, versions).await
     }
 
@@ -1650,7 +1651,7 @@ mod tests {
     use commonware_parallel::Strategy;
     #[cfg(feature = "external")]
     use commonware_utils::channel::mpsc;
-    use commonware_utils::{NZUsize, Probability, ScriptedRng, channel::oneshot};
+    use commonware_utils::{NZUsize, ScriptedRng, channel::oneshot, probability};
     #[cfg(feature = "external")]
     use futures::StreamExt;
     #[cfg(not(feature = "external"))]
@@ -1924,7 +1925,7 @@ mod tests {
         let (stale_config, checkpoint) =
             deterministic::Runner::default().start_and_recover(|context| async move {
                 let config = context.storage_fault_config();
-                *config.write() = FaultConfig::default().open(Probability!(1.0));
+                *config.write() = FaultConfig::default().open(probability!(1.0));
                 config
             });
         *stale_config.write() = FaultConfig::default();
@@ -1938,10 +1939,10 @@ mod tests {
     fn test_recover_retained_successful_resize() {
         let retained_resize = [u64::MAX, 0];
         let cfg = deterministic::Config::default()
-            .with_rng(Box::new(ScriptedRng::new(retained_resize)))
+            .with_rng(ScriptedRng::new(retained_resize))
             .with_storage_fault_config(FaultConfig::default().resize(ResizeConfig {
-                failure_rate: Probability!(0.5),
-                partial_rate: Probability!(0.0),
+                failure_rate: probability!(0.5),
+                partial_rate: probability!(0.0),
             }));
         let (_, checkpoint) =
             deterministic::Runner::new(cfg).start_and_recover(|context| async move {
@@ -1974,8 +1975,8 @@ mod tests {
             let cfg = deterministic::Config::default()
                 .with_seed(seed)
                 .with_storage_fault_config(FaultConfig::default().write(WriteConfig {
-                    failure_rate: Probability!(0.0),
-                    retention_rate: Probability!(0.5),
+                    failure_rate: probability!(0.0),
+                    retention_rate: probability!(0.5),
                     mode: PartialWriteMode::Subset,
                 }));
             let (_, checkpoint) =
@@ -2355,7 +2356,7 @@ mod tests {
     fn test_storage_fault_injection_and_recovery() {
         // Phase 1: Run with 100% sync failure rate
         let cfg = deterministic::Config::default().with_storage_fault_config(FaultConfig {
-            sync_rate: Some(Probability!(1.0)),
+            sync_rate: Some(probability!(1.0)),
             ..Default::default()
         });
 
@@ -2408,7 +2409,7 @@ mod tests {
 
             // Enable sync faults dynamically
             let storage_fault_cfg = ctx.storage_fault_config();
-            storage_fault_cfg.write().sync_rate = Some(Probability!(1.0));
+            storage_fault_cfg.write().sync_rate = Some(probability!(1.0));
 
             // Now sync should fail
             blob.write_at(0, b"updated".to_vec(), WriteOptions::default())
@@ -2418,7 +2419,7 @@ mod tests {
             assert!(result.is_err(), "sync should fail with faults enabled");
 
             // Disable faults
-            storage_fault_cfg.write().sync_rate = Some(Probability!(0.0));
+            storage_fault_cfg.write().sync_rate = Some(probability!(0.0));
 
             // Sync should succeed again
             blob.sync()
@@ -2434,7 +2435,7 @@ mod tests {
             let cfg = deterministic::Config::default()
                 .with_seed(seed)
                 .with_storage_fault_config(FaultConfig {
-                    open_rate: Some(Probability!(0.5)),
+                    open_rate: Some(probability!(0.5)),
                     ..Default::default()
                 });
 
@@ -2472,13 +2473,13 @@ mod tests {
             let cfg = deterministic::Config::default()
                 .with_seed(seed)
                 .with_storage_fault_config(FaultConfig {
-                    open_rate: Some(Probability!(0.5)),
+                    open_rate: Some(probability!(0.5)),
                     write_rate: Some(WriteConfig {
-                        failure_rate: Probability!(0.3),
-                        retention_rate: Probability!(0.0),
+                        failure_rate: probability!(0.3),
+                        retention_rate: probability!(0.0),
                         mode: PartialWriteMode::Prefix,
                     }),
-                    sync_rate: Some(Probability!(0.2)),
+                    sync_rate: Some(probability!(0.2)),
                     ..Default::default()
                 });
 
@@ -2567,7 +2568,7 @@ mod tests {
             assert_eq!(strategy.parallelism(), 2);
 
             let output = strategy
-                .spawn(|strategy| strategy.map_collect_vec(0..2, |i| i + 1))
+                .spawn(2, |strategy| strategy.map_collect_vec(0..2, |i| i + 1))
                 .await;
 
             assert_eq!(output, vec![1, 2]);
@@ -2585,7 +2586,7 @@ mod tests {
             assert_eq!(first.parallelism(), 1);
             assert_eq!(first.run(2, || "serial", || "parallel"), "serial");
             let output = first
-                .spawn(|strategy| strategy.map_collect_vec(0..2, |i| i + 1))
+                .spawn(2, |strategy| strategy.map_collect_vec(0..2, |i| i + 1))
                 .now_or_never()
                 .expect("single-threaded pool should run spawned work inline");
             assert_eq!(output, vec![1, 2]);
@@ -2594,7 +2595,7 @@ mod tests {
             assert_eq!(second.parallelism(), 3);
             assert_eq!(second.run(2, || "serial", || "parallel"), "parallel");
             let output = second
-                .spawn(|strategy| strategy.map_collect_vec(0..3, |i| i + 1))
+                .spawn(3, |strategy| strategy.map_collect_vec(0..3, |i| i + 1))
                 .now_or_never()
                 .expect("single-threaded pool should run spawned work inline");
             assert_eq!(output, vec![1, 2, 3]);
@@ -2606,7 +2607,7 @@ mod tests {
             assert_eq!(third.parallelism(), 4);
             assert_eq!(third.run(2, || "serial", || "parallel"), "parallel");
             let output = third
-                .spawn(|strategy| strategy.map_collect_vec(0..4, |i| i + 1))
+                .spawn(4, |strategy| strategy.map_collect_vec(0..4, |i| i + 1))
                 .now_or_never()
                 .expect("single-threaded pool should run spawned work inline");
             assert_eq!(output, vec![1, 2, 3, 4]);
@@ -2624,7 +2625,7 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
 
             let output = strategy
-                .spawn(|strategy| strategy.map_collect_vec(0..2, |i| i + 1))
+                .spawn(2, |strategy| strategy.map_collect_vec(0..2, |i| i + 1))
                 .await;
             assert_eq!(output, vec![1, 2]);
 

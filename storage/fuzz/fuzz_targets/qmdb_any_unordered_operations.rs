@@ -1,19 +1,19 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_cryptography::{Sha256, sha256::Digest};
+use commonware_cryptography::Sha256;
 use commonware_parallel::Sequential;
 use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::{
-    index::ordered::Index,
+    index::unordered::Index,
     journal::contiguous::fixed::{Config as FConfig, Journal},
-    merkle::{Family as MerkleFamily, Location, Proof, mmb, mmr},
+    merkle::{Family as MerkleFamily, Location, mmb, mmr},
     mmr::full::Config as MerkleConfig,
     qmdb::{
         any::{
             FixedConfig as Config,
             db::Db as AnyDb,
-            ordered::{Operation, Update},
+            unordered::{Operation, Update},
             value::FixedEncoding,
         },
         verify_proof,
@@ -24,7 +24,7 @@ use commonware_utils::{NZU16, NZU64, NZUsize, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::{HashMap, HashSet},
-    num::{NonZeroU16, NonZeroU64},
+    num::NonZeroU16,
 };
 
 type Key = FixedBytes<32>;
@@ -44,36 +44,15 @@ type GenericDb<F> = AnyDb<
     Sequential,
 >;
 
-const MAX_OPS: usize = 25;
-
 #[derive(Arbitrary, Debug, Clone)]
 enum QmdbOperation {
-    Update {
-        key: RawKey,
-        value: RawValue,
-    },
-    Delete {
-        key: RawKey,
-    },
+    Update { key: RawKey, value: RawValue },
+    Delete { key: RawKey },
     Commit,
     OpCount,
     Root,
-    Proof {
-        start_loc: u64,
-        max_ops: NonZeroU64,
-    },
-    ArbitraryProof {
-        start_loc: u64,
-        max_ops: NonZeroU64,
-        proof_leaves: u64,
-        digests: Vec<[u8; 32]>,
-    },
-    Get {
-        key: RawKey,
-    },
-    GetSpan {
-        key: RawKey,
-    },
+    Proof { start_loc: u64, max_ops: u64 },
+    Get { key: RawKey },
 }
 
 #[derive(Arbitrary, Debug)]
@@ -81,15 +60,14 @@ struct FuzzInput {
     operations: Vec<QmdbOperation>,
 }
 
-const PAGE_SIZE: NonZeroU16 = NZU16!(555);
+const PAGE_SIZE: NonZeroU16 = NZU16!(223);
 const PAGE_CACHE_SIZE: usize = 100;
 
 async fn commit_pending<F: MerkleFamily>(
     db: GenericDb<F>,
     pending_writes: &mut Vec<(Key, Option<Value>)>,
-    committed_state: &mut HashMap<RawKey, RawValue>,
-    pending_inserts: &mut HashMap<RawKey, RawValue>,
-    pending_deletes: &mut HashSet<RawKey>,
+    committed_state: &mut HashMap<RawKey, Option<RawValue>>,
+    pending_expected: &mut HashMap<RawKey, Option<RawValue>>,
 ) -> GenericDb<F> {
     let mut batch = db.new_batch();
     for (k, v) in pending_writes.drain(..) {
@@ -101,10 +79,7 @@ async fn commit_pending<F: MerkleFamily>(
         .await
         .expect("commit should not fail");
     let db = db.commit().await.expect("commit fsync should not fail");
-    for key in pending_deletes.drain() {
-        committed_state.remove(&key);
-    }
-    committed_state.extend(pending_inserts.drain());
+    committed_state.extend(pending_expected.drain());
     db
 }
 
@@ -125,6 +100,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                     metadata_partition: format!("test-qmdb-mmr-metadata-{suffix}"),
                     items_per_blob: NZU64!(500000),
                     write_buffer: NZUsize!(1024),
+                    replay_buffer: NZUsize!(1024),
                     strategy: Sequential,
                     page_cache: page_cache.clone(),
                 },
@@ -132,6 +108,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                     partition: format!("test-qmdb-log-journal-{suffix}"),
                     items_per_blob: NZU64!(500000),
                     write_buffer: NZUsize!(1024),
+                    replay_buffer: NZUsize!(1024),
                     page_cache,
                 },
                 translator: EightCap,
@@ -147,30 +124,34 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
 
             // committed_state tracks state after apply_batch. pending_expected tracks
             // uncommitted mutations that haven't been applied yet.
-            let mut committed_state: HashMap<RawKey, RawValue> = HashMap::new();
-            let mut pending_inserts: HashMap<RawKey, RawValue> = HashMap::new();
-            let mut pending_deletes: HashSet<RawKey> = HashSet::new();
+            let mut committed_state: HashMap<RawKey, Option<RawValue>> = HashMap::new();
+            let mut pending_expected: HashMap<RawKey, Option<RawValue>> = HashMap::new();
             let mut all_keys: HashSet<RawKey> = HashSet::new();
             let mut pending_writes: Vec<(Key, Option<Value>)> = Vec::new();
 
-            for op in operations.iter().take(MAX_OPS) {
+            for op in &operations {
                 db = match op {
                     QmdbOperation::Update { key, value } => {
                         let k = Key::new(*key);
                         let v = Value::new(*value);
 
                         pending_writes.push((k, Some(v)));
-                        pending_deletes.remove(key);
-                        pending_inserts.insert(*key, *value);
+                        pending_expected.insert(*key, Some(*value));
                         all_keys.insert(*key);
                         db
                     }
 
                     QmdbOperation::Delete { key } => {
                         let k = Key::new(*key);
-                        pending_writes.push((k, None));
-                        pending_inserts.remove(key);
-                        pending_deletes.insert(*key);
+                        // Check if the key exists in committed state or pending writes.
+                        let exists = db.get(&k).await.expect("get should not fail").is_some()
+                            || pending_expected
+                                .get(key)
+                                .is_some_and(|v| v.is_some());
+                        if exists {
+                            pending_writes.push((k, None));
+                            pending_expected.insert(*key, None);
+                        }
                         db
                     }
 
@@ -180,76 +161,40 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                     }
 
                     QmdbOperation::Commit => {
-                        commit_pending(
-                            db, &mut pending_writes, &mut committed_state,
-                            &mut pending_inserts, &mut pending_deletes,
-                        ).await
+                        commit_pending(db, &mut pending_writes, &mut committed_state, &mut pending_expected).await
                     }
 
                     QmdbOperation::Root => {
-                        let db = commit_pending(
-                            db, &mut pending_writes, &mut committed_state,
-                            &mut pending_inserts, &mut pending_deletes,
-                        ).await;
+                        let db = commit_pending(db, &mut pending_writes, &mut committed_state, &mut pending_expected).await;
                         db.root();
                         db
                     }
 
                     QmdbOperation::Proof { start_loc, max_ops } => {
-                        let db = commit_pending(
-                            db, &mut pending_writes, &mut committed_state,
-                            &mut pending_inserts, &mut pending_deletes,
-                        ).await;
                         let actual_op_count = db.bounds().end;
-
-                        if actual_op_count > 0 {
-                            let current_root = db.root();
-                            let adjusted_start = Location::<F>::new(*start_loc % *actual_op_count);
-                            let (proof, log) = db
-                                .proof(adjusted_start, *max_ops)
-                                .await
-                                .expect("proof should not fail");
-
-                            assert!(
-                                verify_proof::<Sha256, _, _>(
-                                    &proof,
-                                    adjusted_start,
-                                    &log,
-                                    &current_root),
-                                "Proof verification failed for start_loc={adjusted_start}, max_ops={max_ops}",
-                            );
+                        if actual_op_count == 0 || *max_ops == 0 {
+                            continue;
                         }
-                        db
-                    }
 
-                    QmdbOperation::ArbitraryProof { start_loc, max_ops , proof_leaves, digests} => {
-                        let db = commit_pending(
-                            db, &mut pending_writes, &mut committed_state,
-                            &mut pending_inserts, &mut pending_deletes,
-                        ).await;
+                        let db = commit_pending(db, &mut pending_writes, &mut committed_state, &mut pending_expected).await;
+                        let current_root = db.root();
                         let actual_op_count = db.bounds().end;
+                        let adjusted_start = Location::<F>::new(*start_loc % *actual_op_count);
+                        let adjusted_max_ops = (*max_ops % 100).max(1);
 
-                        let proof = Proof {
-                            leaves: Location::<F>::new(*proof_leaves),
-                            inactive_peaks: 0,
-                            digests: digests.iter().map(|d| Digest::from(*d)).collect(),
-                        };
+                        let (proof, log) = db
+                            .proof(adjusted_start, NZU64!(adjusted_max_ops))
+                            .await
+                            .expect("proof should not fail");
 
-                        if actual_op_count > 0 {
-                            let current_root = db.root();
-                            let adjusted_start = Location::<F>::new(*start_loc % *actual_op_count);
-
-                            if let Ok(res) = db
-                                .proof(adjusted_start, *max_ops)
-                                .await {
-                                    let _ = verify_proof::<Sha256, _, _>(
-                                        &proof,
-                                        adjusted_start,
-                                        &res.1,
-                                        &current_root);
-
-                            }
-                        }
+                        assert!(
+                            verify_proof::<Sha256, _, _>(
+                                &proof,
+                                adjusted_start,
+                                &log,
+                                &current_root),
+                            "Proof verification failed for start_loc={adjusted_start}, max_ops={adjusted_max_ops}",
+                        );
                         db
                     }
 
@@ -257,12 +202,19 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                         let k = Key::new(*key);
                         let result = db.get(&k).await.expect("get should not fail");
 
-                        // Verify against committed state only.
+                        // Verify against committed state only (pending writes not yet applied).
                         match committed_state.get(key) {
-                            Some(expected_value) => {
+                            Some(Some(expected_value)) => {
+                                assert!(result.is_some(), "Expected value for key {key:?}");
                                 let v = result.expect("get should not fail");
                                 let v_bytes: &[u8; 64] = v.as_ref().try_into().expect("bytes");
                                 assert_eq!(v_bytes, expected_value, "Value mismatch for key {key:?}");
+                            }
+                            Some(None) => {
+                                assert!(
+                                    result.is_none(),
+                                    "Expected no value for deleted key {key:?}, but found one",
+                                );
                             }
                             None => {
                                 assert!(
@@ -271,14 +223,8 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                                 );
                             }
                         }
-                        all_keys.insert(*key);
-                        db
-                    }
 
-                    QmdbOperation::GetSpan { key } => {
-                        let k = Key::new(*key);
-                        let result = db.get_span(&k).await.expect("get should not fail");
-                        assert_eq!(result.is_some(), !db.is_empty(), "span should be empty only if db is empty");
+                        all_keys.insert(*key);
                         db
                     }
                 };
@@ -286,10 +232,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
 
             // Final commit to ensure all operations are persisted.
             if !pending_writes.is_empty() {
-                db = commit_pending(
-                    db, &mut pending_writes, &mut committed_state,
-                    &mut pending_inserts, &mut pending_deletes,
-                ).await;
+                db = commit_pending(db, &mut pending_writes, &mut committed_state, &mut pending_expected).await;
             }
 
             // Comprehensive final verification - check ALL keys ever touched.
@@ -298,7 +241,8 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                 let result = db.get(&k).await.expect("final get should not fail");
 
                 match committed_state.get(key) {
-                    Some(expected_value) => {
+                    Some(Some(expected_value)) => {
+                        assert!(result.is_some(), "Lost value for key {key:?} at end");
                         let v = result.expect("get should not fail");
                         let v_bytes: &[u8; 64] = v.as_ref().try_into().expect("bytes");
                         assert_eq!(
@@ -306,12 +250,15 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                             "Final value mismatch for key {key:?}"
                         );
                     }
-                    None => {
+                    Some(None) => {
                         assert!(
                             result.is_none(),
                             "Deleted key {key:?} should remain deleted, but found value",
                         );
-                    },
+                    }
+                    None => {
+                        assert!(result.is_none(), "Key {key:?} should not exist");
+                    }
                 }
             }
 
@@ -320,10 +267,6 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                 .apply_batch(batch)
                 .await
                 .expect("final commit should not fail");
-            let db = db
-                .commit()
-                .await
-                .expect("final commit fsync should not fail");
             db.destroy().await.expect("destroy should not fail");
         }
     });

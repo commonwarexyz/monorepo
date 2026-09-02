@@ -16,12 +16,12 @@ use crate::{
             unordered::{Operation, Update},
         },
         current::proof::OperationProof,
+        operation::Key,
     },
 };
 use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
-use commonware_utils::Array;
 
 /// Proof information for verifying a key has a particular value in the database.
 pub type KeyValueProof<F, D, const N: usize> = OperationProof<F, D, N>;
@@ -38,7 +38,7 @@ impl<
     F: merkle::Graftable,
     E: Context,
     C: Contiguous<Item = Operation<F, K, V>>,
-    K: Array,
+    K: Key,
     V: ValueEncoding,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
@@ -71,7 +71,7 @@ impl<
     F: merkle::Graftable,
     E: Context,
     C: Mutable<Item = Operation<F, K, V>>,
-    K: Array,
+    K: Key,
     V: ValueEncoding,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,

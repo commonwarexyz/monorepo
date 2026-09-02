@@ -7,7 +7,7 @@ use crate::{
     CertifiableAutomaton, LATENCY, Relay, Reporter, Viewable,
     simplex::{
         Floor, Plan,
-        actors::{batcher, resolver},
+        actors::{Kind, batcher, resolver},
         elector::Elector,
         metrics::{self, Outbound, TimeoutReason},
         scheme::Scheme,
@@ -177,6 +177,7 @@ impl<
                 leader_timeout: cfg.leader_timeout,
                 certification_timeout: cfg.certification_timeout,
                 timeout_retry: cfg.timeout_retry,
+                skip_budget: cfg.skip_budget,
             },
         );
         (
@@ -1113,8 +1114,7 @@ impl<
         // Process messages
         let mut pending_propose: Option<Request<Context<D, S::PublicKey>, D>> = None;
         let mut pending_verify: Option<Request<Context<D, S::PublicKey>, bool>> = None;
-        let mut certify_pool: AbortablePool<(Rnd, Span, Result<bool, oneshot::error::RecvError>)> =
-            Default::default();
+        let mut certify_pool = AbortablePool::default();
         select_loop! {
             self.context,
             on_start => {
@@ -1135,8 +1135,8 @@ impl<
                 // journal sync completed before this block runs, a child made
                 // eligible by its parent cannot become durable first.
                 let (candidates, fetches) = self.state.certify_candidates();
-                for CertificateFetch { proposal, view, kind, target } in fetches {
-                    resolver.resolve(proposal, view, kind, target);
+                for CertificateFetch { proposal, view } in fetches {
+                    resolver.resolve(proposal, view, Kind::Notarization, None);
                 }
                 for proposal in candidates {
                     let round = proposal.round;

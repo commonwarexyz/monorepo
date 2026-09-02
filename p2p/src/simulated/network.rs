@@ -203,6 +203,9 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     // Subscribers to the connectable peer list (used by PeerSource for LimitedSender)
     peer_subscribers: Vec<(P, ring::Sender<Vec<P>>)>,
 
+    // Subscribers to the set of peers a given peer blocks (used by `Blocker::blocked`).
+    blocked_subscribers: Vec<(P, ring::Sender<Set<P>>)>,
+
     // Metrics for received and sent messages
     received_messages: CounterFamily<metrics::Message>,
     sent_messages: CounterFamily<metrics::Message>,
@@ -247,6 +250,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 transmitter: transmitter::State::new(),
                 subscribers: Vec::new(),
                 peer_subscribers: Vec::new(),
+                blocked_subscribers: Vec::new(),
                 received_messages,
                 sent_messages,
             },
@@ -591,10 +595,23 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 send_result(result, Ok(()))
             }
             ingress::Message::Block { from, to } => {
-                self.blocks.insert((from, to));
+                if self.blocks.insert((from.clone(), to)) {
+                    self.notify_blocked(&from);
+                }
+            }
+            ingress::Message::Unblock { from, to, result } => {
+                if self.blocks.remove(&(from.clone(), to)) {
+                    self.notify_blocked(&from);
+                }
+                send_result(result, Ok(()));
             }
             ingress::Message::Blocked { result } => {
                 send_result(result, Ok(self.blocks.iter().cloned().collect()))
+            }
+            ingress::Message::SubscribeBlocked { from, sender } => {
+                if sender.send_lossy(self.blocked_by(&from)) {
+                    self.blocked_subscribers.push((from, sender));
+                }
             }
         }
     }
@@ -628,6 +645,25 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         if Pin::new(&mut sender).start_send(peers).is_ok() {
             self.peer_subscribers.push((exclude, sender));
         }
+    }
+
+    /// Returns the peers that `from` currently blocks.
+    fn blocked_by(&self, from: &P) -> Set<P> {
+        Set::from_iter_dedup(
+            self.blocks
+                .iter()
+                .filter(|(blocker, _)| blocker == from)
+                .map(|(_, blocked)| blocked.clone()),
+        )
+    }
+
+    /// Send the set of peers `from` blocks to its blocked-set subscribers, dropping
+    /// subscribers that have gone away.
+    fn notify_blocked(&mut self, from: &P) {
+        let blocked = self.blocked_by(from);
+        self.blocked_subscribers.retain(|(subscriber, sender)| {
+            subscriber != from || sender.send_lossy(blocked.clone())
+        });
     }
 
     /// Broadcast updated peer list to all connected peer subscribers.
@@ -1507,7 +1543,7 @@ mod tests {
     };
     use commonware_cryptography::{Signer as _, ed25519};
     use commonware_runtime::{Quota, Runner as _, Supervisor as _, deterministic};
-    use commonware_utils::{NZUsize, ordered::Set};
+    use commonware_utils::{NZUsize, ordered::Set, probability};
     use futures::FutureExt;
     use std::num::NonZeroU32;
 
@@ -1569,7 +1605,7 @@ mod tests {
             let link = ingress::Link {
                 latency: Duration::from_millis(2),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(0.9),
+                success_rate: probability!(0.9),
             };
             oracle
                 .add_link(pk1.clone(), pk2.clone(), link.clone())
@@ -1646,7 +1682,7 @@ mod tests {
                     ingress::Link {
                         latency: Duration::ZERO,
                         jitter: Duration::ZERO,
-                        success_rate: Probability!(1.0),
+                        success_rate: probability!(1.0),
                     },
                 )
                 .await
@@ -1918,7 +1954,7 @@ mod tests {
             let link = ingress::Link {
                 latency: Duration::from_millis(0),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             oracle
                 .add_link(peer_a.clone(), twin.clone(), link.clone())
@@ -2005,7 +2041,7 @@ mod tests {
             let link = ingress::Link {
                 latency: Duration::from_millis(0),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             oracle
                 .add_link(peer_c.clone(), twin.clone(), link.clone())
@@ -2075,7 +2111,7 @@ mod tests {
             let link = ingress::Link {
                 latency: Duration::from_millis(0),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             oracle
                 .add_link(peer_c.clone(), twin.clone(), link.clone())
@@ -2306,7 +2342,7 @@ mod tests {
                     ingress::Link {
                         latency: Duration::from_millis(0),
                         jitter: Duration::from_millis(0),
-                        success_rate: Probability!(1.0),
+                        success_rate: probability!(1.0),
                     },
                 )
                 .await
@@ -2392,7 +2428,7 @@ mod tests {
             let link = ingress::Link {
                 latency: Duration::from_millis(0),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             oracle
                 .add_link(sender_pk.clone(), recipient_a.clone(), link.clone())
@@ -2480,7 +2516,7 @@ mod tests {
             let link = ingress::Link {
                 latency: Duration::from_millis(1),
                 jitter: Duration::ZERO,
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             for (a, b) in [(&pk1, &pk2), (&pk1, &pk3), (&pk2, &pk3)] {
                 oracle
@@ -2631,7 +2667,7 @@ mod tests {
             let link = ingress::Link {
                 latency: Duration::from_millis(1),
                 jitter: Duration::ZERO,
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             oracle
                 .add_link(primary_1.clone(), secondary_0.clone(), link.clone())
