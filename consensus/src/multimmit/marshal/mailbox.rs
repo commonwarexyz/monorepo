@@ -2,10 +2,12 @@
 
 use super::{actors::broadcast, types::OutputIndex};
 use crate::{
-    Reporter,
-    multimmit::types::{
-        Activity, BlockRef, CertificateId, Context, Lqc, TipRecord, TransactionBlock,
+    Reporter, Viewable as _,
+    multimmit::{
+        machine::Artifact,
+        types::{Activity, BlockRef, CertificateId, Context, Lqc, TipRecord, TransactionBlock},
     },
+    types::View,
 };
 use commonware_actor::{
     Feedback, Unreliable,
@@ -206,11 +208,46 @@ where
 {
     type Overflow = VecDeque<Self>;
 
-    fn handle(_overflow: &mut Self::Overflow, command: Self) -> bool {
-        // Reporter hints are advisory: missing history is recovered through backfill. Exact
-        // requests must be retried by their caller rather than retained beyond the configured
-        // ingress capacity.
-        matches!(command.request, Request::Hint(_))
+    fn handle(overflow: &mut Self::Overflow, command: Self) -> bool {
+        // Exact requests must be retried by their caller rather than retained beyond the
+        // configured ingress capacity.
+        let Request::Hint(activity) = &command.request else {
+            return false;
+        };
+        // Finality hints drive the synchronizer's emission and nothing else re-discovers the
+        // finality frontier, so they survive pressure: keep the newest per kind. Other hints are
+        // advisory; missing history is recovered through backfill.
+        let Some((kind, view)) = finality_hint(activity) else {
+            return true;
+        };
+        if let Some(position) = overflow.iter().position(|retained| {
+            matches!(&retained.request, Request::Hint(retained) if finality_hint(retained).is_some_and(|(retained_kind, _)| retained_kind == kind))
+        }) {
+            let Request::Hint(retained) = &overflow[position].request else {
+                unreachable!("the retained command was matched as a hint");
+            };
+            if finality_hint(retained).is_some_and(|(_, retained_view)| retained_view >= view) {
+                return true;
+            }
+            overflow.remove(position);
+        }
+        overflow.push_back(command);
+        true
+    }
+}
+
+/// Classifies a reporter hint that advances the finality frontier: `0` for a finality fact, `1`
+/// for an L-QC, with the view it speaks for.
+fn finality_hint<V: Variant, D: Digest>(activity: &Activity<V, D>) -> Option<(u8, View)> {
+    match activity {
+        Activity::LeaderFinalized { fact } | Activity::LeaderFinalityUpdated { fact } => {
+            Some((0, fact.round().view()))
+        }
+        Activity::ProtocolAccepted { artifact, .. } => match artifact.as_ref() {
+            Artifact::Lqc(proof) => Some((1, proof.view())),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -506,6 +543,42 @@ mod tests {
     use commonware_cryptography::{Sha256, bls12381::primitives::variant::MinPk};
 
     type TestCommand = Command<Sha256, MinPk, EmptyBlock<Sha256>>;
+
+    #[test]
+    fn pressure_retains_only_the_newest_finality_fact() {
+        use crate::{
+            multimmit::{
+                machine::{ArtifactId, FinalityFact, FinalityId},
+                types::Activity,
+            },
+            types::{Epoch, Round, View},
+        };
+        let fact = |view: u64| {
+            FinalityFact::for_test(
+                FinalityId::Lqc(ArtifactId::new(Sha256::hash(&[&view.to_be_bytes()]))),
+                Round::new(Epoch::new(1), View::new(view)),
+                Sha256::hash(&[b"leader"]),
+                CertificateId::new(Sha256::hash(&[b"parent"])),
+                4,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            )
+        };
+        let mut overflow = VecDeque::new();
+        for view in [5u64, 9, 7] {
+            let retained = <TestCommand as UnreliablePolicy>::handle(
+                &mut overflow,
+                TestCommand::new(Request::Hint(Activity::LeaderFinalized { fact: fact(view) })),
+            );
+            assert!(retained);
+        }
+        assert_eq!(overflow.len(), 1);
+        let Request::Hint(Activity::LeaderFinalized { fact }) = &overflow[0].request else {
+            panic!("the newest finality fact is retained");
+        };
+        assert_eq!(fact.round().view(), View::new(9));
+    }
 
     #[test]
     fn pressure_rejects_requests() {
