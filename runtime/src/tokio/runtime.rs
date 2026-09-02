@@ -167,7 +167,7 @@ pub struct Config {
     catch_panics: bool,
 
     /// Base directory for all storage operations, created at start if missing
-    /// and held for the run (see [Runner]).
+    /// and held for the run.
     storage_directory: PathBuf,
 
     /// Blob layouts accepted by storage.
@@ -415,15 +415,6 @@ impl Drop for TaskGuard {
 }
 
 /// Implementation of [crate::Runner] for the `tokio` runtime.
-///
-/// [crate::Runner::start] holds the configured storage directory for the run:
-/// it takes an exclusive advisory lock on a `.hold` file at the directory root
-/// and releases it only once the run's storage and every operation that storage
-/// dispatched have finished, including operations whose futures were dropped
-/// mid-flight. A start on a directory another run still holds blocks, after
-/// logging a warning, until that hold releases. A `Context`, `Storage`, or
-/// `Blob` retained past `start` keeps the hold, so it must be dropped before the
-/// next start on the same directory.
 pub struct Runner {
     cfg: Config,
 }
