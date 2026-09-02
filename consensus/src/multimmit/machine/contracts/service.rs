@@ -44,6 +44,9 @@ pub(crate) const LANE_WEIGHTS: [LaneWeight; 5] = [
 /// Maximum transition cost charged before the voter yields to the runtime.
 pub(crate) const CORE_BUDGET: u32 = 256;
 
+/// Consecutive blocks of one producer chain a single DA-vote signing batch may carry.
+pub(crate) const DA_VOTE_RUN: usize = 16;
+
 /// Accounting for one weighted-round-robin cycle.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ServiceCycle {
