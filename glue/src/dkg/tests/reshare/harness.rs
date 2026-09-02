@@ -20,8 +20,8 @@ use crate::{
         reporter::MonitorReporter,
     },
     stateful::{
-        Application, Config as StatefulConfig, Finalized, Input, Proposed,
-        Stateful as StatefulActor, SyncPlan,
+        Application, Config as StatefulConfig, Input, Proposed, Stateful as StatefulActor,
+        SyncPlan,
         db::{
             DatabaseSet, Merkleized as _, Shared, SyncEngineConfig, Unmerkleized as _,
             p2p as qmdb_resolver,
@@ -442,7 +442,7 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E>
         &mut self,
         context: (E, Self::Context),
         block: &Self::Block,
-        _provenance: Finalized<Self::FinalizedArtifact>,
+        _artifact: Self::FinalizedArtifact,
         _readers: <Self::Databases as DatabaseSet<E>>::Readers,
     ) {
         self.processed

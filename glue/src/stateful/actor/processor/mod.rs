@@ -23,7 +23,7 @@
 //! digest. Proposal recovery remains actor-owned.
 
 use crate::stateful::{
-    Application, Finalized, Input, Proposed, PruneConfig,
+    Application, Input, Proposed, PruneConfig,
     actor::{core::Verification, metrics::Metrics as StatefulMetrics},
     db::{Anchor, Barrier, DatabaseSet},
 };
@@ -874,8 +874,6 @@ where
                 digest, last_processed.digest,
                 "received conflicting finalized block at processed height",
             );
-            self.notify_finalized(context, block, Finalized::Synchronized)
-                .await;
             return None;
         }
 
@@ -949,7 +947,13 @@ where
         } else {
             None
         };
-        self.notify_finalized(context, block, Finalized::Applied(artifact))
+        self.app
+            .finalized(
+                (context.child("finalized"), block.context()),
+                block,
+                artifact,
+                self.execution.databases.readers(),
+            )
             .await;
         let prune = self
             .pruning
@@ -959,24 +963,6 @@ where
         timer.observe(context);
 
         Some(Applied { barrier, prune })
-    }
-
-    /// Notify the application after a finalized block is reflected in the
-    /// database set.
-    pub(super) async fn notify_finalized(
-        &mut self,
-        context: &E,
-        block: &A::Block,
-        provenance: Finalized<A::FinalizedArtifact>,
-    ) {
-        self.app
-            .finalized(
-                (context.child("finalized"), block.context()),
-                block,
-                provenance,
-                self.execution.databases.readers(),
-            )
-            .await;
     }
 
     /// Cache merkleized pending state for a block digest.
@@ -1544,7 +1530,7 @@ mod tests {
         ReplayClaim, ReplayFlights, ReplayTracking, VerificationProgress, fetch_ancestor,
     };
     use crate::stateful::{
-        Application, Finalized, Input, Proposed, PruneConfig,
+        Application, Input, Proposed, PruneConfig,
         actor::metrics::Metrics as StatefulMetrics,
         db::{Anchor, Barrier, DatabaseSet, Merkleized as _, Shared, Unmerkleized as _},
     };
@@ -1822,16 +1808,10 @@ mod tests {
     }
 
     #[derive(Debug, PartialEq, Eq)]
-    enum FinalizedObservation {
-        Applied {
-            artifact: CapturedArtifact,
-            post_counter: u64,
-            post_height: u64,
-        },
-        Synchronized {
-            post_counter: u64,
-            post_height: u64,
-        },
+    struct FinalizedObservation {
+        artifact: CapturedArtifact,
+        post_counter: u64,
+        post_height: u64,
     }
 
     #[derive(Clone)]
@@ -1987,7 +1967,7 @@ mod tests {
             &mut self,
             _context: (deterministic::Context, Self::Context),
             block: &Self::Block,
-            provenance: Finalized<Self::FinalizedArtifact>,
+            artifact: Self::FinalizedArtifact,
             readers: <Self::Databases as DatabaseSet<deterministic::Context>>::Readers,
         ) {
             if let Some(probe) = &self.finalized_probe {
@@ -2010,16 +1990,10 @@ mod tests {
                 .map(|value| digest_to_u64(&value))
                 .expect("finalized counter should be reflected in the database set");
             drop(db);
-            let observation = match provenance {
-                Finalized::Applied(artifact) => FinalizedObservation::Applied {
-                    artifact,
-                    post_counter,
-                    post_height,
-                },
-                Finalized::Synchronized => FinalizedObservation::Synchronized {
-                    post_counter,
-                    post_height,
-                },
+            let observation = FinalizedObservation {
+                artifact,
+                post_counter,
+                post_height,
             };
             observer.lock().push(observation);
         }
@@ -2831,7 +2805,7 @@ mod tests {
             assert_durable(barrier).await;
             assert!(matches!(
                 observations.lock().as_slice(),
-                [FinalizedObservation::Applied { post_height: 1, .. }]
+                [FinalizedObservation { post_height: 1, .. }]
             ));
 
             retry_release
@@ -3792,7 +3766,7 @@ mod tests {
             assert_eq!(
                 observations.lock().as_slice(),
                 [
-                    FinalizedObservation::Applied {
+                    FinalizedObservation {
                         artifact: CapturedArtifact {
                             prior_counter: None,
                             batch_counter: 1,
@@ -3801,7 +3775,7 @@ mod tests {
                         post_counter: 1,
                         post_height: 1,
                     },
-                    FinalizedObservation::Applied {
+                    FinalizedObservation {
                         artifact: CapturedArtifact {
                             prior_counter: Some(1),
                             batch_counter: 2,
@@ -3817,7 +3791,7 @@ mod tests {
     }
 
     #[test]
-    fn execution_duplicate_finalization_is_synchronized() {
+    fn execution_duplicate_finalization_skips_finalized_hook() {
         deterministic::Runner::default().start(|context| async move {
             let (mut harness, observations) = Harness::new_with_finalized_observer(context).await;
             let genesis = Block::genesis();
@@ -3827,13 +3801,7 @@ mod tests {
             observations.lock().clear();
             assert!(!harness.finalize(block).await);
 
-            assert_eq!(
-                observations.lock().as_slice(),
-                [FinalizedObservation::Synchronized {
-                    post_counter: 1,
-                    post_height: 1,
-                }],
-            );
+            assert!(observations.lock().is_empty());
         });
     }
 

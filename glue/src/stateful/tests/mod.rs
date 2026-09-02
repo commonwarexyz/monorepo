@@ -18,7 +18,7 @@ use crate::{
         property::Property,
     },
     stateful::{
-        Application, Config as StatefulConfig, Finalized, Input, Proposed, PruneConfig,
+        Application, Config as StatefulConfig, Input, Proposed, PruneConfig,
         Stateful as StatefulActor, SyncPlan,
         db::{AttachableResolver, DatabaseSet, Merkleized as _, Shared, SyncEngineConfig},
     },
@@ -1037,14 +1037,14 @@ impl Application<deterministic::Context> for GatedMultiApp {
         &mut self,
         context: (deterministic::Context, Self::Context),
         block: &Self::Block,
-        provenance: Finalized<Self::FinalizedArtifact>,
+        artifact: Self::FinalizedArtifact,
         readers: <Self::Databases as DatabaseSet<deterministic::Context>>::Readers,
     ) {
         <MultiApp as Application<deterministic::Context>>::finalized(
             &mut self.inner,
             context,
             block,
-            provenance,
+            artifact,
             readers,
         )
         .await;

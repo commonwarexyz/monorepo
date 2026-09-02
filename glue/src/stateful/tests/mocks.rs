@@ -275,8 +275,22 @@ impl CertifiableBlock for TestBlock {
     }
 }
 
-#[derive(Clone)]
-pub(crate) struct TestApp;
+#[derive(Clone, Default)]
+pub(crate) struct TestApp {
+    finalization_hooks: Option<Arc<AtomicUsize>>,
+}
+
+impl TestApp {
+    pub(crate) fn observe_finalization() -> (Self, Arc<AtomicUsize>) {
+        let hooks: Arc<AtomicUsize> = Arc::default();
+        (
+            Self {
+                finalization_hooks: Some(hooks.clone()),
+            },
+            hooks,
+        )
+    }
+}
 
 impl<
     E: rand_core::Rng
@@ -338,6 +352,21 @@ impl<
         _batches: &<Self::Databases as DatabaseSet<E>>::Merkleized,
         _readers: <Self::Databases as DatabaseSet<E>>::Readers,
     ) {
+        if let Some(hooks) = &self.finalization_hooks {
+            hooks.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    async fn finalized(
+        &mut self,
+        _context: (E, Self::Context),
+        _block: &Self::Block,
+        _artifact: Self::FinalizedArtifact,
+        _readers: <Self::Databases as DatabaseSet<E>>::Readers,
+    ) {
+        if let Some(hooks) = &self.finalization_hooks {
+            hooks.fetch_add(1, Ordering::SeqCst);
+        }
     }
 }
 
