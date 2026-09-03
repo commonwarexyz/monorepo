@@ -75,7 +75,12 @@ use commonware_codec::{
     Codec, CodecFixed, EncodeSize, Error as CodecError, Read, ReadExt, Write, types::lazy::Lazy,
 };
 use commonware_parallel::Strategy;
-use commonware_utils::{Faults, Participant, bitmap::BitMap, iter::NonEmpty, ordered::Set};
+use commonware_utils::{
+    Faults, Participant,
+    bitmap::BitMap,
+    iter::NonEmpty,
+    ordered::{Committee, Set},
+};
 use core::{fmt::Debug, hash::Hash};
 use rand_core::CryptoRng;
 #[cfg(feature = "std")]
@@ -352,8 +357,8 @@ pub trait Scheme: Verifier {
     /// Returns `None` if the scheme is a verifier-only instance.
     fn me(&self) -> Option<Participant>;
 
-    /// Returns the ordered set of participant public identity keys managed by the scheme.
-    fn participants(&self) -> &Set<Self::PublicKey>;
+    /// Returns the ordered committee managed by the scheme.
+    fn participants(&self) -> &Committee<Self::PublicKey>;
 
     /// Signs a subject.
     /// Returns `None` if the scheme cannot sign (e.g. it's a verifier-only instance).
@@ -565,13 +570,30 @@ impl Signers {
     }
 
     /// Requires at least `required` signers in an already validated set.
-    pub(crate) fn require(self, required: u32) -> Result<Self, AssemblyError> {
+    #[cfg(feature = "bls12381")]
+    pub(crate) fn require_count(self, required: u32) -> Result<Self, AssemblyError> {
         let found = u32::try_from(self.count()).expect("signer count exceeds u32::MAX");
         if found < required {
             return Err(AssemblyError::InsufficientAttestations(
                 u64::from(required),
                 u64::from(found),
             ));
+        }
+
+        Ok(self)
+    }
+
+    /// Requires the selected signers to have at least `required` committee weight.
+    pub(crate) fn require_weight<P: Ord>(
+        self,
+        committee: &Committee<P>,
+        required: u64,
+    ) -> Result<Self, AssemblyError> {
+        let found = committee
+            .sum_ordered_weights(self.iter())
+            .expect("validated signer bitmap must contain ordered committee indices");
+        if found < required {
+            return Err(AssemblyError::InsufficientAttestations(required, found));
         }
 
         Ok(self)
@@ -609,6 +631,19 @@ where
 
     fn try_from((participants, signers): (&'a Set<P>, I)) -> Result<Self, Self::Error> {
         let total = u32::try_from(participants.len()).expect("participant count exceeds u32::MAX");
+        Self::new(total, signers)
+    }
+}
+
+/// Builds [`Signers`] using the committee as the valid signer-index range.
+impl<'a, P, I> TryFrom<(&'a Committee<P>, I)> for Signers
+where
+    I: IntoIterator<Item = Participant>,
+{
+    type Error = AssemblyError;
+
+    fn try_from((committee, signers): (&'a Committee<P>, I)) -> Result<Self, Self::Error> {
+        let total = u32::try_from(committee.len()).expect("committee exceeds u32::MAX");
         Self::new(total, signers)
     }
 }
@@ -691,7 +726,7 @@ mod tests {
     use commonware_codec::{Decode, Encode};
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;
-    use commonware_utils::{TryCollect, non_empty, ordered::Set, test_rng};
+    use commonware_utils::{TryCollect, non_empty, ordered::Committee, test_rng};
     use ed25519_fixture::{Scheme as Ed25519Scheme, TestSubject};
 
     #[test]
@@ -734,14 +769,28 @@ mod tests {
         let participants = Set::from_iter_dedup(0..4);
         let signers = Signers::try_from((&participants, [0, 2, 3].map(Participant::new)))
             .unwrap()
-            .require(3)
+            .require_count(3)
             .unwrap();
         assert_eq!(signers.count(), 3);
         assert_eq!(
             Signers::try_from((&participants, [0, 2].map(Participant::new)))
                 .unwrap()
-                .require(3),
+                .require_count(3),
             Err(AssemblyError::InsufficientAttestations(3, 2))
+        );
+
+        let committee = [(0u8, 1), (1, 2), (2, 4), (3, 1)]
+            .into_iter()
+            .try_collect::<Committee<_>>()
+            .unwrap();
+        let signers = Signers::try_from((&committee, [0, 2].map(Participant::new))).unwrap();
+        assert_eq!(
+            signers.clone().require_weight(&committee, 5).map(|s| s.count()),
+            Ok(2)
+        );
+        assert_eq!(
+            signers.require_weight(&committee, 6),
+            Err(AssemblyError::InsufficientAttestations(6, 5))
         );
     }
 
@@ -821,9 +870,9 @@ mod tests {
     fn setup_ed25519(n: u32) -> (Vec<Ed25519Scheme>, Ed25519Scheme) {
         let mut rng = test_rng();
         let private_keys: Vec<_> = (0..n).map(|_| PrivateKey::random(&mut rng)).collect();
-        let participants: Set<crate::ed25519::PublicKey> = private_keys
+        let participants: Committee<crate::ed25519::PublicKey> = private_keys
             .iter()
-            .map(|sk| sk.public_key())
+            .map(|sk| (sk.public_key(), 1))
             .try_collect()
             .unwrap();
         let signers: Vec<_> = private_keys

@@ -791,8 +791,10 @@ mod tests {
             let fixture = threshold_fixture(&mut context);
             let verifier = TestThresholdScheme::certificate_verifier(
                 THRESHOLD_NAMESPACE,
+                fixture.verifier.participants().clone(),
                 *fixture.verifier.identity(),
-            );
+            )
+            .expect("threshold fixture committee is uniform");
             let block = coding_block(
                 fixture.participants[0].clone(),
                 fixture
@@ -946,8 +948,10 @@ mod tests {
             let fixture = threshold_fixture(&mut context);
             let verifier = TestThresholdScheme::certificate_verifier(
                 THRESHOLD_NAMESPACE,
+                fixture.verifier.participants().clone(),
                 *fixture.verifier.identity(),
-            );
+            )
+            .expect("threshold fixture committee is uniform");
             let block = coding_block(
                 fixture.participants[0].clone(),
                 fixture

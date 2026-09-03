@@ -2,6 +2,13 @@
 
 ## v2026.7.1
 
+### Weighted Certificate Committees
+
+Certificate schemes expose weighted committees. Ed25519, secp256r1, and
+BLS multisig certificates form and verify quorum by weight. BLS threshold
+schemes remain count-based and reject non-uniform committees. Certificate
+encoding is unchanged ([#4635]).
+
 ### Crash Recovery
 
 Runtime storage now recovers a blob whose initial header write was interrupted.
@@ -25,6 +32,7 @@ after restart ([#4420]).
 [#4256]: https://github.com/commonwarexyz/monorepo/pull/4256
 [#4275]: https://github.com/commonwarexyz/monorepo/pull/4275
 [#4420]: https://github.com/commonwarexyz/monorepo/pull/4420
+[#4635]: https://github.com/commonwarexyz/monorepo/pull/4635
 
 ## v2026.7.0
 

@@ -1,4 +1,4 @@
-use clap::{Arg, Command, value_parser};
+use clap::{Arg, ArgAction, Command, value_parser};
 use commonware_bridge::{
     APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE,
     types::{
@@ -29,7 +29,7 @@ use commonware_stream::encrypted::{Config as StreamConfig, listen};
 use commonware_utils::{
     TryCollect,
     channel::{mpsc, oneshot},
-    ordered::Set,
+    ordered::{Committee, Set},
     union,
 };
 use std::{
@@ -82,6 +82,14 @@ fn main() {
                 .value_parser(value_parser!(String))
                 .help("All networks"),
         )
+        .arg(
+            Arg::new("committees")
+                .long("committee")
+                .required(true)
+                .action(ArgAction::Append)
+                .value_parser(value_parser!(String))
+                .help("Comma-separated participant keys for one network, in --networks order"),
+        )
         .get_matches();
 
     // Create logger
@@ -123,30 +131,54 @@ fn main() {
         })
         .try_collect()
         .expect("public keys are unique");
-
     // Configure networks
     let mut verifiers: HashMap<G2, Scheme> = HashMap::new();
     let mut blocks: HashMap<G2, HashMap<Sha256Digest, BlockFormat<Sha256Digest>>> = HashMap::new();
     let mut finalizations: HashMap<G2, BTreeMap<View, Finalization<Scheme, Sha256Digest>>> =
         HashMap::new();
-    let networks = matches
+    let networks: Vec<_> = matches
         .get_many::<String>("networks")
-        .expect("Please provide networks");
-    if networks.len() == 0 {
+        .expect("Please provide networks")
+        .cloned()
+        .collect();
+    if networks.is_empty() {
         panic!("Please provide at least one network");
     }
+    let committees: Vec<Committee<_>> = matches
+        .get_many::<String>("committees")
+        .expect("Please provide network committees")
+        .map(|committee| {
+            committee
+                .split(',')
+                .map(|participant| {
+                    let participant = participant
+                        .parse::<u64>()
+                        .expect("Committee participant not well-formed");
+                    let public_key = ed25519::PrivateKey::from_seed(participant).public_key();
+                    (public_key, 1)
+                })
+                .try_collect()
+                .expect("network participants form a committee")
+        })
+        .collect();
+    assert_eq!(
+        networks.len(),
+        committees.len(),
+        "Provide one committee per network"
+    );
 
     // Create context
     let executor = tokio::Runner::default();
     executor.start(|context| async move {
-        for network in networks {
-            let network = from_hex(network).expect("Network not well-formed");
+        for (network, committee) in networks.into_iter().zip(committees) {
+            let network = from_hex(&network).expect("Network not well-formed");
             let public = <MinSig as Variant>::Public::decode(network.as_ref())
                 .expect("Network not well-formed");
             let namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
             verifiers.insert(
                 public,
-                bls12381_threshold::Scheme::certificate_verifier(&namespace, public),
+                bls12381_threshold::Scheme::certificate_verifier(&namespace, committee, public)
+                    .expect("uniform committee supports threshold verification"),
             );
             blocks.insert(public, HashMap::new());
             finalizations.insert(public, BTreeMap::new());

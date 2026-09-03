@@ -172,7 +172,7 @@ use commonware_runtime::{
 use commonware_utils::{
     bitmap::BitMap,
     channel::{fallible::OneshotExt, oneshot},
-    ordered::{Quorum, Set},
+    ordered::Set,
 };
 use rand_core::Rng;
 use std::{
@@ -1913,7 +1913,9 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_runtime::{Quota, Runner, Supervisor as _, deterministic};
     use commonware_utils::{
-        N3f1, NZUsize, Participant, channel::oneshot::error::TryRecvError, ordered::Set,
+        N3f1, NZUsize, Participant,
+        channel::oneshot::error::TryRecvError,
+        ordered::{Committee, Set},
         probability,
     };
     use std::{
@@ -2125,7 +2127,14 @@ mod tests {
                 private_keys.sort_by_key(|s| s.public_key());
                 let peer_keys: Vec<P> = private_keys.iter().map(|c| c.public_key()).collect();
 
-                let participants: Set<P> = Set::from_iter_dedup(peer_keys.clone());
+                let participants = Committee::try_from(
+                    peer_keys
+                        .iter()
+                        .cloned()
+                        .map(|participant| (participant, 1))
+                        .collect::<Vec<_>>(),
+                )
+                .expect("test participants form a committee");
 
                 let mut np_private_keys = (0..self.num_secondary_peers)
                     .map(|i| PrivateKey::from_seed((self.num_primary_peers + i) as u64))
@@ -4881,7 +4890,14 @@ mod tests {
             let mut epoch0_keys: Vec<PrivateKey> = (0..4).map(PrivateKey::from_seed).collect();
             epoch0_keys.sort_by_key(|s| s.public_key());
             let epoch0_pks: Vec<P> = epoch0_keys.iter().map(|c| c.public_key()).collect();
-            let epoch0_set: Set<P> = Set::from_iter_dedup(epoch0_pks.clone());
+            let epoch0_set = Committee::try_from(
+                epoch0_pks
+                    .iter()
+                    .cloned()
+                    .map(|participant| (participant, 1))
+                    .collect::<Vec<_>>(),
+            )
+            .expect("epoch 0 participants form a committee");
 
             let future_peer_key = PrivateKey::from_seed(4);
             let future_peer_pk = future_peer_key.public_key();
@@ -4891,7 +4907,13 @@ mod tests {
                 .chain(std::iter::once(future_peer_pk.clone()))
                 .collect();
             epoch1_pks.sort();
-            let epoch1_set: Set<P> = Set::from_iter_dedup(epoch1_pks);
+            let epoch1_set = Committee::try_from(
+                epoch1_pks
+                    .into_iter()
+                    .map(|participant| (participant, 1))
+                    .collect::<Vec<_>>(),
+            )
+            .expect("epoch 1 participants form a committee");
 
             let receiver_idx_in_epoch0 = epoch0_set
                 .index(&epoch0_pks[0])
@@ -5007,7 +5029,14 @@ mod tests {
             let mut private_keys: Vec<PrivateKey> = (0..4).map(PrivateKey::from_seed).collect();
             private_keys.sort_by_key(|s| s.public_key());
             let peer_keys: Vec<P> = private_keys.iter().map(|k| k.public_key()).collect();
-            let participants: Set<P> = Set::from_iter_dedup(peer_keys.clone());
+            let participants = Committee::try_from(
+                peer_keys
+                    .iter()
+                    .cloned()
+                    .map(|participant| (participant, 1))
+                    .collect::<Vec<_>>(),
+            )
+            .expect("test participants form a committee");
 
             let leader_idx = 0usize;
             let broadcaster_idx = 1usize;
@@ -5038,7 +5067,7 @@ mod tests {
                         .expect("link should be added");
                 }
             }
-            oracle.manager().track(0, participants.clone());
+            oracle.manager().track(0, (*participants).clone());
             context.sleep(Duration::from_millis(10)).await;
 
             let (_leader_control, mut leader_sender, _leader_receiver) = registrations
@@ -5858,7 +5887,14 @@ mod tests {
                 .collect::<Vec<_>>();
             private_keys.sort_by_key(|s| s.public_key());
             let peer_keys: Vec<P> = private_keys.iter().map(|c| c.public_key()).collect();
-            let participants: Set<P> = Set::from_iter_dedup(peer_keys.clone());
+            let participants = Committee::try_from(
+                peer_keys
+                    .iter()
+                    .cloned()
+                    .map(|participant| (participant, 1))
+                    .collect::<Vec<_>>(),
+            )
+            .expect("test participants form a committee");
 
             // Test from the perspective of a single receiver (peer 3).
             let receiver_idx = 3usize;
@@ -5883,7 +5919,7 @@ mod tests {
                 .expect("link should be added");
 
             // Track the full participant set so the engine sees all peers.
-            oracle.manager().track(0, participants.clone());
+            oracle.manager().track(0, (*participants).clone());
             context.sleep(Duration::from_millis(10)).await;
 
             let scheme = Scheme::signer(
@@ -5987,7 +6023,13 @@ mod tests {
             let peer_keys: Vec<P> = private_keys.iter().map(|c| c.public_key()).collect();
             let receiver_pk = peer_keys[0].clone();
             let sender_pk = peer_keys[1].clone();
-            let participants: Set<P> = Set::from_iter_dedup(peer_keys);
+            let participants = Committee::try_from(
+                peer_keys
+                    .into_iter()
+                    .map(|participant| (participant, 1))
+                    .collect::<Vec<_>>(),
+            )
+            .expect("test participants form a committee");
 
             let receiver_control = oracle.control(receiver_pk);
             let scheme = Scheme::signer(
@@ -6067,14 +6109,27 @@ mod tests {
 
             // Epoch 0: first five peers. Epoch 1: swap out `peer_keys[0]` for `peer_keys[5]` so the
             // cutover changes who is in `latest.primary` while `tracked_peer_sets` retains overlap.
-            let epoch0_set: Set<P> = Set::from_iter_dedup(peer_keys[..5].iter().cloned());
-            let epoch1_set: Set<P> = Set::from_iter_dedup([
-                peer_keys[1].clone(),
-                peer_keys[2].clone(),
-                peer_keys[3].clone(),
-                peer_keys[4].clone(),
-                peer_keys[5].clone(),
-            ]);
+            let epoch0_set = Committee::try_from(
+                peer_keys[..5]
+                    .iter()
+                    .cloned()
+                    .map(|participant| (participant, 1))
+                    .collect::<Vec<_>>(),
+            )
+            .expect("epoch 0 participants form a committee");
+            let epoch1_set = Committee::try_from(
+                [
+                    peer_keys[1].clone(),
+                    peer_keys[2].clone(),
+                    peer_keys[3].clone(),
+                    peer_keys[4].clone(),
+                    peer_keys[5].clone(),
+                ]
+                .into_iter()
+                .map(|participant| (participant, 1))
+                .collect::<Vec<_>>(),
+            )
+            .expect("epoch 1 participants form a committee");
 
             let receiver_idx = 3usize;
             let receiver_pk = peer_keys[receiver_idx].clone();
@@ -6098,7 +6153,7 @@ mod tests {
                 .expect("link should be added");
 
             // Peer-set id 0: epoch 0 primaries before any cutover.
-            oracle.manager().track(0, epoch0_set.clone());
+            oracle.manager().track(0, (*epoch0_set).clone());
             context.sleep(Duration::from_millis(10)).await;
 
             let scheme_epoch0 =
@@ -6150,7 +6205,7 @@ mod tests {
             // Cutover to epoch 1 primaries before `Discovered`: `leader_pk` (epoch-0-only) is no
             // longer in `latest.primary`, so overlap-buffered shards for that sender must not feed
             // reconstruction.
-            oracle.manager().track(1, epoch1_set);
+            oracle.manager().track(1, (*epoch1_set).clone());
             context.sleep(Duration::from_millis(10)).await;
 
             // Leader announcement for the old commitment: should not complete reconstruction from
@@ -6203,7 +6258,14 @@ mod tests {
                 .collect::<Vec<_>>();
             private_keys.sort_by_key(|s| s.public_key());
             let peer_keys: Vec<P> = private_keys.iter().map(|c| c.public_key()).collect();
-            let participants: Set<P> = Set::from_iter_dedup(peer_keys.clone());
+            let participants = Committee::try_from(
+                peer_keys
+                    .iter()
+                    .cloned()
+                    .map(|participant| (participant, 1))
+                    .collect::<Vec<_>>(),
+            )
+            .expect("test participants form a committee");
 
             // Receiver (`peer_keys[1]`) is evicted from `latest.primary` after shards are buffered.
             // The leader (`peer_keys[0]`) has no link to the receiver, so reconstruction cannot use a
@@ -6255,7 +6317,7 @@ mod tests {
             }
 
             // Start with the full committee so the receiver's signer scheme matches the coded block.
-            oracle.manager().track(0, participants.clone());
+            oracle.manager().track(0, (*participants).clone());
             context.sleep(Duration::from_millis(10)).await;
 
             let scheme = Scheme::signer(
