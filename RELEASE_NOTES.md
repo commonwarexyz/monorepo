@@ -484,14 +484,15 @@ new `with_prefix` ([#4131], [#4364]).
 The stateful wrapper's traits changed shape. On `Application`, `InputProvider`
 is `Provider` and must be `Clone`, `type Input` is required, `propose` and
 `verify` take `impl Ancestry<Self::Block>` ([#4131]), and `Context` must be
-`Clone` ([#4399]). Finalization is a two-stage handoff: a required `type
-Captured` and `capture(context, block, &batches, readers)` hook run immediately
-before a block's batches are applied, and `finalized`, now required and taking
-the captured value plus read-only `Readers`, runs after them ([#4399], [#4641]).
-Neither hook runs for blocks already reflected in the database set (the genesis
-block on a fresh boot, blocks reconciled at startup, and blocks covered by state
-sync), so hook heights may skip after state sync, and both run serially on the
-actor's mailbox path, so `capture` must stay cheap.
+`Clone` ([#4399]). Finalization is a two-stage handoff: a required
+`capture(context, block, &batches, readers)` hook runs immediately before a
+block's batches are applied and returns a value of the new `type Captured`, and
+`finalized`, now required and taking the captured value plus read-only
+`Readers`, runs after them ([#4399], [#4641]). Neither hook runs for blocks
+already reflected in the database set (the genesis block on a fresh boot, blocks
+reconciled at startup, and blocks covered by state sync), so hook heights may
+skip after state sync, and both run serially on the actor's mailbox path, so
+`capture` must stay cheap.
 
 On `ManagedDb` and `DatabaseSet`, `Merkleized` must be `Clone`, `new_batch` is
 synchronous over a `BatchContext`, and `DatabaseSet` gained `Readers` and
