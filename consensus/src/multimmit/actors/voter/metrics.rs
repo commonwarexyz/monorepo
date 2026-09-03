@@ -189,6 +189,11 @@ pub(super) struct Metrics {
     pub build_latency: Histogram,
     /// Application validation latency; separates application cost from consensus cost.
     pub validation_latency: Histogram,
+    /// Payload entries one signed leader block proposes, summed over chains. Against
+    /// `vote_positions`, the share of the proposal voters endorse.
+    pub proposal_payloads: Histogram,
+    /// Chains one signed leader block anchors at a DA certificate rather than at the carried tip.
+    pub proposal_certified_anchors: Histogram,
     /// Proposal positions endorsed by one signed vote. Coverage per unit of bandwidth.
     pub vote_positions: Histogram,
     /// Signed votes endorsing nothing; wasted bandwidth and signing capacity.
@@ -420,6 +425,16 @@ impl Metrics {
             "application validation latency",
             LATENCY,
         );
+        let proposal_payloads = context.histogram(
+            "proposal_payloads",
+            "payload entries proposed by one signed leader block, summed over chains",
+            COVERAGE,
+        );
+        let proposal_certified_anchors = context.histogram(
+            "proposal_certified_anchors",
+            "chains one signed leader block anchors at a DA certificate",
+            COVERAGE,
+        );
         let vote_positions = context.histogram(
             "vote_positions",
             "proposal positions endorsed by one signed ordinary vote, summed over chains",
@@ -507,6 +522,8 @@ impl Metrics {
             lqc_latency,
             build_latency,
             validation_latency,
+            proposal_payloads,
+            proposal_certified_anchors,
             vote_positions,
             empty_votes,
             qc_deviations,
