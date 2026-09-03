@@ -3,7 +3,7 @@
 //! A node that is starting fresh (or recovering from far behind) needs a recent, trustworthy
 //! finalization, the "floor", as the point to begin state sync from. It cannot trust any
 //! single peer to name that point, so the [`Probe`] asks many peers and adopts the
-//! highest valid finalization from `f + 1` distinct peer replies.
+//! highest valid finalization after the replying weight exceeds the fault budget.
 //!
 //! # Protocol
 //!
@@ -32,7 +32,7 @@
 //! Each peer answers with its own latest finalization (or nothing, if it has none). Every response
 //! is verified against the certificate scheme for its epoch, and its sender must be a participant
 //! in the committee that was solicited. At most one finalization is counted per peer, so no single
-//! peer can inflate the sample on its own. Once `f + 1` distinct peers have replied, the highest
+//! peer can inflate the sample on its own. Once the replying weight exceeds `f`, the highest
 //! finalized round becomes the floor:
 //!
 //! ```text
@@ -62,16 +62,16 @@
 //!            (retry_timeout elapsed)
 //! ```
 //!
-//! # Why the sample is `f + 1`
+//! # Why the sample exceeds `f`
 //!
 //! The `f` used here comes from the configured minimum epoch's committee: the committee that
 //! received the request. Returned finalizations are still verified against their own epoch's
 //! certificate scheme, so an old-committee member may safely report a newer finalization from a
 //! later epoch where it no longer participates.
 //!
-//! Assume at most `f` of the `n` participants in that epoch are faulty. In this protocol, `f` makes
-//! no distinction between Byzantine and crashed nodes: a peer that does not answer and a peer that
-//! answers adversarially both count against the same fault budget.
+//! Assume faulty participants in that epoch have total weight at most `f`. In this protocol, `f`
+//! makes no distinction between Byzantine and crashed nodes: a peer that does not answer and a
+//! peer that answers adversarially both count against the same fault budget.
 //!
 //! A finalization is self-certifying: it carries a quorum certificate, so any one that verifies
 //! proves the network truly finalized that block. Accepting a single peer's finalization is
@@ -83,16 +83,16 @@
 //!
 //! Under [`simplex`](commonware_consensus::simplex)'s synchrony assumptions, after one honest node
 //! advances to a new view, other honest nodes may remain in the previous view until that transition
-//! is delivered within the network-delay bound (`delta`). Waiting for `f + 1` replies guarantees at
-//! least one honest response in the sample: at most `f` responders can be Byzantine, and crashed
-//! nodes do not respond. The selected finalization is therefore at least as recent as that honest
-//! response. Byzantine peers can still replay old certificates, but old certificates lose to newer
-//! honest replies. If they report something higher, it must still be a valid finalization, so it is
-//! a real finalized block rather than a rollback.
+//! is delivered within the network-delay bound (`delta`). Waiting for more than `f` reply weight
+//! guarantees at least one honest response in the sample: Byzantine participants have total weight
+//! at most `f`, and crashed nodes do not respond. The selected finalization is therefore at least
+//! as recent as that honest response. Byzantine peers can still replay old certificates, but old
+//! certificates lose to newer honest replies. If they report something higher, it must still be a
+//! valid finalization, so it is a real finalized block rather than a rollback.
 //!
-//! If fewer than `f + 1` solicited peers can answer for that epoch, probe cannot resolve that
+//! If responding participants have total weight at most `f`, probe cannot resolve that
 //! request round and will retry. This is a liveness tradeoff, not a safety one: using the
-//! solicited committee's `f + 1` threshold preserves the assumption that every completed sample
+//! solicited committee's weight threshold preserves the assumption that every completed sample
 //! includes at least one honest response from the relevant historical committee.
 //!
 //! [`Config::minimum_epoch`] bounds that historical search. A caller that initializes peers from a
@@ -101,7 +101,7 @@
 //! finalizations reported by its participants.
 //!
 //! ```text
-//!   any f + 1 sample:
+//!   any sample with reply weight > f:
 //!
 //!     [ B   B  ...  B ]  [ H ]       at most f Byzantine
 //!      \____ <= f ____/    \_ at least one honest response
@@ -169,8 +169,9 @@ mod test {
     };
     use commonware_storage::archive::immutable;
     use commonware_utils::{
-        Acknowledgement, NZDuration, NZU16, NZU64, NZUsize, NonZeroDuration, TestRng, TryCollect,
-        channel::oneshot, non_empty, probability, sync::Mutex, test_rng,
+        Acknowledgement, NZDuration, NZU16, NZU64, NZUsize, NonZeroDuration, Participant, TestRng,
+        TryCollect, channel::oneshot, non_empty, ordered::Committee, probability, sync::Mutex,
+        test_rng,
     };
     use std::{
         collections::BTreeMap,
@@ -364,9 +365,13 @@ mod test {
             n: u32,
             retry_timeout: NonZeroDuration,
         ) -> Self {
-            Self::setup_with(context, n, retry_timeout, Epoch::zero(), |scheme| {
-                ConstantProvider::new(scheme.clone())
-            })
+            Self::setup_with(
+                context,
+                vec![1; n as usize],
+                retry_timeout,
+                Epoch::zero(),
+                |scheme| ConstantProvider::new(scheme.clone()),
+            )
             .await
         }
 
@@ -375,7 +380,7 @@ mod test {
         /// provider to exercise multi-epoch verification.
         async fn setup_with<D, F>(
             context: &deterministic::Context,
-            n: u32,
+            weights: Vec<u64>,
             retry_timeout: NonZeroDuration,
             minimum_epoch: Epoch,
             make_provider: F,
@@ -384,12 +389,28 @@ mod test {
             D: Provider<Scope = Epoch, Scheme = Scheme>,
             F: Fn(&Scheme) -> D,
         {
+            let n = u32::try_from(weights.len()).expect("participant count must fit in u32");
             let mut rng = test_rng();
-            let Fixture {
-                participants,
-                schemes,
-                ..
-            } = scheme_mocks::fixture(&mut rng, NAMESPACE, n);
+            let Fixture { participants, .. } = scheme_mocks::fixture(&mut rng, NAMESPACE, n);
+            assert_eq!(participants.len(), weights.len());
+            let committee = participants
+                .iter()
+                .cloned()
+                .zip(weights)
+                .try_collect::<Committee<_>>()
+                .expect("weighted committee must be valid");
+            let shared = Shared::default();
+            let schemes = (0..n)
+                .map(|index| {
+                    Scheme::signer(
+                        NAMESPACE,
+                        committee.clone(),
+                        Participant::new(index),
+                        shared.clone(),
+                    )
+                    .expect("scheme signer must be a participant")
+                })
+                .collect::<Vec<_>>();
 
             // Simulated network with all participants tracked in a single peer set.
             let (network, oracle) = Network::new_with_peers(
@@ -902,7 +923,7 @@ mod test {
             let provider = ConstantProvider::new(schemes[0].clone());
             let mut harness = Harness::setup_with(
                 &context,
-                7,
+                vec![1; 7],
                 NZDuration!(Duration::from_secs(3600)),
                 Epoch::zero(),
                 move |_scheme| provider.clone(),
@@ -943,7 +964,7 @@ mod test {
             let provider = ConstantProvider::new(schemes[0].clone());
             let mut harness = Harness::setup_with(
                 &context,
-                7,
+                vec![1; 7],
                 NZDuration!(Duration::from_secs(3600)),
                 Epoch::zero(),
                 move |_scheme| provider.clone(),
@@ -1175,6 +1196,41 @@ mod test {
         });
     }
 
+    /// Discovery derives reply weights and the threshold from its non-uniform committee.
+    #[test]
+    fn test_discovery_selects_by_weight() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|context| async move {
+            // With weights [1, 7, 1, 1], f = 3 and replies must have weight at least 4.
+            let mut harness = Harness::setup_with(
+                &context,
+                vec![1, 7, 1, 1],
+                NZDuration!(Duration::from_secs(3600)),
+                Epoch::zero(),
+                |scheme| ConstantProvider::new(scheme.clone()),
+            )
+            .await;
+            harness.start_probes();
+            let mut subscription = harness.nodes[0].probe.subscribe();
+            let (_, finalization) = harness.finalization(1, 1);
+
+            // Two light replies would satisfy a count threshold of `f + 1 = 2` for four
+            // participants, but their weight of 2 is below the weight threshold of 4.
+            harness.send_raw(2, 0, finalization_bytes(finalization.clone()));
+            harness.send_raw(3, 0, finalization_bytes(finalization.clone()));
+            context.sleep(Duration::from_millis(100)).await;
+            assert!(matches!(
+                subscription.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ));
+
+            // The heavyweight reply crosses the weight threshold.
+            harness.send_raw(1, 0, finalization_bytes(finalization.clone()));
+            context.sleep(Duration::from_millis(100)).await;
+            assert_eq!(subscription.try_recv(), Ok(finalization));
+        });
+    }
+
     /// Finalizations are verified against the scheme for their own epoch: a non-zero-epoch
     /// finalization, signed by that epoch's committee and reported by enough peers, resolves
     /// the floor (exercises the epoch-scoped scheme lookup and per-epoch sample size).
@@ -1191,7 +1247,7 @@ mod test {
 
             let mut harness = Harness::setup_with(
                 &context,
-                4,
+                vec![1; 4],
                 NZDuration!(Duration::from_secs(3600)),
                 Epoch::zero(),
                 {
@@ -1233,7 +1289,7 @@ mod test {
             let provider = EpochProvider::default();
             let mut harness = Harness::setup_with(
                 &context,
-                7,
+                vec![1; 7],
                 NZDuration!(Duration::from_secs(3600)),
                 Epoch::zero(),
                 {
@@ -1291,7 +1347,7 @@ mod test {
             let provider = EpochProvider::default();
             let mut harness = Harness::setup_with(
                 &context,
-                4,
+                vec![1; 4],
                 NZDuration!(Duration::from_secs(3600)),
                 Epoch::new(1),
                 {
@@ -1457,7 +1513,7 @@ mod test {
 
             let mut harness = Harness::setup_with(
                 &context,
-                4,
+                vec![1; 4],
                 NZDuration!(Duration::from_secs(3600)),
                 Epoch::zero(),
                 {
@@ -1506,7 +1562,7 @@ mod test {
 
             let mut harness = Harness::setup_with(
                 &context,
-                4,
+                vec![1; 4],
                 NZDuration!(Duration::from_secs(3600)),
                 Epoch::zero(),
                 {

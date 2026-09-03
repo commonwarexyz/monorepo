@@ -32,19 +32,19 @@ use commonware_codec::Encode;
 use commonware_cryptography::{
     Hasher, PublicKey, Sha256, bls12381::primitives::variant::Variant, certificate::Scheme,
 };
-use commonware_utils::{modulo, ordered::Set};
+use commonware_utils::{modulo, ordered::Committee};
 use std::{fmt, marker::PhantomData, time::Duration};
 
 /// Configuration for creating an [`Elector`].
 ///
 /// Users create and configure this type, then pass it to the consensus configuration.
 /// Consensus will call [`build`](Config::build) internally with the correct
-/// participant set to create the initialized [`Elector`].
+/// committee to create the initialized [`Elector`].
 ///
 /// # Determinism Requirement
 ///
 /// Implementations **must** be deterministic. Honest participants with the same
-/// configuration and participant set must select the same leader for each round.
+/// configuration and committee must select the same leader for each round.
 /// This is stronger than returning the same output for identical inputs because
 /// honest participants may call [`Elector::elect`] with different certificates for
 /// the same round. See [`Elector`] for the certificate handling requirements.
@@ -52,14 +52,8 @@ pub trait Config<S: Scheme>: Clone + Send + 'static {
     /// The initialized elector type.
     type Elector: Elector<S>;
 
-    /// Builds the elector with the given participants.
-    ///
-    /// Called internally by consensus with the correct participant set.
-    ///
-    /// # Panics
-    ///
-    /// Implementations should panic if `participants` is empty.
-    fn build(self, participants: &Set<S::PublicKey>) -> Self::Elector;
+    /// Builds the elector for the epoch committee.
+    fn build(self, participants: &Committee<S::PublicKey>) -> Self::Elector;
 }
 
 /// Leadership term structure reported by an [`Elector`].
@@ -293,9 +287,7 @@ impl<H: Hasher> RoundRobin<H> {
 impl<S: Scheme, H: Hasher> Config<S> for RoundRobin<H> {
     type Elector = RoundRobinElector<S>;
 
-    fn build(self, participants: &Set<S::PublicKey>) -> RoundRobinElector<S> {
-        assert!(!participants.is_empty(), "no participants");
-
+    fn build(self, participants: &Committee<S::PublicKey>) -> RoundRobinElector<S> {
         let mut permutation: Vec<Participant> = (0..participants.len())
             .map(Participant::from_usize)
             .collect();
@@ -432,9 +424,8 @@ where
 
     fn build(
         self,
-        participants: &Set<P>,
+        participants: &Committee<P>,
     ) -> RandomElector<bls12381_threshold_vrf::Scheme<P, V>, H> {
-        assert!(!participants.is_empty(), "no participants");
         RandomElector {
             n: participants.len() as u32,
             version: self,
@@ -521,6 +512,11 @@ mod tests {
     type ThresholdScheme =
         bls12381_threshold_vrf::Scheme<commonware_cryptography::ed25519::PublicKey, MinPk>;
 
+    fn unit_committee<P: Ord>(participants: impl IntoIterator<Item = P>) -> Committee<P> {
+        Committee::try_from_iter(participants.into_iter().map(|participant| (participant, 1)))
+            .unwrap()
+    }
+
     #[test]
     fn stable_terms_preserve_optimistic_views() {
         let stall = Duration::from_secs(1);
@@ -539,7 +535,7 @@ mod tests {
     fn round_robin_rotates_through_participants() {
         let mut rng = test_rng();
         let Fixture { participants, .. } = ed25519::fixture(&mut rng, NAMESPACE, 4);
-        let participants = Set::try_from_iter(participants).unwrap();
+        let participants = unit_committee(participants);
         let n = participants.len() as u32;
         let elector: RoundRobinElector<ed25519::Scheme> =
             RoundRobin::<Sha256>::default().build(&participants);
@@ -559,10 +555,31 @@ mod tests {
     }
 
     #[test]
+    fn round_robin_ignores_nonuniform_weights() {
+        let mut rng = test_rng();
+        let Fixture { participants, .. } = ed25519::fixture(&mut rng, NAMESPACE, 4);
+        let participants =
+            Committee::try_from_iter(participants.into_iter().zip([100, 1, 7, 2])).unwrap();
+        let elector: RoundRobinElector<ed25519::Scheme> =
+            RoundRobin::<Sha256>::default().build(&participants);
+        let epoch = Epoch::new(0);
+
+        let leaders: Vec<_> = (1..=4)
+            .map(|view| elector.elect(Round::new(epoch, View::new(view)), None))
+            .collect();
+
+        assert_eq!(
+            leaders,
+            [1, 2, 3, 0].map(Participant::new),
+            "round-robin schedule must remain participant-index based"
+        );
+    }
+
+    #[test]
     fn round_robin_cycles_through_epochs() {
         let mut rng = test_rng();
         let Fixture { participants, .. } = ed25519::fixture(&mut rng, NAMESPACE, 5);
-        let participants = Set::try_from_iter(participants).unwrap();
+        let participants = unit_committee(participants);
         let n = participants.len();
         let elector: RoundRobinElector<ed25519::Scheme> =
             RoundRobin::<Sha256>::default().build(&participants);
@@ -588,7 +605,7 @@ mod tests {
     fn round_robin_handles_wrapping_epoch_plus_term_index() {
         let mut rng = test_rng();
         let Fixture { participants, .. } = ed25519::fixture(&mut rng, NAMESPACE, 5);
-        let participants = Set::try_from_iter(participants).unwrap();
+        let participants = unit_committee(participants);
         let elector: RoundRobinElector<ed25519::Scheme> = RoundRobin::<Sha256>::default()
             .with_term(
                 TermLength::new(NZU32!(5)),
@@ -611,7 +628,7 @@ mod tests {
     fn round_robin_uses_stable_leaders_within_terms() {
         let mut rng = test_rng();
         let Fixture { participants, .. } = ed25519::fixture(&mut rng, NAMESPACE, 4);
-        let participants = Set::try_from_iter(participants).unwrap();
+        let participants = unit_committee(participants);
         let elector: RoundRobinElector<ed25519::Scheme> = RoundRobin::<Sha256>::default()
             .with_term(
                 TermLength::new(NZU32!(3)),
@@ -639,7 +656,7 @@ mod tests {
     fn round_robin_epoch_transition_shifts_stable_term_leader() {
         let mut rng = test_rng();
         let Fixture { participants, .. } = ed25519::fixture(&mut rng, NAMESPACE, 4);
-        let participants = Set::try_from_iter(participants).unwrap();
+        let participants = unit_committee(participants);
         let elector: RoundRobinElector<ed25519::Scheme> = RoundRobin::<Sha256>::default()
             .with_term(
                 TermLength::new(NZU32!(3)),
@@ -667,7 +684,7 @@ mod tests {
     fn round_robin_shuffled_changes_order() {
         let mut rng = test_rng();
         let Fixture { participants, .. } = ed25519::fixture(&mut rng, NAMESPACE, 5);
-        let participants = Set::try_from_iter(participants).unwrap();
+        let participants = unit_committee(participants);
 
         let elector_no_seed: RoundRobinElector<ed25519::Scheme> =
             RoundRobin::<Sha256>::default().build(&participants);
@@ -726,7 +743,7 @@ mod tests {
     fn round_robin_same_seed_is_deterministic() {
         let mut rng = test_rng();
         let Fixture { participants, .. } = ed25519::fixture(&mut rng, NAMESPACE, 5);
-        let participants = Set::try_from_iter(participants).unwrap();
+        let participants = unit_committee(participants);
 
         let elector1: RoundRobinElector<ed25519::Scheme> =
             RoundRobin::<Sha256>::shuffled(b"same_seed").build(&participants);
@@ -741,19 +758,11 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "no participants")]
-    fn round_robin_build_panics_on_empty_participants() {
-        let participants: Set<commonware_cryptography::ed25519::PublicKey> = Set::default();
-        let _: RoundRobinElector<ed25519::Scheme> =
-            RoundRobin::<Sha256>::default().build(&participants);
-    }
-
-    #[test]
     fn random_falls_back_to_round_robin_for_view_1() {
         let mut rng = test_rng();
         let Fixture { participants, .. } =
             bls12381_threshold_vrf::fixture::<MinPk, _>(&mut rng, NAMESPACE, 5);
-        let participants = Set::try_from_iter(participants).unwrap();
+        let participants = unit_committee(participants);
         let n = participants.len();
         let elector: RandomElector<ThresholdScheme> =
             Random::new(RandomVersion::V1).build(&participants);
@@ -782,7 +791,7 @@ mod tests {
         let mut rng = test_rng();
         let Fixture { participants, .. } =
             bls12381_threshold_vrf::fixture::<MinPk, _>(&mut rng, NAMESPACE, 5);
-        let participants = Set::try_from_iter(participants).unwrap();
+        let participants = unit_committee(participants);
         let random: RandomElector<ThresholdScheme> =
             Random::new(RandomVersion::V1).build(&participants);
         let round_robin: RoundRobinElector<ThresholdScheme> =
@@ -804,7 +813,7 @@ mod tests {
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<MinPk, _>(&mut rng, NAMESPACE, 5);
-        let participants = Set::try_from_iter(participants).unwrap();
+        let participants = unit_committee(participants);
         let elector: RandomElector<ThresholdScheme> =
             Random::new(RandomVersion::V1).build(&participants);
         let quorum = usize::try_from(N3f1::quorum(
@@ -855,19 +864,12 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "no participants")]
-    fn random_build_panics_on_empty_participants() {
-        let participants: Set<commonware_cryptography::ed25519::PublicKey> = Set::default();
-        let _: RandomElector<ThresholdScheme> = Random::new(RandomVersion::V1).build(&participants);
-    }
-
-    #[test]
     #[should_panic]
     fn random_panics_on_none_certificate_after_view_1() {
         let mut rng = test_rng();
         let Fixture { participants, .. } =
             bls12381_threshold_vrf::fixture::<MinPk, _>(&mut rng, NAMESPACE, 5);
-        let participants = Set::try_from_iter(participants).unwrap();
+        let participants = unit_committee(participants);
         let elector: RandomElector<ThresholdScheme> =
             Random::new(RandomVersion::V1).build(&participants);
 
@@ -898,7 +900,7 @@ mod tests {
                 // Generate deterministic participants (using ed25519 fixture)
                 let n = rng.random_range(1..=100);
                 let Fixture { participants, .. } = ed25519::fixture(&mut rng, NAMESPACE, n);
-                let participants = Set::try_from_iter(participants).unwrap();
+                let participants = unit_committee(participants);
 
                 // Generate a random seed for shuffling
                 let shuffle_seed: [u8; 32] = rng.random();
@@ -934,7 +936,7 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<MinPk, _>(&mut rng, NAMESPACE, n);
-            let participants = Set::try_from_iter(participants).unwrap();
+            let participants = unit_committee(participants);
             let elector: RandomElector<ThresholdScheme> = version.build(&participants);
             let quorum = usize::try_from(N3f1::quorum(
                 u64::try_from(schemes.len()).expect("participant count exceeds u64::MAX"),

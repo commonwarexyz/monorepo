@@ -8,10 +8,16 @@ use crate::{
     },
     types::{Participant, Round as Rnd},
 };
-use commonware_cryptography::{Digest, certificate::Verification};
+use commonware_cryptography::{
+    Digest,
+    certificate::{Attestation, Verification},
+};
 use commonware_parallel::Strategy;
 use commonware_runtime::telemetry::traces::TracedExt as _;
-use commonware_utils::{non_empty, ordered::Committee};
+use commonware_utils::{
+    N3f1, non_empty,
+    ordered::{Committee, Quorum as _},
+};
 use rand::rngs::StdRng;
 use rand_core::{CryptoRng, SeedableRng};
 use std::{future::Future, mem, sync::Arc};
@@ -31,13 +37,32 @@ where
         .instrument(span)
 }
 
+fn participant_weight<P: Ord>(committee: &Committee<P>, participant: Participant) -> u64 {
+    committee.weight(participant).unwrap_or(0)
+}
+
+fn attestation_weight<'a, S, D>(
+    scheme: &S,
+    attestations: impl Iterator<Item = &'a Attestation<S>>,
+) -> u64
+where
+    S: Scheme<D> + 'a,
+    D: Digest,
+{
+    attestations
+        .map(|attestation| participant_weight(scheme.participants(), attestation.signer))
+        .sum()
+}
+
 /// Certification progress for one kind of vote.
 ///
 /// Each kind certifies independently: a view can legitimately certify both
 /// a notarization and a nullification.
 struct Certification<V> {
-    /// Verified votes required to recover a certificate.
-    quorum: usize,
+    /// Verified weight required to recover a certificate.
+    quorum_weight: u64,
+    /// Participant-count target for initial vote buffer reservations.
+    reservation_capacity: usize,
     /// Whether the scheme benefits from batching signature verification.
     batchable: bool,
     /// Progress toward a certificate.
@@ -50,8 +75,12 @@ enum State<V> {
     Incomplete {
         /// Votes awaiting signature verification.
         pending: Vec<V>,
+        /// Weight of votes awaiting signature verification.
+        pending_weight: u64,
         /// Votes with verified signatures, held for certificate recovery.
         verified: Vec<V>,
+        /// Weight of votes with verified signatures.
+        verified_weight: u64,
     },
     /// A certificate exists. Further votes are dropped.
     Complete,
@@ -59,13 +88,16 @@ enum State<V> {
 
 impl<V> Certification<V> {
     /// Creates an empty [State::Incomplete] whose vote buffers allocate lazily.
-    const fn new(quorum: usize, batchable: bool) -> Self {
+    const fn new(quorum_weight: u64, reservation_capacity: usize, batchable: bool) -> Self {
         Self {
-            quorum,
+            quorum_weight,
+            reservation_capacity,
             batchable,
             state: State::Incomplete {
                 pending: Vec::new(),
+                pending_weight: 0,
                 verified: Vec::new(),
+                verified_weight: 0,
             },
         }
     }
@@ -73,9 +105,15 @@ impl<V> Certification<V> {
     /// Buffers a vote for verification (or, if already verified, for
     /// certificate recovery). The caller owns signer uniqueness. Votes that
     /// arrive after completion are dropped.
-    fn add(&mut self, vote: V, is_verified: bool) {
+    fn add(&mut self, vote: V, weight: u64, is_verified: bool) {
         // Completed certifications drop subsequent votes without allocating.
-        let State::Incomplete { pending, verified } = &mut self.state else {
+        let State::Incomplete {
+            pending,
+            pending_weight,
+            verified,
+            verified_weight,
+        } = &mut self.state
+        else {
             return;
         };
 
@@ -83,15 +121,24 @@ impl<V> Certification<V> {
         // only needs the remaining unverified slots, while a non-batchable
         // pending buffer is consumed after each vote.
         let initial_capacity = if is_verified || self.batchable {
-            self.quorum.saturating_sub(verified.len()).max(1)
+            self.reservation_capacity
+                .saturating_sub(verified.len())
+                .max(1)
         } else {
             1
         };
-        let votes = if is_verified { verified } else { pending };
+        let (votes, accumulated_weight) = if is_verified {
+            (verified, verified_weight)
+        } else {
+            (pending, pending_weight)
+        };
         if votes.capacity() == 0 {
             votes.reserve_exact(initial_capacity);
         }
         votes.push(vote);
+        *accumulated_weight = accumulated_weight
+            .checked_add(weight)
+            .expect("signer-unique vote weight cannot exceed committee weight");
     }
 
     /// Returns true if a batch verification should run: pending votes exist,
@@ -99,10 +146,19 @@ impl<V> Certification<V> {
     /// could reach it.
     const fn should_verify(&self) -> bool {
         match &self.state {
-            State::Incomplete { pending, verified } => {
+            State::Incomplete {
+                pending,
+                pending_weight,
+                verified_weight,
+                ..
+            } => {
                 !pending.is_empty()
-                    && verified.len() < self.quorum
-                    && (!self.batchable || verified.len() + pending.len() >= self.quorum)
+                    && *verified_weight < self.quorum_weight
+                    && (!self.batchable
+                        || verified_weight
+                            .checked_add(*pending_weight)
+                            .expect("signer-unique vote weight cannot exceed committee weight")
+                            >= self.quorum_weight)
             }
             State::Complete => false,
         }
@@ -112,37 +168,59 @@ impl<V> Certification<V> {
     /// returns, or `None` if a batch is not worth verifying (see
     /// [Self::should_verify]).
     ///
-    /// `f` receives the pending and previously verified votes and returns the
-    /// new verified set plus the signers that failed verification. Returns
-    /// the number of votes processed alongside those signers.
+    /// `f` receives pending votes and prior verified votes. It returns their
+    /// combined verified set, the weight contributed by newly verified pending
+    /// votes, and invalid signers. This method returns the pending batch length
+    /// with those invalid signers.
     async fn try_verify<F, Fut>(&mut self, f: F) -> Option<(usize, Vec<Participant>)>
     where
         F: FnOnce(Vec<V>, Vec<V>) -> Fut,
-        Fut: Future<Output = (Vec<V>, Vec<Participant>)>,
+        Fut: Future<Output = (Vec<V>, u64, Vec<Participant>)>,
     {
         if !self.should_verify() {
             return None;
         }
-        let State::Incomplete { pending, verified } = &mut self.state else {
+        let State::Incomplete {
+            pending,
+            pending_weight,
+            verified,
+            verified_weight,
+        } = &mut self.state
+        else {
             unreachable!("certification complete despite should_verify");
         };
         let batch = pending.len();
         let (pending, prior) = (mem::take(pending), mem::take(verified));
-        let (votes, invalid) = f(pending, prior).await;
-        let State::Incomplete { verified, .. } = &mut self.state else {
+        let prior_weight = mem::take(verified_weight);
+        *pending_weight = 0;
+        let (votes, added_weight, invalid) = f(pending, prior).await;
+        let State::Incomplete {
+            verified,
+            verified_weight,
+            ..
+        } = &mut self.state
+        else {
             unreachable!("certification completed mid-verification");
         };
         *verified = votes;
+        *verified_weight = prior_weight
+            .checked_add(added_weight)
+            .expect("signer-unique vote weight cannot exceed committee weight");
         Some((batch, invalid))
     }
 
     /// Completes with a verified quorum, surrendering it for certificate
     /// recovery, or `None` if the quorum is unmet.
     fn try_complete(&mut self) -> Option<Vec<V>> {
-        let State::Incomplete { verified, .. } = &mut self.state else {
+        let State::Incomplete {
+            verified,
+            verified_weight,
+            ..
+        } = &mut self.state
+        else {
             return None;
         };
-        if verified.len() < self.quorum {
+        if *verified_weight < self.quorum_weight {
             return None;
         }
         let votes = mem::take(verified);
@@ -161,10 +239,18 @@ impl<V> Certification<V> {
     }
 
     /// Retains only the votes matching `f`.
-    fn retain(&mut self, f: impl Fn(&V) -> bool) {
-        if let State::Incomplete { pending, verified } = &mut self.state {
+    fn retain(&mut self, f: impl Fn(&V) -> bool, weight: impl Fn(&V) -> u64) {
+        if let State::Incomplete {
+            pending,
+            pending_weight,
+            verified,
+            verified_weight,
+        } = &mut self.state
+        {
             pending.retain(|v| f(v));
             verified.retain(|v| f(v));
+            *pending_weight = pending.iter().map(&weight).sum();
+            *verified_weight = verified.iter().map(weight).sum();
         }
     }
 }
@@ -226,8 +312,7 @@ impl<D: Digest> ProposalState<D> {
 /// efficient batch verification. For schemes where `is_batchable()` returns `false` (such as [secp256r1]),
 /// signatures are verified eagerly as they arrive since there is no batching benefit.
 ///
-/// To avoid unnecessary verification, it also tracks the number of already verified messages (ensuring
-/// we no longer attempt to verify messages after a quorum of valid messages have already been verified).
+/// The verifier tracks verified weight and stops verification after reaching quorum.
 ///
 /// Once polled, async verification moves the pending batch and accumulated verified votes into
 /// the worker. Do not cancel an in-flight verification unless the verifier will also be discarded.
@@ -268,22 +353,23 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     ///
     /// * `round` - The round being certified.
     /// * `scheme` - Scheme handle used to verify and aggregate votes.
-    /// * `quorum` - Number of votes (2f+1) required to reach a quorum.
-    pub fn new(round: Rnd, scheme: impl Into<Arc<S>>, quorum: u32) -> Self {
-        // Hold quorum as usize to simplify comparisons against queue lengths.
-        let quorum = quorum as usize;
+    pub fn new(round: Rnd, scheme: impl Into<Arc<S>>) -> Self {
+        let scheme = scheme.into();
+        let quorum_weight = scheme.participants().quorum_weight::<N3f1>();
+        let reservation_capacity = usize::try_from(scheme.participants().quorum_count::<N3f1>())
+            .expect("participant quorum must fit in usize");
         let batchable = S::is_batchable();
         Self {
-            scheme: scheme.into(),
+            scheme,
 
             round,
 
             leader: None,
             proposal: ProposalState::Unknown,
 
-            notarize: Certification::new(quorum, batchable),
-            nullify: Certification::new(quorum, batchable),
-            finalize: Certification::new(quorum, batchable),
+            notarize: Certification::new(quorum_weight, reservation_capacity, batchable),
+            nullify: Certification::new(quorum_weight, reservation_capacity, batchable),
+            finalize: Certification::new(quorum_weight, reservation_capacity, batchable),
         }
     }
 
@@ -417,8 +503,15 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
                 replaced: false,
             };
         };
-        self.notarize.retain(|n| &n.proposal == proposal);
-        self.finalize.retain(|f| &f.proposal == proposal);
+        let participants = self.scheme.participants();
+        self.notarize.retain(
+            |n| &n.proposal == proposal,
+            |n| participant_weight(participants, n.signer()),
+        );
+        self.finalize.retain(
+            |f| &f.proposal == proposal,
+            |f| participant_weight(participants, f.signer()),
+        );
         ProposalUpdate {
             changed: true,
             replaced,
@@ -445,6 +538,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     pub fn add(&mut self, msg: Vote<S, D>, verified: bool) {
         match msg {
             Vote::Notarize(notarize) => {
+                let weight = participant_weight(self.scheme.participants(), notarize.signer());
                 self.try_set_proposal_from_leader(&notarize);
 
                 // If the proposal is known and the message is not for it, drop it
@@ -453,19 +547,21 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
                 {
                     return;
                 }
-                self.notarize.add(notarize, verified);
+                self.notarize.add(notarize, weight, verified);
             }
             Vote::Nullify(nullify) => {
-                self.nullify.add(nullify, verified);
+                let weight = participant_weight(self.scheme.participants(), nullify.signer());
+                self.nullify.add(nullify, weight, verified);
             }
             Vote::Finalize(finalize) => {
+                let weight = participant_weight(self.scheme.participants(), finalize.signer());
                 // If the proposal is known and the message is not for it, drop it
                 if let Some(proposal) = self.proposal()
                     && proposal != &finalize.proposal
                 {
                     return;
                 }
-                self.finalize.add(finalize, verified);
+                self.finalize.add(finalize, weight, verified);
             }
         }
     }
@@ -546,13 +642,14 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
                         &strategy,
                     );
 
+                    let added_weight = attestation_weight(scheme.as_ref(), verified.iter());
                     verified_notarizes.extend(verified.into_iter().zip(proposals).map(
                         |(attestation, proposal)| Notarize {
                             proposal,
                             attestation,
                         },
                     ));
-                    (verified_notarizes, invalid)
+                    (verified_notarizes, added_weight, invalid)
                 })
             })
             .await
@@ -596,12 +693,13 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
                         &strategy,
                     );
 
+                    let added_weight = attestation_weight(scheme.as_ref(), verified.iter());
                     verified_nullifies.extend(
                         verified
                             .into_iter()
                             .map(|attestation| Nullify { round, attestation }),
                     );
-                    (verified_nullifies, invalid)
+                    (verified_nullifies, added_weight, invalid)
                 })
             })
             .await
@@ -658,13 +756,14 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
                         &strategy,
                     );
 
+                    let added_weight = attestation_weight(scheme.as_ref(), verified.iter());
                     verified_finalizes.extend(verified.into_iter().zip(proposals).map(
                         |(attestation, proposal)| Finalize {
                             proposal,
                             attestation,
                         },
                     ));
-                    (verified_finalizes, invalid)
+                    (verified_finalizes, added_weight, invalid)
                 })
             })
             .await
@@ -689,21 +788,46 @@ mod tests {
     };
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig},
-        certificate::mocks::Fixture,
+        certificate::{Scheme as _, mocks::Fixture},
         ed25519::PublicKey,
         sha256::Digest as Sha256,
     };
     use commonware_macros::test_async;
     use commonware_parallel::Sequential;
-    use commonware_utils::{Faults, N3f1, TestRng, test_rng};
+    use commonware_utils::{Faults, N3f1, TestRng, ordered::Committee, test_rng};
 
     const NAMESPACE: &[u8] = b"test";
 
-    fn count_quorum(participants: usize) -> u32 {
-        u32::try_from(N3f1::quorum(
-            u64::try_from(participants).expect("participant count exceeds u64::MAX"),
-        ))
-        .expect("quorum for a u32-indexed participant set must fit in u32")
+    fn count_quorum(participants: usize) -> u64 {
+        N3f1::quorum(u64::try_from(participants).expect("participant count exceeds u64::MAX"))
+    }
+
+    fn weighted_ed25519(weights: &[u64]) -> Vec<ed25519::Scheme> {
+        let mut rng = test_rng();
+        let Fixture {
+            participants,
+            private_keys,
+            ..
+        } = ed25519::fixture(
+            &mut rng,
+            NAMESPACE,
+            u32::try_from(weights.len()).expect("test committee must fit in u32"),
+        );
+        let committee = Committee::try_from(
+            participants
+                .into_iter()
+                .zip(weights.iter().copied())
+                .collect::<Vec<_>>(),
+        )
+        .expect("test committee must be valid");
+
+        private_keys
+            .into_iter()
+            .map(|private_key| {
+                ed25519::Scheme::signer(NAMESPACE, committee.clone(), private_key)
+                    .expect("private key must belong to test committee")
+            })
+            .collect()
     }
 
     impl<V> Certification<V> {
@@ -726,9 +850,21 @@ mod tests {
         /// Returns the capacities of the pending and verified vote buffers.
         fn capacities(&self) -> (usize, usize) {
             match &self.state {
-                State::Incomplete { pending, verified } => {
-                    (pending.capacity(), verified.capacity())
-                }
+                State::Incomplete {
+                    pending, verified, ..
+                } => (pending.capacity(), verified.capacity()),
+                State::Complete => (0, 0),
+            }
+        }
+
+        /// Returns the pending and verified vote weights.
+        fn weights(&self) -> (u64, u64) {
+            match &self.state {
+                State::Incomplete {
+                    pending_weight,
+                    verified_weight,
+                    ..
+                } => (*pending_weight, *verified_weight),
                 State::Complete => (0, 0),
             }
         }
@@ -741,8 +877,7 @@ mod tests {
         let Fixture { schemes, .. } = ed25519::fixture(&mut rng, NAMESPACE, 5);
         let quorum = count_quorum(schemes.len());
         let round = Round::new(Epoch::new(0), View::new(1));
-        let mut verifier =
-            Verifier::<ed25519::Scheme, Sha256>::new(round, schemes[0].clone(), quorum);
+        let mut verifier = Verifier::<ed25519::Scheme, Sha256>::new(round, schemes[0].clone());
 
         assert_eq!(verifier.notarize.capacities(), (0, 0));
         assert_eq!(verifier.nullify.capacities(), (0, 0));
@@ -763,20 +898,21 @@ mod tests {
     #[test_async]
     async fn test_non_batchable_certification_avoids_repeated_quorum_reservations() {
         let quorum = 64;
-        let mut certification = Certification::new(quorum, false);
-        certification.add(1u8, false);
+        let mut certification = Certification::new(quorum, quorum as usize, false);
+        certification.add(1u8, 1, false);
         certification
             .try_verify(|pending, mut verified| async move {
+                let added_weight = pending.len() as u64;
                 verified.extend(pending);
-                (verified, Vec::new())
+                (verified, added_weight, Vec::new())
             })
             .await
             .expect("non-batchable pending votes must verify eagerly");
 
-        certification.add(2u8, false);
+        certification.add(2u8, 1, false);
         let (pending, _) = certification.capacities();
         assert!(
-            pending < quorum,
+            pending < quorum as usize,
             "a single eagerly verified vote should not reserve a quorum-sized buffer"
         );
     }
@@ -784,24 +920,115 @@ mod tests {
     #[test_async]
     async fn test_batchable_certification_reserves_only_remaining_quorum() {
         let quorum = 64;
-        let mut certification = Certification::new(quorum, true);
+        let mut certification = Certification::new(quorum, quorum as usize, true);
         for vote in 0..quorum {
-            certification.add(vote, false);
+            certification.add(vote, 1, false);
         }
         certification
             .try_verify(|mut pending, _| async move {
                 pending.pop().expect("quorum batch must be non-empty");
-                (pending, Vec::new())
+                let weight = pending.len() as u64;
+                (pending, weight, Vec::new())
             })
             .await
             .expect("a quorum of pending votes must trigger batch verification");
 
-        certification.add(quorum, false);
+        certification.add(quorum, 1, false);
         let (pending, _) = certification.capacities();
         assert!(
-            pending < quorum,
+            pending < quorum as usize,
             "one replacement vote should not reserve a quorum-sized buffer"
         );
+    }
+
+    #[test_async]
+    async fn test_count_quorum_is_insufficient_without_quorum_weight() {
+        let schemes = weighted_ed25519(&[4, 1, 1, 1]);
+        let round = Round::new(Epoch::new(0), View::new(1));
+        let mut verifier = Verifier::<ed25519::Scheme, Sha256>::new(round, schemes[0].clone());
+
+        for scheme in schemes.iter().skip(1) {
+            verifier.add(Vote::Nullify(create_nullify(scheme, round)), true);
+        }
+
+        assert_eq!(verifier.nullify.verified().len(), 3);
+        assert!(
+            verifier
+                .try_construct_certificate(&Sequential)
+                .await
+                .is_none(),
+            "three signer-unique votes have count quorum but only weight three"
+        );
+    }
+
+    #[test_async]
+    async fn test_exact_weighted_boundary_verifies_and_completes() {
+        let schemes = weighted_ed25519(&[4, 1, 1, 1]);
+        let round = Round::new(Epoch::new(0), View::new(1));
+        let quorum_weight = schemes[0].participants().quorum_weight::<N3f1>();
+        assert_eq!(quorum_weight, 5);
+        let mut verifier = Verifier::<ed25519::Scheme, Sha256>::new(round, schemes[0].clone());
+
+        for scheme in schemes.iter().take(2) {
+            verifier.add(Vote::Nullify(create_nullify(scheme, round)), false);
+        }
+        assert!(verifier.nullify.should_verify());
+        let (_, invalid) = verifier
+            .try_verify_nullifies(&mut test_rng(), &Sequential)
+            .await
+            .expect("exact quorum weight must trigger verification");
+        assert!(invalid.is_empty());
+        assert!(
+            verifier
+                .try_construct_certificate(&Sequential)
+                .await
+                .is_some(),
+            "exact verified quorum weight must complete"
+        );
+    }
+
+    #[test_async]
+    async fn test_invalid_heavy_signature_does_not_complete_with_valid_lights() {
+        let schemes = weighted_ed25519(&[4, 1, 1, 1]);
+        let round = Round::new(Epoch::new(0), View::new(1));
+        let mut verifier = Verifier::<ed25519::Scheme, Sha256>::new(round, schemes[0].clone());
+
+        let mut invalid_heavy = create_nullify(&schemes[1], round);
+        invalid_heavy.attestation.signer = Participant::new(0);
+        verifier.add(Vote::Nullify(invalid_heavy), false);
+        for scheme in schemes.iter().skip(1) {
+            verifier.add(Vote::Nullify(create_nullify(scheme, round)), false);
+        }
+
+        assert!(verifier.nullify.should_verify());
+        let (_, invalid) = verifier
+            .try_verify_nullifies(&mut test_rng(), &Sequential)
+            .await
+            .expect("claimed pending weight reaches quorum");
+        assert_eq!(invalid, vec![Participant::new(0)]);
+        assert_eq!(verifier.nullify.verified().len(), 3);
+        assert!(
+            verifier
+                .try_construct_certificate(&Sequential)
+                .await
+                .is_none(),
+            "only the weight of valid signatures may complete certification"
+        );
+    }
+
+    #[test]
+    fn test_large_weights_do_not_increase_vote_buffer_capacity() {
+        let schemes = weighted_ed25519(&[1_000_000, 1, 1, 1]);
+        let round = Round::new(Epoch::new(0), View::new(1));
+        let quorum_weight = schemes[0].participants().quorum_weight::<N3f1>();
+        let mut verifier = Verifier::<ed25519::Scheme, Sha256>::new(round, schemes[0].clone());
+
+        verifier.add(Vote::Nullify(create_nullify(&schemes[0], round)), false);
+        let (pending, verified) = verifier.nullify.capacities();
+        assert_eq!(verifier.nullify.reservation_capacity, 3);
+        assert!(pending >= verifier.nullify.reservation_capacity);
+        assert_eq!(verified, 0);
+        assert!(pending < quorum_weight as usize);
     }
 
     // Helper function to create a sample digest
@@ -843,12 +1070,8 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
-        let quorum = count_quorum(schemes.len());
-        let mut verifier = Verifier::<S, Sha256>::new(
-            Round::new(Epoch::new(0), View::new(1)),
-            schemes[0].clone(),
-            quorum,
-        );
+        let mut verifier =
+            Verifier::<S, Sha256>::new(Round::new(Epoch::new(0), View::new(1)), schemes[0].clone());
 
         let round = Round::new(Epoch::new(0), View::new(1));
         let leader_notarize = create_notarize(&schemes[0], round, View::new(0), 1);
@@ -875,11 +1098,8 @@ mod tests {
         verifier.add(Vote::Notarize(notarize_diff), false);
         assert_eq!(verifier.notarize.pending().len(), 2);
 
-        let mut verifier2 = Verifier::<S, Sha256>::new(
-            Round::new(Epoch::new(0), View::new(1)),
-            schemes[0].clone(),
-            quorum,
-        );
+        let mut verifier2 =
+            Verifier::<S, Sha256>::new(Round::new(Epoch::new(0), View::new(1)), schemes[0].clone());
         let round2 = Round::new(Epoch::new(0), View::new(2));
         let notarize_non_leader = create_notarize(&schemes[1], round2, View::new(1), 3);
         let notarize_leader = create_notarize(&schemes[0], round2, View::new(1), 3);
@@ -914,12 +1134,8 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
-        let quorum = count_quorum(schemes.len());
-        let mut verifier = Verifier::<S, Sha256>::new(
-            Round::new(Epoch::new(0), View::new(1)),
-            schemes[0].clone(),
-            quorum,
-        );
+        let mut verifier =
+            Verifier::<S, Sha256>::new(Round::new(Epoch::new(0), View::new(1)), schemes[0].clone());
 
         let round = Round::new(Epoch::new(0), View::new(1));
         let leader_notarize = create_notarize(&schemes[0], round, View::new(0), 1);
@@ -938,11 +1154,8 @@ mod tests {
         assert_eq!(verifier.proposal(), Some(&leader_notarize.proposal));
         assert_eq!(verifier.notarize.pending().len(), 2);
 
-        let mut verifier2 = Verifier::<S, Sha256>::new(
-            Round::new(Epoch::new(0), View::new(1)),
-            schemes[0].clone(),
-            quorum,
-        );
+        let mut verifier2 =
+            Verifier::<S, Sha256>::new(Round::new(Epoch::new(0), View::new(1)), schemes[0].clone());
         verifier2.add(Vote::Notarize(leader_notarize.clone()), true);
         verifier2.set_leader(leader, Some(&leader_notarize));
         assert_eq!(verifier2.leader(), Some(leader));
@@ -977,11 +1190,8 @@ mod tests {
 
         // If the notarization arrives first, setting the leader cannot replace
         // its proposal with a conflicting buffered leader vote.
-        let mut verifier3 = Verifier::<S, Sha256>::new(
-            Round::new(Epoch::new(0), View::new(1)),
-            schemes[0].clone(),
-            quorum,
-        );
+        let mut verifier3 =
+            Verifier::<S, Sha256>::new(Round::new(Epoch::new(0), View::new(1)), schemes[0].clone());
         assert!(
             verifier3
                 .set_proposal(ProposalState::Certificate(notarized_proposal.clone()))
@@ -1014,11 +1224,8 @@ mod tests {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
         let quorum = count_quorum(schemes.len());
-        let mut verifier = Verifier::<S, Sha256>::new(
-            Round::new(Epoch::new(0), View::new(1)),
-            schemes[0].clone(),
-            quorum,
-        );
+        let mut verifier =
+            Verifier::<S, Sha256>::new(Round::new(Epoch::new(0), View::new(1)), schemes[0].clone());
         let round = Round::new(Epoch::new(0), View::new(1));
         let notarizes: Vec<_> = schemes
             .iter()
@@ -1051,11 +1258,8 @@ mod tests {
         assert!(verifier.notarize.pending().is_empty());
         assert!(!verifier.notarize.should_verify());
 
-        let mut verifier2 = Verifier::<S, Sha256>::new(
-            Round::new(Epoch::new(0), View::new(1)),
-            schemes[0].clone(),
-            quorum,
-        );
+        let mut verifier2 =
+            Verifier::<S, Sha256>::new(Round::new(Epoch::new(0), View::new(1)), schemes[0].clone());
         let round2 = Round::new(Epoch::new(0), View::new(2));
         let leader_vote = create_notarize(&schemes[0], round2, View::new(1), 10);
         let mut faulty_vote = create_notarize(&schemes[1], round2, View::new(1), 10);
@@ -1064,7 +1268,9 @@ mod tests {
         faulty_vote.attestation.signer = Participant::from_usize(schemes.len() + 10);
         verifier2.add(Vote::Notarize(faulty_vote.clone()), false);
 
-        for scheme in schemes.iter().skip(2).take(quorum as usize - 2) {
+        // The malformed out-of-range signer contributes no pending weight, so
+        // add a full quorum of valid signer weight alongside it.
+        for scheme in schemes.iter().skip(2).take(quorum as usize - 1) {
             verifier2.add(
                 Vote::Notarize(create_notarize(scheme, round2, View::new(1), 10)),
                 false,
@@ -1076,7 +1282,7 @@ mod tests {
             .try_verify_notarizes(&mut rng, &Sequential)
             .await
             .unwrap();
-        assert_eq!(batch, quorum as usize);
+        assert_eq!(batch, quorum as usize + 1);
         assert!(
             verifier2
                 .notarize
@@ -1106,12 +1312,8 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
-        let quorum = count_quorum(schemes.len());
-        let mut verifier = Verifier::<S, Sha256>::new(
-            Round::new(Epoch::new(0), View::new(1)),
-            schemes[0].clone(),
-            quorum,
-        );
+        let mut verifier =
+            Verifier::<S, Sha256>::new(Round::new(Epoch::new(0), View::new(1)), schemes[0].clone());
         let round = Round::new(Epoch::new(0), View::new(1));
         let pending_nullify = create_nullify(&schemes[0], round);
         let verified_nullify = create_nullify(&schemes[1], round);
@@ -1144,12 +1346,8 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
-        let quorum = count_quorum(schemes.len());
-        let mut verifier = Verifier::<S, Sha256>::new(
-            Round::new(Epoch::new(0), View::new(1)),
-            schemes[0].clone(),
-            quorum,
-        );
+        let mut verifier =
+            Verifier::<S, Sha256>::new(Round::new(Epoch::new(0), View::new(1)), schemes[0].clone());
         let round = Round::new(Epoch::new(0), View::new(1));
         let nullifies: Vec<_> = schemes
             .iter()
@@ -1198,12 +1396,8 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
-        let quorum = count_quorum(schemes.len());
-        let mut verifier = Verifier::<S, Sha256>::new(
-            Round::new(Epoch::new(0), View::new(1)),
-            schemes[0].clone(),
-            quorum,
-        );
+        let mut verifier =
+            Verifier::<S, Sha256>::new(Round::new(Epoch::new(0), View::new(1)), schemes[0].clone());
         let round = Round::new(Epoch::new(0), View::new(1));
         let finalize_a = create_finalize(&schemes[0], round, View::new(0), 1);
         let finalize_b = create_finalize(&schemes[1], round, View::new(0), 2);
@@ -1253,12 +1447,8 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
-        let quorum = count_quorum(schemes.len());
-        let mut verifier = Verifier::<S, Sha256>::new(
-            Round::new(Epoch::new(0), View::new(1)),
-            schemes[0].clone(),
-            quorum,
-        );
+        let mut verifier =
+            Verifier::<S, Sha256>::new(Round::new(Epoch::new(0), View::new(1)), schemes[0].clone());
         let round = Round::new(Epoch::new(0), View::new(1));
         let finalizes: Vec<_> = schemes
             .iter()
@@ -1312,12 +1502,8 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
-        let quorum = count_quorum(schemes.len());
-        let mut verifier = Verifier::<S, Sha256>::new(
-            Round::new(Epoch::new(0), View::new(1)),
-            schemes[0].clone(),
-            quorum,
-        );
+        let mut verifier =
+            Verifier::<S, Sha256>::new(Round::new(Epoch::new(0), View::new(1)), schemes[0].clone());
         let round = Round::new(Epoch::new(0), View::new(1));
         let proposal_a = Proposal::new(round, View::new(0), sample_digest(10));
         let proposal_b = Proposal::new(round, View::new(0), sample_digest(20));
@@ -1355,6 +1541,8 @@ mod tests {
         assert_eq!(verifier.finalize.pending()[0].proposal, proposal_a);
         assert_eq!(verifier.finalize.verified().len(), 1);
         assert_eq!(verifier.finalize.verified()[0].proposal, proposal_a);
+        assert_eq!(verifier.notarize.weights(), (1, 1));
+        assert_eq!(verifier.finalize.weights(), (1, 1));
     }
 
     #[test]
@@ -1378,7 +1566,6 @@ mod tests {
         let mut verifier = Verifier::<ed25519::Scheme, Sha256>::new(
             Round::new(Epoch::new(0), View::new(1)),
             schemes[0].clone(),
-            3,
         );
         let leader = Participant::new(0);
         verifier.set_leader(leader, None);
@@ -1395,7 +1582,6 @@ mod tests {
         let mut verifier = Verifier::<ed25519::Scheme, Sha256>::new(
             Round::new(Epoch::new(0), View::new(1)),
             schemes[0].clone(),
-            3,
         );
         verifier.set_leader(Participant::new(0), None);
         verifier.set_leader(Participant::new(1), None);
@@ -1411,7 +1597,6 @@ mod tests {
         let mut verifier = Verifier::<ed25519::Scheme, Sha256>::new(
             Round::new(Epoch::new(0), View::new(1)),
             schemes[0].clone(),
-            3,
         );
         let notarize = create_notarize(
             &schemes[1],
@@ -1430,11 +1615,8 @@ mod tests {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
         let quorum = count_quorum(schemes.len());
-        let mut verifier = Verifier::<S, Sha256>::new(
-            Round::new(Epoch::new(0), View::new(1)),
-            schemes[0].clone(),
-            quorum,
-        );
+        let mut verifier =
+            Verifier::<S, Sha256>::new(Round::new(Epoch::new(0), View::new(1)), schemes[0].clone());
         let round = Round::new(Epoch::new(0), View::new(1));
         let leader_vote = create_notarize(&schemes[0], round, View::new(0), 1);
 
@@ -1486,11 +1668,8 @@ mod tests {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 3);
         let quorum = count_quorum(schemes.len());
-        let mut verifier = Verifier::<S, Sha256>::new(
-            Round::new(Epoch::new(0), View::new(1)),
-            schemes[0].clone(),
-            quorum,
-        );
+        let mut verifier =
+            Verifier::<S, Sha256>::new(Round::new(Epoch::new(0), View::new(1)), schemes[0].clone());
         let round = Round::new(Epoch::new(0), View::new(1));
 
         let notarizes: Vec<_> = schemes
@@ -1548,7 +1727,6 @@ mod tests {
             let mut verifier = Verifier::<S, Sha256>::new(
                 Round::new(Epoch::new(0), View::new(1)),
                 schemes[0].clone(),
-                quorum,
             );
             let round = Round::new(Epoch::new(0), View::new(1));
             let finalizes: Vec<_> = schemes
@@ -1617,11 +1795,8 @@ mod tests {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
         let quorum = count_quorum(schemes.len());
-        let mut verifier = Verifier::<S, Sha256>::new(
-            Round::new(Epoch::new(0), View::new(3)),
-            schemes[0].clone(),
-            quorum,
-        );
+        let mut verifier =
+            Verifier::<S, Sha256>::new(Round::new(Epoch::new(0), View::new(3)), schemes[0].clone());
         let round = Round::new(Epoch::new(0), View::new(3));
         let conflicting = Proposal::new(round, View::new(2), sample_digest(8));
         let proposal = Proposal::new(round, View::new(2), sample_digest(9));
@@ -1687,7 +1862,6 @@ mod tests {
         let mut verifier = Verifier::<_, Sha256>::new(
             Round::new(Epoch::new(333), View::new(7)),
             schemes[0].clone(),
-            quorum.try_into().unwrap(),
         );
         let round = Round::new(Epoch::new(333), View::new(7));
         let proposal_a = Proposal::new(round, View::new(6), sample_digest(1));
@@ -1710,9 +1884,10 @@ mod tests {
         assert!(failed.is_empty());
         assert_eq!(verifier.finalize.verified().len(), 1);
 
-        // The override drops the verified finalize for the old proposal.
+        // The override drops the verified finalize for the old proposal and its weight.
         verifier.set_proposal(ProposalState::Certificate(proposal_b.clone()));
         assert!(verifier.finalize.verified().is_empty());
+        assert_eq!(verifier.finalize.weights(), (0, 0));
 
         for scheme in schemes.iter().take(quorum).skip(1) {
             verifier.add(
@@ -1748,12 +1923,8 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 3);
-        let quorum = count_quorum(schemes.len());
-        let mut verifier = Verifier::<S, Sha256>::new(
-            Round::new(Epoch::new(0), View::new(1)),
-            schemes[0].clone(),
-            quorum,
-        );
+        let mut verifier =
+            Verifier::<S, Sha256>::new(Round::new(Epoch::new(0), View::new(1)), schemes[0].clone());
         let round = Round::new(Epoch::new(0), View::new(1));
         let leader_notarize = create_notarize(&schemes[0], round, View::new(0), 1);
         verifier.set_leader(leader_notarize.signer(), Some(&leader_notarize));
@@ -1780,12 +1951,8 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 3);
-        let quorum = count_quorum(schemes.len());
-        let mut verifier = Verifier::<S, Sha256>::new(
-            Round::new(Epoch::new(0), View::new(1)),
-            schemes[0].clone(),
-            quorum,
-        );
+        let mut verifier =
+            Verifier::<S, Sha256>::new(Round::new(Epoch::new(0), View::new(1)), schemes[0].clone());
         assert!(verifier.nullify.pending().is_empty());
         assert!(!verifier.nullify.should_verify());
         assert!(
@@ -1816,12 +1983,8 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 3);
-        let quorum = count_quorum(schemes.len());
-        let mut verifier = Verifier::<S, Sha256>::new(
-            Round::new(Epoch::new(0), View::new(1)),
-            schemes[0].clone(),
-            quorum,
-        );
+        let mut verifier =
+            Verifier::<S, Sha256>::new(Round::new(Epoch::new(0), View::new(1)), schemes[0].clone());
         verifier.set_leader(Participant::new(0), None);
         assert!(verifier.finalize.pending().is_empty());
         assert!(!verifier.finalize.should_verify());
@@ -1854,11 +2017,8 @@ mod tests {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
         let quorum = count_quorum(schemes.len());
-        let mut verifier = Verifier::<S, Sha256>::new(
-            Round::new(Epoch::new(0), View::new(1)),
-            schemes[0].clone(),
-            quorum,
-        );
+        let mut verifier =
+            Verifier::<S, Sha256>::new(Round::new(Epoch::new(0), View::new(1)), schemes[0].clone());
         let round = Round::new(Epoch::new(0), View::new(1));
 
         let leader_vote = create_notarize(&schemes[0], round, View::new(0), 1);
@@ -1916,11 +2076,8 @@ mod tests {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
         let quorum = count_quorum(schemes.len());
-        let mut verifier = Verifier::<S, Sha256>::new(
-            Round::new(Epoch::new(0), View::new(1)),
-            schemes[0].clone(),
-            quorum,
-        );
+        let mut verifier =
+            Verifier::<S, Sha256>::new(Round::new(Epoch::new(0), View::new(1)), schemes[0].clone());
         let round = Round::new(Epoch::new(0), View::new(1));
 
         verifier.add(Vote::Nullify(create_nullify(&schemes[0], round)), true);
@@ -1962,11 +2119,8 @@ mod tests {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
         let quorum = count_quorum(schemes.len());
-        let mut verifier = Verifier::<S, Sha256>::new(
-            Round::new(Epoch::new(0), View::new(1)),
-            schemes[0].clone(),
-            quorum,
-        );
+        let mut verifier =
+            Verifier::<S, Sha256>::new(Round::new(Epoch::new(0), View::new(1)), schemes[0].clone());
         let round = Round::new(Epoch::new(0), View::new(1));
         let leader_finalize = create_finalize(&schemes[0], round, View::new(0), 1);
         let leader_notarize = create_notarize(&schemes[0], round, View::new(0), 1);
@@ -2017,11 +2171,8 @@ mod tests {
             schemes.len() > quorum as usize,
             "test requires more validators than the quorum"
         );
-        let mut verifier = Verifier::<S, Sha256>::new(
-            Round::new(Epoch::new(0), View::new(1)),
-            schemes[0].clone(),
-            quorum,
-        );
+        let mut verifier =
+            Verifier::<S, Sha256>::new(Round::new(Epoch::new(0), View::new(1)), schemes[0].clone());
         let round = Round::new(Epoch::new(0), View::new(1));
 
         // Pre-load the leader vote as if it had already been processed.
@@ -2079,11 +2230,8 @@ mod tests {
             schemes.len() > quorum as usize,
             "test requires more validators than the quorum"
         );
-        let mut verifier = Verifier::<S, Sha256>::new(
-            Round::new(Epoch::new(0), View::new(1)),
-            schemes[0].clone(),
-            quorum,
-        );
+        let mut verifier =
+            Verifier::<S, Sha256>::new(Round::new(Epoch::new(0), View::new(1)), schemes[0].clone());
         let round = Round::new(Epoch::new(0), View::new(1));
 
         // First mark a quorum's worth of verified nullifies.
@@ -2133,11 +2281,8 @@ mod tests {
             schemes.len() > quorum as usize,
             "test requires more validators than the quorum"
         );
-        let mut verifier = Verifier::<S, Sha256>::new(
-            Round::new(Epoch::new(0), View::new(1)),
-            schemes[0].clone(),
-            quorum,
-        );
+        let mut verifier =
+            Verifier::<S, Sha256>::new(Round::new(Epoch::new(0), View::new(1)), schemes[0].clone());
         let round = Round::new(Epoch::new(0), View::new(1));
 
         // Prime the leader state so the quorum is already satisfied by verified finalizes.
@@ -2185,22 +2330,22 @@ mod tests {
     #[test_async]
     async fn test_certification_lifecycle() {
         // Non-batchable schemes verify eagerly whenever votes are pending.
-        let mut eager = Certification::<u64>::new(3, false);
-        eager.add(1, false);
+        let mut eager = Certification::<u64>::new(3, 3, false);
+        eager.add(1, 1, false);
         assert!(eager.should_verify());
 
         // Certification owns the pending and verified buffer lifecycle; its
         // caller owns signer uniqueness. Opaque values keep this test focused
         // on that boundary.
-        let mut votes = Certification::<u64>::new(3, true);
-        votes.add(1, false);
-        votes.add(2, true);
+        let mut votes = Certification::<u64>::new(3, 3, true);
+        votes.add(1, 1, false);
+        votes.add(2, 1, true);
         assert_eq!(votes.pending(), &[1]);
         assert_eq!(votes.verified(), &[2]);
 
         // Batchable schemes wait until the buffers could reach quorum.
         assert!(!votes.should_verify());
-        votes.add(3, false);
+        votes.add(3, 1, false);
         assert!(votes.should_verify());
 
         // Verification consumes both buffers and stores the new verified set.
@@ -2209,20 +2354,21 @@ mod tests {
             .try_verify(|pending, verified| async move {
                 assert_eq!(pending, vec![1, 3]);
                 assert_eq!(verified, vec![2]);
-                (vec![1, 2], vec![])
+                (vec![1, 2], 1, vec![])
             })
             .await
             .unwrap();
         assert_eq!(batch, 2);
         assert!(invalid.is_empty());
         assert!(votes.pending().is_empty());
+        assert_eq!(votes.weights(), (0, 2));
         assert_eq!(votes.try_complete(), None);
 
         // At quorum, recovery completes the phase and consumes the votes.
-        votes.add(3, true);
+        votes.add(3, 1, true);
         assert_eq!(votes.try_complete(), Some(vec![1, 2, 3]));
         assert!(votes.is_complete());
-        votes.add(5, false);
+        votes.add(5, 1, false);
         assert!(votes.pending().is_empty());
         assert!(votes.verified().is_empty());
         assert!(
@@ -2237,11 +2383,37 @@ mod tests {
         assert!(votes.is_complete());
 
         // Network certificates complete without any votes.
-        let mut votes = Certification::<u64>::new(3, true);
-        votes.add(1, false);
+        let mut votes = Certification::<u64>::new(3, 3, true);
+        votes.add(1, 1, false);
         votes.complete();
         assert!(votes.is_complete());
         assert!(votes.pending().is_empty());
+    }
+
+    /// Retaining votes recomputes both cached weights from the surviving votes.
+    #[test]
+    fn test_retain_recomputes_weights() {
+        // Votes are (id, weight) pairs so the weight closure has something to read.
+        let weight = |vote: &(u8, u64)| vote.1;
+        let mut votes = Certification::<(u8, u64)>::new(5, 4, true);
+        votes.add((1, 1), 1, false);
+        votes.add((2, 3), 3, false);
+        votes.add((3, 1), 1, true);
+        votes.add((4, 3), 3, true);
+        assert_eq!(votes.weights(), (4, 4));
+
+        // Dropping the light votes leaves weight 3 in each buffer: not the stale 4 and not a
+        // count of one.
+        votes.retain(|vote| vote.1 == 3, weight);
+        assert_eq!(votes.pending(), &[(2, 3)]);
+        assert_eq!(votes.verified(), &[(4, 3)]);
+        assert_eq!(votes.weights(), (3, 3));
+
+        // Stale weight would complete here (4 + 1 >= 5); the recomputed weight does not.
+        votes.add((5, 1), 1, true);
+        assert_eq!(votes.try_complete(), None);
+        votes.add((6, 1), 1, true);
+        assert_eq!(votes.try_complete(), Some(vec![(4, 3), (5, 1), (6, 1)]));
     }
 
     /// The leader's late notarize must still set the proposal after the
@@ -2253,12 +2425,8 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
-        let quorum = count_quorum(schemes.len());
-        let mut verifier = Verifier::<S, Sha256>::new(
-            Round::new(Epoch::new(0), View::new(1)),
-            schemes[0].clone(),
-            quorum,
-        );
+        let mut verifier =
+            Verifier::<S, Sha256>::new(Round::new(Epoch::new(0), View::new(1)), schemes[0].clone());
         let round = Round::new(Epoch::new(0), View::new(1));
 
         verifier.record_certificate(Kind::Notarization);
@@ -2294,7 +2462,7 @@ mod tests {
         let quorum = count_quorum(schemes.len());
         let quorum_size = usize::try_from(quorum).expect("quorum exceeds usize::MAX");
         let round = Round::new(Epoch::new(0), View::new(1));
-        let mut verifier = Verifier::<_, Sha256>::new(round, schemes[0].clone(), quorum);
+        let mut verifier = Verifier::<_, Sha256>::new(round, schemes[0].clone());
 
         let leader_notarize = create_notarize(&schemes[0], round, View::new(0), 1);
         verifier.set_leader(leader_notarize.signer(), Some(&leader_notarize));
@@ -2313,11 +2481,8 @@ mod tests {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = ed25519::fixture(&mut rng, NAMESPACE, 5);
         let quorum = count_quorum(schemes.len());
-        let mut verifier = Verifier::<_, Sha256>::new(
-            Round::new(Epoch::new(0), View::new(1)),
-            schemes[0].clone(),
-            quorum,
-        );
+        let mut verifier =
+            Verifier::<_, Sha256>::new(Round::new(Epoch::new(0), View::new(1)), schemes[0].clone());
         let round = Round::new(Epoch::new(0), View::new(1));
 
         // Give every kind a pre-verified quorum

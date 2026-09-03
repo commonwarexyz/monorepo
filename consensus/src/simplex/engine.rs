@@ -2,6 +2,7 @@ use super::{
     actors::{batcher, resolver, voter},
     config::{Config, SkipPolicy},
     elector::{self, Elector as _},
+    metrics,
     types::{Activity, Context},
 };
 use crate::{
@@ -15,8 +16,9 @@ use commonware_parallel::Strategy;
 use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage, spawn_cell,
 };
+use commonware_utils::N3f1;
 use rand_core::CryptoRng;
-use tracing::debug;
+use tracing::{debug, info, warn};
 
 /// Instance of `simplex` consensus engine.
 pub struct Engine<
@@ -31,6 +33,7 @@ pub struct Engine<
     T: Strategy,
 > {
     context: ContextCell<E>,
+    _committee_metrics: metrics::CommitteeProfile,
 
     voter: voter::Actor<E, S, L::Elector, B, D, A, R, F>,
     voter_mailbox: voter::Mailbox<S, D>,
@@ -58,6 +61,7 @@ impl<
     pub fn new(mut context: E, cfg: Config<S, L, B, D, A, R, F, T>) -> Self {
         // Ensure configuration is valid
         cfg.assert(&mut context);
+        let profile = cfg.scheme.participants().profile::<N3f1>();
         let skip_budget = match cfg.skip {
             SkipPolicy::Disabled => 0,
             SkipPolicy::Enabled { budget, .. } => budget.resolve(cfg.scheme.participants().len()),
@@ -131,9 +135,36 @@ impl<
             },
         );
 
+        info!(
+            epoch = %cfg.epoch,
+            total_weight = profile.total_weight,
+            max_fault_weight = profile.max_fault_weight,
+            quorum_weight = profile.quorum_weight,
+            max_participant_weight = profile.max_weight,
+            minimum_quorum_cardinality = profile.minimum_quorum_cardinality,
+            "installed committee",
+        );
+        if profile.max_weight_reaches_quorum() {
+            warn!(
+                epoch = %cfg.epoch,
+                max_participant_weight = profile.max_weight,
+                quorum_weight = profile.quorum_weight,
+                "participant weight reaches quorum",
+            );
+        } else if profile.max_weight_exceeds_max_fault_weight() {
+            warn!(
+                epoch = %cfg.epoch,
+                max_participant_weight = profile.max_weight,
+                max_fault_weight = profile.max_fault_weight,
+                "participant weight exceeds maximum faulty weight",
+            );
+        }
+        let committee_metrics = metrics::CommitteeProfile::init(&context, cfg.epoch, profile);
+
         // Return the engine
         Self {
             context: ContextCell::new(context),
+            _committee_metrics: committee_metrics,
 
             voter,
             voter_mailbox,
