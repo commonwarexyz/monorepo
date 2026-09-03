@@ -226,15 +226,15 @@ mod tests {
         let mut buf = TrackingReadBuf::new(&[0x03, 0x01, 0x02, 0x03]);
         let value = Vec::<u8>::read_cfg(&mut buf, &((..).into(), ())).unwrap();
         assert_eq!(value, vec![1, 2, 3]);
-        assert_eq!(buf.copy_to_slice_calls, 1);
-        assert_eq!(buf.get_u8_calls, 1);
+        assert_eq!(buf.bulk_read_calls, 1);
+        assert_eq!(buf.byte_read_calls, 1);
 
         // Other element types still read one element at a time.
         let mut buf = TrackingReadBuf::new(&[0x03, 0x01, 0x02, 0x03]);
         let value = Vec::<Byte>::read_cfg(&mut buf, &((..).into(), ())).unwrap();
         assert_eq!(value, vec![Byte(1), Byte(2), Byte(3)]);
-        assert_eq!(buf.copy_to_slice_calls, 0);
-        assert_eq!(buf.get_u8_calls, 4);
+        assert_eq!(buf.bulk_read_calls, 0);
+        assert_eq!(buf.byte_read_calls, 4);
     }
 
     #[test]
