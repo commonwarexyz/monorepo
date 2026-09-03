@@ -8,6 +8,20 @@
 //! Compared to [`super::standard`], this variant makes more efficient usage of the network's bandwidth
 //! by spreading the load of block dissemination across all participants.
 //!
+//! # Committees
+//!
+//! The coding marshal supports committees with `4..=u16::MAX` participants when the coding scheme
+//! accepts the derived shard configuration. The marshal derives the minimum shard count by summing
+//! participant weights from greatest to least until the sum reaches the quorum weight minus the
+//! maximum faulty weight. For unsupported committees, the marshal declines to propose and rejects
+//! every payload.
+//!
+//! The threshold depends on absolute weight because fault bounds use integer rounding. For example,
+//! five equal weights of one require three shards, while five equal weights of two require two.
+//!
+//! The derived configuration is embedded in coding commitments, so changing the derivation requires
+//! a coordinated, drained upgrade. Rolling and mid-epoch activation are unsupported.
+//!
 //! # Components
 //!
 //! - [`crate::marshal::core::Actor`]: The unified marshal actor that orders finalized blocks,
@@ -69,7 +83,10 @@ mod tests {
             ancestry::BlockProvider,
             coding::{
                 Coding, Marshaled, MarshaledConfig, shards,
-                types::{CodedBlock, coding_config_for_participants, hash_context},
+                types::{
+                    CodedBlock, coding_config_for_committee, coding_config_for_participants,
+                    hash_context,
+                },
             },
             config::{Config, Start},
             core,
@@ -86,7 +103,11 @@ mod tests {
             resolver::handler,
         },
         simplex::{
-            Plan, scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Proposal,
+            Plan,
+            scheme::{
+                bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519 as simplex_ed25519,
+            },
+            types::Proposal,
         },
         types::{Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta, coding::Commitment},
     };
@@ -96,7 +117,7 @@ mod tests {
     use commonware_coding::{CodecConfig, Config as CodingConfig, ReedSolomon};
     use commonware_cryptography::{
         Committable, Digestible, Hasher,
-        certificate::{ConstantProvider, Verifier as _, mocks::Fixture},
+        certificate::{ConstantProvider, Scheme as _, Verifier as _, mocks::Fixture},
         sha256::Sha256,
     };
     use commonware_macros::{select, test_group, test_traced};
@@ -108,7 +129,8 @@ mod tests {
     };
     use commonware_storage::archive::immutable;
     use commonware_utils::{
-        NZU16, NZU64, NZUsize, channel::oneshot, sync::Mutex, vec::NonEmptyVec,
+        NZU16, NZU64, NZUsize, TryCollect, channel::oneshot, ordered::Committee, sync::Mutex,
+        vec::NonEmptyVec,
     };
     use std::{sync::Arc, time::Duration};
 
@@ -3542,6 +3564,100 @@ mod tests {
             mailbox.set_floor(finalization);
             context.sleep(Duration::from_secs(5)).await;
         })
+    }
+
+    #[test]
+    fn test_coding_check_payload_uses_weighted_config() {
+        let runner = deterministic::Runner::default();
+        runner.start(|mut context| async move {
+            let fixture = simplex_ed25519::fixture(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let committee = fixture
+                .participants
+                .iter()
+                .cloned()
+                .zip([4, 1, 1, 1])
+                .try_collect::<Committee<_>>()
+                .unwrap();
+            let scheme = simplex_ed25519::Scheme::verifier(NAMESPACE, committee);
+            let config =
+                coding_config_for_committee::<ReedSolomon<Sha256>, _>(scheme.participants())
+                    .unwrap();
+            let genesis = genesis_commitment();
+            let weighted =
+                Commitment::from((genesis.block(), genesis.root(), genesis.context(), config));
+
+            assert!(<TestCodingVariant as core::Variant>::check_payload(
+                &scheme, weighted
+            ));
+
+            // Four unit-weight validators commit to the count-based config, which this
+            // committee no longer accepts.
+            let unit = Commitment::from((
+                genesis.block(),
+                genesis.root(),
+                genesis.context(),
+                coding_config_for_participants(NUM_VALIDATORS as u16),
+            ));
+            assert!(!<TestCodingVariant as core::Variant>::check_payload(
+                &scheme, unit
+            ));
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_marshaled_unsupported_committee_skips_propose_and_rejects_verify() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, 3);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
+            let me = participants[0].clone();
+            let provider = ConstantProvider::new(schemes[0].clone());
+            let setup = CodingHarness::setup_validator(
+                context.child("validator").with_attribute("index", 0),
+                &mut oracle,
+                me.clone(),
+                provider.clone(),
+            )
+            .await;
+            let cfg = MarshaledConfig {
+                application: MockVerifyingApp::<CodingB, S>::new(),
+                marshal: setup.mailbox,
+                shards: setup.extra,
+                scheme_provider: provider,
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
+            let consensus_context = CodingCtx {
+                round: Round::new(Epoch::zero(), View::new(1)),
+                leader: me,
+                parent: (View::zero(), genesis_commitment()),
+            };
+
+            assert!(
+                marshaled
+                    .propose(consensus_context.clone())
+                    .await
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                marshaled
+                    .verify(consensus_context, genesis_commitment())
+                    .await
+                    .await,
+                Ok(false)
+            );
+        });
     }
 
     /// When the scheme provider has no entry for the current epoch,

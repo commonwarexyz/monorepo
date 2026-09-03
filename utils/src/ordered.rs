@@ -329,35 +329,35 @@ impl<P: Ord> Committee<P> {
         Ok(sum)
     }
 
-    /// Returns quorum diagnostics for the selected fault model.
-    pub fn profile<M: Faults>(&self) -> Profile {
-        let max_faults = self.max_fault_weight::<M>();
-        let quorum = self.quorum_weight::<M>();
+    /// Returns the fewest participants whose combined weight reaches `target`.
+    ///
+    /// Returns `None` if `target` exceeds the total committee weight.
+    pub fn minimum_cardinality(&self, target: u64) -> Option<u32> {
+        if target > self.total_weight {
+            return None;
+        }
         let mut weights = self.weights().to_vec();
         weights.sort_unstable_by(|left, right| right.cmp(left));
-        let max_weight = weights[0];
         let mut accumulated = 0u64;
-        let mut minimum_quorum_cardinality = 0u32;
-        for weight in weights {
-            accumulated = accumulated
-                .checked_add(weight)
-                .expect("committee weights cannot exceed total weight");
-            minimum_quorum_cardinality += 1;
-            if accumulated >= quorum {
-                break;
-            }
+        let mut cardinality = 0u32;
+        while accumulated < target {
+            accumulated += weights[cardinality as usize];
+            cardinality += 1;
         }
-        assert!(
-            accumulated >= quorum,
-            "the full committee must reach quorum"
-        );
+        Some(cardinality)
+    }
 
+    /// Returns quorum diagnostics for the selected fault model.
+    pub fn profile<M: Faults>(&self) -> Profile {
+        let quorum = self.quorum_weight::<M>();
         Profile {
             total_weight: self.total_weight,
-            max_fault_weight: max_faults,
+            max_fault_weight: self.max_fault_weight::<M>(),
             quorum_weight: quorum,
-            max_weight,
-            minimum_quorum_cardinality,
+            max_weight: *self.weights().iter().max().expect("committee is not empty"),
+            minimum_quorum_cardinality: self
+                .minimum_cardinality(quorum)
+                .expect("the full committee reaches quorum"),
         }
     }
 }
@@ -1138,6 +1138,16 @@ mod test {
         assert_eq!(profile.quorum_weight, 10);
         assert_eq!(profile.max_weight, 7);
         assert_eq!(profile.minimum_quorum_cardinality, 2);
+    }
+
+    #[test]
+    fn test_minimum_cardinality_takes_heaviest_first() {
+        let committee = Committee::try_from_iter([('c', 7), ('a', 2), ('b', 5)]).unwrap();
+        assert_eq!(committee.minimum_cardinality(0), Some(0));
+        assert_eq!(committee.minimum_cardinality(7), Some(1));
+        assert_eq!(committee.minimum_cardinality(8), Some(2));
+        assert_eq!(committee.minimum_cardinality(14), Some(3));
+        assert_eq!(committee.minimum_cardinality(15), None);
     }
 
     #[test]
