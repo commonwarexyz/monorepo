@@ -1,7 +1,7 @@
 //! Proposal selection, view-message collection, and deterministic view exits.
 
 use super::{
-    Artifact, ArtifactId, ChainProposalPass, ChainProposalProgress, ChainState, Observation,
+    Artifact, ArtifactId, ChainState, Observation,
     Profile, ProposalRequest, Role, SignRequest, ViewNullification, ViewSnapshot, ViewStance,
     ViewTransition, VoteBodyPass, VoteBodyProgress, VoteRequest,
     algebra::{Tips, ValidatedVqc, validate_vqc, validate_vqc_votes},
@@ -48,7 +48,6 @@ enum RegularSignPass<V: Variant, D: Digest> {
         parent: ParentRecord<V, D>,
         attach_parent: bool,
         next_chain: usize,
-        current: Option<ChainProposalPass<V, D>>,
         proposals: Vec<crate::multimmit::types::ChainProposal<V, D>>,
     },
 }
@@ -1290,43 +1289,24 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
                     parent,
                     attach_parent,
                     next_chain,
-                    current,
                     proposals,
                 } => {
-                    if current.is_none() {
-                        if let Some(tip) = parent.tips.blocks().get(*next_chain).copied() {
-                            *current = Some(
-                                chain
-                                    .begin_proposal_pass::<H>(profile, tip)
-                                    .map_err(|_| ViewError::Chain)?,
-                            );
-                            None
-                        } else {
-                            Some(Self::finish_proposal_request::<H>(
-                                profile,
-                                *view,
-                                parent,
-                                *attach_parent,
-                                proposals,
-                            )?)
-                        }
+                    if let Some(tip) = parent.tips.blocks().get(*next_chain).copied() {
+                        proposals.push(
+                            chain
+                                .propose_chain::<H>(profile, tip)
+                                .map_err(|_| ViewError::Chain)?,
+                        );
+                        *next_chain += 1;
+                        None
                     } else {
-                        match chain
-                            .resume_proposal_pass(
-                                current
-                                    .as_mut()
-                                    .expect("the current proposal pass was checked above"),
-                            )
-                            .map_err(|_| ViewError::Chain)?
-                        {
-                            ChainProposalProgress::Pending => None,
-                            ChainProposalProgress::Complete(proposal) => {
-                                proposals.push(proposal);
-                                *next_chain += 1;
-                                *current = None;
-                                None
-                            }
-                        }
+                        Some(Self::finish_proposal_request::<H>(
+                            profile,
+                            *view,
+                            parent,
+                            *attach_parent,
+                            proposals,
+                        )?)
                     }
                 }
             };
@@ -1449,7 +1429,6 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
             parent,
             attach_parent,
             next_chain: 0,
-            current: None,
             proposals: Vec::with_capacity(self.config.chains()),
         }))
     }
