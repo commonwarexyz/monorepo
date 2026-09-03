@@ -19,7 +19,7 @@ use crate::{
             BlockRef, CertificateId, ChainId, LeaderBlock, Lqc, Position, Vote, VoteBody, Vqc,
         },
     },
-    types::{Attributable, Participant, Round, View},
+    types::{Attributable, Height, Participant, Round, View},
 };
 use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
 use std::{
@@ -615,6 +615,7 @@ pub struct FinalityFact<D: Digest> {
     parent: CertificateId<D>,
     votes: usize,
     blocks: Vec<BlockRef<D>>,
+    proposed: Vec<Height>,
     positions: Vec<Position>,
     settled: Vec<bool>,
 }
@@ -629,6 +630,7 @@ impl<D: Digest> FinalityFact<D> {
         parent: CertificateId<D>,
         votes: usize,
         blocks: Vec<BlockRef<D>>,
+        proposed: Vec<Height>,
         positions: Vec<Position>,
         settled: Vec<bool>,
     ) -> Self {
@@ -639,6 +641,7 @@ impl<D: Digest> FinalityFact<D> {
             parent,
             votes,
             blocks,
+            proposed,
             positions,
             settled,
         }
@@ -672,6 +675,11 @@ impl<D: Digest> FinalityFact<D> {
     /// Returns one final block per chain in canonical chain order.
     pub fn blocks(&self) -> &[BlockRef<D>] {
         &self.blocks
+    }
+
+    /// Returns one proposed tip height per chain in canonical chain order.
+    pub fn proposed(&self) -> &[Height] {
+        &self.proposed
     }
 
     /// Returns one final proposal position per chain in canonical chain order.
@@ -2343,6 +2351,7 @@ fn finality_fact<V: Variant, D: Digest>(
         parent: leader.parent(),
         votes,
         blocks: tips.blocks().to_vec(),
+        proposed: leader.proposed_heights(),
         positions,
         settled,
     })

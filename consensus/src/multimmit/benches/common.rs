@@ -110,7 +110,7 @@ impl<V: Variant> Fixture<V> {
             .collect();
         let verifier = Scheme::verifier(&epoch_config, roster, da, nullification).unwrap();
         let tips = epoch_config.genesis().tips().to_vec();
-        let parent_history = TipRecord::new(
+        let parent_history = TipRecord::at_tips(
             genesis_history::<Sha256>(epoch_config.genesis()),
             tips.clone(),
         )

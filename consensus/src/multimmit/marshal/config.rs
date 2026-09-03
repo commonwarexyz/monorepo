@@ -212,7 +212,7 @@ pub enum Start<V: Variant, D: Digest> {
     /// Start after the synthetic height-zero tips.
     Genesis(EpochGenesis<D>),
     /// Start after a state sync authenticated by the caller.
-    Floor(Floor<V, D>),
+    Floor(Box<Floor<V, D>>),
 }
 
 /// Marshal configuration for one Multimmit epoch.
@@ -629,6 +629,7 @@ where
                         .map_err(|error| error.to_string())?;
                 }
                 Start::Floor(floor) => {
+                    let floor = *floor;
                     let id = floor.proof.id::<H>();
                     let lqc_index = floor.proof.view().get();
                     let history = floor.history.commitment::<H>();
@@ -1077,7 +1078,7 @@ mod tests {
             )
             .unwrap();
             let record =
-                Arc::new(TipRecord::new(initial.history(), genesis.tips().to_vec()).unwrap());
+                Arc::new(TipRecord::at_tips(initial.history(), genesis.tips().to_vec()).unwrap());
             let commitment = record.commitment::<Sha256>();
             let checkpoint = Checkpoint::new(
                 epoch,
@@ -1159,7 +1160,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let committee = Committee::<MinPk>::new(8, 6, Limits::new(4, 0).unwrap());
             let genesis = committee.config.genesis();
-            let history = TipRecord::new(
+            let history = TipRecord::at_tips(
                 protocol_genesis_history::<Sha256>(genesis),
                 genesis.tips().to_vec(),
             )
@@ -1170,12 +1171,12 @@ mod tests {
                 TestConfig::new(
                     committee.config.epoch(),
                     NonZeroU32::new(committee.codec().chains() as u32).unwrap(),
-                    Start::Floor(Floor::new(
+                    Start::Floor(Box::new(Floor::new(
                         generation,
                         proof.clone(),
                         history.clone(),
                         genesis.tips().to_vec(),
-                    )),
+                    ))),
                     "marshal_trusted_floor_test".into(),
                     committee.codec(),
                     (),
@@ -1208,7 +1209,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let committee = Committee::<MinPk>::new(8, 6, Limits::new(4, 0).unwrap());
             let genesis = committee.config.genesis();
-            let history = TipRecord::new(
+            let history = TipRecord::at_tips(
                 protocol_genesis_history::<Sha256>(genesis),
                 genesis.tips().to_vec(),
             )
@@ -1282,12 +1283,12 @@ mod tests {
             let config = TestConfig::new(
                 committee.config.epoch(),
                 NonZeroU32::new(committee.codec().chains() as u32).unwrap(),
-                Start::Floor(Floor::new(
+                Start::Floor(Box::new(Floor::new(
                     8,
                     replacement,
                     history.clone(),
                     genesis.tips().to_vec(),
-                )),
+                ))),
                 prefix.into(),
                 committee.codec(),
                 (),

@@ -644,7 +644,11 @@ impl<D: Digest> HistoryOrder<D> {
         let mut base = base.to_vec();
         let mut slots = VecDeque::new();
         for link in links {
-            slots.extend(Horizontal::new(&base, link.record.tips())?);
+            slots.extend(Horizontal::new(
+                &base,
+                link.record.tips(),
+                link.record.proposed(),
+            )?);
             base = link.record.tips().to_vec();
         }
         Ok(Self { slots })
@@ -1083,6 +1087,7 @@ where
             let Ok(mut sweep) = FinalSweep::new(
                 self.state.ordered(),
                 fact.blocks().to_vec(),
+                fact.proposed(),
                 fact.settled().to_vec(),
             ) else {
                 continue;
@@ -1274,7 +1279,11 @@ where
                     "tip-history opening does not extend its recovery window",
                 ));
             }
-            let opening_outputs = Self::opening_output_count(&ordered, link.record.tips())?;
+            let opening_outputs = Self::opening_output_count(
+                &ordered,
+                link.record.tips(),
+                link.record.proposed(),
+            )?;
             let window_outputs = outputs
                 .checked_add(opening_outputs)
                 .ok_or(Error::OutputExhausted)?;
@@ -1306,8 +1315,9 @@ where
     fn opening_output_count(
         base: &[BlockRef<H::Digest>],
         target: &[BlockRef<H::Digest>],
+        proposed: &[Height],
     ) -> Result<u64, Error> {
-        drop(Horizontal::new(base, target)?);
+        drop(Horizontal::new(base, target, proposed)?);
         base.iter()
             .zip(target)
             .try_fold(0u64, |total, (base, target)| {
@@ -1474,7 +1484,11 @@ where
         batch: &mut PublicationBatch<H, V, B>,
     ) -> Result<(), Error> {
         let emitted = self.state.emitted().to_vec();
-        let mut stream = Horizontal::new(self.state.ordered(), link.record.tips())?;
+        let mut stream = Horizontal::new(
+            self.state.ordered(),
+            link.record.tips(),
+            link.record.proposed(),
+        )?;
         let common = self.stage(&stream, link.record.tips(), &emitted).await?;
         self.state
             .validate_opening::<H>(link.commitment, &link.record, &common)?;
@@ -3031,7 +3045,7 @@ mod tests {
     fn genesis_record(committee: &Committee<MinPk>) -> Arc<TipRecord<Sha256Digest>> {
         let genesis = committee.config.genesis();
         Arc::new(
-            TipRecord::new(genesis_history::<Sha256>(genesis), genesis.tips().to_vec()).unwrap(),
+            TipRecord::at_tips(genesis_history::<Sha256>(genesis), genesis.tips().to_vec()).unwrap(),
         )
     }
 
@@ -3267,7 +3281,7 @@ mod tests {
                 .unwrap();
             assert_eq!(waiters.lock().len(), 2);
 
-            let record = Arc::new(TipRecord::new(history, vec![tip(&blocks)]).unwrap());
+            let record = Arc::new(TipRecord::at_tips(history, vec![tip(&blocks)]).unwrap());
             let commitment = record.commitment::<Sha256>();
             let mut batch = PublicationBatch::new(actor.max_commit_outputs, 0);
             let mut opening =
@@ -3324,7 +3338,7 @@ mod tests {
             ];
             let tips = blocks.iter().map(|blocks| tip(blocks)).collect();
             let history = digest(b"history", 0);
-            let record = Arc::new(TipRecord::new(history, tips).unwrap());
+            let record = Arc::new(TipRecord::at_tips(history, tips).unwrap());
             let commitment = record.commitment::<Sha256>();
             let mut actor = actor(
                 checkpoint(epoch, history, bases.clone(), bases),
@@ -3368,7 +3382,7 @@ mod tests {
                 chain(epoch, bases[2], 3),
             ];
             let record = Arc::new(
-                TipRecord::new(
+                TipRecord::at_tips(
                     digest(b"local batch history", 0),
                     blocks.iter().map(|blocks| tip(blocks)).collect(),
                 )
@@ -3454,7 +3468,7 @@ mod tests {
             let base = base(0, 0);
             let blocks = vec![chain(epoch, base, 3)];
             let record = Arc::new(
-                TipRecord::new(digest(b"cached history", 0), vec![tip(&blocks[0])]).unwrap(),
+                TipRecord::at_tips(digest(b"cached history", 0), vec![tip(&blocks[0])]).unwrap(),
             );
             let commitment = record.commitment::<Sha256>();
             let mut actor = actor(
@@ -3507,7 +3521,7 @@ mod tests {
             let base = base(0, 0);
             let blocks = vec![chain(epoch, base, 3)];
             let record = Arc::new(
-                TipRecord::new(digest(b"parallel body history", 0), vec![tip(&blocks[0])]).unwrap(),
+                TipRecord::at_tips(digest(b"parallel body history", 0), vec![tip(&blocks[0])]).unwrap(),
             );
             let commitment = record.commitment::<Sha256>();
             let mut actor = actor(
@@ -3543,7 +3557,7 @@ mod tests {
                 .map(|base| chain(epoch, base, 3))
                 .collect::<Vec<_>>();
             let record = Arc::new(
-                TipRecord::new(
+                TipRecord::at_tips(
                     digest(b"interleaved range history", 0),
                     blocks.iter().map(|blocks| tip(blocks)).collect(),
                 )
@@ -3574,7 +3588,7 @@ mod tests {
             let base = base(0, 0);
             let blocks = vec![chain(epoch, base, 5)];
             let record = Arc::new(
-                TipRecord::new(digest(b"split range history", 0), vec![tip(&blocks[0])]).unwrap(),
+                TipRecord::at_tips(digest(b"split range history", 0), vec![tip(&blocks[0])]).unwrap(),
             );
             let commitment = record.commitment::<Sha256>();
             let mut actor = actor(
@@ -3603,7 +3617,7 @@ mod tests {
             let base = base(0, 0);
             let blocks = vec![chain(epoch, base, 5)];
             let record = Arc::new(
-                TipRecord::new(digest(b"short range history", 0), vec![tip(&blocks[0])]).unwrap(),
+                TipRecord::at_tips(digest(b"short range history", 0), vec![tip(&blocks[0])]).unwrap(),
             );
             let commitment = record.commitment::<Sha256>();
             let mut actor = actor(
@@ -3631,7 +3645,7 @@ mod tests {
             let base = base(0, 0);
             let blocks = vec![chain(epoch, base, 40)];
             let record = Arc::new(
-                TipRecord::new(digest(b"custody page history", 0), vec![tip(&blocks[0])]).unwrap(),
+                TipRecord::at_tips(digest(b"custody page history", 0), vec![tip(&blocks[0])]).unwrap(),
             );
             let commitment = record.commitment::<Sha256>();
             let mut actor = actor(
@@ -3705,7 +3719,7 @@ mod tests {
             let base = base(0, 0);
             let blocks = vec![chain(epoch, base, OUTPUTS)];
             let record = Arc::new(
-                TipRecord::new(digest(b"small custody window", 0), vec![tip(&blocks[0])]).unwrap(),
+                TipRecord::at_tips(digest(b"small custody window", 0), vec![tip(&blocks[0])]).unwrap(),
             );
             let commitment = record.commitment::<Sha256>();
             let mut actor = actor_with_backfill(
@@ -3737,7 +3751,7 @@ mod tests {
             let base = base(0, 0);
             let blocks = vec![chain(epoch, base, OUTPUTS)];
             let record = Arc::new(
-                TipRecord::new(digest(b"custody window history", 0), vec![tip(&blocks[0])])
+                TipRecord::at_tips(digest(b"custody window history", 0), vec![tip(&blocks[0])])
                     .unwrap(),
             );
             let commitment = record.commitment::<Sha256>();
@@ -3772,7 +3786,7 @@ mod tests {
             let base = base(0, 0);
             let blocks = vec![chain(epoch, base, OUTPUTS)];
             let record = Arc::new(
-                TipRecord::new(digest(b"sliding custody history", 0), vec![tip(&blocks[0])])
+                TipRecord::at_tips(digest(b"sliding custody history", 0), vec![tip(&blocks[0])])
                     .unwrap(),
             );
             let commitment = record.commitment::<Sha256>();
@@ -3806,7 +3820,7 @@ mod tests {
             let base = base(0, 0);
             let blocks = vec![chain(epoch, base, OUTPUTS)];
             let record = Arc::new(
-                TipRecord::new(
+                TipRecord::at_tips(
                     digest(b"batched custody refill history", 0),
                     vec![tip(&blocks[0])],
                 )
@@ -3863,7 +3877,7 @@ mod tests {
             let mut parent = genesis_history::<Sha256>(genesis);
             let mut batch = PublicationBatch::new(BATCH, 0);
             for _ in 0..OPENINGS {
-                let record = Arc::new(TipRecord::new(parent, genesis.tips().to_vec()).unwrap());
+                let record = Arc::new(TipRecord::at_tips(parent, genesis.tips().to_vec()).unwrap());
                 let commitment = record.commitment::<Sha256>();
                 actor
                     .process_opening(HistoryLink { commitment, record }, &mut batch)
@@ -3886,10 +3900,10 @@ mod tests {
             let base = base(0, 0);
             let blocks = vec![chain(epoch, base, 2)];
             let history = digest(b"cross-opening history", 0);
-            let first = Arc::new(TipRecord::new(history, vec![blocks[0][0].reference()]).unwrap());
+            let first = Arc::new(TipRecord::at_tips(history, vec![blocks[0][0].reference()]).unwrap());
             let first_id = first.commitment::<Sha256>();
             let second =
-                Arc::new(TipRecord::new(first_id, vec![blocks[0][1].reference()]).unwrap());
+                Arc::new(TipRecord::at_tips(first_id, vec![blocks[0][1].reference()]).unwrap());
             let second_id = second.commitment::<Sha256>();
             let proof = lqc_with_history(&committee, 1, second_id, blocks[0][1].reference());
             let id = proof.id::<Sha256>();
@@ -3927,10 +3941,10 @@ mod tests {
             let blocks = vec![chain(epoch, base, 2)];
             let history = digest(b"boundary history", 0);
             let fork = BlockRef::new(ChainId::new(0), Height::new(1), digest(b"fork", 1));
-            let first = Arc::new(TipRecord::new(history, vec![fork]).unwrap());
+            let first = Arc::new(TipRecord::at_tips(history, vec![fork]).unwrap());
             let first_id = first.commitment::<Sha256>();
             let second =
-                Arc::new(TipRecord::new(first_id, vec![blocks[0][1].reference()]).unwrap());
+                Arc::new(TipRecord::at_tips(first_id, vec![blocks[0][1].reference()]).unwrap());
             let second_id = second.commitment::<Sha256>();
             let proof = lqc_with_history(&committee, 1, second_id, blocks[0][1].reference());
             let id = proof.id::<Sha256>();
@@ -3975,7 +3989,7 @@ mod tests {
             let mut parent = history;
             let mut batch = PublicationBatch::new(BATCH, 0);
             for block in &blocks {
-                let record = Arc::new(TipRecord::new(parent, vec![block.reference()]).unwrap());
+                let record = Arc::new(TipRecord::at_tips(parent, vec![block.reference()]).unwrap());
                 let commitment = record.commitment::<Sha256>();
                 actor
                     .process_opening(HistoryLink { commitment, record }, &mut batch)
@@ -3999,7 +4013,7 @@ mod tests {
             let base = base(0, 10_000);
             let blocks = vec![chain(epoch, base, GAP)];
             let record = Arc::new(
-                TipRecord::new(digest(b"long history", 0), vec![tip(&blocks[0])]).unwrap(),
+                TipRecord::at_tips(digest(b"long history", 0), vec![tip(&blocks[0])]).unwrap(),
             );
             let commitment = record.commitment::<Sha256>();
             let mut actor = actor(
@@ -4040,7 +4054,7 @@ mod tests {
             let base = base(0, 0);
             let blocks = vec![chain(epoch, base, 5)];
             let record = Arc::new(
-                TipRecord::new(digest(b"byte bound history", 0), vec![tip(&blocks[0])]).unwrap(),
+                TipRecord::at_tips(digest(b"byte bound history", 0), vec![tip(&blocks[0])]).unwrap(),
             );
             let commitment = record.commitment::<Sha256>();
             let mut actor = actor(
@@ -4066,7 +4080,7 @@ mod tests {
             let committee = committee(14, 2, Limits::new(2, 1).unwrap());
             let genesis = committee.config.genesis();
             let parent = genesis_history::<Sha256>(genesis);
-            let record = Arc::new(TipRecord::new(parent, genesis.tips().to_vec()).unwrap());
+            let record = Arc::new(TipRecord::at_tips(parent, genesis.tips().to_vec()).unwrap());
             let commitment = record.commitment::<Sha256>();
             let proof = Arc::new(committee.lqc(1));
             assert_eq!(proof.leader().history(), commitment);
@@ -4104,7 +4118,7 @@ mod tests {
             let blocks = vec![chain(epoch, base, 4)];
             let emitted = tip(&blocks[0]);
             let history = digest(b"restart history", 0);
-            let record = Arc::new(TipRecord::new(history, vec![emitted]).unwrap());
+            let record = Arc::new(TipRecord::at_tips(history, vec![emitted]).unwrap());
             let commitment = record.commitment::<Sha256>();
             let mut actor = actor(
                 checkpoint(epoch, history, vec![base], vec![emitted]),
@@ -4129,7 +4143,7 @@ mod tests {
     ) {
         let genesis = committee.config.genesis();
         let parent = genesis_history::<Sha256>(genesis);
-        let history = Arc::new(TipRecord::new(parent, genesis.tips().to_vec()).unwrap());
+        let history = Arc::new(TipRecord::at_tips(parent, genesis.tips().to_vec()).unwrap());
         let anchor = Arc::new(committee.lqc(1));
         let current = checkpoint(
             genesis.epoch(),
@@ -4306,7 +4320,7 @@ mod tests {
             );
             let genesis_record = genesis_record(&committee);
             let parent_record = Arc::new(
-                TipRecord::new(parent.leader().history(), genesis.tips().to_vec()).unwrap(),
+                TipRecord::at_tips(parent.leader().history(), genesis.tips().to_vec()).unwrap(),
             );
             assert_eq!(
                 parent_record.commitment::<Sha256>(),
@@ -4472,7 +4486,10 @@ mod tests {
 
             actor.run(receiver).await.unwrap();
 
-            assert_eq!(*selected.lock(), vec![first_id, second_id]);
+            // Same-view proofs are resolved together in certificate-id order.
+            let mut expected = vec![first_id, second_id];
+            expected.sort();
+            assert_eq!(*selected.lock(), expected);
         });
     }
 

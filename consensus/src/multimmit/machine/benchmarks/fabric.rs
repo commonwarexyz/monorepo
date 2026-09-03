@@ -148,7 +148,7 @@ pub(super) fn observer(protocol: Config<Digest>) -> Profile<Sha256, MinPk> {
 
 /// Returns the commitment to the synthetic genesis history and tips.
 pub(super) fn genesis_anchor(protocol: &Config<Digest>) -> Digest {
-    TipRecord::new(
+    TipRecord::at_tips(
         genesis_history::<Sha256>(protocol.genesis()),
         protocol.genesis().tips().to_vec(),
     )

@@ -405,7 +405,7 @@ mod tests {
 
     fn link(marker: u64) -> HistoryLink<Sha256> {
         let record = Arc::new(
-            TipRecord::new(
+            TipRecord::at_tips(
                 digest(b"parent", marker),
                 vec![BlockRef::new(
                     ChainId::new(0),

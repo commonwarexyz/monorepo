@@ -241,7 +241,8 @@ Marshal is split by ownership rather than run as one protocol loop:
   through `commonware-resolver`. Producer wire keys contain only chain and header digest to avoid
   redundant bytes; request completion still compares the complete `BlockRef`, including height.
 - `Synchronizer` walks recursive history commitments and producer ancestry through disk-backed
-  scratch journals, applies the paper's offset-major horizontal and final sweeps, and asks Catalog
+  scratch journals, applies the offset-major horizontal and final sweeps in two passes (proposed region, then
+  extension region), and asks Catalog
   to commit bounded batches of adjacent history openings and dense rows. Producer ancestry is
   serial within each chain and concurrent across chains up to `backfill_concurrency`; a stalled
   chain therefore does not block another chain. Once exact block references are known, missing
@@ -640,7 +641,7 @@ Marshal checks a separate invariant set after every durable commit and recovery:
    and acknowledged output are one canonical checkpoint. Every frontier is chain ordered and
    monotone within its generation.
 3. Dense outputs are contiguous by `OutputIndex`; each index names one complete transaction block.
-   History is processed oldest first, and each horizontal sweep is offset major across chains.
+   History is processed oldest first, and each horizontal sweep is offset major across chains, visiting every chain's proposed region before any chain's extension region so that an extension endorsed by only part of the quorum defers no proposed block.
 4. Evidence, openings, blocks, and output rows are durable before checkpoint exposure. An ordinary
    checkpoint carries its exact remaining temporary-cleanup obligation, which startup completes
    before serving reads. Delivery advances only through a contiguous FIFO prefix whose `Exact`

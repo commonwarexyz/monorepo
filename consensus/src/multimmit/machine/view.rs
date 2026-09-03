@@ -15,7 +15,7 @@ use crate::{
             SignedLeaderBlock, TipRecord, ViewMessage, Vote, VoteBody, Vqc, genesis_history,
         },
     },
-    types::{Attributable, Participant, Round, View},
+    types::{Attributable, Height, Participant, Round, View},
 };
 use bytes::Bytes;
 use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
@@ -71,6 +71,8 @@ struct ParentRecord<V: Variant, D: Digest> {
     canonical: Bytes,
     certificate: Option<Arc<Artifact<V, D>>>,
     tips: Tips<D>,
+    /// Each chain's proposed tip height in the view this record's V-QC certified.
+    proposed: Vec<Height>,
     messages: usize,
 }
 
@@ -716,6 +718,7 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
             history: genesis_history::<H>(genesis),
             canonical: Bytes::new(),
             certificate: None,
+            proposed: genesis.tips().iter().map(|tip| tip.height()).collect(),
             tips,
             messages: 0,
         };
@@ -808,7 +811,11 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
             .get(&leader.parent())
             .ok_or(ViewError::MissingParent)?;
         let history = Arc::new(
-            TipRecord::new(parent.history, parent.tips.blocks().to_vec())
+            TipRecord::new(
+                parent.history,
+                parent.tips.blocks().to_vec(),
+                parent.proposed.clone(),
+            )
                 .map_err(|_| ViewError::Proposal)?,
         );
         (history.commitment::<H>() == leader.history())
@@ -1469,7 +1476,11 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
         let block = LeaderBlock::new(
             Round::new(profile.protocol().epoch(), view),
             parent.id,
-            TipRecord::new(parent.history, parent.tips.blocks().to_vec())
+            TipRecord::new(
+                parent.history,
+                parent.tips.blocks().to_vec(),
+                parent.proposed.clone(),
+            )
                 .map_err(|_| ViewError::Proposal)?
                 .commitment::<H>(),
             proposals.to_vec(),
@@ -2780,6 +2791,7 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
             history: certificate.leader().history(),
             canonical,
             certificate: Some(Arc::clone(artifact)),
+            proposed: certificate.leader().proposed_heights(),
             tips,
             messages: certificate.tally().signers().count()
                 + certificate.novoters().count()
@@ -2857,7 +2869,11 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
         if block.proposals().len() != parent.tips.blocks().len() {
             return Ok(false);
         }
-        let history = TipRecord::new(parent.history, parent.tips.blocks().to_vec())
+        let history = TipRecord::new(
+                parent.history,
+                parent.tips.blocks().to_vec(),
+                parent.proposed.clone(),
+            )
             .map_err(|_| ViewError::Proposal)?;
         if history.commitment::<H>() != block.history() {
             return Ok(false);

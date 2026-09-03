@@ -574,6 +574,7 @@ mod tests {
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
+                Vec::new(),
             )
         };
         let mut overflow = VecDeque::new();
@@ -609,6 +610,7 @@ mod tests {
                 Sha256::hash(&[b"leader"]),
                 CertificateId::new(Sha256::hash(&[b"parent"])),
                 votes,
+                Vec::new(),
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),

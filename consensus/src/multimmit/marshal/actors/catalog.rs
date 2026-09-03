@@ -6107,7 +6107,7 @@ mod tests {
                 spawn_catalog(first_config, context.child("first_open")).await;
             let current = client.checkpoint().await.unwrap();
             let record = Arc::new(
-                TipRecord::new(
+                TipRecord::at_tips(
                     current.history(),
                     committee.config.genesis().tips().to_vec(),
                 )
@@ -7030,7 +7030,7 @@ mod tests {
                     spawn_catalog(configure(), delayed.child("catalog")).await;
                 let current = client.checkpoint().await.unwrap();
                 let record = Arc::new(
-                    TipRecord::new(
+                    TipRecord::at_tips(
                         current.history(),
                         committee.config.genesis().tips().to_vec(),
                     )
@@ -7283,11 +7283,11 @@ mod tests {
             );
             let genesis = committee.config.genesis();
             let base = Arc::new(
-                TipRecord::new(genesis_history::<Sha256>(genesis), genesis.tips().to_vec())
+                TipRecord::at_tips(genesis_history::<Sha256>(genesis), genesis.tips().to_vec())
                     .unwrap(),
             );
             let record = Arc::new(
-                TipRecord::new(base.commitment::<Sha256>(), genesis.tips().to_vec()).unwrap(),
+                TipRecord::at_tips(base.commitment::<Sha256>(), genesis.tips().to_vec()).unwrap(),
             );
             let history = record.commitment::<Sha256>();
             let parent = committee.vqc(3);
@@ -7367,10 +7367,10 @@ mod tests {
                 limits,
             );
             let genesis = committee.config.genesis();
-            let base = TipRecord::new(genesis_history::<Sha256>(genesis), genesis.tips().to_vec())
+            let base = TipRecord::at_tips(genesis_history::<Sha256>(genesis), genesis.tips().to_vec())
                 .unwrap();
             let record = Arc::new(
-                TipRecord::new(base.commitment::<Sha256>(), genesis.tips().to_vec()).unwrap(),
+                TipRecord::at_tips(base.commitment::<Sha256>(), genesis.tips().to_vec()).unwrap(),
             );
             let history = record.commitment::<Sha256>();
             let parent = committee.vqc(3);
@@ -7462,7 +7462,7 @@ mod tests {
             );
             let genesis = committee.config.genesis();
             let record = Arc::new(
-                TipRecord::new(genesis_history::<Sha256>(genesis), genesis.tips().to_vec())
+                TipRecord::at_tips(genesis_history::<Sha256>(genesis), genesis.tips().to_vec())
                     .unwrap(),
             );
             let history = record.commitment::<Sha256>();
@@ -7572,7 +7572,7 @@ mod tests {
             let genesis = committee.config.genesis();
             let initial_history = genesis_history::<Sha256>(genesis);
             let record =
-                Arc::new(TipRecord::new(initial_history, genesis.tips().to_vec()).unwrap());
+                Arc::new(TipRecord::at_tips(initial_history, genesis.tips().to_vec()).unwrap());
             let history = record.commitment::<Sha256>();
             let proof = Arc::new(committee.lqc(3));
             let alternate_proof = Arc::new(alternate.lqc(3));
@@ -7642,7 +7642,7 @@ mod tests {
                         proof_id,
                         proof.clone(),
                         Arc::new(
-                            TipRecord::new(
+                            TipRecord::at_tips(
                                 Sha256::hash(&[b"wrong history parent"]),
                                 genesis.tips().to_vec(),
                             )
@@ -7709,7 +7709,7 @@ mod tests {
                 Some(OutputIndex::ZERO),
             );
             let stale_record = Arc::new(
-                TipRecord::new(
+                TipRecord::at_tips(
                     Sha256::hash(&[b"stale pending history"]),
                     genesis.tips().to_vec(),
                 )
@@ -7880,7 +7880,7 @@ mod tests {
             );
             let floor_id = floor_proof.id::<Sha256>();
             let floor_record = Arc::new(
-                TipRecord::new(history, committee.config.genesis().tips().to_vec()).unwrap(),
+                TipRecord::at_tips(history, committee.config.genesis().tips().to_vec()).unwrap(),
             );
             let floor_history = floor_record.commitment::<Sha256>();
             assert_eq!(floor_proof.leader().history(), floor_history);

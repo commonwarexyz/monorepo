@@ -256,7 +256,7 @@ impl Fixture {
                 .unwrap()
             })
             .collect::<Vec<_>>();
-        let history = TipRecord::new(
+        let history = TipRecord::at_tips(
             genesis_history::<Sha256>(protocol.genesis()),
             genesis_tips.clone(),
         )

@@ -2501,8 +2501,8 @@ mod tests {
     fn compact_segments_require_exact_linked_ancestry() {
         let committee = Committee::<MinPk>::new(41, 6, Limits::new(1, 0).unwrap());
         let tips = committee.config.genesis().tips().to_vec();
-        let oldest = TipRecord::new(Sha256::hash(&[b"history floor"]), tips.clone()).unwrap();
-        let newest = TipRecord::new(oldest.commitment::<Sha256>(), tips).unwrap();
+        let oldest = TipRecord::at_tips(Sha256::hash(&[b"history floor"]), tips.clone()).unwrap();
+        let newest = TipRecord::at_tips(oldest.commitment::<Sha256>(), tips).unwrap();
         let head = newest.commitment::<Sha256>();
         assert!(validate_history_segment::<Sha256>(head, vec![newest.clone(), oldest]).is_some());
         assert!(validate_history_segment::<Sha256>(head, vec![newest.clone(), newest]).is_none());
@@ -3243,14 +3243,14 @@ mod tests {
                 .unwrap();
             let bodies = promoter::Bodies::new(catalog.clone(), promoter);
             let parent = Arc::new(
-                TipRecord::new(
+                TipRecord::at_tips(
                     genesis_history::<Sha256>(committee.config.genesis()),
                     committee.config.genesis().tips().to_vec(),
                 )
                 .unwrap(),
             );
             let record = Arc::new(
-                TipRecord::new(
+                TipRecord::at_tips(
                     parent.commitment::<Sha256>(),
                     committee.config.genesis().tips().to_vec(),
                 )
@@ -3438,7 +3438,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let committee = Committee::<MinPk>::new(7, 6, Limits::new(2, 1).unwrap());
             let record = Arc::new(
-                TipRecord::new(
+                TipRecord::at_tips(
                     genesis_history::<Sha256>(committee.config.genesis()),
                     committee.config.genesis().tips().to_vec(),
                 )
@@ -3524,13 +3524,13 @@ mod tests {
             let wrong_proof = committee.lqc(4);
             let id = proof.id::<Sha256>();
             let record = Arc::new(
-                TipRecord::new(
+                TipRecord::at_tips(
                     genesis_history::<Sha256>(committee.config.genesis()),
                     committee.config.genesis().tips().to_vec(),
                 )
                 .unwrap(),
             );
-            let wrong_record = TipRecord::new(
+            let wrong_record = TipRecord::at_tips(
                 Sha256::hash(&[b"wrong history parent"]),
                 committee.config.genesis().tips().to_vec(),
             )
@@ -3845,7 +3845,7 @@ mod tests {
             });
             let history_parent = genesis_history::<Sha256>(committee.config.genesis());
             let history = Arc::new(
-                TipRecord::new(history_parent, committee.config.genesis().tips().to_vec()).unwrap(),
+                TipRecord::at_tips(history_parent, committee.config.genesis().tips().to_vec()).unwrap(),
             );
             let history_commitment = history.commitment::<Sha256>();
             let partition = "resolver_concurrent_produce_test";
@@ -3984,7 +3984,7 @@ mod tests {
                 });
             let block = &blocks[0];
             let history = Arc::new(
-                TipRecord::new(
+                TipRecord::at_tips(
                     genesis_history::<Sha256>(committee.config.genesis()),
                     committee.config.genesis().tips().to_vec(),
                 )
