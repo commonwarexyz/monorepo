@@ -29,13 +29,17 @@ use commonware_runtime::{
     Blob, Error as RError, Handle, Metrics, ReadOptions, Storage,
     buffer::paged::{CacheRef, Replay as BlobReplay, Writer},
 };
-use commonware_utils::NZUsize;
+use commonware_utils::{Cached, NZUsize};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     marker::PhantomData,
     num::{NonZeroU16, NonZeroUsize},
 };
 use tracing::{trace, warn};
+
+// Reusable scratch for [`Inner::try_get_sync`], sized to one item. A fresh zeroed allocation per
+// synchronous read contends under the pool's fan-out.
+commonware_utils::thread_local_cache!(static READ_SCRATCH: Vec<u8>);
 
 /// State for replaying a single section's blob.
 struct SectionReplay<B: Blob> {
@@ -427,8 +431,13 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         if remaining < Self::CHUNK_SIZE_U64 {
             return None;
         }
-        let mut buf = vec![0u8; Self::CHUNK_SIZE];
-        if !blob.try_read_sync_into(&mut buf, offset) {
+        let mut scratch =
+            Cached::take(&READ_SCRATCH, || Ok::<_, ()>(Vec::new()), |_| Ok(())).unwrap();
+        if scratch.len() < Self::CHUNK_SIZE {
+            scratch.resize(Self::CHUNK_SIZE, 0);
+        }
+        let buf = &mut scratch[..Self::CHUNK_SIZE];
+        if !blob.try_read_sync_into(buf, offset) {
             return None;
         }
         A::decode(&buf[..]).ok()
