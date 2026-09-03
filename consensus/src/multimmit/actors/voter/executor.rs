@@ -160,7 +160,9 @@ where
                             generation = generation.traced(),
                             kind = sign_request_kind(&request),
                             positions = tracing::field::Empty,
-                            extensions = tracing::field::Empty
+                            extensions = tracing::field::Empty,
+                            payloads = tracing::field::Empty,
+                            certified_anchors = tracing::field::Empty
                         );
                         if let Some(view) = request.consensus_view() {
                             span.record("view", view.get().traced());
@@ -187,6 +189,28 @@ where
                                 if positions == 0 && extensions == 0 {
                                     self.metrics.empty_votes.inc();
                                 }
+                            }
+                            SignRequest::LeaderBlock(proposal) => {
+                                let proposals = proposal.block().proposals();
+                                let payloads = proposals
+                                    .iter()
+                                    .map(|chain| chain.len() as u64)
+                                    .sum::<u64>();
+                                let certified = proposals
+                                    .iter()
+                                    .filter(|chain| {
+                                        matches!(
+                                            chain.anchor(),
+                                            crate::multimmit::types::Anchor::Certificate(_)
+                                        )
+                                    })
+                                    .count() as u64;
+                                span.record("payloads", payloads.traced());
+                                span.record("certified_anchors", certified.traced());
+                                self.metrics.proposal_payloads.observe(payloads as f64);
+                                self.metrics
+                                    .proposal_certified_anchors
+                                    .observe(certified as f64);
                             }
                             _ => {}
                         }
