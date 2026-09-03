@@ -164,7 +164,7 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
     Verified {
         /// The span carried with this request.
         span: Span,
-        /// The round in which the block was verified.
+        /// The round of the verify request.
         round: Round,
         /// The block.
         block: Arc<V::Block>,
@@ -176,7 +176,7 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
     Certified {
         /// The span carried with this request.
         span: Span,
-        /// The round in which the block was certified.
+        /// The round of the certify request.
         round: Round,
         /// The block.
         block: Arc<V::Block>,
