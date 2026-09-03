@@ -412,20 +412,12 @@ where
                     acknowledgement,
                     retry_mailbox,
                 }) => {
-                    let process = info_span!(parent: &span, "stateful.actor.finalized");
                     if skip_finalized_block(&mut self.skip_finalized_until, block.height()) {
-                        async {
-                            verifications
-                                .drive(self.processor.notify_finalized(
-                                    self.context.as_present(),
-                                    block.as_ref(),
-                                ))
-                                .await;
-                            acknowledgement.acknowledge();
-                        }
-                        .instrument(process)
-                        .await;
+                        // The block is already reflected in the database set by a
+                        // completed state sync, so there is nothing to capture or apply.
+                        acknowledgement.acknowledge();
                     } else {
+                        let process = info_span!(parent: &span, "stateful.actor.finalized");
                         let boundary = self.processor.finalization_boundary(block.as_ref());
                         let (retry, reject) = verifications
                             .quiesce_where(|progress| boundary.disposition(progress))
@@ -441,9 +433,10 @@ where
                                 ))
                                 .await;
                             let Some(Applied { barrier, prune }) = applied else {
-                                // Duplicate report: marshal redelivers a processed
-                                // height only after a restart, where startup aligned
-                                // the databases to durable state.
+                                // A duplicate report is the startup anchor redelivered by
+                                // marshal: genesis on a fresh boot or a newly installed
+                                // floor. Its state is durable before the actor starts, so
+                                // no barrier is needed.
                                 acknowledgement.acknowledge();
                                 return;
                             };
@@ -616,6 +609,7 @@ mod tests {
         type Context = <TestApp as Application<deterministic::Context>>::Context;
         type Block = TestBlock;
         type Databases = TestDatabases;
+        type Captured = ();
         type Provider = ();
         type Input = ();
 
@@ -669,6 +663,24 @@ mod tests {
         ) -> TestMerkleized {
             TestMerkleized
         }
+
+        async fn capture(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            _block: &Self::Block,
+            _batches: &TestMerkleized,
+            _readers: <Self::Databases as DatabaseSet<deterministic::Context>>::Readers,
+        ) {
+        }
+
+        async fn finalized(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            _block: &Self::Block,
+            _captured: Self::Captured,
+            _readers: <Self::Databases as DatabaseSet<deterministic::Context>>::Readers,
+        ) {
+        }
     }
 
     #[derive(Clone)]
@@ -683,6 +695,7 @@ mod tests {
         type Context = <TestApp as Application<deterministic::Context>>::Context;
         type Block = TestBlock;
         type Databases = TestDatabases;
+        type Captured = ();
         type Provider = ();
         type Input = ();
 
@@ -733,6 +746,24 @@ mod tests {
         ) -> TestMerkleized {
             TestMerkleized
         }
+
+        async fn capture(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            _block: &Self::Block,
+            _batches: &TestMerkleized,
+            _readers: <Self::Databases as DatabaseSet<deterministic::Context>>::Readers,
+        ) {
+        }
+
+        async fn finalized(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            _block: &Self::Block,
+            _captured: Self::Captured,
+            _readers: <Self::Databases as DatabaseSet<deterministic::Context>>::Readers,
+        ) {
+        }
     }
 
     #[derive(Clone)]
@@ -742,7 +773,9 @@ mod tests {
         finalized_gate: Arc<Mutex<Option<ApplicationGate>>>,
         gate_height: Height,
         apply_calls: Arc<AtomicUsize>,
+        capture_calls: Arc<AtomicUsize>,
         verify_calls: Arc<AtomicUsize>,
+        applied_finalizations: Arc<Mutex<Vec<Height>>>,
     }
 
     impl Application<deterministic::Context> for ReplayGatedApp {
@@ -750,6 +783,7 @@ mod tests {
         type Context = <TestApp as Application<deterministic::Context>>::Context;
         type Block = TestBlock;
         type Databases = TestDatabases;
+        type Captured = Height;
         type Provider = ();
         type Input = ();
 
@@ -803,12 +837,25 @@ mod tests {
             TestMerkleized
         }
 
+        async fn capture(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            block: &Self::Block,
+            _batches: &TestMerkleized,
+            _readers: <Self::Databases as DatabaseSet<deterministic::Context>>::Readers,
+        ) -> Self::Captured {
+            self.capture_calls.fetch_add(1, Ordering::SeqCst);
+            block.height()
+        }
+
         async fn finalized(
             &mut self,
             _context: (deterministic::Context, Self::Context),
             _block: &Self::Block,
+            height: Self::Captured,
             _readers: <Self::Databases as DatabaseSet<deterministic::Context>>::Readers,
         ) {
+            self.applied_finalizations.lock().push(height);
             let gate = self.finalized_gate.lock().take();
             if let Some(mut gate) = gate {
                 let _ = gate.started.send(());
@@ -1702,14 +1749,18 @@ mod tests {
             )
             .await;
             let (verify_gate, verify_started, verify_release) = application_gate();
-            let (finalized_gate, finalized_started, finalized_release) = application_gate();
+            let apply_calls = Arc::new(AtomicUsize::new(0));
+            let capture_calls = Arc::new(AtomicUsize::new(0));
+            let applied_finalizations: Arc<Mutex<Vec<Height>>> = Arc::default();
             let app = ReplayGatedApp {
                 gates: Arc::new(Mutex::new(VecDeque::new())),
                 verify_gate: Arc::new(Mutex::new(Some(verify_gate))),
-                finalized_gate: Arc::new(Mutex::new(Some(finalized_gate))),
+                finalized_gate: Arc::default(),
                 gate_height: finalized.height(),
-                apply_calls: Arc::new(AtomicUsize::new(0)),
+                apply_calls: apply_calls.clone(),
+                capture_calls: capture_calls.clone(),
                 verify_calls: Arc::new(AtomicUsize::new(0)),
+                applied_finalizations: applied_finalizations.clone(),
             };
             let processor = Processor::new(
                 app,
@@ -1743,34 +1794,85 @@ mod tests {
 
             let (acknowledgement, waiter) = Exact::handle();
             let _ = mailbox.report(Update::Block(Arc::new(finalized), acknowledgement));
-            finalized_started
-                .await
-                .expect("finalized hook should start");
-            verify_release
-                .send(())
-                .expect("child verification should remain active");
-            let result = select! {
-                valid = &mut verify_child => Some(valid),
-                _ = context.sleep(Duration::from_millis(100)) => None,
-            };
-
-            finalized_release
-                .send(())
-                .expect("finalized hook should remain active");
             waiter
                 .await
                 .expect("skipped finalized block should be acknowledged");
-            let valid = match result {
-                Some(valid) => valid,
-                None => verify_child.await,
-            };
+
+            assert!(
+                poll!(&mut verify_child).is_pending(),
+                "skipped finalization must not resolve a retained verification",
+            );
+            verify_release
+                .send(())
+                .expect("child verification should remain active");
+            let valid = verify_child.await;
             actor.abort();
             drop(marshal.guards);
             assert!(valid);
-            assert!(
-                result.is_some(),
-                "skipped finalization stalled a retained verification",
+            assert_eq!(apply_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(capture_calls.load(Ordering::SeqCst), 0);
+            assert!(applied_finalizations.lock().is_empty());
+        });
+    }
+
+    #[test]
+    fn fresh_boot_genesis_skips_hooks() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let genesis = TestBlock::new(0, 0);
+            let mut signing = context.child("signing");
+            let scheme =
+                scheme_mocks::fixture(&mut signing, b"fresh-boot-genesis", 1).schemes[0].clone();
+            let marshal = fixtures::marshal_fixture(
+                context.child("marshal"),
+                "fresh-boot-genesis",
+                scheme,
+                None,
+                NZUsize!(1),
+                false,
+            )
+            .await;
+            let apply_calls = Arc::new(AtomicUsize::new(0));
+            let capture_calls = Arc::new(AtomicUsize::new(0));
+            let applied_finalizations: Arc<Mutex<Vec<Height>>> = Arc::default();
+            let app = ReplayGatedApp {
+                gates: Arc::default(),
+                verify_gate: Arc::default(),
+                finalized_gate: Arc::default(),
+                gate_height: genesis.height(),
+                apply_calls: apply_calls.clone(),
+                capture_calls: capture_calls.clone(),
+                verify_calls: Arc::new(AtomicUsize::new(0)),
+                applied_finalizations: applied_finalizations.clone(),
+            };
+            let processor = Processor::new(
+                app,
+                test_databases(),
+                anchor(0, 0),
+                StatefulMetrics::new(&context),
+                None,
             );
+            let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(1));
+            let mut mailbox = Mailbox::new(sender);
+            let processing = Processing {
+                context: ContextCell::new(context.child("processing")),
+                mailbox: receiver,
+                provider: (),
+                marshal: marshal.mailbox,
+                processor,
+                deferred_verifications: Vec::new(),
+                skip_finalized_until: None,
+            };
+            let actor = context.child("loop").spawn(move |_| processing.start());
+
+            let (acknowledgement, waiter) = Exact::handle();
+            let _ = mailbox.report(Update::Block(Arc::new(genesis), acknowledgement));
+            waiter.await.expect("genesis should be acknowledged");
+
+            assert_eq!(apply_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(capture_calls.load(Ordering::SeqCst), 0);
+            assert!(applied_finalizations.lock().is_empty());
+            actor.abort();
+            drop(marshal.guards);
         });
     }
 
@@ -1892,7 +1994,9 @@ mod tests {
                 finalized_gate: Arc::new(Mutex::new(Some(finalized_gate))),
                 gate_height: parent.height(),
                 apply_calls: apply_calls.clone(),
+                capture_calls: Arc::new(AtomicUsize::new(0)),
                 verify_calls: verify_calls.clone(),
+                applied_finalizations: Arc::default(),
             };
             let processor = Processor::new(
                 app,
@@ -1990,7 +2094,9 @@ mod tests {
                 finalized_gate: Arc::new(Mutex::new(None)),
                 gate_height: finalized.height(),
                 apply_calls: apply_calls.clone(),
+                capture_calls: Arc::new(AtomicUsize::new(0)),
                 verify_calls: verify_calls.clone(),
+                applied_finalizations: Arc::default(),
             };
             let processor = Processor::new(
                 app,
@@ -2083,7 +2189,9 @@ mod tests {
                 finalized_gate: Arc::new(Mutex::new(None)),
                 gate_height: first.height(),
                 apply_calls: apply_calls.clone(),
+                capture_calls: Arc::new(AtomicUsize::new(0)),
                 verify_calls: verify_calls.clone(),
+                applied_finalizations: Arc::default(),
             };
             let processor = Processor::new(
                 app,
@@ -2189,7 +2297,9 @@ mod tests {
                 finalized_gate: Arc::new(Mutex::new(Some(finalized_gate))),
                 gate_height: first.height(),
                 apply_calls: Arc::new(AtomicUsize::new(0)),
+                capture_calls: Arc::new(AtomicUsize::new(0)),
                 verify_calls: Arc::new(AtomicUsize::new(0)),
+                applied_finalizations: Arc::default(),
             };
             let processor = Processor::new(
                 app,
@@ -2302,7 +2412,9 @@ mod tests {
                 finalized_gate: Arc::new(Mutex::new(None)),
                 gate_height: parent.height(),
                 apply_calls: apply_calls.clone(),
+                capture_calls: Arc::new(AtomicUsize::new(0)),
                 verify_calls: verify_calls.clone(),
+                applied_finalizations: Arc::default(),
             };
             let control = FlushControl::default();
             let (prune_started, prune_release) = control.gate_prune();
@@ -2650,6 +2762,112 @@ mod tests {
             let release = control.flushes.lock().remove(0);
             let _ = release.send(Ok(()));
             waiter2.await.expect("block 2 acknowledgement");
+        });
+    }
+
+    #[test]
+    fn finalized_handoff_survives_pending_sync() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let genesis = TestBlock::new(0, 0);
+            let block1 = TestBlock::child(&genesis, 1);
+            let block2 = TestBlock::child(&block1, 2);
+            let mut signing = context.child("signing");
+            let scheme =
+                scheme_mocks::fixture(&mut signing, b"handoff-sync-order", 1).schemes[0].clone();
+            let marshal = fixtures::marshal_fixture(
+                context.child("marshal"),
+                "handoff-sync-order",
+                scheme,
+                None,
+                NZUsize!(2),
+                false,
+            )
+            .await;
+            let (finalized_gate, finalized_started, finalized_release) = application_gate();
+            let capture_calls = Arc::new(AtomicUsize::new(0));
+            let applied_finalizations: Arc<Mutex<Vec<Height>>> = Arc::default();
+            let app = ReplayGatedApp {
+                gates: Arc::default(),
+                verify_gate: Arc::default(),
+                finalized_gate: Arc::new(Mutex::new(Some(finalized_gate))),
+                gate_height: block1.height(),
+                apply_calls: Arc::new(AtomicUsize::new(0)),
+                capture_calls: capture_calls.clone(),
+                verify_calls: Arc::new(AtomicUsize::new(0)),
+                applied_finalizations: applied_finalizations.clone(),
+            };
+            let control = FlushControl::default();
+            let processor = Processor::new(
+                app,
+                Shared::new("test", TestDb::gated(control.clone())),
+                anchor(0, 0),
+                StatefulMetrics::new(&context),
+                None,
+            );
+            let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(2));
+            let mut mailbox = Mailbox::new(sender);
+            let processing = Processing {
+                context: ContextCell::new(context.child("processing")),
+                mailbox: receiver,
+                provider: (),
+                marshal: marshal.mailbox,
+                processor,
+                deferred_verifications: Vec::new(),
+                skip_finalized_until: None,
+            };
+            let actor = context.child("loop").spawn(move |_| processing.start());
+
+            let (acknowledgement, mut waiter1) = Exact::handle();
+            let _ = mailbox.report(Update::Block(Arc::new(block1), acknowledgement));
+            finalized_started
+                .await
+                .expect("finalized handoff should start");
+            assert_eq!(control.applied.load(Ordering::Relaxed), 1);
+            assert_eq!(capture_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(applied_finalizations.lock().as_slice(), &[Height::new(1)]);
+            assert_eq!(control.flushes.lock().len(), 1);
+            assert!(poll!(&mut waiter1).is_pending());
+
+            finalized_release
+                .send(())
+                .expect("finalized handoff should remain active");
+
+            let (acknowledgement, mut waiter2) = Exact::handle();
+            let _ = mailbox.report(Update::Block(Arc::new(block2), acknowledgement));
+            while control.applied.load(Ordering::Relaxed) < 2 {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            assert_eq!(capture_calls.load(Ordering::SeqCst), 2);
+            assert_eq!(
+                applied_finalizations.lock().as_slice(),
+                &[Height::new(1), Height::new(2)],
+            );
+            assert_eq!(control.flushes.lock().len(), 1);
+            assert!(poll!(&mut waiter1).is_pending());
+            assert!(poll!(&mut waiter2).is_pending());
+
+            control
+                .flushes
+                .lock()
+                .remove(0)
+                .send(Ok(()))
+                .expect("first sync should remain pending");
+            waiter1.await.expect("block 1 should be acknowledged");
+            assert!(poll!(&mut waiter2).is_pending());
+
+            while control.flushes.lock().is_empty() {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            control
+                .flushes
+                .lock()
+                .remove(0)
+                .send(Ok(()))
+                .expect("successor sync should remain pending");
+            waiter2.await.expect("block 2 should be acknowledged");
+
+            actor.abort();
+            drop(marshal.guards);
         });
     }
 

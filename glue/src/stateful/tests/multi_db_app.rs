@@ -288,6 +288,7 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
     type Context = Context<sha256::Digest, ed25519::PublicKey>;
     type Block = Block;
     type Databases = MultiDatabaseSet<E>;
+    type Captured = ();
     type Provider = ();
     type Input = ();
 
@@ -351,6 +352,24 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> <Self::Databases as DatabaseSet<E>>::Merkleized {
         Self::execute(block.height(), batches).await
+    }
+
+    async fn capture(
+        &mut self,
+        _context: (E, Self::Context),
+        _block: &Self::Block,
+        _batches: &<Self::Databases as DatabaseSet<E>>::Merkleized,
+        _readers: <Self::Databases as DatabaseSet<E>>::Readers,
+    ) {
+    }
+
+    async fn finalized(
+        &mut self,
+        _context: (E, Self::Context),
+        _block: &Self::Block,
+        _captured: Self::Captured,
+        _readers: <Self::Databases as DatabaseSet<E>>::Readers,
+    ) {
     }
 
     fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {
