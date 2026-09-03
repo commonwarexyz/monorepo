@@ -2,6 +2,7 @@
 set -eo pipefail
 
 no_std_packages=(
+  commonware-clearing
   commonware-codec
   commonware-utils
   commonware-cryptography

@@ -86,7 +86,7 @@ const LTHASH_SIZE: usize = 2048;
 const LTHASH_ELEMENTS: usize = LTHASH_SIZE / 2; // each u16 is 2 bytes
 
 /// An additive homomorphic hash function over [crate::Blake3].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct LtHash {
     /// Internal state as 1024 16-bit unsigned integers

@@ -3,6 +3,7 @@ members = [
     "actor",
     "bench",
     "broadcast",
+    "clearing",
     "codec",
     "codec/macros",
     "coding",
@@ -33,9 +34,11 @@ members = [
     "examples/flood",
     "examples/log",
     "examples/reshare",
+    "examples/terminal",
 
     # Fuzz builds
     "broadcast/fuzz",
+    "clearing/fuzz",
     "codec/fuzz",
     "coding/fuzz",
     "collector/fuzz",
@@ -117,6 +120,7 @@ colored = "3.1.1"
 commonware-actor = { version = "2026.7.0", path = "actor" }
 commonware-bench = { version = "2026.7.0", path = "bench" }
 commonware-broadcast = { version = "2026.7.0", path = "broadcast" }
+commonware-clearing = { version = "2026.7.0", path = "clearing", default-features = false }
 commonware-codec = { version = "2026.7.0", path = "codec", default-features = false }
 commonware-codec-macros = { version = "2026.7.0", path = "codec/macros" }
 commonware-coding = { version = "2026.7.0", path = "coding" }
@@ -195,11 +199,13 @@ ratatui = "0.30.2"
 rayon = { version = "1.12.0", default-features = false }
 reqwest = "0.13.4"
 rstest = "0.26.1"
+rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"] }
 serde = "1.0.228"
 serde_json = "1.0.150"
 serde_yaml = "0.9.34"
 sha2 = { version = "0.11.0", default-features = false }
 shlex = "2.0.1"
+stateright = "0.31.0"
 subtle = { version = "2.6.1", default-features = false }
 syn = "2.0.119"
 sysinfo = "0.39.6"
@@ -248,6 +254,9 @@ overflow-checks = true
 debug = "line-tables-only"
 
 [profile.test.package.curve25519-dalek]
+opt-level = 3
+
+[profile.test.package.commonware-cryptography-curve25519]
 opt-level = 3
 
 [profile.test.package.aws-lc-rs]

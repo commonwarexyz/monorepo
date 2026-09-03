@@ -492,14 +492,14 @@ function buildPaymentMinimal(mount) {
     weight: 700,
     fill: GREEN,
   });
-  s.revealText(stepX, OP_Y + 56, 'sign R', {
+  s.revealText(stepX, OP_Y + 56, 'countersign R', {
     at: 2.15,
     anchor: 'end',
     size: 12.5,
     weight: 700,
     fill: GOLD,
   });
-  s.revealText(stepX, OP_Y + 76, 'a: 100→80 • b/κ₀: (0,0)→(20,1)', {
+  s.revealText(stepX, OP_Y + 76, 'a: 100→80 • a→b: (0,0)→(20,1)', {
     at: 2.35,
     anchor: 'end',
     size: 12,
@@ -518,95 +518,6 @@ function buildPaymentMinimal(mount) {
     labelSize: 13.5,
   });
 
-  // The operator already holds both S and R, so it could hand the pair to b
-  // directly, landing at 2δ: one hop sooner than the payer-forward path. A
-  // dashed whole-line fade (no progressive draw) marks it as optional.
-  const dx1 = xOf(1) + 8;
-  const dy1 = OP_Y + 10;
-  const dx2 = xOf(2) - 8;
-  const dy2 = RCPT_Y - 10;
-  const dLen = Math.hypot(dx2 - dx1, dy2 - dy1);
-  const dux = (dx2 - dx1) / dLen;
-  const duy = (dy2 - dy1) / dLen;
-  const direct = svgEl('g', { opacity: 0 });
-  direct.appendChild(svgEl('line', {
-    x1: dx1,
-    y1: dy1,
-    x2: dx2 - dux * 6,
-    y2: dy2 - duy * 6,
-    stroke: GREEN,
-    'stroke-width': 2,
-    'stroke-linecap': 'round',
-    'stroke-dasharray': '3 7',
-    opacity: 0.85,
-  }));
-  direct.appendChild(svgEl('polygon', {
-    points: dx2 + ',' + dy2 + ' ' +
-      (dx2 - dux * 9 - duy * 3.8) + ',' + (dy2 - duy * 9 + dux * 3.8) + ' ' +
-      (dx2 - dux * 9 + duy * 3.8) + ',' + (dy2 - duy * 9 - dux * 3.8),
-    fill: GREEN,
-    opacity: 0.85,
-  }));
-  s.dynamicLayer.appendChild(direct);
-  s.updaters.push(tau => setOpacity(direct, tau >= 2.7));
-
-  // A ghost pair rides the dashed path, landing at 2δ as the response reaches
-  // the payer, then settles translucent: b could already hold the pair here.
-  const ghost = svgEl('g', { opacity: 0 });
-  const gSize = 15;
-  const gGap = 2.5;
-  ghost.appendChild(svgEl('rect', {
-    x: -gSize - gGap / 2,
-    y: -gSize / 2,
-    width: gSize,
-    height: gSize,
-    fill: GREEN,
-    stroke: 'black',
-    'stroke-width': 1,
-  }));
-  ghost.appendChild(svgEl('rect', {
-    x: gGap / 2,
-    y: -gSize / 2,
-    width: gSize,
-    height: gSize,
-    fill: GOLD,
-    stroke: 'black',
-    'stroke-width': 1,
-  }));
-  ghost.appendChild(textEl(-(gSize + gGap) / 2, 3.5, 'S', {
-    'text-anchor': 'middle',
-    'font-size': 8.5,
-    'font-weight': 700,
-    fill: 'white',
-  }));
-  ghost.appendChild(textEl((gSize + gGap) / 2, 3.5, 'R', {
-    'text-anchor': 'middle',
-    'font-size': 8.5,
-    'font-weight': 700,
-    fill: 'white',
-  }));
-  s.dynamicLayer.appendChild(ghost);
-  const ghostEndX = dx2 - dux * 10;
-  const ghostEndY = dy2 - duy * 10;
-  s.updaters.push(tau => {
-    if (tau < 2.75) {
-      ghost.setAttribute('opacity', 0);
-      return;
-    }
-    const frac = clamp((tau - 2.75) / 1.0, 0, 1);
-    const gx = dx1 + (ghostEndX - dx1) * frac;
-    const gy = dy1 + (ghostEndY - dy1) * frac;
-    ghost.setAttribute('transform', 'translate(' + gx + ' ' + gy + ')');
-    ghost.setAttribute('opacity', frac < 1 ? 0.9 : 0.55);
-  });
-
-  s.revealText(xOf(1.7), 360, 'optional: relay to recipient', {
-    at: 2.85,
-    anchor: 'start',
-    size: 12.5,
-    weight: 600,
-    fill: GREEN,
-  });
   s.pair(xOf(2), PAYER_Y, {
     at: 3.65,
     retained: true,

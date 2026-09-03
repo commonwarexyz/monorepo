@@ -3,6 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest as Sha256Digest};
+use commonware_parallel::Sequential;
 use commonware_storage::bmt::{Builder, Proof};
 use libfuzzer_sys::fuzz_target;
 
@@ -60,6 +61,13 @@ enum BmtOperation {
     VerifyRangeProofWrongLeaves {
         start: u32,
         tampered_values: Vec<u64>,
+    },
+    // Range proof narrowing
+    NarrowRangeProof {
+        start: u32,
+        end: u32,
+        sub_offset: u8,
+        sub_len: u8,
     },
     // Multi-proof operations
     GenerateMultiProof {
@@ -132,7 +140,7 @@ fn fuzz(input: FuzzInput) {
 
             BmtOperation::BuildFromLeaves => {
                 if let Some(b) = builder.take() {
-                    tree = Some(b.build());
+                    tree = Some(b.build(&Sequential));
                 }
             }
 
@@ -174,7 +182,7 @@ fn fuzz(input: FuzzInput) {
 
             BmtOperation::BuildEmptyTree => {
                 let b = Builder::<Sha256>::new(0);
-                tree = Some(b.build());
+                tree = Some(b.build(&Sequential));
                 leaf_values.clear();
             }
 
@@ -188,7 +196,7 @@ fn fuzz(input: FuzzInput) {
                     b.add(&digest);
                     leaf_values.push(i as u64);
                 }
-                tree = Some(b.build());
+                tree = Some(b.build(&Sequential));
             }
 
             // Range proof operations
@@ -296,6 +304,55 @@ fn fuzz(input: FuzzInput) {
                     // Verify with tampered digests
                     let root = t.root();
                     let _ = rp.verify_range_inclusion::<Sha256>(*start, &tampered_digests, &root);
+                }
+            }
+
+            BmtOperation::NarrowRangeProof {
+                start,
+                end,
+                sub_offset,
+                sub_len,
+            } => {
+                if let Some(ref t) = tree
+                    && let Ok(rp) = t.range_proof(*start, *end)
+                    && let Some(values) = leaf_values.get(*start as usize..=*end as usize)
+                {
+                    let leaf_digests: Vec<_> = values
+                        .iter()
+                        .map(|v| Sha256::hash(&[&v.to_be_bytes()]))
+                        .collect();
+                    let root = t.root();
+
+                    // Narrowing trusts its inputs, so only leaves that verify against the
+                    // root (they may be stale relative to the tree) make the oracle meaningful
+                    if rp
+                        .verify_range_inclusion::<Sha256>(*start, &leaf_digests, &root)
+                        .is_ok()
+                    {
+                        let sub_start = start.saturating_add(*sub_offset as u32);
+                        let sub_end = sub_start.saturating_add(*sub_len as u32);
+                        match rp.narrow::<Sha256>(*start, &leaf_digests, sub_start, sub_end) {
+                            Ok(narrowed) => {
+                                // The narrowed proof must match the tree's own proof exactly
+                                let expected = t
+                                    .range_proof(sub_start, sub_end)
+                                    .expect("sub-range inside a valid range");
+                                assert_eq!(narrowed, expected);
+                                let sub_leaves = &leaf_digests
+                                    [(sub_start - start) as usize..=(sub_end - start) as usize];
+                                assert!(
+                                    narrowed
+                                        .verify_range_inclusion::<Sha256>(
+                                            sub_start, sub_leaves, &root
+                                        )
+                                        .is_ok()
+                                );
+                            }
+
+                            // Verified inputs only fail when the sub-range leaves the range
+                            Err(_) => assert!(sub_end > *end),
+                        }
+                    }
                 }
             }
 

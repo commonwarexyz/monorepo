@@ -554,7 +554,7 @@ impl<H: Hasher> PhasedScheme for Zoda<H> {
         for hash in &row_hashes {
             bmt_builder.add(hash);
         }
-        let bmt = bmt_builder.build();
+        let bmt = bmt_builder.build(strategy);
         let root = bmt.root();
 
         // Step 4: Commit to the root, and the size of the data.

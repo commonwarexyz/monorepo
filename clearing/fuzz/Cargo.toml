@@ -1,0 +1,41 @@
+[package]
+name = "commonware-clearing-fuzz"
+version.workspace = true
+publish = false
+edition.workspace = true
+license.workspace = true
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+arbitrary = { workspace = true, features = ["derive"] }
+bytes.workspace = true
+commonware-clearing = { workspace = true, features = ["arbitrary", "std"] }
+commonware-codec.workspace = true
+commonware-cryptography.workspace = true
+commonware-cryptography-curve25519 = { workspace = true, features = ["arbitrary", "std"] }
+commonware-parallel.workspace = true
+commonware-utils.workspace = true
+libfuzzer-sys.workspace = true
+
+[[bin]]
+name = "wire"
+path = "fuzz_targets/wire_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "protocol_verification"
+path = "fuzz_targets/verify.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "settlement"
+path = "fuzz_targets/settlement.rs"
+test = false
+doc = false
+bench = false

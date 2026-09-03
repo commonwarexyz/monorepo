@@ -151,6 +151,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "bmt_streaming"
+path = "fuzz_targets/bmt_streaming.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "freezer_operations"
 path = "fuzz_targets/freezer_operations.rs"
 test = false

@@ -161,7 +161,7 @@ commonware_macros::stability_scope!(BETA {
         fn recover_signer(&self, namespace: &[u8], msg: &[u8]) -> Option<Self::PublicKey>;
     }
 
-    /// Verifies whether all [Signature]s are correct or that some [Signature] is incorrect.
+    /// Batch-verifies [Signature]s.
     pub trait BatchVerifier {
         /// The type of public keys that this verifier can accept.
         type PublicKey: PublicKey;
@@ -189,17 +189,17 @@ commonware_macros::stability_scope!(BETA {
             signature: &<Self::PublicKey as Verifier>::Signature,
         ) -> bool;
 
-        /// Verify all items added to the batch.
+        /// Run the batch check over all added items.
         ///
-        /// Returns `false` if no items were added or any item is invalid.
+        /// Returns `false` if no items were added. Valid non-empty batches are accepted within
+        /// the concrete implementation's documented limits. Randomized implementations may accept
+        /// an invalid batch with a negligible, implementation-defined probability.
         ///
         /// # Why Randomness?
         ///
-        /// When performing batch verification, it is often important to add some randomness
-        /// to prevent an attacker from constructing a malicious batch of signatures that pass
-        /// batch verification but are invalid individually. Abstractly, think of this as
-        /// there existing two valid signatures (`c_1` and `c_2`) and an attacker proposing
-        /// (`c_1 + d` and `c_2 - d`).
+        /// Random coefficients bound the probability that malicious cancellation survives a
+        /// batch check. Abstractly, think of two valid signatures (`c_1` and `c_2`) and an attacker
+        /// proposing (`c_1 + d` and `c_2 - d`). Concrete implementations document their bound.
         ///
         /// You can read more about this [here](https://ethresear.ch/t/security-of-bls-batch-verification/10748#the-importance-of-randomness-4).
         fn verify<R: CryptoRng>(self, rng: &mut R, strategy: &impl Strategy) -> bool;

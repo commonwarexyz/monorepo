@@ -145,6 +145,7 @@ jobs:
           - fuzz_dir: broadcast/fuzz
           - fuzz_dir: codec/fuzz
           - fuzz_dir: coding/fuzz
+          - fuzz_dir: clearing/fuzz
           - fuzz_dir: collector/fuzz
           - fuzz_dir: consensus/fuzz
             partition: "1/4"
