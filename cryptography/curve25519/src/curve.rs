@@ -106,6 +106,8 @@ impl F {
     }
 
     /// Carry-propagates the limbs for canonical serialization.
+    ///
+    /// All limbs are below `2^51`, except limb 1, which may equal `2^51`.
     fn carry(&self) -> Self {
         let mut l = Self::reduce(self.0).0;
         l[1] += l[0] >> 51;
@@ -149,11 +151,15 @@ impl F {
     }
 
     /// Returns whether two canonical representatives are equal.
+    ///
+    /// Variable-time; use only with public field elements.
     pub fn eq(&self, other: &Self) -> bool {
         self.to_bytes() == other.to_bytes()
     }
 
     /// Returns whether the canonical representative is zero.
+    ///
+    /// Variable-time; use only with public field elements.
     pub fn is_zero(&self) -> bool {
         self.eq(&Self::ZERO)
     }
@@ -337,6 +343,8 @@ impl FVec {
     }
 
     /// Selects `other` in lanes whose corresponding mask is true.
+    ///
+    /// Variable-time; the mask must be public.
     fn select_lanes(self, other: Self, select_other: &[bool; LANES]) -> Self {
         let masks = select_other.map(|select| 0u64.wrapping_sub(select as u64));
         Self {
@@ -435,8 +443,8 @@ impl G {
         //   C = 2d * T1 * T2                 G = D + C        Z3 = F*G
         //   D = 2 * Z1 * Z2                  H = B + A        T3 = E*H
         //
-        // The formula is complete because d is non-square. The extended-coordinate invariant
-        // holds identically: (E*H)*(F*G) = (E*F)*(G*H).
+        // The formula is complete because a = -1 is a square and d is non-square. The
+        // extended-coordinate invariant holds identically: (E*H)*(F*G) = (E*F)*(G*H).
         let a = self.y.sub(self.x).mul(rhs.y.sub(rhs.x));
         let b = self.y.add(self.x).mul(rhs.y.add(rhs.x));
         let c = self.t.mul(rhs.t).mul(F::EDWARDS_D2);
@@ -577,6 +585,8 @@ impl GAffine {
     };
 
     /// Decompresses a point encoding, accepting non-canonical `y` values per ZIP215.
+    ///
+    /// Also accepts `x = 0` with the sign bit set (negative zero), as ZIP215 requires.
     pub fn decompress(bytes: &[u8; 32]) -> Option<Self> {
         let sign = bytes[31] >> 7;
         let y = F::from_bytes(bytes);
@@ -798,6 +808,8 @@ impl GAffineVec {
     }
 
     /// Packs affine points, negating the selected lanes.
+    ///
+    /// Variable-time; the lane signs must be public.
     pub fn from_signed_lanes<B: FBackend>(
         backend: B,
         lanes: &[GAffine; LANES],

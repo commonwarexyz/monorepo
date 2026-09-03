@@ -20,6 +20,7 @@ _Primitives are designed for deployment in adversarial environments. If you find
 * [conformance](./conformance/README.md): Automatically assert the stability of encoding and mechanisms over time.
 * [consensus](./consensus/README.md): Order opaque messages in a Byzantine environment.
 * [cryptography](./cryptography/README.md): Generate keys, sign arbitrary messages, and deterministically verify signatures.
+* [cryptography/curve25519](./cryptography/curve25519/README.md): Perform Curve25519 arithmetic, Ed25519 signing and verification, and X25519 key exchange.
 * [deployer](./deployer/README.md): Deploy infrastructure across cloud providers.
 * [glue](./glue/README.md): Default constructions that span multiple primitives.
 * [math](./math/README.md): Create and manipulate mathematical objects.

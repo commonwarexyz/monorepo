@@ -13,7 +13,7 @@ const L: [u64; 4] = [
 ];
 
 /// `floor(2^512 / L)`, the Barrett reduction constant for reducing a 512-bit value modulo `L`
-/// (see [`barrett_reduce`]). `L` is just over `2^252`, so this is just over `2^260`, five
+/// (see [`barrett_reduce`]). `L` is just over `2^252`, so this is just under `2^260`, five
 /// little-endian 64-bit limbs.
 const MU: [u64; 5] = [
     0xed9ce5a30a2c131b,

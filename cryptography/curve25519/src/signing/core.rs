@@ -65,8 +65,8 @@ impl Signature {
 /// CSPRNG (and never revealed) are indistinguishable from exactly that. Deriving each signature's
 /// coefficient from its *position* rather than drawing all of them from the shared `rng` up
 /// front lets every thread compute its own signatures' coefficients locally -- and makes the
-/// batch's entire execution a deterministic function of `(items, seed)`, identical at every
-/// thread count.
+/// batch's coefficients and verdict deterministic functions of `(items, seed)`, identical at
+/// every thread count.
 fn batch_coefficients(seed: &[u8; 32], block: u64) -> [Scalar; 4] {
     let digest = sha512(&[seed, &block.to_le_bytes()]);
     core::array::from_fn(|k| {

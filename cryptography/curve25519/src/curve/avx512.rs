@@ -63,7 +63,7 @@ fn store(regs: [__m512i; 5]) -> [[u64; LANES]; 5] {
 ///
 /// # Correctness
 ///
-/// `z` must be less than `2^60` per lane so the shifts do not discard significant bits.
+/// `z` must be less than `2^59` per lane so `19*z` fits in `u64`.
 #[target_feature(enable = "avx512f")]
 fn mul19(z: __m512i) -> __m512i {
     _mm512_add_epi64(

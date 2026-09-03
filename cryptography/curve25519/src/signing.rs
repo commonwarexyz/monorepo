@@ -13,8 +13,9 @@
 //! [`VerifyingKey::verify`] and [`BatchVerifier::verify`] apply the same criteria.
 //! A non-empty batch of at most `u32::MAX` signatures is always accepted when every signature
 //! verifies individually. Because batch verification checks a randomized linear combination, an
-//! invalid batch may be accepted with probability about `2^-128`. See [this post] for why these
-//! criteria matter.
+//! invalid batch may be accepted with probability about `2^-128`, provided each verification
+//! call draws a fresh seed from an RNG unpredictable to whoever assembled the batch. See
+//! [this post] for why these criteria matter.
 //!
 //! [this post]: https://hdevalence.ca/blog/2020-10-04-its-25519am
 //! [ZIP215]: https://zips.z.cash/zip-0215
@@ -45,6 +46,8 @@ use zeroize::{ZeroizeOnDrop, Zeroizing};
 /// An Ed25519 signing key.
 ///
 /// Secret material is zeroized when the key is dropped.
+/// Serialization writes the raw secret seed; callers must protect the encoded bytes as secret
+/// key material.
 #[derive(ZeroizeOnDrop)]
 pub struct SigningKey {
     /// When serializing, we want to just write the seed, so we keep it around.
@@ -187,6 +190,10 @@ impl SigningKey {
     /// message, so signing the same message twice yields the same signature and no randomness
     /// is consumed.
     ///
+    /// # Panics
+    ///
+    /// Panics if `namespace` is longer than `u32::MAX` bytes.
+    ///
     /// [RFC 8032]: https://www.rfc-editor.org/rfc/rfc8032
     pub fn sign(&self, namespace: &[u8], msg: &[u8]) -> Signature {
         let msg = union_unique(namespace, msg);
@@ -201,6 +208,11 @@ impl SigningKey {
 }
 
 /// A public key used to check signatures.
+///
+/// Decoding accepts any 32 bytes and defers point validation until signature verification.
+/// Encodings that do not represent a curve point can never verify a signature.
+/// Equality, ordering, and hashing use the original encoding: distinct encodings of the same
+/// point are distinct keys, and verification hashes the received bytes as required by ZIP215.
 #[derive(Clone)]
 pub struct VerifyingKey {
     /// The encoded point.
@@ -327,6 +339,10 @@ impl VerifyingKey {
 impl VerifyingKey {
     /// Verifies `sig` over the namespaced message, per the [module's validation
     /// criteria](self).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `namespace` is longer than `u32::MAX` bytes.
     #[must_use]
     pub fn verify(&self, namespace: &[u8], msg: &[u8], sig: &Signature) -> bool {
         let msg = union_unique(namespace, msg);
@@ -345,6 +361,9 @@ impl VerifyingKey {
 /// For an honestly generated [`VerifyingKey`], successful verification demonstrates approval by
 /// the holder of the corresponding [`SigningKey`]. A maliciously generated verifying key can
 /// admit a signature that verifies for any message.
+///
+/// Decoding accepts any 64 bytes. Point decoding and scalar canonicality are checked during
+/// verification. Equality, ordering, and hashing compare the original encoding.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Signature {
     bytes: [u8; 64],
@@ -414,6 +433,9 @@ pub struct BatchVerifier {
 
 impl BatchVerifier {
     /// Creates a verifier with space for `capacity` signatures.
+    ///
+    /// `capacity` is a trusted allocation hint; bound externally supplied counts before passing
+    /// them here.
     pub fn new(capacity: usize) -> Self {
         Self {
             items: Vec::with_capacity(capacity),
@@ -421,6 +443,10 @@ impl BatchVerifier {
     }
 
     /// Queues a signature for verification over the namespaced message.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `namespace` is longer than `u32::MAX` bytes.
     pub fn add(
         &mut self,
         namespace: &[u8],
@@ -442,6 +468,10 @@ impl BatchVerifier {
     /// under the [module's validation criteria](self). Because this checks a randomized linear
     /// combination, an invalid batch may be accepted when the random weights make the combined
     /// equation hold, an event of negligible probability (about `2^-128`).
+    ///
+    /// This bound requires an RNG unpredictable to whoever assembled the batch. Each call draws
+    /// a fresh seed from `rng`; a predictable or reused seed can let an attacker construct an
+    /// invalid batch that passes verification.
     #[must_use]
     pub fn verify(self, rng: &mut impl CryptoRng, strategy: &impl Strategy) -> bool {
         let items = self
