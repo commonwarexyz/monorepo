@@ -207,6 +207,18 @@ const CHECK_COST: usize = 150;
 /// multiplication per addition.
 const CHUNK: usize = 1024;
 
+/// Number of independent chains the shared inversion is split into, which is
+/// also how many additions are completed side by side.
+///
+/// A field multiplication's latency is well above its throughput, and both the
+/// running product of Montgomery's trick and the three multiplications of an
+/// addition are serial. Walking one chain would leave the core waiting on each
+/// result before it could start the next; interleaving this many independent
+/// chains keeps the multiplier busy. The chains cost a few extra
+/// multiplications per chunk to split one inversion between them. Measured
+/// flat from four upwards.
+const LANES: usize = 4;
+
 /// Flag stored in the high bit of a queued job's output slot, marking its
 /// operands equal (a doubling rather than a chord).
 const DOUBLE: u32 = 1 << 31;
@@ -751,27 +763,30 @@ fn absorb(
     state: &mut [u8],
     pending: &mut Pending,
 ) {
-    let Some(mut running) = pending.total_inverse() else {
+    let Some(mut running) = pending.chain_inverses() else {
         return;
     };
-    for index in (0..pending.jobs.len()).rev() {
+    let mut end = pending.jobs.len();
+    while end > 0 {
+        let start = end.saturating_sub(LANES);
         // The walk runs backwards, so the slot a job below will reopen is as
         // far off as the one the accumulation loop looks ahead for.
-        if let Some(&(ahead, _)) = pending.jobs.get(index.wrapping_sub(PREFETCH_DISTANCE)) {
-            prefetch(slots, (ahead & SLOT_MASK) as usize);
+        for index in start..end {
+            if let Some(&(ahead, _)) = pending.jobs.get(index.wrapping_sub(PREFETCH_DISTANCE)) {
+                prefetch(slots, (ahead & SLOT_MASK) as usize);
+            }
         }
-        let (slot, point) = pending.jobs[index];
-        let inverse = pending.unwind(index, &mut running);
-        let bucket = (slot & SLOT_MASK) as usize;
-        let sum = chord(
-            &slots[bucket],
-            &src[point as usize],
-            &inverse,
-            slot & DOUBLE != 0,
-            slot & OP_NEGATE != 0,
+        let inverses = pending.unwind(start, end, &mut running);
+        finish(
+            slots,
+            &pending.jobs[start..end],
+            &inverses[..end - start],
+            Seconds::Points(src),
         );
-        slots[bucket] = sum;
-        state[bucket] = FILLED;
+        for &(slot, _) in &pending.jobs[start..end] {
+            state[(slot & SLOT_MASK) as usize] = FILLED;
+        }
+        end = start;
     }
     pending.clear();
 }
@@ -841,24 +856,25 @@ fn queue_add(
 
 /// Finish the additions queued by [`queue_add`].
 fn complete(slots: &mut [blst_p1_affine], pending: &mut Pending) {
-    let Some(mut running) = pending.total_inverse() else {
+    let Some(mut running) = pending.chain_inverses() else {
         return;
     };
-    for index in (0..pending.jobs.len()).rev() {
-        if let Some(&(ahead, _)) = pending.jobs.get(index.wrapping_sub(PREFETCH_DISTANCE)) {
-            prefetch(slots, (ahead & SLOT_MASK) as usize);
+    let mut end = pending.jobs.len();
+    while end > 0 {
+        let start = end.saturating_sub(LANES);
+        for index in start..end {
+            if let Some(&(ahead, _)) = pending.jobs.get(index.wrapping_sub(PREFETCH_DISTANCE)) {
+                prefetch(slots, (ahead & SLOT_MASK) as usize);
+            }
         }
-        let (slot, second) = pending.jobs[index];
-        let inverse = pending.unwind(index, &mut running);
-        let out = (slot & SLOT_MASK) as usize;
-        let sum = chord(
-            &slots[out],
-            &slots[second as usize],
-            &inverse,
-            slot & DOUBLE != 0,
-            slot & OP_NEGATE != 0,
+        let inverses = pending.unwind(start, end, &mut running);
+        finish(
+            slots,
+            &pending.jobs[start..end],
+            &inverses[..end - start],
+            Seconds::Slots,
         );
-        slots[out] = sum;
+        end = start;
     }
     pending.clear();
 }
@@ -907,8 +923,9 @@ fn reduce(
 struct Pending {
     jobs: Vec<(u32, u32)>,
     denominators: Vec<blst_fp>,
-    /// Running products of the denominators, walked back down as each addition
-    /// takes its inverse.
+    /// Running products of the denominators along [`LANES`] interleaved
+    /// chains (entry `i` continues entry `i - LANES`), walked back down as each
+    /// addition takes its inverse.
     prefix: Vec<blst_fp>,
     /// How many additions to queue before sharing an inversion.
     limit: usize,
@@ -942,27 +959,51 @@ impl Pending {
     /// denominator.
     #[inline(always)]
     fn push(&mut self, slot: u32, second: u32, denominator: blst_fp) {
-        let product = self
-            .prefix
-            .last()
-            .map_or(denominator, |running| fp_mul(running, &denominator));
+        let product = match self.prefix.len().checked_sub(LANES) {
+            Some(previous) => fp_mul(&self.prefix[previous], &denominator),
+            None => denominator,
+        };
         self.prefix.push(product);
         self.jobs.push((slot, second));
         self.denominators.push(denominator);
     }
 
-    /// Invert the running product of every queued denominator, or `None` when
-    /// nothing is queued.
+    /// Invert every chain's running product, or `None` when nothing is queued.
+    ///
+    /// One field inversion serves all the chains: their totals are multiplied
+    /// together, the product inverted, and each chain's inverse recovered from
+    /// that by Montgomery's trick once more, over [`LANES`] values.
     ///
     /// Every denominator MUST be nonzero (`blst_fp_inverse(0) == 0` would
     /// silently poison the shared product); the callers' classification
     /// guarantees it.
-    fn total_inverse(&self) -> Option<blst_fp> {
-        let total = self.prefix.last()?;
-        let mut inverse = blst_fp::default();
+    fn chain_inverses(&self) -> Option<[blst_fp; LANES]> {
+        let len = self.prefix.len();
+        if len == 0 {
+            return None;
+        }
+        // Chain `c` holds the indices congruent to `c` modulo LANES, so its
+        // total is its last entry; chains past `len` are empty.
+        let chains = len.min(LANES);
+        let mut totals = [blst_fp::default(); LANES];
+        for (chain, total) in totals[..chains].iter_mut().enumerate() {
+            *total = self.prefix[len - 1 - (len - 1 - chain) % LANES];
+        }
+        let mut products = [blst_fp::default(); LANES];
+        products[0] = totals[0];
+        for chain in 1..chains {
+            products[chain] = fp_mul(&products[chain - 1], &totals[chain]);
+        }
+        let mut running = blst_fp::default();
         // SAFETY: both pointers reference valid blst_fp values.
-        unsafe { blst_fp_inverse(&mut inverse, total) };
-        Some(inverse)
+        unsafe { blst_fp_inverse(&mut running, &products[chains - 1]) };
+        let mut inverses = [blst_fp::default(); LANES];
+        for chain in (1..chains).rev() {
+            inverses[chain] = fp_mul(&running, &products[chain - 1]);
+            running = fp_mul(&running, &totals[chain]);
+        }
+        inverses[0] = running;
+        Some(inverses)
     }
 
     /// Whether the queue has grown to a full inversion's worth of work.
@@ -971,16 +1012,29 @@ impl Pending {
         self.jobs.len() >= self.limit
     }
 
-    /// Return the inverse of job `index`'s denominator, advancing `running` (the
-    /// inverse of the running product through `index`) to the next job down.
+    /// Return the inverses of the denominators of jobs `start..end` (at most
+    /// [`LANES`] consecutive jobs, so each on a different chain), advancing
+    /// each chain's `running` inverse to its next job down.
+    ///
+    /// The chains are independent, so the multiplications here overlap rather
+    /// than wait on one another.
     #[inline(always)]
-    fn unwind(&self, index: usize, running: &mut blst_fp) -> blst_fp {
-        if index == 0 {
-            return *running;
+    fn unwind(&self, start: usize, end: usize, running: &mut [blst_fp; LANES]) -> [blst_fp; LANES] {
+        debug_assert!(end - start <= LANES);
+        let mut inverses = [blst_fp::default(); LANES];
+        for (lane, index) in (start..end).enumerate() {
+            let running = &mut running[index % LANES];
+            inverses[lane] = index
+                .checked_sub(LANES)
+                .map_or(*running, |previous| fp_mul(running, &self.prefix[previous]));
         }
-        let inverse = fp_mul(running, &self.prefix[index - 1]);
-        *running = fp_mul(running, &self.denominators[index]);
-        inverse
+        for index in start..end {
+            if index >= LANES {
+                let running = &mut running[index % LANES];
+                *running = fp_mul(running, &self.denominators[index]);
+            }
+        }
+        inverses
     }
 
     fn clear(&mut self) {
@@ -990,13 +1044,88 @@ impl Pending {
     }
 }
 
-/// Complete one affine addition (or doubling) given the inverse of its
-/// denominator.
+/// Where a queued job's second operand lives.
+#[derive(Clone, Copy)]
+enum Seconds<'a> {
+    /// In the batch being accumulated, at the job's second index.
+    Points(&'a [blst_p1_affine]),
+    /// In the slot array itself, at the job's second index.
+    Slots,
+}
+
+/// Complete up to [`LANES`] queued additions (or doublings) side by side,
+/// given the inverses of their denominators, writing each result over the slot
+/// that held its first operand.
 ///
 /// Chord/tangent formulas for curve coefficient `a = 0`:
 /// `add: lambda = (y_b - y_a) / (x_b - x_a)`,
 /// `double: lambda = 3 x_a^2 / (2 y_a)`,
 /// `x_out = lambda^2 - x_a - x_b`, `y_out = lambda (x_a - x_out) - y_a`.
+///
+/// The three multiplications of one addition depend on each other; those of
+/// different additions do not. Each step is taken for every job before the
+/// next step for any, so consecutive multiplications are independent and the
+/// core can overlap them. Every operand is read before any result is written,
+/// which the callers' waves of disjoint outputs make sound.
+#[inline(always)]
+fn finish(
+    slots: &mut [blst_p1_affine],
+    jobs: &[(u32, u32)],
+    inverses: &[blst_fp],
+    seconds: Seconds<'_>,
+) {
+    let count = jobs.len();
+    debug_assert!((1..=LANES).contains(&count) && inverses.len() == count);
+    let mut results = [blst_p1_affine::default(); LANES];
+    {
+        let slots: &[blst_p1_affine] = slots;
+        let placeholder = &slots[0];
+        let mut firsts = [placeholder; LANES];
+        let mut others = [placeholder; LANES];
+        for (lane, &(slot, second)) in jobs.iter().enumerate() {
+            firsts[lane] = &slots[(slot & SLOT_MASK) as usize];
+            others[lane] = match seconds {
+                Seconds::Points(points) => &points[second as usize],
+                Seconds::Slots => &slots[second as usize],
+            };
+        }
+        let mut lambdas = [blst_fp::default(); LANES];
+        for (lane, &(slot, _)) in jobs.iter().enumerate() {
+            let (first, second) = (firsts[lane], others[lane]);
+            lambdas[lane] = if slot & DOUBLE != 0 {
+                let square = fp_sqr(&first.x);
+                fp_mul(&fp_add(&fp_add(&square, &square), &square), &inverses[lane])
+            } else if slot & OP_NEGATE != 0 {
+                // The second operand enters negated, which negates the
+                // numerator; the caller took its denominator the other way
+                // round, so the two signs cancel and the negation costs no
+                // arithmetic at all. Only x is read below, and negation leaves
+                // x alone.
+                fp_mul(&fp_add(&second.y, &first.y), &inverses[lane])
+            } else {
+                fp_mul(&fp_sub(&second.y, &first.y), &inverses[lane])
+            };
+        }
+        for lane in 0..count {
+            let (first, second) = (firsts[lane], others[lane]);
+            results[lane].x = fp_sub(&fp_sub(&fp_sqr(&lambdas[lane]), &first.x), &second.x);
+        }
+        for lane in 0..count {
+            let first = firsts[lane];
+            results[lane].y = fp_sub(
+                &fp_mul(&lambdas[lane], &fp_sub(&first.x, &results[lane].x)),
+                &first.y,
+            );
+        }
+    }
+    for (lane, &(slot, _)) in jobs.iter().enumerate() {
+        slots[(slot & SLOT_MASK) as usize] = results[lane];
+    }
+}
+
+/// Complete one affine addition (or doubling) given the inverse of its
+/// denominator; the single-job form of [`finish`], for the measurements.
+#[cfg(test)]
 #[inline(always)]
 fn chord(
     first: &blst_p1_affine,
@@ -2437,6 +2566,179 @@ mod tests {
                 all_valid
             );
         }
+    }
+
+    /// Latency vs throughput of the addition's pieces, and what interleaving
+    /// independent additions buys. Run with:
+    /// `cargo test -p commonware-cryptography --release --features bls12381 \
+    ///   subgroup::tests::measure_interleave -- --ignored --nocapture`
+    #[test]
+    #[ignore = "manual benchmark"]
+    fn measure_interleave() {
+        use std::time::Instant;
+        let mut rng = test_rng();
+        let n = 8192;
+        let points: Vec<G1> = (0..2 * n).map(|_| in_subgroup_point(&mut rng)).collect();
+        let affine = G1::batch_to_affine(&points);
+        let denominators: Vec<blst_fp> = (0..n)
+            .map(|i| fp_sub(&affine[2 * i + 1].x, &affine[2 * i].x))
+            .collect();
+
+        // Dependent chain: latency of one multiplication.
+        let reps = 2_000_000;
+        let mut x = affine[0].x;
+        let start = Instant::now();
+        for _ in 0..reps {
+            x = fp_mul(&x, &affine[1].x);
+        }
+        std::hint::black_box(&x);
+        println!(
+            "fp_mul dependent chain {:.1} ns",
+            start.elapsed().as_nanos() as f64 / reps as f64
+        );
+
+        // k independent chains interleaved: does the core overlap them?
+        for k in [1usize, 2, 4, 8] {
+            let mut xs: Vec<blst_fp> = affine[..k].iter().map(|p| p.x).collect();
+            let start = Instant::now();
+            for _ in 0..reps / k {
+                for chain in xs.iter_mut() {
+                    *chain = fp_mul(chain, &affine[1].x);
+                }
+            }
+            std::hint::black_box(&xs);
+            println!(
+                "fp_mul {k} interleaved chains {:.1} ns/mul",
+                start.elapsed().as_nanos() as f64 / reps as f64
+            );
+        }
+
+        let mut prefix = Vec::new();
+        let mut inverses = denominators.clone();
+        batch_invert(&mut inverses, &mut prefix);
+
+        // Chord: one at a time (as `complete` does), then k interleaved.
+        let reps = 200;
+        let mut out = vec![blst_p1_affine::default(); n];
+        let start = Instant::now();
+        for _ in 0..reps {
+            for i in 0..n {
+                out[i] = chord(&affine[2 * i], &affine[2 * i + 1], &inverses[i], false, false);
+            }
+            std::hint::black_box(&out);
+        }
+        println!(
+            "chord x1            {:.1} ns/addition",
+            start.elapsed().as_nanos() as f64 / (reps * n) as f64
+        );
+        let start = Instant::now();
+        for _ in 0..reps {
+            for i in (0..n).step_by(2) {
+                let (a, b) = (&affine[2 * i], &affine[2 * i + 1]);
+                let (c, d) = (&affine[2 * i + 2], &affine[2 * i + 3]);
+                let l0 = fp_mul(&fp_sub(&b.y, &a.y), &inverses[i]);
+                let l1 = fp_mul(&fp_sub(&d.y, &c.y), &inverses[i + 1]);
+                let x0 = fp_sub(&fp_sub(&fp_sqr(&l0), &a.x), &b.x);
+                let x1 = fp_sub(&fp_sub(&fp_sqr(&l1), &c.x), &d.x);
+                let y0 = fp_sub(&fp_mul(&l0, &fp_sub(&a.x, &x0)), &a.y);
+                let y1 = fp_sub(&fp_mul(&l1, &fp_sub(&c.x, &x1)), &c.y);
+                out[i] = blst_p1_affine { x: x0, y: y0 };
+                out[i + 1] = blst_p1_affine { x: x1, y: y1 };
+            }
+            std::hint::black_box(&out);
+        }
+        println!(
+            "chord x2 interleaved {:.1} ns/addition",
+            start.elapsed().as_nanos() as f64 / (reps * n) as f64
+        );
+        let start = Instant::now();
+        for _ in 0..reps {
+            for i in (0..n).step_by(4) {
+                let mut l = [blst_fp::default(); 4];
+                for j in 0..4 {
+                    let (a, b) = (&affine[2 * (i + j)], &affine[2 * (i + j) + 1]);
+                    l[j] = fp_mul(&fp_sub(&b.y, &a.y), &inverses[i + j]);
+                }
+                let mut xs = [blst_fp::default(); 4];
+                for j in 0..4 {
+                    let (a, b) = (&affine[2 * (i + j)], &affine[2 * (i + j) + 1]);
+                    xs[j] = fp_sub(&fp_sub(&fp_sqr(&l[j]), &a.x), &b.x);
+                }
+                for j in 0..4 {
+                    let a = &affine[2 * (i + j)];
+                    let y = fp_sub(&fp_mul(&l[j], &fp_sub(&a.x, &xs[j])), &a.y);
+                    out[i + j] = blst_p1_affine { x: xs[j], y };
+                }
+            }
+            std::hint::black_box(&out);
+        }
+        println!(
+            "chord x4 interleaved {:.1} ns/addition",
+            start.elapsed().as_nanos() as f64 / (reps * n) as f64
+        );
+
+        // Backward walk of the inversion: one serial chain vs four.
+        let reps = 400;
+        let start = Instant::now();
+        for _ in 0..reps {
+            let mut values = denominators.clone();
+            batch_invert(&mut values, &mut prefix);
+            std::hint::black_box(&values);
+        }
+        let clone_cost = {
+            let start = Instant::now();
+            for _ in 0..reps {
+                let values = denominators.clone();
+                std::hint::black_box(&values);
+            }
+            start.elapsed().as_nanos() as f64 / (reps * n) as f64
+        };
+        println!(
+            "batch_invert 1 chain {:.1} ns/element",
+            start.elapsed().as_nanos() as f64 / (reps * n) as f64 - clone_cost
+        );
+        let start = Instant::now();
+        for _ in 0..reps {
+            let values = denominators.clone();
+            // Forward: four interleaved prefix chains.
+            let mut pre = vec![blst_fp::default(); n];
+            pre[..4].copy_from_slice(&values[..4]);
+            for i in 4..n {
+                pre[i] = fp_mul(&pre[i - 4], &values[i]);
+            }
+            // One inversion of the product of the four totals, then split.
+            let t01 = fp_mul(&pre[n - 4], &pre[n - 3]);
+            let t23 = fp_mul(&pre[n - 2], &pre[n - 1]);
+            let total = fp_mul(&t01, &t23);
+            let mut inv = blst_fp::default();
+            // SAFETY: both pointers reference valid blst_fp values.
+            unsafe { blst_fp_inverse(&mut inv, &total) };
+            let inv01 = fp_mul(&inv, &t23);
+            let inv23 = fp_mul(&inv, &t01);
+            let mut running = [
+                fp_mul(&inv01, &pre[n - 3]),
+                fp_mul(&inv01, &pre[n - 4]),
+                fp_mul(&inv23, &pre[n - 1]),
+                fp_mul(&inv23, &pre[n - 2]),
+            ];
+            let mut out = vec![blst_fp::default(); n];
+            let mut i = n;
+            while i > 4 {
+                i -= 4;
+                for c in 0..4 {
+                    out[i + c] = fp_mul(&running[c], &pre[i + c - 4]);
+                }
+                for c in 0..4 {
+                    running[c] = fp_mul(&running[c], &values[i + c]);
+                }
+            }
+            out[..4].copy_from_slice(&running);
+            std::hint::black_box(&out);
+        }
+        println!(
+            "batch_invert 4 chains {:.1} ns/element (incl. alloc)",
+            start.elapsed().as_nanos() as f64 / (reps * n) as f64 - clone_cost
+        );
     }
 
     /// Cost of the pieces of one batch-affine addition. Run with:

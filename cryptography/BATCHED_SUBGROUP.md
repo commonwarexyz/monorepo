@@ -120,7 +120,15 @@ sums where C checks only `m` combinations — C's total check count stays at
 
 A pass over the points buys at most `log₂(3^m)` bits of soundness, whatever
 the round does with its bucket sums: a lone bad point escapes whenever its
-coefficient vector is the zero vector, which has probability `3^-m`. So the
+coefficient vector is the zero vector, which has probability `3^-m`. The bound
+is not about the zero vector in particular. Two points with cancelling cofactor
+parts (`T` and `-T`) that land in the same bucket with the same sign vanish in
+that bucket's sum, and nothing done with the sums afterwards can see them; this
+happens with probability `1/3^m` for *any* rule that adds each point once into
+one of `3^m/2` signed buckets, whatever the alphabet, however the buckets are
+combined, and whichever component of the cofactor group the points live in.
+So a pass is worth at most `log₂(2 · slots)` bits, and the slot count is bounded
+by the combine, which costs about two additions per occupied slot. So the
 additions per point are
 
 ```
@@ -141,13 +149,46 @@ batch-affine addition, seven passes is ~45 multiplications per point against
 ~1200 for an exact check — a ceiling around 22×, which the implementation now
 reaches to within about 6%.
 
+Put the other way round: with `B ≈ n/10` slots the floor is
+`⌈128 / log₂(2B)⌉` passes — nine at a hundred thousand points, eight at a
+million, seven at three million — and the plans above are already there. What
+remains between the measured speedup and the multiplication count is the
+constant per addition (see "The engine" and "What did not pay"), not the
+schedule. The ideas that look like they escape the bound do not:
+
+- **Handling the 3-torsion separately** (a cubic-residue test of one line
+  evaluation per point, batched multiplicatively at one field multiplication
+  per point per pass) removes the reason the alphabet is ternary, but the
+  cancelling-pair bound is indifferent to the alphabet: the elliptic passes
+  still need `128 / log₂(2B)` of them, and the multiplicative passes come on
+  top.
+- **Folding by the cube-root endomorphism** (`φ(x, y) = (ωx, y)`, one
+  multiplication or a precomputed coordinate) would let six vectors share a
+  slot instead of two, for `log₂ 3` more bits per pass. But `φ` acts trivially
+  on the order-3 component, so a coefficient alphabet closed under `φ` is
+  not uniform modulo 3 there: a cancelling 3-torsion pair escapes a digit with
+  probability `19/49` rather than `1/3`, and the pass buys fewer bits per slot
+  than plain trits do. It only pays once the 3-torsion is handled separately,
+  whose cost (above) is about the pass it saves.
+- **Tate pairings for the whole cofactor.** Every prime of `h` divides `p - 1`
+  (`x - 1` does), so a reduced Tate pairing into `μ_ℓ ⊂ F_p` exists for each,
+  and its final exponentiation batches multiplicatively. The Miller loop does
+  not: it is `~4` multiplications per bit of `ℓ` per point, some 250 for the
+  26-bit prime alone and more for the two generators the `(Z/ℓ)²` torsion
+  needs — several times the whole batched check.
+- **Sparser or shared accumulation** — pre-summing pairs, reusing a pass's
+  bucket sums as the next pass's inputs, tensoring two passes' buckets — either
+  correlates the coefficients a pair of points receives (a shared sum hides a
+  cancelling pair inside it forever) or costs as much to marginalize as it saves
+  to accumulate.
+
 This is why the speedup grows with the batch and then flattens: the `K/n` term
 and the fixed costs (converting to affine, drawing coefficients) amortize away,
 and the pass count steps down only twice more after nine.
 
 ## The engine
 
-Three implementation choices carry most of the constant:
+Four implementation choices carry most of the constant:
 
 - **Streaming accumulation with shared inversions.** A bucket's slot holds its
   running sum; additions are queued, and a chunk of 1024 of them shares one
@@ -181,6 +222,18 @@ Three implementation choices carry most of the constant:
   and the marginals of all levels reduce together so a handful of inversions
   cover the whole combine. This is what makes `m = 9` affordable — and `m = 9`
   is what turns 17 passes into 9.
+- **Interleaved inversion chains.** A field multiplication's latency (19 ns
+  here) is well above its throughput (14 ns), and the engine had two serial
+  chains of them: the running product Montgomery's trick unwinds, and the
+  three dependent multiplications of each addition, with the out-of-order
+  window too short to overlap one addition's chain with the next. The queue
+  now keeps four interleaved running products (entry `i` continues entry
+  `i - 4`), one inversion serves all four for six extra multiplications per
+  chunk, and the completing walk finishes four additions side by side, taking
+  each step for all four before the next step for any. That takes the
+  isolated inversion walk from 52 to 44 ns per element and an addition from
+  ~145 to ~130 ns; the whole round is 8% faster at a hundred thousand points.
+  Four chains measured the same as eight.
 - **Field arithmetic without ceremony.** `blst_fp_add`/`blst_fp_sub` are
   replaced by inlined carry chains (the call and the mandatory zeroing of the
   out-parameter cost more than the arithmetic), multiplications write into
@@ -303,6 +356,44 @@ against per-point checking.
   and which partitioning does not touch. The premise is worth re-testing on a
   machine with a smaller last-level cache, where the Xeon's own numbers (8% per
   addition one step past its 2 MiB, 15% two steps) suggest it would bind.
+
+- **Vectorizing the field arithmetic (NEON).** Apple silicon issues about
+  three 64×64→128 products per cycle (0.15 ns per `mul`+`umulh` pair measured
+  with independent chains), which blst's hand-scheduled multiplication uses to
+  within about 25% — its 14 ns is ~400 instructions at the core's issue width.
+  NEON has no 64-bit lane multiply: `umull` (two 32×32 products per
+  instruction) measured 0.17 ns per instruction, no more product bandwidth
+  than the scalar pipes once carries are handled in 26-bit limbs, and 64-bit
+  floating-point FMA (0.067 ns per two-lane instruction) needs three
+  operations per exact 52-bit limb product plus conversions, which puts an
+  8-limb Montgomery multiplication near 25 ns per lane-pair — slower than the
+  scalar code it would replace. Without an IFMA-style instruction the vector
+  units cannot beat three scalar multipliers on this field size.
+- **A pure-Rust Montgomery multiplication, to inline it.** Six `blst` calls
+  per addition each cost a Rust wrapper, a C wrapper and an assembly prologue
+  that saves ten registers — around 9% of the instructions — and an inlined
+  multiplication would also let the compiler schedule across the three
+  dependent ones. Both a product-then-reduce and a CIOS form in `u128`
+  arithmetic compile to 20.8 ns per multiplication against blst's 14.3 (the
+  latency is the same, 20.5 vs 19.3 ns; the throughput is not — LLVM's carry
+  handling is bulkier than the hand-written `adcs` chains). A 44% slower
+  multiplication cannot be repaid by the glue it removes. A dedicated
+  squaring got to 18.0 ns against 14.6 for blst's, which has no separate
+  squaring on aarch64; not enough either.
+- **Prefetching the point stream.** The accumulation at a million points costs
+  ~130 ns per addition against ~120 at a hundred and fifty thousand, and the
+  step is exactly where the point array stops fitting the 16 MB second-level
+  cache (150k points is 14.4 MB; 300k is 28.8). Software prefetch of the
+  stream, whether 24 points ahead into L1 or 128 ahead into L2, in the
+  accumulation loop and the completing walk both, moved nothing outside noise:
+  the hardware prefetcher already has the stream, and whatever the remaining
+  7% is, it is not exposed latency the software can hide.
+- **Recomputing the denominators in the walk (again).** Recorded above as a
+  3% loss because it put the serial running product behind a random load.
+  With four independent chains that argument lapses, but so does the gain: the
+  chain's latency is already hidden by the other three, so the 96 bytes of
+  traffic it would save are worth about what the subtraction it adds costs.
+  Not retried.
 
 ## Same-engine strategy comparison
 
