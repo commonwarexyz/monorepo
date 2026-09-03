@@ -289,8 +289,8 @@ where
     ///
     /// Called when the wrapper lacks state for `block`: during lazy recovery
     /// for a missing ancestor (e.g. after a restart), or during finalization
-    /// for an uncached winner. The implementation should unconditionally
-    /// execute the block's state transitions.
+    /// for an uncached winner. The implementation should execute the block's
+    /// state transitions.
     ///
     /// The returned merkleized state must match what
     /// [`verify`](Self::verify) accepts for `block`. The wrapper checks it
@@ -300,23 +300,24 @@ where
     /// replay result during finalization and cannot re-check block-specific
     /// commitments generically.
     ///
+    /// Return [`None`] if the block cannot be executed. Under optimistic
+    /// validation a replayed ancestor may not have passed
+    /// [`verify`](Self::verify), and the wrapper rejects the ancestry that
+    /// depends on it. A finalized block always executes.
+    ///
     /// This future may be cancelled if its originating request is dropped, or
     /// cancelled and retried before finalization or pruning. Cancellation and
     /// retry must not violate invariants or lose durable progress.
     ///
     /// # Panics
     ///
-    /// Implementations should panic on data corruption or non-determinism,
-    /// but not on an application-invalid block: under deferred voting with
-    /// optimistic validation a replayed ancestor may never have passed
-    /// [`verify`](Self::verify). Return the state its execution yields and
-    /// let the commitment check reject the ancestry.
+    /// Implementations should panic if executing a valid block fails.
     fn apply(
         &mut self,
         context: (E, Self::Context),
         block: &Self::Block,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> impl Future<Output = <Self::Databases as DatabaseSet<E>>::Merkleized> + Send;
+    ) -> impl Future<Output = Option<<Self::Databases as DatabaseSet<E>>::Merkleized>> + Send;
 
     /// Capture data from winning batches before they are applied.
     ///

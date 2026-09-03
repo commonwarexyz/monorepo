@@ -914,6 +914,9 @@ where
             None
         } else {
             let batches = self.execution.databases.new_batches().await;
+
+            // A finalized block was certified by a quorum that verified it, so
+            // it always executes.
             let batch = self
                 .app
                 .apply(
@@ -921,7 +924,8 @@ where
                     block,
                     batches,
                 )
-                .await;
+                .await
+                .expect("finalize reconstruction must execute the block");
             assert!(
                 A::Databases::matches_sync_targets(&batch, &sync_targets),
                 "finalize reconstruction must match block commitments",
@@ -1228,8 +1232,9 @@ where
 
     /// Replays one block and caches its commitment-matching state.
     ///
-    /// Cancellation caches nothing. A commitment mismatch or state that cannot
-    /// be cached across active finalization makes the ancestry invalid.
+    /// Cancellation caches nothing. A block that cannot be executed, a
+    /// commitment mismatch, or state that cannot be cached across active
+    /// finalization makes the ancestry invalid.
     async fn replay_block<C>(
         &self,
         app: &mut A,
@@ -1262,6 +1267,10 @@ where
         .await
         else {
             return Err(PrepareBatchesError::Cancelled);
+        };
+        let Some(merkleized) = merkleized else {
+            warn!(?target_digest, block = ?digest, "rebuild replay could not execute block");
+            return Err(PrepareBatchesError::Invalid);
         };
 
         if !A::Databases::matches_sync_targets(&merkleized, &A::sync_targets(&block)) {
@@ -1940,11 +1949,11 @@ mod tests {
             _context: (deterministic::Context, Self::Context),
             block: &Self::Block,
             batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
-        ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized {
+        ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
             if let Some(probe) = &self.apply_probe {
                 probe.call(block.digest()).await;
             }
-            Self::execute(block.height(), block.context.round.view(), batches).await
+            Some(Self::execute(block.height(), block.context.round.view(), batches).await)
         }
 
         async fn capture(

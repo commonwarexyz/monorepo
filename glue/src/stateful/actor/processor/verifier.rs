@@ -118,8 +118,7 @@ where
         };
         let block_digest = block.digest();
 
-        // Replayed state is reusable as a parent but is not a verdict, so only
-        // state that passed verify or came from propose settles the request.
+        // Only skip verification if the application already verified this block.
         if self.execution.pending_verified(&block_digest) {
             timer.observe(context);
             return Some(true);
