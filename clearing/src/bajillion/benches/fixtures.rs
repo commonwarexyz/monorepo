@@ -30,7 +30,7 @@ use commonware_parallel::{Rayon, Strategy};
 use commonware_utils::TestRng;
 use std::{num::NonZeroUsize, sync::OnceLock};
 
-pub(crate) const WORKERS: usize = 8;
+pub(crate) const WORKERS: usize = 16;
 pub(crate) const PROFILE_ENV: &str = "COMMONWARE_CLEARING_PROFILE";
 
 pub(crate) fn strategy() -> &'static Rayon {

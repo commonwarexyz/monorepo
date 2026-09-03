@@ -412,7 +412,7 @@ Hard-fault recovery needs no operator, but claimants still need their openings a
 
 ## The Close Never Grows (with Payments)
 
-Every profile below uses a 100-validator committee and 256 slices. Prepare, deal, seal, and challenge checks share one adaptive eight-worker pool (AWS c8a.4xlarge), while certificate and withdrawal-claim checks are scalar calling-thread measurements. The first matrix varies $N$, the number of live accounts: every account sends one entry and the same 512 accounts receive, so with $A$ changed accounts and $B$ distinct recipients the fixture holds $A=N$ and $B=512$ as $N$ grows from 1,024 to one million. A second matrix holds $N$ at one million while the active accounts shrink.
+Every profile below uses a 100-validator committee and 256 slices. Prepare, deal, and seal share one adaptive 16-worker pool (AWS c8a.4xlarge), while certificate, challenge, and withdrawal-claim checks are scalar calling-thread measurements. The first matrix varies $N$, the number of live accounts: every account sends one entry and the same 512 accounts receive, so with $A$ changed accounts and $B$ distinct recipients the fixture holds $A=N$ and $B=512$ as $N$ grows from 1,024 to one million. A second matrix holds $N$ at one million while the active accounts shrink.
 
 Four quantities appear in the tables. The posted close is what a reader holding the previous certified state must download: live accounts ride as one-or-two-byte rank gaps, and the transpose, both states, and prefixes are derived rather than shipped. The proof-slice corpus is the complete evidence, the union of all 256 proof slices with every row, both state leaf sets, and every opening. The largest dealing is the busiest validator's share of it, one proof slice per span with no unchanged leaves, since every validator retains its key interval across closes and hydrates each dealing against it. The external certified package is the commitment and certificate.
 
@@ -453,17 +453,17 @@ Each stage is measured independently and follows the pipeline: the operator prep
     </tr>
     <tr>
       <td style="padding-left:20px;">prepare</td>
-      <td style="text-align:right;">2.60 ms</td>
-      <td style="text-align:right;">20.2 ms</td>
-      <td style="text-align:right;">182 ms</td>
-      <td style="text-align:right;">1.86 s</td>
+      <td style="text-align:right;">2.50 ms</td>
+      <td style="text-align:right;">17.0 ms</td>
+      <td style="text-align:right;">178 ms</td>
+      <td style="text-align:right;">1.78 s</td>
     </tr>
     <tr>
       <td style="padding-left:20px;">deal</td>
-      <td style="text-align:right;">4.66 ms</td>
-      <td style="text-align:right;">4.87 ms</td>
-      <td style="text-align:right;">9.16 ms</td>
-      <td style="text-align:right;">44.0 ms</td>
+      <td style="text-align:right;">2.70 ms</td>
+      <td style="text-align:right;">2.89 ms</td>
+      <td style="text-align:right;">6.75 ms</td>
+      <td style="text-align:right;">42.9 ms</td>
     </tr>
     <tr><th colspan="5" style="text-align:left;">Certification</th></tr>
     <tr>
@@ -475,10 +475,10 @@ Each stage is measured independently and follows the pipeline: the operator prep
     </tr>
     <tr>
       <td style="padding-left:20px;">seal</td>
-      <td style="text-align:right;">17.7 ms</td>
-      <td style="text-align:right;">58.3 ms</td>
-      <td style="text-align:right;">432 ms</td>
-      <td style="text-align:right;">4.23 s</td>
+      <td style="text-align:right;">10.1 ms</td>
+      <td style="text-align:right;">33.2 ms</td>
+      <td style="text-align:right;">227 ms</td>
+      <td style="text-align:right;">2.21 s</td>
     </tr>
     <tr><th colspan="5" style="text-align:left;">Settlement</th></tr>
     <tr>
@@ -526,24 +526,24 @@ Each stage is measured independently and follows the pipeline: the operator prep
     </tr>
     <tr>
       <td style="padding-left:20px;">check HigherAckDebit</td>
-      <td style="text-align:right;"><strong>0.278 ms</strong></td>
-      <td style="text-align:right;"><strong>0.273 ms</strong></td>
-      <td style="text-align:right;"><strong>0.269 ms</strong></td>
-      <td style="text-align:right;"><strong>0.271 ms</strong></td>
+      <td style="text-align:right;"><strong>0.218 ms</strong></td>
+      <td style="text-align:right;"><strong>0.218 ms</strong></td>
+      <td style="text-align:right;"><strong>0.220 ms</strong></td>
+      <td style="text-align:right;"><strong>0.217 ms</strong></td>
     </tr>
     <tr>
       <td style="padding-left:20px;">check HigherAckEntry</td>
-      <td style="text-align:right;"><strong>0.332 ms</strong></td>
-      <td style="text-align:right;"><strong>0.326 ms</strong></td>
-      <td style="text-align:right;"><strong>0.322 ms</strong></td>
-      <td style="text-align:right;"><strong>0.324 ms</strong></td>
+      <td style="text-align:right;"><strong>0.219 ms</strong></td>
+      <td style="text-align:right;"><strong>0.219 ms</strong></td>
+      <td style="text-align:right;"><strong>0.221 ms</strong></td>
+      <td style="text-align:right;"><strong>0.218 ms</strong></td>
     </tr>
     <tr>
       <td style="padding-left:20px;">check AckFork</td>
-      <td style="text-align:right;"><strong>0.324 ms</strong></td>
-      <td style="text-align:right;"><strong>0.323 ms</strong></td>
-      <td style="text-align:right;"><strong>0.320 ms</strong></td>
-      <td style="text-align:right;"><strong>0.318 ms</strong></td>
+      <td style="text-align:right;"><strong>0.212 ms</strong></td>
+      <td style="text-align:right;"><strong>0.215 ms</strong></td>
+      <td style="text-align:right;"><strong>0.216 ms</strong></td>
+      <td style="text-align:right;"><strong>0.212 ms</strong></td>
     </tr>
   </tbody>
 </table>
@@ -592,17 +592,17 @@ The busiest validator's dealing is 78 to 93% smaller than the proof-slice corpus
     </tr>
     <tr>
       <td style="padding-left:20px;">prepare</td>
-      <td style="text-align:right;">159 ms</td>
-      <td style="text-align:right;">176 ms</td>
-      <td style="text-align:right;">340 ms</td>
-      <td style="text-align:right;">1.86 s</td>
+      <td style="text-align:right;">151 ms</td>
+      <td style="text-align:right;">166 ms</td>
+      <td style="text-align:right;">315 ms</td>
+      <td style="text-align:right;">1.78 s</td>
     </tr>
     <tr>
       <td style="padding-left:20px;">seal</td>
-      <td style="text-align:right;">45.6 ms</td>
-      <td style="text-align:right;">108 ms</td>
-      <td style="text-align:right;">693 ms</td>
-      <td style="text-align:right;">4.23 s</td>
+      <td style="text-align:right;">26.1 ms</td>
+      <td style="text-align:right;">62.6 ms</td>
+      <td style="text-align:right;">360 ms</td>
+      <td style="text-align:right;">2.21 s</td>
     </tr>
   </tbody>
 </table>

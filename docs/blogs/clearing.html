@@ -1070,15 +1070,15 @@ O’Grady</a></div>
         <h2 id="the-close-never-grows-with-payments">The Close Never
         Grows (with Payments)</h2>
         <p>Every profile below uses a 100-validator committee and 256
-        slices. Prepare, deal, seal, and challenge checks share one
-        adaptive eight-worker pool (AWS c8a.4xlarge), while certificate
-        and withdrawal-claim checks are scalar calling-thread
-        measurements. The first matrix varies <span
-        class="math inline">N</span>, the number of live accounts: every
-        account sends one entry and the same 512 accounts receive, so
-        with <span class="math inline">A</span> changed accounts and
-        <span class="math inline">B</span> distinct recipients the
-        fixture holds <span class="math inline">A=N</span> and <span
+        slices. Prepare, deal, and seal share one adaptive 16-worker
+        pool (AWS c8a.4xlarge), while certificate, challenge, and
+        withdrawal-claim checks are scalar calling-thread measurements.
+        The first matrix varies <span class="math inline">N</span>, the
+        number of live accounts: every account sends one entry and the
+        same 512 accounts receive, so with <span
+        class="math inline">A</span> changed accounts and <span
+        class="math inline">B</span> distinct recipients the fixture
+        holds <span class="math inline">A=N</span> and <span
         class="math inline">B=512</span> as <span
         class="math inline">N</span> grows from 1,024 to one million. A
         second matrix holds <span class="math inline">N</span> at one
@@ -1151,17 +1151,17 @@ O’Grady</a></div>
             </tr>
             <tr>
               <td style="padding-left:20px;">prepare</td>
-              <td style="text-align:right;">2.60 ms</td>
-              <td style="text-align:right;">20.2 ms</td>
-              <td style="text-align:right;">182 ms</td>
-              <td style="text-align:right;">1.86 s</td>
+              <td style="text-align:right;">2.50 ms</td>
+              <td style="text-align:right;">17.0 ms</td>
+              <td style="text-align:right;">178 ms</td>
+              <td style="text-align:right;">1.78 s</td>
             </tr>
             <tr>
               <td style="padding-left:20px;">deal</td>
-              <td style="text-align:right;">4.66 ms</td>
-              <td style="text-align:right;">4.87 ms</td>
-              <td style="text-align:right;">9.16 ms</td>
-              <td style="text-align:right;">44.0 ms</td>
+              <td style="text-align:right;">2.70 ms</td>
+              <td style="text-align:right;">2.89 ms</td>
+              <td style="text-align:right;">6.75 ms</td>
+              <td style="text-align:right;">42.9 ms</td>
             </tr>
             <tr><th colspan="5" style="text-align:left;">Certification</th></tr>
             <tr>
@@ -1173,10 +1173,10 @@ O’Grady</a></div>
             </tr>
             <tr>
               <td style="padding-left:20px;">seal</td>
-              <td style="text-align:right;">17.7 ms</td>
-              <td style="text-align:right;">58.3 ms</td>
-              <td style="text-align:right;">432 ms</td>
-              <td style="text-align:right;">4.23 s</td>
+              <td style="text-align:right;">10.1 ms</td>
+              <td style="text-align:right;">33.2 ms</td>
+              <td style="text-align:right;">227 ms</td>
+              <td style="text-align:right;">2.21 s</td>
             </tr>
             <tr><th colspan="5" style="text-align:left;">Settlement</th></tr>
             <tr>
@@ -1224,24 +1224,24 @@ O’Grady</a></div>
             </tr>
             <tr>
               <td style="padding-left:20px;">check HigherAckDebit</td>
-              <td style="text-align:right;"><strong>0.278 ms</strong></td>
-              <td style="text-align:right;"><strong>0.273 ms</strong></td>
-              <td style="text-align:right;"><strong>0.269 ms</strong></td>
-              <td style="text-align:right;"><strong>0.271 ms</strong></td>
+              <td style="text-align:right;"><strong>0.218 ms</strong></td>
+              <td style="text-align:right;"><strong>0.218 ms</strong></td>
+              <td style="text-align:right;"><strong>0.220 ms</strong></td>
+              <td style="text-align:right;"><strong>0.217 ms</strong></td>
             </tr>
             <tr>
               <td style="padding-left:20px;">check HigherAckEntry</td>
-              <td style="text-align:right;"><strong>0.332 ms</strong></td>
-              <td style="text-align:right;"><strong>0.326 ms</strong></td>
-              <td style="text-align:right;"><strong>0.322 ms</strong></td>
-              <td style="text-align:right;"><strong>0.324 ms</strong></td>
+              <td style="text-align:right;"><strong>0.219 ms</strong></td>
+              <td style="text-align:right;"><strong>0.219 ms</strong></td>
+              <td style="text-align:right;"><strong>0.221 ms</strong></td>
+              <td style="text-align:right;"><strong>0.218 ms</strong></td>
             </tr>
             <tr>
               <td style="padding-left:20px;">check AckFork</td>
-              <td style="text-align:right;"><strong>0.324 ms</strong></td>
-              <td style="text-align:right;"><strong>0.323 ms</strong></td>
-              <td style="text-align:right;"><strong>0.320 ms</strong></td>
-              <td style="text-align:right;"><strong>0.318 ms</strong></td>
+              <td style="text-align:right;"><strong>0.212 ms</strong></td>
+              <td style="text-align:right;"><strong>0.215 ms</strong></td>
+              <td style="text-align:right;"><strong>0.216 ms</strong></td>
+              <td style="text-align:right;"><strong>0.212 ms</strong></td>
             </tr>
           </tbody>
         </table>
@@ -1299,17 +1299,17 @@ O’Grady</a></div>
             </tr>
             <tr>
               <td style="padding-left:20px;">prepare</td>
-              <td style="text-align:right;">159 ms</td>
-              <td style="text-align:right;">176 ms</td>
-              <td style="text-align:right;">340 ms</td>
-              <td style="text-align:right;">1.86 s</td>
+              <td style="text-align:right;">151 ms</td>
+              <td style="text-align:right;">166 ms</td>
+              <td style="text-align:right;">315 ms</td>
+              <td style="text-align:right;">1.78 s</td>
             </tr>
             <tr>
               <td style="padding-left:20px;">seal</td>
-              <td style="text-align:right;">45.6 ms</td>
-              <td style="text-align:right;">108 ms</td>
-              <td style="text-align:right;">693 ms</td>
-              <td style="text-align:right;">4.23 s</td>
+              <td style="text-align:right;">26.1 ms</td>
+              <td style="text-align:right;">62.6 ms</td>
+              <td style="text-align:right;">360 ms</td>
+              <td style="text-align:right;">2.21 s</td>
             </tr>
           </tbody>
         </table>
