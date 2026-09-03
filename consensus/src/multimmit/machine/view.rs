@@ -3004,7 +3004,7 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
                 records
                     .iter()
                     .filter(|record| record.observation.cohort() == earliest)
-                    .min_by_key(|record| record.id)
+                    .min_by_key(|record| (record.observation, record.id))
                     .map(|record| (record.observation, Arc::clone(&record.artifact)))
             })
             .flatten();
