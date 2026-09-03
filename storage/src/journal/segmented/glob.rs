@@ -28,6 +28,7 @@
 
 use super::manager::{Config as ManagerConfig, Manager, WriteFactory};
 use crate::{Context, journal::Error};
+use bytes::Bytes;
 use commonware_codec::{Codec, CodecShared, FixedSize};
 use commonware_cryptography::{Crc32, crc32};
 #[cfg(any(test, feature = "test-utils"))]
@@ -123,7 +124,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             .ok_or(Error::SectionOutOfRange(section))?;
 
         // Read via buffered writer (handles read-through for buffered data)
-        let buf = writer.read_at(offset, size as usize).await?.coalesce();
+        let buf = Bytes::from(writer.read_at(offset, size as usize).await?.coalesce());
 
         // Entry format: [compressed_data] [crc32 (4 bytes)]
         if buf.len() < CHECKSUM_SIZE {
@@ -131,7 +132,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         }
 
         let data_len = buf.len() - CHECKSUM_SIZE;
-        let compressed_data = &buf.as_ref()[..data_len];
+        let compressed_data = buf.slice(..data_len);
         let stored_checksum = u32::from_be_bytes(
             buf.as_ref()[data_len..]
                 .try_into()
@@ -139,16 +140,16 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         );
 
         // Verify checksum
-        let checksum = Crc32::checksum(compressed_data);
+        let checksum = Crc32::checksum(&compressed_data);
         if checksum != stored_checksum {
             return Err(Error::ChecksumMismatch(stored_checksum, checksum));
         }
 
         // Decompress if needed and decode
         let value = if self.compression.is_some() {
-            let decompressed =
-                decode_all(Cursor::new(compressed_data)).map_err(|_| Error::DecompressionFailed)?;
-            V::decode_cfg(decompressed.as_ref(), &self.codec_config).map_err(Error::Codec)?
+            let decompressed = decode_all(Cursor::new(&compressed_data))
+                .map_err(|_| Error::DecompressionFailed)?;
+            V::decode_cfg(Bytes::from(decompressed), &self.codec_config).map_err(Error::Codec)?
         } else {
             V::decode_cfg(compressed_data, &self.codec_config).map_err(Error::Codec)?
         };
