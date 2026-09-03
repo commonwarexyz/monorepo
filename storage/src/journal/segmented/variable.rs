@@ -1065,6 +1065,20 @@ mod tests {
     }
 
     #[test_traced]
+    #[should_panic(expected = "must be replayed before append")]
+    fn test_segmented_variable_gates_clean_older_section() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            const PARTITION: &str = "segmented-variable-gate-clean-older-section";
+
+            // Sections 0 and 2 are intact and section 1 is torn. The oldest section is gated
+            // even though it is neither torn nor the newest.
+            let journal = journal_with_torn_interior_page(&context, PARTITION, true).await;
+            let _ = journal.append(0, &7).await;
+        });
+    }
+
+    #[test_traced]
     fn test_segmented_variable_replay_propagates_read_options() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {

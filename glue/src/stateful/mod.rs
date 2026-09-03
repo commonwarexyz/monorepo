@@ -81,7 +81,11 @@
 //! to the nearest known ancestor or the finalized tip,
 //! then replays forward via [`Application::apply`] to fill the gap. Each
 //! replayed block is inserted into the pending map immediately so that
-//! partial progress survives timeouts.
+//! partial progress survives timeouts. Consensus may build on a block before
+//! it is certified (for example, with stable leaders), so a replayed ancestor
+//! is not guaranteed to be valid.
+//! Replayed state is reusable as parent state but is never a verification
+//! verdict: verifying a replayed block still runs [`Application::verify`].
 //!
 //! # Compatibility
 //!
@@ -235,8 +239,9 @@ where
 
     /// Verify a block received from a peer, relative to its ancestry.
     ///
-    /// Called before voting. The implementation should execute the block
-    /// against the provided batches and merkleize them.
+    /// Called before the node votes to finalize the block (the notarize vote
+    /// may already have been cast). The implementation should execute the
+    /// block against the provided batches and merkleize them.
     ///
     /// This future should not resolve until the implementation can produce a
     /// stable verdict. Return [`None`] only when the block is permanently
@@ -283,17 +288,26 @@ where
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> impl Future<Output = Option<<Self::Databases as DatabaseSet<E>>::Merkleized>> + Send;
 
-    /// Apply a previously certified block to reconstruct its merkleized state.
+    /// Apply a block to reconstruct its merkleized state.
     ///
-    /// Called by the wrapper during lazy recovery when pending state for
-    /// an ancestor block is missing (e.g. after a restart). The block is
-    /// known-good (it was previously certified), so the implementation
-    /// should unconditionally execute the block's state transitions.
+    /// Called when the wrapper lacks state for `block`: during lazy recovery
+    /// for a missing ancestor (e.g. after a restart), or during finalization
+    /// for an uncached winner. The implementation should execute the block's
+    /// state transitions.
     ///
     /// The returned merkleized state must match what
-    /// [`verify`](Self::verify) accepted for `block`. The wrapper commits this
+    /// [`verify`](Self::verify) accepts for `block`. The wrapper checks it
+    /// against the block's commitments before caching it and reuses it as
+    /// parent state, but never as a verdict: a request to verify the replayed
+    /// block still runs [`verify`](Self::verify). The wrapper commits this
     /// replay result during finalization and cannot re-check block-specific
     /// commitments generically.
+    ///
+    /// Return [`None`] if the block cannot be executed. Consensus may ask the
+    /// wrapper to verify or build on a block before its ancestors are certified,
+    /// so a replayed ancestor is not guaranteed to have passed
+    /// [`verify`](Self::verify) anywhere. The wrapper then rejects the ancestry
+    /// that depends on it. A finalized block always executes.
     ///
     /// This future may be cancelled if its originating request is dropped, or
     /// cancelled and retried before finalization or pruning. Cancellation and
@@ -301,14 +315,13 @@ where
     ///
     /// # Panics
     ///
-    /// Implementations should panic if execution fails, as this indicates
-    /// data corruption or non-determinism.
+    /// Implementations should panic if executing a valid block fails.
     fn apply(
         &mut self,
         context: (E, Self::Context),
         block: &Self::Block,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> impl Future<Output = <Self::Databases as DatabaseSet<E>>::Merkleized> + Send;
+    ) -> impl Future<Output = Option<<Self::Databases as DatabaseSet<E>>::Merkleized>> + Send;
 
     /// Capture data from winning batches before they are applied.
     ///
