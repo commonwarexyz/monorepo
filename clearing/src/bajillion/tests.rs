@@ -2147,8 +2147,8 @@ fn phantom_credit(
 #[test]
 fn byzantine_operator_cannot_certify_invalid_runs() {
     // Each rewrite is pinned to the first check that catches it in a whole-close span: a
-    // successor vector whose length disagrees with the disclosed leaves fails the state range
-    // bracket, a rewritten predecessor side fails the predecessor opening, a rewritten
+    // successor vector whose length disagrees with the disclosed leaves fails the state range's
+    // derived count, a rewritten predecessor side fails the predecessor opening, a rewritten
     // successor balance or a live closed account fails its row balance equation (the
     // derived withdrawal amount enters that equation before the output is compared), and a
     // credit without a debit reaches the terminal accumulator equality.

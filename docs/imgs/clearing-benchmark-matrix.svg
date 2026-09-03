@@ -41,15 +41,15 @@
   <text class="axis-strong" x="290" y="402" text-anchor="middle">100k</text>
   <text class="axis-strong" x="380" y="402" text-anchor="middle">1M</text>
   <text class="axis" x="250" y="430" text-anchor="middle">live accounts (N)</text>
-  <path class="prepare series" d="M120 308.4 L205 268.4 L290 226.5 L380 182.0"/>
+  <path class="prepare series" d="M120 307.7 L205 268.6 L290 226.6 L380 182.1"/>
   <circle cx="120" cy="308.4" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
   <circle cx="205" cy="268.4" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
   <circle cx="290" cy="226.5" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
   <circle cx="380" cy="182.0" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
-  <text class="value prepare-text" x="128" y="297">2.51</text>
-  <text class="value prepare-text" x="213" y="257">20.4</text>
-  <text class="value prepare-text" x="298" y="215">183</text>
-  <text class="value prepare-text" x="372" y="171" text-anchor="end">1,876</text>
+  <text class="value prepare-text" x="128" y="297">2.60</text>
+  <text class="value prepare-text" x="213" y="258">20.2</text>
+  <text class="value prepare-text" x="298" y="216">182</text>
+  <text class="value prepare-text" x="372" y="171" text-anchor="end">1,862</text>
 
   <rect class="frame" x="460" y="90" width="400" height="360" rx="3"/>
   <text class="panel-title" x="660" y="122">Operator: Deal</text>
@@ -71,15 +71,15 @@
   <text class="axis-strong" x="720" y="402" text-anchor="middle">100k</text>
   <text class="axis-strong" x="810" y="402" text-anchor="middle">1M</text>
   <text class="axis" x="680" y="430" text-anchor="middle">live accounts (N)</text>
-  <path class="deal series" d="M550 296.6 L635 295.6 L720 285.8 L810 252.8"/>
+  <path class="deal series" d="M550 296.6 L635 295.7 L720 283.7 L810 253.7"/>
   <circle cx="550" cy="296.6" r="5" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
   <circle cx="635" cy="295.6" r="5" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
   <circle cx="720" cy="285.8" r="5" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
   <circle cx="810" cy="252.8" r="5" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
   <text class="value deal-text" x="558" y="286">4.66</text>
-  <text class="value deal-text" x="643" y="285">4.91</text>
-  <text class="value deal-text" x="728" y="275">8.21</text>
-  <text class="value deal-text" x="802" y="242" text-anchor="end">46.1</text>
+  <text class="value deal-text" x="643" y="285">4.87</text>
+  <text class="value deal-text" x="728" y="273">9.16</text>
+  <text class="value deal-text" x="802" y="243" text-anchor="end">44.0</text>
 
   <rect class="frame" x="890" y="90" width="400" height="360" rx="3"/>
   <text class="panel-title" x="1090" y="122">Validator: Seal</text>
@@ -101,13 +101,13 @@
   <text class="axis-strong" x="1150" y="402" text-anchor="middle">100k</text>
   <text class="axis-strong" x="1240" y="402" text-anchor="middle">1M</text>
   <text class="axis" x="1110" y="430" text-anchor="middle">live accounts (N)</text>
-  <path class="seal series" d="M980 271.1 L1065 246.8 L1150 207.5 L1240 160.5"/>
+  <path class="seal series" d="M980 271.1 L1065 248.3 L1150 210.0 L1240 166.5"/>
   <circle cx="980" cy="271.1" r="5" fill="#fff" stroke="#d9251c" stroke-width="3"/>
   <circle cx="1065" cy="246.8" r="5" fill="#fff" stroke="#d9251c" stroke-width="3"/>
   <circle cx="1150" cy="207.5" r="5" fill="#fff" stroke="#d9251c" stroke-width="3"/>
   <circle cx="1240" cy="160.5" r="5" fill="#fff" stroke="#d9251c" stroke-width="3"/>
   <text class="value seal-text" x="988" y="260">17.7</text>
-  <text class="value seal-text" x="1073" y="236">63.0</text>
-  <text class="value seal-text" x="1158" y="197">493</text>
-  <text class="value seal-text" x="1232" y="149" text-anchor="end">5,780</text>
+  <text class="value seal-text" x="1073" y="237">58.3</text>
+  <text class="value seal-text" x="1158" y="199">432</text>
+  <text class="value seal-text" x="1232" y="155" text-anchor="end">4,227</text>
 </svg>

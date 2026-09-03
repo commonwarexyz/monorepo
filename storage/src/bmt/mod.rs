@@ -157,6 +157,50 @@ fn hash_parent_level<H: Hasher>(
         });
 }
 
+/// Per level of a range, the proof siblings pairing with its first node (a right child) and
+/// its last node (a left child with a sibling in the tree).
+type Edges<'a, D> = Vec<(Option<&'a D>, Option<&'a D>)>;
+
+/// Hashes `current`, the nodes `lo..=hi` of a level holding `size` nodes, into `next`, their
+/// parents. A first node that is a right child pairs with `left`, a last node that is a left
+/// child pairs with `right` when the tree holds its sibling and with itself at the end of an
+/// odd level.
+fn fold_level<H: Hasher>(
+    current: &[H::Digest],
+    lo: usize,
+    hi: usize,
+    size: usize,
+    left: Option<&H::Digest>,
+    right: Option<&H::Digest>,
+    next: &mut Vec<H::Digest>,
+) -> Result<(), Error> {
+    next.clear();
+    let mut body = current;
+    if !lo.is_multiple_of(2) {
+        let left = left.ok_or(Error::UnalignedProof)?;
+        next.push(H::hash(&[left.as_ref(), body[0].as_ref()]));
+        body = &body[1..];
+    }
+    let (pairs, tail) = match body.len().is_multiple_of(2) {
+        true => (body, None),
+        false => {
+            let (pairs, tail) = body.split_at(body.len() - 1);
+            (pairs, Some(tail[0]))
+        }
+    };
+    let offset = next.len();
+    next.resize(offset + pairs.len() / 2, H::Digest::EMPTY);
+    hash_parent_level::<H>(pairs, &mut next[offset..], &commonware_parallel::Sequential);
+    if let Some(last) = tail {
+        let right = match hi + 1 < size {
+            true => *right.ok_or(Error::UnalignedProof)?,
+            false => last,
+        };
+        next.push(H::hash(&[last.as_ref(), right.as_ref()]));
+    }
+    Ok(())
+}
+
 /// Constructor for a Binary Merkle Tree (BMT).
 pub struct Builder<H: Hasher> {
     leaves: Vec<H::Digest>,
@@ -827,24 +871,131 @@ impl<D: Digest> Proof<D> {
         if leaves.is_empty() && position != 0 {
             return Err(Error::InvalidPosition(position));
         }
-        if !leaves.is_empty() {
-            let leaves_len =
-                u32::try_from(leaves.len()).map_err(|_| Error::InvalidPosition(position))?;
-            let end = position
-                .checked_add(leaves_len - 1)
-                .ok_or(Error::InvalidPosition(position))?;
-            if end >= self.leaf_count {
-                return Err(Error::InvalidPosition(end));
-            }
-        }
+        let finalized = self.root_from_range_inclusion::<H>(
+            position,
+            leaves,
+            &commonware_parallel::Sequential,
+        )?;
 
-        // Convert to format expected by verify_multi_inclusion
-        let elements: Vec<(D, u32)> = leaves
-            .iter()
-            .enumerate()
-            .map(|(i, leaf)| (*leaf, position + i as u32))
-            .collect();
-        self.verify_multi_inclusion::<H>(&elements, root)
+        if finalized == *root {
+            Ok(())
+        } else {
+            Err(Error::InvalidProof(finalized.to_string(), root.to_string()))
+        }
+    }
+
+    /// Reconstructs the finalized root from a contiguous range of `leaves` starting at `start`
+    /// and this proof's outer siblings, folding aligned subtrees with `strategy`.
+    ///
+    /// The result equals [`Self::root_from_multi_inclusion`] over the same positions. A
+    /// contiguous range needs no sorting and no per-node positions: the range is cut into at
+    /// least one aligned subtree per worker of `strategy`, each folding to its root on its own,
+    /// the edge subtrees taking the proof's siblings at the levels where the range does not
+    /// begin on a left child or end on a right one, and those roots then fold to the tree
+    /// root. This method does not compare the result against a trusted root.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NoLeaves`] if `leaves` is empty and the tree is not,
+    /// [`Error::InvalidPosition`] if the range exceeds the tree, and [`Error::UnalignedProof`]
+    /// if the sibling count does not match the shape of the range.
+    pub fn root_from_range_inclusion<H: Hasher<Digest = D>>(
+        &self,
+        start: u32,
+        leaves: &[D],
+        strategy: &impl Strategy,
+    ) -> Result<D, Error> {
+        if leaves.is_empty() {
+            if self.leaf_count == 0 && self.siblings.is_empty() {
+                let empty_tree_root = H::hash(&[]);
+                return Ok(finalize::<H>(0, &empty_tree_root));
+            }
+            return Err(Error::NoLeaves);
+        }
+        let leaves_len = u32::try_from(leaves.len()).map_err(|_| Error::InvalidPosition(start))?;
+        let end = start
+            .checked_add(leaves_len - 1)
+            .ok_or(Error::InvalidPosition(start))?;
+        if end >= self.leaf_count {
+            return Err(Error::InvalidPosition(end));
+        }
+        let (start, end) = (start as usize, end as usize);
+        let levels = levels_in_tree(self.leaf_count);
+        let edges = self.range_edges(start, end, levels)?;
+
+        // Aligned subtrees of `span` leaves, at least one per worker, fold to their roots at
+        // level `depth` in parallel. A range shorter than the worker count is one leaf per
+        // subtree, and a small tree is one subtree.
+        let manual = strategy.manual();
+        let depth = match (end - start + 1) / manual.parallelism().max(1) {
+            0 => 0,
+            subtrees => subtrees.ilog2() as usize,
+        }
+        .min(levels - 1);
+        let span = 1_usize << depth;
+        let (first, last) = (start / span, end / span);
+        let mut current = manual.try_map_collect_vec(first..=last, |block| {
+            let lo = start.max(block * span);
+            let hi = end.min((block * span).saturating_add(span - 1));
+            let mut current = leaves[lo - start..=hi - start].to_vec();
+            hash_positioned_leaves::<H>(&mut current, lo as u32, &commonware_parallel::Sequential);
+            let mut next = Vec::with_capacity(current.len().div_ceil(2) + 1);
+            let (mut lo, mut hi, mut size) = (lo, hi, self.leaf_count as usize);
+            for (left, right) in &edges[..depth] {
+                fold_level::<H>(&current, lo, hi, size, *left, *right, &mut next)?;
+                core::mem::swap(&mut current, &mut next);
+                lo /= 2;
+                hi /= 2;
+                size = size.div_ceil(2);
+            }
+            if current.len() != 1 {
+                return Err(Error::UnalignedProof);
+            }
+            Ok(current[0])
+        })?;
+
+        // The subtree roots occupy `first..=last` at level `depth` and fold on up.
+        let (mut lo, mut hi, mut size) = (first, last, (self.leaf_count as usize).div_ceil(span));
+        let mut next = Vec::with_capacity(current.len().div_ceil(2) + 1);
+        for (left, right) in &edges[depth..] {
+            fold_level::<H>(&current, lo, hi, size, *left, *right, &mut next)?;
+            core::mem::swap(&mut current, &mut next);
+            lo /= 2;
+            hi /= 2;
+            size = size.div_ceil(2);
+        }
+        if current.len() != 1 {
+            return Err(Error::UnalignedProof);
+        }
+        Ok(finalize::<H>(self.leaf_count, &current[0]))
+    }
+
+    /// Splits this proof's siblings by level into the one pairing with the range's first node
+    /// when that node is a right child and the one pairing with its last node when that node
+    /// is a left child with a sibling in the tree, in the order [`Tree::range_proof`] emits
+    /// them. Every sibling must be used.
+    fn range_edges(&self, start: usize, end: usize, levels: usize) -> Result<Edges<'_, D>, Error> {
+        let mut siblings = self.siblings.iter();
+        let mut edges = Vec::with_capacity(levels.saturating_sub(1));
+        let (mut lo, mut hi, mut size) = (start, end, self.leaf_count as usize);
+        for _ in 0..levels.saturating_sub(1) {
+            let left = match lo.is_multiple_of(2) {
+                true => None,
+                false => Some(siblings.next().ok_or(Error::UnalignedProof)?),
+            };
+            let right = match hi.is_multiple_of(2) && hi + 1 < size {
+                true => Some(siblings.next().ok_or(Error::UnalignedProof)?),
+                false => None,
+            };
+            edges.push((left, right));
+            lo /= 2;
+            hi /= 2;
+            size = size.div_ceil(2);
+        }
+        if siblings.next().is_some() {
+            return Err(Error::UnalignedProof);
+        }
+        Ok(edges)
     }
 
     /// Narrows a range proof to a sub-range without access to the tree.
@@ -1865,6 +2016,157 @@ mod tests {
                     .verify_range_inclusion::<Sha256>(start, &digests[start as usize..end], &root)
                     .is_err()
             );
+        }
+    }
+
+    #[rstest]
+    fn range_inclusion_matches_multi_inclusion(
+        #[values(1, 2, 3, 5, 8, 13, 16, 17)] tree_size: u32,
+    ) {
+        let digests: Vec<Digest> = (0..tree_size)
+            .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+            .collect();
+        let mut builder = Builder::<Sha256>::new(digests.len());
+        for digest in &digests {
+            builder.add(digest);
+        }
+        let tree = builder.build(&Sequential);
+        let root = tree.root();
+        let parallel = Rayon::new(NonZeroUsize::new(2).unwrap()).unwrap();
+        for start in 0..tree_size {
+            for end in start..tree_size {
+                let proof = tree.range_proof(start, end).unwrap();
+                let leaves = &digests[start as usize..=end as usize];
+                let elements: Vec<(Digest, u32)> = leaves
+                    .iter()
+                    .enumerate()
+                    .map(|(i, leaf)| (*leaf, start + i as u32))
+                    .collect();
+                let expected = proof
+                    .root_from_multi_inclusion::<Sha256>(&elements, &Sequential)
+                    .unwrap();
+                assert_eq!(expected, root);
+                assert_eq!(
+                    proof
+                        .root_from_range_inclusion::<Sha256>(start, leaves, &Sequential)
+                        .unwrap(),
+                    root
+                );
+                assert_eq!(
+                    proof
+                        .root_from_range_inclusion::<Sha256>(start, leaves, &parallel)
+                        .unwrap(),
+                    root
+                );
+
+                // A shifted range, a missing sibling, or a tampered leaf never reproduces
+                // the root.
+                if start < end {
+                    assert_ne!(
+                        proof
+                            .root_from_range_inclusion::<Sha256>(
+                                start + 1,
+                                &leaves[1..],
+                                &Sequential
+                            )
+                            .ok(),
+                        Some(root)
+                    );
+                }
+                let mut short = proof.clone();
+                if short.siblings.pop().is_some() {
+                    assert!(matches!(
+                        short.root_from_range_inclusion::<Sha256>(start, leaves, &Sequential),
+                        Err(Error::UnalignedProof)
+                    ));
+                }
+                let mut tampered = leaves.to_vec();
+                tampered[0] = Sha256::hash(&[b"tampered"]);
+                assert_ne!(
+                    proof
+                        .root_from_range_inclusion::<Sha256>(start, &tampered, &Sequential)
+                        .unwrap(),
+                    root
+                );
+            }
+        }
+        let proof = tree.range_proof(0, 0).unwrap();
+        assert!(matches!(
+            proof.root_from_range_inclusion::<Sha256>(0, &[], &Sequential),
+            Err(Error::NoLeaves)
+        ));
+        assert!(matches!(
+            proof.root_from_range_inclusion::<Sha256>(tree_size, &digests[..1], &Sequential),
+            Err(Error::InvalidPosition(_))
+        ));
+    }
+
+    #[test]
+    fn range_inclusion_folds_across_subtrees() {
+        let tree_size = 6_149_u32;
+        let digests: Vec<Digest> = (0..tree_size)
+            .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+            .collect();
+        let mut builder = Builder::<Sha256>::new(digests.len());
+        for digest in &digests {
+            builder.add(digest);
+        }
+        let parallel = Rayon::new(NonZeroUsize::new(3).unwrap()).unwrap();
+        let tree = builder.build(&parallel);
+        let root = tree.root();
+        // Three workers cut the full range into 2,048-leaf subtrees.
+        let span = 2_048_u32;
+        let mut ranges = vec![
+            (0, tree_size - 1),
+            (1, tree_size - 2),
+            (0, span - 1),
+            (span, 2 * span - 1),
+            (span - 1, span),
+            (span + 7, 3 * span + 1),
+            (3 * span, tree_size - 1),
+            (tree_size - 1, tree_size - 1),
+            (2 * span + 1, 2 * span + 1),
+        ];
+        let mut seed = 7_u32;
+        for _ in 0..40 {
+            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            let start = seed % tree_size;
+            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            let end = start + seed % (tree_size - start);
+            ranges.push((start, end));
+        }
+        for (start, end) in ranges {
+            let proof = tree.range_proof(start, end).unwrap();
+            let leaves = &digests[start as usize..=end as usize];
+            assert_eq!(
+                proof
+                    .root_from_range_inclusion::<Sha256>(start, leaves, &parallel)
+                    .unwrap(),
+                root,
+                "{start}..={end}"
+            );
+            assert_eq!(
+                proof
+                    .root_from_range_inclusion::<Sha256>(start, leaves, &Sequential)
+                    .unwrap(),
+                root,
+                "{start}..={end}"
+            );
+            let mut tampered = leaves.to_vec();
+            tampered[leaves.len() / 2] = Sha256::hash(&[b"tampered"]);
+            assert_ne!(
+                proof
+                    .root_from_range_inclusion::<Sha256>(start, &tampered, &parallel)
+                    .unwrap(),
+                root
+            );
+            let mut short = proof.clone();
+            if short.siblings.pop().is_some() {
+                assert!(matches!(
+                    short.root_from_range_inclusion::<Sha256>(start, leaves, &parallel),
+                    Err(Error::UnalignedProof)
+                ));
+            }
         }
     }
 

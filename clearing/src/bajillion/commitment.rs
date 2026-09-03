@@ -221,7 +221,7 @@ fn check_len(len: u32) -> Result<(), Error> {
     }
 }
 
-fn leaf_digest<H: Hasher>(
+pub(crate) fn leaf_digest<H: Hasher>(
     kind: VectorKind,
     len: u32,
     position: u32,
@@ -525,43 +525,53 @@ type Bracket<T, D> = (Option<T>, Option<T>, RangeOpening<D>);
 /// every pair stays inside one block.
 const LEAF_BLOCK: usize = 2048;
 
-/// Hashes `values` into positioned leaves from `start`, pairwise like the builder's two-lane
-/// path.
-fn hash_block<H, B>(
+/// Hashes `values` into the leaves at `start` onward, pairwise like the builder's two-lane
+/// path, after checking that they fit a vector of `len` values.
+pub(crate) fn hash_block<H, B, I>(
     kind: VectorKind,
     len: u32,
     start: u32,
-    values: &[B],
-) -> Result<Vec<(H::Digest, u32)>, Error>
+    mut values: I,
+) -> Result<Vec<H::Digest>, Error>
 where
     H: Hasher,
     B: AsRef<[u8]>,
+    I: ExactSizeIterator<Item = B>,
 {
+    bound(start, len, values.len())?;
+
+    // Every position below stays under `start + count`, so the increments cannot overflow.
     let mut leaves = Vec::with_capacity(values.len());
-    for (pair_index, pair) in values.chunks(2).enumerate() {
-        let first_position = start + (pair_index as u32) * 2;
-        match pair {
-            [first, second] => {
-                let second_position = first_position + 1;
+    let mut position = start;
+    while let Some(first) = values.next() {
+        match values.next() {
+            Some(second) => {
                 let (first, second) = leaf_digest_pair::<H>(
                     kind,
                     len,
-                    first_position,
+                    position,
                     first.as_ref(),
-                    second_position,
+                    position + 1,
                     second.as_ref(),
                 )?;
-                leaves.push((first, first_position));
-                leaves.push((second, second_position));
+                leaves.push(first);
+                leaves.push(second);
+                position += 2;
             }
-            [first] => leaves.push((
-                leaf_digest::<H>(kind, len, first_position, first.as_ref())?,
-                first_position,
-            )),
-            _ => unreachable!("chunks(2) yields one or two values"),
+            None => leaves.push(leaf_digest::<H>(kind, len, position, first.as_ref())?),
         }
     }
     Ok(leaves)
+}
+
+/// Checks that `count` values from `start` fit a vector of `len` values.
+fn bound(start: u32, len: u32, count: usize) -> Result<(), Error> {
+    let count = u32::try_from(count).map_err(|_| Error::TooManyValues(count as u64))?;
+    start
+        .checked_add(count)
+        .filter(|end| *end <= len)
+        .ok_or(Error::NonCanonicalPositions)?;
+    Ok(())
 }
 
 /// A bounded BMT proof for one contiguous range of encoded vector values.
@@ -605,15 +615,19 @@ impl<D: Digest> RangeOpening<D> {
         Ok(())
     }
 
-    /// Hashes the covered encoded values into positioned leaves after checking that they fit
-    /// the vector from [`Self::start`].
-    fn leaves<H, B>(&self, kind: VectorKind, encoded_values: &[B]) -> Result<Vec<(D, u32)>, Error>
+    /// Hashes the covered encoded values into leaves after checking that they fit the vector
+    /// from [`Self::start`].
+    fn leaves<H, B>(&self, kind: VectorKind, encoded_values: &[B]) -> Result<Vec<D>, Error>
     where
         H: Hasher<Digest = D>,
         B: AsRef<[u8]>,
     {
-        let len = self.bound_values(encoded_values)?;
-        hash_block::<H, B>(kind, len, self.start, encoded_values)
+        hash_block::<H, &B, _>(
+            kind,
+            self.proof.leaf_count,
+            self.start,
+            encoded_values.iter(),
+        )
     }
 
     /// Hashes the covered values like [`Self::leaves`], in parallel blocks under `strategy`.
@@ -622,12 +636,13 @@ impl<D: Digest> RangeOpening<D> {
         kind: VectorKind,
         encoded_values: &[B],
         strategy: &impl Strategy,
-    ) -> Result<Vec<(D, u32)>, Error>
+    ) -> Result<Vec<D>, Error>
     where
         H: Hasher<Digest = D>,
         B: AsRef<[u8]> + Sync,
     {
-        let len = self.bound_values(encoded_values)?;
+        let len = self.proof.leaf_count;
+        bound(self.start, len, encoded_values.len())?;
 
         // Blocks have an even length, so every pair stays inside one block and each block
         // hashes exactly as the sequential path does. The bound above keeps every position
@@ -636,22 +651,10 @@ impl<D: Digest> RangeOpening<D> {
             encoded_values.chunks(LEAF_BLOCK).enumerate(),
             |(block_index, block)| {
                 let block_start = self.start + (block_index * LEAF_BLOCK) as u32;
-                hash_block::<H, B>(kind, len, block_start, block)
+                hash_block::<H, &B, _>(kind, len, block_start, block.iter())
             },
         )?;
         Ok(blocks.into_iter().flatten().collect())
-    }
-
-    /// Checks that the values fit the vector from `start` and returns the leaf count.
-    fn bound_values<B>(&self, encoded_values: &[B]) -> Result<u32, Error> {
-        let len = self.proof.leaf_count;
-        let count = u32::try_from(encoded_values.len())
-            .map_err(|_| Error::TooManyValues(encoded_values.len() as u64))?;
-        self.start
-            .checked_add(count)
-            .filter(|end| *end <= len)
-            .ok_or(Error::NonCanonicalPositions)?;
-        Ok(len)
     }
 
     pub(crate) fn reconstruct<H, B>(
@@ -664,19 +667,8 @@ impl<D: Digest> RangeOpening<D> {
         B: AsRef<[u8]>,
     {
         self.validate_shape()?;
-        let len = self.proof.leaf_count;
-        if encoded_values.is_empty() {
-            return if len == 0 && self.start == 0 {
-                Ok(empty_root::<H>(kind))
-            } else {
-                Err(Error::MalformedEmpty)
-            };
-        }
         let leaves = self.leaves::<H, B>(kind, encoded_values)?;
-        let inner = self
-            .proof
-            .root_from_multi_inclusion::<H>(&leaves, &Sequential)?;
-        Ok(bind_root::<H>(kind, len, &inner))
+        self.root_from_leaves::<H>(kind, &leaves, &Sequential)
     }
 
     /// Reconstructs the root like [`Self::reconstruct`], hashing the covered values and the
@@ -692,18 +684,31 @@ impl<D: Digest> RangeOpening<D> {
         B: AsRef<[u8]> + Sync,
     {
         self.validate_shape()?;
+        let leaves = self.leaves_with::<H, B>(kind, encoded_values, strategy)?;
+        self.root_from_leaves::<H>(kind, &leaves, strategy)
+    }
+
+    /// Binds the covered leaves and the proof's frontier into the domain-separated root.
+    fn root_from_leaves<H>(
+        &self,
+        kind: VectorKind,
+        leaves: &[D],
+        strategy: &impl Strategy,
+    ) -> Result<VectorRoot<D>, Error>
+    where
+        H: Hasher<Digest = D>,
+    {
         let len = self.proof.leaf_count;
-        if encoded_values.is_empty() {
+        if leaves.is_empty() {
             return if len == 0 && self.start == 0 {
                 Ok(empty_root::<H>(kind))
             } else {
                 Err(Error::MalformedEmpty)
             };
         }
-        let leaves = self.leaves_with::<H, B>(kind, encoded_values, strategy)?;
         let inner = self
             .proof
-            .root_from_multi_inclusion::<H>(&leaves, strategy)?;
+            .root_from_range_inclusion::<H>(self.start, leaves, strategy)?;
         Ok(bind_root::<H>(kind, len, &inner))
     }
 
@@ -739,6 +744,29 @@ impl<D: Digest> RangeOpening<D> {
         B: AsRef<[u8]> + Sync,
     {
         if self.reconstruct_with::<H, B>(kind, encoded_values, strategy)? == *root {
+            Ok(())
+        } else {
+            Err(Error::InvalidOpening)
+        }
+    }
+
+    /// Verifies the covered leaves against a domain-separated root, hashing the tree levels
+    /// with `strategy`. The leaves must be the covered values in position order, hashed as
+    /// [`Self::leaves_with`] hashes them, so a caller that derives the values in parallel can
+    /// hash each where it is produced.
+    pub(crate) fn verify_leaves_with<H>(
+        &self,
+        kind: VectorKind,
+        root: &VectorRoot<D>,
+        leaves: &[D],
+        strategy: &impl Strategy,
+    ) -> Result<(), Error>
+    where
+        H: Hasher<Digest = D>,
+    {
+        self.validate_shape()?;
+        bound(self.start, self.proof.leaf_count, leaves.len())?;
+        if self.root_from_leaves::<H>(kind, leaves, strategy)? == *root {
             Ok(())
         } else {
             Err(Error::InvalidOpening)
@@ -788,11 +816,7 @@ impl<D: Digest> RangeOpening<D> {
             .checked_add(sub_count)
             .filter(|sub_end| sub_start >= self.start && *sub_end <= end)
             .ok_or(Error::NonCanonicalPositions)?;
-        let leaves = self
-            .leaves::<H, B>(kind, encoded_values)?
-            .into_iter()
-            .map(|(leaf, _)| leaf)
-            .collect::<Vec<_>>();
+        let leaves = self.leaves::<H, B>(kind, encoded_values)?;
         Ok(Self {
             start: sub_start,
             proof: self

@@ -3,7 +3,7 @@ title: "Keep the Change"
 description: "$0.000001 payments cost more to replicate, settle onchain, and index than they're worth. Yet your agent will need to make millions of them over the coming years."
 date: "August 19th, 2026"
 published-time: "2026-08-19T00:00:00Z"
-modified-time: "2026-09-02T00:00:00Z"
+modified-time: "2026-09-03T00:00:00Z"
 author: "Patrick O'Grady"
 author_twitter: "https://x.com/_patrickogrady"
 url: "https://commonware.xyz/blogs/clearing"
@@ -11,7 +11,7 @@ image: "https://commonware.xyz/imgs/clearing.png"
 katex: true
 ---
 
-*Update (9/2/26): Each payer now signs one cumulative endpoint per epoch that covers every recipient it pays (many of which can now be paid at once). The close shrinks to one row per changed account and one entry per edge (each entry lives in its payer's own vector, so payments to a popular recipient never contend). Every credit now traces to a payer-signed entry, so only omission remains challengeable. Validators retain their slices of the state across closes and are dealt only the delta.*
+*Update (9/3/26): Each payer now signs one cumulative endpoint per epoch that covers every recipient it pays (many of which can now be paid at once). The close shrinks to one row per changed account and one entry per edge (each entry lives in its payer's own vector, so payments to a popular recipient never contend). Every credit now traces to a payer-signed entry, so only omission remains challengeable. Validators retain their slices of the state across closes and are dealt only the delta.*
 
 *Update (8/20/26): Clearing now uses a 32-byte commitment and BLS12-381 multisignatures for the commitment certificate.*
 
@@ -453,17 +453,17 @@ Each stage is measured independently and follows the pipeline: the operator prep
     </tr>
     <tr>
       <td style="padding-left:20px;">prepare</td>
-      <td style="text-align:right;">2.51 ms</td>
-      <td style="text-align:right;">20.4 ms</td>
-      <td style="text-align:right;">183 ms</td>
-      <td style="text-align:right;">1.88 s</td>
+      <td style="text-align:right;">2.60 ms</td>
+      <td style="text-align:right;">20.2 ms</td>
+      <td style="text-align:right;">182 ms</td>
+      <td style="text-align:right;">1.86 s</td>
     </tr>
     <tr>
       <td style="padding-left:20px;">deal</td>
       <td style="text-align:right;">4.66 ms</td>
-      <td style="text-align:right;">4.91 ms</td>
-      <td style="text-align:right;">8.21 ms</td>
-      <td style="text-align:right;">46.1 ms</td>
+      <td style="text-align:right;">4.87 ms</td>
+      <td style="text-align:right;">9.16 ms</td>
+      <td style="text-align:right;">44.0 ms</td>
     </tr>
     <tr><th colspan="5" style="text-align:left;">Certification</th></tr>
     <tr>
@@ -476,9 +476,9 @@ Each stage is measured independently and follows the pipeline: the operator prep
     <tr>
       <td style="padding-left:20px;">seal</td>
       <td style="text-align:right;">17.7 ms</td>
-      <td style="text-align:right;">63.0 ms</td>
-      <td style="text-align:right;">493 ms</td>
-      <td style="text-align:right;">5.78 s</td>
+      <td style="text-align:right;">58.3 ms</td>
+      <td style="text-align:right;">432 ms</td>
+      <td style="text-align:right;">4.23 s</td>
     </tr>
     <tr><th colspan="5" style="text-align:left;">Settlement</th></tr>
     <tr>
@@ -592,17 +592,17 @@ The busiest validator's dealing is 78 to 93% smaller than the proof-slice corpus
     </tr>
     <tr>
       <td style="padding-left:20px;">prepare</td>
-      <td style="text-align:right;">168 ms</td>
-      <td style="text-align:right;">199 ms</td>
-      <td style="text-align:right;">338 ms</td>
-      <td style="text-align:right;">1.88 s</td>
+      <td style="text-align:right;">159 ms</td>
+      <td style="text-align:right;">176 ms</td>
+      <td style="text-align:right;">340 ms</td>
+      <td style="text-align:right;">1.86 s</td>
     </tr>
     <tr>
       <td style="padding-left:20px;">seal</td>
-      <td style="text-align:right;">191 ms</td>
-      <td style="text-align:right;">553 ms</td>
-      <td style="text-align:right;">1.61 s</td>
-      <td style="text-align:right;">5.78 s</td>
+      <td style="text-align:right;">45.6 ms</td>
+      <td style="text-align:right;">108 ms</td>
+      <td style="text-align:right;">693 ms</td>
+      <td style="text-align:right;">4.23 s</td>
     </tr>
   </tbody>
 </table>
