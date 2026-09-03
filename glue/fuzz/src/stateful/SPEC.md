@@ -125,9 +125,10 @@ produces, and on whether a block verifies.
   drawn from the fuzz input, so that lazy recovery is exercised. Neither half of the compromised
   identity may be crashed. At most one correct identity may be down at any moment.
 - **R13 — Bounded run.** The run MUST be bounded so that throughput stays above the floor in §10.
-  The adversarial prefix, the number of blocks required in the suffix, and the storage buffer and
-  cache sizes MUST each be a single named constant shared by every run; a value that varies per
-  configuration is a defect under P2.
+  The adversarial prefix and the storage buffer and cache sizes MUST each be a single named
+  constant shared by every run. The number of suffix heights a run requires, and the leader term
+  length, are drawn from the input tape within single named bounds, so what a run explores varies
+  but its bounds do not. A value that varies per configuration is a defect under P2.
 - **R14 — Deterministic execution.** A run MUST be fully determined by its input bytes: the same
   input reproduces the same execution, using the deterministic runtime, SimplexCertMock, and a
   `FuzzRng` instantiated from the input's raw bytes rather than from a seed. No entropy-backed
@@ -140,6 +141,8 @@ produces, and on whether a block verifies.
   driver and channel-splitting logic are re-derived in `glue/fuzz` from the published crates. The
   corresponding code in `consensus/fuzz` is a reference to model on, not a dependency, and this
   duplication is deliberate.
+- **R16 - not block fuzzing activities.** `disconnect_on_block` for p2p networks must be set to
+  `false` to not block faulty messages,
 
 ## 4. Properties
 
@@ -149,8 +152,9 @@ criteria; the checkable predicates are enumerated in §8.
 - **P1 — Correct-node symmetry.** Every correct node runs the same application, the same stack, and
   the same configuration. Any divergence among them is therefore attributable to glue and never to
   the harness. A correct node MUST NOT be given a distinguishing knob.
-- **P2 — Uniform bounds.** Prefix length, required suffix blocks, timeout, and storage sizing are
-  shared constants. No configuration may be granted a relaxed bound to make it pass.
+- **P2 — Uniform bounds.** Prefix length, timeout, storage sizing, and the bounds on required
+  suffix heights and term length are shared constants. No configuration may be granted a relaxed
+  bound to make it pass.
 - **P3 — Adversary confinement.** Application-level faults occur only on the secondary half. A
   correct node's application never deviates, so a violation of §8 is never explained by the
   harness having lied on a correct node's behalf.
@@ -253,10 +257,12 @@ Every run MUST proceed as follows.
    forcing lazy recovery on its next proposal or verification.
 4. **Suffix.** Past the prefix the scenario prescribes no partition, so the network is whole and
    both halves address every identity.
-5. **Measurement point.** The run ends when the required number of blocks has been finalized in
-   the suffix, or when the run's bounded timeout expires. Because quorum is three of four, a crash
-   during a partition can legitimately stall the run; termination MUST therefore be by timeout and
-   MUST NOT be by a liveness wait. The invariants in §8 are then checked over whatever was observed,
+5. **Measurement point.** The run ends when every correct node has applied the required number of
+   suffix heights, or when the run's bounded timeout expires. Completion is keyed on application
+   rather than delivery, because the commitment I2 compares exists only once a height is applied.
+   Because quorum is three of four, a crash during a partition can legitimately stall the run, so a
+   run that never reaches the required heights MUST end at the timeout and MUST NOT be reported as
+   a failure. The invariants in §8 are then checked over whatever was observed,
    including nothing.
 
 Observations MUST be keyed by engine, not by identity, since the two halves share a key.
@@ -276,7 +282,9 @@ reportable defect. Both halves of the compromised identity are excluded from I1-
   those nodes' committed database state for that height MUST be identical. The observable is the
   per-height database commitment each node reaches once the height is applied, recorded per node
   at the moment it is applied rather than sampled globally, so that nodes progressing at different
-  rates are compared at the same height and not at the same instant. This is the invariant the
+  rates are compared at the same height and not at the same instant. Application is at-least-once
+  and restarts replay heights, so an exact repeat of a commitment already recorded for a height MUST
+  be accepted and a differing repeat MUST NOT. This is the invariant the
   feature exists for; I1 holding while I2 fails is the defect class no existing target can see.
 - **I3 — Verification-verdict agreement.** No correct node's application may accept a block that
   another correct node's application rejected. R5 makes the correct application deterministic and
