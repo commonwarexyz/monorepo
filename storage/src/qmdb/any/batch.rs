@@ -35,8 +35,8 @@ use std::{
 };
 use tracing::debug;
 
-type DiffVec<K, F, V> = Vec<(K, DiffEntry<F, V>)>;
-type DiffSlice<K, F, V> = [(K, DiffEntry<F, V>)];
+type DiffVec<K, F> = Vec<(K, DiffEntry<F>)>;
+type DiffSlice<K, F> = [(K, DiffEntry<F>)];
 
 /// Sorted locations at the retained batch chain's committed boundary.
 type AncestorBaseLocs<K, F> = Vec<(K, Option<Location<F>>)>;
@@ -114,10 +114,11 @@ type UncommittedReadResolution<'a, K, V> = (Vec<Option<V>>, Vec<PendingRead<'a, 
 
 /// What happened to a key in this batch.
 #[derive(Clone)]
-pub(crate) enum DiffEntry<F: Family, V> {
+pub(crate) enum DiffEntry<F: Family> {
     /// Key was updated (existing) or created (new).
+    /// Values are not stored here. An `Active` entry's value is the update written at `loc`
+    /// in the batch's own operations (see [`MerkleizedBatch::lookup`]).
     Active {
-        value: V,
         /// Uncommitted location where this operation will be written.
         loc: Location<F>,
         /// The key's committed location in the DB snapshot, or `None` if the key did not exist
@@ -133,7 +134,7 @@ pub(crate) enum DiffEntry<F: Family, V> {
     },
 }
 
-impl<F: Family, V> DiffEntry<F, V> {
+impl<F: Family> DiffEntry<F> {
     /// The key's location in the base DB snapshot, regardless of variant.
     pub(crate) const fn base_old_loc(&self) -> Option<Location<F>> {
         match self {
@@ -145,14 +146,6 @@ impl<F: Family, V> DiffEntry<F, V> {
     pub(crate) const fn loc(&self) -> Option<Location<F>> {
         match self {
             Self::Active { loc, .. } => Some(*loc),
-            Self::Deleted { .. } => None,
-        }
-    }
-
-    /// The value if active, `None` if deleted.
-    pub(crate) const fn value(&self) -> Option<&V> {
-        match self {
-            Self::Active { value, .. } => Some(value),
             Self::Deleted { .. } => None,
         }
     }
@@ -176,10 +169,7 @@ fn sorted_contains<T: Ord>(items: &[T], cursor: &mut usize, target: &T) -> bool 
 }
 
 /// Merge two key-sorted diffs with disjoint keys into one sorted diff.
-fn merge_sorted_diffs<K: Ord, F: Family, V>(
-    a: DiffVec<K, F, V>,
-    b: DiffVec<K, F, V>,
-) -> DiffVec<K, F, V> {
+fn merge_sorted_diffs<K: Ord, F: Family>(a: DiffVec<K, F>, b: DiffVec<K, F>) -> DiffVec<K, F> {
     let mut merged = Vec::with_capacity(a.len() + b.len());
     let mut a = a.into_iter().peekable();
     let mut b = b.into_iter().peekable();
@@ -338,7 +328,8 @@ pub struct MerkleizedBatch<F: Family, D: Digest, U: update::Update, S: Strategy>
 
     /// This batch's local key-level changes only (not accumulated from ancestors).
     /// Sorted by key with no duplicates; queried via `lookup_sorted` (binary search).
-    pub(crate) diff: Arc<DiffVec<U::Key, F, U::Value>>,
+    /// Values live in `journal_batch`'s operations, addressed by each entry's location.
+    pub(crate) diff: Arc<DiffVec<U::Key, F>>,
 
     /// The parent batch in the chain, if any.
     parent: Option<Weak<Self>>,
@@ -349,7 +340,7 @@ pub struct MerkleizedBatch<F: Family, D: Digest, U: update::Update, S: Strategy>
     /// Arc refs to each ancestor's diff, collected during `finish()` while ancestors are
     /// alive. Used by `apply_batch` to apply uncommitted ancestor snapshot diffs.
     /// 1:1 with `bounds.ancestors` (same length, same ordering).
-    pub(crate) ancestor_diffs: Vec<Arc<DiffVec<U::Key, F, U::Value>>>,
+    pub(crate) ancestor_diffs: Vec<Arc<DiffVec<U::Key, F>>>,
 
     /// Locations at `bounds.db` for keys whose retained ancestor diffs cross a dropped prefix.
     /// Only overlapping keys are retained, bounding this by the live speculative suffix rather
@@ -387,7 +378,7 @@ where
 fn resolve_in_ancestors<'a, F: Family, D: Digest, U: update::Update, S: Strategy>(
     ancestors: &'a [Arc<MerkleizedBatch<F, D, U, S>>],
     key: &U::Key,
-) -> Option<&'a DiffEntry<F, U::Value>> {
+) -> Option<&'a DiffEntry<F>> {
     for batch in ancestors {
         if let Some(entry) = lookup_sorted(batch.diff.as_slice(), key) {
             return Some(entry);
@@ -421,12 +412,12 @@ enum FloorOutcome<F: Family> {
 /// Streaming equivalent of [`resolve_in_ancestors`] for an ascending sequence of queries:
 /// one cursor per key-sorted diff advances in a linear merge instead of binary-searching
 /// each diff per key. Diffs must be ordered closest-first (the first hit wins).
-pub(crate) struct DiffCursors<'a, K, F: Family, V> {
-    diffs: Vec<(&'a DiffSlice<K, F, V>, usize)>,
+pub(crate) struct DiffCursors<'a, K, F: Family> {
+    diffs: Vec<(&'a DiffSlice<K, F>, usize)>,
 }
 
-impl<'a, K: Ord, F: Family, V> DiffCursors<'a, K, F, V> {
-    pub(crate) fn new(diffs: impl IntoIterator<Item = &'a DiffSlice<K, F, V>>) -> Self {
+impl<'a, K: Ord, F: Family> DiffCursors<'a, K, F> {
+    pub(crate) fn new(diffs: impl IntoIterator<Item = &'a DiffSlice<K, F>>) -> Self {
         Self {
             diffs: diffs.into_iter().map(|diff| (diff, 0)).collect(),
         }
@@ -439,7 +430,7 @@ impl<'a, K: Ord, F: Family, V> DiffCursors<'a, K, F, V> {
     ///
     /// Panics on any out-of-order query that would return a wrong result (the cursor has
     /// already advanced past an entry at or above the query).
-    pub(crate) fn resolve(&mut self, key: &K) -> Option<&'a DiffEntry<F, V>> {
+    pub(crate) fn resolve(&mut self, key: &K) -> Option<&'a DiffEntry<F>> {
         for (diff, cursor) in &mut self.diffs {
             assert!(
                 *cursor == 0 || diff[*cursor - 1].0 < *key,
@@ -458,37 +449,37 @@ impl<'a, K: Ord, F: Family, V> DiffCursors<'a, K, F, V> {
     }
 }
 
-/// Resolve unresolved input slots against ancestor diffs, preserving final results by original
-/// input slot. The caller keeps `pending` in input order so DB fallthrough can do the same.
+/// Resolve unresolved input slots against ancestor batches (closest first), preserving final
+/// results by original input slot. The caller keeps `pending` in input order so DB fallthrough
+/// can do the same.
 ///
 /// `on_hit` is invoked (serially, in `pending` order) with each resolving diff entry, so
 /// staged reads can record ancestor resolutions alongside the values.
-fn resolve_pending_from_diffs<'a, K, F: Family, V: Clone + Send + Sync + 'a, S: Strategy>(
-    pending: &[PendingRead<'a, K>],
-    diffs: &[&'a DiffSlice<K, F, V>],
+fn resolve_pending_from_diffs<'a, F: Family, D: Digest, U: update::Update, S: Strategy>(
+    pending: &[PendingRead<'a, U::Key>],
+    ancestors: &[&'a MerkleizedBatch<F, D, U, S>],
     strategy: &S,
     resolved: &mut [bool],
-    results: &mut [Option<V>],
-    mut on_hit: impl FnMut(usize, &DiffEntry<F, V>),
-) where
-    K: Ord + Sync,
-{
-    if pending.is_empty() || diffs.is_empty() {
+    results: &mut [Option<U::Value>],
+    mut on_hit: impl FnMut(usize, &DiffEntry<F>),
+) {
+    if pending.is_empty() || ancestors.is_empty() {
         return;
     }
 
-    let resolve = |chunk: &[PendingRead<'a, K>]| -> Vec<(usize, &'a DiffEntry<F, V>)> {
+    type Hit<'a, F, V> = (usize, &'a DiffEntry<F>, Option<&'a V>);
+    let resolve = |chunk: &[PendingRead<'a, U::Key>]| -> Vec<Hit<'a, F, U::Value>> {
         chunk
             .iter()
             .filter_map(|(slot, key)| {
-                diffs
+                ancestors
                     .iter()
-                    .find_map(|diff| lookup_sorted(diff, key))
-                    .map(|entry| (*slot, entry))
+                    .find_map(|batch| batch.lookup_entry(key))
+                    .map(|(entry, value)| (*slot, entry, value))
             })
             .collect()
     };
-    let hits: Vec<(usize, &'a DiffEntry<F, V>)> = strategy.run(
+    let hits: Vec<Hit<'a, F, U::Value>> = strategy.run(
         pending.len(),
         || resolve(pending),
         || {
@@ -503,30 +494,26 @@ fn resolve_pending_from_diffs<'a, K, F: Family, V: Clone + Send + Sync + 'a, S: 
         },
     );
 
-    for (slot, entry) in hits {
+    for (slot, entry, value) in hits {
         resolved[slot] = true;
-        results[slot] = entry.value().cloned();
+        results[slot] = value.cloned();
         on_hit(slot, entry);
     }
 }
 
 /// Resolve `keys` against a local source (`local` returns `Some` when it owns the key, with the
-/// inner `Option` distinguishing a live value from a delete) and then against `diffs`, returning
-/// per-slot results and the slots that still need committed DB reads.
+/// inner `Option` distinguishing a live value from a delete) and then against `ancestors`,
+/// returning per-slot results and the slots that still need committed DB reads.
 ///
 /// `on_diff_hit` is invoked with each slot resolved by a diff entry (see
 /// [`resolve_pending_from_diffs`]). Slots resolved by `local` do not report.
-fn resolve_reads<'a, K, F: Family, V, S: Strategy>(
-    keys: &[&'a K],
-    local: impl Fn(&K) -> Option<Option<V>>,
-    diffs: &[&DiffSlice<K, F, V>],
+fn resolve_reads<'a, F: Family, D: Digest, U: update::Update, S: Strategy>(
+    keys: &[&'a U::Key],
+    local: impl Fn(&U::Key) -> Option<Option<U::Value>>,
+    ancestors: &[&MerkleizedBatch<F, D, U, S>],
     strategy: &S,
-    on_diff_hit: impl FnMut(usize, &DiffEntry<F, V>),
-) -> UncommittedReadResolution<'a, K, V>
-where
-    K: Ord + Sync,
-    V: Clone + Send + Sync,
-{
+    on_diff_hit: impl FnMut(usize, &DiffEntry<F>),
+) -> UncommittedReadResolution<'a, U::Key, U::Value> {
     let mut results = vec![None; keys.len()];
     let mut resolved = vec![false; keys.len()];
     let mut pending = Vec::new();
@@ -541,7 +528,7 @@ where
     }
     resolve_pending_from_diffs(
         &pending,
-        diffs,
+        ancestors,
         strategy,
         &mut resolved,
         &mut results,
@@ -554,11 +541,11 @@ where
 
 /// Apply a single diff entry to the snapshot index and activity bitmap in lockstep:
 /// install the winning `Active` location and clear the prior committed location.
-fn apply_diff<F: Family, V, I: UnorderedIndex<Value = Location<F>>, const N: usize>(
+fn apply_diff<F: Family, I: UnorderedIndex<Value = Location<F>>, const N: usize>(
     snapshot: &mut I,
     bitmap: &mut bitmap::Prunable<N>,
     key: &impl Key,
-    entry: &DiffEntry<F, V>,
+    entry: &DiffEntry<F>,
     base_old_loc: Option<Location<F>>,
 ) {
     match entry {
@@ -582,22 +569,22 @@ fn apply_diff<F: Family, V, I: UnorderedIndex<Value = Location<F>>, const N: usi
 
 /// k-way sorted merge over diff slices in priority order. On equal keys, the lowest-indexed
 /// stream wins and all tied cursors are advanced. Each input slice must be sorted by key.
-struct DiffMerge<'a, K, F: Family, V> {
-    cursors: Vec<(&'a DiffSlice<K, F, V>, usize)>,
+struct DiffMerge<'a, K, F: Family> {
+    cursors: Vec<(&'a DiffSlice<K, F>, usize)>,
 }
 
-impl<'a, K: Ord, F: Family, V> DiffMerge<'a, K, F, V> {
-    fn new(streams: impl IntoIterator<Item = &'a DiffSlice<K, F, V>>) -> Self {
+impl<'a, K: Ord, F: Family> DiffMerge<'a, K, F> {
+    fn new(streams: impl IntoIterator<Item = &'a DiffSlice<K, F>>) -> Self {
         Self {
             cursors: streams.into_iter().map(|s| (s, 0)).collect(),
         }
     }
 
-    fn peek_key(cursor: &(&'a DiffSlice<K, F, V>, usize)) -> Option<&'a K> {
+    fn peek_key(cursor: &(&'a DiffSlice<K, F>, usize)) -> Option<&'a K> {
         cursor.0.get(cursor.1).map(|(k, _)| k)
     }
 
-    fn next_general(&mut self) -> Option<(&'a K, &'a DiffEntry<F, V>)> {
+    fn next_general(&mut self) -> Option<(&'a K, &'a DiffEntry<F>)> {
         let n = self.cursors.len();
         let mut winner: Option<usize> = None;
         for level in 0..n {
@@ -624,8 +611,8 @@ impl<'a, K: Ord, F: Family, V> DiffMerge<'a, K, F, V> {
     }
 }
 
-impl<'a, K: Ord, F: Family, V> Iterator for DiffMerge<'a, K, F, V> {
-    type Item = (&'a K, &'a DiffEntry<F, V>);
+impl<'a, K: Ord, F: Family> Iterator for DiffMerge<'a, K, F> {
+    type Item = (&'a K, &'a DiffEntry<F>);
 
     fn next(&mut self) -> Option<Self::Item> {
         match self.cursors.len() {
@@ -943,7 +930,7 @@ where
     async fn finish<E, C, I, const N: usize>(
         self,
         mut ops: Vec<Operation<F, U>>,
-        mut diff: DiffVec<U::Key, F, U::Value>,
+        mut diff: DiffVec<U::Key, F>,
         mut superseded_locs: Vec<Location<F>>,
         active_keys_delta: isize,
         user_steps: u64,
@@ -1143,10 +1130,8 @@ where
                         FloorOutcome::Inactive => continue,
                         FloorOutcome::MoveExisting { idx, base_old_loc } => {
                             let new_loc = self.base_state.size + ops.len() as u64;
-                            let value = extract_update_value(&op);
                             ops.push(op);
                             diff[idx].1 = DiffEntry::Active {
-                                value,
                                 loc: new_loc,
                                 base_old_loc,
                             };
@@ -1154,12 +1139,10 @@ where
                         FloorOutcome::MoveNew { base_old_loc } => {
                             let key = op.key().cloned().expect("moved op has a key");
                             let new_loc = self.base_state.size + ops.len() as u64;
-                            let value = extract_update_value(&op);
                             ops.push(op);
                             floor_diff.push((
                                 key,
                                 DiffEntry::Active {
-                                    value,
                                     loc: new_loc,
                                     base_old_loc,
                                 },
@@ -1692,25 +1675,18 @@ where
         &self,
         keys: &[&'a U::Key],
         strategy: &S,
-        on_diff_hit: impl FnMut(usize, &DiffEntry<F, U::Value>),
-    ) -> UncommittedReadResolution<'a, U::Key, U::Value>
-    where
-        U::Value: Send + Sync,
-    {
+        on_diff_hit: impl FnMut(usize, &DiffEntry<F>),
+    ) -> UncommittedReadResolution<'a, U::Key, U::Value> {
         let ancestors = self.base.parent().map(|parent| {
             let mut ancestors = vec![Arc::clone(parent)];
             ancestors.extend(parent.ancestors());
             ancestors
         });
-        let diffs: Vec<_> = ancestors
-            .iter()
-            .flatten()
-            .map(|batch| batch.diff.as_slice())
-            .collect();
+        let ancestors: Vec<_> = ancestors.iter().flatten().map(Arc::as_ref).collect();
         resolve_reads(
             keys,
             |key| self.mutations.get(key).cloned(),
-            &diffs,
+            &ancestors,
             strategy,
             on_diff_hit,
         )
@@ -1965,8 +1941,7 @@ where
         // Generate user mutation operations.
         let mut ops: Vec<Operation<F, update::Unordered<K, V>>> =
             Vec::with_capacity(mutations.len() + staged_updates.len() + 1);
-        let mut diff: DiffVec<K, F, V::Value> =
-            Vec::with_capacity(mutations.len() + staged_updates.len());
+        let mut diff: DiffVec<K, F> = Vec::with_capacity(mutations.len() + staged_updates.len());
 
         // Committed locations superseded by this batch, collected for the floor raise (which
         // skips re-reading them). Emission order is ascending in `base_old_loc` except for
@@ -1982,14 +1957,10 @@ where
             superseded_locs.extend(base_old_loc);
             match mutation {
                 Some(value) => {
-                    ops.push(Operation::Update(update::Unordered(
-                        key.clone(),
-                        value.clone(),
-                    )));
+                    ops.push(Operation::Update(update::Unordered(key.clone(), value)));
                     diff.push((
                         key,
                         DiffEntry::Active {
-                            value,
                             loc: new_loc,
                             base_old_loc,
                         },
@@ -2082,14 +2053,10 @@ where
         for (key, value, base_old_loc) in creates {
             let new_loc = m.base_state.size + ops.len() as u64;
             superseded_locs.extend(base_old_loc);
-            ops.push(Operation::Update(update::Unordered(
-                key.clone(),
-                value.clone(),
-            )));
+            ops.push(Operation::Update(update::Unordered(key.clone(), value)));
             diff.push((
                 key,
                 DiffEntry::Active {
-                    value,
                     loc: new_loc,
                     base_old_loc,
                 },
@@ -2332,7 +2299,7 @@ where
         };
         let mut seen: AHashSet<&K> = AHashSet::with_capacity(seen_cap);
         let mut ancestor_deleted: Vec<K> = Vec::new();
-        let mut ancestor_active: Vec<(&K, &V::Value, Location<F>)> = Vec::new();
+        let mut ancestor_active: Vec<(&K, Location<F>)> = Vec::new();
         for batch in m.ancestors.iter() {
             let (mut ui, mut ci, mut di) = (0, 0, 0);
             for (key, entry) in batch.diff.iter() {
@@ -2356,8 +2323,8 @@ where
                     continue;
                 }
                 match entry {
-                    DiffEntry::Active { value, loc, .. } => {
-                        ancestor_active.push((key, value, *loc));
+                    DiffEntry::Active { loc, .. } => {
+                        ancestor_active.push((key, *loc));
                     }
                     DiffEntry::Deleted { .. } => {
                         ancestor_deleted.push(key.clone());
@@ -2369,9 +2336,8 @@ where
         ancestor_deleted.dedup();
 
         // Batch-read the collected active entries' ops and emit their candidates.
-        let ancestor_locs: Vec<Location<F>> =
-            ancestor_active.iter().map(|&(_, _, loc)| loc).collect();
-        for (op, (key, value, loc)) in m
+        let ancestor_locs: Vec<Location<F>> = ancestor_active.iter().map(|&(_, loc)| loc).collect();
+        for (op, (key, loc)) in m
             .read_ops(&ancestor_locs, &[], &db.log)
             .await?
             .into_iter()
@@ -2383,7 +2349,7 @@ where
             };
             next_candidates.push(key.clone());
             next_candidates.push(data.next_key);
-            prev_candidates.push((key.clone(), (Some(value.clone()), loc)));
+            prev_candidates.push((key.clone(), (Some(data.value), loc)));
         }
 
         // Sort + dedup candidate sets now so find_next_key/find_prev_key can binary-search.
@@ -2418,7 +2384,7 @@ where
         // Generate operations.
         let mut ops: Vec<Operation<F, update::Ordered<K, V>>> =
             Vec::with_capacity(deleted.len() + updated.len() + created.len() + 1);
-        let mut diff: DiffVec<K, F, V::Value> =
+        let mut diff: DiffVec<K, F> =
             Vec::with_capacity(deleted.len() + updated.len() + created.len());
         let mut active_keys_delta: isize = 0;
         let mut user_steps: u64 = 0;
@@ -2456,7 +2422,6 @@ where
             diff.push((
                 key.clone(),
                 DiffEntry::Active {
-                    value: value.clone(),
                     loc: new_loc,
                     base_old_loc,
                 },
@@ -2477,7 +2442,6 @@ where
             diff.push((
                 key.clone(),
                 DiffEntry::Active {
-                    value: value.clone(),
                     loc: new_loc,
                     base_old_loc: *base_old_loc,
                 },
@@ -2528,7 +2492,6 @@ where
                 diff.push((
                     prev_key.clone(),
                     DiffEntry::Active {
-                        value: prev_value.clone(),
                         loc: prev_new_loc,
                         base_old_loc: prev_base_old_loc,
                     },
@@ -2585,6 +2548,28 @@ impl<F: Family, D: Digest, U: update::Update, S: Strategy> MerkleizedBatch<F, D,
     /// Weak ref fails to upgrade (ancestor was freed).
     pub(crate) fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> + use<F, D, U, S> {
         batch_chain::ancestors(self.parent.clone(), |batch| batch.parent.as_ref())
+    }
+
+    /// Resolve `key` against this batch's diff: `None` if untouched, `Some(None)` if deleted,
+    /// and `Some(Some(value))` if written.
+    pub(crate) fn lookup(&self, key: &U::Key) -> Option<Option<&U::Value>> {
+        self.lookup_entry(key).map(|(_, value)| value)
+    }
+
+    /// [`Self::lookup`] that also returns the diff entry.
+    fn lookup_entry(&self, key: &U::Key) -> Option<(&DiffEntry<F>, Option<&U::Value>)> {
+        let entry = lookup_sorted(self.diff.as_slice(), key)?;
+        Some((entry, entry.loc().map(|loc| self.value_at(loc))))
+    }
+
+    /// The value of the update at `loc`, which must be one of this batch's own operations.
+    fn value_at(&self, loc: Location<F>) -> &U::Value {
+        let items = self.journal_batch.items();
+        let base = self.journal_batch.size() - items.len() as u64;
+        match &items[(*loc - base) as usize] {
+            Operation::Update(update) => update.value(),
+            _ => unreachable!("active diff entry must point at an update"),
+        }
     }
 
     /// The [`Commitment`] this batch commits to.
@@ -2695,14 +2680,14 @@ where
         I: UnorderedIndex<Value = Location<F>> + 'static,
         H: Hasher<Digest = D>,
     {
-        if let Some(entry) = lookup_sorted(self.diff.as_slice(), key) {
-            return Ok(entry.value().cloned());
+        if let Some(value) = self.lookup(key) {
+            return Ok(value.cloned());
         }
         // Walk parent chain. If a parent was freed (committed and dropped), the iterator
         // stops and we fall through to DB.
         for batch in self.ancestors() {
-            if let Some(entry) = lookup_sorted(batch.diff.as_slice(), key) {
-                return Ok(entry.value().cloned());
+            if let Some(value) = batch.lookup(key) {
+                return Ok(value.cloned());
             }
         }
         db.get(key).await
@@ -2727,14 +2712,11 @@ where
         }
 
         let ancestors: Vec<_> = self.ancestors().collect();
-        let diffs: Vec<_> = ancestors
-            .iter()
-            .map(|batch| batch.diff.as_slice())
-            .collect();
+        let ancestors: Vec<_> = ancestors.iter().map(Arc::as_ref).collect();
         let (mut results, unresolved) = resolve_reads(
             keys,
-            |key| lookup_sorted(self.diff.as_slice(), key).map(|entry| entry.value().cloned()),
-            &diffs,
+            |key| self.lookup(key).map(|value| value.cloned()),
+            &ancestors,
             db.strategy(),
             |_, _| {},
         );
@@ -2976,14 +2958,6 @@ where
     }
 }
 
-/// Extract the value from an Update operation via the `Update` trait.
-fn extract_update_value<F: Family, U: update::Update>(op: &Operation<F, U>) -> U::Value {
-    match op {
-        Operation::Update(update) => update.value().clone(),
-        _ => unreachable!("floor raise should only re-append Update operations"),
-    }
-}
-
 #[cfg(any(test, feature = "test-traits"))]
 mod trait_impls {
     use super::*;
@@ -3182,7 +3156,7 @@ mod tests {
         for _ in 0..50 {
             // Build 1-4 sorted diffs over a small key universe so overlaps are common.
             let num_diffs = rng.random_range(1..=4);
-            let diffs: Vec<DiffVec<u64, mmr::Family, u64>> = (0..num_diffs)
+            let diffs: Vec<DiffVec<u64, mmr::Family>> = (0..num_diffs)
                 .map(|d| {
                     let mut keys: Vec<u64> = (0..rng.random_range(0..30))
                         .map(|_| rng.random_range(0..50u64))
@@ -3194,7 +3168,6 @@ mod tests {
                             (
                                 k,
                                 DiffEntry::Active {
-                                    value: k * 1000 + d,
                                     loc: loc(k * 1000 + d),
                                     base_old_loc: None,
                                 },
@@ -3227,13 +3200,12 @@ mod tests {
     #[test]
     #[should_panic(expected = "queries must be non-decreasing")]
     fn diff_cursors_rejects_out_of_order_query() {
-        let diff: DiffVec<u64, mmr::Family, u64> = vec![1, 5]
+        let diff: DiffVec<u64, mmr::Family> = vec![1, 5]
             .into_iter()
             .map(|k| {
                 (
                     k,
                     DiffEntry::Active {
-                        value: k,
                         loc: loc(k),
                         base_old_loc: None,
                     },
@@ -3279,13 +3251,13 @@ mod tests {
         let mut rng = test_rng();
         for _ in 0..50 {
             // Disjoint key sets: evens on one side, odds on the other.
-            let mut build = |offset: u64| -> DiffVec<u64, mmr::Family, u64> {
+            let mut build = |offset: u64| -> DiffVec<u64, mmr::Family> {
                 let mut keys: Vec<u64> = (0..rng.random_range(0..30))
                     .map(|_| rng.random_range(0..50u64) * 2 + offset)
                     .collect();
                 keys.sort_unstable();
                 keys.dedup();
-                keys.into_iter().map(|k| (k, active(k, k))).collect()
+                keys.into_iter().map(|k| (k, active(k))).collect()
             };
             let a = build(0);
             let b = build(1);
@@ -3299,7 +3271,6 @@ mod tests {
             for ((mk, me), (rk, re)) in merged.iter().zip(&reference) {
                 assert_eq!(mk, rk);
                 assert_eq!(me.loc(), re.loc());
-                assert_eq!(me.value(), re.value());
             }
         }
     }
@@ -3325,15 +3296,14 @@ mod tests {
         (candidate < tip).then(|| Location::new(candidate))
     }
 
-    fn active(value: u64, location: u64) -> DiffEntry<mmr::Family, u64> {
+    fn active(location: u64) -> DiffEntry<mmr::Family> {
         DiffEntry::Active {
-            value,
             loc: loc(location),
             base_old_loc: None,
         }
     }
 
-    fn deleted(base_old_loc: Option<u64>) -> DiffEntry<mmr::Family, u64> {
+    fn deleted(base_old_loc: Option<u64>) -> DiffEntry<mmr::Family> {
         DiffEntry::Deleted {
             base_old_loc: base_old_loc.map(loc),
         }
@@ -3341,90 +3311,82 @@ mod tests {
 
     #[test]
     fn diff_merge_returns_sorted_newest_entries() {
-        let child = vec![(2, active(20, 20)), (5, active(50, 50))];
+        let child = vec![(2, active(20)), (5, active(50))];
         let parent = vec![
-            (1, active(11, 11)),
-            (2, active(12, 12)),
+            (1, active(11)),
+            (2, active(12)),
             (4, deleted(Some(4))),
-            (7, active(17, 17)),
+            (7, active(17)),
         ];
         let grandparent = vec![
-            (2, active(102, 102)),
-            (3, active(103, 103)),
-            (4, active(104, 104)),
-            (6, active(106, 106)),
+            (2, active(102)),
+            (3, active(103)),
+            (4, active(104)),
+            (6, active(106)),
         ];
 
         // Streams are priority ordered: child, parent, then grandparent. Equal keys should
         // yield only the newest entry while preserving ascending key order for resolver lookups.
         let merged: Vec<_> =
             DiffMerge::new([child.as_slice(), parent.as_slice(), grandparent.as_slice()])
-                .map(|(key, entry)| (*key, entry.value().copied(), entry.loc()))
+                .map(|(key, entry)| (*key, entry.loc()))
                 .collect();
 
         assert_eq!(
             merged,
             vec![
-                (1, Some(11), Some(loc(11))),
-                (2, Some(20), Some(loc(20))),
-                (3, Some(103), Some(loc(103))),
-                (4, None, None),
-                (5, Some(50), Some(loc(50))),
-                (6, Some(106), Some(loc(106))),
-                (7, Some(17), Some(loc(17))),
+                (1, Some(loc(11))),
+                (2, Some(loc(20))),
+                (3, Some(loc(103))),
+                (4, None),
+                (5, Some(loc(50))),
+                (6, Some(loc(106))),
+                (7, Some(loc(17))),
             ]
         );
     }
 
     #[test]
     fn diff_merge_two_way_priority() {
-        let a = vec![
-            (1, active(10, 10)),
-            (3, active(30, 30)),
-            (5, deleted(Some(5))),
-        ];
+        let a = vec![(1, active(10)), (3, active(30)), (5, deleted(Some(5)))];
         let b = vec![
-            (2, active(20, 20)),
-            (3, active(300, 300)),
-            (4, active(40, 40)),
-            (5, active(50, 50)),
+            (2, active(20)),
+            (3, active(300)),
+            (4, active(40)),
+            (5, active(50)),
         ];
 
         let merged: Vec<_> = DiffMerge::new([a.as_slice(), b.as_slice()])
-            .map(|(key, entry)| (*key, entry.value().copied(), entry.loc()))
+            .map(|(key, entry)| (*key, entry.loc()))
             .collect();
 
         assert_eq!(
             merged,
             vec![
-                (1, Some(10), Some(loc(10))),
-                (2, Some(20), Some(loc(20))),
-                (3, Some(30), Some(loc(30))),
-                (4, Some(40), Some(loc(40))),
-                (5, None, None),
+                (1, Some(loc(10))),
+                (2, Some(loc(20))),
+                (3, Some(loc(30))),
+                (4, Some(loc(40))),
+                (5, None),
             ]
         );
     }
 
     #[test]
     fn diff_merge_single_stream() {
-        let a = vec![(1, active(10, 10)), (3, active(30, 30))];
+        let a = vec![(1, active(10)), (3, active(30))];
 
         let merged: Vec<_> = DiffMerge::new([a.as_slice()])
-            .map(|(key, entry)| (*key, entry.value().copied()))
+            .map(|(key, entry)| (*key, entry.loc()))
             .collect();
 
-        assert_eq!(merged, vec![(1, Some(10)), (3, Some(30))]);
+        assert_eq!(merged, vec![(1, Some(loc(10))), (3, Some(loc(30)))]);
     }
 
     #[test]
     fn diff_cursors_use_nearest_touch() {
-        let parent = vec![(2, active(20, 20)), (5, deleted(Some(5)))];
-        let grandparent = vec![
-            (2, active(200, 200)),
-            (4, active(40, 40)),
-            (5, active(50, 50)),
-        ];
+        let parent = vec![(2, active(20)), (5, deleted(Some(5)))];
+        let grandparent = vec![(2, active(200)), (4, active(40)), (5, active(50))];
         let mut cursors = DiffCursors::new([parent.as_slice(), grandparent.as_slice()]);
 
         // Lookups are issued in ascending order, as they are from DiffMerge in apply_batch.
@@ -3593,7 +3555,7 @@ mod tests {
     /// but without requiring a full Merkleizer instance.
     fn extract_parent_deleted_creates<K: Ord + Clone, V: Clone>(
         mutations: &mut BTreeMap<K, Option<V>>,
-        base_diff: &[(K, DiffEntry<mmr::Family, V>)],
+        base_diff: &[(K, DiffEntry<mmr::Family>)],
     ) -> Vec<(K, V, Option<crate::mmr::Location>)> {
         let creates: Vec<_> = mutations
             .iter()
@@ -3619,7 +3581,7 @@ mod tests {
         mutations.insert(2, None); // delete (not a create)
         mutations.insert(3, Some(300)); // update, but not in base diff
 
-        let mut base_diff: Vec<(u64, DiffEntry<mmr::Family, u64>)> = vec![
+        let mut base_diff: Vec<(u64, DiffEntry<mmr::Family>)> = vec![
             (
                 1,
                 DiffEntry::Deleted {
@@ -3629,7 +3591,6 @@ mod tests {
             (
                 4,
                 DiffEntry::Active {
-                    value: 400,
                     loc: crate::mmr::Location::new(10),
                     base_old_loc: None,
                 },
@@ -3657,7 +3618,7 @@ mod tests {
         let mut mutations: BTreeMap<u64, Option<u64>> = BTreeMap::new();
         mutations.insert(1, None); // deleting a parent-deleted key
 
-        let base_diff: Vec<(u64, DiffEntry<mmr::Family, u64>)> = vec![(
+        let base_diff: Vec<(u64, DiffEntry<mmr::Family>)> = vec![(
             1,
             DiffEntry::Deleted {
                 base_old_loc: Some(crate::mmr::Location::new(5)),
