@@ -18,7 +18,6 @@ use super::{
         CertificateDerivations, FinalityEffect, FinalityError, FinalityOutput, FinalityUpdate,
         PreparedLqc,
     },
-    state::PendingVoteDa,
     view::{ViewEffect, ViewError},
 };
 use crate::{
@@ -1809,12 +1808,8 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             return Ok((true, capabilities));
         }
 
-        let vote_da_pending = self
-            .pending_vote_da
-            .as_ref()
-            .is_some_and(|pending| pending.view == self.durable.view);
         let (da_status, da_capabilities) =
-            if vote_da_pending || self.views.regular_vote_in_progress(self.durable.view) {
+            if self.views.regular_vote_in_progress(self.durable.view) {
                 (WorkStatus::Complete, Capabilities::None)
             } else {
                 self.reserve_ready_da_votes(cycle)?
@@ -1913,109 +1908,11 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         Ok((WorkStatus::Requeue, step.into_capabilities()))
     }
 
-    fn reserve_pending_vote_da(&mut self, cycle: &mut ServiceCycle) -> WorkResult<V, H::Digest> {
-        let Some(mut pending) = self.pending_vote_da.take() else {
-            return Ok((WorkStatus::Complete, Capabilities::None));
-        };
-        pending.blocks.retain(|block| {
-            self.durable
-                .da_safety_heights
-                .get(block.header().chain().get() as usize)
-                .is_some_and(|safe| block.header().height() > *safe)
-        });
-        if pending.blocks.is_empty() {
-            return Ok((WorkStatus::Complete, Capabilities::None));
-        }
-        if cycle.remaining_core() == 0 {
-            self.pending_vote_da = Some(pending);
-            return Ok((WorkStatus::Requeue, Capabilities::None));
-        }
-
-        // Leave capacity for the ordinary vote when possible. If other work consumes that slot,
-        // the completed vote request remains frozen until it can be reserved.
-        let outbox_slots = self.certificate_outbox_slots();
-        let resource_slots = if outbox_slots > 1 {
-            self.certificate_artifact_slots().saturating_sub(1)
-        } else {
-            0
-        };
-        let available = resource_slots.min(cycle.remaining_core() as usize);
-        if available == 0 {
-            self.pending_vote_da = Some(pending);
-            return Ok((WorkStatus::Blocked, Capabilities::None));
-        }
-
-        let blocks = pending
-            .blocks
-            .iter()
-            .filter(|block| {
-                let header = block.header();
-                self.da_vote_extends_durable_safety(header.chain(), header.height())
-            })
-            .take(available)
-            .cloned()
-            .collect::<Vec<_>>();
-        if blocks.is_empty() {
-            self.pending_vote_da = Some(pending);
-            return Ok((WorkStatus::Requeue, Capabilities::None));
-        }
-
-        let requests = blocks
-            .iter()
-            .cloned()
-            .map(|block| SignRequest::DaVote(DaVoteRequest::new(block)))
-            .collect::<Vec<_>>();
-        let effect = if let [request] = requests.as_slice() {
-            DurableEffect::Sign(request.clone())
-        } else {
-            DurableEffect::SignBatch(requests.into())
-        };
-        if !self.effect_fits(&effect, 0)? {
-            self.pending_vote_da = Some(pending);
-            return Ok((WorkStatus::Blocked, Capabilities::None));
-        }
-        match cycle.charge(
-            Lane::LocalCompletion,
-            TransitionCost::ArtifactItems(blocks.len()),
-        ) {
-            Ok(()) => {}
-            Err(ServiceError::CoreBudgetExhausted | ServiceError::LaneExhausted) => {
-                self.pending_vote_da = Some(pending);
-                return Ok((WorkStatus::Requeue, Capabilities::None));
-            }
-            Err(ServiceError::CostOverflow) => return Err(StepError::IdentifierExhausted),
-        }
-
-        let selected = blocks
-            .iter()
-            .map(|block| block.header().chain())
-            .collect::<BTreeSet<_>>();
-        pending
-            .blocks
-            .retain(|block| !selected.contains(&block.header().chain()));
-        for block in blocks {
-            self.chain.mark_da_vote_reserved(block.header().clone());
-        }
-        let step = self.reserve_effect_prechecked(effect)?;
-        if !pending.blocks.is_empty() {
-            self.pending_vote_da = Some(pending);
-            return Ok((WorkStatus::Requeue, step.into_capabilities()));
-        }
-        Ok((WorkStatus::Complete, step.into_capabilities()))
-    }
-
     fn drive_view_component(
         &mut self,
         cycle: &mut ServiceCycle,
     ) -> Result<(bool, Capabilities<V, H::Digest>), StepError> {
         let mut capabilities = self.take_view_capabilities();
-        if self
-            .pending_vote_da
-            .as_ref()
-            .is_some_and(|pending| pending.view != self.durable.view)
-        {
-            self.pending_vote_da = None;
-        }
         let local_leader = matches!(
             self.profile.role(),
             Role::Validator(me) if me == self.profile.protocol().leader(self.durable.view)
@@ -2045,34 +1942,13 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                 return Ok((true, capabilities));
             }
         }
-        let needs_da_frontier = self
-            .views
-            .needs_da_frontier::<H>(&self.profile, self.durable.view)?;
-        if needs_da_frontier {
-            if self.pending_vote_da.is_none() {
-                // One vote per chain here: the pre-vote reservation freezes the frontier the
-                // ordinary vote endorses, and stays bounded so vote construction never absorbs
-                // a chain's DA backlog (background passes own that work).
-                let blocks = self.chain.ready_da_votes(
-                    &self.profile,
-                    self.profile.protocol().codec_config().chains(),
-                    1,
-                )?;
-                self.pending_vote_da = Some(PendingVoteDa {
-                    view: self.durable.view,
-                    blocks: blocks.into(),
-                });
-            }
-            let (da_status, da_capabilities) = self.reserve_pending_vote_da(cycle)?;
-            capabilities.extend(da_capabilities);
-            match da_status {
-                WorkStatus::Complete => {}
-                WorkStatus::Requeue => return Ok((true, capabilities)),
-                WorkStatus::Blocked => return Ok((false, capabilities)),
-            }
-        } else if !self.views.regular_vote_in_progress(self.durable.view) {
-            self.pending_vote_da = None;
-        }
+        // Vote with the DA frontier the background pass has already advanced, rather than
+        // reserving a fresh frontier DA-vote on the critical path. A processor votes its current
+        // DA positions ("no processor blocks or fetches on the critical path"); freezing a
+        // fresher frontier per view serialized the ordinary vote behind the data-availability
+        // plane, so votes were cast at times dispersed by DA-plane contention and the committee's
+        // quorum gather ran wider than the network delay alone. The background reservation
+        // (reserve_ready_da_votes) still advances the endorsed frontier between views.
         let regular = self.views.drive_regular_sign_request::<H>(
             &self.profile,
             self.durable.view,

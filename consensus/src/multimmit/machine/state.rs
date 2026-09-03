@@ -582,12 +582,6 @@ pub(crate) enum Lifecycle {
     Live,
 }
 
-/// The finite set of DA choices that must precede one ordinary vote decision.
-pub(crate) struct PendingVoteDa<V: Variant, D: Digest> {
-    pub(crate) view: View,
-    pub(crate) blocks: VecDeque<Arc<SignedTransactionBlock<V, D>>>,
-}
-
 /// The single owner of all Multimmit protocol state for one epoch.
 pub(super) struct Machine<H: Hasher, V: Variant> {
     pub(crate) profile: Profile<H, V>,
@@ -675,7 +669,6 @@ pub(super) struct Machine<H: Hasher, V: Variant> {
     pub(crate) prepared_lqc: Option<PreparedLqc<V, H::Digest>>,
     pub(crate) defer_da_certificate: bool,
     pub(crate) prefer_deferred_view_certificate: bool,
-    pub(crate) pending_vote_da: Option<PendingVoteDa<V, H::Digest>>,
     pub(crate) chain: ChainState<V, H::Digest>,
     pub(crate) views: ViewState<V, H::Digest>,
     pub(crate) finality: FinalityState<V, H::Digest>,
@@ -758,7 +751,6 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             prepared_lqc: None,
             defer_da_certificate: false,
             prefer_deferred_view_certificate: false,
-            pending_vote_da: None,
             chain,
             views,
             finality,

@@ -1393,20 +1393,6 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
         }
     }
 
-    pub(crate) fn needs_da_frontier<H: Hasher<Digest = D>>(
-        &self,
-        profile: &Profile<H, V>,
-        view: View,
-    ) -> Result<bool, ViewError> {
-        if !matches!(profile.role(), Role::Validator(_)) || !self.slot_state(view).can_vote() {
-            return Ok(false);
-        }
-        if self.regular_vote_in_progress(view) {
-            return Ok(false);
-        }
-        Ok(self.valid_proposal::<H>(profile, view)?.is_some())
-    }
-
     pub(crate) fn regular_vote_in_progress(&self, view: View) -> bool {
         matches!(
             self.regular_sign_pass,
