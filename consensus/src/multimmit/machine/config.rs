@@ -49,33 +49,31 @@ impl Timers {
 /// Every chain proposal is anchored at the highest data-availability certificate the leader
 /// holds above that chain's ordered tip, or at the tip itself when it holds none. The anchor
 /// needs no endorsement: a certificate carries `n - 2f` DA votes and proves the block is
-/// retrievable. Blocks appended above the anchor do need endorsement, because a voter reports
-/// the proposed position it has DA-voted itself, an L-QC finalizes the position `3f + 1` of its
-/// `n - f` votes reach, and a chain whose finalized position falls below the proposed tip holds
-/// the ordering sweep at that chain until a later view. This policy is local leader choice:
-/// proposal validity and tip extraction are identical under all three.
+/// retrievable. Blocks appended above the anchor need endorsement: a voter reports the proposed
+/// position it has DA-voted itself, and an L-QC finalizes the position `3f + 1` of its `n - f`
+/// votes reach, so up to `2f` voters may lag the leader without lowering the finalized tip.
+/// Blocks above the proposed tip enter a view only through vote extensions, which every vote of
+/// an L-QC must endorse. The ordering sweep places proposed blocks before extension blocks, so
+/// an extension that falls short defers only extensions. This policy is local leader choice:
+/// proposal validity and tip extraction are identical under both.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub enum ProposalPolicy {
     /// Propose only blocks whose data-availability certificate this node holds.
     ///
     /// The anchor is already the highest such certificate, so a certified proposal is its
-    /// anchor alone. No vote can then report a position below the proposed tip. With
-    /// [`Limits::extension_bound`] at zero that settles the chain in every L-QC, because an
-    /// L-QC leaves at most `f` votes unseen and no vote path reaches past the anchor, so the
-    /// ordering sweep never halts. Fresh blocks still reach the ordering, through the next
-    /// view's anchor and through the vote extensions a view quorum agrees on, so this trades
-    /// proposal reach for settled chains.
-    ///
-    /// [`Limits::extension_bound`]: crate::multimmit::config::Limits::extension_bound
+    /// anchor alone and no vote can report a position below the proposed tip. Every fresh block
+    /// is then an extension, and a chain whose extension misses any quorum vote waits for the
+    /// next view's anchor. Certificates trail production by a DA round trip, so this trades a
+    /// view of latency for proposals no voter can fall short of.
     #[default]
     Certified,
     /// Propose the prefix this node has DA-voted itself, as the paper's `ProposeChains` does.
     ///
-    /// The leader's own DA frontier runs ahead of the committee's under load, so the voters
-    /// that have not received those blocks report lower positions. That both lowers the
-    /// finalized tip and discards the vote extensions, which count only for a chain whose
-    /// finalized position reaches the proposed tip. This pays off when bodies reach every
-    /// voter well before the view's vote event.
+    /// The leader's frontier is one block delivery and one validation old, and voters near the
+    /// leader hold the same blocks by the time its proposal reaches them. A voter that has not
+    /// received a proposed block reports a lower position, and the `3f + 1` rule absorbs up to
+    /// `2f` such voters before the finalized tip drops. This is the policy under which a view
+    /// places the blocks that reached its leader.
     Endorsed,
 }
 
