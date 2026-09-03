@@ -55,8 +55,3 @@ path = "src/benches/bench.rs"
 name = "coding_scheme_sizes"
 harness = false
 path = "src/benches/bench_size.rs"
-
-[[bench]]
-name = "ocelot_field"
-harness = false
-path = "src/ocelot/field/benches/bench.rs"
