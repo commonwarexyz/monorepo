@@ -123,7 +123,11 @@ where
                     (floor, replies + 1)
                 });
         let floor = floor?;
-        if replies < N3f1::max_faults(committee_size) as usize + 1 {
+        if u64::try_from(replies).expect("reply count exceeds u64::MAX")
+            < N3f1::max_faults(
+                u64::try_from(committee_size).expect("committee size exceeds u64::MAX"),
+            ) + 1
+        {
             return None;
         }
 

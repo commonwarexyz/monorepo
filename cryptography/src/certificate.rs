@@ -165,7 +165,7 @@ impl<S: Scheme> Verification<S> {
 pub enum AssemblyError {
     /// Structurally valid attestations do not meet the scheme's quorum.
     #[error("insufficient attestations: expected={0}, found={1}")]
-    InsufficientAttestations(u32, u32),
+    InsufficientAttestations(u64, u64),
     /// An attestation references an index outside the participant set.
     #[error("unknown signer: {0}")]
     UnknownSigner(Participant),
@@ -568,7 +568,10 @@ impl Signers {
     pub(crate) fn require(self, required: u32) -> Result<Self, AssemblyError> {
         let found = u32::try_from(self.count()).expect("signer count exceeds u32::MAX");
         if found < required {
-            return Err(AssemblyError::InsufficientAttestations(required, found));
+            return Err(AssemblyError::InsufficientAttestations(
+                u64::from(required),
+                u64::from(found),
+            ));
         }
 
         Ok(self)

@@ -560,7 +560,7 @@ impl<B: Block + Eq, C: Scheme, H: Hasher> Eq for StoredCodedBlock<B, C, H> {}
 ///
 /// Panics if `n_participants < 4`.
 pub fn coding_config_for_participants(n_participants: u16) -> CodingConfig {
-    let max_faults = N3f1::max_faults(n_participants);
+    let max_faults = N3f1::max_faults(u64::from(n_participants));
     assert!(
         max_faults >= 1,
         "Need at least 4 participants to maintain fault tolerance"

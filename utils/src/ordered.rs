@@ -22,6 +22,10 @@ type VecIntoIter<T> = std::vec::IntoIter<T>;
 /// Errors that can occur when interacting with ordered collections.
 #[derive(Error, Debug, PartialEq, Eq)]
 pub enum Error {
+    /// A committee was empty.
+    #[error("committee must not be empty")]
+    EmptyCommittee,
+
     /// A key was duplicated.
     #[error("duplicate key")]
     DuplicateKey,
@@ -29,6 +33,26 @@ pub enum Error {
     /// A value was duplicated.
     #[error("duplicate value")]
     DuplicateValue,
+
+    /// A committee has more participants than can be indexed.
+    #[error("too many participants")]
+    TooManyParticipants,
+
+    /// A committee member has zero weight.
+    #[error("weight must not be zero")]
+    ZeroWeight,
+
+    /// The total committee weight overflowed `u64`.
+    #[error("total weight overflow")]
+    WeightOverflow,
+
+    /// A participant index was not greater than the previous index.
+    #[error("participant indices must be strictly increasing: {0}")]
+    NonIncreasingParticipant(Participant),
+
+    /// A participant index was not in the committee.
+    #[error("unknown participant: {0}")]
+    UnknownParticipant(Participant),
 }
 
 use crate::{Faults, Participant, TryFromIterator};
@@ -230,6 +254,176 @@ impl<T> From<Set<T>> for Vec<T> {
     }
 }
 
+/// An ordered participant set with a positive weight for each participant.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Committee<P> {
+    members: Map<P, u64>,
+    total_weight: u64,
+}
+
+impl<P: Ord> Committee<P> {
+    /// Returns the weight at `participant`, if it belongs to the committee.
+    pub fn weight(&self, participant: Participant) -> Option<u64> {
+        self.members.value(usize::from(participant)).copied()
+    }
+
+    /// Returns all weights in participant-key order.
+    pub fn weights(&self) -> &[u64] {
+        self.members.values()
+    }
+
+    /// Returns the total committee weight.
+    pub const fn total_weight(&self) -> u64 {
+        self.total_weight
+    }
+
+    /// Returns the participant key at the given index.
+    pub fn key(&self, index: Participant) -> Option<&P> {
+        self.members.get(usize::from(index))
+    }
+
+    /// Returns the index for the given participant key, if present.
+    pub fn index(&self, key: &P) -> Option<Participant> {
+        self.members.position(key).map(Participant::from_usize)
+    }
+
+    /// Returns the quorum weight for the selected fault model.
+    pub fn quorum_weight<M: Faults>(&self) -> u64 {
+        M::quorum(self.total_weight)
+    }
+
+    /// Returns the maximum faulty weight tolerated by the selected fault model.
+    pub fn max_fault_weight<M: Faults>(&self) -> u64 {
+        M::max_faults(self.total_weight)
+    }
+
+    /// Sums the weights of strictly increasing participant indices.
+    ///
+    /// Returns an error if the indices are not strictly increasing or an index
+    /// does not belong to the committee.
+    pub fn sum_ordered_weights<I>(&self, participants: I) -> Result<u64, Error>
+    where
+        I: IntoIterator<Item = Participant>,
+    {
+        let mut previous = None;
+        let mut sum = 0u64;
+        for participant in participants {
+            if previous.is_some_and(|previous| participant <= previous) {
+                return Err(Error::NonIncreasingParticipant(participant));
+            }
+            let weight = self
+                .weight(participant)
+                .ok_or(Error::UnknownParticipant(participant))?;
+            previous = Some(participant);
+            sum = sum
+                .checked_add(weight)
+                .expect("ordered committee weights cannot exceed total weight");
+        }
+        Ok(sum)
+    }
+
+    /// Returns quorum diagnostics for the selected fault model.
+    pub fn profile<M: Faults>(&self) -> Profile {
+        let max_faults = self.max_fault_weight::<M>();
+        let quorum = self.quorum_weight::<M>();
+        let mut weights = self.weights().to_vec();
+        weights.sort_unstable_by(|left, right| right.cmp(left));
+        let max_weight = weights[0];
+        let mut accumulated = 0u64;
+        let mut minimum_quorum_cardinality = 0u32;
+        for weight in weights {
+            accumulated = accumulated
+                .checked_add(weight)
+                .expect("committee weights cannot exceed total weight");
+            minimum_quorum_cardinality += 1;
+            if accumulated >= quorum {
+                break;
+            }
+        }
+        assert!(
+            accumulated >= quorum,
+            "the full committee must reach quorum"
+        );
+
+        Profile {
+            total_weight: self.total_weight,
+            max_fault_weight: max_faults,
+            quorum_weight: quorum,
+            max_weight,
+            minimum_quorum_cardinality,
+        }
+    }
+}
+
+impl<P: Ord> TryFromIterator<(P, u64)> for Committee<P> {
+    type Error = Error;
+
+    fn try_from_iter<I: IntoIterator<Item = (P, u64)>>(iter: I) -> Result<Self, Self::Error> {
+        let members = Map::try_from_iter(iter)?;
+        if members.is_empty() {
+            return Err(Error::EmptyCommittee);
+        }
+        u32::try_from(members.len()).map_err(|_| Error::TooManyParticipants)?;
+        let mut total_weight = 0u64;
+        for &weight in members.values() {
+            if weight == 0 {
+                return Err(Error::ZeroWeight);
+            }
+            total_weight = total_weight
+                .checked_add(weight)
+                .ok_or(Error::WeightOverflow)?;
+        }
+
+        Ok(Self {
+            members,
+            total_weight,
+        })
+    }
+}
+
+impl<P: Ord> TryFrom<Vec<(P, u64)>> for Committee<P> {
+    type Error = Error;
+
+    fn try_from(participants: Vec<(P, u64)>) -> Result<Self, Self::Error> {
+        Self::try_from_iter(participants)
+    }
+}
+
+impl<P> Deref for Committee<P> {
+    type Target = Set<P>;
+
+    fn deref(&self) -> &Self::Target {
+        self.members.as_ref()
+    }
+}
+
+/// Derived quorum diagnostics for a [`Committee`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Profile {
+    /// The sum of all participant weights.
+    pub total_weight: u64,
+    /// The maximum faulty weight tolerated by the selected fault model.
+    pub max_fault_weight: u64,
+    /// The quorum weight for the selected fault model.
+    pub quorum_weight: u64,
+    /// The greatest weight assigned to one participant.
+    pub max_weight: u64,
+    /// The fewest participants whose combined weight can reach quorum.
+    pub minimum_quorum_cardinality: u32,
+}
+
+impl Profile {
+    /// Returns whether one participant's weight exceeds the tolerated faulty weight.
+    pub const fn max_weight_exceeds_max_fault_weight(&self) -> bool {
+        self.max_weight > self.max_fault_weight
+    }
+
+    /// Returns whether one participant can form a quorum alone.
+    pub const fn max_weight_reaches_quorum(&self) -> bool {
+        self.max_weight >= self.quorum_weight
+    }
+}
+
 #[cfg(feature = "arbitrary")]
 impl<T> arbitrary::Arbitrary<'_> for Set<T>
 where
@@ -241,24 +435,24 @@ where
     }
 }
 
-/// Extension trait for [`Set`] participant sets providing quorum and index utilities.
+/// Extension trait for ordered participant sets providing count-based quorum and index utilities.
 pub trait Quorum {
     /// The type of items in this set.
     type Item: Ord;
 
-    /// Returns the quorum value for this participant set using the given fault model.
+    /// Returns the quorum count for this participant set using the given fault model.
     ///
     /// ## Panics
     ///
     /// Panics if the number of participants exceeds `u32::MAX`.
-    fn quorum<M: Faults>(&self) -> u32;
+    fn quorum_count<M: Faults>(&self) -> u32;
 
-    /// Returns the maximum number of faults tolerated by this participant set.
+    /// Returns the maximum number of faulty participants tolerated by this set.
     ///
     /// ## Panics
     ///
     /// Panics if the number of participants exceeds `u32::MAX`.
-    fn max_faults<M: Faults>(&self) -> u32;
+    fn max_faults_count<M: Faults>(&self) -> u32;
 
     /// Returns the participant key at the given index.
     fn key(&self, index: Participant) -> Option<&Self::Item>;
@@ -274,12 +468,16 @@ pub trait Quorum {
 impl<T: Ord> Quorum for Set<T> {
     type Item = T;
 
-    fn quorum<M: Faults>(&self) -> u32 {
-        M::quorum(u32::try_from(self.len()).expect("too many participants"))
+    fn quorum_count<M: Faults>(&self) -> u32 {
+        let count = u32::try_from(self.len()).expect("too many participants");
+        u32::try_from(M::quorum(u64::from(count)))
+            .expect("quorum count cannot exceed participant count")
     }
 
-    fn max_faults<M: Faults>(&self) -> u32 {
-        M::max_faults(self.len())
+    fn max_faults_count<M: Faults>(&self) -> u32 {
+        let count = u32::try_from(self.len()).expect("too many participants");
+        u32::try_from(M::max_faults(u64::from(count)))
+            .expect("fault count cannot exceed participant count")
     }
 
     fn key(&self, index: Participant) -> Option<&Self::Item> {
@@ -876,6 +1074,147 @@ where
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::N3f1;
+    use proptest::prelude::*;
+
+    #[test]
+    fn test_committee_constructor_failures() {
+        assert_eq!(
+            Committee::<u8>::try_from_iter([]),
+            Err(Error::EmptyCommittee)
+        );
+        assert_eq!(
+            Committee::try_from_iter([(1u8, 1), (1, 2)]),
+            Err(Error::DuplicateKey)
+        );
+        assert_eq!(Committee::try_from_iter([(1u8, 0)]), Err(Error::ZeroWeight));
+        assert_eq!(
+            Committee::try_from_iter([(1u8, u64::MAX), (2, 1)]),
+            Err(Error::WeightOverflow)
+        );
+    }
+
+    #[test]
+    fn test_committee_alignment_lookups_and_sum() {
+        let committee = Committee::try_from_iter([('c', 7), ('a', 2), ('b', 5)]).unwrap();
+        assert_eq!(
+            committee.iter().copied().collect::<Vec<_>>(),
+            ['a', 'b', 'c']
+        );
+        assert_eq!(committee.weights(), &[2, 5, 7]);
+        assert_eq!(committee.total_weight(), 14);
+        assert_eq!(committee.weight(Participant::new(1)), Some(5));
+        assert_eq!(committee.weight(Participant::new(3)), None);
+        assert_eq!(committee.key(Participant::new(2)), Some(&'c'));
+        assert_eq!(committee.index(&'b'), Some(Participant::new(1)));
+        assert_eq!(
+            committee.sum_ordered_weights([Participant::new(0), Participant::new(2)]),
+            Ok(9)
+        );
+        assert_eq!(committee.sum_ordered_weights([]), Ok(0));
+        assert_eq!(
+            committee.sum_ordered_weights([Participant::new(1), Participant::new(1)]),
+            Err(Error::NonIncreasingParticipant(Participant::new(1)))
+        );
+        assert_eq!(
+            committee.sum_ordered_weights([Participant::new(2), Participant::new(1)]),
+            Err(Error::NonIncreasingParticipant(Participant::new(1)))
+        );
+        assert_eq!(
+            committee.sum_ordered_weights([Participant::new(3)]),
+            Err(Error::UnknownParticipant(Participant::new(3)))
+        );
+
+        let profile = committee.profile::<N3f1>();
+        assert_eq!(profile.total_weight, 14);
+        assert_eq!(profile.max_fault_weight, 4);
+        assert_eq!(profile.quorum_weight, 10);
+        assert_eq!(profile.max_weight, 7);
+        assert_eq!(profile.minimum_quorum_cardinality, 2);
+    }
+
+    #[test]
+    fn test_uniform_committee_matches_set_quorums() {
+        for count in 1u32..=100 {
+            let keys: Vec<_> = (0..count).collect();
+            let set = Set::try_from(keys.clone()).unwrap();
+            let committee = Committee::try_from_iter(keys.into_iter().map(|key| (key, 1))).unwrap();
+            assert_eq!(
+                committee.quorum_weight::<N3f1>(),
+                u64::from(set.quorum_count::<N3f1>())
+            );
+            assert_eq!(
+                committee.max_fault_weight::<N3f1>(),
+                u64::from(set.max_faults_count::<N3f1>())
+            );
+            assert_eq!(
+                committee.profile::<N3f1>().minimum_quorum_cardinality,
+                set.quorum_count::<N3f1>()
+            );
+        }
+    }
+
+    #[test]
+    fn test_count_and_weight_quorums_are_explicit() {
+        let committee =
+            Committee::try_from_iter([('a', 100), ('b', 1), ('c', 1), ('d', 1)]).unwrap();
+        assert_eq!(committee.quorum_count::<N3f1>(), 3);
+        assert_eq!(committee.quorum_weight::<N3f1>(), 69);
+    }
+
+    #[test]
+    fn test_profile_warning_boundaries() {
+        let at_max_faults = Committee::try_from_iter([(0u8, 2), (1, 2), (2, 2), (3, 1)]).unwrap();
+        let above_max_faults =
+            Committee::try_from_iter([(0u8, 3), (1, 2), (2, 1), (3, 1)]).unwrap();
+        assert!(
+            !at_max_faults
+                .profile::<N3f1>()
+                .max_weight_exceeds_max_fault_weight()
+        );
+        assert!(
+            above_max_faults
+                .profile::<N3f1>()
+                .max_weight_exceeds_max_fault_weight()
+        );
+
+        let below_quorum = Committee::try_from_iter([(0u8, 2), (1, 2)]).unwrap();
+        let at_quorum = Committee::try_from_iter([(0u8, 3), (1, 1)]).unwrap();
+        assert!(!below_quorum.profile::<N3f1>().max_weight_reaches_quorum());
+        assert!(at_quorum.profile::<N3f1>().max_weight_reaches_quorum());
+    }
+
+    proptest! {
+        #[test]
+        fn test_committee_quorum_matches_brute_force(weights in prop::collection::vec(1u64..20, 1..9)) {
+            let committee = Committee::try_from_iter(weights.iter().copied().enumerate()).unwrap();
+            let quorum = committee.quorum_weight::<N3f1>();
+            let subset_count = 1u16 << weights.len();
+            let mut minimum_cardinality = u32::MAX;
+
+            for mask in 0..subset_count {
+                let participants = (0..weights.len())
+                    .filter(|index| mask & (1u16 << index) != 0)
+                    .map(|index| Participant::new(u32::try_from(index).unwrap()));
+                let sum = committee.sum_ordered_weights(participants).unwrap();
+                let expected_sum = weights
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| mask & (1u16 << index) != 0)
+                    .map(|(_, weight)| weight)
+                    .sum::<u64>();
+                prop_assert_eq!(sum, expected_sum);
+                if sum >= quorum {
+                    minimum_cardinality = minimum_cardinality.min(mask.count_ones());
+                }
+            }
+
+            prop_assert_eq!(
+                committee.profile::<N3f1>().minimum_quorum_cardinality,
+                minimum_cardinality
+            );
+        }
+    }
 
     #[test]
     fn test_sorted_unique_construct_unseal() {

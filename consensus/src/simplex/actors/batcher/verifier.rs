@@ -699,6 +699,13 @@ mod tests {
 
     const NAMESPACE: &[u8] = b"test";
 
+    fn count_quorum(participants: usize) -> u32 {
+        u32::try_from(N3f1::quorum(
+            u64::try_from(participants).expect("participant count exceeds u64::MAX"),
+        ))
+        .expect("quorum for a u32-indexed participant set must fit in u32")
+    }
+
     impl<V> Certification<V> {
         /// Returns the pending buffer (empty once complete).
         fn pending(&self) -> &[V] {
@@ -732,7 +739,7 @@ mod tests {
     fn test_verifier_allocates_vote_buffers_lazily() {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = ed25519::fixture(&mut rng, NAMESPACE, 5);
-        let quorum = N3f1::quorum(schemes.len());
+        let quorum = count_quorum(schemes.len());
         let round = Round::new(Epoch::new(0), View::new(1));
         let mut verifier =
             Verifier::<ed25519::Scheme, Sha256>::new(round, schemes[0].clone(), quorum);
@@ -836,7 +843,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
-        let quorum = N3f1::quorum(schemes.len());
+        let quorum = count_quorum(schemes.len());
         let mut verifier = Verifier::<S, Sha256>::new(
             Round::new(Epoch::new(0), View::new(1)),
             schemes[0].clone(),
@@ -907,7 +914,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
-        let quorum = N3f1::quorum(schemes.len());
+        let quorum = count_quorum(schemes.len());
         let mut verifier = Verifier::<S, Sha256>::new(
             Round::new(Epoch::new(0), View::new(1)),
             schemes[0].clone(),
@@ -1006,7 +1013,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
-        let quorum = N3f1::quorum(schemes.len());
+        let quorum = count_quorum(schemes.len());
         let mut verifier = Verifier::<S, Sha256>::new(
             Round::new(Epoch::new(0), View::new(1)),
             schemes[0].clone(),
@@ -1099,7 +1106,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
-        let quorum = N3f1::quorum(schemes.len());
+        let quorum = count_quorum(schemes.len());
         let mut verifier = Verifier::<S, Sha256>::new(
             Round::new(Epoch::new(0), View::new(1)),
             schemes[0].clone(),
@@ -1137,7 +1144,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
-        let quorum = N3f1::quorum(schemes.len());
+        let quorum = count_quorum(schemes.len());
         let mut verifier = Verifier::<S, Sha256>::new(
             Round::new(Epoch::new(0), View::new(1)),
             schemes[0].clone(),
@@ -1191,7 +1198,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
-        let quorum = N3f1::quorum(schemes.len());
+        let quorum = count_quorum(schemes.len());
         let mut verifier = Verifier::<S, Sha256>::new(
             Round::new(Epoch::new(0), View::new(1)),
             schemes[0].clone(),
@@ -1246,7 +1253,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
-        let quorum = N3f1::quorum(schemes.len());
+        let quorum = count_quorum(schemes.len());
         let mut verifier = Verifier::<S, Sha256>::new(
             Round::new(Epoch::new(0), View::new(1)),
             schemes[0].clone(),
@@ -1305,7 +1312,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
-        let quorum = N3f1::quorum(schemes.len());
+        let quorum = count_quorum(schemes.len());
         let mut verifier = Verifier::<S, Sha256>::new(
             Round::new(Epoch::new(0), View::new(1)),
             schemes[0].clone(),
@@ -1422,7 +1429,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
-        let quorum = N3f1::quorum(schemes.len());
+        let quorum = count_quorum(schemes.len());
         let mut verifier = Verifier::<S, Sha256>::new(
             Round::new(Epoch::new(0), View::new(1)),
             schemes[0].clone(),
@@ -1478,7 +1485,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 3);
-        let quorum = N3f1::quorum(schemes.len());
+        let quorum = count_quorum(schemes.len());
         let mut verifier = Verifier::<S, Sha256>::new(
             Round::new(Epoch::new(0), View::new(1)),
             schemes[0].clone(),
@@ -1536,7 +1543,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 3);
-        let quorum = N3f1::quorum(schemes.len());
+        let quorum = count_quorum(schemes.len());
         let test_verifier_finalize = || {
             let mut verifier = Verifier::<S, Sha256>::new(
                 Round::new(Epoch::new(0), View::new(1)),
@@ -1609,7 +1616,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
-        let quorum = N3f1::quorum(schemes.len());
+        let quorum = count_quorum(schemes.len());
         let mut verifier = Verifier::<S, Sha256>::new(
             Round::new(Epoch::new(0), View::new(3)),
             schemes[0].clone(),
@@ -1675,7 +1682,8 @@ mod tests {
     async fn test_nonbatchable_finalize_accounting_tracks_proposal_override() {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = secp256r1::fixture(&mut rng, NAMESPACE, 5);
-        let quorum = N3f1::quorum(schemes.len()) as usize;
+        let quorum = usize::try_from(count_quorum(schemes.len()))
+            .expect("participant quorum exceeds usize::MAX");
         let mut verifier = Verifier::<_, Sha256>::new(
             Round::new(Epoch::new(333), View::new(7)),
             schemes[0].clone(),
@@ -1740,7 +1748,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 3);
-        let quorum = N3f1::quorum(schemes.len());
+        let quorum = count_quorum(schemes.len());
         let mut verifier = Verifier::<S, Sha256>::new(
             Round::new(Epoch::new(0), View::new(1)),
             schemes[0].clone(),
@@ -1772,7 +1780,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 3);
-        let quorum = N3f1::quorum(schemes.len());
+        let quorum = count_quorum(schemes.len());
         let mut verifier = Verifier::<S, Sha256>::new(
             Round::new(Epoch::new(0), View::new(1)),
             schemes[0].clone(),
@@ -1808,7 +1816,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 3);
-        let quorum = N3f1::quorum(schemes.len());
+        let quorum = count_quorum(schemes.len());
         let mut verifier = Verifier::<S, Sha256>::new(
             Round::new(Epoch::new(0), View::new(1)),
             schemes[0].clone(),
@@ -1845,7 +1853,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
-        let quorum = N3f1::quorum(schemes.len());
+        let quorum = count_quorum(schemes.len());
         let mut verifier = Verifier::<S, Sha256>::new(
             Round::new(Epoch::new(0), View::new(1)),
             schemes[0].clone(),
@@ -1907,7 +1915,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
-        let quorum = N3f1::quorum(schemes.len());
+        let quorum = count_quorum(schemes.len());
         let mut verifier = Verifier::<S, Sha256>::new(
             Round::new(Epoch::new(0), View::new(1)),
             schemes[0].clone(),
@@ -1953,7 +1961,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
-        let quorum = N3f1::quorum(schemes.len());
+        let quorum = count_quorum(schemes.len());
         let mut verifier = Verifier::<S, Sha256>::new(
             Round::new(Epoch::new(0), View::new(1)),
             schemes[0].clone(),
@@ -2004,7 +2012,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
-        let quorum = N3f1::quorum(schemes.len());
+        let quorum = count_quorum(schemes.len());
         assert!(
             schemes.len() > quorum as usize,
             "test requires more validators than the quorum"
@@ -2066,7 +2074,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
-        let quorum = N3f1::quorum(schemes.len());
+        let quorum = count_quorum(schemes.len());
         assert!(
             schemes.len() > quorum as usize,
             "test requires more validators than the quorum"
@@ -2120,7 +2128,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
-        let quorum = N3f1::quorum(schemes.len());
+        let quorum = count_quorum(schemes.len());
         assert!(
             schemes.len() > quorum as usize,
             "test requires more validators than the quorum"
@@ -2245,7 +2253,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
-        let quorum = N3f1::quorum(schemes.len());
+        let quorum = count_quorum(schemes.len());
         let mut verifier = Verifier::<S, Sha256>::new(
             Round::new(Epoch::new(0), View::new(1)),
             schemes[0].clone(),
@@ -2283,7 +2291,7 @@ mod tests {
             .into_iter()
             .map(|scheme| wrapped::Scheme::new(scheme, wrapped::Behavior::RecoveryFailure))
             .collect();
-        let quorum = N3f1::quorum(schemes.len());
+        let quorum = count_quorum(schemes.len());
         let quorum_size = usize::try_from(quorum).expect("quorum exceeds usize::MAX");
         let round = Round::new(Epoch::new(0), View::new(1));
         let mut verifier = Verifier::<_, Sha256>::new(round, schemes[0].clone(), quorum);
@@ -2304,7 +2312,7 @@ mod tests {
     async fn test_construct_drains_kinds_in_order() {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = ed25519::fixture(&mut rng, NAMESPACE, 5);
-        let quorum = N3f1::quorum(schemes.len());
+        let quorum = count_quorum(schemes.len());
         let mut verifier = Verifier::<_, Sha256>::new(
             Round::new(Epoch::new(0), View::new(1)),
             schemes[0].clone(),
