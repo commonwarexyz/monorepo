@@ -32,8 +32,6 @@ pub struct StatefulTwinsFuzzInput {
     /// Leader term length. A term longer than one view makes the scenario's
     /// scripted leader stable across several views.
     pub term_length: TermLength,
-    /// Number of scheduled crash/restart events over correct identities.
-    pub restarts: u8,
     /// Byte tape seeding the deterministic runtime, the scenario sampler, the
     /// fault schedule, and the restart schedule.
     pub raw_bytes: Vec<u8>,
@@ -47,7 +45,6 @@ impl fmt::Debug for StatefulTwinsFuzzInput {
             .field("faults", &self.faults)
             .field("required_heights", &self.required_heights)
             .field("term_length", &self.term_length)
-            .field("restarts", &self.restarts)
             .field("raw_bytes_len", &self.raw_bytes.len())
             .finish()
     }
@@ -70,7 +67,6 @@ impl Arbitrary<'_> for StatefulTwinsFuzzInput {
 
         let required_heights = u.int_in_range(1..=MAX_REQUIRED_HEIGHTS)?;
         let term_length = TermLength::new(NZU32!(u.int_in_range(1..=MAX_TERM_LENGTH)?));
-        let restarts = u.int_in_range(0..=MAX_RESTARTS)?;
 
         let remaining = u.len().min(MAX_RAW_BYTES);
         let raw_bytes = if remaining == 0 {
@@ -83,6 +79,56 @@ impl Arbitrary<'_> for StatefulTwinsFuzzInput {
             case_selector,
             sustained,
             faults,
+            required_heights,
+            term_length,
+            raw_bytes,
+        })
+    }
+}
+
+/// One run of the stateful restart target.
+///
+/// Every identity is correct here; the only fault is environmental.
+#[derive(Clone)]
+pub struct StatefulRestartsFuzzInput {
+    /// Heights each node must apply before the run ends.
+    pub required_heights: u8,
+    /// Leader term length.
+    pub term_length: TermLength,
+    /// Number of scheduled crash/restart events over correct identities.
+    pub restarts: u8,
+    /// Byte tape seeding the deterministic runtime and the restart schedule.
+    pub raw_bytes: Vec<u8>,
+}
+
+impl fmt::Debug for StatefulRestartsFuzzInput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StatefulRestartsFuzzInput")
+            .field("required_heights", &self.required_heights)
+            .field("term_length", &self.term_length)
+            .field("restarts", &self.restarts)
+            .field("raw_bytes_len", &self.raw_bytes.len())
+            .finish()
+    }
+}
+
+impl Arbitrary<'_> for StatefulRestartsFuzzInput {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let required_heights = u.int_in_range(1..=MAX_REQUIRED_HEIGHTS)?;
+        let term_length = TermLength::new(NZU32!(u.int_in_range(1..=MAX_TERM_LENGTH)?));
+
+        // A run with no restart exercises nothing this target exists for, so the
+        // schedule always has at least one event.
+        let restarts = u.int_in_range(1..=MAX_RESTARTS)?;
+
+        let remaining = u.len().min(MAX_RAW_BYTES);
+        let raw_bytes = if remaining == 0 {
+            vec![0]
+        } else {
+            u.bytes(remaining)?.to_vec()
+        };
+
+        Ok(Self {
             required_heights,
             term_length,
             restarts,

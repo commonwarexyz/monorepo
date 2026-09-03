@@ -22,8 +22,8 @@ use commonware_consensus::{
     simplex::{
         self,
         config::{ForwardPolicy, SkipPolicy},
+        elector,
         elector::RoundRobin,
-        mocks::twins,
     },
     types::{Epoch, FixedEpocher, TermLength, ViewDelta},
 };
@@ -83,9 +83,13 @@ const MERKLE_BLOB_ITEMS: NonZeroU64 = NZU64!(11);
 const LOG_BLOB_ITEMS: NonZeroU64 = NZU64!(7);
 const SECTION_ITEMS: NonZeroU64 = NZU64!(10);
 
-/// Leader election: scripted twins leaders for the adversarial prefix, then the
-/// round-robin fallback.
-pub(super) type Elector = twins::Elector<RoundRobin<Sha256>>;
+/// What an engine needs of a leader-election configuration.
+pub(super) trait ElectorConfig:
+    elector::Config<Scheme> + Clone + Send + Sync + 'static
+{
+}
+
+impl<T> ElectorConfig for T where T: elector::Config<Scheme> + Clone + Send + Sync + 'static {}
 
 /// The fallback elector, built for the run's term length so that the elector and
 /// the channel split agree on where each term begins.
@@ -181,10 +185,10 @@ pub(super) struct EngineChannels<VS, CS, RS, BS, FS> {
 }
 
 /// Everything one engine needs, so a restart can rebuild it unchanged.
-pub(super) struct EngineConfig<A> {
+pub(super) struct EngineConfig<A, EC> {
     pub(super) identity: PublicKey,
     pub(super) scheme: Scheme,
-    pub(super) elector: Elector,
+    pub(super) elector: EC,
     pub(super) genesis: Block,
     pub(super) partition_prefix: String,
     pub(super) application: A,
@@ -195,10 +199,10 @@ pub(super) struct EngineConfig<A> {
 ///
 /// The task never returns, so the whole node stays alive until the handle is
 /// aborted; aborting it takes every descendant actor down with it.
-pub(super) fn spawn_engine<A, VS, CS, RS, BS, FS>(
+pub(super) fn spawn_engine<A, EC, VS, CS, RS, BS, FS>(
     context: deterministic::Context,
     oracle: Oracle<PublicKey, deterministic::Context>,
-    config: EngineConfig<A>,
+    config: EngineConfig<A, EC>,
     channels: EngineChannels<VS, CS, RS, BS, FS>,
 ) -> Handle<()>
 where
@@ -216,16 +220,17 @@ where
     RS: SenderTrait<PublicKey = PublicKey>,
     BS: SenderTrait<PublicKey = PublicKey>,
     FS: SenderTrait<PublicKey = PublicKey>,
+    EC: ElectorConfig,
 {
     context.spawn(move |context| async move {
         run_engine(context, oracle, config, channels).await;
     })
 }
 
-async fn run_engine<A, VS, CS, RS, BS, FS>(
+async fn run_engine<A, EC, VS, CS, RS, BS, FS>(
     context: deterministic::Context,
     oracle: Oracle<PublicKey, deterministic::Context>,
-    config: EngineConfig<A>,
+    config: EngineConfig<A, EC>,
     channels: EngineChannels<VS, CS, RS, BS, FS>,
 ) where
     A: Application<
@@ -242,6 +247,7 @@ async fn run_engine<A, VS, CS, RS, BS, FS>(
     RS: SenderTrait<PublicKey = PublicKey>,
     BS: SenderTrait<PublicKey = PublicKey>,
     FS: SenderTrait<PublicKey = PublicKey>,
+    EC: ElectorConfig,
 {
     let EngineConfig {
         identity,

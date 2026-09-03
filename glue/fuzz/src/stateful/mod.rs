@@ -17,8 +17,11 @@
 //! - `network` splits the compromised identity's channels per the twins scenario.
 //! - `app` holds the correct and faulty applications.
 //! - `stack` builds one engine and is the unit a restart rebuilds.
-//! - `runner` selects the scenario, starts the engines, schedules restarts, and
-//!   drives the run to its measurement point.
+//! - `runner` holds what both drivers share: cluster setup, correct-node
+//!   startup and restart, the height waiters, and the measurement point.
+//! - `twins` is the byzantine driver: five engines, no crashes.
+//! - `restarts` is the environment driver: four correct engines, crashed and
+//!   restarted on a schedule.
 //! - `invariants` records what each engine delivered, committed, and verified,
 //!   and holds the checks.
 
@@ -26,8 +29,10 @@ mod app;
 mod input;
 mod invariants;
 mod network;
+mod restarts;
 mod runner;
 mod stack;
+mod twins;
 
 use commonware_consensus::simplex::{mocks::scheme::Scheme as MockScheme, types::Context};
 use commonware_cryptography::{Sha256, ed25519, sha256};
@@ -36,13 +41,15 @@ use commonware_parallel::Sequential;
 use commonware_runtime::deterministic;
 use commonware_storage::{mmr, qmdb::any::unordered::fixed, translator::TwoCap};
 use commonware_utils::{NZU16, NZU64, NZUsize};
-pub use input::StatefulTwinsFuzzInput;
+pub use input::{StatefulRestartsFuzzInput, StatefulTwinsFuzzInput};
 pub use invariants::Counts;
-pub use runner::{Outcome, RunReport, fuzz_stateful_cert_mock_twins, run_stateful_twins};
+pub use restarts::{fuzz_stateful_cert_mock_restarts, run_stateful_restarts};
+pub use runner::{Outcome, RunReport};
 use std::{
     num::{NonZeroU16, NonZeroU64, NonZeroUsize},
     time::Duration,
 };
+pub use twins::{fuzz_stateful_cert_mock_twins, run_stateful_twins};
 
 /// Identity key type.
 pub(crate) type PublicKey = ed25519::PublicKey;

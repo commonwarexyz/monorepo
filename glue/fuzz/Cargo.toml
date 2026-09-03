@@ -48,3 +48,10 @@ path = "fuzz_targets/stateful_cert_mock_twins.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "stateful_cert_mock_restarts"
+path = "fuzz_targets/stateful_cert_mock_restarts.rs"
+test = false
+doc = false
+bench = false
