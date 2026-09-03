@@ -2,9 +2,9 @@
 //!
 //! [`stateful::probe`](crate::stateful::probe) and
 //! [`dkg::probe`](crate::dkg::probe) both discover a floor by soliciting a
-//! committee's latest finalizations and selecting the highest from `f + 1`
-//! distinct replies. [`Sample`] owns the bookkeeping of that protocol:
-//! per-peer reply dedup, the fault-budget threshold, and max-selection. Each
+//! committee's latest finalizations and selecting the highest after replies
+//! exceed the fault budget. [`Sample`] owns the bookkeeping of that protocol:
+//! per-peer reply dedup, reply-mass accounting, and max-selection. Each
 //! probe keeps its own wire format, committee source, minimum-epoch filter,
 //! verification, and peer blocking.
 
@@ -17,17 +17,15 @@ use commonware_consensus::{
     types::Epoch,
 };
 use commonware_cryptography::Digest;
-use commonware_utils::{Faults, N3f1};
 use std::collections::BTreeMap;
 
-/// An `f + 1` sample of a committee's latest finalizations.
+/// A fault-budget sample of a committee's latest finalizations.
 ///
 /// The sample counts at most one reply per peer and resolves to the highest
-/// reply once `f + 1` distinct peers have contributed, where `f` is the
-/// maximum fault count of the solicited committee under the `3f + 1` model.
-/// Waiting for `f + 1` replies guarantees at least one comes from an honest,
-/// current committee member, so the selected floor is at least as recent as
-/// that member's latest finalization.
+/// reply once the mass of contributed replies exceeds the caller's fault
+/// budget. Waiting for that threshold guarantees at least one reply comes from
+/// an honest, current committee member, so the selected floor is at least as
+/// recent as that member's latest finalization.
 ///
 /// Callers verify replies and enforce committee membership before recording
 /// them, and judge which recorded replies are currently usable at selection
@@ -95,24 +93,25 @@ where
     ///
     /// Only replies for which `judgeable` returns true are counted or
     /// eligible: a recorded reply whose epoch can no longer be judged must not
-    /// contribute to the sample. Selection requires `f + 1` judgeable replies,
-    /// where `f` is derived from `committee_size`. Returns the floor exactly
+    /// contribute to the sample. Selection requires judgeable replies whose
+    /// total `mass` is at least `required_mass`. Returns the floor exactly
     /// once, when it is first selected.
     pub(crate) fn select(
         &mut self,
-        committee_size: usize,
+        required_mass: u64,
+        mass: impl Fn(&S::PublicKey) -> u64,
         judgeable: impl Fn(&Finalization<S, D>) -> bool,
     ) -> Option<Finalization<S, D>> {
         if self.floor.is_some() {
             return None;
         }
 
-        let (floor, replies) =
+        let (floor, reply_mass) =
             self.replies
-                .values()
-                .fold((None, 0usize), |(floor, replies), finalization| {
+                .iter()
+                .fold((None, 0u64), |(floor, reply_mass), (peer, finalization)| {
                     if !judgeable(finalization) {
-                        return (floor, replies);
+                        return (floor, reply_mass);
                     }
                     let floor = floor
                         .is_none_or(|candidate: &Finalization<S, D>| {
@@ -120,14 +119,15 @@ where
                         })
                         .then_some(finalization)
                         .or(floor);
-                    (floor, replies + 1)
+                    (
+                        floor,
+                        reply_mass
+                            .checked_add(mass(peer))
+                            .expect("reply mass exceeds u64::MAX"),
+                    )
                 });
         let floor = floor?;
-        if u64::try_from(replies).expect("reply count exceeds u64::MAX")
-            < N3f1::max_faults(
-                u64::try_from(committee_size).expect("committee size exceeds u64::MAX"),
-            ) + 1
-        {
+        if reply_mass < required_mass {
             return None;
         }
 

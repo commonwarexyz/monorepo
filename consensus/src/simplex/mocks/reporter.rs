@@ -109,7 +109,7 @@ where
     D: Digest + Eq + Hash + Clone,
 {
     pub fn new(context: E, cfg: Config<S, L>) -> Self {
-        let elector = cfg.elector.build(&cfg.participants);
+        let elector = cfg.elector.build(cfg.scheme.participants());
 
         Self {
             context: Arc::new(Mutex::new(context)),

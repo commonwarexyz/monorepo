@@ -15,7 +15,7 @@ use commonware_cryptography::{
     ed25519::{PrivateKey, PublicKey},
 };
 use commonware_math::algebra::Random as _;
-use commonware_utils::{TestRng, TryCollect, ordered::Set};
+use commonware_utils::{TestRng, TryCollect, ordered::Committee};
 use libfuzzer_sys::fuzz_target;
 use std::time::Duration;
 
@@ -44,16 +44,12 @@ where
         .map(|i| {
             let mut rng = TestRng::new(i as u64);
             let private_key = PrivateKey::random(&mut rng);
-            private_key.public_key()
+            (private_key.public_key(), 1)
         })
-        .try_collect::<Set<_>>()
+        .try_collect::<Committee<_>>()
     else {
         return;
     };
-
-    if participants.is_empty() {
-        return;
-    }
 
     let elector = elector_config.build(&participants);
 

@@ -120,7 +120,7 @@ where
 
     fn build(
         self,
-        participants: &commonware_utils::ordered::Set<<Scheme<S> as Verifier>::PublicKey>,
+        participants: &commonware_utils::ordered::Committee<<Scheme<S> as Verifier>::PublicKey>,
     ) -> Self::Elector {
         Elector {
             inner: self.0.build(participants),
