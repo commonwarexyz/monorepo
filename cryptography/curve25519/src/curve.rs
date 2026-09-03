@@ -99,7 +99,8 @@ impl F {
             l[i + 1] += l[i] >> 51;
             l[i] &= MASK_51;
         }
-        l[0] += (l[4] >> 51) * 19;
+        let high = l[4] >> 51;
+        l[0] += (high << 4) + (high << 1) + high;
         l[4] &= MASK_51;
         Self(l)
     }
@@ -188,7 +189,8 @@ impl F {
             c[i + 1] += c[i] >> 51;
             c[i] &= MASK;
         }
-        c[0] += 19 * (c[4] >> 51);
+        let high = c[4] >> 51;
+        c[0] += (high << 4) + (high << 1) + high;
         c[4] &= MASK;
         c[1] += c[0] >> 51;
         c[0] &= MASK;
@@ -209,7 +211,8 @@ impl F {
         }
         let (low, high) = c.split_at_mut(5);
         for (low, high) in low.iter_mut().zip(high) {
-            *low += 19 * *high;
+            // Checked u128 multiplication by 19 can emit operand-dependent branches on AArch64.
+            *low += (*high << 4) + (*high << 1) + *high;
         }
         Self::from_wide([c[0], c[1], c[2], c[3], c[4]])
     }
