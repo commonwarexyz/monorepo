@@ -1877,7 +1877,7 @@ mod tests {
         }
 
         fn parent_history(&self, marker: u64) -> TipRecord<Digest> {
-            TipRecord::new(digest(b"history parent", marker), self.tips.clone()).unwrap()
+            TipRecord::at_tips(digest(b"history parent", marker), self.tips.clone()).unwrap()
         }
 
         fn body(

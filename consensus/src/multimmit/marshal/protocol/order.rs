@@ -213,28 +213,123 @@ pub(in crate::multimmit::marshal) trait OrderedSlots<D: Digest>:
     fn newest_first(&self) -> impl Iterator<Item = Slot<D>> + '_;
 }
 
-/// Offset-major traversal from one canonical tip vector to a higher vector.
+/// Per-chain slot counts of the two ordering passes from one tip vector to a higher one.
+///
+/// Pass A holds the heights from the base up to the proposed tip, clamped to the target; pass B
+/// the heights above the proposed tip. The proposal pins pass A's blocks, so an L-QC finalizes them
+/// at `3f + 1` votes, while pass B's blocks need every quorum vote. Sweeping pass A first keeps an
+/// extension that only some voters saw from deferring other chains' pinned blocks.
+struct Regions {
+    /// Height of each chain's base tip.
+    base: Vec<u64>,
+    /// Height of each chain's proposed tip, clamped into `[base, target]`.
+    boundary: Vec<u64>,
+    /// Pass A slots per chain.
+    positional: Vec<u64>,
+    /// Pass B slots per chain.
+    extension: Vec<u64>,
+}
+
+impl Regions {
+    fn new<D: Digest>(
+        base: &[BlockRef<D>],
+        target: &[BlockRef<D>],
+        proposed: &[Height],
+    ) -> Result<Self, Error> {
+        validate_monotone(base, target)?;
+        if proposed.len() != base.len() {
+            return Err(Error::Frontier);
+        }
+        let chains = base.len();
+        let mut regions = Self {
+            base: Vec::with_capacity(chains),
+            boundary: Vec::with_capacity(chains),
+            positional: Vec::with_capacity(chains),
+            extension: Vec::with_capacity(chains),
+        };
+        for ((base, target), proposed) in base.iter().zip(target).zip(proposed) {
+            let (base, target) = (base.height().get(), target.height().get());
+            if proposed.get() < base {
+                return Err(Error::Regression);
+            }
+            let boundary = proposed.get().min(target);
+            regions.base.push(base);
+            regions.boundary.push(boundary);
+            regions.positional.push(boundary - base);
+            regions.extension.push(target - boundary);
+        }
+        Ok(regions)
+    }
+
+    /// Returns the slot count of both passes together.
+    fn total(&self) -> Result<u64, Error> {
+        self.positional
+            .iter()
+            .chain(&self.extension)
+            .try_fold(0u64, |total, delta| total.checked_add(*delta))
+            .ok_or(Error::Frontier)
+    }
+}
+
+/// Traversal state of both passes.
+struct Passes {
+    regions: Regions,
+    positional: Coordinates,
+    extension: Coordinates,
+}
+
+impl Passes {
+    fn new(regions: Regions, positional: Vec<u64>, extension: Vec<u64>) -> Self {
+        Self {
+            positional: Coordinates::new(positional),
+            extension: Coordinates::new(extension),
+            regions,
+        }
+    }
+
+    fn next<D: Digest>(&mut self, target: &[BlockRef<D>]) -> Option<Slot<D>> {
+        if let Some(coordinate) = self.positional.next() {
+            return Some(slot_above(&self.regions.base, target, coordinate));
+        }
+        self.extension
+            .next()
+            .map(|coordinate| slot_above(&self.regions.boundary, target, coordinate))
+    }
+
+    fn newest_first<'a, D: Digest>(
+        &'a self,
+        target: &'a [BlockRef<D>],
+    ) -> impl Iterator<Item = Slot<D>> + 'a {
+        self.extension
+            .newest_first()
+            .map(move |coordinate| slot_above(&self.regions.boundary, target, coordinate))
+            .chain(
+                self.positional
+                    .newest_first()
+                    .map(move |coordinate| slot_above(&self.regions.base, target, coordinate)),
+            )
+    }
+}
+
+/// Offset-major traversal from one canonical tip vector to a higher vector, positional region
+/// first and extension region second.
 pub(in crate::multimmit::marshal) struct Horizontal<D: Digest> {
-    base: Vec<BlockRef<D>>,
     target: Vec<BlockRef<D>>,
-    coordinates: Coordinates,
+    passes: Passes,
 }
 
 impl<D: Digest> Horizontal<D> {
     pub(in crate::multimmit::marshal) fn new(
         base: &[BlockRef<D>],
         target: &[BlockRef<D>],
+        proposed: &[Height],
     ) -> Result<Self, Error> {
-        validate_monotone(base, target)?;
-        let deltas = base
-            .iter()
-            .zip(target)
-            .map(|(base, target)| target.height().get() - base.height().get())
-            .collect::<Vec<_>>();
+        let regions = Regions::new(base, target, proposed)?;
+        let positional = regions.positional.clone();
+        let extension = regions.extension.clone();
         Ok(Self {
-            base: base.to_vec(),
             target: target.to_vec(),
-            coordinates: Coordinates::new(deltas),
+            passes: Passes::new(regions, positional, extension),
         })
     }
 }
@@ -243,24 +338,26 @@ impl<D: Digest> Iterator for Horizontal<D> {
     type Item = Slot<D>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.coordinates
-            .next()
-            .map(|coordinate| slot_at(&self.base, &self.target, coordinate))
+        self.passes.next(&self.target)
     }
 }
 
 impl<D: Digest> OrderedSlots<D> for Horizontal<D> {
     fn newest_first(&self) -> impl Iterator<Item = Slot<D>> + '_ {
-        newest_first(&self.base, &self.target, &self.coordinates)
+        self.passes.newest_first(&self.target)
     }
 }
 
 /// Streaming rho sweep toward final tips.
+///
+/// Pass A halts at the first chain whose finalized position fell short of its proposed tip, since
+/// a same-view V-QC may still carry that chain up to the proposed tip. Pass B runs only when every
+/// chain reached its proposed tip and halts at the first unsettled chain, since `f + 1` votes may
+/// still endorse a block beyond its finalized tip. Either halt defers only the slots after it.
 pub(in crate::multimmit::marshal) struct FinalSweep<D: Digest> {
-    base: Vec<BlockRef<D>>,
     target: Vec<BlockRef<D>>,
-    coordinates: Coordinates,
-    /// Whether an unsettled chain cut the sweep short of the final tips.
+    passes: Passes,
+    /// Whether a halt deferred slots below the final tips to a later view.
     halted: bool,
     /// Slots the sweep will emit.
     planned: u64,
@@ -270,57 +367,31 @@ impl<D: Digest> FinalSweep<D> {
     pub(in crate::multimmit::marshal) fn new(
         base: &[BlockRef<D>],
         target: Vec<BlockRef<D>>,
+        proposed: &[Height],
         settled: Vec<bool>,
     ) -> Result<Self, Error> {
-        validate_monotone(base, &target)?;
+        let regions = Regions::new(base, &target, proposed)?;
         if settled.len() != target.len() {
             return Err(Error::Frontier);
         }
-        let deltas = base
+        let total = regions.total()?;
+        let short = regions
+            .boundary
             .iter()
-            .zip(&target)
-            .map(|(base, target)| target.height().get() - base.height().get())
-            .collect::<Vec<_>>();
-        let max_offset = deltas.iter().copied().max().ok_or(Error::Frontier)?;
-        let cutoff = base
-            .iter()
-            .zip(&target)
-            .zip(&settled)
-            .enumerate()
-            .filter(|(_, (_, settled))| !**settled)
-            .filter_map(|(chain, ((base, target), _))| {
-                (target.height().get() - base.height().get())
-                    .checked_add(1)
-                    .map(|offset| (offset, chain))
-            })
-            .min();
-        let back = match cutoff {
-            Some((1, 0)) => None,
-            Some((offset, chain)) if chain > 0 => Some(Coordinate {
-                offset,
-                chain: chain - 1,
-            }),
-            Some((offset, _)) => Some(Coordinate {
-                offset: offset - 1,
-                chain: base.len() - 1,
-            }),
-            None if max_offset == 0 => None,
-            None => Some(Coordinate {
-                offset: max_offset,
-                chain: base.len() - 1,
-            }),
+            .zip(proposed)
+            .map(|(boundary, proposed)| *boundary < proposed.get());
+        let (positional, halted_positional) = truncate_at(&regions.positional, short);
+        let extension = if halted_positional {
+            vec![0; regions.extension.len()]
+        } else {
+            truncate_at(&regions.extension, settled.iter().map(|settled| !*settled)).0
         };
-        let complete = (max_offset > 0).then(|| Coordinate {
-            offset: max_offset,
-            chain: base.len() - 1,
-        });
-        let maxima = truncate_deltas(&deltas, back);
+        let planned = positional.iter().chain(&extension).sum::<u64>();
         Ok(Self {
-            base: base.to_vec(),
             target,
-            halted: cutoff.is_some() && back != complete,
-            planned: maxima.iter().sum(),
-            coordinates: Coordinates::new(maxima),
+            halted: planned < total,
+            planned,
+            passes: Passes::new(regions, positional, extension),
         })
     }
 
@@ -340,14 +411,15 @@ impl<D: Digest> FinalSweep<D> {
                 tips.settled(ChainId::new(chain)).ok_or(Error::Frontier)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        Self::new(base, tips.blocks().to_vec(), settled)
+        let proposed = certificate.leader().proposed_heights();
+        Self::new(base, tips.blocks().to_vec(), &proposed, settled)
     }
 
     pub(in crate::multimmit::marshal) fn target(&self) -> &[BlockRef<D>] {
         &self.target
     }
 
-    /// Returns whether an unsettled chain deferred slots below the final tips to a later view.
+    /// Returns whether a halt deferred slots below the final tips to a later view.
     pub(in crate::multimmit::marshal) const fn halted(&self) -> bool {
         self.halted
     }
@@ -362,15 +434,13 @@ impl<D: Digest> Iterator for FinalSweep<D> {
     type Item = Slot<D>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.coordinates
-            .next()
-            .map(|coordinate| slot_at(&self.base, &self.target, coordinate))
+        self.passes.next(&self.target)
     }
 }
 
 impl<D: Digest> OrderedSlots<D> for FinalSweep<D> {
     fn newest_first(&self) -> impl Iterator<Item = Slot<D>> + '_ {
-        newest_first(&self.base, &self.target, &self.coordinates)
+        self.passes.newest_first(&self.target)
     }
 }
 
@@ -566,32 +636,51 @@ impl Iterator for ReverseCoordinates {
     }
 }
 
-const fn slot_at<D: Digest>(
-    base: &[BlockRef<D>],
+const fn slot_above<D: Digest>(
+    floor: &[u64],
     target: &[BlockRef<D>],
     coordinate: Coordinate,
 ) -> Slot<D> {
-    let base = base[coordinate.chain];
-    let target = target[coordinate.chain];
     Slot {
-        tip: target,
+        tip: target[coordinate.chain],
         height: Height::new(
-            base.height()
-                .get()
+            floor[coordinate.chain]
                 .checked_add(coordinate.offset)
                 .expect("offset is bounded by the target height"),
         ),
     }
 }
 
-fn newest_first<'a, D: Digest>(
-    base: &'a [BlockRef<D>],
-    target: &'a [BlockRef<D>],
-    coordinates: &Coordinates,
-) -> impl Iterator<Item = Slot<D>> + 'a {
-    coordinates
-        .newest_first()
-        .map(move |coordinate| slot_at(base, target, coordinate))
+/// Truncates offset-major deltas at the first empty slot of a halting chain.
+///
+/// Returns the slots each chain keeps and whether any chain halted the pass.
+fn truncate_at(deltas: &[u64], halting: impl Iterator<Item = bool>) -> (Vec<u64>, bool) {
+    let cutoff = deltas
+        .iter()
+        .zip(halting)
+        .enumerate()
+        .filter(|(_, (_, halting))| *halting)
+        .filter_map(|(chain, (delta, _))| delta.checked_add(1).map(|offset| (offset, chain)))
+        .min();
+    let max_offset = deltas.iter().copied().max().unwrap_or(0);
+    let last = deltas.len().saturating_sub(1);
+    let back = match cutoff {
+        Some((1, 0)) => None,
+        Some((offset, chain)) if chain > 0 => Some(Coordinate {
+            offset,
+            chain: chain - 1,
+        }),
+        Some((offset, _)) => Some(Coordinate {
+            offset: offset - 1,
+            chain: last,
+        }),
+        None if max_offset == 0 => None,
+        None => Some(Coordinate {
+            offset: max_offset,
+            chain: last,
+        }),
+    };
+    (truncate_deltas(deltas, back), cutoff.is_some())
 }
 
 fn truncate_deltas(deltas: &[u64], back: Option<Coordinate>) -> Vec<u64> {
@@ -657,6 +746,10 @@ mod tests {
         )
     }
 
+    fn heights(heights: &[u64]) -> Vec<Height> {
+        heights.iter().map(|height| Height::new(*height)).collect()
+    }
+
     fn tips(heights: &[u64]) -> Vec<BlockRef<Sha256Digest>> {
         heights
             .iter()
@@ -677,15 +770,38 @@ mod tests {
 
     #[test]
     fn horizontal_is_offset_major() {
-        let stream = Horizontal::new(&tips(&[2, 5]), &tips(&[4, 6])).unwrap();
+        let stream = Horizontal::new(&tips(&[2, 5]), &tips(&[4, 6]), &heights(&[2, 5])).unwrap();
         assert_eq!(coordinates(stream), vec![(0, 3), (1, 6), (0, 4)]);
+    }
+
+    #[test]
+    fn horizontal_places_positional_slots_before_extensions() {
+        let base = tips(&[0, 0]);
+        let target = tips(&[3, 2]);
+        let stream = Horizontal::new(&base, &target, &heights(&[2, 1])).unwrap();
+        let mut reverse = coordinates(stream.newest_first());
+        reverse.reverse();
+        let forward = coordinates(stream);
+        assert_eq!(forward, vec![(0, 1), (1, 1), (0, 2), (0, 3), (1, 2)]);
+        assert_eq!(forward, reverse);
+
+        // A proposal beyond the target only pins what the target reaches.
+        let stream = Horizontal::new(&base, &target, &heights(&[5, 1])).unwrap();
+        assert_eq!(
+            coordinates(stream),
+            vec![(0, 1), (1, 1), (0, 2), (0, 3), (1, 2)]
+        );
+        assert!(matches!(
+            Horizontal::new(&tips(&[2, 2]), &target, &heights(&[1, 2])),
+            Err(Error::Regression)
+        ));
     }
 
     #[test]
     fn horizontal_newest_first_is_exact_reverse() {
         let base = tips(&[2, 5, 1, 8]);
         let target = tips(&[6, 6, 4, 8]);
-        let stream = Horizontal::new(&base, &target).unwrap();
+        let stream = Horizontal::new(&base, &target, &heights(&[2, 5, 1, 8])).unwrap();
         let mut reverse = coordinates(stream.newest_first());
         reverse.reverse();
         assert_eq!(coordinates(stream), reverse);
@@ -695,42 +811,100 @@ mod tests {
     fn final_sweep_skips_settled_and_halts_at_unsettled_holes() {
         let base = tips(&[0, 0]);
         let target = tips(&[1, 2]);
-        let mut settled = FinalSweep::new(&base, target.clone(), vec![true, true]).unwrap();
+        let mut settled =
+            FinalSweep::new(&base, target.clone(), &heights(&[0, 0]), vec![true, true]).unwrap();
         assert!(!settled.halted());
         assert_eq!(settled.planned(), 3);
         assert_eq!(coordinates(settled.by_ref()), vec![(0, 1), (1, 1), (1, 2)]);
 
-        let mut unsettled = FinalSweep::new(&base, target.clone(), vec![false, true]).unwrap();
+        let mut unsettled =
+            FinalSweep::new(&base, target.clone(), &heights(&[0, 0]), vec![false, true]).unwrap();
         assert!(unsettled.halted());
         assert_eq!(unsettled.planned(), 2);
         assert_eq!(coordinates(unsettled.by_ref()), vec![(0, 1), (1, 1)]);
 
         // An unsettled chain with no new block may still gain one at the first offset, so the
         // sweep halts before emitting anything.
-        let mut idle = FinalSweep::new(&tips(&[1, 0]), target, vec![false, true]).unwrap();
+        let mut idle =
+            FinalSweep::new(&tips(&[1, 0]), target, &heights(&[1, 0]), vec![false, true]).unwrap();
         assert!(idle.halted());
         assert_eq!(idle.planned(), 0);
         assert!(coordinates(idle.by_ref()).is_empty());
     }
 
     #[test]
+    fn final_sweep_places_pinned_slots_past_an_unsettled_extension() {
+        // Chain 0 proposed nothing and some voters endorsed a block above its tip; chain 1's
+        // proposal reached height 3 and every position finalized. The pinned blocks emit.
+        let base = tips(&[0, 0]);
+        let mut sweep =
+            FinalSweep::new(&base, tips(&[0, 3]), &heights(&[0, 3]), vec![false, true]).unwrap();
+        assert!(!sweep.halted());
+        assert_eq!(sweep.planned(), 3);
+        assert_eq!(coordinates(sweep.by_ref()), vec![(1, 1), (1, 2), (1, 3)]);
+
+        // Chain 1's own extension above its proposed tip waits behind chain 0's empty slot.
+        let mut sweep =
+            FinalSweep::new(&base, tips(&[0, 4]), &heights(&[0, 3]), vec![false, true]).unwrap();
+        assert!(sweep.halted());
+        assert_eq!(sweep.planned(), 3);
+        assert_eq!(coordinates(sweep.by_ref()), vec![(1, 1), (1, 2), (1, 3)]);
+
+        // A settled extension follows every pinned block.
+        let mut sweep =
+            FinalSweep::new(&base, tips(&[2, 3]), &heights(&[1, 3]), vec![true, true]).unwrap();
+        assert!(!sweep.halted());
+        assert_eq!(sweep.planned(), 5);
+        assert_eq!(
+            coordinates(sweep.by_ref()),
+            vec![(0, 1), (1, 1), (1, 2), (1, 3), (0, 2)]
+        );
+    }
+
+    #[test]
+    fn final_sweep_halts_the_positional_pass_on_a_shortfall() {
+        // Chain 0 finalized position 1 of a two-entry proposal: a V-QC may still carry it to
+        // height 2, so the pass halts there and no extension slot is reached.
+        let base = tips(&[0, 0]);
+        let mut sweep =
+            FinalSweep::new(&base, tips(&[1, 3]), &heights(&[2, 2]), vec![false, true]).unwrap();
+        assert!(sweep.halted());
+        assert_eq!(sweep.planned(), 2);
+        assert_eq!(coordinates(sweep.by_ref()), vec![(0, 1), (1, 1)]);
+    }
+
+    #[test]
     fn final_sweep_newest_first_is_exact_reverse() {
-        for (base, target, settled) in [
-            (vec![2, 5, 1, 8], vec![6, 6, 4, 8], vec![true; 4]),
+        for (base, target, proposed, settled) in [
+            (vec![2, 5, 1, 8], vec![6, 6, 4, 8], vec![2, 5, 1, 8], vec![true; 4]),
             (
                 vec![2, 5, 1, 8],
                 vec![6, 6, 4, 8],
+                vec![2, 5, 1, 8],
                 vec![true, false, true, false],
             ),
             (
                 vec![2, 5, 1, 8],
                 vec![2, 8, 4, 9],
+                vec![2, 5, 1, 8],
                 vec![false, true, false, true],
+            ),
+            (
+                vec![2, 5, 1, 8],
+                vec![6, 6, 4, 9],
+                vec![4, 6, 2, 8],
+                vec![true, false, true, false],
+            ),
+            (
+                vec![2, 5, 1, 8],
+                vec![6, 6, 4, 9],
+                vec![4, 7, 2, 8],
+                vec![true, false, true, false],
             ),
         ] {
             let base = tips(&base);
             let target = tips(&target);
-            let stream = FinalSweep::new(&base, target, settled).unwrap();
+            let stream = FinalSweep::new(&base, target, &heights(&proposed), settled).unwrap();
             let mut reverse = coordinates(stream.newest_first());
             reverse.reverse();
             assert_eq!(coordinates(stream), reverse);
@@ -758,9 +932,9 @@ mod tests {
     #[test]
     fn history_openings_are_oldest_first_and_frontier_is_exact() {
         let history = Sha256::hash(&[b"history"]);
-        let first = TipRecord::new(history, tips(&[1, 1])).unwrap();
+        let first = TipRecord::at_tips(history, tips(&[1, 1])).unwrap();
         let first_id = first.commitment::<Sha256>();
-        let second = TipRecord::new(first_id, tips(&[2, 2])).unwrap();
+        let second = TipRecord::at_tips(first_id, tips(&[2, 2])).unwrap();
         let second_id = second.commitment::<Sha256>();
         let mut state = HistoryState::new(history, tips(&[0, 0]), tips(&[1, 0])).unwrap();
 
@@ -771,7 +945,7 @@ mod tests {
         state
             .validate_opening::<Sha256>(first_id, &first, &tips(&[1, 0]))
             .unwrap();
-        let stream = Horizontal::new(state.ordered(), first.tips()).unwrap();
+        let stream = Horizontal::new(state.ordered(), first.tips(), first.proposed()).unwrap();
         for slot in stream {
             let resolved = resolve(slot);
             let action = state.reconcile(slot, resolved).unwrap();
@@ -800,49 +974,65 @@ mod tests {
         assert_eq!(state.reconcile(slot, conflict), Err(Error::Conflict));
     }
 
+    /// One offset-major pass over `deltas` above `floors`, halting at the first empty slot of a
+    /// halting chain. Returns the visited coordinates and whether the pass halted.
+    fn reference_pass(floors: &[u64], deltas: &[u64], halting: &[bool]) -> (Vec<(u32, u64)>, bool) {
+        let max = deltas.iter().copied().max().unwrap_or(0);
+        let mut visited = Vec::new();
+        for offset in 1..=max.saturating_add(1) {
+            for chain in 0..deltas.len() {
+                if offset <= deltas[chain] {
+                    visited.push((chain as u32, floors[chain] + offset));
+                } else if halting[chain] {
+                    return (visited, true);
+                }
+            }
+        }
+        (visited, false)
+    }
+
     proptest! {
         #[test]
         fn streams_match_materialized_reference(
             base in vec(0u64..20, 1..5),
             deltas in vec(0u64..6, 1..5),
+            proposed in vec(0u64..8, 1..5),
             settled in vec(any::<bool>(), 1..5),
         ) {
-            let chains = base.len().min(deltas.len()).min(settled.len());
+            let chains = base.len().min(deltas.len()).min(proposed.len()).min(settled.len());
             let base = &base[..chains];
             let deltas = &deltas[..chains];
             let settled = &settled[..chains];
             let target_heights = base.iter().zip(deltas).map(|(base, delta)| base + delta).collect::<Vec<_>>();
+            let proposed_heights = base.iter().zip(&proposed[..chains]).map(|(base, delta)| base + delta).collect::<Vec<_>>();
+            let boundary = target_heights.iter().zip(&proposed_heights).map(|(target, proposed)| *target.min(proposed)).collect::<Vec<_>>();
+            let positional = boundary.iter().zip(base).map(|(boundary, base)| boundary - base).collect::<Vec<_>>();
+            let extension = target_heights.iter().zip(&boundary).map(|(target, boundary)| target - boundary).collect::<Vec<_>>();
             let base_tips = tips(base);
             let target_tips = tips(&target_heights);
+            let proposed = heights(&proposed_heights);
 
-            let max = deltas.iter().copied().max().unwrap();
-            let expected_horizontal = (1..=max)
-                .flat_map(|offset| (0..chains).filter_map(move |chain| {
-                    (offset <= deltas[chain]).then_some((chain as u32, base[chain] + offset))
-                }))
-                .collect::<Vec<_>>();
-            let horizontal_stream = Horizontal::new(&base_tips, &target_tips).unwrap();
+            let never = vec![false; chains];
+            let mut expected_horizontal = reference_pass(base, &positional, &never).0;
+            expected_horizontal.extend(reference_pass(&boundary, &extension, &never).0);
+            let horizontal_stream = Horizontal::new(&base_tips, &target_tips, &proposed).unwrap();
             let mut reverse_horizontal = coordinates(horizontal_stream.newest_first());
             reverse_horizontal.reverse();
             let horizontal = coordinates(horizontal_stream);
             prop_assert_eq!(&horizontal, &expected_horizontal);
             prop_assert_eq!(horizontal, reverse_horizontal);
 
-            let mut expected_sweep = Vec::new();
-            'outer: for offset in 1..=max.saturating_add(1) {
-                for chain in 0..chains {
-                    if offset <= deltas[chain] {
-                        expected_sweep.push((chain as u32, base[chain] + offset));
-                    } else if !settled[chain] {
-                        break 'outer;
-                    }
-                }
-                if offset == max && settled.iter().all(|settled| *settled) {
-                    break;
-                }
+            let short = boundary.iter().zip(&proposed_heights).map(|(boundary, proposed)| boundary < proposed).collect::<Vec<_>>();
+            let (mut expected_sweep, halted) = reference_pass(base, &positional, &short);
+            if !halted {
+                let unsettled = settled.iter().map(|settled| !settled).collect::<Vec<_>>();
+                expected_sweep.extend(reference_pass(&boundary, &extension, &unsettled).0);
             }
+            let total = positional.iter().chain(&extension).sum::<u64>();
             let sweep_stream =
-                FinalSweep::new(&base_tips, target_tips, settled.to_vec()).unwrap();
+                FinalSweep::new(&base_tips, target_tips, &proposed, settled.to_vec()).unwrap();
+            prop_assert_eq!(sweep_stream.planned(), expected_sweep.len() as u64);
+            prop_assert_eq!(sweep_stream.halted(), (expected_sweep.len() as u64) < total);
             let mut reverse_sweep = coordinates(sweep_stream.newest_first());
             reverse_sweep.reverse();
             let sweep = coordinates(sweep_stream);

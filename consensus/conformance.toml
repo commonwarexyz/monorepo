@@ -272,7 +272,7 @@ hash = "baaf86c19b02c4bb317d44d44ec44352351bd1d9d5368ca4b44f268167826393"
 
 ["commonware_consensus::multimmit::types::arbitrary::conformance::TipRecordConformance"]
 n_cases = 128
-hash = "789cd532088fc89c78ee017d939a7719195dcffa4dcb48df94c016c480b21e24"
+hash = "6bead31438abe29af9a22ab77c27c25c7aaaa92fd8148ded7f1484e64ba52d16"
 
 ["commonware_consensus::ordered_broadcast::types::tests::conformance::CodecConformance<Ack<PublicKey,Scheme,Sha256Digest>>"]
 n_cases = 65536

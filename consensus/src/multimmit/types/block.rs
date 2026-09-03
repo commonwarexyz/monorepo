@@ -856,6 +856,14 @@ impl<V: Variant, D: Digest> LeaderBlock<V, D> {
         &self.proposals
     }
 
+    /// Returns each chain's proposed tip height: the anchor plus the payloads above it.
+    pub fn proposed_heights(&self) -> Vec<Height> {
+        self.proposals
+            .iter()
+            .map(|proposal| Height::new(proposal.anchor().height().get() + proposal.len() as u64))
+            .collect()
+    }
+
     /// Returns the digest of this canonical leader block.
     pub fn digest<H: Hasher<Digest = D>>(&self) -> D {
         H::hash(&[self.encode().as_ref()])

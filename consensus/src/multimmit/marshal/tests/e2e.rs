@@ -779,7 +779,7 @@ fn body(marker: u64) -> TestBody {
 fn initial_history(committee: &Committee<MinPk>) -> Arc<TipRecord<Sha256Digest>> {
     let genesis = committee.config.genesis();
     Arc::new(
-        TipRecord::new(
+        TipRecord::at_tips(
             protocol_genesis_history::<Sha256>(genesis),
             genesis.tips().to_vec(),
         )
@@ -942,11 +942,36 @@ fn pool_finality_update_emits_suffix_truncated_by_first_lqc() {
             harness.committee.config.genesis().tips(),
             vec![vec![body(1_320)], vec![body(1_321), body(1_322)]],
         );
-        let leader = batch.proof.leader().clone();
-        let positions = vec![Position::new(1), Position::new(2)];
+        // The leader proposes only chain 1's first block; its second block reaches the final
+        // tips as an extension every quorum vote endorses. Chain 0's lone extension vote leaves
+        // that chain unsettled, so the extension region halts at chain 0 and defers chain 1's
+        // extension while both proposed blocks emit at once.
+        let certified = batch.proof.leader();
+        let mut proposals = certified.proposals().to_vec();
+        proposals[1] = ChainProposal::new(
+            ChainId::new(1),
+            Anchor::Tip(harness.committee.config.genesis().tips()[1]),
+            vec![batch.blocks[1][0].header().body_digest()],
+            harness.committee.codec().pipeline_depth(),
+        )
+        .unwrap();
+        let leader = LeaderBlock::new(
+            certified.round(),
+            certified.parent(),
+            certified.history(),
+            proposals,
+            harness.committee.codec(),
+        )
+        .unwrap();
+        let positions = vec![Position::new(1), Position::new(1)];
         let votes = (0..harness.committee.codec().view_quorum())
             .map(|signer| {
                 let mut extensions = vec![Extension::empty(); CHAINS];
+                extensions[1] = Extension::new(
+                    vec![batch.blocks[1][1].header().body_digest()],
+                    harness.committee.codec().extension_bound(),
+                )
+                .unwrap();
                 if signer == 0 {
                     extensions[0] = Extension::new(
                         vec![digest(b"unsettled chain extension", 0)],
@@ -981,6 +1006,7 @@ fn pool_finality_update_emits_suffix_truncated_by_first_lqc() {
             leader.parent(),
             harness.committee.codec().view_quorum(),
             batch.tips(),
+            leader.proposed_heights(),
             positions.clone(),
             vec![false, true],
         );
@@ -1015,6 +1041,7 @@ fn pool_finality_update_emits_suffix_truncated_by_first_lqc() {
             leader.parent(),
             harness.committee.codec().view_quorum(),
             batch.tips(),
+            leader.proposed_heights(),
             positions.clone(),
             vec![true; CHAINS],
         );
@@ -1031,6 +1058,7 @@ fn pool_finality_update_emits_suffix_truncated_by_first_lqc() {
             leader.parent(),
             PARTICIPANTS as usize,
             batch.tips(),
+            leader.proposed_heights(),
             positions,
             vec![true; CHAINS],
         );
@@ -1444,7 +1472,7 @@ fn remote_resolver_backfills_exact_lqc_history_and_blocks() {
             vec![vec![body(20), body(21)], vec![body(22), body(23)]],
         );
         let second_history =
-            Arc::new(TipRecord::new(first.history.commitment::<Sha256>(), first.tips()).unwrap());
+            Arc::new(TipRecord::at_tips(first.history.commitment::<Sha256>(), first.tips()).unwrap());
         let second = certify(
             &harness.committee,
             2,
@@ -2124,7 +2152,7 @@ fn sustained_one_output_commits_remain_dense_and_memory_only() {
             expected.extend(batch.offset_major());
             bases = batch.tips();
             history = Arc::new(
-                TipRecord::new(batch.history.commitment::<Sha256>(), bases.clone()).unwrap(),
+                TipRecord::at_tips(batch.history.commitment::<Sha256>(), bases.clone()).unwrap(),
             );
         }
 
@@ -2197,7 +2225,7 @@ fn sustained_history_catchup_remains_dense_and_memory_only() {
             expected.extend(batch.offset_major());
             bases = batch.tips();
             history = Arc::new(
-                TipRecord::new(batch.history.commitment::<Sha256>(), bases.clone()).unwrap(),
+                TipRecord::at_tips(batch.history.commitment::<Sha256>(), bases.clone()).unwrap(),
             );
             final_proof = Some(batch.proof);
         }
@@ -2500,7 +2528,7 @@ fn floor_installation_retires_the_pending_delivery_window() {
             .await;
 
         let floor_history =
-            Arc::new(TipRecord::new(first.history.commitment::<Sha256>(), first.tips()).unwrap());
+            Arc::new(TipRecord::at_tips(first.history.commitment::<Sha256>(), first.tips()).unwrap());
         let floor = certify(
             &harness.committee,
             2,
@@ -2527,7 +2555,7 @@ fn floor_installation_retires_the_pending_delivery_window() {
         harness.reporter(0).discard_pending();
 
         let continuation_history =
-            Arc::new(TipRecord::new(floor.history.commitment::<Sha256>(), floor.tips()).unwrap());
+            Arc::new(TipRecord::at_tips(floor.history.commitment::<Sha256>(), floor.tips()).unwrap());
         let continuation = certify(
             &harness.committee,
             3,
@@ -2580,7 +2608,7 @@ async fn run_floor_case(
     assert!(harness.reporter(0).delivered().is_empty());
 
     let mailbox = harness.mailbox(0);
-    let intermediate_history = Arc::new(TipRecord::new(old_history, floor.tips()).unwrap());
+    let intermediate_history = Arc::new(TipRecord::at_tips(old_history, floor.tips()).unwrap());
     let intermediate_commitment = intermediate_history.commitment::<Sha256>();
     let mut reporter = mailbox.clone();
     assert_eq!(
@@ -2592,7 +2620,7 @@ async fn run_floor_case(
         Feedback::Ok
     );
     let continuation_history =
-        Arc::new(TipRecord::new(intermediate_commitment, floor.tips()).unwrap());
+        Arc::new(TipRecord::at_tips(intermediate_commitment, floor.tips()).unwrap());
     let continuation = certify(
         &harness.committee,
         2,

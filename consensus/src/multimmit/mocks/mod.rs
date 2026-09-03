@@ -297,9 +297,13 @@ impl<V: Variant> Committee<V> {
         let (tips, _) = VqcExtraction::new::<Sha256, V>(parent, self.codec())
             .expect("fixture parent V-QC extracts")
             .into_parts();
-        let history = TipRecord::new(parent.leader().history(), tips.blocks().to_vec())
-            .expect("fixture tips are canonical")
-            .commitment::<Sha256>();
+        let history = TipRecord::new(
+            parent.leader().history(),
+            tips.blocks().to_vec(),
+            parent.leader().proposed_heights(),
+        )
+        .expect("fixture tips are canonical")
+        .commitment::<Sha256>();
         self.empty_leader_block(view, parent.id::<Sha256>(), history)
     }
 

@@ -829,9 +829,13 @@ fn leader_extending_view_one_vqc(
     parent: &Vqc<MinPk, Digest>,
 ) -> (LeaderBlock<MinPk, Digest>, Digest) {
     let protocol = machine.profile().protocol();
+    let (tips, _) = VqcExtraction::new::<Sha256, MinPk>(parent, protocol.codec_config())
+        .unwrap()
+        .into_parts();
     let history = TipRecord::new(
         parent.leader().history(),
-        protocol.genesis().tips().to_vec(),
+        tips.blocks().to_vec(),
+        parent.leader().proposed_heights(),
     )
     .unwrap()
     .commitment::<Sha256>();
@@ -11349,9 +11353,13 @@ fn proposal_accepts_exact_lower_parent_with_complete_gap() {
         VqcExtraction::new::<Sha256, MinPk>(&parent, machine.profile().protocol().codec_config())
             .unwrap();
     let (tips, _) = extraction.into_parts();
-    let history = TipRecord::new(parent.leader().history(), tips.blocks().to_vec())
-        .unwrap()
-        .commitment::<Sha256>();
+    let history = TipRecord::new(
+        parent.leader().history(),
+        tips.blocks().to_vec(),
+        parent.leader().proposed_heights(),
+    )
+    .unwrap()
+    .commitment::<Sha256>();
     let base = leader(&machine, 4);
     let proposal = LeaderBlock::new(
         base.round(),

@@ -309,7 +309,11 @@ where
             })
             .collect::<ArbitraryResult<_>>()?;
 
-        Ok(Self::new(u.arbitrary()?, tips).expect("generated tip record is canonical"))
+        let proposed = (0..codec_config().chains())
+            .map(|_| u.arbitrary())
+            .collect::<ArbitraryResult<_>>()?;
+
+        Ok(Self::new(u.arbitrary()?, tips, proposed).expect("generated tip record is canonical"))
     }
 }
 
