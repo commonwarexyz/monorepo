@@ -72,13 +72,13 @@
 //!
 //! # Peer Selection
 //!
-//! Outbound fetches are only sent to peers in `latest.primary` (see [commonware_p2p::Provider]) but inbound
-//! requests are handled for all connected peers. Thus, callers that still expect a key to be fetchable after
-//! a peer set update must ensure the latest primary set can serve it.
+//! By default, outbound fetches are sent only to peers in `latest.primary` (see
+//! [commonware_p2p::Provider]), while inbound requests are handled for all connected peers.
+//! [`Engine::new_with_all_peers`] instead uses the union of all retained peer sets for historical
+//! data whose source may no longer belong to the latest primary set.
 //!
-//! [`TargetedResolver::fetch_targeted`](crate::TargetedResolver::fetch_targeted) can narrow the current primary set
-//! further, but it does not bypass that latest-primary filter. Explicit targets that are no longer
-//! in the latest primary set are ignored until they become primary again.
+//! [`TargetedResolver::fetch_targeted`](crate::TargetedResolver::fetch_targeted) narrows whichever
+//! peer-set view the engine uses. It does not add a peer absent from that view.
 //!
 //! # Performance Considerations
 //!

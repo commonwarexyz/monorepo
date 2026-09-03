@@ -1,22 +1,22 @@
 ["commonware_consensus::aggregation::types::tests::conformance::CodecConformance<Ack<Scheme,Sha256Digest>>"]
 n_cases = 65536
-hash = "c28b55d44ff803a04bfc4dbf07e8f94ff7e577dc43cef99c390caf3289706ce4"
-
-["commonware_consensus::aggregation::types::tests::conformance::CodecConformance<Activity<Scheme,Sha256Digest>>"]
-n_cases = 65536
-hash = "d20fab64a4250b37244b1ce45fa7e062dacefbe56868e063f669f043e40a3d70"
+hash = "403e866144f11c0af693b1009b1e525f0352603baca0fe5dad529f1c1b8f900a"
 
 ["commonware_consensus::aggregation::types::tests::conformance::CodecConformance<Certificate<Scheme,Sha256Digest>>"]
 n_cases = 65536
-hash = "c7ed824caef05e558858a5566bf3ee8c15658fc3d261d9be73f48086069949b4"
+hash = "1cc057914de5688dec8228c0ba788b74f00f2e6d11c5371eeedf0c025b330a73"
 
 ["commonware_consensus::aggregation::types::tests::conformance::CodecConformance<Item<Sha256Digest>>"]
 n_cases = 65536
 hash = "55b287b5530fc9ba77c45ec5030ada38f86b2ddf66a1595fde27d4699667b1a3"
 
-["commonware_consensus::aggregation::types::tests::conformance::CodecConformance<TipAck<Scheme,Sha256Digest>>"]
+["commonware_consensus::aggregation::types::tests::conformance::CodecConformance<RecoveryKey>"]
 n_cases = 65536
-hash = "51b04637257c54cecdc4e5ded4568efccafbc08f20be3fe0951369cab43ba2b6"
+hash = "828c322acd71f3adf7d6bba9328eb5082d5c1f89bbaeec8069b1f47206c42ddc"
+
+["commonware_consensus::aggregation::types::tests::conformance::CodecConformance<RecoveryNamespace>"]
+n_cases = 65536
+hash = "d65ced18cacd65769e8f9732131a06216e6600d5a115c4ed7483a8530813ddcd"
 
 ["commonware_consensus::marshal::coding::types::test::conformance::CodecConformance<Shard<TestBlock,ReedSolomon<Sha256>,Sha256>>"]
 n_cases = 65536

@@ -4,12 +4,13 @@
 //! [`orchestrator::Actor`]: super::orchestrator::Actor
 
 use commonware_consensus::types::Epoch;
+use commonware_utils::sync::Mutex;
 use futures::task::AtomicWaker;
 use std::{
     future::Future,
     pin::Pin,
     sync::{
-        Arc,
+        Arc, Weak,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     task::{Context, Poll},
@@ -27,12 +28,8 @@ pub struct Fence {
 impl Fence {
     pub fn new(epoch: Epoch) -> (Self, Gate) {
         let state = Arc::new(State::new(epoch));
-        (
-            Self {
-                state: state.clone(),
-            },
-            Gate { state },
-        )
+        let gate = Gate::new(state.clone());
+        (Self { state }, gate)
     }
 
     pub fn epoch(&self) -> Epoch {
@@ -52,9 +49,22 @@ impl Drop for Fence {
 
 pub struct Gate {
     state: Arc<State>,
+    waker: Arc<AtomicWaker>,
+}
+
+impl Clone for Gate {
+    fn clone(&self) -> Self {
+        Self::new(self.state.clone())
+    }
 }
 
 impl Gate {
+    fn new(state: Arc<State>) -> Self {
+        let waker = Arc::new(AtomicWaker::new());
+        state.register(&waker);
+        Self { state, waker }
+    }
+
     pub fn epoch(&self) -> Epoch {
         self.state.epoch()
     }
@@ -78,7 +88,7 @@ impl Future for Waiter<'_> {
     type Output = Result<(), Closed>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        self.gate.state.waker.register(cx.waker());
+        self.gate.waker.register(cx.waker());
 
         let closed = self.gate.state.closed.load(Ordering::Acquire);
         if self.epoch <= self.gate.state.epoch() {
@@ -93,10 +103,16 @@ impl Future for Waiter<'_> {
     }
 }
 
+impl Drop for Gate {
+    fn drop(&mut self) {
+        self.state.unregister(&self.waker);
+    }
+}
+
 struct State {
     epoch: AtomicU64,
     closed: AtomicBool,
-    waker: AtomicWaker,
+    wakers: Mutex<Vec<Weak<AtomicWaker>>>,
 }
 
 impl State {
@@ -104,7 +120,37 @@ impl State {
         Self {
             epoch: AtomicU64::new(epoch.get()),
             closed: AtomicBool::new(false),
-            waker: AtomicWaker::new(),
+            wakers: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn register(&self, waker: &Arc<AtomicWaker>) {
+        self.wakers.lock().push(Arc::downgrade(waker));
+    }
+
+    fn unregister(&self, waker: &Arc<AtomicWaker>) {
+        let waker = Arc::downgrade(waker);
+        self.wakers
+            .lock()
+            .retain(|registered| !Weak::ptr_eq(registered, &waker));
+    }
+
+    fn wake(&self) {
+        let wakers = {
+            let mut registered = self.wakers.lock();
+            let mut wakers = Vec::with_capacity(registered.len());
+            registered.retain(|waker| {
+                let Some(waker) = waker.upgrade() else {
+                    return false;
+                };
+                wakers.push(waker);
+                true
+            });
+            wakers
+        };
+
+        for waker in wakers {
+            waker.wake();
         }
     }
 
@@ -116,14 +162,14 @@ impl State {
         let previous = self.epoch.fetch_max(epoch.get(), Ordering::AcqRel);
         let latest = Epoch::new(previous.max(epoch.get()));
         if epoch.get() > previous {
-            self.waker.wake();
+            self.wake();
         }
         latest
     }
 
     fn close(&self) {
         self.closed.store(true, Ordering::Release);
-        self.waker.wake();
+        self.wake();
     }
 }
 
@@ -207,6 +253,47 @@ mod tests {
 
         assert!(waiter.as_mut().poll(&mut second_context).is_ready());
         assert!(second_wakes.count() > 0);
+    }
+
+    #[test]
+    fn wakes_concurrent_cloned_gates() {
+        let (fence, mut first_gate) = Fence::new(Epoch::zero());
+        let mut second_gate = first_gate.clone();
+        let mut first_waiter = Box::pin(first_gate.wait(Epoch::new(1)));
+        let mut second_waiter = Box::pin(second_gate.wait(Epoch::new(1)));
+        let first_wakes = WakeCounter::new();
+        let second_wakes = WakeCounter::new();
+
+        let first_waker = waker_ref(&first_wakes);
+        let mut first_context = Context::from_waker(&first_waker);
+        assert!(first_waiter.as_mut().poll(&mut first_context).is_pending());
+
+        let second_waker = waker_ref(&second_wakes);
+        let mut second_context = Context::from_waker(&second_waker);
+        assert!(
+            second_waiter
+                .as_mut()
+                .poll(&mut second_context)
+                .is_pending()
+        );
+
+        fence.mark(Epoch::new(1));
+
+        assert_eq!(first_wakes.count(), 1);
+        assert_eq!(second_wakes.count(), 1);
+        assert!(first_waiter.as_mut().poll(&mut first_context).is_ready());
+        assert!(second_waiter.as_mut().poll(&mut second_context).is_ready());
+    }
+
+    #[test]
+    fn dropped_clones_unregister_wakers() {
+        let (_fence, gate) = Fence::new(Epoch::zero());
+
+        for _ in 0..100 {
+            drop(gate.clone());
+        }
+
+        assert_eq!(gate.state.wakers.lock().len(), 1);
     }
 
     #[test]
