@@ -11,7 +11,7 @@ image: "https://commonware.xyz/imgs/clearing.png"
 katex: true
 ---
 
-*Update (9/2/26): Each payer now signs one cumulative endpoint per epoch that covers every recipient it pays (many of which can now be paid at once). The close shrinks to one row per changed account and one entry per edge (each entry lives in its payer's own vector, so payments to a popular recipient never contend). Validators retain their slices of the state across closes and are dealt only the delta.*
+*Update (9/2/26): Each payer now signs one cumulative endpoint per epoch that covers every recipient it pays (many of which can now be paid at once). The close shrinks to one row per changed account and one entry per edge (each entry lives in its payer's own vector, so payments to a popular recipient never contend). Every credit now traces to a payer-signed entry, so only omission remains challengeable. Validators retain their slices of the state across closes and are dealt only the delta.*
 
 *Update (8/20/26): Clearing now uses a 32-byte commitment and BLS12-381 multisignatures for the commitment certificate.*
 
