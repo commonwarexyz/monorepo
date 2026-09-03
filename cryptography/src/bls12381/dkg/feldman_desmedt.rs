@@ -581,7 +581,7 @@ impl<V: Variant, P: Ord> Output<V, P> {
 
     /// Return the quorum, i.e. the number of players needed to reconstruct the key.
     pub fn quorum<M: Faults>(&self) -> u32 {
-        self.players.quorum::<M>()
+        self.players.quorum_count::<M>()
     }
 
     /// Get the public polynomial associated with this output.
@@ -673,7 +673,10 @@ where
         )
         .map_err(|_| arbitrary::Error::IncorrectFormat)?;
 
-        let max_revealed = N3f1::max_faults(total) as usize;
+        let max_revealed = usize::try_from(N3f1::max_faults(
+            u64::try_from(total).expect("participant count exceeds u64::MAX"),
+        ))
+        .expect("maximum faults exceeds usize::MAX");
         let revealed = Set::from_iter_dedup(
             players
                 .iter()
@@ -761,11 +764,11 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
     }
 
     fn degree<M: Faults>(&self) -> u32 {
-        self.players.quorum::<M>().saturating_sub(1)
+        self.players.quorum_count::<M>().saturating_sub(1)
     }
 
     fn required_commitments<M: Faults>(&self) -> u32 {
-        let dealer_quorum = self.dealers.quorum::<M>();
+        let dealer_quorum = self.dealers.quorum_count::<M>();
         let prev_quorum = self
             .previous
             .as_ref()
@@ -775,17 +778,21 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
     }
 
     fn max_reveals<M: Faults>(&self) -> u32 {
-        self.players.max_faults::<M>()
+        self.players.max_faults_count::<M>()
     }
 
     fn reveal_threshold<M: Faults>(&self) -> u32 {
         #[allow(deprecated)]
         match self.reveal {
-            Reveal::V0 => self.players.max_faults::<M>() + 1,
+            Reveal::V0 => self
+                .players
+                .max_faults_count::<M>()
+                .checked_add(1)
+                .expect("reveal threshold exceeds u32::MAX"),
             Reveal::V1 => {
                 let max_faults = self.previous.as_ref().map_or_else(
-                    || self.dealers.max_faults::<M>(),
-                    |previous| previous.players.max_faults::<M>(),
+                    || self.dealers.max_faults_count::<M>(),
+                    |previous| previous.players.max_faults_count::<M>(),
                 );
                 self.required_commitments::<M>()
                     .checked_sub(max_faults)
@@ -954,7 +961,9 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
             {
                 return Err(Error::DealerNotInRound(format!("{unknown:?}")));
             }
-            if dealers.len() < previous.quorum::<M>() as usize {
+            if dealers.len()
+                < usize::try_from(previous.quorum::<M>()).expect("quorum exceeds usize::MAX")
+            {
                 return Err(Error::NumDealers(dealers.len()));
             }
         }
@@ -2205,8 +2214,8 @@ pub fn deal<V: Variant, P: Clone + Ord, M: Faults>(
     if players.is_empty() {
         return Err(Error::NumPlayers(0));
     }
-    let n = NZU32!(players.len() as u32);
-    let t = players.quorum::<M>();
+    let n = NZU32!(u32::try_from(players.len()).expect("player count exceeds u32::MAX"));
+    let t = players.quorum_count::<M>();
     let private = Poly::new(&mut rng, t - 1);
     let shares: Map<_, _> = players
         .iter()
@@ -2509,8 +2518,12 @@ mod test_plan {
                     }
                 }
                 // Must have >= quorum(prev_players) dealers
-                let required = N3f1::quorum(prev_players.len());
-                if (self.dealers.len() as u32) < required {
+                let required = N3f1::quorum(
+                    u64::try_from(prev_players.len()).expect("participant count exceeds u64::MAX"),
+                );
+                if u64::try_from(self.dealers.len()).expect("dealer count exceeds u64::MAX")
+                    < required
+                {
                     return Err(anyhow!(
                         "not enough dealers: have {}, need {} (quorum of {} previous players)",
                         self.dealers.len(),
@@ -2528,7 +2541,11 @@ mod test_plan {
                 return true;
             }
             if let Some(shift) = self.shift_degrees.get(&dealer) {
-                let degree = N3f1::quorum(self.players.len()) as i32 - 1;
+                let degree = i32::try_from(N3f1::quorum(
+                    u64::try_from(self.players.len()).expect("participant count exceeds u64::MAX"),
+                ))
+                .expect("player quorum exceeds i32::MAX")
+                    - 1;
                 // We shift the degree, but saturate at 0, so it's possible
                 // that the shift isn't actually doing anything.
                 //
@@ -2548,7 +2565,10 @@ mod test_plan {
                 .chain(self.no_acks.iter().copied())
                 .filter_map(|(d, p)| if d == dealer { Some(p) } else { None })
                 .collect::<BTreeSet<_>>();
-            revealed_players.len() as u32 > N3f1::max_faults(self.players.len())
+            u64::try_from(revealed_players.len()).expect("revealed player count exceeds u64::MAX")
+                > N3f1::max_faults(
+                    u64::try_from(self.players.len()).expect("participant count exceeds u64::MAX"),
+                )
         }
 
         /// Determine if this round is expected to fail.
@@ -2559,9 +2579,12 @@ mod test_plan {
                 .filter(|&&d| !self.bad(previous_successful_round.is_some(), d))
                 .count();
             let required = previous_successful_round
-                .map(N3f1::quorum)
+                .map(|count| N3f1::quorum(u64::from(count)))
                 .unwrap_or_default()
-                .max(N3f1::quorum(self.dealers.len())) as usize;
+                .max(N3f1::quorum(
+                    u64::try_from(self.dealers.len()).expect("dealer count exceeds u64::MAX"),
+                ));
+            let required = usize::try_from(required).expect("dealer quorum exceeds usize::MAX");
             good_dealer_count < required
         }
     }
@@ -3216,7 +3239,10 @@ mod test_plan {
             last_successful_players: Option<&Set<u32>>,
         ) -> arbitrary::Result<Round> {
             let dealers = if let Some(players) = last_successful_players {
-                let to_pick = u.int_in_range(players.quorum::<N3f1>() as usize..=players.len())?;
+                let to_pick = u.int_in_range(
+                    usize::try_from(players.quorum_count::<N3f1>())
+                        .expect("quorum exceeds usize::MAX")..=players.len(),
+                )?;
                 pick(u, to_pick, players.into_iter().copied().collect())?
             } else {
                 let to_pick = u.int_in_range(1..=num_participants as usize)?;
@@ -3271,7 +3297,12 @@ mod test_plan {
                     indices
                         .into_iter()
                         .map(|k| {
-                            let expected = N3f1::quorum(players.len()) as i32 - 1;
+                            let expected = i32::try_from(N3f1::quorum(
+                                u64::try_from(players.len())
+                                    .expect("participant count exceeds u64::MAX"),
+                            ))
+                            .expect("quorum exceeds i32::MAX")
+                                - 1;
                             let shift = u.int_in_range(1..=expected.max(1))?;
                             let shift = if bool::arbitrary(u)? { -shift } else { shift };
                             Ok((k, NonZeroI32::new(shift).expect("checked to not be zero")))

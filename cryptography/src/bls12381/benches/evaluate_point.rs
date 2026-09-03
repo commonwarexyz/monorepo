@@ -16,7 +16,9 @@ fn bench_evaluate_point(c: &mut Criterion) {
                     b.iter_batched(
                         || {
                             let mut rng = test_rng();
-                            let polynomial: Poly<G1> = Poly::commit(Poly::new(&mut rng, t - 1));
+                            let degree =
+                                u32::try_from(t - 1).expect("quorum degree must fit in u32");
+                            let polynomial: Poly<G1> = Poly::commit(Poly::new(&mut rng, degree));
                             let scalar = Scalar::random(&mut rng);
                             (scalar, polynomial)
                         },

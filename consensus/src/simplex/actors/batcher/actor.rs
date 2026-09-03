@@ -132,7 +132,7 @@ where
             Buckets::CRYPTOGRAPHY,
         );
         let (sender, receiver) = mailbox::new(context.child("mailbox"), cfg.mailbox_size);
-        let mut required_active = participants.quorum::<N3f1>() as usize;
+        let mut required_active = participants.quorum_count::<N3f1>() as usize;
         if scheme.me().is_some() {
             // We are live by construction (we never observe our own messages).
             required_active = required_active

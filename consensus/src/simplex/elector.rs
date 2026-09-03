@@ -807,7 +807,10 @@ mod tests {
         let participants = Set::try_from_iter(participants).unwrap();
         let elector: RandomElector<ThresholdScheme> =
             Random::new(RandomVersion::V1).build(&participants);
-        let quorum = N3f1::quorum(schemes.len()) as usize;
+        let quorum = usize::try_from(N3f1::quorum(
+            u64::try_from(schemes.len()).expect("participant count exceeds u64::MAX"),
+        ))
+        .expect("quorum exceeds usize::MAX");
 
         // Create certificate for round (1, 2)
         let round1 = Round::new(Epoch::new(1), View::new(2));
@@ -933,8 +936,10 @@ mod tests {
             } = bls12381_threshold_vrf::fixture::<MinPk, _>(&mut rng, NAMESPACE, n);
             let participants = Set::try_from_iter(participants).unwrap();
             let elector: RandomElector<ThresholdScheme> = version.build(&participants);
-            let quorum =
-                usize::try_from(N3f1::quorum(schemes.len())).expect("quorum exceeds usize::MAX");
+            let quorum = usize::try_from(N3f1::quorum(
+                u64::try_from(schemes.len()).expect("participant count exceeds u64::MAX"),
+            ))
+            .expect("quorum exceeds usize::MAX");
 
             // Generate deterministic round parameters
             let epoch = rng.random_range(0..1000);
