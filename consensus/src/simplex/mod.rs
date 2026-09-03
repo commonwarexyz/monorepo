@@ -26,13 +26,21 @@
 //! [`Config::floor`](config::Config::floor) supplies the initial finalized state. Voting begins
 //! at view 1, with the first proposal referencing genesis as its parent.
 //!
+//! ### Weighted Quorums
+//!
+//! Each epoch's [`Committee`](commonware_utils::ordered::Committee) assigns a positive weight to
+//! every participant. Let `W` be the total committee weight, `f = floor((W - 1) / 3)` the maximum
+//! faulty weight, and `q = W - f` the quorum weight. A certificate forms when votes from unique
+//! participants have combined weight at least `q`. Uniform unit weights recover the count-based
+//! protocol. When `W = 3f + 1`, `q = 2f + 1`.
+//!
 //! ### Specification for View `v`
 //!
 //! Upon entering view `v`:
 //! * Determine leader `l` for view `v`
 //! * Set timer for leader proposal `t_l = 2Δ` and advance `t_a = 3Δ`
-//!     * If leader `l` has not been active for the configured skip timeout while a quorum of
-//!       participants has been, set both `t_l` and `t_a` to 0.
+//!     * If leader `l` has not been active for the configured skip timeout while active
+//!       participants have reached quorum weight, set both `t_l` and `t_a` to 0.
 //! * If leader `l`, broadcast `notarize(c,v)`
 //!   * If can't propose container in view `v` because missing notarization/nullification for a
 //!     previous view `v_m`, request `v_m`
@@ -45,7 +53,7 @@
 //!   be exactly `v-1`), verify `c` and broadcast `notarize(c,v)`
 //!     * If verification of `c` fails, immediately broadcast `nullify(v)`
 //!
-//! Upon receiving `2f+1` `notarize(c,v)`:
+//! Upon receiving quorum weight `q` in `notarize(c,v)` votes:
 //! * Mark `c` as notarized
 //! * Broadcast `notarization(c,v)` (even if we have not verified `c`)
 //! * Attempt to certify `c` (see [Certification](#certification)), leaving `t_a` armed so a
@@ -54,11 +62,11 @@
 //!       `nullify(v)` or observed `l` equivocate in `v`)
 //!     * On failure: treat as immediate timeout expiry and broadcast `nullify(v)`
 //!
-//! Upon receiving `2f+1` `nullify(v)`:
+//! Upon receiving quorum weight `q` in `nullify(v)` votes:
 //! * Broadcast `nullification(v)`
 //! * Enter `next_term_start(v)` (equivalent to `v+1` when `term_length = 1`)
 //!
-//! Upon receiving `2f+1` `finalize(c,v)`:
+//! Upon receiving quorum weight `q` in `finalize(c,v)` votes:
 //! * Mark `c` as finalized (and recursively finalize its parents)
 //! * Broadcast `finalization(c,v)` (even if we have not verified `c`)
 //!
@@ -71,16 +79,17 @@
 //!      when `term_length` is 1), otherwise the notarization of `v-1`. If we hold none (as in
 //!      view 1), rebroadcast `nullify(v)` alone.
 //!
-//! _When `2f+1` votes of a given type (`notarize(c,v)`, `nullify(v)`, or `finalize(c,v)`) have been collected
-//! from unique participants, a certificate (`notarization(c,v)`, `nullification(v)`, or `finalization(c,v)`) can be assembled.
+//! _When votes of a given type (`notarize(c,v)`, `nullify(v)`, or `finalize(c,v)`) from unique
+//! participants reach quorum weight `q`, a certificate (`notarization(c,v)`, `nullification(v)`,
+//! or `finalization(c,v)`) can be assembled.
 //! These certificates serve as a standalone proof of consensus progress that downstream systems can ingest without executing
 //! the protocol._
 //!
 //! ### Joining Consensus
 //!
-//! As soon as `2f+1` nullifies or finalizes are observed for some view `v`, the `Voter` will
-//! enter the corresponding successor view (`next_term_start(v)` for nullification, `v+1` for
-//! finalization). Notarizations advance the view if-and-only-if the application certifies them.
+//! As soon as the `Voter` observes quorum weight `q` in nullifies or finalizes for view `v`, it
+//! enters the corresponding successor view (`next_term_start(v)` for nullification, `v+1` for
+//! finalization). Notarizations advance the view only if the application certifies them.
 //! This means that a new participant joining consensus will immediately jump ahead on the previous
 //! view's nullification or finalization and begin participating in consensus at the current view.
 //!
@@ -98,7 +107,8 @@
 //! broadcast `nullify` or observed the leader equivocate) and enters the next view. If `certify` returns `false`, the participant broadcasts
 //! `nullify` for the view instead (treating it as an immediate timeout), and will refuse to build upon the
 //! proposal or notarize proposals that build upon it.
-//! Thus, a payload can only be finalized if a quorum of participants certify it.
+//! Thus, a payload can be finalized only if participants with combined weight at least `q`
+//! certify it.
 //!
 //! Certification of some notarization should only be abandoned once a finalization at the same or higher view is observed.
 //! Until then (say a nullification certificate for a view arrives before certification completes), the application should continue
@@ -117,8 +127,8 @@
 //!   either a "block" or a "dummy block", respectively.
 //! * Introduce a "leader timeout" to trigger early view transitions for unresponsive leaders.
 //! * Skip "leader timeout" and "certification timeout" if a designated leader has not participated
-//!   for the configured skip timeout while a quorum of participants has (again to trigger early
-//!   view transition for an unresponsive leader).
+//!   for the configured skip timeout while activity has reached quorum weight. This triggers an
+//!   early view transition for an unresponsive leader.
 //! * Introduce message rebroadcast to continue making progress if messages from a given view are dropped (only way
 //!   to ensure messages are reliably delivered is with a heavyweight reliable broadcast protocol).
 //! * Treat local proposal failure as immediate timeout expiry and broadcast `nullify(v)`.
@@ -156,22 +166,22 @@
 //!
 //! 1. To propose in view `v+k`, the leader must reference a certified parent in some view `v_p`
 //!    and possess required nullifications covering the skipped views from `v_p` to `v+k`.
-//! 2. A nullification certificate requires `2f+1` `nullify` votes for the covered view or an
-//!    earlier view in the same term.
+//! 2. A nullification certificate requires quorum weight `q` in `nullify` votes for the covered
+//!    view or an earlier view in the same term.
 //! 3. An honest participant only broadcasts `nullify` on a nullify trigger: an expired timeout
 //!    (`t_l`, `t_a`, or the stall timeout) or an event treated as immediate timeout expiry
 //!    (proposal build failure, verification failure, certification failure, the leader's own
 //!    `nullify`, or leader inactivity, as listed in
 //!    [Deviations](#deviations-from-simplex-consensus)).
 //!
-//! Therefore, a nullification covering `v` can only form if at least `f+1` honest participants
-//! broadcast `nullify` at a single view `u` in `[term_start(v), v]`. If every view in that term
-//! prefix completes without any nullify trigger (just view `v` itself when
+//! Therefore, a nullification covering `v` can form only if honest participants with total weight
+//! greater than `f` broadcast `nullify` at a single view `u` in `[term_start(v), v]`. If every
+//! view in that term prefix completes without any nullify trigger (just view `v` itself when
 //! `term_length` is 1), no honest participant has broadcast a covering `nullify`: at most `f`
-//! covering votes exist at any single view, which is insufficient to form a nullification
-//! certificate. Without that certificate, no future leader can skip view `v`, and the notarized
-//! payload must be included as an ancestor in all subsequent proposals. Note that a clean view
-//! `v` alone is not enough when `term_length > 1`: an honest `nullify` broadcast at an earlier
+//! faulty weight can provide covering votes at any single view. This is insufficient to form a
+//! nullification certificate. Without that certificate, no future leader can skip view `v`, and
+//! the notarized payload must be included as an ancestor in all subsequent proposals. A clean
+//! view `v` alone is not enough when `term_length > 1`: an honest `nullify` broadcast at an earlier
 //! view of the term (say, after a transient timeout at a view that later notarized) covers `v`
 //! even though no trigger fired at `v` itself.
 //!
@@ -252,11 +262,11 @@
 //! compared to the 3 hops required for full finalization (proposal + notarization + finalization).
 //! Observing the notarization does not by itself rule out exclusion: honest participants may
 //! still be inside a view of the term prefix, where a trigger can still fire (say, a
-//! certification that outlives `t_a`). Exclusion requires `f+1` or more honest participants to
-//! broadcast `nullify` at a single view of that prefix. Because certification is deterministic,
-//! it either fails for all honest participants or none, so a certification failure always
-//! produces a nullification. In the common case (no faults, no timeouts), exclusion cannot
-//! happen.
+//! certification that outlives `t_a`). Exclusion requires participants representing more than `f`
+//! honest weight to broadcast `nullify` at a single view of that prefix. Because certification is
+//! deterministic, it either fails for all honest participants or none. A certification failure
+//! therefore always produces a nullification. In the common case (no faults, no timeouts),
+//! exclusion cannot happen.
 //!
 //! A Byzantine leader, however, can exclude even its own valid, certifiable, and timely proposal:
 //! honest participants treat the leader's `nullify(v)` as an immediate timeout, so a leader can
@@ -271,13 +281,13 @@
 //! `notarization(c,v)`, it broadcasts `finalize(c,v)` and immediately enters `v+1`,
 //! regardless of what happens in subsequent views. These `finalize(c,v)` votes accumulate
 //! independently of the current view: even if views `v+1` through `v+k` all time out
-//! (producing nullifications), the `finalize(c,v)` votes still count toward the `2f+1`
-//! threshold needed to form `finalization(c,v)`.
+//! (producing nullifications), the `finalize(c,v)` votes still count toward quorum weight `q`
+//! needed to form `finalization(c,v)`.
 //!
 //! This means a payload notarized in view `v` can be finalized while the network is
 //! in view `v+k` for any `k >= 1`. There is no requirement that a particular view
-//! after `v` succeeds or that any subsequent leader cooperates. As long as `2f+1`
-//! participants eventually certify and broadcast `finalize(c,v)`, the finalization
+//! after `v` succeeds or that any subsequent leader cooperates. As long as participants with
+//! quorum weight eventually certify and broadcast `finalize(c,v)`, the finalization
 //! certificate will form.
 //!
 //! ## Architecture
@@ -683,7 +693,7 @@ mod tests {
     use commonware_cryptography::{
         Hasher as _, Sha256, Signer as _,
         bls12381::primitives::variant::{MinPk, MinSig, Variant},
-        certificate::mocks::Fixture,
+        certificate::{Scheme as _, mocks::Fixture},
         ed25519::{PrivateKey, PublicKey},
         sha256::{Digest as Sha256Digest, Digest as D},
     };
@@ -699,8 +709,11 @@ mod tests {
         buffer::paged::CacheRef, deterministic, telemetry::metrics::count_running_tasks,
     };
     use commonware_utils::{
-        Faults, N3f1, NZU16, NZU32, NZUsize, TestRng, non_empty, ordered::Set, probability,
-        sync::Mutex, test_rng,
+        Faults, N3f1, NZU16, NZU32, NZUsize, TestRng, TryCollect, non_empty,
+        ordered::{Committee, Set},
+        probability,
+        sync::Mutex,
+        test_rng,
     };
     use engine::Engine;
     use futures::future::join_all;
@@ -781,6 +794,53 @@ mod tests {
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
+
+    fn unit_committee<P: Ord + Clone>(participants: &[P]) -> Committee<P> {
+        participants
+            .iter()
+            .cloned()
+            .map(|participant| (participant, 1))
+            .try_collect()
+            .unwrap()
+    }
+
+    fn weighted_ed25519_fixture<R: CryptoRng>(
+        rng: &mut R,
+        namespace: &[u8],
+        weights: &[u64],
+    ) -> Fixture<ed25519::Scheme> {
+        let Fixture {
+            participants,
+            private_keys,
+            ..
+        } = ed25519::fixture(
+            rng,
+            namespace,
+            u32::try_from(weights.len()).expect("test committee must fit in u32"),
+        );
+        let committee: Committee<_> = participants
+            .iter()
+            .cloned()
+            .zip(weights.iter().copied())
+            .try_collect()
+            .expect("test committee must be valid");
+        let schemes = private_keys
+            .iter()
+            .cloned()
+            .map(|private_key| {
+                ed25519::Scheme::signer(namespace, committee.clone(), private_key)
+                    .expect("private key must belong to test committee")
+            })
+            .collect();
+        let verifier = ed25519::Scheme::verifier(namespace, committee);
+
+        Fixture {
+            participants,
+            private_keys,
+            schemes,
+            verifier,
+        }
+    }
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
     type TestChannel = (
@@ -1281,6 +1341,141 @@ mod tests {
         );
     }
 
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_weighted_engine_finalizes_with_weight_quorum() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(60));
+        executor.start(|mut context| async move {
+            let namespace = b"consensus".to_vec();
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = weighted_ed25519_fixture(&mut context, &namespace, &[4, 1, 1, 1]);
+            let committee = schemes[0].participants().clone();
+            assert_eq!(committee.quorum_weight::<N3f1>(), 5);
+
+            let mut oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
+            let mut registrations = register_validators(&mut oracle, &participants).await;
+            let link = Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: probability!(1.0),
+            };
+            link_validators(
+                &mut oracle,
+                &participants,
+                Action::Link(link),
+                Some(|_, i, j| i < 2 && j < 2),
+            )
+            .await;
+
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
+            let mut reporters = Vec::new();
+            let mut engine_handlers = Vec::new();
+            for (idx, validator) in participants.iter().enumerate().take(2) {
+                let context = context
+                    .child("validator")
+                    .with_attribute("public_key", validator);
+                let reporter = mocks::reporter::Reporter::new(
+                    context.child("reporter"),
+                    mocks::reporter::Config {
+                        participants: participants.clone().try_into().unwrap(),
+                        scheme: schemes[idx].clone(),
+                        elector: RoundRobin::<Sha256>::default(),
+                    },
+                );
+                reporters.push(reporter.clone());
+                let (actor, application) = mocks::application::Application::new(
+                    context.child("application"),
+                    mocks::application::Config::<Sha256, _> {
+                        relay: relay.clone(),
+                        me: validator.clone(),
+                        propose_latency: (10.0, 5.0),
+                        verify_latency: (10.0, 5.0),
+                        certify_latency: (10.0, 5.0),
+                        should_certify: mocks::application::Certifier::Always,
+                    },
+                );
+                actor.start();
+                let engine = Engine::new(
+                    context.child("engine"),
+                    config::Config {
+                        scheme: schemes[idx].clone(),
+                        elector: RoundRobin::<Sha256>::default(),
+                        blocker: oracle.control(validator.clone()),
+                        automaton: application.clone(),
+                        relay: application.clone(),
+                        reporter: reporter.clone(),
+                        strategy: Sequential,
+                        partition: validator.to_string(),
+                        mailbox_size: NZUsize!(1024),
+                        epoch: Epoch::new(333),
+                        floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                            Epoch::new(333),
+                        )),
+                        leader_timeout: Duration::from_secs(1),
+                        certification_timeout: Duration::from_secs(2),
+                        timeout_retry: Duration::from_secs(1),
+                        fetch_timeout: Duration::from_secs(1),
+                        view_retention: ViewDelta::new(10),
+                        skip: SkipPolicy::Disabled,
+                        replay_buffer: NZUsize!(1024 * 1024),
+                        write_buffer: NZUsize!(1024 * 1024),
+                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                        forward: ForwardPolicy::Disabled,
+                        track_historical_votes: false,
+                    },
+                );
+                let (pending, recovered, resolver) = registrations
+                    .remove(validator)
+                    .expect("validator should be registered");
+                engine_handlers.push(engine.start(pending, recovered, resolver));
+            }
+
+            let required_view = View::new(4);
+            let mut finalizers = Vec::new();
+            for reporter in &mut reporters {
+                let (mut latest, mut monitor) = reporter.subscribe().await;
+                finalizers.push(context.child("finalizer").spawn(move |_| async move {
+                    while latest < required_view {
+                        latest = monitor.recv().await.expect("event missing");
+                    }
+                }));
+            }
+            join_all(finalizers).await;
+
+            for reporter in &reporters {
+                reporter.assert_no_faults();
+                reporter.assert_no_invalid();
+                let exact_weight_quorum = reporter.finalizes.lock().values().any(|payloads| {
+                    payloads.values().any(|signers| {
+                        signers.len() == 2
+                            && signers
+                                .iter()
+                                .map(|signer| {
+                                    committee
+                                        .index(signer)
+                                        .and_then(|participant| committee.weight(participant))
+                                        .unwrap_or(0)
+                                })
+                                .sum::<u64>()
+                                == 5
+                    })
+                });
+                assert!(
+                    exact_weight_quorum,
+                    "the heavy participant and one light participant must finalize"
+                );
+            }
+
+            assert!(oracle.blocked().await.unwrap().is_empty());
+            drop(engine_handlers);
+        });
+    }
+
     fn non_genesis_floor_joiner_catches_tip<S, F, L>(fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
@@ -1602,7 +1797,7 @@ mod tests {
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             let elector = RoundRobin::default();
-            let participants_set: Set<S::PublicKey> = participants.clone().try_into().unwrap();
+            let participants_set = unit_committee(&participants);
             let built_elector = elector.clone().build(&participants_set);
             let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
@@ -1823,7 +2018,7 @@ mod tests {
             engine.start(pending, recovered, resolver);
         }
 
-        let participants_set = participants.clone().try_into().unwrap();
+        let participants_set = unit_committee(&participants);
         let built_elector: elector::RoundRobinElector<ed25519::Scheme> =
             elector.build(&participants_set);
         let leader_idx = usize::from(built_elector.elect(Round::new(epoch, View::new(1)), None));
@@ -6458,7 +6653,7 @@ mod tests {
             // participant leads view 10, the group leads views 11..=12, and the
             // lone participant leads view 13.
             let epoch = Epoch::new(333);
-            let participant_set: Set<PublicKey> = participants.clone().try_into().unwrap();
+            let participant_set = unit_committee(&participants);
             let schedule = elector.clone().build(&participant_set);
             let leader_of =
                 |view: u64| usize::from(schedule.elect(Round::new(epoch, View::new(view)), None));
@@ -6668,7 +6863,7 @@ mod tests {
             // participant leads view 10, the lone participant leads view 11, and
             // the group leads views 12..=13.
             let epoch = Epoch::new(333);
-            let participant_set: Set<PublicKey> = participants.clone().try_into().unwrap();
+            let participant_set = unit_committee(&participants);
             let schedule = elector.clone().build(&participant_set);
             let leader_of =
                 |view: u64| usize::from(schedule.elect(Round::new(epoch, View::new(view)), None));
@@ -6883,7 +7078,7 @@ mod tests {
             // participant leads view 10, the group leads views 11..=12, and the
             // lone participant leads view 13.
             let epoch = Epoch::new(333);
-            let participant_set: Set<PublicKey> = participants.clone().try_into().unwrap();
+            let participant_set = unit_committee(&participants);
             let schedule = elector.clone().build(&participant_set);
             let leader_of =
                 |view: u64| usize::from(schedule.elect(Round::new(epoch, View::new(view)), None));
@@ -7120,7 +7315,7 @@ mod tests {
 
             // Choose an epoch where the same participant leads terms 1 and 5.
             let epoch = Epoch::new(2);
-            let participant_set: Set<PublicKey> = participants.clone().try_into().unwrap();
+            let participant_set = unit_committee(&participants);
             let schedule = elector.clone().build(&participant_set);
             let leader_of =
                 |view: u64| usize::from(schedule.elect(Round::new(epoch, View::new(view)), None));

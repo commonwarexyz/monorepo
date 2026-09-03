@@ -23,7 +23,7 @@ use commonware_p2p::{Blocker, Receiver, Recipients, Sender};
 use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, ContextCell, Metrics, Spawner};
 use commonware_utils::{
-    NonZeroDuration,
+    Faults, N3f1, NonZeroDuration,
     channel::{fallible::OneshotExt as _, oneshot},
 };
 use futures::future::{self, Either};
@@ -369,10 +369,10 @@ where
         boundary_sender: &mut impl Sender<PublicKey = S::PublicKey>,
     ) -> bool {
         // The all-epoch verifier judges every recorded reply.
-        let Some(floor) = self
-            .sample
-            .select(self.bootstrap_participants.dealers.len(), |_| true)
-        else {
+        let participant_count = u64::try_from(self.bootstrap_participants.dealers.len())
+            .expect("bootstrap participant count exceeds u64::MAX");
+        let required_replies = N3f1::max_faults(participant_count) + 1;
+        let Some(floor) = self.sample.select(required_replies, |_| 1, |_| true) else {
             return false;
         };
         let target = floor.epoch();

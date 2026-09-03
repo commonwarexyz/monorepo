@@ -9,6 +9,14 @@ BLS multisig certificates form and verify quorum by weight. BLS threshold
 schemes remain count-based and reject non-uniform committees. Certificate
 encoding is unchanged ([#4635]).
 
+### Weighted Simplex Committees
+
+Simplex forms certificates and evaluates recent activity by committee weight.
+Elector configurations receive the full committee, while built-in electors remain
+participant-index based. Simplex also logs and exports committee quorum diagnostics
+when it installs an epoch. The stateful recovery probe selects its floor after reply
+weight exceeds the solicited committee's fault budget ([#4639]).
+
 ### Crash Recovery
 
 Runtime storage now recovers a blob whose initial header write was interrupted.
@@ -33,6 +41,7 @@ after restart ([#4420]).
 [#4275]: https://github.com/commonwarexyz/monorepo/pull/4275
 [#4420]: https://github.com/commonwarexyz/monorepo/pull/4420
 [#4635]: https://github.com/commonwarexyz/monorepo/pull/4635
+[#4639]: https://github.com/commonwarexyz/monorepo/pull/4639
 
 ## v2026.7.0
 

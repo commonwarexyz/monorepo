@@ -26,7 +26,7 @@ use commonware_runtime::{
         traces::TracedExt as _,
     },
 };
-use commonware_utils::{N3f1, ordered::Quorum};
+use commonware_utils::{N3f1, ordered::Committee};
 use rand_core::CryptoRng;
 use std::{
     collections::BTreeMap,
@@ -45,6 +45,36 @@ struct Current {
     view: View,
     leader: Option<Participant>,
     leader_nullify_hinted: bool,
+}
+
+fn required_active_weight<P: Ord>(participants: &Committee<P>, me: Option<Participant>) -> u64 {
+    let quorum_weight = participants.quorum_weight::<N3f1>();
+    me.map_or(quorum_weight, |me| {
+        // Local participants are live by construction because they do not receive their own
+        // messages.
+        quorum_weight.saturating_sub(
+            participants
+                .weight(me)
+                .expect("local participant must belong to committee"),
+        )
+    })
+}
+
+fn recent_activity_weight(
+    last_activity: &[Option<SystemTime>],
+    weights: &[u64],
+    min_time: SystemTime,
+) -> u64 {
+    debug_assert_eq!(last_activity.len(), weights.len());
+    last_activity
+        .iter()
+        .zip(weights)
+        .filter_map(|(activity, weight)| {
+            activity
+                .is_some_and(|activity| activity >= min_time)
+                .then_some(weight)
+        })
+        .sum()
 }
 
 pub struct Actor<E, S, B, D, Re, Rl, T>
@@ -78,11 +108,11 @@ where
     /// participant. `None` means no activity has been observed.
     last_activity: Vec<Option<SystemTime>>,
 
-    /// Number of observed participants that must be recently active for the
+    /// Weight of observed participants that must be recently active for the
     /// network to be considered responsive (see [Self::is_active]). We never
     /// observe our own messages, so when we are a participant we count
     /// ourselves as live by construction.
-    required_active: usize,
+    required_active: u64,
 
     mailbox_receiver: mailbox::Receiver<Message<S, D>>,
 
@@ -132,13 +162,7 @@ where
             Buckets::CRYPTOGRAPHY,
         );
         let (sender, receiver) = mailbox::new(context.child("mailbox"), cfg.mailbox_size);
-        let mut required_active = participants.quorum_count::<N3f1>() as usize;
-        if scheme.me().is_some() {
-            // We are live by construction (we never observe our own messages).
-            required_active = required_active
-                .checked_sub(1)
-                .expect("quorum is never zero");
-        }
+        let required_active = required_active_weight(participants, scheme.me());
         (
             Self {
                 context: ContextCell::new(context),
@@ -198,8 +222,8 @@ where
         }
     }
 
-    /// Returns true if the participant has sent a recent message, or if fewer
-    /// than a quorum of participants have (fail-open).
+    /// Returns true if the participant has sent a recent message or recent
+    /// activity is below the required weight.
     fn is_active(&self, participant: Participant, skip_timeout: Duration) -> bool {
         // Track activity with wall-clock time rather than raw view deltas. Stable-leader terms can
         // skip many view numbers at once, so we only fast-timeout when a quorum has been active
@@ -212,9 +236,13 @@ where
         let recent =
             |activity: &Option<SystemTime>| activity.is_some_and(|activity| activity >= min_time);
 
-        // If fewer than the required number of participants are recently active, we "fail-open"
-        // since we know the network is not expected to be responsive.
-        let active = self.last_activity.iter().filter(|a| recent(a)).count();
+        // Treat every participant as active until the weight of recently active participants
+        // reaches the required threshold.
+        let active = recent_activity_weight(
+            &self.last_activity,
+            self.scheme.participants().weights(),
+            min_time,
+        );
         if active < self.required_active {
             return true;
         }
@@ -706,5 +734,45 @@ where
                 }
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_utils::TryFromIterator;
+
+    fn committee(weights: impl IntoIterator<Item = u64>) -> Committee<u8> {
+        Committee::try_from_iter(
+            weights
+                .into_iter()
+                .enumerate()
+                .map(|(participant, weight)| (participant as u8, weight)),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn required_activity_uses_weight_and_saturates() {
+        let participants = committee([8, 1, 1]);
+        assert_eq!(participants.quorum_weight::<N3f1>(), 7);
+        assert_eq!(required_active_weight(&participants, None), 7);
+        assert_eq!(
+            required_active_weight(&participants, Some(Participant::new(0))),
+            0
+        );
+        assert_eq!(
+            required_active_weight(&participants, Some(Participant::new(1))),
+            6
+        );
+    }
+
+    #[test]
+    fn recent_activity_sums_participant_weight() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(10);
+        let stale = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+        let activity = [Some(stale), Some(now), None, Some(now)];
+
+        assert_eq!(recent_activity_weight(&activity, &[1, 6, 1, 2], now), 8);
     }
 }

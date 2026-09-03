@@ -21,7 +21,7 @@ use commonware_p2p::{Blocker, Receiver, Recipients, Sender};
 use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, ContextCell, Metrics, Spawner};
 use commonware_utils::{
-    NonZeroDuration,
+    N3f1, NonZeroDuration,
     channel::{fallible::OneshotExt, oneshot},
 };
 use futures::future::{self, Either};
@@ -230,13 +230,19 @@ where
         let Some(scheme) = self.provider.scheme(self.sample.minimum_epoch()) else {
             return;
         };
+        let participants = scheme.participants();
+        let required_weight = participants.max_fault_weight::<N3f1>() + 1;
         let provider = &self.provider;
-        let Some(floor) = self
-            .sample
-            .select(scheme.participants().len(), |finalization| {
-                provider.scoped(finalization.epoch()).is_some()
-            })
-        else {
+        let Some(floor) = self.sample.select(
+            required_weight,
+            |peer| {
+                participants
+                    .index(peer)
+                    .and_then(|participant| participants.weight(participant))
+                    .unwrap_or(0)
+            },
+            |finalization| provider.scoped(finalization.epoch()).is_some(),
+        ) else {
             return;
         };
 

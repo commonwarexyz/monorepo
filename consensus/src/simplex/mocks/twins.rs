@@ -76,7 +76,7 @@ use crate::{
 };
 use commonware_cryptography::certificate::Scheme;
 use commonware_p2p::simulated::SplitTarget;
-use commonware_utils::ordered::Set;
+use commonware_utils::ordered::Committee;
 use rand::{Rng, RngExt as _, seq::SliceRandom};
 use std::{
     collections::{HashMap, HashSet},
@@ -308,7 +308,7 @@ where
 {
     type Elector = ElectorState<C::Elector>;
 
-    fn build(self, participants: &Set<S::PublicKey>) -> Self::Elector {
+    fn build(self, participants: &Committee<S::PublicKey>) -> Self::Elector {
         ElectorState {
             fallback: self.fallback.build(participants),
             round_leaders: self.round_leaders,
@@ -1265,7 +1265,7 @@ mod tests {
         types::{Epoch, ViewDelta},
     };
     use commonware_cryptography::{Sha256, Signer, ed25519::PrivateKey};
-    use commonware_utils::{NZU32, TestRng, ordered::Set, test_rng};
+    use commonware_utils::{NZU32, TestRng, ordered::Committee, test_rng};
     use std::{collections::HashSet, time::Duration};
 
     fn round(_: usize, leader: usize, primary_mask: u64, secondary_mask: u64) -> RoundScenario {
@@ -2223,7 +2223,13 @@ mod tests {
         let participants: Vec<_> = (0..framework.participants as u64)
             .map(|seed| PrivateKey::from_seed(seed).public_key())
             .collect();
-        let participants = Set::try_from(participants).expect("participants should be unique");
+        let participants = Committee::try_from(
+            participants
+                .into_iter()
+                .map(|participant| (participant, 1))
+                .collect::<Vec<_>>(),
+        )
+        .expect("participants should be unique");
         let twins = <Elector<RoundRobin<Sha256>> as elector::Config<ed25519::Scheme>>::build(
             Elector::new(
                 RoundRobin::<Sha256>::default(),
@@ -2271,7 +2277,13 @@ mod tests {
         let participants: Vec<_> = (0..3)
             .map(|seed| PrivateKey::from_seed(seed).public_key())
             .collect();
-        let participants = Set::try_from(participants).expect("participants should be unique");
+        let participants = Committee::try_from(
+            participants
+                .into_iter()
+                .map(|participant| (participant, 1))
+                .collect::<Vec<_>>(),
+        )
+        .expect("participants should be unique");
         let term_length = TermLength::new(NZU32!(3));
         let twins = <Elector<RoundRobin<Sha256>> as elector::Config<ed25519::Scheme>>::build(
             Elector::new(
