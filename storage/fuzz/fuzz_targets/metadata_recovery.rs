@@ -6,8 +6,8 @@
 //! write, an unsynced write parked at the delayed durability barrier, and an acked sync that
 //! completes the barrier first. The oracle pins that recovery yields the baseline or the
 //! complete candidate, never a mixture, that a crash after an acknowledged sync preserves
-//! the acked state exactly, and that a first sync smaller than the torn image survives
-//! reopen on the copy init repaired.
+//! the acked state exactly, and that the first sync after a repair survives reopen on the
+//! repaired copy.
 
 use arbitrary::Arbitrary;
 use commonware_codec::Read;
@@ -237,10 +237,10 @@ fn run(input: &FuzzInput, mode: PartialWriteMode) {
             );
         }
 
-        // Shrink first. The first sync lands on the copy init repaired without adopting, and the
-        // shrunk baseline is smaller than the image that copy held before the crash, so a stale
-        // tail left by an incomplete repair fails its checksum at reopen. Reopen before the next
-        // sync rotates the newest state to the other copy.
+        // Shrink first. When init repaired a torn copy, the first sync lands on it, and the shrunk
+        // state is never larger than the image that copy held before the crash, so any stale tail
+        // left by an incomplete repair fails its checksum at reopen. Reopen before the next sync
+        // rotates the newest state to the other copy.
         let mut expected = recovered;
         metadata.remove(&U64::new(0));
         expected.remove(&0);

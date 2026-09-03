@@ -1237,22 +1237,17 @@ mod tests {
         Sequential,
     >;
 
-    /// The variable-encoding wrapper accepts variable-length keys.
-    fn _assert_variable_db_accepts_variable_keys() {
-        fn managed<D: ManagedDb<deterministic::Context>>() {}
-        managed::<
-            variable::Db<
-                mmr::Family,
-                deterministic::Context,
-                Vec<u8>,
-                Digest,
-                Sha256,
-                TwoCap,
-                64,
-                Sequential,
-            >,
-        >();
-    }
+    /// The unordered variable wrapper accepts variable-length keys.
+    type VariableDb = variable::Db<
+        mmr::Family,
+        deterministic::Context,
+        Vec<u8>,
+        Digest,
+        Sha256,
+        TwoCap,
+        64,
+        Sequential,
+    >;
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(101);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(11);
@@ -1334,6 +1329,13 @@ mod tests {
         assert_state_sync_db::<OrderedVariableDb, Arc<OrderedVariableDb>>();
         assert_database_set::<Shared<OrderedFixedDb>>();
         assert_database_set::<Shared<OrderedVariableDb>>();
+    }
+
+    #[test]
+    fn variable_current_db_trait_impls_compile() {
+        assert_managed_db::<VariableDb>();
+        assert_state_sync_db::<VariableDb, Arc<VariableDb>>();
+        assert_database_set::<Shared<VariableDb>>();
     }
 
     #[test]

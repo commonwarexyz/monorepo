@@ -913,8 +913,8 @@ where
         } else {
             let batches = self.execution.databases.new_batches().await;
 
-            // A finalized block was certified by a quorum that verified it, so
-            // it always executes.
+            // A finalized block was certified by a quorum whose honest voters
+            // verified it, so it always executes.
             let batch = self
                 .app
                 .apply(

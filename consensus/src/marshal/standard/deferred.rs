@@ -539,8 +539,8 @@ where
                 //
                 // The recovered block is safe to reuse only if its embedded
                 // context matches the context simplex just recovered, or if it
-                // is the parent itself: a boundary re-proposal stores the parent
-                // under its original context, whose round is the parent's own.
+                // is the parent re-proposed at the epoch boundary: that stores the
+                // parent under its original context, whose round is the parent's own.
                 // Otherwise the cached block was built against a different
                 // parent and cannot be broadcast under the current header, so
                 // drop the receiver and let the voter nullify the view via
