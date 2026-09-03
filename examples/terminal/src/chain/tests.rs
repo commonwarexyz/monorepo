@@ -4022,7 +4022,7 @@ async fn drive(
             deals.push(node::Deal::new(
                 participant,
                 peer.clone(),
-                0,
+                epoch,
                 header,
                 roots,
                 dealings[usize::from(participant)].clone(),

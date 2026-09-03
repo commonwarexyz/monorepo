@@ -338,21 +338,43 @@ the exact batch.
 
 ## Run
 
-Generate the fixed committee and the operators' node directories, then start each role in its
-own terminal. Setup writes `./data/validator-0` through `./data/validator-3` (the committee
-size must equal the fixed clearing committee) plus one directory per operator,
-`./data/operator-0` and `./data/operator-1` by default (`--operators` chooses the count, one
-deployment each):
+Four validators, two operators, and any number of wallet agents run as separate processes on one
+machine. Start them in this order, each in its own terminal (or under a multiplexer such as
+`mprocs`). Build once first so the four validators do not compile concurrently:
+
+```bash
+cargo build --release -p commonware-terminal
+```
+
+| Role | Process | Default addresses |
+|---|---|---|
+| validators | `terminal-chain validator` | p2p `127.0.0.1:3000` to `3003`, query servers `3200` to `3203` |
+| operators | `terminal-operator` | p2p `127.0.0.1:3400` and `3401`, RPC `--bind` (use `7001` and `7002`) |
+| agents | `terminal-agent` | no listener, dial the operator RPC and the validator query servers |
+
+**1. Set up.** Writes `./data/validator-0` to `./data/validator-3` and `./data/operator-0` and
+`./data/operator-1`, each with its keys plus the shared `network.json` and `genesis.json`. The
+validator count is fixed at four by the clearing committee, so keep the default `--peers 4`.
+`--operators` chooses how many operators (one deployment each), and every other flag only moves
+ports or the host (`terminal-chain setup --help`).
 
 ```bash
 cargo run --release -p commonware-terminal --bin terminal-chain -- setup
+```
+
+**2. Start the four validators.** They form the consensus network, execute one settlement
+machine per deployment, seal dealings, and answer certified reads and evidence requests on their
+query servers.
+
+```bash
 mprocs "cargo run --release -p commonware-terminal --bin terminal-chain -- validator --node-dir ./data/validator-0" \
        "cargo run --release -p commonware-terminal --bin terminal-chain -- validator --node-dir ./data/validator-1" \
        "cargo run --release -p commonware-terminal --bin terminal-chain -- validator --node-dir ./data/validator-2" \
        "cargo run --release -p commonware-terminal --bin terminal-chain -- validator --node-dir ./data/validator-3"
 ```
 
-Start both operators, each on its own RPC address and SQLite database:
+**3. Start the operators.** Each joins the validators' network as a secondary, so start them after
+the validators. Give each its own RPC address and SQLite database:
 
 ```bash
 cargo run --release -p commonware-terminal --bin terminal-operator -- \
@@ -363,20 +385,50 @@ cargo run --release -p commonware-terminal --bin terminal-operator -- \
   --database terminal-operator-1.sqlite
 ```
 
-Each agent binds one operator and its deployment at startup: `--operator` names the operator's
-RPC address and `--deployment` resolves that operator's deployment from the genesis list
-(operator N runs deployment N):
+**4. Start wallet agents.** `--identity` picks the wallet (`0` Alice, `1` Bob, `2` Carol, `3` Dave,
+`4` Eve, who is unregistered and only receives), `--operator` names the operator's RPC address,
+and `--deployment` must be that operator's index in the genesis list (operator N runs deployment
+N). `--query` takes one or more validator query servers; one suffices and more give failover.
+The defaults are operator `127.0.0.1:7001`, deployment `0`, identity `0`, and the genesis at
+`data/validator-0/genesis.json`, so the smallest command is the first one below. Run Alice and
+Bob on the same deployment to watch a payment land on the receiving side, and a wallet on
+deployment `1` to see the second operator's independent ledger:
 
 ```bash
-cargo run --release -p commonware-terminal --bin terminal-agent -- --identity 0 \
-  --operator 127.0.0.1:7001 --deployment 0 \
-  --genesis data/validator-0/genesis.json \
+cargo run --release -p commonware-terminal --bin terminal-agent -- --query 127.0.0.1:3200
+cargo run --release -p commonware-terminal --bin terminal-agent -- --identity 1 \
   --query 127.0.0.1:3200 --query 127.0.0.1:3201
 cargo run --release -p commonware-terminal --bin terminal-agent -- --identity 0 \
   --operator 127.0.0.1:7002 --deployment 1 \
   --genesis data/validator-0/genesis.json \
   --query 127.0.0.1:3200 --query 127.0.0.1:3201
 ```
+
+**Keys in the agent UI.** Left and Right select the receiver, `+` and `-` change the amount by
+one and PageUp and PageDown by ten, and `q` or Esc quits. `p` pays the selected receiver the
+selected amount, `a` stages the selected entry into a draft batch and `b` sends every staged
+entry as one batched payment, `d` deposits the selected amount, `w` signs a withdrawal of the
+selected amount for the operator to carry and `f` signs an amountless account Close, `x`
+escalates a signed withdrawal into settlement's queue when the operator will not carry it, `s`
+starts the epoch close, `c` claims a finalized withdrawal, `e` claims an external payout, `r`
+refunds an expired pending deposit, and `h` runs hard-fault recovery. The activity feed logs
+every enforcement event as it happens.
+
+**Reset.** Every role is durable. To start over, stop everything and delete the chain's `./data`
+directory (validator and operator storage), every `terminal-operator-*.sqlite`, and every
+`terminal-agent-*.sqlite`, or pass fresh paths. Wallet and sealed-dealing layouts change on
+this branch without migration, so a reset is also required after pulling a new revision.
+
+**Walkthrough without a terminal UI.** With the validators and operators running, the scripted
+walkthrough drives the whole arc on operator-0 and deployment 0 (pass `--operator
+127.0.0.1:7002 --deployment 1` for the other operator) and exits when it completes:
+
+```bash
+cargo run --release -p commonware-terminal --bin terminal-agent -- --scripted \
+  --query 127.0.0.1:3200 --query 127.0.0.1:3201
+```
+
+The rest of this section explains what each role does with those inputs.
 
 Each operator's node directory carries its network key, its clearing key, and the shared
 network and genesis files, and its follower state lives under
@@ -474,18 +526,7 @@ bound to their original epoch, so a lost response cannot cut the active successo
 prunes only the balance versions that epochs below the retention window still needed, so every
 finalized close inside that window reconstructs exactly for receiver reconciliation.
 
-For a terminal-free walkthrough, start the validators and operators as above, then run (the
-scripted walkthrough stays on operator-0 and deployment 0; pass `--operator 127.0.0.1:7002
---deployment 1` to run the same arc on operator-1's deployment instead):
-
-```bash
-cargo run --release -p commonware-terminal --bin terminal-agent -- --scripted \
-  --operator 127.0.0.1:7001 \
-  --genesis data/validator-0/genesis.json \
-  --query 127.0.0.1:3200 --query 127.0.0.1:3201
-```
-
-The walkthrough deposits and waits for the operator's observed credit to show in the verified
+The scripted walkthrough deposits and waits for the operator's observed credit to show in the verified
 balance, hands the operator a withdrawal to carry, pays an internal receiver,
 pays a two-receiver batch under one signature, and pays an external receiver. A receiver then
 durably intakes and settlement-anchors its incoming pairs and gates service on that held evidence
