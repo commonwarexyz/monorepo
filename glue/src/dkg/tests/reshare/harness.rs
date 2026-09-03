@@ -375,6 +375,7 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E>
     type Context = Context<sha256::Digest, ed25519::PublicKey>;
     type Block = Block;
     type Databases = Database<E>;
+    type Captured = ();
     type Provider = ();
     type Input = ReshareInput<(), MinPk, ed25519::PrivateKey, TestDirectory>;
 
@@ -428,10 +429,20 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E>
         Self::execute(block.height(), batches).await
     }
 
+    async fn capture(
+        &mut self,
+        _context: (E, Self::Context),
+        _block: &Self::Block,
+        _batches: &<Self::Databases as DatabaseSet<E>>::Merkleized,
+        _readers: <Self::Databases as DatabaseSet<E>>::Readers,
+    ) {
+    }
+
     async fn finalized(
         &mut self,
         context: (E, Self::Context),
         block: &Self::Block,
+        _captured: Self::Captured,
         _readers: <Self::Databases as DatabaseSet<E>>::Readers,
     ) {
         self.processed
