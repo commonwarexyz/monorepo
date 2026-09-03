@@ -23,7 +23,8 @@ type Regs = [uint64x2_t; 5];
 
 /// The NEON backend token.
 ///
-/// NEON is part of the AArch64 baseline, so the token needs no runtime feature check.
+/// This module is compiled only when the AArch64 target enables NEON, so the token needs no
+/// runtime feature check.
 #[derive(Clone, Copy)]
 pub(super) struct Backend;
 

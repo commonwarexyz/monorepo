@@ -781,7 +781,11 @@ impl GAffineVec {
     }
 
     /// Untransposes backend lanes into scalar affine points.
-    #[cfg(any(test, feature = "fuzz", not(target_arch = "aarch64")))]
+    #[cfg(any(
+        test,
+        feature = "fuzz",
+        not(all(target_arch = "aarch64", target_feature = "neon"))
+    ))]
     pub fn untranspose(self) -> [GAffine; LANES] {
         let x = self.x.untranspose();
         let y = self.y.untranspose();
@@ -886,9 +890,13 @@ pub mod montgomery;
 // Now, a module for each backend.
 #[cfg(all(target_arch = "x86_64", any(feature = "std", test)))]
 mod avx512;
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
 mod neon;
-#[cfg(any(test, feature = "fuzz", not(target_arch = "aarch64")))]
+#[cfg(any(
+    test,
+    feature = "fuzz",
+    not(all(target_arch = "aarch64", target_feature = "neon"))
+))]
 mod portable;
 #[cfg(any(test, feature = "fuzz"))]
 pub mod test;
@@ -902,8 +910,9 @@ pub fn test_backend() -> impl Backend {
 /// Run a computation with the best [`Backend`] this CPU supports.
 ///
 /// This is the only way to gain access to a backend. AVX-512 requires runtime feature detection;
-/// AArch64 includes NEON in its baseline ISA. Every use is forced through this single gate so an
-/// accelerated backend is only constructed where its instructions are guaranteed to be available.
+/// NEON is selected only when enabled by the AArch64 target. Every use is forced through this
+/// single gate so an accelerated backend is only constructed where its instructions are
+/// guaranteed to be available.
 pub fn with_backend<F: WithBackend>(f: F) -> F::Output {
     #[cfg(all(target_arch = "x86_64", any(feature = "std", test)))]
     {
@@ -913,12 +922,12 @@ pub fn with_backend<F: WithBackend>(f: F) -> F::Output {
             return unsafe { backend.call(f) };
         }
     }
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
     {
-        // NEON is part of the AArch64 baseline, so no runtime feature check is needed.
+        // The target guarantees NEON support, so no runtime feature check is needed.
         f.call(neon::Backend::new())
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
     {
         // Portable fallback, available everywhere.
         f.call(portable::Backend::new())
