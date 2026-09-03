@@ -121,7 +121,7 @@ impl<R: Receiver, V: Codec> WrappedReceiver<R, V> {
     /// Receive a message from an arbitrary recipient.
     pub async fn recv(&mut self) -> Result<WrappedMessage<R::PublicKey, V>, R::Error> {
         let (pk, bytes) = self.receiver.recv().await?;
-        let decoded = match V::decode_cfg(bytes.as_ref(), &self.config) {
+        let decoded = match V::decode_cfg(bytes, &self.config) {
             Ok(decoded) => decoded,
             Err(e) => {
                 return Ok((pk, Err(e)));
@@ -260,7 +260,7 @@ where
             } => {
                 let config = self.codec_config.clone();
                 let handle = self.strategy.spawn(bytes.len(), move |_| {
-                    let result = V::decode_cfg(bytes.as_ref(), &config);
+                    let result = V::decode_cfg(bytes, &config);
                     (peer, result)
                 });
                 decode_pool.push(handle);
