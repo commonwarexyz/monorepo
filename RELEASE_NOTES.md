@@ -369,7 +369,10 @@ as invalid ([#4383], [#4645]).
 
 Peers are ranked by an exponential moving average of throughput (higher is
 better) instead of response latency, `p2p::Config::initial` is removed, and the
-`peer_performance` gauge's value semantics changed accordingly ([#4619]).
+`peer_performance` gauge's value semantics changed accordingly ([#4619]). The
+marshal, simplex, and stateful sync `Producer` handlers drop serve requests that
+overflow their mailbox instead of queueing them without bound, so a peer whose
+request overflows receives an error and retries elsewhere ([#4666]).
 
 ### Simplex
 
@@ -460,9 +463,14 @@ verification registers its block wait before publishing the certification gate
 so an evicted buffered block no longer stalls verification ([#4606]), a pending
 floor anchor superseded by the round floor is released ([#4643]), and honest
 peers are no longer blocked when local provider pruning invalidates a response
-after admission ([#4645]). `Update::Tip` is documented as not being a durability
-signal, and `Update::Block` carries that guarantee ([#4602]). The `Block` trait
-now documents that encodings must be canonical: every byte sequence the decoder
+after admission ([#4645]).
+
+A leader that restarts after relaying its epoch-boundary re-proposal of the
+parent now recovers that re-proposal instead of dropping it, so the view is not
+lost when the restart completes before peers' leader timeout ([#4666]).
+`Update::Tip` is documented as not being a durability signal, and
+`Update::Block` carries that guarantee ([#4602]). The `Block` trait now
+documents that encodings must be canonical: every byte sequence the decoder
 accepts must satisfy `encode(decode(bytes)) == bytes` ([#4628]).
 
 ### Stateful Applications and DKG
@@ -518,7 +526,11 @@ is in flight, with later finalizations coalesced behind it ([#4462]), and
 `Application::finalized` runs once state is readable rather than durable, so
 proposals may build on applied state whose flush is still in flight ([#4384]).
 Redelivery after a crash remains possible until a covering sync and marshal's
-processed position are durable.
+processed position are durable. `Application::apply` returns
+`Option<Merkleized>`, with `None` meaning the block cannot be executed and the
+wrapper rejecting the ancestry that depends on it, and an ancestor rebuilt
+through `apply` during recovery no longer counts as verified, so verifying a
+replayed block still runs `Application::verify` ([#4666]).
 
 ### Deployer
 
@@ -635,6 +647,7 @@ upgrades ([#4597]). Deployment tags and instance names must match
 [#4654]: https://github.com/commonwarexyz/monorepo/pull/4654
 [#4655]: https://github.com/commonwarexyz/monorepo/pull/4655
 [#4658]: https://github.com/commonwarexyz/monorepo/pull/4658
+[#4666]: https://github.com/commonwarexyz/monorepo/pull/4666
 
 ## v2026.7.1
 
