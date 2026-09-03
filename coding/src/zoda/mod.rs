@@ -524,6 +524,10 @@ impl<H: Hasher> PhasedScheme for Zoda<H> {
     type CheckedShard = CheckedShard;
     type Error = Error;
 
+    fn validate_config(_config: &Config) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
     fn encode(
         namespace: &[u8],
         config: &Config,
