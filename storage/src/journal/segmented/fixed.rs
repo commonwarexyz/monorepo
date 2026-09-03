@@ -37,8 +37,7 @@ use std::{
 };
 use tracing::{trace, warn};
 
-// Reusable scratch for [`Inner::try_get_sync`], sized to one item. A fresh zeroed allocation per
-// synchronous read contends under the pool's fan-out.
+// Reusable scratch for [`Inner::try_get_sync`], sized to one item.
 commonware_utils::thread_local_cache!(static READ_SCRATCH: Vec<u8>);
 
 /// State for replaying a single section's blob.
