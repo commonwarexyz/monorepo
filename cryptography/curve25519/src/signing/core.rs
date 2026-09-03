@@ -428,15 +428,15 @@ mod tests {
         let a = batch_coefficients(&seed, 0);
         let b = batch_coefficients(&seed, 0);
         for k in 0..4 {
-            assert_eq!(a[k].0, b[k].0);
+            assert_eq!(a[k].to_bytes(), b[k].to_bytes());
         }
         assert_ne!(
-            batch_coefficients(&seed, 0)[0].0,
-            batch_coefficients(&seed, 1)[0].0
+            batch_coefficients(&seed, 0)[0].to_bytes(),
+            batch_coefficients(&seed, 1)[0].to_bytes()
         );
         assert_ne!(
-            batch_coefficients(&seed, 0)[0].0,
-            batch_coefficients(&[8u8; 32], 0)[0].0
+            batch_coefficients(&seed, 0)[0].to_bytes(),
+            batch_coefficients(&[8u8; 32], 0)[0].to_bytes()
         );
     }
 

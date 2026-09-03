@@ -24,8 +24,9 @@ const MU: [u64; 5] = [
 ];
 
 /// An integer modulo `L`, always canonically reduced (`< L`).
-#[derive(Copy, Clone, Debug, Zeroize)]
-pub struct Scalar(pub [u64; 4]);
+#[derive(Copy, Clone, Zeroize)]
+#[cfg_attr(test, derive(Debug))]
+pub struct Scalar([u64; 4]);
 
 /// Returns `true` if `a < b`, comparing as 256-bit unsigned integers (little-endian limbs).
 fn limbs_lt(a: &[u64; 4], b: &[u64; 4]) -> bool {
@@ -168,11 +169,7 @@ impl Scalar {
 
     /// Returns the additive inverse modulo `L`.
     pub fn neg_mod_l(&self) -> Self {
-        if self.0 == Self::ZERO.0 {
-            *self
-        } else {
-            Self(limbs_sub(&L, &self.0))
-        }
+        Self(limbs_conditional_sub(&limbs_sub(&L, &self.0), &L))
     }
 
     /// Interprets `bytes` as a little-endian integer and rejects it unless it is already the
@@ -397,6 +394,32 @@ mod tests {
                 let expected = reduce_wide_naive(&bytes);
 
                 assert_eq!(a.mul_mod_l(&b).0, expected.0);
+                Ok(())
+            });
+    }
+
+    #[test]
+    fn neg_mod_l_is_canonical_additive_inverse() {
+        for scalar in [
+            Scalar::ZERO,
+            Scalar::from_u128(1),
+            Scalar(limbs_sub(&L, &[1, 0, 0, 0])),
+        ] {
+            let negative = scalar.neg_mod_l();
+            assert!(limbs_lt(&negative.0, &L));
+            assert_eq!(scalar.add_mod_l(&negative).0, Scalar::ZERO.0);
+            assert_eq!(negative.neg_mod_l().0, scalar.0);
+        }
+
+        Builder::default()
+            .with_seed(0)
+            .with_search_limit(64)
+            .test(|u| {
+                let scalar: Scalar = u.arbitrary()?;
+                let negative = scalar.neg_mod_l();
+                assert!(limbs_lt(&negative.0, &L));
+                assert_eq!(scalar.add_mod_l(&negative).0, Scalar::ZERO.0);
+                assert_eq!(negative.neg_mod_l().0, scalar.0);
                 Ok(())
             });
     }
