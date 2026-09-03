@@ -106,7 +106,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
             Epoch::zero(),
             Scheme::signer(
                 NAMESPACE,
-                genesis_info.output.players().clone(),
+                types::committee(genesis_info.output.players()),
                 genesis_info.output.public().clone(),
                 share,
             )
@@ -117,9 +117,10 @@ pub async fn run(context: tokio::Context, args: Validator) {
             Epoch::zero(),
             Scheme::verifier(
                 NAMESPACE,
-                genesis_info.output.players().clone(),
+                types::committee(genesis_info.output.players()),
                 genesis_info.output.public().clone(),
-            ),
+            )
+            .expect("genesis threshold committee must be uniform"),
         );
     }
 
@@ -179,7 +180,12 @@ pub async fn run(context: tokio::Context, args: Validator) {
             participants: genesis_info.participants(),
             directory: Unit,
         },
-        verifier: Scheme::certificate_verifier(NAMESPACE, *genesis_info.output.public().public()),
+        verifier: Scheme::certificate_verifier(
+            NAMESPACE,
+            types::committee(genesis_info.output.players()),
+            *genesis_info.output.public().public(),
+        )
+        .expect("genesis threshold committee must be uniform"),
         genesis: genesis_info.clone(),
         strategy: Sequential,
         blocker: oracle.clone(),
@@ -199,9 +205,10 @@ pub async fn run(context: tokio::Context, args: Validator) {
             artifact.info.epoch,
             Scheme::verifier(
                 NAMESPACE,
-                artifact.info.output.players().clone(),
+                types::committee(artifact.info.output.players()),
                 artifact.info.output.public().clone(),
-            ),
+            )
+            .expect("reshared threshold committee must be uniform"),
         );
         plan = plan.with_floor(artifact.floor.clone());
         Some(artifact)

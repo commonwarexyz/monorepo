@@ -25,9 +25,7 @@ use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
     telemetry::traces::TracedExt as _,
 };
-use commonware_utils::{
-    channel::fallible::OneshotExt, ordered::Quorum, sequence::U64, vec::NonEmptyVec,
-};
+use commonware_utils::{channel::fallible::OneshotExt, sequence::U64, vec::NonEmptyVec};
 use rand_core::CryptoRng;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -128,12 +126,13 @@ impl<
         sender: impl Sender<PublicKey = S::PublicKey>,
         receiver: impl Receiver<PublicKey = S::PublicKey>,
     ) {
-        let participants = self.scheme.participants().clone();
+        let participants = self.scheme.participants();
         let me = self
             .scheme
             .me()
             .and_then(|index| participants.key(index))
             .cloned();
+        let participant_set = (**participants).clone();
 
         let (handler_tx, mut handler_rx) =
             mailbox::new(self.context.as_ref().child("handler"), self.mailbox_size);
@@ -142,7 +141,7 @@ impl<
         let (resolver_engine, mut resolver) = p2p::Engine::new(
             self.context.child("resolver"),
             p2p::Config {
-                peer_provider: StaticProvider::new(self.epoch.get(), participants),
+                peer_provider: StaticProvider::new(self.epoch.get(), participant_set),
                 blocker: self.blocker.take().expect("blocker must be set"),
                 consumer: handler.clone(),
                 producer: handler,

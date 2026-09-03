@@ -59,7 +59,11 @@ use commonware_p2p::{
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{Quota, Runner, Supervisor as _, buffer::paged::CacheRef, tokio};
-use commonware_utils::{NZU16, NZU32, NZUsize, TryCollect, ordered::Set, union};
+use commonware_utils::{
+    NZU16, NZU32, NZUsize, TryCollect,
+    ordered::{Committee, Set},
+    union,
+};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     str::FromStr,
@@ -185,7 +189,13 @@ fn main() {
 
         // Initialize application
         let namespace = union(APPLICATION_NAMESPACE, b"_CONSENSUS");
-        let scheme = application::Scheme::signer(&namespace, validators.clone(), signer.clone())
+        let committee: Committee<_> = validators
+            .iter()
+            .cloned()
+            .map(|participant| (participant, 1))
+            .try_collect()
+            .expect("validators form a committee");
+        let scheme = application::Scheme::signer(&namespace, committee, signer.clone())
             .expect("private key must be in participants");
         let (application, scheme, reporter, mailbox) = application::Application::<_, Sha256>::new(
             context.child("application"),

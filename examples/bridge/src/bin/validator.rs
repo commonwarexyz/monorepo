@@ -25,7 +25,11 @@ use commonware_runtime::{
     Network, Quota, Runner, Strategizer, Supervisor as _, buffer::paged::CacheRef, tokio,
 };
 use commonware_stream::encrypted::{Config as StreamConfig, dial};
-use commonware_utils::{NZU16, NZU32, NZUsize, TryCollect, ordered::Set, union};
+use commonware_utils::{
+    NZU16, NZU32, NZUsize, TryCollect,
+    ordered::{Committee, Set},
+    union,
+};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     str::FromStr,
@@ -56,6 +60,14 @@ fn main() {
         .arg(Arg::new("indexer").long("indexer").required(true))
         .arg(Arg::new("identity").long("identity").required(true))
         .arg(Arg::new("share").long("share").required(true))
+        .arg(
+            Arg::new("other-participants")
+                .long("other-participants")
+                .required(true)
+                .value_delimiter(',')
+                .value_parser(value_parser!(u64))
+                .help("Participants in the other network"),
+        )
         .arg(Arg::new("other-public").long("other-public").required(true))
         .get_matches();
 
@@ -98,6 +110,12 @@ fn main() {
         .try_collect()
         .expect("public keys are unique");
     let max_peers_per_set = authenticated::peer_set_limit(&validators, &signer.public_key());
+    let committee: Committee<_> = validators
+        .iter()
+        .cloned()
+        .map(|participant| (participant, 1))
+        .try_collect()
+        .expect("validators form a committee");
 
     // Configure bootstrappers (if provided)
     let bootstrappers = matches.get_many::<String>("bootstrappers");
@@ -154,6 +172,16 @@ fn main() {
     let other_public = from_hex(other_public).expect("Other identity not well-formed");
     let other_public = <MinSig as Variant>::Public::decode(other_public.as_ref())
         .expect("Other identity not well-formed");
+    let other_committee: Committee<_> = matches
+        .get_many::<u64>("other-participants")
+        .expect("Please provide other network participants")
+        .copied()
+        .map(|participant| {
+            let public_key = ed25519::PrivateKey::from_seed(participant).public_key();
+            (public_key, 1)
+        })
+        .try_collect()
+        .expect("other network participants form a committee");
 
     // Initialize context
     let runtime_cfg = tokio::Config::new().with_storage_directory(storage_directory);
@@ -212,10 +240,11 @@ fn main() {
         // Initialize application
         let strategy = context.strategy(NZUsize!(2));
         let consensus_namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
-        let this_network =
-            Scheme::signer(&consensus_namespace, validators.clone(), identity, share)
-                .expect("share must be in participants");
-        let other_network = Scheme::certificate_verifier(&consensus_namespace, other_public);
+        let this_network = Scheme::signer(&consensus_namespace, committee.clone(), identity, share)
+            .expect("share and uniform committee must be compatible");
+        let other_network =
+            Scheme::certificate_verifier(&consensus_namespace, other_committee, other_public)
+                .expect("uniform committee supports threshold verification");
         let (application, scheme, mailbox) = application::Application::<_, Sha256, _, _>::new(
             context.child("application"),
             application::Config {
