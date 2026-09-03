@@ -6,7 +6,8 @@
 // coverage boundary positions and prefixes; four-byte opening positions; one-byte option
 // tags; BMT range proofs with the storage crate's sibling rule). Fed the benchmark's
 // per-slice counts it reproduces the measured sizes bench to the byte. The calculator
-// spreads accounts, senders, edges, and recipients evenly over the 256 slices and assumes
+// spreads accounts, senders, edges, and recipients evenly over the slices (the smallest power
+// of two at or above the committee size) and assumes
 // every edge credits a distinct account.
 
 const RED = '#d9251c';
@@ -15,7 +16,14 @@ const GRID = '#e4e4e4';
 const INK = '#111111';
 const DASH = '#8a8a8a';
 
-const SLICES = 256;
+// The slice count is the smallest power of two at or above the committee size: slices are
+// account-key prefixes, so they must be a power of two, and every validator's ring window
+// starts on its own slice boundary once there are at least as many slices as validators.
+function sliceCount(n) {
+  let slices = 1;
+  while (slices < n) slices *= 2;
+  return slices;
+}
 const KEY = 32;
 const SIG = 64;
 const DIGEST = 32;
@@ -88,7 +96,7 @@ function shape(p0, p1, c0, c1, s0, s1, t0, t1, senders, groups, x0, x1) {
 }
 
 // Exact dealt bytes of one proof slice covering slices [lo, hi).
-function dealtSpan(counts, lo, hi, totals, entriesPerSender, gapBytes) {
+function dealtSpan(counts, lo, hi, totals, entriesPerSender, gapBytes, slices) {
   const span = hi - lo;
   const first = counts[lo];
   const last = counts[hi - 1];
@@ -126,7 +134,7 @@ function dealtSpan(counts, lo, hi, totals, entriesPerSender, gapBytes) {
   const c = bracket(totals.rows, first.c0, last.c1);
   const p = bracket(totals.pred, first.p0, last.p1);
   const s = bracket(totals.succ, first.s0, last.s1);
-  bytes += opening(SLICES + 1, lo, hi);
+  bytes += opening(slices + 1, lo, hi);
   bytes += opening(totals.rows, c.first, c.last);
   bytes += opening(totals.pred, p.first, p.last);
   bytes += opening(totals.succ, s.first, s.last);
@@ -138,18 +146,18 @@ function dealtSpan(counts, lo, hi, totals, entriesPerSender, gapBytes) {
 }
 
 // Exact bytes of the certified close as posted against the reader's replica.
-function certified(rows, senders, edges, indexBytes, gapBytes, senderSlices) {
+function certified(rows, senders, edges, indexBytes, gapBytes, senderSlices, slices) {
   let bytes = HEADER + ROOTS + varint(rows);
   bytes += rows * (1 + gapBytes) + senders * (varint(0) + SIG);
   bytes += senders * varint(edges / Math.max(senders, 1)) + edges * (indexBytes + 1 + 1);
-  bytes += varint(SLICES) + SLICES + AGG * senderSlices;
+  bytes += varint(slices) + slices + AGG * senderSlices;
   return bytes;
 }
 
 // Splits a total evenly over the slices with exact integer cumulative positions.
-function spread(total) {
+function spread(total, slices) {
   const cut = [];
-  for (let i = 0; i <= SLICES; i += 1) cut.push(Math.round((total * i) / SLICES));
+  for (let i = 0; i <= slices; i += 1) cut.push(Math.round((total * i) / slices));
   return cut;
 }
 
@@ -170,22 +178,22 @@ function meanIndexBytes(rows) {
 // The scenario: N live accounts, E = N * k edges, every edge crediting a distinct account.
 // Below out-degree one only E accounts send (out-degree one each); at one and above every
 // account sends k edges and every account receives.
-function scenario(N, k) {
+function scenario(N, k, slices) {
   const E = Math.round(N * k);
   const S = Math.min(N, E);
   const R = Math.min(N, E);
   const A = Math.min(N, S + R);
   const perSender = S > 0 ? E / S : 0;
-  const pred = spread(N);
-  const rows = spread(A);
-  const send = spread(S);
-  const trans = spread(E);
-  const groups = spread(R);
+  const pred = spread(N, slices);
+  const rows = spread(A, slices);
+  const send = spread(S, slices);
+  const trans = spread(E, slices);
+  const groups = spread(R, slices);
   // Every edge moves one unit and nothing is deposited, withdrawn, or paid out, so the
   // debit, credit, and both entry counts before a cut all equal the edges before it.
   const prefix = (edges) => [edges, edges, 0, 0, 0, 0, edges, edges];
   const counts = [];
-  for (let i = 0; i < SLICES; i += 1) {
+  for (let i = 0; i < slices; i += 1) {
     counts.push(shape(
       pred[i], pred[i + 1], rows[i], rows[i + 1], pred[i], pred[i + 1],
       trans[i], trans[i + 1], send[i + 1] - send[i], groups[i + 1] - groups[i],
@@ -195,24 +203,24 @@ function scenario(N, k) {
   const gapBytes = A > 0 ? varint(Math.max(0, Math.floor(N / A) - 1)) : 1;
   const senderSlices = counts.filter((c) => c.senders > 0).length;
   return {
-    E, S, R, A, perSender, gapBytes, senderSlices, counts,
+    E, S, R, A, perSender, gapBytes, senderSlices, counts, slices,
     totals: { pred: N, rows: A, succ: N, transpose: E },
   };
 }
 
 function corpus(sc) {
   let bytes = 0;
-  for (let i = 0; i < SLICES; i += 1) {
-    bytes += dealtSpan(sc.counts, i, i + 1, sc.totals, Math.max(1, sc.perSender), sc.gapBytes);
+  for (let i = 0; i < sc.slices; i += 1) {
+    bytes += dealtSpan(sc.counts, i, i + 1, sc.totals, Math.max(1, sc.perSender), sc.gapBytes, sc.slices);
   }
   return bytes;
 }
 
 // The quorum window holding slice s: q consecutive validators starting at floor(s n / S).
-function spans(n, q, validator) {
+function spans(n, q, validator, slices) {
   const held = [];
-  for (let s = 0; s < SLICES; s += 1) {
-    const start = Math.floor((s * n) / SLICES);
+  for (let s = 0; s < slices; s += 1) {
+    const start = Math.floor((s * n) / slices);
     const end = start + q;
     if ((validator >= start && validator < end) || (end > n && validator < end - n)) held.push(s);
   }
@@ -229,8 +237,8 @@ function committee(sc, n, q) {
   let egress = 0;
   for (let v = 0; v < n; v += 1) {
     let dealing = 0;
-    for (const [lo, hi] of spans(n, q, v)) {
-      dealing += dealtSpan(sc.counts, lo, hi, sc.totals, Math.max(1, sc.perSender), sc.gapBytes);
+    for (const [lo, hi] of spans(n, q, v, sc.slices)) {
+      dealing += dealtSpan(sc.counts, lo, hi, sc.totals, Math.max(1, sc.perSender), sc.gapBytes, sc.slices);
     }
     busiest = Math.max(busiest, dealing);
     egress += dealing;
@@ -455,20 +463,21 @@ function mount(root) {
   // Committee sizes snap to n = 3f + 1.
   const curV = () => {
     const f = Math.max(1, Math.round((Math.pow(10, parseFloat(sV.input.value)) - 1) / 3));
-    return { n: 3 * f + 1, q: 2 * f + 1 };
+    const n = 3 * f + 1;
+    return { n, q: 2 * f + 1, slices: sliceCount(n) };
   };
 
   function draw() {
     const N = curN();
     const K = curK();
     const V = curV();
-    const sc = scenario(N, K);
+    const sc = scenario(N, K, V.slices);
     const st = stateBmt(N);
     sN.out.textContent = `${count(N)}  (state ${bytesText(st)})`;
     sK.out.textContent = `${K}  (E = ${count(sc.E)})`;
-    sV.out.textContent = `${count(V.n)}  (q = ${count(V.q)})`;
+    sV.out.textContent = `${count(V.n)}  (q = ${count(V.q)}, S = ${count(V.slices)})`;
 
-    const posted = certified(sc.A, sc.S, sc.E, meanIndexBytes(sc.A), sc.gapBytes, sc.senderSlices);
+    const posted = certified(sc.A, sc.S, sc.E, meanIndexBytes(sc.A), sc.gapBytes, sc.senderSlices, sc.slices);
     const dt = corpus(sc);
     const cm = committee(sc, V.n, V.q);
     oCertified.value.textContent = bytesText(posted);
@@ -487,7 +496,7 @@ function mount(root) {
       ['row references (rank gap + tag)', sc.A * (1 + sc.gapBytes)],
       ['sending seq + payer signatures', sc.S * (varint(0) + SIG)],
       ['edge entries (index + amount + count)', sc.S * varint(sc.E / Math.max(sc.S, 1)) + sc.E * (idx + 2)],
-      ['per-slice operator aggregates', varint(SLICES) + SLICES + AGG * sc.senderSlices],
+      ['per-slice operator aggregates', varint(sc.slices) + sc.slices + AGG * sc.senderSlices],
     ]);
     const dRows = sc.A * (1 + sc.gapBytes) + sc.S * (varint(0) + SIG);
     const dVec = sc.S * (varint(perSender) + perSender * (KEY + 2));
@@ -533,8 +542,8 @@ function mount(root) {
     let yMax = 0;
     for (let j = 0; j <= STEPS; j += 1) {
       const kj = kMin * Math.pow(kMax / kMin, j / STEPS);
-      const sj = scenario(N, kj);
-      const pj = certified(sj.A, sj.S, sj.E, meanIndexBytes(sj.A), sj.gapBytes, sj.senderSlices);
+      const sj = scenario(N, kj, V.slices);
+      const pj = certified(sj.A, sj.S, sj.E, meanIndexBytes(sj.A), sj.gapBytes, sj.senderSlices, sj.slices);
       const dj = corpus(sj);
       ks.push(kj);
       cv.push(pj);

@@ -1513,11 +1513,13 @@ O’Grady</a></div>
         every proof slice once in the dealt wire, smaller than the
         proof-slice corpus because unchanged leaves and derivable
         columns are stripped. The calculator spreads accounts, senders,
-        and edges evenly over the 256 slices and assumes every edge
-        credits a distinct account, so its defaults sit above the
-        tables, whose fixture credits 512 recipients.</p>
-        <div id="clearing-fig-calculator" class="clearing-calculator" role="region" aria-label="Interactive wire-size calculator. Sliders set the account count, the mean out-degree, and the committee size. Readouts give the certified close, the dealt corpus, the busiest validator's dealing, and the operator's egress per close.">
-          <noscript>With JavaScript enabled this figure is a live calculator over the encodings above. At one million accounts each sending one entry to a distinct account, the certified close is 73 MB, the dealt corpus 171 MB, the busiest validator's dealing 114 MB, and the operator's egress 11.3 GB across 100 validators.</noscript>
+        and edges evenly over the slices, using the smallest power of
+        two at or above the committee size (128 for 100 validators,
+        where the tables used 256), and assumes every edge credits a
+        distinct account, so its defaults sit above the tables, whose
+        fixture credits 512 recipients.</p>
+        <div id="clearing-fig-calculator" class="clearing-calculator" role="region" aria-label="Interactive wire-size calculator. Sliders set the account count, the mean out-degree, and the committee size, which also fixes the slice count. Readouts give the certified close, the dealt corpus, the busiest validator's dealing, and the operator's egress per close.">
+          <noscript>With JavaScript enabled this figure is a live calculator over the encodings above. At one million accounts each sending one entry to a distinct account, the certified close is 73 MB, the dealt corpus 170 MB, the busiest validator's dealing 114 MB, and the operator's egress 11.3 GB across 100 validators.</noscript>
         </div>
         <script type="module" src="clearing.calculator.js"></script>
         <div class="image-caption">
@@ -1535,8 +1537,12 @@ O’Grady</a></div>
         the slices, with the accumulator start states and range openings
         once per span), and operator egress ships one dealing to each
         validator. Committee sizes snap to <span
-        class="math inline">n=3f+1</span>. Tap a size for its byte
-        breakdown.</p>
+        class="math inline">n=3f+1</span>, and the slice count follows
+        as the smallest power of two at or above <span
+        class="math inline">n</span>: every validator’s ring window then
+        starts on its own slice boundary, and each extra slice costs one
+        boundary and one operator aggregate per holder. Tap a size for
+        its byte breakdown.</p>
         </div>
         <p>The fresh tree is intentionally conventional. Both state
         roots are rebuilt from ordered streams, a simple bolt-on to an

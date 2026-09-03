@@ -4,7 +4,10 @@
 //! outgoing committee's holders over a codec-framed request and response exchange, verify
 //! every answer under the successor root the outgoing certificate committed, and seal the
 //! next epoch's dealing themselves. `committee_rotation_hands_over_intervals_between_groups`
-//! is the code that shows a committee change is possible with dealing alone.
+//! is the code that shows a committee change is possible with dealing alone. The two
+//! `committee_rotation_*_slices_*` tests show the repair when the committee size, and with it
+//! the slice count, changes: a verified coarser slice is narrowed to the finer slices it
+//! covers, and two verified adjacent slices are merged into the slice they halve.
 
 use super::*;
 use crate::bajillion::{
@@ -14,15 +17,15 @@ use crate::bajillion::{
     },
     commitment::VectorRoot,
     retained::decode_dealt_slice_bounded,
-    serve::{SliceInterval, slice_interval, verified_interval},
-    transition::{OperatorVariant, StateRange},
+    serve::{SliceInterval, merge_intervals, narrow_interval, slice_interval, verified_interval},
+    transition::{MAX_SLICE_BITS, OperatorVariant, StateRange},
 };
 use alloc::collections::{BTreeMap, BTreeSet};
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{Decode, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write};
 use commonware_cryptography::bls12381::primitives::variant::MinSig;
 use commonware_utils::Participant;
-use core::{num::NonZeroU64, ops::Range};
+use core::{cmp::Ordering, num::NonZeroU64, ops::Range};
 use thiserror::Error;
 
 /// Eight slices, so each validator of a four-member committee holds six.
@@ -36,6 +39,10 @@ const LEAVING: [Participant; 2] = [Participant::new(0), Participant::new(2)];
 /// The outgoing holder that answers one member short. Position 0 is asked first for six of
 /// the eight slices, so its answers are the ones the incoming committee must catch.
 const BYZANTINE: Participant = Participant::new(0);
+/// Key seeds of the seven-member committee the four `OUTGOING` validators grow into.
+const GROWN: [u64; 7] = [1_001, 1_002, 1_003, 1_004, 1_005, 1_006, 1_007];
+/// Key seeds of the four-member committee `GROWN` shrinks to: three continuing, one joining.
+const SHRUNK: [u64; 4] = [1_002, 1_004, 1_006, 1_008];
 
 fn validator(seed: u64) -> BlsPrivate {
     BlsPrivate::new(Scalar::from(seed))
@@ -262,14 +269,126 @@ fn close_under(
     }
 }
 
+/// Epoch `e`'s close under `assignment`: 24 live accounts and four fresh ones, ten senders,
+/// deposits creating three accounts, closes deleting three, one partial withdrawal, and one
+/// payout to a fresh account that never becomes live. Returns the key-sorted table of every
+/// account with the close.
+fn epoch_close(assignment: Assignment<ShaDigest>) -> (Vec<(VerifyingKey, SigningKey)>, Fixture) {
+    let live = accounts((0..24).map(|index| ACCOUNT_SEED_START + index));
+    let fresh = accounts((0..4).map(|index| ACCOUNT_SEED_START + 1_000 + index));
+    let keys = accounts(
+        (0..24)
+            .chain(1_000..1_004)
+            .map(|index| ACCOUNT_SEED_START + index),
+    );
+    let at = |public: &VerifyingKey| keys.binary_search_by(|(key, _)| key.cmp(public)).unwrap();
+    let recipients = live[..6]
+        .iter()
+        .chain([&fresh[2], &fresh[3]])
+        .map(|(public, _)| at(public))
+        .collect::<Vec<_>>();
+    let opening = AccountState {
+        balance: OPENING_BALANCE,
+        active: true,
+        ..AccountState::default()
+    };
+    let first = close_under(
+        EPOCH,
+        assignment,
+        &keys,
+        live.iter()
+            .map(|(public, _)| StateLeaf {
+                account: public.clone(),
+                state: opening,
+            })
+            .collect(),
+        &Activity {
+            sends: (0..10)
+                .map(|payer| {
+                    let paid = (1..=2)
+                        .map(|offset| recipients[(payer + offset) % recipients.len()])
+                        .collect();
+                    (at(&live[payer].0), paid)
+                })
+                .collect(),
+            deposits: vec![
+                (at(&fresh[0].0), 50),
+                (at(&fresh[1].0), 70),
+                (at(&fresh[2].0), 20),
+                (at(&live[16].0), 10),
+            ],
+            withdrawals: vec![
+                (at(&live[12].0), WithdrawalAction::Close),
+                (at(&live[13].0), WithdrawalAction::Close),
+                (at(&live[5].0), WithdrawalAction::Close),
+                (
+                    at(&live[15].0),
+                    WithdrawalAction::Amount(NonZeroU64::new(30).unwrap()),
+                ),
+            ],
+        },
+    );
+    let close_e = first.prepared.close();
+    let created = close_e
+        .rows
+        .iter()
+        .filter(|row| !row.predecessor.active && row.successor.active)
+        .count();
+    let deleted = close_e
+        .rows
+        .iter()
+        .filter(|row| row.predecessor.active && !row.successor.active)
+        .count();
+    assert_eq!((created, deleted), (3, 3));
+    assert!(!close_e.unchanged.is_empty());
+    (keys, first)
+}
+
+/// The next epoch's close at `epoch` under `assignment` from the live `successor` state:
+/// eight of the first ten live accounts each pay the next two, with no deposits or
+/// withdrawals.
+fn next_close(
+    epoch: u64,
+    assignment: Assignment<ShaDigest>,
+    keys: &[(VerifyingKey, SigningKey)],
+    successor: Vec<StateLeaf<VerifyingKey>>,
+) -> Fixture {
+    let at = |public: &VerifyingKey| keys.binary_search_by(|(key, _)| key.cmp(public)).unwrap();
+    let live_after = successor
+        .iter()
+        .map(|leaf| at(&leaf.account))
+        .collect::<Vec<_>>();
+    close_under(
+        epoch,
+        assignment,
+        keys,
+        successor,
+        &Activity {
+            sends: (0..8)
+                .map(|payer| {
+                    let paid = vec![live_after[(payer + 1) % 10], live_after[(payer + 2) % 10]];
+                    (live_after[payer], paid)
+                })
+                .collect(),
+            deposits: Vec::new(),
+            withdrawals: Vec::new(),
+        },
+    )
+}
+
+/// The whole successor state of a close, key-sorted.
+fn successor_leaves(fixture: &Fixture) -> Vec<StateLeaf<VerifyingKey>> {
+    successor_intervals(fixture)
+        .iter()
+        .flat_map(|interval| interval.leaves().iter().cloned())
+        .collect()
+}
+
 /// The whole successor state of a close as its vector tree, for byte-for-byte comparison.
 fn successor_tree(
     fixture: &Fixture,
 ) -> (Vec<StateLeaf<VerifyingKey>>, commitment::Tree<ShaDigest>) {
-    let leaves = successor_intervals(fixture)
-        .iter()
-        .flat_map(|interval| interval.leaves().iter().cloned())
-        .collect::<Vec<_>>();
+    let leaves = successor_leaves(fixture);
     let mut builder =
         commitment::Builder::<Sha256>::new(VectorKind::State, leaves.len() as u32).unwrap();
     builder.add_values(&leaves, &Sequential).unwrap();
@@ -456,6 +575,94 @@ fn verified_interval_rejects_tampered_dropped_foreign_and_wrong_root() {
     ));
 }
 
+#[test]
+fn narrowed_and_merged_intervals_match_whole_state_and_broken_seams_are_rejected() {
+    // A dense close, then a sparse one with empty slices, both under three bits and re-sliced
+    // to two bits and back.
+    for fixture in [churn_fixture(), fixture_with(EPOCH, 6, 3, 3, 2, None)] {
+        let fine_bits = fixture.context.assignment().slice_bits();
+        let coarse_bits = fine_bits - 1;
+        let (leaves, tree) = successor_tree(&fixture);
+        let fine = intervals_of(&leaves, fine_bits);
+        let coarse = intervals_of(&leaves, coarse_bits);
+        let mut populated = 0;
+        for (index, expected) in coarse.iter().enumerate() {
+            let slice = index as u16;
+            let lower = slice << 1;
+            let merge = |first: &SliceInterval<VerifyingKey, ShaDigest>,
+                         second: &SliceInterval<VerifyingKey, ShaDigest>| {
+                merge_intervals(first, second, slice, coarse_bits)
+            };
+
+            // Narrowing the coarse slice yields each half's whole-state interval, and merging
+            // the halves as the whole tree serves them yields the coarse slice back.
+            for half in [lower, lower + 1] {
+                assert_eq!(
+                    narrow_interval(expected, half, fine_bits).unwrap(),
+                    fine[usize::from(half)]
+                );
+            }
+            let first = whole_span(&leaves, &tree, &(lower..lower + 1), fine_bits);
+            let second = whole_span(&leaves, &tree, &(lower + 1..lower + 2), fine_bits);
+            assert_eq!(merge(&first, &second).unwrap(), *expected);
+            if first.members.is_empty() && second.members.is_empty() {
+                continue;
+            }
+            populated += 1;
+
+            // Swapped halves carry the wrong prefixes.
+            assert!(matches!(merge(&second, &first), Err(ServeError::Range)));
+
+            // A member dropped on either side of the seam, or a guard that no longer names
+            // the other half's first leaf, breaks the seam.
+            if let Some((_, rest)) = first.members.split_last() {
+                let mut dropped = first.clone();
+                dropped.members = rest.to_vec();
+                assert!(matches!(merge(&dropped, &second), Err(ServeError::Range)));
+            }
+            if !second.members.is_empty() {
+                let mut dropped = second.clone();
+                dropped.members.remove(0);
+                assert!(matches!(merge(&first, &dropped), Err(ServeError::Range)));
+                let mut unguarded = first.clone();
+                unguarded.range.successor = None;
+                assert!(matches!(merge(&unguarded, &second), Err(ServeError::Range)));
+            }
+
+            // A populated slice other than the adjacent half is not the pair's other half.
+            let other = (0..1_u16 << fine_bits)
+                .filter(|other| !(lower..lower + 2).contains(other))
+                .find(|other| !fine[usize::from(*other)].leaves().is_empty());
+            if let Some(other) = other {
+                let foreign = whole_span(&leaves, &tree, &(other..other + 1), fine_bits);
+                assert!(matches!(merge(&first, &foreign), Err(ServeError::Range)));
+                assert!(matches!(merge(&foreign, &second), Err(ServeError::Range)));
+            }
+        }
+        assert!(populated > 0);
+
+        // Slices outside the partition.
+        assert!(matches!(
+            narrow_interval(&coarse[0], 0, MAX_SLICE_BITS + 1),
+            Err(ServeError::Transition(CloseError::SliceBits))
+        ));
+        assert!(matches!(
+            narrow_interval(&coarse[0], 1 << fine_bits, fine_bits),
+            Err(ServeError::Transition(CloseError::SliceIndex))
+        ));
+        let first = whole_span(&leaves, &tree, &(0..1), fine_bits);
+        let second = whole_span(&leaves, &tree, &(1..2), fine_bits);
+        assert!(matches!(
+            merge_intervals(&first, &second, 0, MAX_SLICE_BITS),
+            Err(ServeError::Transition(CloseError::SliceBits))
+        ));
+        assert!(matches!(
+            merge_intervals(&first, &second, 1 << coarse_bits, coarse_bits),
+            Err(ServeError::Transition(CloseError::SliceIndex))
+        ));
+    }
+}
+
 /// What an incoming validator asks an outgoing holder.
 #[derive(Debug, Eq, PartialEq)]
 enum Request {
@@ -564,13 +771,24 @@ impl Read for Response {
     }
 }
 
+/// How a Byzantine holder answers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Fault {
+    /// Every populated slice one member short.
+    Short,
+    /// With the interval of another slice it holds.
+    Foreign,
+}
+
 /// An outgoing validator after sealing epoch `e`: the dealing it certified and the per-slice
 /// intervals it advanced, which it serves to the incoming committee.
 struct Holder {
     sealed: SealedDealing<VerifyingKey, ShaDigest>,
+    /// Slice bits of the assignment it sealed under.
+    slice_bits: u8,
     intervals: BTreeMap<u16, Interval<VerifyingKey>>,
-    /// Answers every populated slice one member short.
-    byzantine: bool,
+    /// How it answers wrongly, when it does.
+    fault: Option<Fault>,
     /// Slices this holder no longer serves.
     pruned: BTreeSet<u16>,
 }
@@ -585,6 +803,7 @@ impl Holder {
         seed: u64,
     ) -> (bls12381::Vote, Self) {
         let close = fixture.prepared.close();
+        let slice_bits = fixture.context.assignment().slice_bits();
         let spans = assigned_slice_spans::<Sha256, _>(
             scheme.committee(),
             fixture.context.assignment(),
@@ -612,14 +831,15 @@ impl Holder {
         for slice in sealed.slices() {
             let mut interval = span_interval(predecessor, &slice.span);
             interval.advance(slice);
-            intervals.extend(split(&interval, &slice.span));
+            intervals.extend(split(&interval, &slice.span, slice_bits));
         }
         (
             vote,
             Self {
                 sealed,
+                slice_bits,
                 intervals,
-                byzantine: false,
+                fault: None,
                 pruned: BTreeSet::new(),
             },
         )
@@ -637,23 +857,38 @@ impl Holder {
         let Some(proof) = self.sealed.serve(*slice) else {
             return Response::NotHolder;
         };
-        let mut interval = slice_interval::<Sha256, _, _>(proof, *slice, SLICE_BITS).unwrap();
-        if self.byzantine && !interval.members.is_empty() {
-            interval.members.remove(0);
+        let mut interval = slice_interval::<Sha256, _, _>(proof, *slice, self.slice_bits).unwrap();
+        match self.fault {
+            Some(Fault::Short) if !interval.members.is_empty() => {
+                interval.members.remove(0);
+            }
+            Some(Fault::Foreign) => {
+                let other = self
+                    .sealed
+                    .slices()
+                    .iter()
+                    .flat_map(|held| held.span.clone())
+                    .find(|held| held != slice)
+                    .expect("holder has another slice");
+                let proof = self.sealed.serve(other).expect("holder serves its slices");
+                interval = slice_interval::<Sha256, _, _>(proof, other, self.slice_bits).unwrap();
+            }
+            _ => {}
         }
         Response::Interval(Box::new(interval))
     }
 }
 
-/// Splits one advanced span interval into per-slice intervals.
+/// Splits one advanced span interval into per-slice intervals under `slice_bits`.
 fn split(
     interval: &Interval<VerifyingKey>,
     span: &Range<u16>,
+    slice_bits: u8,
 ) -> BTreeMap<u16, Interval<VerifyingKey>> {
     let mut buckets: BTreeMap<u16, Vec<StateLeaf<VerifyingKey>>> =
         span.clone().map(|slice| (slice, Vec::new())).collect();
     for leaf in interval.leaves() {
-        let slice = account_slice(&leaf.account, SLICE_BITS).unwrap();
+        let slice = account_slice(&leaf.account, slice_bits).unwrap();
         buckets
             .get_mut(&slice)
             .expect("advanced leaf left its span")
@@ -697,15 +932,65 @@ fn exchange(
     Ok(decoded)
 }
 
-/// What one incoming validator saw from the outgoing holders.
+/// What one incoming validator saw from the outgoing holders, by holder and outgoing slice.
 #[derive(Debug, Default)]
 struct Log {
-    /// Answers that verified, by holder and slice.
+    /// Answers that verified.
     served: Vec<(Participant, u16)>,
-    /// Answers that failed verification, by holder and slice.
+    /// Answers that failed verification.
     rejected: Vec<(Participant, u16, ServeError)>,
     /// Holders that declined a slice or answered unusably.
     declined: Vec<(Participant, u16)>,
+}
+
+impl Log {
+    /// Appends what another fetch saw.
+    fn extend(&mut self, other: Self) {
+        self.served.extend(other.served);
+        self.rejected.extend(other.rejected);
+        self.declined.extend(other.declined);
+    }
+}
+
+/// Asks the outgoing holders of `slice` in holder order and returns the first answer that
+/// verifies under `root` with the interval it proves, logging every answer.
+fn fetch_slice(
+    holders: &[Holder],
+    outgoing: &Committee,
+    assignment: &Assignment<ShaDigest>,
+    root: &VectorRoot<ShaDigest>,
+    slice: u16,
+    max_members: usize,
+    log: &mut Log,
+) -> Option<(
+    SliceInterval<VerifyingKey, ShaDigest>,
+    Interval<VerifyingKey>,
+)> {
+    let request = Request::Interval { root: *root, slice };
+    for holder in slice_holders::<Sha256, _>(outgoing, assignment, slice).unwrap() {
+        let Ok(response) = exchange(&holders[usize::from(holder)], &request, max_members) else {
+            log.declined.push((holder, slice));
+            continue;
+        };
+        match response {
+            Response::Interval(interval) => {
+                match verified_interval::<Sha256, _, _>(
+                    &interval,
+                    root,
+                    slice,
+                    assignment.slice_bits(),
+                ) {
+                    Ok(verified) => {
+                        log.served.push((holder, slice));
+                        return Some((*interval, verified));
+                    }
+                    Err(error) => log.rejected.push((holder, slice, error)),
+                }
+            }
+            Response::NotHolder | Response::Unknown => log.declined.push((holder, slice)),
+        }
+    }
+    None
 }
 
 /// Why an incoming validator did not seal.
@@ -727,22 +1012,62 @@ enum HandoffError {
 struct Joiner {
     scheme: bls12381::Scheme,
     spans: Vec<Range<u16>>,
+    /// Slice bits of the incoming assignment.
+    slice_bits: u8,
     intervals: BTreeMap<u16, Interval<VerifyingKey>>,
 }
 
 impl Joiner {
+    /// An incoming validator under `assignment` retaining `retained`, the per-slice intervals
+    /// it validated under `retained_bits`, re-sliced to the incoming partition: each is
+    /// narrowed to the two slices it covers when the partition doubles, and two retained
+    /// halves join into the slice they halve when it halves.
     fn new(
         scheme: bls12381::Scheme,
         assignment: &Assignment<ShaDigest>,
         retained: BTreeMap<u16, Interval<VerifyingKey>>,
+        retained_bits: u8,
     ) -> Self {
         let spans =
             assigned_slice_spans::<Sha256, _>(scheme.committee(), assignment, scheme.me().unwrap())
                 .unwrap();
+        let slice_bits = assignment.slice_bits();
+        assert!(
+            slice_bits.abs_diff(retained_bits) <= 1,
+            "the slice count changes by one bit per rotation"
+        );
+        let intervals = match slice_bits.cmp(&retained_bits) {
+            Ordering::Equal => retained,
+            Ordering::Greater => retained
+                .iter()
+                .flat_map(|(coarse, interval)| {
+                    [coarse << 1, (coarse << 1) + 1]
+                        .map(|fine| (fine, narrow_interval(interval, fine, slice_bits).unwrap()))
+                })
+                .collect(),
+
+            // Both halves are this validator's own validated live sets, so their union is
+            // the merged slice's.
+            Ordering::Less => retained
+                .iter()
+                .filter(|(lower, _)| *lower % 2 == 0)
+                .filter_map(|(lower, first)| {
+                    let second = retained.get(&(lower + 1))?;
+                    let leaves = first
+                        .leaves()
+                        .iter()
+                        .chain(second.leaves())
+                        .cloned()
+                        .collect();
+                    Some((lower >> 1, Interval::new(leaves).unwrap()))
+                })
+                .collect(),
+        };
         Self {
             scheme,
             spans,
-            intervals: retained,
+            slice_bits,
+            intervals,
         }
     }
 
@@ -760,7 +1085,10 @@ impl Joiner {
     }
 
     /// Fetches every lacking slice from the outgoing holders in holder order, keeping the
-    /// first answer that verifies under `root`.
+    /// first answer that verifies under `root`, and repairs across a slice count change: when
+    /// the outgoing partition is one bit coarser, the outgoing slice covering a lacking slice
+    /// is fetched once and narrowed to both slices it covers, and when it is one bit finer, a
+    /// lacking slice's two halves are fetched from their own holders and merged.
     fn fetch(
         &mut self,
         holders: &[Holder],
@@ -770,27 +1098,42 @@ impl Joiner {
         max_members: usize,
     ) -> Log {
         let mut log = Log::default();
+        let fetch = |slice, log: &mut Log| {
+            fetch_slice(holders, outgoing, assignment, root, slice, max_members, log)
+        };
         for slice in self.lacking() {
-            let request = Request::Interval { root: *root, slice };
-            for holder in slice_holders::<Sha256, _>(outgoing, assignment, slice).unwrap() {
-                let Ok(response) = exchange(&holders[usize::from(holder)], &request, max_members)
-                else {
-                    log.declined.push((holder, slice));
-                    continue;
-                };
-                match response {
-                    Response::Interval(interval) => {
-                        match verified_interval::<Sha256, _, _>(&interval, root, slice, SLICE_BITS)
-                        {
-                            Ok(verified) => {
-                                self.intervals.insert(slice, verified);
-                                log.served.push((holder, slice));
-                                break;
-                            }
-                            Err(error) => log.rejected.push((holder, slice, error)),
+            if self.intervals.contains_key(&slice) {
+                // Narrowing the outgoing slice covering it filled this one already.
+                continue;
+            }
+            match self.slice_bits.cmp(&assignment.slice_bits()) {
+                Ordering::Equal => {
+                    if let Some((_, interval)) = fetch(slice, &mut log) {
+                        self.intervals.insert(slice, interval);
+                    }
+                }
+                Ordering::Greater => {
+                    let coarse = slice >> 1;
+                    if let Some((_, interval)) = fetch(coarse, &mut log) {
+                        for fine in [coarse << 1, (coarse << 1) + 1] {
+                            let narrowed = narrow_interval(&interval, fine, self.slice_bits);
+                            self.intervals.insert(fine, narrowed.unwrap());
                         }
                     }
-                    Response::NotHolder | Response::Unknown => log.declined.push((holder, slice)),
+                }
+                Ordering::Less => {
+                    let lower = slice << 1;
+                    let Some((first, _)) = fetch(lower, &mut log) else {
+                        continue;
+                    };
+                    let Some((second, _)) = fetch(lower + 1, &mut log) else {
+                        continue;
+                    };
+
+                    // Both halves verified under `root`, so their seam is proven consistent.
+                    let merged = merge_intervals(&first, &second, slice, self.slice_bits)
+                        .expect("verified halves meet at their seam");
+                    self.intervals.insert(slice, merged);
                 }
             }
         }
@@ -838,10 +1181,75 @@ impl Joiner {
         .map_err(HandoffError::Seal)?;
         for (mut interval, slice) in intervals.into_iter().zip(sealed.slices()) {
             interval.advance(slice);
-            self.intervals.extend(split(&interval, &slice.span));
+            self.intervals
+                .extend(split(&interval, &slice.span, self.slice_bits));
         }
         Ok(vote)
     }
+}
+
+/// Every outgoing validator seals its own dealing of `fixture` and advances its intervals to
+/// the successor state. Returns the holders and the exact certificate over the header from
+/// the first quorum of votes.
+fn seal_outgoing(
+    schemes: &[bls12381::Scheme],
+    fixture: &Fixture,
+) -> (Vec<Holder>, bls12381::Certificate) {
+    let predecessor = intervals_of(
+        fixture.cache.leaves(),
+        fixture.context.assignment().slice_bits(),
+    );
+    let expected = successor_intervals(fixture);
+    let mut votes = Vec::new();
+    let mut holders = Vec::new();
+    for (seed, scheme) in schemes.iter().enumerate() {
+        let (vote, holder) = Holder::seal(scheme, fixture, &predecessor, seed as u64);
+        for (slice, interval) in &holder.intervals {
+            assert_eq!(interval, &expected[usize::from(*slice)]);
+        }
+        votes.push(vote);
+        holders.push(holder);
+    }
+    let quorum = schemes[0].committee().quorum();
+    let certificate = schemes[0]
+        .assemble_exact(votes.into_iter().take(quorum))
+        .unwrap();
+    (holders, certificate)
+}
+
+/// Every incoming validator is dealt its spans of `next` in dealt form, and every validator
+/// holding its intervals hydrates, seals with its own key, and advances. Returns the votes
+/// and the validators that did not seal, with why.
+fn seal_incoming(
+    joiners: &mut [Joiner],
+    next: &Fixture,
+) -> (Vec<bls12381::Vote>, Vec<(Participant, HandoffError)>) {
+    let expected_next = successor_intervals(next);
+    let mut votes = Vec::new();
+    let mut failed = Vec::new();
+    for (seed, joiner) in joiners.iter_mut().enumerate() {
+        let dealings = next
+            .prepared
+            .deal(&next.cache, &joiner.spans, &Sequential)
+            .unwrap();
+        let dealt = joiner
+            .spans
+            .iter()
+            .map(|span| dealings.encode_span(span).encode())
+            .collect::<Vec<_>>();
+        match joiner.seal(next, &dealt, 100 + seed as u64) {
+            Ok(vote) => {
+                for span in &joiner.spans {
+                    for slice in span.clone() {
+                        assert_eq!(joiner.intervals[&slice], expected_next[usize::from(slice)]);
+                    }
+                }
+                votes.push(vote);
+            }
+            Err(error) => failed.push((joiner.me(), error)),
+        }
+    }
+    (votes, failed)
 }
 
 /// The settlement chain is not involved: committee A certifies epoch `e`, committee B's
@@ -879,95 +1287,12 @@ fn committee_rotation_hands_over_intervals_between_groups() {
     assert_eq!((committee_a.members().len(), quorum), (4, 3));
     assert!(LEAVING.contains(&BYZANTINE));
 
-    // Epoch e under A: 24 live accounts and four fresh ones, ten senders, deposits creating
-    // three accounts, closes deleting three, one partial withdrawal, and one payout to a
-    // fresh account that never becomes live.
-    let live = accounts((0..24).map(|index| ACCOUNT_SEED_START + index));
-    let fresh = accounts((0..4).map(|index| ACCOUNT_SEED_START + 1_000 + index));
-    let keys = accounts(
-        (0..24)
-            .chain(1_000..1_004)
-            .map(|index| ACCOUNT_SEED_START + index),
-    );
-    let at = |public: &VerifyingKey| keys.binary_search_by(|(key, _)| key.cmp(public)).unwrap();
-    let recipients = live[..6]
-        .iter()
-        .chain([&fresh[2], &fresh[3]])
-        .map(|(public, _)| at(public))
-        .collect::<Vec<_>>();
-    let opening = AccountState {
-        balance: OPENING_BALANCE,
-        active: true,
-        ..AccountState::default()
-    };
-    let first = close_under(
-        EPOCH,
-        assignment_a,
-        &keys,
-        live.iter()
-            .map(|(public, _)| StateLeaf {
-                account: public.clone(),
-                state: opening,
-            })
-            .collect(),
-        &Activity {
-            sends: (0..10)
-                .map(|payer| {
-                    let paid = (1..=2)
-                        .map(|offset| recipients[(payer + offset) % recipients.len()])
-                        .collect();
-                    (at(&live[payer].0), paid)
-                })
-                .collect(),
-            deposits: vec![
-                (at(&fresh[0].0), 50),
-                (at(&fresh[1].0), 70),
-                (at(&fresh[2].0), 20),
-                (at(&live[16].0), 10),
-            ],
-            withdrawals: vec![
-                (at(&live[12].0), WithdrawalAction::Close),
-                (at(&live[13].0), WithdrawalAction::Close),
-                (at(&live[5].0), WithdrawalAction::Close),
-                (
-                    at(&live[15].0),
-                    WithdrawalAction::Amount(NonZeroU64::new(30).unwrap()),
-                ),
-            ],
-        },
-    );
-    let close_e = first.prepared.close();
-    let created = close_e
-        .rows
-        .iter()
-        .filter(|row| !row.predecessor.active && row.successor.active)
-        .count();
-    let deleted = close_e
-        .rows
-        .iter()
-        .filter(|row| row.predecessor.active && !row.successor.active)
-        .count();
-    assert_eq!((created, deleted), (3, 3));
-    assert!(!close_e.unchanged.is_empty());
-
-    // Every A validator seals its own dealing and advances its intervals to the successor
+    // Epoch e under A, sealed by every A validator, whose intervals advance to the successor
     // state. A's exact certificate over header_e is what B will check.
-    let predecessor = intervals_of(first.cache.leaves(), SLICE_BITS);
+    let (keys, first) = epoch_close(assignment_a);
     let expected_e = successor_intervals(&first);
-    let mut votes = Vec::new();
-    let mut holders = Vec::new();
-    for (seed, scheme) in schemes_a.iter().enumerate() {
-        let (vote, holder) = Holder::seal(scheme, &first, &predecessor, seed as u64);
-        for (slice, interval) in &holder.intervals {
-            assert_eq!(interval, &expected_e[usize::from(*slice)]);
-        }
-        votes.push(vote);
-        holders.push(holder);
-    }
+    let (mut holders, certificate_a) = seal_outgoing(&schemes_a, &first);
     let verifier_a = bls12381::Scheme::verifier(committee_a.clone());
-    let certificate_a = schemes_a[0]
-        .assemble_exact(votes.into_iter().take(quorum))
-        .unwrap();
 
     // What A publishes: header, roots, and certificate. B trusts the successor root only
     // after the certificate verifies against committee A and the roots against the header.
@@ -986,7 +1311,7 @@ fn committee_rotation_hands_over_intervals_between_groups() {
                 .index_of(key)
                 .map(|held| holders[usize::from(held)].intervals.clone())
                 .unwrap_or_default();
-            Joiner::new(scheme.clone(), &assignment_b, retained)
+            Joiner::new(scheme.clone(), &assignment_b, retained, SLICE_BITS)
         })
         .collect::<Vec<_>>();
     let dealing = usize::from(slice_count) * quorum / committee_b.members().len();
@@ -1014,7 +1339,7 @@ fn committee_rotation_hands_over_intervals_between_groups() {
     for holder in &mut holders {
         holder.pruned.insert(pruned);
     }
-    holders[usize::from(BYZANTINE)].byzantine = true;
+    holders[usize::from(BYZANTINE)].fault = Some(Fault::Short);
     let max_members = usize::try_from(first.context.limits().max_states()).unwrap();
 
     // A root A never certified is unknown to its holders.
@@ -1075,57 +1400,10 @@ fn committee_rotation_hands_over_intervals_between_groups() {
     // Epoch e + 1 under B from the successor state of epoch e. The operator deals each B
     // validator its spans in dealt form, and every validator holding its intervals hydrates,
     // seals with its own key, and advances.
-    let successor = expected_e
-        .iter()
-        .flat_map(|interval| interval.leaves().iter().cloned())
-        .collect::<Vec<_>>();
-    let live_after = successor
-        .iter()
-        .map(|leaf| at(&leaf.account))
-        .collect::<Vec<_>>();
-    let second = close_under(
-        EPOCH + 1,
-        assignment_b,
-        &keys,
-        successor,
-        &Activity {
-            sends: (0..8)
-                .map(|payer| {
-                    let paid = vec![live_after[(payer + 1) % 10], live_after[(payer + 2) % 10]];
-                    (live_after[payer], paid)
-                })
-                .collect(),
-            deposits: Vec::new(),
-            withdrawals: Vec::new(),
-        },
-    );
+    let second = next_close(EPOCH + 1, assignment_b, &keys, successor_leaves(&first));
     assert_eq!(*second.context.predecessor_root(), root);
     let close_next = second.prepared.close();
-    let expected_next = successor_intervals(&second);
-    let mut votes = Vec::new();
-    let mut failed = Vec::new();
-    for (seed, joiner) in joiners.iter_mut().enumerate() {
-        let dealings = second
-            .prepared
-            .deal(&second.cache, &joiner.spans, &Sequential)
-            .unwrap();
-        let dealt = joiner
-            .spans
-            .iter()
-            .map(|span| dealings.encode_span(span).encode())
-            .collect::<Vec<_>>();
-        match joiner.seal(&second, &dealt, 100 + seed as u64) {
-            Ok(vote) => {
-                for span in &joiner.spans {
-                    for slice in span.clone() {
-                        assert_eq!(joiner.intervals[&slice], expected_next[usize::from(slice)]);
-                    }
-                }
-                votes.push(vote);
-            }
-            Err(error) => failed.push((joiner.me(), error)),
-        }
-    }
+    let (votes, failed) = seal_incoming(&mut joiners, &second);
 
     // The validator nobody served cannot hydrate its span and does not seal. The other three
     // are exactly B's quorum, so B certifies epoch e + 1 without A.
@@ -1141,4 +1419,171 @@ fn committee_rotation_hands_over_intervals_between_groups() {
     let verifier_b = bls12381::Scheme::verifier(committee_b);
     assert!(verifier_b.verify_exact(&close_next.header, &certificate_b));
     assert!(!verifier_a.verify_exact(&close_next.header, &certificate_b));
+}
+
+/// Rotates from the `outgoing` validators, who seal epoch `e` under `outgoing_bits`, to the
+/// `incoming` validators, who seal epoch `e + 1` under `incoming_bits`, across a slice count
+/// change: every incoming validator repairs the intervals it lacks from the outgoing holders'
+/// verified answers, narrowing when the partition doubles and merging when it halves. The
+/// holders in `faults` answer wrongly. Returns how many slices the incoming validators lacked
+/// after re-slicing what they retained, and everything they saw from the holders.
+fn resize(
+    outgoing: &[u64],
+    outgoing_bits: u8,
+    incoming: &[u64],
+    incoming_bits: u8,
+    faults: &[(Participant, Fault)],
+) -> (usize, Log) {
+    let outgoing_keys = outgoing.iter().copied().map(validator).collect::<Vec<_>>();
+    let incoming_keys = incoming.iter().copied().map(validator).collect::<Vec<_>>();
+    let (committee_out, schemes_out) = committee(&outgoing_keys);
+    let (committee_in, schemes_in) = committee(&incoming_keys);
+    assert_ne!(
+        committee_out.commitment::<Sha256>(),
+        committee_in.commitment::<Sha256>()
+    );
+    let assignment_out =
+        Assignment::new(committee_out.commitment::<Sha256>(), outgoing_bits).unwrap();
+    let assignment_in =
+        Assignment::new(committee_in.commitment::<Sha256>(), incoming_bits).unwrap();
+
+    // The slice count is the smallest power of two at or above the committee size, so it
+    // changes with the size.
+    for (committee, assignment) in [
+        (&committee_out, &assignment_out),
+        (&committee_in, &assignment_in),
+    ] {
+        assert_eq!(
+            usize::from(assignment.slice_count()),
+            committee.members().len().next_power_of_two()
+        );
+    }
+    assert_eq!(outgoing_bits.abs_diff(incoming_bits), 1);
+
+    // Epoch e under the outgoing committee, sealed and certified by its validators. The
+    // incoming committee trusts the successor root only after the certificate verifies
+    // against the outgoing committee and the roots against the header.
+    let (keys, first) = epoch_close(assignment_out);
+    let (mut holders, certificate_out) = seal_outgoing(&schemes_out, &first);
+    let verifier_out = bls12381::Scheme::verifier(committee_out.clone());
+    let header_e = *holders[0].sealed.header();
+    let roots_e = *holders[0].sealed.roots();
+    assert!(verifier_out.verify_exact(&header_e, &certificate_out));
+    assert!(header_e.verify::<Sha256, VerifyingKey>(&first.context, &roots_e));
+    let root = roots_e.successor;
+    for (holder, fault) in faults {
+        holders[usize::from(*holder)].fault = Some(*fault);
+    }
+
+    // The incoming validators: continuing members re-slice what they retain to the incoming
+    // partition, which already matches the whole successor state, and newcomers hold none.
+    let successor = successor_leaves(&first);
+    let expected_in = intervals_of(&successor, incoming_bits);
+    let mut joiners = schemes_in
+        .iter()
+        .map(|scheme| {
+            let key = &committee_in.members()[usize::from(scheme.me().unwrap())];
+            let retained = committee_out
+                .index_of(key)
+                .map(|held| holders[usize::from(held)].intervals.clone())
+                .unwrap_or_default();
+            Joiner::new(scheme.clone(), &assignment_in, retained, outgoing_bits)
+        })
+        .collect::<Vec<_>>();
+    for joiner in &joiners {
+        for (slice, interval) in &joiner.intervals {
+            assert_eq!(interval, &expected_in[usize::from(*slice)]);
+        }
+    }
+    let lacking = joiners
+        .iter()
+        .map(|joiner| joiner.lacking().len())
+        .sum::<usize>();
+    assert!(lacking > 0);
+
+    // Repair over the wire: every answer is verified under the certified root as the outgoing
+    // slice it was asked for before it is narrowed or merged, so a wrong answer is rejected
+    // before any repair uses it, and every repaired interval is the whole state's.
+    let max_members = usize::try_from(first.context.limits().max_states()).unwrap();
+    let mut log = Log::default();
+    for joiner in &mut joiners {
+        let seen = joiner.fetch(
+            &holders,
+            &committee_out,
+            &assignment_out,
+            &root,
+            max_members,
+        );
+        assert!(joiner.lacking().is_empty());
+        for (slice, interval) in &joiner.intervals {
+            assert_eq!(interval, &expected_in[usize::from(*slice)]);
+        }
+        for (holder, slice, error) in &seen.rejected {
+            assert!(
+                faults.iter().any(|(faulty, _)| faulty == holder),
+                "slice {slice}: {error}"
+            );
+            assert!(
+                matches!(error, ServeError::Range | ServeError::Commitment(_)),
+                "{error}"
+            );
+        }
+        assert!(seen.declined.is_empty());
+        log.extend(seen);
+    }
+    for (faulty, _) in faults {
+        assert!(
+            log.rejected.iter().any(|(holder, _, _)| holder == faulty),
+            "{faulty:?} was never caught"
+        );
+    }
+
+    // Epoch e + 1 under the incoming committee: every validator hydrates its dealt spans
+    // against the repaired intervals and seals, and the exact certificate is the incoming
+    // committee's alone.
+    let second = next_close(EPOCH + 1, assignment_in, &keys, successor);
+    assert_eq!(*second.context.predecessor_root(), root);
+    let (votes, failed) = seal_incoming(&mut joiners, &second);
+    assert!(failed.is_empty(), "{failed:?}");
+    assert_eq!(votes.len(), committee_in.members().len());
+    let certificate_in = schemes_in[0]
+        .assemble_exact(votes.into_iter().take(committee_in.quorum()))
+        .unwrap();
+    let verifier_in = bls12381::Scheme::verifier(committee_in);
+    let header_next = &second.prepared.close().header;
+    assert!(verifier_in.verify_exact(header_next, &certificate_in));
+    assert!(!verifier_out.verify_exact(header_next, &certificate_in));
+    (lacking, log)
+}
+
+/// Four validators over four slices grow into seven over eight, so every incoming slice is
+/// half of one outgoing slice. An incoming validator lacking slice `b` fetches outgoing slice
+/// `b / 2`, verifies it complete under the certified root, and narrows it to both halves, so
+/// fewer answers than lacking slices are needed. The outgoing position 0 answers short and is
+/// caught before anything is narrowed.
+#[test]
+fn committee_rotation_splits_slices_when_the_committee_grows() {
+    let (lacking, log) = resize(&OUTGOING, 2, &GROWN, 3, &[(BYZANTINE, Fault::Short)]);
+    assert!(log.served.len() < lacking);
+}
+
+/// Seven validators over eight slices shrink into four over four, so every incoming slice is
+/// the union of two adjacent outgoing slices, each with its own holders. An incoming validator
+/// lacking slice `c` fetches outgoing slices `2c` and `2c + 1`, verifies each, checks their
+/// seam, and joins them, so every lacking slice takes two answers. The outgoing position 0
+/// answers short and position 1 answers with another slice it holds, and both are caught
+/// before anything is merged.
+#[test]
+fn committee_rotation_merges_slices_when_the_committee_shrinks() {
+    let (lacking, log) = resize(
+        &GROWN,
+        3,
+        &SHRUNK,
+        2,
+        &[
+            (Participant::new(0), Fault::Short),
+            (Participant::new(1), Fault::Foreign),
+        ],
+    );
+    assert_eq!(log.served.len(), 2 * lacking);
 }

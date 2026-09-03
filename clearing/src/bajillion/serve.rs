@@ -20,7 +20,10 @@
 //! A holder also hands intervals to validators joining the committee. [slice_interval]
 //! extracts one slice's exact successor live set from a sealed slice as a [SliceInterval],
 //! bracketed and opened under the successor root, and [verified_interval] checks such an
-//! answer on the receiving side before it becomes the joiner's retained [Interval].
+//! answer on the receiving side before it becomes the joiner's retained [Interval]. When the
+//! committee change also changes the slice count, [narrow_interval] cuts a verified coarser
+//! slice down to one of the finer slices it covers and [merge_intervals] joins two verified
+//! adjacent halves into the slice they halve.
 
 use crate::bajillion::{
     boundary::WithdrawalBatch,
@@ -715,6 +718,90 @@ where
     Ok(Interval::new(interval.members.clone())?)
 }
 
+/// Narrows the live set of a coarser slice to slice `slice` under `slice_bits`, one of the
+/// finer slices it covers.
+///
+/// A slice is the accounts whose keys start with `slice_bits` bits, so a slice under fewer
+/// bits is the union of the finer slices sharing its prefix, and a finer slice's exact live
+/// set is the members carrying its prefix. `interval` must be the exact live set of a coarser
+/// slice containing `slice`, from the caller's own validation or from [verified_interval].
+/// Any other interval yields a subset that is not the slice's live set.
+///
+/// Fails with [TransitionError::SliceBits] or [TransitionError::SliceIndex] for a slice
+/// outside the partition.
+pub fn narrow_interval<P: PublicKey>(
+    interval: &Interval<P>,
+    slice: u16,
+    slice_bits: u8,
+) -> Result<Interval<P>, ServeError> {
+    if slice_bits > MAX_SLICE_BITS {
+        return Err(TransitionError::SliceBits.into());
+    }
+    if slice >= 1_u16 << slice_bits {
+        return Err(TransitionError::SliceIndex.into());
+    }
+    let mut members = Vec::new();
+    for leaf in interval.leaves() {
+        if account_slice(&leaf.account, slice_bits)? == slice {
+            members.push(leaf.clone());
+        }
+    }
+    Ok(Interval::new(members)?)
+}
+
+/// Joins the live sets of two adjacent slices under `slice_bits + 1` into the live set of
+/// slice `slice` under `slice_bits`, the slice they halve.
+///
+/// `first` must be slice `2 * slice` and `second` slice `2 * slice + 1`, each already checked
+/// with [verified_interval] for that index under the same root. Their seam is checked before
+/// joining: every member carries its half's prefix, the leaf after `first` (its successor
+/// guard) is the first leaf of `second` (its first member, or its successor guard when it is
+/// empty), and the leaf before `second` (its predecessor guard) is the last leaf of `first`
+/// (its last member, or its predecessor guard when it is empty). Two halves verified under
+/// one root always meet, so a mismatch means a half was not verified as claimed or the pair
+/// is not adjacent. The seam check alone proves nothing: an unverified empty half fits any
+/// seam.
+///
+/// Fails with [ServeError::Range] on a prefix or seam mismatch and with
+/// [TransitionError::SliceBits] or [TransitionError::SliceIndex] for a slice outside the
+/// partition.
+pub fn merge_intervals<P: PublicKey, D: Digest>(
+    first: &SliceInterval<P, D>,
+    second: &SliceInterval<P, D>,
+    slice: u16,
+    slice_bits: u8,
+) -> Result<Interval<P>, ServeError> {
+    let halves = slice_bits
+        .checked_add(1)
+        .filter(|bits| *bits <= MAX_SLICE_BITS)
+        .ok_or(TransitionError::SliceBits)?;
+    if slice >= 1_u16 << slice_bits {
+        return Err(TransitionError::SliceIndex.into());
+    }
+    let lower = slice << 1;
+    for (half, index) in [(first, lower), (second, lower + 1)] {
+        for member in &half.members {
+            if account_slice(&member.account, halves)? != index {
+                return Err(ServeError::Range);
+            }
+        }
+    }
+    let after_first = first.range.successor.as_ref();
+    let second_start = second.members.first().or(second.range.successor.as_ref());
+    let before_second = second.range.predecessor.as_ref();
+    let first_end = first.members.last().or(first.range.predecessor.as_ref());
+    if after_first != second_start || before_second != first_end {
+        return Err(ServeError::Range);
+    }
+    let members = first
+        .members
+        .iter()
+        .chain(&second.members)
+        .cloned()
+        .collect();
+    Ok(Interval::new(members)?)
+}
+
 /// A request one span index cannot answer.
 #[derive(Debug, Error)]
 pub enum ServeError {
@@ -728,7 +815,8 @@ pub enum ServeError {
     #[error("retained interval is not the span's predecessor live set")]
     Interval,
     /// A served state range is not one slice's exact live set: a neighbor is missing or
-    /// misplaced, a leaf is out of order or not live, or a leaf is from the wrong slice.
+    /// misplaced, a leaf is out of order or not live, a leaf is from the wrong slice, or two
+    /// halves do not meet at their seam.
     #[error("state range is not the slice's exact live set")]
     Range,
     /// The slice is inconsistent with itself or does not reproduce the certified roots.
