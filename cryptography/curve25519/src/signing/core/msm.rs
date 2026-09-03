@@ -499,6 +499,20 @@ mod tests {
 
     #[test]
     fn matches_naive_double_and_add() {
+        struct Compute<'a> {
+            points: &'a [GAffine],
+            scalars: &'a [Scalar],
+            width: u32,
+        }
+
+        impl crate::curve::WithBackend for Compute<'_> {
+            type Output = G;
+
+            fn call<B: Backend>(self, backend: B) -> G {
+                multiscalar_mul_points_serial(backend, self.points, self.scalars, self.width)
+            }
+        }
+
         let backend = crate::curve::test_backend();
         Builder::default()
             .with_seed(0)
@@ -522,6 +536,12 @@ mod tests {
                     for width in TEST_WIDTHS {
                         let actual = multiscalar_mul_points_serial(backend, points, scalars, width);
                         assert!(points_equal(actual, expected), "n={n} width={width}");
+                        let accelerated = crate::curve::with_backend(Compute {
+                            points,
+                            scalars,
+                            width,
+                        });
+                        assert!(points_equal(accelerated, expected), "n={n} width={width}");
                     }
                 }
                 Ok(())
@@ -581,6 +601,7 @@ mod tests {
         // actual Rayon dispatch (rather than the policy falling back to serial for small inputs).
         let strategy = commonware_parallel::Rayon::new(commonware_utils::NZUsize!(4))
             .unwrap()
+            .with_parallelism(commonware_utils::NZUsize!(32))
             .manual();
 
         Builder::default()
@@ -589,6 +610,7 @@ mod tests {
             .test(|u| {
                 for width in [6, 8, 10] {
                     let terms = arbitrary_terms(u, 1000, width)?;
+                    assert!(range_count(terms.len(), num_windows(width), 32) > 1);
                     for n in [0, 1, 300, 600, 1000] {
                         let chunks =
                             split_terms(terms[..n].to_vec(), &[128, 128, 128, 128, 128, 128]);
