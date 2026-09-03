@@ -38,6 +38,7 @@ impl<F: Family> EngineMessage<F> {
     }
 }
 
+/// Deliveries retained while the ready queue is full.
 pub(super) struct EnginePending<F: Family>(VecDeque<EngineMessage<F>>);
 
 impl<F: Family> Default for EnginePending<F> {
@@ -72,10 +73,14 @@ impl<F: Family> Policy for EngineMessage<F> {
     type Overflow = EnginePending<F>;
 
     fn handle(overflow: &mut Self::Overflow, message: Self) {
-        if message.response_closed() {
-            return;
+        // Deliveries are retained until the actor has room. Produce requests
+        // are dropped so the serve backlog stays bounded by the ready queue,
+        // and the peer sees the closed response as an error.
+        if let Self::Deliver { response, .. } = &message
+            && !response.is_closed()
+        {
+            overflow.0.push_back(message);
         }
-        overflow.0.push_back(message);
     }
 }
 
@@ -127,5 +132,63 @@ impl<F: Family> Producer for Handler<F> {
             .sender
             .enqueue(EngineMessage::Produce { key, response });
         receiver
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_storage::mmr::{self, Location};
+    use commonware_utils::NZU64;
+
+    #[test]
+    fn handle_retains_open_deliveries_only() {
+        let mut overflow = EnginePending::<mmr::Family>::default();
+        let key = Request::Operations {
+            size: Location::new(10),
+            start: Location::new(0),
+            max_ops: NZU64!(1),
+        };
+
+        // An overflowed produce request is dropped and its requester sees the
+        // closed response.
+        let (response, mut produce) = oneshot::channel();
+        EngineMessage::handle(&mut overflow, EngineMessage::Produce { key, response });
+        assert!(matches!(
+            produce.try_recv(),
+            Err(oneshot::error::TryRecvError::Closed)
+        ));
+
+        // Deliveries are retained, and drain skips one whose requester left.
+        let (response, closed) = oneshot::channel();
+        EngineMessage::handle(
+            &mut overflow,
+            EngineMessage::Deliver {
+                key,
+                value: Bytes::new(),
+                response,
+            },
+        );
+        let (response, _open) = oneshot::channel();
+        EngineMessage::handle(
+            &mut overflow,
+            EngineMessage::Deliver {
+                key,
+                value: Bytes::from_static(b"open"),
+                response,
+            },
+        );
+        drop(closed);
+
+        let mut messages = Vec::new();
+        Overflow::drain(&mut overflow, |message| {
+            messages.push(message);
+            None
+        });
+        assert_eq!(messages.len(), 1);
+        assert!(matches!(
+            messages.pop(),
+            Some(EngineMessage::Deliver { value, .. }) if value == Bytes::from_static(b"open")
+        ));
     }
 }

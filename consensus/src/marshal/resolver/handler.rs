@@ -51,7 +51,7 @@ impl<D: Digest> Message<D> {
     }
 }
 
-/// Pending resolver handler messages retained after the mailbox fills.
+/// Deliveries retained while the ready queue is full.
 pub(crate) struct Pending<D: Digest>(VecDeque<Message<D>>);
 
 impl<D: Digest> Default for Pending<D> {
@@ -86,10 +86,14 @@ impl<D: Digest> Policy for Message<D> {
     type Overflow = Pending<D>;
 
     fn handle(overflow: &mut Self::Overflow, message: Self) {
-        if message.response_closed() {
-            return;
+        // Deliveries are retained until the actor has room. Produce requests
+        // are dropped so the serve backlog stays bounded by the ready queue,
+        // and the peer sees the closed response as an error.
+        if let Self::Deliver { response, .. } = &message
+            && !response.is_closed()
+        {
+            overflow.0.push_back(message);
         }
-        overflow.0.push_back(message);
     }
 }
 
@@ -511,50 +515,69 @@ mod tests {
         Hasher as _,
         sha256::{Digest as Sha256Digest, Sha256},
     };
+    use commonware_utils::vec::NonEmptyVec;
     use std::collections::BTreeSet;
 
     type D = Sha256Digest;
 
     #[test]
-    fn handler_drain_skips_closed_responses() {
+    fn handle_retains_open_deliveries_only() {
         let mut overflow = Pending::<D>::default();
+        let deliver = |height: u64, response| Message::Deliver {
+            delivery: Delivery {
+                key: Key::Finalized {
+                    height: Height::new(height),
+                },
+                subscribers: NonEmptyVec::new((
+                    Annotation::Finalized(Finalized::ByHeight {
+                        height: Height::new(height),
+                    }),
+                    tracing::Span::none(),
+                )),
+            },
+            value: Bytes::new(),
+            response,
+        };
 
-        let (closed_response, closed_receiver) = oneshot::channel();
+        // An overflowed produce request is dropped and its requester sees the
+        // closed response.
+        let (response, mut produce) = oneshot::channel();
         Message::handle(
             &mut overflow,
             Message::Produce {
                 key: Key::Finalized {
                     height: Height::new(1),
                 },
-                response: closed_response,
+                response,
             },
         );
-        drop(closed_receiver);
+        assert!(matches!(
+            produce.try_recv(),
+            Err(oneshot::error::TryRecvError::Closed)
+        ));
 
-        let (open_response, _open_receiver) = oneshot::channel();
-        Message::handle(
-            &mut overflow,
-            Message::Produce {
-                key: Key::Finalized {
-                    height: Height::new(2),
-                },
-                response: open_response,
-            },
-        );
+        // Deliveries are retained, and drain skips one whose requester left.
+        let (response, closed) = oneshot::channel();
+        Message::handle(&mut overflow, deliver(2, response));
+        let (response, _open) = oneshot::channel();
+        Message::handle(&mut overflow, deliver(3, response));
+        drop(closed);
 
         let mut messages = Vec::new();
         Overflow::drain(&mut overflow, |message| {
             messages.push(message);
             None
         });
-
         assert_eq!(messages.len(), 1);
         assert!(matches!(
             messages.pop(),
-            Some(Message::Produce {
-                key: Key::Finalized { height },
+            Some(Message::Deliver {
+                delivery: Delivery {
+                    key: Key::Finalized { height },
+                    ..
+                },
                 ..
-            }) if height == Height::new(2)
+            }) if height == Height::new(3)
         ));
     }
 

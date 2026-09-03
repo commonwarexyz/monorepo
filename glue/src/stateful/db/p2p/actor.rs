@@ -49,7 +49,8 @@ where
     /// Local database used to serve incoming requests when available.
     pub database: Option<Shared<DB>>,
 
-    /// Maximum size of resolver mailbox backlogs.
+    /// Maximum size of resolver mailbox backlogs. Peer requests that overflow
+    /// the mailbox are answered with an error rather than queued.
     pub mailbox_size: NonZeroUsize,
 
     /// Local node identity if available.

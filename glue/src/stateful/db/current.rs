@@ -715,8 +715,6 @@ mod open {
             },
         },
     };
-    use commonware_utils::Array;
-
     type VConfig<T, F, K, V, S> = VariableConfig<
         T,
         <Operation<F, unordered::Update<K, VariableEncoding<V>>> as Read>::Cfg,
@@ -732,7 +730,7 @@ mod open {
     where
         F: Graftable,
         E: Context + Spawner,
-        K: Array,
+        K: commonware_storage::qmdb::operation::Key,
         V: VariableValue + 'static,
         H: Hasher,
         T: commonware_storage::translator::Translator,
@@ -775,7 +773,7 @@ impl<F, E, K, V, H, T, const N: usize, S> ManagedDb<E>
 where
     F: Graftable,
     E: Context + Spawner,
-    K: Key + Array,
+    K: Key,
     V: value::VariableValue + 'static,
     H: Hasher,
     T: Translator,
@@ -1091,7 +1089,7 @@ impl<F, E, K, V, H, T, R, const N: usize, S> StateSyncDb<E, R>
 where
     F: Graftable,
     E: Context + Spawner,
-    K: Key + Array,
+    K: Key,
     V: value::VariableValue + 'static,
     H: Hasher,
     T: Translator,
@@ -1190,7 +1188,7 @@ mod tests {
         merkle::{full::Config as MerkleConfig, mmr},
         qmdb::current::{
             ordered::{fixed as ordered_fixed, variable as ordered_variable},
-            unordered::fixed,
+            unordered::{fixed, variable},
         },
         translator::TwoCap,
     };
@@ -1238,6 +1236,23 @@ mod tests {
         64,
         Sequential,
     >;
+
+    /// The variable-encoding wrapper accepts variable-length keys.
+    fn _assert_variable_db_accepts_variable_keys() {
+        fn managed<D: ManagedDb<deterministic::Context>>() {}
+        managed::<
+            variable::Db<
+                mmr::Family,
+                deterministic::Context,
+                Vec<u8>,
+                Digest,
+                Sha256,
+                TwoCap,
+                64,
+                Sequential,
+            >,
+        >();
+    }
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(101);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(11);

@@ -295,7 +295,7 @@ impl HandlerMessage {
     }
 }
 
-/// Pending resolver handler messages retained after the mailbox fills.
+/// Deliveries retained while the ready queue is full.
 #[derive(Default)]
 pub(crate) struct HandlerPending(VecDeque<HandlerMessage>);
 
@@ -325,10 +325,14 @@ impl Policy for HandlerMessage {
     type Overflow = HandlerPending;
 
     fn handle(overflow: &mut Self::Overflow, message: Self) {
-        if message.response_closed() {
-            return;
+        // Deliveries are retained until the actor has room. Produce requests
+        // are dropped so the serve backlog stays bounded by the ready queue,
+        // and the peer sees the closed response as an error.
+        if let Self::Deliver { response, .. } = &message
+            && !response.is_closed()
+        {
+            overflow.0.push_back(message);
         }
-        overflow.0.push_back(message);
     }
 }
 
@@ -501,38 +505,47 @@ mod tests {
     }
 
     #[test]
-    fn handler_drain_skips_closed_responses() {
+    fn handle_retains_open_deliveries_only() {
         let mut overflow = HandlerPending::default();
+        let deliver = |view: u64, response| HandlerMessage::Deliver {
+            span: Span::none(),
+            view: View::new(view),
+            data: Bytes::new(),
+            asks: NonEmptyVec::new(Ask::backfill()),
+            response,
+        };
 
-        let (closed_response, closed_receiver) = oneshot::channel();
+        // An overflowed produce request is dropped and its requester sees the
+        // closed response.
+        let (response, mut produce) = oneshot::channel();
         HandlerMessage::handle(
             &mut overflow,
             HandlerMessage::Produce {
                 view: View::new(1),
-                response: closed_response,
+                response,
             },
         );
-        drop(closed_receiver);
+        assert!(matches!(
+            produce.try_recv(),
+            Err(oneshot::error::TryRecvError::Closed)
+        ));
 
-        let (open_response, _open_receiver) = oneshot::channel();
-        HandlerMessage::handle(
-            &mut overflow,
-            HandlerMessage::Produce {
-                view: View::new(2),
-                response: open_response,
-            },
-        );
+        // Deliveries are retained, and drain skips one whose requester left.
+        let (response, closed) = oneshot::channel();
+        HandlerMessage::handle(&mut overflow, deliver(2, response));
+        let (response, _open) = oneshot::channel();
+        HandlerMessage::handle(&mut overflow, deliver(3, response));
+        drop(closed);
 
         let mut messages = Vec::new();
         Overflow::drain(&mut overflow, |message| {
             messages.push(message);
             None
         });
-
         assert_eq!(messages.len(), 1);
         assert!(matches!(
             messages.pop(),
-            Some(HandlerMessage::Produce { view, .. }) if view == View::new(2)
+            Some(HandlerMessage::Deliver { view, .. }) if view == View::new(3)
         ));
     }
 

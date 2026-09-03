@@ -1323,6 +1323,23 @@ mod tests {
     }
 
     #[test_traced]
+    #[should_panic(expected = "must be replayed before append")]
+    fn test_segmented_fixed_gates_older_section_after_reopen() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context);
+            seed(&context, &cfg, 1..=3).await;
+
+            // Every nonempty retained section is append-locked, not only the oldest or the
+            // newest.
+            let journal = Journal::<_, u64>::init(context.child("reopen"), cfg)
+                .await
+                .expect("failed to reopen");
+            journal.append(2, &2).await.unwrap();
+        });
+    }
+
+    #[test_traced]
     fn test_segmented_fixed_floor_preflight_reads_boundary_only() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {

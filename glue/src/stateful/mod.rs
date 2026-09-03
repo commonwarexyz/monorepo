@@ -81,7 +81,9 @@
 //! to the nearest known ancestor or the finalized tip,
 //! then replays forward via [`Application::apply`] to fill the gap. Each
 //! replayed block is inserted into the pending map immediately so that
-//! partial progress survives timeouts.
+//! partial progress survives timeouts. Replayed state is reusable as parent
+//! state but is never a verification verdict: verifying a replayed block
+//! still runs [`Application::verify`].
 //!
 //! # Compatibility
 //!
@@ -283,15 +285,18 @@ where
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> impl Future<Output = Option<<Self::Databases as DatabaseSet<E>>::Merkleized>> + Send;
 
-    /// Apply a previously certified block to reconstruct its merkleized state.
+    /// Apply a block to reconstruct its merkleized state.
     ///
-    /// Called by the wrapper during lazy recovery when pending state for
-    /// an ancestor block is missing (e.g. after a restart). The block is
-    /// known-good (it was previously certified), so the implementation
-    /// should unconditionally execute the block's state transitions.
+    /// Called when the wrapper lacks state for `block`: during lazy recovery
+    /// for a missing ancestor (e.g. after a restart), or during finalization
+    /// for an uncached winner. The implementation should unconditionally
+    /// execute the block's state transitions.
     ///
     /// The returned merkleized state must match what
-    /// [`verify`](Self::verify) accepted for `block`. The wrapper commits this
+    /// [`verify`](Self::verify) accepts for `block`. The wrapper checks it
+    /// against the block's commitments before caching it and reuses it as
+    /// parent state, but never as a verdict: a request to verify the replayed
+    /// block still runs [`verify`](Self::verify). The wrapper commits this
     /// replay result during finalization and cannot re-check block-specific
     /// commitments generically.
     ///
@@ -301,8 +306,11 @@ where
     ///
     /// # Panics
     ///
-    /// Implementations should panic if execution fails, as this indicates
-    /// data corruption or non-determinism.
+    /// Implementations should panic on data corruption or non-determinism,
+    /// but not on an application-invalid block: under deferred voting with
+    /// optimistic validation a replayed ancestor may never have passed
+    /// [`verify`](Self::verify). Return the state its execution yields and
+    /// let the commitment check reject the ancestry.
     fn apply(
         &mut self,
         context: (E, Self::Context),

@@ -1279,6 +1279,90 @@ mod tests {
     }
 
     #[test]
+    fn replayed_parent_is_not_a_verdict() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let genesis = TestBlock::new(0, 0);
+            let parent = TestBlock::child(&genesis, 1);
+            let child = TestBlock::child(&parent, 2);
+            let mut signing = context.child("signing");
+            let scheme =
+                scheme_mocks::fixture(&mut signing, b"replayed-parent", 1).schemes[0].clone();
+            let marshal = fixtures::marshal_fixture_with_finalized_block(
+                context.child("marshal"),
+                "replayed-parent",
+                scheme,
+                &genesis,
+                NZUsize!(1),
+                true,
+            )
+            .await;
+            let apply_calls = Arc::new(AtomicUsize::new(0));
+            let verify_calls = Arc::new(AtomicUsize::new(0));
+            let app = ReplayGatedApp {
+                gates: Arc::default(),
+                verify_gate: Arc::default(),
+                finalized_gate: Arc::default(),
+                gate_height: parent.height(),
+                apply_calls: apply_calls.clone(),
+                capture_calls: Arc::new(AtomicUsize::new(0)),
+                verify_calls: verify_calls.clone(),
+                applied_finalizations: Arc::default(),
+            };
+            let processor = Processor::new(
+                app,
+                test_databases(),
+                anchor(0, 0),
+                StatefulMetrics::new(&context),
+                None,
+            );
+            let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
+            let mut mailbox = Mailbox::new(sender);
+            let processing = Processing {
+                context: ContextCell::new(context.child("processing")),
+                mailbox: receiver,
+                provider: (),
+                marshal: marshal.mailbox,
+                processor,
+                deferred_verifications: Vec::new(),
+                skip_finalized_until: None,
+            };
+            let actor = context.child("loop").spawn(move |_| processing.start());
+
+            // Verifying the child replays its missing parent through apply.
+            assert!(
+                mailbox
+                    .verify(
+                        (context.child("verify_child"), child.context()),
+                        ancestry::from_iter([Arc::new(child), Arc::new(parent.clone())]),
+                    )
+                    .await
+            );
+            assert_eq!(apply_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(verify_calls.load(Ordering::SeqCst), 1);
+
+            // Replayed state is reusable parent state, not a verdict: verifying the
+            // parent asks the application once and then settles from the cache.
+            for label in ["verify_parent", "verify_parent_again"] {
+                assert!(
+                    mailbox
+                        .verify(
+                            (context.child(label), parent.context()),
+                            ancestry::from_iter([
+                                Arc::new(parent.clone()),
+                                Arc::new(genesis.clone())
+                            ]),
+                        )
+                        .await
+                );
+            }
+            assert_eq!(apply_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(verify_calls.load(Ordering::SeqCst), 2);
+            actor.abort();
+            drop(marshal.guards);
+        });
+    }
+
+    #[test]
     fn conflicting_processed_block_is_rejected() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (mut mailbox, control, _marshal, actor) =
