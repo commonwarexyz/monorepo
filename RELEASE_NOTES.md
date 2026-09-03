@@ -537,10 +537,12 @@ replayed block still runs `Application::verify` ([#4666]).
 `deployer aws create` waits for EC2 capacity instead of failing, rescanning
 eligible availability zones every 15 seconds and launching one instance at a
 time per region ([#4543]). Deployed instances no longer receive automatic APT
-upgrades ([#4597]). Deployment tags and instance names must match
-`[A-Za-z0-9_-]+`, instance names must be unique ignoring case and must not be
-`monitoring`, and violations are rejected before any AWS resource is created
-([#4593]).
+upgrades ([#4597]). SDK retries for EC2 and S3 requests are bounded at 256
+attempts (over two hours of backoff) instead of unlimited, which removes a
+per-request stall in binaries built against `aws-smithy-runtime` 1.12.1 or newer
+([#4670]). Deployment tags and instance names must match `[A-Za-z0-9_-]+`,
+instance names must be unique ignoring case and must not be `monitoring`, and
+violations are rejected before any AWS resource is created ([#4593]).
 
 [#3352]: https://github.com/commonwarexyz/monorepo/pull/3352
 [#3416]: https://github.com/commonwarexyz/monorepo/pull/3416
@@ -648,6 +650,7 @@ upgrades ([#4597]). Deployment tags and instance names must match
 [#4655]: https://github.com/commonwarexyz/monorepo/pull/4655
 [#4658]: https://github.com/commonwarexyz/monorepo/pull/4658
 [#4666]: https://github.com/commonwarexyz/monorepo/pull/4666
+[#4670]: https://github.com/commonwarexyz/monorepo/pull/4670
 
 ## v2026.7.1
 
