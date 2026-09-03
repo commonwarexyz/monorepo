@@ -73,14 +73,18 @@ impl<F: Family> Policy for EngineMessage<F> {
     type Overflow = EnginePending<F>;
 
     fn handle(overflow: &mut Self::Overflow, message: Self) {
-        // Deliveries are retained until the actor has room. Produce requests
-        // are dropped so the serve backlog stays bounded by the ready queue,
-        // and the peer sees the closed response as an error.
-        if let Self::Deliver { response, .. } = &message
-            && !response.is_closed()
-        {
-            overflow.0.push_back(message);
+        // Drop produce requests so the serve backlog stays bounded by the ready
+        // queue. We prefer handling our own responses over serving peers, who can
+        // ask a less loaded peer instead.
+        if matches!(message, Self::Produce { .. }) {
+            return;
         }
+
+        // Retain deliveries that still have a waiting requester.
+        if message.response_closed() {
+            return;
+        }
+        overflow.0.push_back(message);
     }
 }
 
