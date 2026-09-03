@@ -70,7 +70,7 @@ layer, or asset-adapter implementation.
 
 ## Benchmarks
 
-The benchmark matrix uses one adaptive pool with eight workers and selects one live-account
+The benchmark matrix uses one adaptive pool with 16 workers and selects one live-account
 profile per fresh process. The default profile set is a smaller developer matrix with six
 profiles, `0` through `5`. The blog's measured matrix needs `RUSTFLAGS="--cfg full_bench"` and
 has seven profiles: `0` through `3` sweep the live-account count from 1,024 to one million with
