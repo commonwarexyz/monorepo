@@ -210,6 +210,7 @@ impl Application<deterministic::Context> for CorrectApp {
     type Context = Ctx;
     type Block = Block;
     type Databases = Databases;
+    type Captured = ();
     type Provider = ();
     type Input = ();
 
@@ -261,10 +262,20 @@ impl Application<deterministic::Context> for CorrectApp {
         execute(block.height(), CORRECT_BUMP, batches).await
     }
 
+    async fn capture(
+        &mut self,
+        _context: (deterministic::Context, Self::Context),
+        _block: &Self::Block,
+        _batches: &MerkleizedBatches,
+        _readers: Readers,
+    ) {
+    }
+
     async fn finalized(
         &mut self,
         _context: (deterministic::Context, Self::Context),
         block: &Self::Block,
+        _captured: Self::Captured,
         readers: Readers,
     ) {
         // The reader exposes the set's current root, which is this block's root
@@ -377,6 +388,7 @@ impl Application<deterministic::Context> for FaultyApp {
     type Context = Ctx;
     type Block = Block;
     type Databases = Databases;
+    type Captured = <CorrectApp as Application<deterministic::Context>>::Captured;
     type Provider = ();
     type Input = ();
 
@@ -440,12 +452,25 @@ impl Application<deterministic::Context> for FaultyApp {
         self.inner.apply(context, block, batches).await
     }
 
+    async fn capture(
+        &mut self,
+        context: (deterministic::Context, Self::Context),
+        block: &Self::Block,
+        batches: &MerkleizedBatches,
+        readers: Readers,
+    ) -> Self::Captured {
+        self.inner.capture(context, block, batches, readers).await
+    }
+
     async fn finalized(
         &mut self,
         context: (deterministic::Context, Self::Context),
         block: &Self::Block,
+        captured: Self::Captured,
         readers: Readers,
     ) {
-        self.inner.finalized(context, block, readers).await;
+        self.inner
+            .finalized(context, block, captured, readers)
+            .await;
     }
 }
