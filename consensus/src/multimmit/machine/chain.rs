@@ -725,11 +725,17 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         self.chains[index].certified.retain(|height, certified| {
             *height == self.genesis[index].height() || *height > retired || certified.block == block
         });
+        // A vote reports positions from the leader's anchor, and a leader anchors at the newest
+        // certificate it held when it proposed. Certificates keep arriving while the proposal
+        // travels, so a voter's own certified floor commonly passes that anchor before it votes.
+        // Choices at or below the floor add no availability, but they are exactly the record a
+        // vote needs to endorse the leader's payloads, so keep one pipelining depth of them.
+        let retained = Height::new(retired.get().saturating_sub(self.pipeline_depth));
         self.chains[index]
             .local_da_votes
-            .retain(|height, _| *height > retired);
-        // Retirement only drops choices at or below the new floor, so the surviving prefix stays
-        // contiguous; raising the cursor to the floor keeps it a valid lower bound.
+            .retain(|height, _| *height > retained);
+        // Retirement only drops choices below the retained window, so the prefix above the new
+        // floor stays contiguous; raising the cursor to the floor keeps it a valid lower bound.
         self.chains[index].da_voted_run = self.chains[index].da_voted_run.max(retired);
         self.certificate_candidates.retain(|candidate, _| {
             candidate.chain() != block.chain() || candidate.height() > retired
@@ -762,10 +768,11 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
     /// Routes a chain's current durable DA choices above the anchor to its validator plane so the
     /// plane's eligibility read-copy stays a lower-bound mirror of central's durable record.
     fn emit_validator_chosen(&mut self, chain: usize) {
+        let retired = self.chains[chain].data_retired_through;
         let choices = self.chains[chain]
             .local_da_votes
-            .values()
-            .cloned()
+            .range(Height::new(retired.get().saturating_add(1))..)
+            .map(|(_, choice)| choice.clone())
             .collect();
         self.capabilities.push(ChainEffect::ValidatorChosen {
             chain: ChainId::new(chain as u32),

@@ -4523,6 +4523,72 @@ fn replayable_publication_is_exposed_before_its_obligation_barrier() {
 }
 
 #[test]
+fn da_choices_below_a_newer_certificate_still_endorse_proposed_positions() {
+    // Pipelining depth 2: the retained window below the certified floor is two heights.
+    let profile = profile_for(Role::Validator(Participant::new(0)), 6, 2);
+    let mut chain =
+        crate::multimmit::machine::chain::ChainState::<MinPk, Digest>::new::<Sha256>(&profile);
+    let protocol = profile.protocol();
+    let genesis = protocol.genesis().tips()[0];
+    let mut parent = genesis.digest();
+    let mut headers = Vec::new();
+    for height in 1..=3u64 {
+        let header = TransactionBlockHeader::new(
+            protocol.epoch(),
+            ChainId::new(0),
+            Height::new(height),
+            parent,
+            digest(format!("body {height}").as_bytes()),
+        )
+        .unwrap();
+        parent = header.digest::<Sha256>();
+        headers.push(header);
+    }
+    chain
+        .reconcile_da_choices::<Sha256>(headers.clone())
+        .unwrap();
+
+    // A certificate for height 3 retires those heights as availability work. A leader that held
+    // only the height-1 certificate when it proposed still names heights 2 and 3 as payloads,
+    // and this voter DA-voted both, so its vote must endorse position 2.
+    chain
+        .compact_certified::<Sha256>(
+            &symbolic_da_certificate(headers[2].clone(), 0),
+            Height::new(3),
+        )
+        .unwrap();
+    let depth = protocol.codec_config().pipeline_depth();
+    let proposals = protocol
+        .genesis()
+        .tips()
+        .iter()
+        .map(|tip| {
+            if tip.chain() == ChainId::new(0) {
+                ChainProposal::new(
+                    tip.chain(),
+                    Anchor::Certificate(symbolic_da_certificate(headers[0].clone(), 1)),
+                    vec![headers[1].body_digest(), headers[2].body_digest()],
+                    depth,
+                )
+            } else {
+                ChainProposal::new(tip.chain(), Anchor::Tip(*tip), Vec::new(), depth)
+            }
+            .unwrap()
+        })
+        .collect();
+    let leader = LeaderBlock::new(
+        Round::new(protocol.epoch(), View::new(1)),
+        protocol.genesis().vqc(),
+        genesis_tip_history(protocol),
+        proposals,
+        protocol.codec_config(),
+    )
+    .unwrap();
+    let body = chain.vote_body::<Sha256>(&profile, &leader).unwrap();
+    assert_eq!(body.positions()[0], Position::new(2));
+}
+
+#[test]
 fn da_certificate_atomically_replaces_the_block_and_vote_publications() {
     let role = Role::Validator(Participant::new(0));
     let (mut machine, mut step) = start_profile(profile_for(role, 6, 2));
