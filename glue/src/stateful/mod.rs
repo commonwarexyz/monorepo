@@ -81,9 +81,10 @@
 //! to the nearest known ancestor or the finalized tip,
 //! then replays forward via [`Application::apply`] to fill the gap. Each
 //! replayed block is inserted into the pending map immediately so that
-//! partial progress survives timeouts. Replayed state is reusable as parent
-//! state but is never a verification verdict: verifying a replayed block
-//! still runs [`Application::verify`].
+//! partial progress survives timeouts. Consensus may build on a block before
+//! it is certified, so a replayed ancestor is not guaranteed to be valid.
+//! Replayed state is reusable as parent state but is never a verification
+//! verdict: verifying a replayed block still runs [`Application::verify`].
 //!
 //! # Compatibility
 //!
@@ -300,10 +301,11 @@ where
     /// replay result during finalization and cannot re-check block-specific
     /// commitments generically.
     ///
-    /// Return [`None`] if the block cannot be executed. Under optimistic
-    /// validation a replayed ancestor may not have passed
-    /// [`verify`](Self::verify), and the wrapper rejects the ancestry that
-    /// depends on it. A finalized block always executes.
+    /// Return [`None`] if the block cannot be executed. Consensus may ask the
+    /// wrapper to verify or build on a block before its ancestors are certified,
+    /// so a replayed ancestor is not guaranteed to have passed
+    /// [`verify`](Self::verify) anywhere. The wrapper then rejects the ancestry
+    /// that depends on it. A finalized block always executes.
     ///
     /// This future may be cancelled if its originating request is dropped, or
     /// cancelled and retried before finalization or pruning. Cancellation and

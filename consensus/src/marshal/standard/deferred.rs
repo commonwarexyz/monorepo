@@ -125,9 +125,10 @@ use tracing::{Instrument as _, debug, info_span};
 /// - Parent digest matches the consensus context's expected parent
 /// - Block height is exactly one greater than the parent's height
 ///
-/// Verifying only the immediate parent is sufficient since the parent itself must have
-/// been notarized by consensus, which guarantees a quorum verified its context. This means
-/// the entire ancestry chain back to genesis is transitively validated.
+/// Verifying only the immediate parent is sufficient since the parent was either notarized by
+/// consensus, whose honest voters verified its context, or verified locally before this
+/// participant voted for it (optimistic validation). Either way the entire ancestry chain back
+/// to genesis is transitively validated.
 ///
 /// Applications do not need to re-implement these checks in their own verification logic.
 ///

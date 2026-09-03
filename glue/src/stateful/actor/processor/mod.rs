@@ -196,8 +196,6 @@ where
     round: Round,
     parent: PendingDigest<A, E>,
     merkleized: PendingBatches<A, E>,
-    /// Whether the application produced this state through propose or verify
-    /// rather than replay.
     verified: bool,
 }
 
@@ -1088,8 +1086,8 @@ where
     ) -> bool {
         let mut state = self.state.lock();
         if let Some(existing) = state.pending.get_mut(&digest) {
-            debug_assert_eq!(existing.parent, parent, "pending parent changed for digest");
-            debug_assert_eq!(existing.round, round, "pending round changed for digest");
+            assert_eq!(existing.parent, parent, "pending parent changed for digest");
+            assert_eq!(existing.round, round, "pending round changed for digest");
 
             // Verifying a replayed block upgrades its entry to a verdict.
             existing.verified |= verified;
