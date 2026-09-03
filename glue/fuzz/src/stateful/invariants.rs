@@ -45,8 +45,11 @@ struct Records {
     verdicts: BTreeMap<Digest, Verdicts>,
     /// Restarts this engine completed.
     restarts: usize,
+    /// Every height applied so far, in order, so a subscriber that arrives
+    /// after the fact still sees what it missed.
+    applied: Vec<(Height, View)>,
     /// Subscribers woken when a height is applied and committed.
-    applied: Vec<mpsc::UnboundedSender<(Height, View)>>,
+    waiters: Vec<mpsc::UnboundedSender<(Height, View)>>,
 }
 
 /// Per-engine observations. Cloning shares one record set, so it survives a
@@ -76,15 +79,25 @@ impl EngineObservations {
     pub(super) fn record_state(&self, height: Height, view: View, root: Digest) {
         let mut records = self.0.lock();
         records.states.entry(height).or_default().insert(root);
+        records.applied.push((height, view));
         records
-            .applied
+            .waiters
             .retain(|waiter| waiter.send((height, view)).is_ok());
     }
 
     /// Subscribe to this engine's applied heights.
+    ///
+    /// The heights already applied are replayed into the new subscriber, so a
+    /// waiter installed after the engine started still counts them. Without
+    /// that, a run could satisfy its height requirement during startup and then
+    /// wait out the whole timeout.
     pub(super) fn subscribe_applied(&self) -> mpsc::UnboundedReceiver<(Height, View)> {
         let (sender, receiver) = mpsc::unbounded_channel();
-        self.0.lock().applied.push(sender);
+        let mut records = self.0.lock();
+        for applied in &records.applied {
+            let _ = sender.send(*applied);
+        }
+        records.waiters.push(sender);
         receiver
     }
 
@@ -505,6 +518,18 @@ mod tests {
         node.record_state(Height::new(2), View::new(2), digest(b"root"));
         node.record_state(Height::new(2), View::new(2), digest(b"other"));
         check_state_agreement(&[(0, &node)]);
+    }
+
+    /// A waiter installed after the fact still sees what was already applied.
+    #[test]
+    fn subscription_replays_applied_heights() {
+        let node = EngineObservations::new();
+        node.record_state(Height::new(1), View::new(1), digest(b"a"));
+        node.record_state(Height::new(2), View::new(2), digest(b"b"));
+        let mut applied = node.subscribe_applied();
+        assert_eq!(applied.try_recv(), Ok((Height::new(1), View::new(1))));
+        assert_eq!(applied.try_recv(), Ok((Height::new(2), View::new(2))));
+        assert!(applied.try_recv().is_err());
     }
 
     #[test]
