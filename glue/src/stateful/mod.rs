@@ -238,8 +238,10 @@ where
 
     /// Verify a block received from a peer, relative to its ancestry.
     ///
-    /// Called before voting. The implementation should execute the block
-    /// against the provided batches and merkleize them.
+    /// Called before the node votes to finalize the block. Under deferred
+    /// verification the notarize vote may already have been cast. The
+    /// implementation should execute the block against the provided batches
+    /// and merkleize them.
     ///
     /// This future should not resolve until the implementation can produce a
     /// stable verdict. Return [`None`] only when the block is permanently

@@ -538,13 +538,22 @@ where
                 // the only proposal we can broadcast for this round.
                 //
                 // The recovered block is safe to reuse only if its embedded
-                // context matches the context simplex just recovered. Otherwise the
-                // cached block was built against a different parent and cannot be
-                // broadcast under the current header, so drop the receiver
-                // and let the voter nullify the view via timeout.
+                // context matches the context simplex just recovered, or if it
+                // is the parent itself: a boundary re-proposal stores the parent
+                // under its original context, whose round is the parent's own.
+                // Otherwise the cached block was built against a different
+                // parent and cannot be broadcast under the current header, so
+                // drop the receiver and let the voter nullify the view via
+                // timeout.
+                let last_in_epoch = epocher
+                    .last(consensus_context.epoch())
+                    .expect("current epoch should exist");
                 if let Some(block) = marshal.get_verified(consensus_context.round).await {
                     let block_context = block.context();
-                    if block_context != consensus_context {
+                    let digest = block.digest();
+                    let reproposal =
+                        digest == consensus_context.parent.1 && block.height() == last_in_epoch;
+                    if !reproposal && block_context != consensus_context {
                         debug!(
                             round = ?consensus_context.round,
                             ?consensus_context,
@@ -557,10 +566,10 @@ where
                     // it through the same handshake as a fresh proposal. The
                     // relay-time persist deduplicates against the pre-crash
                     // write, with the handle covering the original.
-                    let digest = block.digest();
                     debug!(
                         round = ?consensus_context.round,
                         ?digest,
+                        reproposal,
                         "reusing verified block from marshal on leader recovery"
                     );
                     gates
@@ -614,9 +623,6 @@ where
                 // Special case: If the parent block is the last block in the epoch,
                 // re-propose it as to not produce any blocks that will be cut out
                 // by the epoch transition.
-                let last_in_epoch = epocher
-                    .last(consensus_context.epoch())
-                    .expect("current epoch should exist");
                 if parent.height() == last_in_epoch {
                     let digest = parent.digest();
                     gates
@@ -760,8 +766,9 @@ where
                 // - Re-proposal detection via `digest == context.parent.1`.
                 //
                 // Re-proposals return early and skip normal parent/height checks
-                // because they were already verified when originally proposed and
-                // parent-child checks would fail by construction when parent == block.
+                // because consensus settles their validity when certifying the view
+                // that first carried the block, and parent-child checks would fail by
+                // construction when parent == block.
                 let Some(decision) = precheck_epoch_and_reproposal(
                     &marshaled.epocher,
                     &marshal,
@@ -1523,6 +1530,99 @@ mod tests {
         });
     }
 
+    /// Regression: a boundary re-proposal stores the parent block itself at
+    /// the re-proposal round, under the parent's original embedded context.
+    /// A leader that crashes after that relay broadcast must recognize the
+    /// cached parent as the re-proposal on restart and propose it again,
+    /// rather than skipping the round because its embedded context names an
+    /// older round.
+    #[test_traced("WARN")]
+    fn test_propose_reuses_reproposed_boundary_block_on_restart() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
+
+            let me = participants[0].clone();
+            let setup = StandardHarness::setup_validator(
+                context.child("validator").with_attribute("index", 0),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
+
+            // Seed the boundary block at the re-proposal round, where the
+            // pre-crash relay broadcast of the re-proposal persisted it.
+            let boundary_height = Height::new(BLOCKS_PER_EPOCH.get() - 1);
+            let boundary_round = Round::new(Epoch::zero(), View::new(boundary_height.get()));
+            let boundary_block = B::new::<Sha256>(
+                Ctx {
+                    round: boundary_round,
+                    leader: default_leader(),
+                    parent: (View::zero(), genesis.digest()),
+                },
+                genesis.digest(),
+                boundary_height,
+                1900,
+            );
+            let boundary_digest = boundary_block.digest();
+            let round = Round::new(Epoch::zero(), View::new(boundary_height.get() + 1));
+            assert!(marshal.verified(round, boundary_block).await);
+
+            let ctx = Ctx {
+                round,
+                leader: me.clone(),
+                parent: (View::new(boundary_height.get()), boundary_digest),
+            };
+
+            // The app cannot build and its verification never completes, so
+            // the assertions below hold only if the cached parent is
+            // re-proposed as-is.
+            let (mock_app, verify_started, _release_verify): (GatedVerifyingApp<B, S>, _, _) =
+                GatedVerifyingApp::new();
+            let mut marshaled = Deferred::new(
+                context.child("deferred"),
+                mock_app,
+                marshal.clone(),
+                FixedEpocher::new(BLOCKS_PER_EPOCH),
+            );
+
+            let digest_rx = marshaled.propose(ctx).await;
+            let digest = digest_rx.await.expect("propose must return a digest");
+            assert_eq!(
+                digest, boundary_digest,
+                "propose must re-propose the boundary block marshal already persisted for this round"
+            );
+
+            let _ = marshaled.broadcast(digest, Plan::Propose { round });
+            let certify_rx = marshaled.certify(round, digest).await;
+            select! {
+                result = certify_rx => {
+                    assert!(
+                        result.expect("certify result missing"),
+                        "re-proposed boundary block must certify through the relay handshake"
+                    );
+                },
+                _ = verify_started => {
+                    panic!("certifying a re-proposed boundary block must not run app verification");
+                },
+            }
+        });
+    }
+
     /// Regression: if a pre-crash leader persisted a verified block for a
     /// round but the simplex `Notarize` never reached the journal, replay
     /// can recover a `consensus_context` whose parent differs from the one
@@ -1879,6 +1979,37 @@ mod tests {
                 "optimistic verify accepts an available block with a matching context"
             );
 
+            let certify_rx = fixture
+                .marshaled
+                .certify(fixture.round, fixture.digest)
+                .await;
+            select! {
+                result = certify_rx => {
+                    assert!(
+                        !result.expect("certify result missing"),
+                        "certify must propagate the application rejection"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("certify should resolve promptly");
+                },
+            }
+        });
+    }
+
+    /// Without a registered gate (never verified locally, or the gate was lost
+    /// to a restart), certification runs the application against the block's
+    /// embedded context. A live rejection there must reach consensus too.
+    #[test_traced("WARN")]
+    fn test_certify_without_prior_verify_honors_application_rejection() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let mut fixture =
+                equivocation_fixture(&mut context, MockVerifyingApp::with_verify_result(false))
+                    .await;
+
+            // No prior verify, so no gate exists and certify falls through to
+            // the embedded-context path.
             let certify_rx = fixture
                 .marshaled
                 .certify(fixture.round, fixture.digest)

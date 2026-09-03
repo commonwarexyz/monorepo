@@ -159,24 +159,26 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// A channel sent once the block sync has started.
         ack: oneshot::Sender<Handle<()>>,
     },
-    /// A notification that a block has been verified by the application.
+    /// A notification that a block reached the verify stage. Persisting it
+    /// does not imply application validity.
     Verified {
         /// The span carried with this request.
         span: Span,
         /// The round in which the block was verified.
         round: Round,
-        /// The verified block.
+        /// The block.
         block: Arc<V::Block>,
         /// A channel sent once the block sync has started.
         ack: oneshot::Sender<Handle<()>>,
     },
-    /// A notification that a block has been certified by the application.
+    /// A notification that a block reached the certify stage. Persisting it
+    /// does not imply application validity.
     Certified {
         /// The span carried with this request.
         span: Span,
         /// The round in which the block was certified.
         round: Round,
-        /// The certified block.
+        /// The block.
         block: Arc<V::Block>,
         /// A channel sent once the block and notarization syncs have started; the
         /// handle covers both.
@@ -912,7 +914,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         });
     }
 
-    /// Notifies the actor that a block has been verified.
+    /// Notifies the actor that a block reached the verify stage.
     ///
     /// Returns after the block is durably persisted. Mirrors [Self::certified]: the
     /// durable sync is awaited on the caller's task (off the actor), so the actor
@@ -927,7 +929,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         handle.durable(round, "verified").await
     }
 
-    /// Notifies the actor that a block has been certified.
+    /// Notifies the actor that a block reached the certify stage.
     ///
     /// Returns after the block is durably persisted.
     #[must_use = "callers must consider block durability before proceeding"]

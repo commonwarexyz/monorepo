@@ -730,14 +730,22 @@ where
                 // block is the only proposal we can broadcast for this round.
                 //
                 // The recovered block is safe to reuse only if its embedded
-                // context matches the context simplex just recovered.
+                // context matches the context simplex just recovered, or if it
+                // is the parent itself: a boundary re-proposal stores the parent
+                // under its original context, whose round is the parent's own.
                 // Otherwise the cached block was built against a different
                 // parent and cannot be broadcast under the current header, so
                 // drop the receiver and let the voter nullify the view via
                 // timeout.
+                let last_in_epoch = epocher
+                    .last(consensus_context.epoch())
+                    .expect("current epoch should exist");
                 if let Some(block) = marshal.get_verified(consensus_context.round).await {
                     let block_context = block.context();
-                    if block_context != consensus_context {
+                    let commitment = block.commitment();
+                    let reproposal =
+                        commitment == consensus_context.parent.1 && block.height() == last_in_epoch;
+                    if !reproposal && block_context != consensus_context {
                         debug!(
                             round = ?consensus_context.round,
                             ?consensus_context,
@@ -750,11 +758,11 @@ where
                     // its shards through the same handshake as a fresh
                     // proposal. The relay-time persist deduplicates against the
                     // pre-crash write, with the handle covering the original.
-                    let commitment = block.commitment();
                     let round = consensus_context.round;
                     debug!(
                         ?round,
                         ?commitment,
+                        reproposal,
                         "reusing verified block from marshal on leader recovery"
                     );
                     gates
@@ -802,9 +810,6 @@ where
                 // Special case: If the parent block is the last block in the epoch,
                 // re-propose it as to not produce any blocks that will be cut out
                 // by the epoch transition.
-                let last_in_epoch = epocher
-                    .last(consensus_context.epoch())
-                    .expect("current epoch should exist");
                 if parent.height() == last_in_epoch {
                     let commitment = parent.commitment();
                     let round = consensus_context.round;
@@ -947,7 +952,7 @@ where
         // original proposal view.
         //
         // Re-proposals also skip shard-validity and deferred verification because:
-        // 1. The block was already verified when originally proposed
+        // 1. Consensus settles the block's validity when certifying the view that first carried it
         // 2. The parent-child height check would fail (parent IS the block)
         // 3. Waiting for shards could stall if the leader doesn't rebroadcast
         if is_reproposal {
