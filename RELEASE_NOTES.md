@@ -261,6 +261,10 @@ fixed on the next open, and `init_cache_size` was removed from the Immutable
 config ([#4644]). Batch chains whose committed ancestors were dropped before a
 descendant was merkleized now apply with the correct root ([#4402]), and
 detached merkleize workers no longer panic when a caller cancels ([#4461]).
+Applying a merkleized batch to an in-memory `Mmr` or `Mmb` pruned past a leaf
+the batch overwrites now installs the overwrite into the pinned node instead of
+panicking or leaving a stale root, so prune and apply commute for merkleized
+batches ([#4658]).
 
 ### QMDB
 
@@ -479,15 +483,23 @@ new `with_prefix` ([#4131], [#4364]).
 
 The stateful wrapper's traits changed shape. On `Application`, `InputProvider`
 is `Provider` and must be `Clone`, `type Input` is required, `propose` and
-`verify` take `impl Ancestry<Self::Block>` ([#4131]), `Context` must be `Clone`,
-and `finalized` receives read-only `Readers` ([#4399]). On `ManagedDb` and
-`DatabaseSet`, `Merkleized` must be `Clone`, `new_batch` is synchronous over a
-`BatchContext`, and `DatabaseSet` gained `Readers` and `readers` ([#4399]),
-while `finalize(batch)` split into `apply(batch)` and `finalize()`, the latter
-returning a durability handle (a `Barrier` on the set) ([#4384], [#4462]).
-`Config::input_provider` is `provider` ([#4131]), `Config::marshal` is
-`(marshal::core::Mailbox, Floor)` and `PruneConfig` lost `max_pending_acks`,
-which glue now reads from the mailbox ([#4384]), and
+`verify` take `impl Ancestry<Self::Block>` ([#4131]), and `Context` must be
+`Clone` ([#4399]). Finalization is a two-stage handoff: a required `type
+Captured` and `capture(context, block, &batches, readers)` hook run immediately
+before a block's batches are applied, and `finalized`, now required and taking
+the captured value plus read-only `Readers`, runs after them ([#4399], [#4641]).
+Neither hook runs for blocks already reflected in the database set (the genesis
+block on a fresh boot, blocks reconciled at startup, and blocks covered by state
+sync), so hook heights may skip after state sync, and both run serially on the
+actor's mailbox path, so `capture` must stay cheap.
+
+On `ManagedDb` and `DatabaseSet`, `Merkleized` must be `Clone`, `new_batch` is
+synchronous over a `BatchContext`, and `DatabaseSet` gained `Readers` and
+`readers` ([#4399]), while `finalize(batch)` split into `apply(batch)` and
+`finalize()`, the latter returning a durability handle (a `Barrier` on the set)
+([#4384], [#4462]). `Config::input_provider` is `provider` ([#4131]),
+`Config::marshal` is `(marshal::core::Mailbox, Floor)` and `PruneConfig` lost
+`max_pending_acks`, which glue now reads from the mailbox ([#4384]), and
 `SyncEngineConfig::apply_batch_size` is `NonZeroU64` ([#4360]).
 
 `stateful::db::Shared<DB>` is a struct rather than an
@@ -614,12 +626,14 @@ upgrades ([#4597]). Deployment tags and instance names must match
 [#4625]: https://github.com/commonwarexyz/monorepo/pull/4625
 [#4627]: https://github.com/commonwarexyz/monorepo/pull/4627
 [#4628]: https://github.com/commonwarexyz/monorepo/pull/4628
+[#4641]: https://github.com/commonwarexyz/monorepo/pull/4641
 [#4643]: https://github.com/commonwarexyz/monorepo/pull/4643
 [#4644]: https://github.com/commonwarexyz/monorepo/pull/4644
 [#4645]: https://github.com/commonwarexyz/monorepo/pull/4645
 [#4646]: https://github.com/commonwarexyz/monorepo/pull/4646
 [#4654]: https://github.com/commonwarexyz/monorepo/pull/4654
 [#4655]: https://github.com/commonwarexyz/monorepo/pull/4655
+[#4658]: https://github.com/commonwarexyz/monorepo/pull/4658
 
 ## v2026.7.1
 
