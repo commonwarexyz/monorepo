@@ -380,7 +380,7 @@ mod tests {
             _context: (deterministic::Context, Self::Context),
             _block: &Self::Block,
             _batches: TestUnmerkleized,
-        ) -> TestMerkleized {
+        ) -> Option<TestMerkleized> {
             unreachable!("WedgeApp only serves the syncer harness")
         }
 

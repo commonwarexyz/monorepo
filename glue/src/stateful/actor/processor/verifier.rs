@@ -118,7 +118,8 @@ where
         };
         let block_digest = block.digest();
 
-        if self.execution.pending_contains(&block_digest) {
+        // Only skip verification for blocks the application built or verified.
+        if self.execution.pending_verified(&block_digest) {
             timer.observe(context);
             return Some(true);
         }
@@ -371,7 +372,7 @@ where
         }
         if !self
             .execution
-            .cache_pending(block_digest, parent.digest, round, merkleized)
+            .cache_pending(block_digest, parent.digest, round, merkleized, true)
         {
             warn!(
                 parent_digest = ?parent.digest,

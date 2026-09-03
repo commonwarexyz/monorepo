@@ -1006,7 +1006,7 @@ impl Application<deterministic::Context> for GatedMultiApp {
         context: (deterministic::Context, Self::Context),
         block: &Self::Block,
         batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
-    ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized {
+    ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
         <MultiApp as Application<deterministic::Context>>::apply(
             &mut self.inner,
             context,
