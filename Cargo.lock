@@ -1444,7 +1444,6 @@ dependencies = [
  "rand_core 0.10.1",
  "rand_distr",
  "rayon",
- "rstest",
  "thiserror 2.0.18",
  "tracing",
  "tracing-subscriber",

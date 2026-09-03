@@ -63,6 +63,11 @@ impl<N: Namespace> Generic<N> {
         }
     }
 
+    /// Returns the pre-computed namespace.
+    pub const fn namespace(&self) -> &N {
+        &self.namespace
+    }
+
     /// Returns the index of "self" in the participant set, if available.
     pub fn me(&self) -> Option<Participant> {
         self.signer.as_ref().map(|(index, _)| *index)

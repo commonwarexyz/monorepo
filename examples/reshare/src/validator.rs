@@ -4,17 +4,20 @@ use crate::{
     application::App,
     config::{NetworkConfig, NodeConfig},
     types::{
-        self, BACKFILL_CHANNEL, BLOCKS_PER_EPOCH, BROADCAST_CHANNEL, Block, CERTIFICATE_CHANNEL,
-        DKG_CHANNEL, DKG_PROBE_CHANNEL, DynamicProvider, FileSecretStore, IO_BUFFER_SIZE,
-        LogReporter, MAILBOX_SIZE, MAX_MESSAGE_SIZE, MAX_PARTICIPANTS, MAX_SUPPORTED_MODE,
-        MESSAGE_RATE, NAMESPACE, PAGE_CACHE_SIZE, PAGE_SIZE, Participants, QMDB_CHANNEL,
-        RESOLVER_CHANNEL, REVEAL, Registrar, SHARING_MODE, Scheme, VOTE_CHANNEL,
+        self, AGGREGATION_ACK_CHANNEL, AGGREGATION_ACTIVE_EPOCHS, AGGREGATION_RECOVERY_CHANNEL,
+        AggregationScheme, BACKFILL_CHANNEL, BLOCKS_PER_EPOCH, BROADCAST_CHANNEL, Block,
+        CERTIFICATE_CHANNEL, DKG_CHANNEL, DKG_PROBE_CHANNEL, DynamicProvider, FileSecretStore,
+        IO_BUFFER_SIZE, LogReporter, MAILBOX_SIZE, MAX_MESSAGE_SIZE, MAX_PARTICIPANTS,
+        MAX_SUPPORTED_MODE, MESSAGE_RATE, NAMESPACE, PAGE_CACHE_SIZE, PAGE_SIZE, Participants,
+        QMDB_CHANNEL, RESOLVER_CHANNEL, REVEAL, Registrar, RetainedSecretStore, SHARING_MODE,
+        Scheme, VOTE_CHANNEL,
     },
 };
 use clap::Args;
 use commonware_broadcast::buffered;
 use commonware_consensus::{
     Reporters,
+    aggregation::RecoveryCoordinator,
     marshal::{
         self, core::Actor as MarshalActor, resolver::p2p as marshal_resolver, standard::Deferred,
     },
@@ -25,7 +28,11 @@ use commonware_consensus::{
     },
     types::{Epoch, FixedEpocher, ViewDelta},
 };
-use commonware_cryptography::{ed25519, sha256::Sha256};
+use commonware_cryptography::{
+    certificate::Provider as _,
+    ed25519,
+    sha256::{Digest as Sha256Digest, Sha256},
+};
 use commonware_glue::{
     dkg::{
         SecretStore as _,
@@ -39,12 +46,20 @@ use commonware_glue::{
     },
 };
 use commonware_macros::boxed;
-use commonware_p2p::authenticated::{self, discovery};
+use commonware_p2p::{
+    authenticated::{self, discovery},
+    utils::mux::Muxer,
+};
 use commonware_parallel::Sequential;
-use commonware_runtime::{Handle, Supervisor as _, buffer::paged::CacheRef, tokio};
-use commonware_storage::{archive::prunable, translator::TwoCap};
-use commonware_utils::{NZDuration, NZU64, NZUsize, sequence::Unit};
-use std::{marker::PhantomData, path::PathBuf, time::Duration};
+use commonware_resolver::p2p as aggregation_resolver;
+use commonware_runtime::{Handle, Spawner as _, Supervisor as _, buffer::paged::CacheRef, tokio};
+use commonware_storage::{
+    archive::{immutable, prunable},
+    metadata,
+    translator::TwoCap,
+};
+use commonware_utils::{NZDuration, NZU64, NZUsize, acknowledgement::Exact, sequence::Unit};
+use std::{marker::PhantomData, num::NonZeroUsize, path::PathBuf, time::Duration};
 use tracing::error;
 
 /// Start a validator node.
@@ -83,6 +98,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
         MAX_MESSAGE_SIZE,
     );
     p2p_config.mailbox_size = MAILBOX_SIZE;
+    p2p_config.tracked_peer_sets = AGGREGATION_ACTIVE_EPOCHS;
     let (mut p2p, oracle) = discovery::Network::new(context.child("network"), p2p_config);
 
     // Channel rates are enforced independently per peer. The network derives each shared inbound
@@ -95,13 +111,25 @@ pub async fn run(context: tokio::Context, args: Validator) {
     let qmdb_network = p2p.register(QMDB_CHANNEL, MESSAGE_RATE);
     let dkg_network = p2p.register(DKG_CHANNEL, MESSAGE_RATE);
     let dkg_probe_network = p2p.register(DKG_PROBE_CHANNEL, MESSAGE_RATE);
+    let aggregation_ack_network = p2p.register(AGGREGATION_ACK_CHANNEL, MESSAGE_RATE);
+    let aggregation_recovery_network = p2p.register(AGGREGATION_RECOVERY_CHANNEL, MESSAGE_RATE);
     let p2p_handle = p2p.start();
 
     let provider = DynamicProvider::default();
     let store = FileSecretStore::load(args.node_dir.join("secrets.json"))
         .expect("failed to load secret store");
+    let aggregation_provider = DynamicProvider::<AggregationScheme>::load(store.clone())
+        .expect("failed to load aggregation epochs");
     let mut store_for_genesis = store.clone();
     if let Some(share) = store_for_genesis.get_share(Epoch::zero()).await {
+        aggregation_provider
+            .register_authenticated(
+                Epoch::zero(),
+                genesis_info.output.players().clone(),
+                genesis_info.output.public().clone(),
+                Some(share.clone()),
+            )
+            .expect("failed to persist epoch-0 aggregation scheme");
         provider.register(
             Epoch::zero(),
             Scheme::signer(
@@ -113,6 +141,14 @@ pub async fn run(context: tokio::Context, args: Validator) {
             .expect("epoch-0 share must match genesis"),
         );
     } else {
+        aggregation_provider
+            .register_authenticated(
+                Epoch::zero(),
+                genesis_info.output.players().clone(),
+                genesis_info.output.public().clone(),
+                None,
+            )
+            .expect("failed to persist epoch-0 aggregation scheme");
         provider.register(
             Epoch::zero(),
             Scheme::verifier(
@@ -123,6 +159,134 @@ pub async fn run(context: tokio::Context, args: Validator) {
             .expect("genesis threshold committee must be uniform"),
         );
     }
+
+    let aggregation_scheme = aggregation_provider
+        .scheme(Epoch::zero())
+        .expect("genesis aggregation scheme");
+    let aggregation_namespace =
+        <AggregationScheme as commonware_consensus::aggregation::scheme::Scheme<
+            Sha256Digest,
+        >>::recovery_namespace(&aggregation_scheme);
+    let (history_actor, history) =
+        orchestrator::aggregation::Actor::<_, AggregationScheme, Sha256Digest, _, _>::init(
+            context.child("aggregation_history"),
+            orchestrator::aggregation::Config {
+                namespace: aggregation_namespace,
+                archive: immutable_archive_config(
+                    partition_prefix,
+                    "aggregation_history",
+                    page_cache.clone(),
+                    (),
+                ),
+                metadata: metadata::Config {
+                    partition: format!("{partition_prefix}-aggregation-retirement"),
+                    codec_config: (),
+                },
+                mailbox_size: MAILBOX_SIZE,
+            },
+            aggregation_provider.clone(),
+            Sequential,
+        )
+        .await
+        .expect("aggregation history");
+    let history_task = history_actor.start();
+    let history_handle = context
+        .child("aggregation_history_supervisor")
+        .spawn(|_| async move {
+            history_task
+                .await
+                .expect("aggregation history task")
+                .expect("aggregation history failure");
+        });
+
+    let (recovery_coordinator, recovery) = RecoveryCoordinator::staged(
+        context.child("aggregation_recovery_coordinator"),
+        NZUsize!(64),
+        MAILBOX_SIZE,
+    );
+    let (router_actor, router_consumer, router_registry) =
+        orchestrator::aggregation_router::Actor::<_, AggregationScheme, Sha256Digest, _, _>::new(
+            context.child("aggregation_router"),
+            history.clone(),
+            aggregation_provider.clone(),
+            recovery.clone(),
+            MAILBOX_SIZE,
+        );
+    let router_handle = router_actor.start();
+    let (resolver_engine, resolver) = aggregation_resolver::Engine::new_with_all_peers(
+        context.child("aggregation_resolver"),
+        aggregation_resolver::Config {
+            peer_provider: oracle.clone(),
+            blocker: oracle.clone(),
+            consumer: router_consumer,
+            producer: history.clone(),
+            mailbox_size: MAILBOX_SIZE,
+            me: Some(local.clone()),
+            timeout: Duration::from_secs(2),
+            fetch_retry_timeout: Duration::from_millis(250),
+            priority_requests: false,
+            priority_responses: false,
+        },
+    );
+    let aggregation_resolver_handle = resolver_engine.start(aggregation_recovery_network);
+    let recovery_handle = recovery_coordinator.attach(resolver).start();
+    let (aggregation_muxer, aggregation_mux) = Muxer::new(
+        context.child("aggregation_ack_mux"),
+        aggregation_ack_network.0,
+        aggregation_ack_network.1,
+        MAILBOX_SIZE.get(),
+    );
+    let aggregation_muxer_task = aggregation_muxer.start();
+    let aggregation_muxer_handle =
+        context
+            .child("aggregation_ack_mux_supervisor")
+            .spawn(|_| async move {
+                aggregation_muxer_task
+                    .await
+                    .expect("aggregation ack mux task")
+                    .expect("aggregation ack mux failure");
+            });
+    let store = RetainedSecretStore::new(
+        store,
+        history.clone(),
+        aggregation_namespace,
+        aggregation_provider.clone(),
+    );
+
+    let aggregation_window = NZU64!(64);
+    let checkpoint_capacity = NonZeroUsize::new(
+        AGGREGATION_ACTIVE_EPOCHS
+            .get()
+            .checked_mul(aggregation_window.get() as usize)
+            .expect("aggregation checkpoint capacity overflow"),
+    )
+    .expect("aggregation checkpoint capacity must be non-zero");
+    let (checkpoint_actor, checkpoint_automaton) =
+        orchestrator::checkpoints::Actor::<_, Block, Exact>::init(
+            context.child("aggregation_checkpoints"),
+            orchestrator::checkpoints::Config {
+                archive: immutable_archive_config(
+                    partition_prefix,
+                    "aggregation_checkpoints",
+                    page_cache.clone(),
+                    (),
+                ),
+                mailbox_size: MAILBOX_SIZE,
+                max_pending_requests: checkpoint_capacity,
+            },
+        )
+        .await
+        .expect("aggregation checkpoints");
+    let checkpoint_task = checkpoint_actor.start();
+    let checkpoint_handle =
+        context
+            .child("aggregation_checkpoints_supervisor")
+            .spawn(|_| async move {
+                checkpoint_task
+                    .await
+                    .expect("aggregation checkpoint task")
+                    .expect("aggregation checkpoint failure");
+            });
 
     let resolver = marshal_resolver::init(
         context.child("marshal_resolver"),
@@ -201,6 +365,17 @@ pub async fn run(context: tokio::Context, args: Validator) {
     let should_state_sync = plan.should_state_sync(args.state_sync);
     let probe_artifact = if should_state_sync {
         let artifact = probe_mailbox.subscribe().await.expect("probe stopped");
+        aggregation_provider
+            .register_authenticated(
+                artifact.info.epoch,
+                artifact.info.output.players().clone(),
+                artifact.info.output.public().clone(),
+                None,
+            )
+            .expect("failed to persist state-sync aggregation epoch");
+        aggregation_provider
+            .set_discovery_floor(artifact.info.epoch)
+            .expect("failed to persist state-sync aggregation floor");
         provider.register(
             artifact.info.epoch,
             Scheme::verifier(
@@ -282,6 +457,56 @@ pub async fn run(context: tokio::Context, args: Validator) {
     .await;
 
     let (fence, gate) = Fence::new(fence_epoch);
+    let aggregation_current = aggregation_provider
+        .latest_epoch()
+        .expect("genesis aggregation epoch");
+    let (aggregation_actor, aggregation_mailbox): (
+        _,
+        orchestrator::aggregation_lifecycle::Handler<Block, Exact>,
+    ) = orchestrator::aggregation_lifecycle::Actor::new(
+        context.child("aggregation_lifecycle"),
+        orchestrator::aggregation_lifecycle::Config {
+            namespace: aggregation_namespace,
+            current_epoch: aggregation_current,
+            epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+            active_old_epochs: AGGREGATION_ACTIVE_EPOCHS.get() - 1,
+            mailbox_size: MAILBOX_SIZE,
+            certificate_mailbox_size: MAILBOX_SIZE,
+            parked_interval: Duration::from_secs(2),
+            parked_missing_batch: NZUsize!(64),
+            automaton: checkpoint_automaton.clone(),
+            blocker: oracle.clone(),
+            strategy: Sequential,
+            engine: orchestrator::aggregation_lifecycle::EngineConfig {
+                priority_acks: false,
+                rebroadcast_timeout: NZDuration!(Duration::from_secs(1)),
+                recovery_after_rebroadcasts: NZU64!(3),
+                window: aggregation_window,
+                journal_partition_prefix: format!("{partition_prefix}-aggregation-engine"),
+                journal_write_buffer: IO_BUFFER_SIZE,
+                journal_replay_buffer: IO_BUFFER_SIZE,
+                journal_heights_per_section: NZU64!(64),
+                journal_compression: None,
+                journal_page_cache: page_cache.clone(),
+            },
+        },
+        aggregation_provider.clone(),
+        history.clone(),
+        router_registry,
+        gate.clone(),
+        recovery,
+        aggregation_mux,
+    );
+    let aggregation_task = aggregation_actor.start();
+    let aggregation_handle =
+        context
+            .child("aggregation_lifecycle_supervisor")
+            .spawn(|_| async move {
+                aggregation_task
+                    .await
+                    .expect("aggregation lifecycle task")
+                    .expect("aggregation lifecycle failure");
+            });
     let (reshare_actor, reshare_mailbox) = reshare::Actor::new(
         context.child("reshare"),
         reshare::Config {
@@ -291,7 +516,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
             participants_provider: participants,
             secret_store: store,
             strategy: Sequential,
-            registrar: Registrar::new(provider.clone()),
+            registrar: Registrar::new(provider.clone(), aggregation_provider.clone()),
             marshal: marshal.clone(),
             state_sync: state_sync.clone(),
             fence,
@@ -364,6 +589,8 @@ pub async fn run(context: tokio::Context, args: Validator) {
             gate,
             state_sync,
             blocks_per_epoch: BLOCKS_PER_EPOCH,
+            peer_set_retention: (AGGREGATION_ACTIVE_EPOCHS.get() - 1) as u64,
+            peer_set_capacity: AGGREGATION_ACTIVE_EPOCHS,
             muxer_size: 128,
             mailbox_size: MAILBOX_SIZE,
             partition_prefix: format!("{partition_prefix}-orchestrator"),
@@ -375,8 +602,14 @@ pub async fn run(context: tokio::Context, args: Validator) {
     let reporters = Reporters::from((
         stateful_mailbox.clone(),
         Reporters::from((
-            orchestrator_mailbox,
-            Reporters::from((reshare_mailbox, LogReporter)),
+            checkpoint_automaton,
+            Reporters::from((
+                aggregation_mailbox,
+                Reporters::from((
+                    orchestrator_mailbox,
+                    Reporters::from((reshare_mailbox, LogReporter)),
+                )),
+            )),
         )),
     ));
     let marshal_handle = marshal_actor.start(reporters, buffer, resolver);
@@ -388,6 +621,13 @@ pub async fn run(context: tokio::Context, args: Validator) {
         broadcast_handle,
         probe_handle,
         qmdb_handle,
+        history_handle,
+        checkpoint_handle,
+        router_handle,
+        aggregation_resolver_handle,
+        recovery_handle,
+        aggregation_muxer_handle,
+        aggregation_handle,
         reshare_handle,
         orchestrator_handle,
         marshal_handle,
@@ -396,6 +636,33 @@ pub async fn run(context: tokio::Context, args: Validator) {
     .await
     {
         error!(?err, "validator task failed");
+    }
+}
+
+fn immutable_archive_config<C>(
+    prefix: &str,
+    name: &str,
+    page_cache: CacheRef,
+    codec_config: C,
+) -> immutable::Config<C> {
+    immutable::Config {
+        metadata_partition: format!("{prefix}-{name}-metadata"),
+        freezer_table_partition: format!("{prefix}-{name}-table"),
+        freezer_table_initial_size: 64,
+        freezer_table_resize_frequency: 4,
+        freezer_table_resize_chunk_size: 32,
+        freezer_key_partition: format!("{prefix}-{name}-keys"),
+        freezer_key_page_cache: page_cache,
+        freezer_value_partition: format!("{prefix}-{name}-values"),
+        freezer_value_target_size: 1024 * 1024,
+        freezer_value_compression: None,
+        ordinal_partition: format!("{prefix}-{name}-ordinal"),
+        items_per_section: NZU64!(64),
+        freezer_key_write_buffer: IO_BUFFER_SIZE,
+        freezer_value_write_buffer: IO_BUFFER_SIZE,
+        ordinal_write_buffer: IO_BUFFER_SIZE,
+        replay_buffer: IO_BUFFER_SIZE,
+        codec_config,
     }
 }
 

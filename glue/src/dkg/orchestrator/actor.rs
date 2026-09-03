@@ -187,6 +187,20 @@ where
     /// Number of blocks in each epoch.
     pub blocks_per_epoch: NonZeroU64,
 
+    /// Number of prior epoch peer sets to retain in addition to the current epoch.
+    ///
+    /// On restart, only peer sets whose authenticated boundary blocks remain
+    /// available in local marshal storage can be restored. In particular, a
+    /// state-sync artifact authenticates the current epoch but does not restore
+    /// missing boundary history for prior epochs.
+    pub peer_set_retention: u64,
+
+    /// Peer-set capacity configured on the underlying P2P manager.
+    ///
+    /// This must match the transport configuration. Construction rejects a
+    /// retention horizon that does not leave one slot for the current epoch.
+    pub peer_set_capacity: NonZeroUsize,
+
     /// Maximum number of messages to buffer in each network muxer.
     pub muxer_size: usize,
 
@@ -241,6 +255,7 @@ where
         <MV::ApplicationBlock as ReshareBlock>::Directory,
     >,
     blocks_per_epoch: NonZeroU64,
+    peer_set_retention: u64,
     muxer_size: usize,
     partition_prefix: String,
     page_cache_ref: CacheRef,
@@ -283,6 +298,10 @@ where
         context: E,
         config: Config<B, M, P, MV, DV, A, L, T>,
     ) -> (Self, Mailbox<MV::ApplicationBlock, ACK>) {
+        assert!(
+            config.peer_set_retention < config.peer_set_capacity.get() as u64,
+            "peer-set capacity must cover retained epochs plus the current epoch"
+        );
         let (sender, mailbox) = mailbox::new(context.child("mailbox"), config.mailbox_size);
         let page_cache_ref = CacheRef::from_pooler(
             &context,
@@ -305,6 +324,7 @@ where
                 gate: config.gate,
                 state_sync: config.state_sync,
                 blocks_per_epoch: config.blocks_per_epoch,
+                peer_set_retention: config.peer_set_retention,
                 muxer_size: config.muxer_size,
                 partition_prefix: config.partition_prefix,
                 page_cache_ref,
@@ -357,6 +377,14 @@ where
             debug!("context shutdown while resolving startup epoch");
             return;
         };
+        if let Err(error) = self.track_retained_peer_sets(start.epoch, &epocher).await {
+            warn!(
+                epoch = start.epoch.get(),
+                %error,
+                "failed to activate retained peer set"
+            );
+            return;
+        }
         let mut active = match self
             .enter_epoch(start.epoch, start.floor, &start.info, &mut channels)
             .await
@@ -478,6 +506,54 @@ where
             .await
     }
 
+    /// Activate retained prior peer sets before the current peer set.
+    ///
+    /// Marshal boundary blocks are the authenticated source for prior epoch
+    /// metadata. Missing history is skipped because state sync may begin from a
+    /// recent floor without restoring older boundaries. This helper never
+    /// starts Simplex and excludes `current`, which is tracked by [`Self::enter_epoch`].
+    async fn track_retained_peer_sets(
+        &mut self,
+        current: Epoch,
+        epocher: &FixedEpocher,
+    ) -> Result<(), M::Error> {
+        let first = current.get().saturating_sub(self.peer_set_retention);
+        for epoch in first..current.get() {
+            let epoch = Epoch::new(epoch);
+            let Some(height) = Self::boundary_height(epoch, epocher) else {
+                debug!(%epoch, "retained epoch boundary height overflowed");
+                continue;
+            };
+            let Some(boundary) = self.marshal.get_block(height).await else {
+                debug!(%epoch, %height, "retained epoch boundary block unavailable");
+                continue;
+            };
+            let block = MV::into_inner(boundary);
+            let Some(Payload::EpochInfo(info)) = block.payload() else {
+                panic!("boundary block {height} missing epoch info");
+            };
+            if info.epoch != epoch {
+                panic!(
+                    "boundary block {height} carries epoch info for {}, expected {epoch}",
+                    info.epoch
+                );
+            }
+
+            self.manager
+                .track(epoch, info.participants().tracked_peers(), &info.directory)?;
+            info!(%epoch, "activated retained epoch peer set");
+        }
+
+        Ok(())
+    }
+
+    /// Return the finalized block height that carries an epoch's public metadata.
+    fn boundary_height(epoch: Epoch, epocher: &FixedEpocher) -> Option<Height> {
+        epoch
+            .previous()
+            .map_or(Some(Height::zero()), |epoch| epocher.last(epoch))
+    }
+
     /// Resolve a locally recovered epoch from marshal's finalized boundary block.
     ///
     /// Ordinary restarts should not re-enter the configured bootstrap epoch if
@@ -509,10 +585,10 @@ where
             <MV::ApplicationBlock as ReshareBlock>::Directory,
         >,
     > {
-        let height = epoch
-            .previous()
-            .and_then(|epoch| epocher.last(epoch))
-            .unwrap_or_else(Height::zero);
+        let Some(height) = Self::boundary_height(epoch, epocher) else {
+            debug!(%epoch, "boundary height overflowed, shutting down orchestrator");
+            return None;
+        };
         let Some(boundary) = self.marshal.get_block(height).await else {
             debug!(%height, "boundary block unavailable, shutting down orchestrator");
             return None;

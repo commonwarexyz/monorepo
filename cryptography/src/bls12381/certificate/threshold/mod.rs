@@ -212,7 +212,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     }
 
     /// Returns the pre-computed namespace.
-    const fn namespace(&self) -> &N {
+    pub const fn namespace(&self) -> &N {
         &self.namespace
     }
 
