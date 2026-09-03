@@ -20,7 +20,9 @@
 use crate::curve::{F, montgomery};
 use bytes::{Buf, BufMut};
 use commonware_codec::{FixedSize, Read, Write};
+use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
+use core::fmt::{self, Debug, Display};
 use subtle::ConstantTimeEq;
 use zeroize::{ZeroizeOnDrop, Zeroizing};
 
@@ -95,6 +97,18 @@ impl PartialEq for PublicKey {
 }
 
 impl Eq for PublicKey {}
+
+impl Debug for PublicKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", Hex(&self.bytes))
+    }
+}
+
+impl Display for PublicKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", Hex(&self.bytes))
+    }
+}
 
 impl AsRef<[u8]> for PublicKey {
     fn as_ref(&self) -> &[u8] {
@@ -201,7 +215,7 @@ mod tests {
                 bytes: canonical_bytes,
             };
             let alias = PublicKey { bytes: alias_bytes };
-            assert!(canonical == alias);
+            assert_eq!(canonical, alias);
             assert_ne!(canonical.as_ref(), alias.as_ref());
 
             let canonical_shared = SecretKey { bytes: [42; 32] }.exchange(&canonical);
@@ -215,7 +229,7 @@ mod tests {
             }
         }
 
-        assert!(PublicKey { bytes: [0; 32] } != PublicKey { bytes: one });
+        assert_ne!(PublicKey { bytes: [0; 32] }, PublicKey { bytes: one });
     }
 
     #[test]
