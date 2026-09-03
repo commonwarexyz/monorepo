@@ -40,13 +40,14 @@ use std::{
     sync::Arc,
 };
 
-/// Sign-pass entries covered by one core credit.
+/// Proposal and vote-body pass steps covered by one core credit.
 ///
-/// A proposal or vote-body pass entry is one digest comparison plus a map lookup, orders of
-/// magnitude cheaper than the transitions core credits are calibrated for. Charging each entry a
-/// full credit made pass completion scale with `pipeline_depth * chains` service cycles, which
-/// dominated view latency once deep pipelines ran many entries per view.
-const SIGN_PASS_ENTRIES_PER_CREDIT: usize = 16;
+/// A pass step handles one producer chain: at most the pipelining depth plus the extension bound
+/// of digest comparisons and map lookups, still far cheaper than the transitions core credits are
+/// calibrated for. Metering by chain keeps a body for every chain inside one drive, where metering
+/// by payload entry let completion scale with `pipeline_depth * chains` service cycles and pushed
+/// the vote a quarter of a view later once proposals ran deep.
+const SIGN_PASS_CHAINS_PER_CREDIT: usize = 4;
 
 /// A serialized input to the local state machine.
 #[derive(Clone, Debug)]
@@ -1953,14 +1954,14 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             &self.profile,
             self.durable.view,
             &self.chain,
-            (cycle.remaining_core() as usize).saturating_mul(SIGN_PASS_ENTRIES_PER_CREDIT),
+            (cycle.remaining_core() as usize).saturating_mul(SIGN_PASS_CHAINS_PER_CREDIT),
         )?;
         if regular.processed > 0 {
             cycle
                 .charge(
                     Lane::LocalCompletion,
                     TransitionCost::CommitteePass(
-                        regular.processed.div_ceil(SIGN_PASS_ENTRIES_PER_CREDIT),
+                        regular.processed.div_ceil(SIGN_PASS_CHAINS_PER_CREDIT),
                     ),
                 )
                 .map_err(|_| StepError::IdentifierExhausted)?;

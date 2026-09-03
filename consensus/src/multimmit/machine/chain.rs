@@ -18,21 +18,6 @@ use std::{
     sync::Arc,
 };
 
-pub(crate) struct ChainProposalPass<V: Variant, D: Digest> {
-    tip: BlockRef<D>,
-    anchor: Anchor<V, D>,
-    parent: BlockRef<D>,
-    payloads: Vec<D>,
-    attempted: usize,
-    budget: usize,
-    pipeline_depth: usize,
-}
-
-pub(crate) enum ChainProposalProgress<V: Variant, D: Digest> {
-    Pending,
-    Complete(ChainProposal<V, D>),
-}
-
 #[derive(Clone, Debug)]
 enum SigningSubject<V: Variant, D: Digest> {
     One(SignRequest<V, D>),
@@ -64,24 +49,12 @@ impl<V: Variant, D: Digest> PartialEq for SigningSubject<V, D> {
 
 impl<V: Variant, D: Digest> Eq for SigningSubject<V, D> {}
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum VoteBodyPhase {
-    Proposal,
-    Extension,
-}
-
 pub(crate) struct VoteBodyPass<V: Variant, D: Digest> {
     leader: LeaderBlock<V, D>,
     // A vote decision uses one immutable DA frontier even if later validations complete while
     // its budgeted body construction is still in progress.
     da_frontiers: Vec<Height>,
     chain: usize,
-    phase: VoteBodyPhase,
-    parent: Option<BlockRef<D>>,
-    proposal_index: usize,
-    extension_index: usize,
-    position: usize,
-    extension_payloads: Vec<D>,
     positions: Vec<Position>,
     extensions: Vec<Extension<D>>,
     extension_bound: usize,
@@ -1671,14 +1644,20 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         self.producer_wake = true;
     }
 
-    pub(crate) fn begin_proposal_pass<H: Hasher<Digest = D>>(
+    /// Builds one chain's proposal: the anchor, then this node's own DA choices for consecutive
+    /// heights above it, up to the policy's budget and the local DA frontier.
+    ///
+    /// The anchor sits at the highest certificate this node holds on the chain, so nothing above
+    /// it can be certified here: a [`ProposalPolicy::Certified`] proposal is its anchor alone.
+    pub(crate) fn propose_chain<H: Hasher<Digest = D>>(
         &self,
         profile: &Profile<H, V>,
         tip: BlockRef<D>,
-    ) -> Result<ChainProposalPass<V, D>, ChainError> {
+    ) -> Result<ChainProposal<V, D>, ChainError> {
         let chain = tip.chain().get() as usize;
-        let certificates = &self.chains.get(chain).ok_or(ChainError::Context)?.certified;
-        let certified = certificates
+        let state = self.chains.get(chain).ok_or(ChainError::Context)?;
+        let certified = state
+            .certified
             .range(..)
             .rev()
             .take_while(|(height, _)| **height > tip.height())
@@ -1688,79 +1667,32 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
                     .clone()
                     .map(|certificate| (certificate, certified.block))
             });
-        let (anchor, parent) = match certified {
+        let (anchor, mut parent) = match certified {
             Some((certificate, block)) => (Anchor::Certificate(certificate), block),
             None => (Anchor::Tip(tip), tip),
         };
         let pipeline_depth = profile.protocol().codec_config().pipeline_depth();
-        let policy = profile.proposal_policy();
-        Ok(ChainProposalPass {
-            tip,
-            anchor,
-            parent,
-            payloads: Vec::new(),
-            attempted: 0,
-            // The anchor above already sits at the highest certificate this node holds on this
-            // chain, so nothing above it can be certified here: a certified proposal is its
-            // anchor alone and walks no payload entries.
-            budget: match policy {
-                ProposalPolicy::Certified => 0,
-                ProposalPolicy::Endorsed => pipeline_depth,
-            },
-            pipeline_depth,
-        })
-    }
-
-    /// Advances one chain-proposal pass by one payload entry.
-    ///
-    /// Each step appends this node's own DA choice for the next consecutive height when it
-    /// extends the current parent, and otherwise ends the pass at the local DA frontier.
-    ///
-    /// [`ProposalPolicy::Certified`] appends nothing, so the first step completes the pass at
-    /// the certified anchor.
-    pub(crate) fn resume_proposal_pass(
-        &self,
-        pass: &mut ChainProposalPass<V, D>,
-    ) -> Result<ChainProposalProgress<V, D>, ChainError> {
-        if pass.attempted < pass.budget {
-            pass.attempted += 1;
-            let Some(height) = pass.parent.height().get().checked_add(1).map(Height::new) else {
-                pass.attempted = pass.budget;
-                return self.finish_proposal_pass(pass);
+        let budget = match profile.proposal_policy() {
+            ProposalPolicy::Certified => 0,
+            ProposalPolicy::Endorsed => pipeline_depth,
+        };
+        let mut payloads = Vec::with_capacity(budget);
+        while payloads.len() < budget {
+            let Some(height) = parent.height().get().checked_add(1).map(Height::new) else {
+                break;
             };
-            let chain = pass.tip.chain().get() as usize;
-            let endorsed = self
-                .chains
-                .get(chain)
-                .ok_or(ChainError::Context)?
+            let Some(choice) = state
                 .local_da_votes
                 .get(&height)
-                .filter(|choice| choice.header.parent() == pass.parent.digest());
-            let Some(choice) = endorsed else {
-                pass.attempted = pass.budget;
-                return self.finish_proposal_pass(pass);
+                .filter(|choice| choice.header.parent() == parent.digest())
+            else {
+                break;
             };
-            pass.payloads.push(choice.header.body_digest());
-            pass.parent = choice.block_ref;
-            if pass.attempted < pass.budget {
-                return Ok(ChainProposalProgress::Pending);
-            }
+            payloads.push(choice.header.body_digest());
+            parent = choice.block_ref;
         }
-        self.finish_proposal_pass(pass)
-    }
-
-    fn finish_proposal_pass(
-        &self,
-        pass: &ChainProposalPass<V, D>,
-    ) -> Result<ChainProposalProgress<V, D>, ChainError> {
-        let proposal = ChainProposal::new(
-            pass.tip.chain(),
-            pass.anchor.clone(),
-            pass.payloads.clone(),
-            pass.pipeline_depth,
-        )
-        .map_err(|_| ChainError::Context)?;
-        Ok(ChainProposalProgress::Complete(proposal))
+        ChainProposal::new(tip.chain(), anchor, payloads, pipeline_depth)
+            .map_err(|_| ChainError::Context)
     }
 
     #[cfg(test)]
@@ -1769,15 +1701,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         profile: &Profile<H, V>,
         tip: BlockRef<D>,
     ) -> Result<ChainProposal<V, D>, ChainError> {
-        let mut pass = self.begin_proposal_pass::<H>(profile, tip)?;
-        loop {
-            match self.resume_proposal_pass(&mut pass)? {
-                ChainProposalProgress::Pending => {}
-                ChainProposalProgress::Complete(proposal) => {
-                    return Ok(proposal);
-                }
-            }
-        }
+        self.propose_chain::<H>(profile, tip)
     }
 
     pub(crate) fn begin_vote_body_pass(
@@ -1798,18 +1722,18 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
                 })
                 .collect(),
             chain: 0,
-            phase: VoteBodyPhase::Proposal,
-            parent: None,
-            proposal_index: 0,
-            extension_index: 0,
-            position: 0,
-            extension_payloads: Vec::new(),
             positions: Vec::with_capacity(profile.protocol().codec_config().chains()),
             extensions: Vec::with_capacity(profile.protocol().codec_config().chains()),
             extension_bound: profile.protocol().codec_config().extension_bound(),
         }
     }
 
+    /// Advances one vote-body pass by one chain: the endorsed proposal prefix, then up to the
+    /// extension bound of this node's DA choices above it.
+    ///
+    /// Each chain costs at most the pipelining depth plus the extension bound of map lookups, so a
+    /// step is cheap however deep the proposal reaches, and a body for every chain completes
+    /// within a single drive rather than trickling out one payload entry per credit.
     pub(crate) fn resume_vote_body_pass<H: Hasher<Digest = D>>(
         &self,
         profile: &Profile<H, V>,
@@ -1827,9 +1751,6 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         }
 
         let proposal = &pass.leader.proposals()[pass.chain];
-        let parent = pass
-            .parent
-            .get_or_insert_with(|| proposal.anchor().block_ref::<H>());
         let votes = &self
             .chains
             .get(pass.chain)
@@ -1839,80 +1760,51 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             .da_frontiers
             .get(pass.chain)
             .ok_or(ChainError::Context)?;
-        match pass.phase {
-            VoteBodyPhase::Proposal => {
-                let Some(payload) = proposal.payloads().get(pass.proposal_index) else {
-                    pass.phase = VoteBodyPhase::Extension;
-                    return Ok(VoteBodyProgress::Pending);
-                };
-                pass.proposal_index += 1;
-                let Some(height) = parent.height().get().checked_add(1).map(Height::new) else {
-                    pass.phase = VoteBodyPhase::Extension;
-                    return Ok(VoteBodyProgress::Pending);
-                };
-                if height > frontier {
-                    pass.phase = VoteBodyPhase::Extension;
-                    return Ok(VoteBodyProgress::Pending);
-                }
-                let Some(choice) = votes.get(&height) else {
-                    pass.phase = VoteBodyPhase::Extension;
-                    return Ok(VoteBodyProgress::Pending);
-                };
-                let header = &choice.header;
-                if header.chain().get() as usize != pass.chain
-                    || header.parent() != parent.digest()
-                    || header.body_digest() != *payload
-                {
-                    pass.phase = VoteBodyPhase::Extension;
-                    return Ok(VoteBodyProgress::Pending);
-                }
-                pass.position += 1;
-                *parent = choice.block_ref;
-                Ok(VoteBodyProgress::Pending)
+        let mut parent = proposal.anchor().block_ref::<H>();
+        let mut position = 0usize;
+        for payload in proposal.payloads() {
+            let Some(choice) = Self::next_da_choice(votes, parent, frontier, pass.chain) else {
+                break;
+            };
+            if choice.header.body_digest() != *payload {
+                break;
             }
-            VoteBodyPhase::Extension => {
-                if pass.extension_index < pass.extension_bound {
-                    pass.extension_index += 1;
-                    let Some(height) = parent.height().get().checked_add(1).map(Height::new) else {
-                        pass.extension_index = pass.extension_bound;
-                        return Ok(VoteBodyProgress::Pending);
-                    };
-                    if height > frontier {
-                        pass.extension_index = pass.extension_bound;
-                        return Ok(VoteBodyProgress::Pending);
-                    }
-                    let Some(choice) = votes.get(&height) else {
-                        pass.extension_index = pass.extension_bound;
-                        return Ok(VoteBodyProgress::Pending);
-                    };
-                    let header = &choice.header;
-                    if header.chain().get() as usize != pass.chain
-                        || header.parent() != parent.digest()
-                    {
-                        pass.extension_index = pass.extension_bound;
-                        return Ok(VoteBodyProgress::Pending);
-                    }
-                    pass.extension_payloads.push(header.body_digest());
-                    *parent = choice.block_ref;
-                    return Ok(VoteBodyProgress::Pending);
-                }
-
-                let position = u32::try_from(pass.position).map_err(|_| ChainError::Context)?;
-                pass.positions.push(Position::new(position));
-                pass.extensions.push(
-                    Extension::new(pass.extension_payloads.clone(), pass.extension_bound)
-                        .map_err(|_| ChainError::Context)?,
-                );
-                pass.chain += 1;
-                pass.phase = VoteBodyPhase::Proposal;
-                pass.parent = None;
-                pass.proposal_index = 0;
-                pass.extension_index = 0;
-                pass.position = 0;
-                pass.extension_payloads.clear();
-                Ok(VoteBodyProgress::Pending)
-            }
+            position += 1;
+            parent = choice.block_ref;
         }
+        let mut extension_payloads = Vec::with_capacity(pass.extension_bound);
+        while extension_payloads.len() < pass.extension_bound {
+            let Some(choice) = Self::next_da_choice(votes, parent, frontier, pass.chain) else {
+                break;
+            };
+            extension_payloads.push(choice.header.body_digest());
+            parent = choice.block_ref;
+        }
+        let position = u32::try_from(position).map_err(|_| ChainError::Context)?;
+        pass.positions.push(Position::new(position));
+        pass.extensions.push(
+            Extension::new(extension_payloads, pass.extension_bound)
+                .map_err(|_| ChainError::Context)?,
+        );
+        pass.chain += 1;
+        Ok(VoteBodyProgress::Pending)
+    }
+
+    /// Returns this node's DA choice for the block above `parent`, when it lies within the frozen
+    /// frontier and extends `parent` on `chain`.
+    fn next_da_choice(
+        votes: &BTreeMap<Height, DaChoice<D>>,
+        parent: BlockRef<D>,
+        frontier: Height,
+        chain: usize,
+    ) -> Option<&DaChoice<D>> {
+        let height = Height::new(parent.height().get().checked_add(1)?);
+        if height > frontier {
+            return None;
+        }
+        let choice = votes.get(&height)?;
+        (choice.header.chain().get() as usize == chain && choice.header.parent() == parent.digest())
+            .then_some(choice)
     }
 
     pub(crate) fn vote_body<H: Hasher<Digest = D>>(
