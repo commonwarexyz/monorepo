@@ -207,9 +207,9 @@ const fn default_extension_bound() -> u32 {
 #[serde(rename_all = "lowercase")]
 pub enum ProposalPolicyArg {
     /// Propose only blocks whose data-availability certificate the leader holds.
-    #[default]
     Certified,
     /// Propose the prefix the leader has DA-voted itself.
+    #[default]
     Endorsed,
 }
 
@@ -498,18 +498,18 @@ mod tests {
     }
 
     #[test]
-    fn the_proposal_policy_is_certified_unless_named() {
+    fn the_proposal_policy_is_endorsed_unless_named() {
         assert_eq!(
             parse(&["deploy"]).proposal_policy,
-            ProposalPolicyArg::Certified
-        );
-        assert_eq!(
-            parse(&["deploy", "--proposal-policy", "endorsed"]).proposal_policy,
             ProposalPolicyArg::Endorsed
         );
         assert_eq!(
-            serde_yaml::from_str::<ProposalPolicyArg>("endorsed").unwrap(),
-            ProposalPolicyArg::Endorsed,
+            parse(&["deploy", "--proposal-policy", "certified"]).proposal_policy,
+            ProposalPolicyArg::Certified
+        );
+        assert_eq!(
+            serde_yaml::from_str::<ProposalPolicyArg>("certified").unwrap(),
+            ProposalPolicyArg::Certified,
             "node configs must accept the same spelling the flag takes",
         );
     }
