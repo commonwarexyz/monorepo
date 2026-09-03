@@ -1,0 +1,488 @@
+# Batched G1 subgroup checks: strategy comparison
+
+Findings from implementing and measuring three randomized strategies for
+checking that a batch of BLS12-381 G1 points lies in the prime-order subgroup.
+The shipping implementation is `bls12381::primitives::subgroup::batch_in_g1`
+(Strategy C below); a naive-bucketing prototype (Strategy B) is preserved on
+`gv/subgroup-bucketed-prototype`.
+
+Unless stated otherwise, timings in this document come from a 4-core Intel
+Xeon (Cascade Lake, 2.8 GHz, 1 MiB L2 per core, 33 MiB L3) and are single-shot
+best-of-three medians from the manual harnesses in `subgroup.rs`. On that
+machine one exact per-point check costs ~52 µs, one field multiplication
+~43 ns, and one batch-affine point addition ~344 ns, so a check is worth about
+150 point additions — the ratio that decides every number below.
+
+## The problem
+
+A decoded curve point can lie outside the prime-order subgroup; using it in a
+pairing or scalar multiplication enables small-subgroup attacks. blst's exact
+per-point check (Scott, [2021/1130](https://eprint.iacr.org/2021/1130), the
+endomorphism test) costs a ~128-bit scalar multiplication — about 1200 field
+multiplications, or ~52 µs here — so a 100 000-point batch costs 5.2 s checked
+one at a time.
+
+Every point splits as `P = G + T` with `G` in-subgroup and `T` a "cofactor
+part" in the group of order
+
+```
+h = 3 · (11 · 10177 · 859267 · 52437899)²   (odd; smallest prime factor 3)
+```
+
+`P ∈ G1` iff `T = 0`. Every strategy below forms random combinations of the
+points and applies the exact check to those; a combination is in G1 iff its
+combined cofactor parts cancel. Rounds repeat until the cheating probability is
+below `2^-security`.
+
+## The soundness building block (shared by A and C)
+
+A single combination `Q = Σ c_i·P_i` with `c_i` uniform iid over a three-element
+set — `{0,1,2}` as first implemented, `{-1,0,1}` as shipped: `h` is odd, so
+every nonzero cofactor part `T` has order ≥ 3 and never 2, so `c·T` takes three
+distinct values as `c` ranges over either set (two coinciding would need the
+order to divide a difference, and the differences are 1 and 2). Fix any bad
+`P_j` and condition on all other coefficients: `c_j·T_j` must hit one fixed
+value out of three, so the combination vanishes with probability ≤ 1/3, for any
+number of bad points and any cofactor group structure. The bound is tight (a
+lone bad point escapes exactly when `c_j = 0`), so a *single* combination cannot
+beat `log₂3 ≈ 1.58` bits per evaluation; only more combinations can.
+`t = ⌈security/log₂3⌉ = 81` combinations give 128-bit soundness.
+
+Three values is also the most a coefficient can be worth. Any coefficient acts
+on an order-3 component through its residue mod 3, so a larger alphabet buys no
+more than these three residues do — which is why signed trits, and not some
+wider digit, are what the shipped scheme draws.
+
+Verified footguns:
+
+- **Combination count.** 81 combinations = 128.38 bits; 80 = 126.8 —
+  insufficient. The code divides by a strict lower bound on `log₂3`.
+- **Coefficient uniformity.** The margin is 0.38 bits. A biased `byte % 3`
+  (max probability 86/256) yields 127.5 bits — below target. The implementation
+  rejection-samples (words < 3²⁰ → twenty exact trits); this is load-bearing.
+- **Odd cofactor required.** An order-2 part `T` has `2T = 0`: escape
+  probability 2/3 per combination. BLS12-377 G1 (`2^92 | h`) cannot use this
+  scheme as-is.
+
+## Strategy A — one combination per round (first implementation)
+
+Per round: draw `c_i ∈ {0,1,2}` per point, evaluate `Q = Σ c_i·P_i` as one
+2-bit Pippenger MSM (blst), check `Q`. Needs 81 rounds — i.e. **81 full
+accumulation passes over the `n` points**, one check each.
+
+## Strategy B — random bucketing, per-bucket checks (celo/zexe PR #4)
+
+Per round: assign each point a uniform bucket in `{0,…,B−1}`, sum each bucket,
+check **each** bucket sum. A cancelling pair escapes a round only by colliding
+in one bucket → `1/B` per round → `⌈security/log₂B⌉` rounds.
+
+Fewer accumulation passes, but a fixed `rounds × B` check floor that dwarfs
+everything else: at 128-bit security the round count falls only as `1/log₂B`
+while the check count grows as `B`. Rejected; prototype preserved for
+reference.
+
+## Strategy C — m parallel combinations per round (shipping)
+
+Per round, draw for every point a coefficient *vector* in `{-1,0,1}^m` (m iid
+signed trits, read as a balanced-ternary value in `[-(3^m-1)/2, (3^m-1)/2]`),
+and evaluate all m combinations `Q_j = Σ_i c_{j,i}·P_i` from one shared
+accumulation:
+
+1. **Bucket by vector, folded onto its negation.** Points with the same
+   coefficient vector are summed together, and a vector shares a bucket with
+   its negation — negating an affine point is the sign of its `y`, so the point
+   is stored negated. That leaves `(3^m+1)/2` buckets, and still only `n` point
+   additions total (each point lands in exactly one bucket). This is the key:
+   *one accumulation pass serves m combinations.* The canonical bucket is the
+   absolute value of the balanced-ternary value, so it falls straight out of the
+   residue the sampler draws.
+2. **Combine deterministically.** `Q_j = Σ_{v_j=1} S_v - Σ_{v_j=-1} S_v`, where
+   `v_j` is the j-th balanced-ternary digit. The weights are deterministic
+   digits — all randomness is in the vector assignment — so this evaluates
+   exactly the m combinations (it is *not* the unsound re-randomized sum over
+   bucket sums, which would collapse back to one combination). Folding carries
+   the `-1` side across as it goes, so each `Q_j` ends up a plain sum with
+   nothing to negate or double.
+3. **Check the m outputs.** Soundness per round = `3^-m` (product of m
+   independent 1/3 bounds); `r ≈ 81/m` rounds at 128-bit.
+
+`m` (and whether to batch at all) is chosen per batch by a cost model;
+soundness holds for every choice, so the model's constants only affect
+performance.
+
+### Why C dominates B
+
+At equal per-round soundness (`B = 3^m` buckets), B checks all `3^m` bucket
+sums where C checks only `m` combinations — C's total check count stays at
+`r·m ≈ 81` for any m (the same as A), while B's grows as `rounds × B`.
+
+## What the cost actually is
+
+A pass over the points buys at most `log₂(3^m)` bits of soundness, whatever
+the round does with its bucket sums: a lone bad point escapes whenever its
+coefficient vector is the zero vector, which has probability `3^-m`. The bound
+is not about the zero vector in particular. Two points with cancelling cofactor
+parts (`T` and `-T`) that land in the same bucket with the same sign vanish in
+that bucket's sum, and nothing done with the sums afterwards can see them; this
+happens with probability `1/3^m` for *any* rule that adds each point once into
+one of `3^m/2` signed buckets, whatever the alphabet, however the buckets are
+combined, and whichever component of the cofactor group the points live in.
+So a pass is worth at most `log₂(2 · slots)` bits, and the slot count is bounded
+by the combine, which costs about two additions per occupied slot. So the
+additions per point are
+
+```
+adds/point ≈ passes + Σ_rounds K_r/n,     K = (3^m+1)/2 buckets, passes = ⌈81/m⌉
+```
+
+— one addition per point per pass for the accumulation, less one per bucket for
+the point that lands there first, plus about two per bucket for the combine.
+The two terms pull against each other: a wider round costs `3^m` in the combine
+to save one pass over `n`, so the width worth choosing rises with the batch and
+the cost model picks it per batch. At a hundred thousand points that is nine
+rounds of width nine (9.1 additions per point); at a million, eight rounds of
+width 11 and 10 (8.3); at three million, seven rounds of width 12 and 11 (7.4).
+
+Below about seven passes there is nothing left: six would need width 14, whose
+buckets alone outweigh three million points. At six field multiplications per
+batch-affine addition, seven passes is ~45 multiplications per point against
+~1200 for an exact check — a ceiling around 22×, which the implementation now
+reaches to within about 6%.
+
+Put the other way round: with `B ≈ n/10` slots the floor is
+`⌈128 / log₂(2B)⌉` passes — nine at a hundred thousand points, eight at a
+million, seven at three million — and the plans above are already there. What
+remains between the measured speedup and the multiplication count is the
+constant per addition (see "The engine" and "What did not pay"), not the
+schedule. The ideas that look like they escape the bound do not:
+
+- **Handling the 3-torsion separately** (a cubic-residue test of one line
+  evaluation per point, batched multiplicatively at one field multiplication
+  per point per pass) removes the reason the alphabet is ternary, but the
+  cancelling-pair bound is indifferent to the alphabet: the elliptic passes
+  still need `128 / log₂(2B)` of them, and the multiplicative passes come on
+  top.
+- **Folding by the cube-root endomorphism** (`φ(x, y) = (ωx, y)`, one
+  multiplication or a precomputed coordinate) would let six vectors share a
+  slot instead of two, for `log₂ 3` more bits per pass. But `φ` acts trivially
+  on the order-3 component, so a coefficient alphabet closed under `φ` is
+  not uniform modulo 3 there: a cancelling 3-torsion pair escapes a digit with
+  probability `19/49` rather than `1/3`, and the pass buys fewer bits per slot
+  than plain trits do. It only pays once the 3-torsion is handled separately,
+  whose cost (above) is about the pass it saves.
+- **Tate pairings for the whole cofactor.** Every prime of `h` divides `p - 1`
+  (`x - 1` does), so a reduced Tate pairing into `μ_ℓ ⊂ F_p` exists for each,
+  and its final exponentiation batches multiplicatively. The Miller loop does
+  not: it is `~4` multiplications per bit of `ℓ` per point, some 250 for the
+  26-bit prime alone and more for the two generators the `(Z/ℓ)²` torsion
+  needs — several times the whole batched check.
+- **Sparser or shared accumulation** — pre-summing pairs, reusing a pass's
+  bucket sums as the next pass's inputs, tensoring two passes' buckets — either
+  correlates the coefficients a pair of points receives (a shared sum hides a
+  cancelling pair inside it forever) or costs as much to marginalize as it saves
+  to accumulate.
+
+This is why the speedup grows with the batch and then flattens: the `K/n` term
+and the fixed costs (converting to affine, drawing coefficients) amortize away,
+and the pass count steps down only twice more after nine.
+
+## The engine
+
+Four implementation choices carry most of the constant:
+
+- **Streaming accumulation with shared inversions.** A bucket's slot holds its
+  running sum; additions are queued, and a chunk of 1024 of them shares one
+  field inversion (Montgomery's trick), about six field multiplications per
+  addition. A bucket with a queued addition is closed until its chunk
+  completes, and a point arriving meanwhile is carried to the next pass — with
+  uniform bucket ids only ~5% of points ever are. A point is therefore read
+  once, added once, and never copied to a work list. Slots are touched in
+  random order, so the accumulator prefetches the slot each point will land in
+  a couple of dozen iterations ahead, and so does the completion walk, which
+  reopens those same slots in the same random order a chunk later — long after
+  the accumulator's read of them has been evicted. The hint is an intrinsic on
+  x86_64 and inline assembly on aarch64, where the intrinsic is still unstable.
+- **Signed coefficients, folded buckets.** Coefficients are drawn from
+  `{-1,0,1}` rather than `{0,1,2}`, which leaves the `1/3` bound untouched (the
+  cofactor's order is odd and at least 3, so it divides neither difference a
+  three-element set admits) but lets a vector share a bucket with its negation:
+  negating an affine point is the sign of its `y`, so the point is stored
+  negated and the bucket count falls to `(3^m+1)/2`. Reading a bucket index as a
+  balanced-ternary *value* makes the canonical vectors exactly the non-negative
+  ones, so the bucket is `|value|` and the sign falls out of the residue the
+  sampler already draws. That halves the combine and the slot footprint, and
+  costs nothing per addition: negating the second operand negates the chord's
+  numerator, so taking its denominator the other way round cancels the sign.
+- **A shared collapse for the combine.** Recovering the `m` combinations one at
+  a time touches most of the bucket sums each, which caps `m` where the combine
+  costs more than the accumulation it saves. Folding away one digit at a time
+  instead (level `j+1` is level `j` with its top remaining digit collapsed, as
+  `L[a] = S[a] + S[H+a] - S[H-a]`, whose three terms are all canonical)
+  yields every digit's marginals for about two additions per bucket in total,
+  and the marginals of all levels reduce together so a handful of inversions
+  cover the whole combine. This is what makes `m = 9` affordable — and `m = 9`
+  is what turns 17 passes into 9.
+- **Interleaved inversion chains.** A field multiplication's latency (19 ns
+  here) is well above its throughput (14 ns), and the engine had two serial
+  chains of them: the running product Montgomery's trick unwinds, and the
+  three dependent multiplications of each addition, with the out-of-order
+  window too short to overlap one addition's chain with the next. The queue
+  now keeps four interleaved running products (entry `i` continues entry
+  `i - 4`), one inversion serves all four for six extra multiplications per
+  chunk, and the completing walk finishes four additions side by side, taking
+  each step for all four before the next step for any. That takes the
+  isolated inversion walk from 52 to 44 ns per element and an addition from
+  ~145 to ~130 ns; the whole round is 8% faster at a hundred thousand points.
+  Four chains measured the same as eight.
+- **Field arithmetic without ceremony.** `blst_fp_add`/`blst_fp_sub` are
+  replaced by inlined carry chains (the call and the mandatory zeroing of the
+  out-parameter cost more than the arithmetic), multiplications write into
+  `MaybeUninit` rather than a zeroed temporary, and each addition consumes its
+  inverse where the inversion's backward walk produces it, so no inverse is
+  ever written to memory. The running product that walk unwinds is extended as
+  each addition is queued, riding along with work already holding the
+  denominator, so the queue is written once and walked once instead of twice.
+
+A round's bucket slots are the accumulator's working set (and its collapse
+workspace is half as large again), so the cost model caps the width at what fits
+a 2 MiB budget — `3^9` slots. Past it, cost per addition rises about 8% at
+`m = 10` and 15% at `m = 11`, while the workspace grows threefold per step, per
+thread: `m = 9` asks for 2.8 MB, `m = 11` for 25 MB. At a million points the
+best plan `m = 11` allows (eight rounds, widths 11/10) measures within run-to-run
+noise of the nine-round plan chosen here; at a hundred thousand it is 36% worse.
+The budget buys the memory bound for no measurable speed.
+
+## Measured results
+
+Serial (single-threaded) and parallel (4 threads), against per-point checking:
+
+| n         | per-point | C serial          | C parallel         |
+|-----------|-----------|-------------------|--------------------|
+| 200       | 10.5 ms   | 7.3 ms (1.4×)     | 2.4 ms (4.3×)      |
+| 1 000     | 52.0 ms   | 12.5 ms (4.2×)    | 4.4 ms (11.9×)     |
+| 6 000     | 321 ms    | 39.5 ms (8.1×)    | 14.3 ms (22.5×)    |
+| 100 000   | 5.24 s    | 429 ms (12.2×)    | 166 ms (31.6×)     |
+| 300 000   | 15.8 s    | 1.13 s (14.0×)    | 444 ms (35.5×)     |
+| 1 000 000 | 52.3 s    | **3.57 s (14.6×)**| 1.47 s (35.6×)     |
+| 3 000 000 | 163 s     | 10.5 s (15.5×)    | 4.35 s (37.4×)     |
+
+Run-to-run spread on this (shared, virtualized) machine is ±5%: across runs the
+million- and three-million-point rows have measured anywhere from 14.5× to 16.4×
+serial, so read them as "about 15× serial", not as a sharp figure. The
+`n = 200` row sits just above the per-point fallback threshold; below it the
+cost model declines to batch at all.
+
+For reference, the previous implementation of this same strategy measured
+4.7× serial at n = 100 000 on this machine (1.15 s), against 430 ms now.
+
+Chosen plans: 14 rounds of width 6/5 at n = 200, 16 rounds of width 6/5 at
+n = 1 000, 13 rounds of width 7/6 at n = 6 000, and 9 rounds of width 9 from
+n = 100 000 up — nine being the floor, since the slot budget caps the width at
+nine and `ceil(81/9) = 9`.
+
+Phase breakdown at n = 10⁶ (3.5 s total): 3.2 s in the nine rounds, 0.38 s
+converting the batch to affine, 0.04 s drawing coefficients. The conversion is
+7 field multiplications per point against 54 for the rounds, and it disappears
+entirely for callers whose points arrive already affine (as decoded points do).
+
+## On a second machine (Apple M5 Pro)
+
+The Xeon figures above are what the cost model was calibrated against. Repeating
+the measurement on an 18-core Apple M5 Pro (macOS, 6 performance cores) checks
+that the model travels: an exact check costs 22.5 µs there and a batch-affine
+addition ~145 ns, so a check is worth ~153 additions — within 2% of the Xeon's
+150, which is why no constant needed retuning.
+
+Single-threaded, on points in decoded (`z = 1`) form, best of several runs; the
+per-point column is measured on a 20 000-point prefix and scaled, since it is
+exactly linear:
+
+| n         | per-point | previous engine | C serial            |
+|-----------|-----------|-----------------|---------------------|
+| 1 000     | 22.3 ms   | 6.81 ms (3.3×)  | 4.90 ms (4.6×)      |
+| 6 000     | 133 ms    | 24.0 ms (5.6×)  | 14.3 ms (9.3×)      |
+| 100 000   | 2.22 s    | 299 ms (7.5×)   | 141 ms (15.7×)      |
+| 1 000 000 | 21.3 s    | 3.19 s (7.0×)   | 1.13 s (18.8×)      |
+| 3 000 000 | 64.0 s    | —               | **3.08 s (20.8×)**  |
+
+"Previous engine" is the single-combination-per-round implementation this
+strategy replaced, measured on the same batches in the same session. Run-to-run
+spread here is ±2%, tighter than the virtualized Xeon's ±5%.
+
+Every row is above the Xeon's, and the last two by more than the ratio of
+addition to check cost explains. Two of the choices above are worth more on a
+machine with this much cache: folding halves a round's slots, and the budget
+that bounds them is set here to admit widths 11 and 12, the two steps that buy
+a pass — eight rather than nine at a million points, seven at three million. On the Xeon both were left
+where its smaller L2 wants them. The shape is the same on both: flat below a
+thousand points, still climbing at a hundred thousand, flattening toward the
+pass floor after a million.
+
+## What did not pay
+
+Recorded because each looked like it should, and the measurement is the only
+reason to believe otherwise. All figures are single-threaded on the M5 Pro,
+against per-point checking.
+
+- **Queueing the denominators instead of recomputing them.** A queued addition
+  stores its denominator and reads it back, 96 bytes of traffic that the
+  completing walk could avoid: it holds both operands already, so one
+  subtraction reproduces the value. It costs 3% (17.5× → 17.0× at a million
+  points). The stored denominator is a sequential load the hardware has
+  prefetched, while recomputing it puts the inversion chain's serial
+  multiplication — `running *= denominator` — behind the *random* slot load it
+  was previously independent of. The memory saved is not on the critical path;
+  the dependency added is.
+- **Resizing the inversion chunk.** 1024 additions per shared inversion holds
+  ~100 KB of denominators and prefix products, around this core's L1. Neither
+  direction moves it: 256 → 14.3×, 512 → 14.4×, 1024 → 14.7×, 2048 → 14.7× at a
+  hundred thousand points. An inversion is ~1.5 µs, so past a few hundred
+  additions its share is already under 2 ns each, and nothing else is
+  chunk-sensitive enough to show through the noise.
+- **Tiling the accumulation.** Worth it for an engine that materializes a work
+  list per pass; this one streams, so there is no per-tile buffer to keep
+  resident and the point array is read sequentially either way. Nine passes
+  over a million points is 864 MB of sequential reads against ~1.3 s of
+  arithmetic — under 2% of the time at this machine's bandwidth.
+- **Radix-partitioning the accumulation.** The proposal is to scatter points
+  into `3^k` contiguous ranges by their top digits first, so the random-access
+  working set becomes one partition's slots rather than the whole array, and
+  the width stops being bounded by cache. It is a real fix for a real problem,
+  but not one this machine has: raising the slot budget straight to 16 MiB —
+  an 8.5 MB slot array, four times what the old budget allowed — costs nothing
+  measurable per addition and buys 9% at a million points; a 25 MB one at width
+  12 buys a further 8% at three million. Cache was not what bounded the
+  width. What bounds it is the combine, which grows as `3^m`
+  and which partitioning does not touch. The premise is worth re-testing on a
+  machine with a smaller last-level cache, where the Xeon's own numbers (8% per
+  addition one step past its 2 MiB, 15% two steps) suggest it would bind.
+
+- **Vectorizing the field arithmetic (NEON).** Apple silicon issues about
+  three 64×64→128 products per cycle (0.15 ns per `mul`+`umulh` pair measured
+  with independent chains), which blst's hand-scheduled multiplication uses to
+  within about 25% — its 14 ns is ~400 instructions at the core's issue width.
+  NEON has no 64-bit lane multiply: `umull` (two 32×32 products per
+  instruction) measured 0.17 ns per instruction, no more product bandwidth
+  than the scalar pipes once carries are handled in 26-bit limbs, and 64-bit
+  floating-point FMA (0.067 ns per two-lane instruction) needs three
+  operations per exact 52-bit limb product plus conversions, which puts an
+  8-limb Montgomery multiplication near 25 ns per lane-pair — slower than the
+  scalar code it would replace. Without an IFMA-style instruction the vector
+  units cannot beat three scalar multipliers on this field size.
+- **A pure-Rust Montgomery multiplication, to inline it.** Six `blst` calls
+  per addition each cost a Rust wrapper, a C wrapper and an assembly prologue
+  that saves ten registers — around 9% of the instructions — and an inlined
+  multiplication would also let the compiler schedule across the three
+  dependent ones. Both a product-then-reduce and a CIOS form in `u128`
+  arithmetic compile to 20.8 ns per multiplication against blst's 14.3 (the
+  latency is the same, 20.5 vs 19.3 ns; the throughput is not — LLVM's carry
+  handling is bulkier than the hand-written `adcs` chains). A 44% slower
+  multiplication cannot be repaid by the glue it removes. A dedicated
+  squaring got to 18.0 ns against 14.6 for blst's, which has no separate
+  squaring on aarch64; not enough either.
+- **Prefetching the point stream.** The accumulation at a million points costs
+  ~130 ns per addition against ~120 at a hundred and fifty thousand, and the
+  step is exactly where the point array stops fitting the 16 MB second-level
+  cache (150k points is 14.4 MB; 300k is 28.8). Software prefetch of the
+  stream, whether 24 points ahead into L1 or 128 ahead into L2, in the
+  accumulation loop and the completing walk both, moved nothing outside noise:
+  the hardware prefetcher already has the stream, and whatever the remaining
+  7% is, it is not exposed latency the software can hide.
+- **Recomputing the denominators in the walk (again).** Recorded above as a
+  3% loss because it put the serial running product behind a random load.
+  With four independent chains that argument lapses, but so does the gain: the
+  chain's latency is already hidden by the other three, so the 96 bytes of
+  traffic it would save are worth about what the subtraction it adds costs.
+  Not retried.
+
+## Same-engine strategy comparison
+
+All three strategies run on the shipped accumulation engine (`measure_strategies`,
+single-shot), so the comparison isolates the strategy rather than the engine:
+
+| n       | per-point | A (81 passes) | B, best width      | C (shipping)      |
+|---------|-----------|---------------|--------------------|-------------------|
+| 6 000   | 315 ms    | ~167 ms*      | 144 ms (B=81, r=21)| **38.7 ms**       |
+| 100 000 | 5.16 s    | ~2.79 s*      | 1.02 s (B=81, r=21)| **0.41 s**        |
+
+(*) A's row is projected, not measured: `81 · n` additions at the engine's
+measured 344 ns. Running A on this engine literally (`m = 1`) measures 13.4 s at
+n = 100 000, because three buckets leave at most three additions in flight and
+the shared inversion has nothing to amortize over — a batch-affine engine is
+simply the wrong engine for a one-combination round, which is why the original
+Strategy A used blst's Jacobian MSM. Either way A needs 81 passes where C needs
+9.
+
+B was measured at `B ∈ {9, 81, 729}` with `rounds = ⌈81/log₃B⌉`; 81 is its best
+width at both sizes, and its check floor (`rounds × B` exact checks — 1701
+checks at B=81, r=21) is what keeps it 2.5× behind C.
+
+## Related work
+
+The current state of the art in the literature is Koshelev–El Housni–Fotiadis,
+"Batch subgroup membership testing on pairing-friendly curves"
+([eprint 2025/1311](https://eprint.iacr.org/2025/1311), gnark-crypto-based Go
+implementation). Their construction is a two-step procedure: a per-point
+Tate-pairing/power-residue prefilter removes the small-torsion components
+(3- and 11-torsion on BLS12-381), after which the smallest remaining cofactor
+prime is 10177 and a few rounds of a 13-bit-coefficient RLC (one full MSM per
+round) reach the target. Points of comparison, from the paper itself:
+
+- They state the same barrier (soundness of one combination ≤ `1/p` for the
+  smallest cofactor prime `p`, i.e. 1/3 on BLS12-381) and the same multi-round
+  escape (`n = ⌈µ/log₂ m⌉` rounds of small coefficients), but their cost model
+  charges **one full MSM per round**, which is why they judge the multi-round
+  route impractical and reach for the prefilter instead.
+- **On BLS12-381 their end-to-end method is slower than naive per-point
+  checking on valid inputs** (their words: the first-stage Tate/residue checks
+  dominate; Step 2 alone would be 9.6–47× but is unsound without Step 1). Their
+  remedy is generating new curves (BLS12-376, a new BLS12-377) where the
+  prefilter shrinks — gaining 1.1–1.5× end-to-end, single-threaded, at a
+  2⁻⁶⁰ target (vs 2⁻¹²⁸ here).
+- Their multi-round variant (old BLS12-377, 60 rounds of `{0,1}` coefficients)
+  uses running-sum mixed additions; they name affine additions with
+  Montgomery batch inversion as *future work*. The cross-round vector-bucketing
+  used here — one accumulation pass serving all `m` combinations — does not
+  appear in the paper.
+
+Strategy C therefore fills exactly the gap their cost model assumes away: it
+makes the no-prefilter multi-combination route cost `≈81/m` passes instead of
+81 MSMs, which is what turns batch SMT on **unmodified BLS12-381** from "slower
+than naive" (their result) into 8–21× serial and 19–37× parallel (ours, at a
+stronger 2⁻¹²⁸ target). Their binary-coefficient variant also shows how C
+extends to even-cofactor curves (e.g. BLS12-377): use `{0,1}` coefficient
+vectors (2^m buckets, 1 bit per combination, 128 total) instead of trits.
+
+Note that a faster field multiplication would *lower* these ratios, not raise
+them: the exact check is almost pure multiplication while the batched path is
+part multiplication and part memory traffic. The multiplication-count ceiling
+above (~22×) is the machine-independent statement.
+
+## Status
+
+Strategy C is implemented in `subgroup::batch_in_g1` with:
+
+- soundness-bearing details in the module docs (odd-cofactor proof, exact-trit
+  requirement, deterministic-combine clarification, and why a pass cannot beat
+  `3^-m`);
+- a differential fuzz of the whole round against a direct computation: every
+  combination is rebuilt from the round's marginals and compared value for
+  value with a direct sum over the coefficient digits, across 400 seeds of
+  adversarial point and id distributions and every width up to 9;
+- an accumulator oracle test (fuzz vs naive G1 addition over mixed
+  good/bad/identity/negated/duplicated points) plus deterministic tests for
+  every special-case branch (cancelling pairs, doubling chains, identity
+  inputs, single-bucket contention, wide plans, empty buckets);
+- a chi-square bound on the drawn coefficients — overall, per digit position,
+  per adjacent pair, and per slot in the word that produced them; both
+  mutations it is meant to catch (one id too many per word, a widened rejection
+  bound) do fail it;
+- the bounded round-plan search pinned against the exhaustive one it replaces,
+  and against absurd soundness targets;
+- an oracle test for the inlined field arithmetic against `blst_fp_add` /
+  `blst_fp_sub`, and for the affine conversion against `blst_p1s_to_affine`;
+- adversarial batch tests (cancelling bad pair, repeated bad point, identity
+  padding);
+- `cargo miri` cannot run the module (blst FFI is unsupported by miri); the
+  unsafe surface is thin per-call FFI wrappers plus prefetch hints, with all
+  pass-scheduling logic in safe Rust under the oracle tests.
