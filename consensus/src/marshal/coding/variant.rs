@@ -4,7 +4,7 @@ use crate::{
         ancestry::BlockProvider,
         coding::{
             shards,
-            types::{CodedBlock, CodedBlockCfg, StoredCodedBlock, coding_config_for_participants},
+            types::{CodedBlock, CodedBlockCfg, StoredCodedBlock, coding_config_for_committee},
         },
         core::{Buffer, CommitmentFallback, Mailbox, Retirement, Variant},
     },
@@ -86,9 +86,8 @@ where
     where
         S: SimplexScheme<Self::Commitment>,
     {
-        let n_participants = u16::try_from(scheme.participants().len())
-            .expect("scheme must have at most 2^16-1 participants");
-        payload.config() == coding_config_for_participants(n_participants)
+        coding_config_for_committee::<C, _>(scheme.participants())
+            .is_some_and(|config| payload.config() == config)
     }
 
     fn block_cfg(
@@ -311,7 +310,9 @@ mod tests {
         type TestVariant = Coding<NoCloneBlock, TestScheme, Sha256, PublicKey>;
 
         let block = no_clone_block(CONFIG);
-        let coded = CodedBlock::<NoCloneBlock, TestScheme, Sha256>::new(block, CONFIG, &Sequential);
+        let coded =
+            CodedBlock::<NoCloneBlock, TestScheme, Sha256>::try_new(block, CONFIG, &Sequential)
+                .unwrap();
         let expected = coded.commitment();
         let stored = StoredCodedBlock::new(coded);
 

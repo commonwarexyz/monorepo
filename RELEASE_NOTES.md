@@ -17,6 +17,14 @@ participant-index based. Simplex also logs and exports committee quorum diagnost
 when it installs an epoch. The stateful recovery probe selects its floor after reply
 weight exceeds the solicited committee's fault budget ([#4639]).
 
+### Weighted Coding Committees
+
+The coding marshal derives its minimum shard count from committee weights and
+rejects participant counts outside `4..=u16::MAX` or configurations that the
+coding scheme cannot support. This changes coding commitments for unit-weight
+committees whose size is not `3f + 1` and requires a coordinated, drained
+upgrade ([#4652]).
+
 ### Crash Recovery
 
 Runtime storage now recovers a blob whose initial header write was interrupted.
@@ -42,6 +50,7 @@ after restart ([#4420]).
 [#4420]: https://github.com/commonwarexyz/monorepo/pull/4420
 [#4635]: https://github.com/commonwarexyz/monorepo/pull/4635
 [#4639]: https://github.com/commonwarexyz/monorepo/pull/4639
+[#4652]: https://github.com/commonwarexyz/monorepo/pull/4652
 
 ## v2026.7.0
 

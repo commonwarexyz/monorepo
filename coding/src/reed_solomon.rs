@@ -51,6 +51,19 @@ fn total_shards(config: &Config) -> Result<u16, Error> {
         .map_err(|_| Error::TooManyTotalShards(total))
 }
 
+fn validate_config(config: &Config) -> Result<u16, Error> {
+    let total = total_shards(config)?;
+    let original_count = usize::from(config.minimum_shards.get());
+    let recovery_count = usize::from(config.extra_shards.get());
+    if !Encoder::supports(original_count, recovery_count) {
+        return Err(Error::ReedSolomon(RsError::UnsupportedShardCount {
+            original_count,
+            recovery_count,
+        }));
+    }
+    Ok(total)
+}
+
 /// A piece of data from a Reed-Solomon encoded object.
 #[derive(Debug, Clone)]
 pub struct Chunk<D: Digest> {
@@ -1149,13 +1162,17 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
     type CheckedShard = CheckedChunk<H::Digest>;
     type Error = Error;
 
+    fn validate_config(config: &Config) -> Result<(), Self::Error> {
+        validate_config(config).map(|_| ())
+    }
+
     fn encode(
         config: &Config,
         data: impl Buf,
         strategy: &impl Strategy,
     ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error> {
         encode::<H, _>(
-            total_shards(config)?,
+            validate_config(config)?,
             config.minimum_shards.get(),
             data,
             strategy,
@@ -1190,7 +1207,7 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
         strategy: &impl Strategy,
     ) -> Result<Vec<u8>, Self::Error> {
         decode::<H, _>(
-            total_shards(config)?,
+            validate_config(config)?,
             config.minimum_shards.get(),
             commitment,
             shards,
@@ -2239,6 +2256,27 @@ mod tests {
             )
             .is_err()
         )
+    }
+
+    #[test]
+    fn test_validate_config_shard_count_boundary() {
+        let supported = Config {
+            minimum_shards: NZU16!(32_768),
+            extra_shards: NZU16!(32_767),
+        };
+        assert!(RS::validate_config(&supported).is_ok());
+
+        let config = Config {
+            minimum_shards: NZU16!(32_766),
+            extra_shards: NZU16!(32_769),
+        };
+        assert!(matches!(
+            RS::validate_config(&config),
+            Err(Error::ReedSolomon(RsError::UnsupportedShardCount {
+                original_count: 32_766,
+                recovery_count: 32_769,
+            }))
+        ));
     }
 
     #[test]

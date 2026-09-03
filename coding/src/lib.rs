@@ -169,6 +169,9 @@ commonware_macros::stability_scope!(ALPHA {
         /// The type of errors that can occur during encoding, checking, and decoding.
         type Error: std::fmt::Debug + Send;
 
+        /// Returns an error if this scheme does not support `config`.
+        fn validate_config(config: &Config) -> Result<(), Self::Error>;
+
         /// Encode a piece of data, returning a commitment, along with shards, and proofs.
         ///
         /// Each shard and proof is intended for exactly one participant. The number of shards returned
@@ -305,6 +308,9 @@ commonware_macros::stability_scope!(ALPHA {
         /// The type of errors that can occur during encoding, weakening, checking, and decoding.
         type Error: std::fmt::Debug + Send;
 
+        /// Returns an error if this scheme does not support `config`.
+        fn validate_config(config: &Config) -> Result<(), Self::Error>;
+
         /// Encode a piece of data, returning a commitment, along with shards, and proofs.
         ///
         /// Each shard and proof is intended for exactly one participant. The number of shards returned
@@ -419,6 +425,10 @@ commonware_macros::stability_scope!(ALPHA {
         type Shard = P::StrongShard;
         type CheckedShard = PhasedCheckedShard<P>;
         type Error = PhasedAsSchemeError<P::Error>;
+
+        fn validate_config(config: &Config) -> Result<(), Self::Error> {
+            P::validate_config(config).map_err(PhasedAsSchemeError::Scheme)
+        }
 
         fn encode(
             config: &Config,
