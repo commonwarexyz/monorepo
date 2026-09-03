@@ -16,11 +16,7 @@ use alloc::{collections::BTreeSet, vec::Vec};
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, Read, ReadRangeExt, Write, types::lazy::Lazy};
 use commonware_parallel::Strategy;
-use commonware_utils::{
-    Participant,
-    iter::NonEmpty,
-    ordered::{Quorum, Set},
-};
+use commonware_utils::{Participant, iter::NonEmpty, ordered::Committee};
 use rand_core::CryptoRng;
 #[cfg(feature = "std")]
 use std::collections::BTreeSet;
@@ -33,7 +29,7 @@ use std::collections::BTreeSet;
 #[derive(Clone, Debug)]
 pub struct Generic<N: Namespace> {
     /// Participants in the committee.
-    pub participants: Set<PublicKey>,
+    pub participants: Committee<PublicKey>,
     /// Key used for generating signatures.
     pub signer: Option<(Participant, PrivateKey)>,
     /// Pre-computed namespace(s) for this subject type.
@@ -44,7 +40,7 @@ impl<N: Namespace> Generic<N> {
     /// Creates a new generic Ed25519 scheme instance.
     pub fn signer(
         namespace: &[u8],
-        participants: Set<PublicKey>,
+        participants: Committee<PublicKey>,
         private_key: PrivateKey,
     ) -> Option<Self> {
         let signer = participants
@@ -59,7 +55,7 @@ impl<N: Namespace> Generic<N> {
     }
 
     /// Builds a verifier that can authenticate signatures without generating them.
-    pub fn verifier(namespace: &[u8], participants: Set<PublicKey>) -> Self {
+    pub fn verifier(namespace: &[u8], participants: Committee<PublicKey>) -> Self {
         Self {
             participants,
             signer: None,
@@ -200,8 +196,9 @@ impl<N: Namespace> Generic<N> {
         // Sort the signatures by signer index.
         entries.sort_by_key(|(signer, _)| *signer);
         let (signer, signatures): (Vec<Participant>, Vec<_>) = entries.into_iter().unzip();
-        let quorum = self.participants.quorum_count::<S::Faults>();
-        let signers = Signers::try_from((&self.participants, signer))?.require(quorum)?;
+        let quorum = self.participants.quorum_weight::<S::Faults>();
+        let signers = Signers::try_from((&self.participants, signer))?
+            .require_weight(&self.participants, quorum)?;
         let signatures = signatures.into_iter().map(Lazy::from).collect();
 
         Ok(Certificate {
@@ -235,8 +232,14 @@ impl<N: Namespace> Generic<N> {
         }
 
         // If the certificate does not meet the quorum, return false.
-        let quorum = self.participants.quorum_count::<S::Faults>() as usize;
-        if certificate.signers.count() < quorum {
+        let quorum = self.participants.quorum_weight::<S::Faults>();
+        let Ok(weight) = self
+            .participants
+            .sum_ordered_weights(certificate.signers.iter())
+        else {
+            return false;
+        };
+        if weight < quorum {
             return false;
         }
 
@@ -314,7 +317,7 @@ impl<N: Namespace> Generic<N> {
         true
     }
 
-    pub const fn certificate_codec_config(&self) -> <Certificate as commonware_codec::Read>::Cfg {
+    pub fn certificate_codec_config(&self) -> <Certificate as commonware_codec::Read>::Cfg {
         self.participants.len()
     }
 
@@ -458,7 +461,7 @@ macro_rules! impl_certificate_ed25519 {
             /// in the participant set.
             pub fn signer(
                 namespace: &[u8],
-                participants: commonware_utils::ordered::Set<$crate::ed25519::PublicKey>,
+                participants: commonware_utils::ordered::Committee<$crate::ed25519::PublicKey>,
                 private_key: $crate::ed25519::PrivateKey,
             ) -> Option<Self> {
                 Some(Self {
@@ -475,7 +478,7 @@ macro_rules! impl_certificate_ed25519 {
             /// Participants use the same key for both identity and signing.
             pub fn verifier(
                 namespace: &[u8],
-                participants: commonware_utils::ordered::Set<$crate::ed25519::PublicKey>,
+                participants: commonware_utils::ordered::Committee<$crate::ed25519::PublicKey>,
             ) -> Self {
                 Self {
                     generic: $crate::ed25519::certificate::Generic::verifier(
@@ -545,7 +548,7 @@ macro_rules! impl_certificate_ed25519 {
                 self.generic.me()
             }
 
-            fn participants(&self) -> &commonware_utils::ordered::Set<Self::PublicKey> {
+            fn participants(&self) -> &commonware_utils::ordered::Committee<Self::PublicKey> {
                 &self.generic.participants
             }
 
@@ -616,7 +619,9 @@ mod tests {
     use commonware_codec::{Decode, Encode};
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;
-    use commonware_utils::{N3f1, Participant, TryCollect, non_empty, ordered::Set, test_rng};
+    use commonware_utils::{
+        N3f1, Participant, TryCollect, non_empty, ordered::Committee, test_rng,
+    };
 
     const NAMESPACE: &[u8] = b"test-ed25519";
     const MESSAGE: &[u8] = b"test message";
@@ -643,10 +648,18 @@ mod tests {
     impl_certificate_ed25519!(TestSubject, Vec<u8>, N3f1);
 
     fn setup_signers(rng: &mut impl CryptoRng, n: u32) -> (Vec<Scheme>, Scheme) {
-        let private_keys: Vec<_> = (0..n).map(|_| PrivateKey::random(&mut *rng)).collect();
-        let participants: Set<PublicKey> = private_keys
+        setup_weighted_signers(rng, &vec![1; n as usize])
+    }
+
+    fn setup_weighted_signers(rng: &mut impl CryptoRng, weights: &[u64]) -> (Vec<Scheme>, Scheme) {
+        let private_keys: Vec<_> = weights
             .iter()
-            .map(|sk| sk.public_key())
+            .map(|_| PrivateKey::random(&mut *rng))
+            .collect();
+        let participants: Committee<PublicKey> = private_keys
+            .iter()
+            .zip(weights)
+            .map(|(sk, weight)| (sk.public_key(), *weight))
             .try_collect()
             .unwrap();
 
@@ -658,6 +671,12 @@ mod tests {
         let verifier = Scheme::verifier(NAMESPACE, participants);
 
         (signers, verifier)
+    }
+
+    fn by_weight(schemes: &[Scheme]) -> Vec<&Scheme> {
+        let mut schemes: Vec<_> = schemes.iter().collect();
+        schemes.sort_by_key(|scheme| scheme.participants().weight(scheme.me().unwrap()).unwrap());
+        schemes
     }
 
     #[test]
@@ -710,7 +729,7 @@ mod tests {
     fn test_verify_attestations_filters_invalid() {
         let mut rng = test_rng();
         let (schemes, _) = setup_signers(&mut rng, 5);
-        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+        let quorum = usize::try_from(schemes[0].participants().quorum_weight::<N3f1>())
             .expect("quorum exceeds usize::MAX");
 
         let attestations: Vec<_> = schemes
@@ -769,7 +788,7 @@ mod tests {
     fn test_assemble_certificate() {
         let mut rng = test_rng();
         let (schemes, _) = setup_signers(&mut rng, 4);
-        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+        let quorum = usize::try_from(schemes[0].participants().quorum_weight::<N3f1>())
             .expect("quorum exceeds usize::MAX");
 
         let attestations: Vec<_> = schemes
@@ -833,7 +852,7 @@ mod tests {
     fn test_verify_certificate() {
         let mut rng = test_rng();
         let (schemes, verifier) = setup_signers(&mut rng, 4);
-        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+        let quorum = usize::try_from(schemes[0].participants().quorum_weight::<N3f1>())
             .expect("quorum exceeds usize::MAX");
 
         let attestations: Vec<_> = schemes
@@ -865,7 +884,7 @@ mod tests {
     fn test_verify_certificate_detects_corruption() {
         let mut rng = test_rng();
         let (schemes, verifier) = setup_signers(&mut rng, 4);
-        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+        let quorum = usize::try_from(schemes[0].participants().quorum_weight::<N3f1>())
             .expect("quorum exceeds usize::MAX");
 
         let attestations: Vec<_> = schemes
@@ -910,7 +929,7 @@ mod tests {
     fn test_certificate_codec_roundtrip() {
         let mut rng = test_rng();
         let (schemes, _) = setup_signers(&mut rng, 4);
-        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+        let quorum = usize::try_from(schemes[0].participants().quorum_weight::<N3f1>())
             .expect("quorum exceeds usize::MAX");
 
         let attestations: Vec<_> = schemes
@@ -936,7 +955,7 @@ mod tests {
     fn test_certificate_rejects_sub_quorum() {
         let mut rng = test_rng();
         let (schemes, _) = setup_signers(&mut rng, 4);
-        let expected = u64::from(schemes[0].participants().quorum_count::<N3f1>());
+        let expected = schemes[0].participants().quorum_weight::<N3f1>();
         let found = expected - 1;
         let found_count = usize::try_from(found).expect("quorum exceeds usize::MAX");
 
@@ -958,10 +977,86 @@ mod tests {
     }
 
     #[test]
+    fn test_weighted_quorum_security_boundary() {
+        let mut rng = test_rng();
+        let (schemes, verifier) = setup_weighted_signers(&mut rng, &[1, 1, 1, 6]);
+        let schemes = by_weight(&schemes);
+        let subject = || TestSubject {
+            message: Bytes::from_static(MESSAGE),
+        };
+        assert_eq!(verifier.participants().quorum_weight::<N3f1>(), 7);
+
+        // Three light signers reach the count quorum but not the quorum weight.
+        let light: Vec<_> = schemes[..3]
+            .iter()
+            .map(|scheme| scheme.sign::<Sha256Digest>(subject()).unwrap())
+            .collect();
+        assert_eq!(
+            schemes[0].assemble(non_empty![@light.clone()], &Sequential),
+            Err(AssemblyError::InsufficientAttestations(7, 3))
+        );
+        let light_certificate = Certificate {
+            signers: Signers::new(4, light.iter().map(|attestation| attestation.signer)).unwrap(),
+            signatures: light
+                .into_iter()
+                .map(|attestation| attestation.signature)
+                .collect(),
+        };
+        assert!(!verifier.verify_certificate::<_, Sha256Digest>(
+            &mut rng,
+            subject(),
+            &light_certificate,
+            &Sequential,
+        ));
+
+        // The heavy signer alone is one short of quorum.
+        let heavy = schemes[3].sign::<Sha256Digest>(subject()).unwrap();
+        assert_eq!(
+            schemes[0].assemble(non_empty![heavy.clone()], &Sequential),
+            Err(AssemblyError::InsufficientAttestations(7, 6))
+        );
+        let below_quorum = Certificate {
+            signers: Signers::new(4, [heavy.signer]).unwrap(),
+            signatures: vec![heavy.signature.clone()],
+        };
+        assert!(!verifier.verify_certificate::<_, Sha256Digest>(
+            &mut rng,
+            subject(),
+            &below_quorum,
+            &Sequential,
+        ));
+
+        // The heavy signer and one light signer reach quorum with two signatures.
+        let light = schemes[0].sign::<Sha256Digest>(subject()).unwrap();
+        let certificate = schemes[0]
+            .assemble(non_empty![heavy, light], &Sequential)
+            .unwrap();
+        assert_eq!(certificate.signers.count(), 2);
+        assert!(verifier.verify_certificate::<_, Sha256Digest>(
+            &mut rng,
+            subject(),
+            &certificate,
+            &Sequential,
+        ));
+
+        // A participant holding quorum weight forms a certificate alone.
+        let (schemes, verifier) = setup_weighted_signers(&mut rng, &[1, 1, 1, 7]);
+        let schemes = by_weight(&schemes);
+        let heavy = schemes[3].sign::<Sha256Digest>(subject()).unwrap();
+        let certificate = schemes[3].assemble(non_empty![heavy], &Sequential).unwrap();
+        assert!(verifier.verify_certificate::<_, Sha256Digest>(
+            &mut rng,
+            subject(),
+            &certificate,
+            &Sequential,
+        ));
+    }
+
+    #[test]
     fn test_certificate_rejects_invalid_signer() {
         let mut rng = test_rng();
         let (schemes, _) = setup_signers(&mut rng, 4);
-        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+        let quorum = usize::try_from(schemes[0].participants().quorum_weight::<N3f1>())
             .expect("quorum exceeds usize::MAX");
 
         let mut attestations: Vec<_> = schemes
@@ -989,7 +1084,7 @@ mod tests {
     fn test_certificate_rejects_malformed_signature() {
         let mut rng = test_rng();
         let (schemes, _) = setup_signers(&mut rng, 4);
-        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+        let quorum = usize::try_from(schemes[0].participants().quorum_weight::<N3f1>())
             .expect("quorum exceeds usize::MAX");
 
         let mut attestations: Vec<_> = schemes
@@ -1087,7 +1182,7 @@ mod tests {
     fn test_verify_certificates_batch() {
         let mut rng = test_rng();
         let (schemes, verifier) = setup_signers(&mut rng, 4);
-        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+        let quorum = usize::try_from(schemes[0].participants().quorum_weight::<N3f1>())
             .expect("quorum exceeds usize::MAX");
 
         let messages: Vec<Bytes> = [b"msg1".as_slice(), b"msg2".as_slice(), b"msg3".as_slice()]
@@ -1134,7 +1229,7 @@ mod tests {
     fn test_verify_certificates_batch_detects_failure() {
         let mut rng = test_rng();
         let (schemes, verifier) = setup_signers(&mut rng, 4);
-        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+        let quorum = usize::try_from(schemes[0].participants().quorum_weight::<N3f1>())
             .expect("quorum exceeds usize::MAX");
 
         let messages: Vec<Bytes> = [b"msg1".as_slice(), b"msg2".as_slice()]

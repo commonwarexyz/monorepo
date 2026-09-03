@@ -209,7 +209,7 @@ mod tests {
         scheme: &S,
     ) -> mocks::reporter::Reporter<deterministic::Context, S, RoundRobin, Sha256Digest> {
         let reporter_cfg = mocks::reporter::Config {
-            participants: scheme.participants().clone(),
+            participants: (**scheme.participants()).clone(),
             scheme: scheme.clone(),
             elector: <RoundRobin>::default(),
         };

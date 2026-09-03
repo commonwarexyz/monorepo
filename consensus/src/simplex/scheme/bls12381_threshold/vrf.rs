@@ -82,7 +82,7 @@ use commonware_utils::{
     N3f1,
     iter::NonEmpty,
     non_empty,
-    ordered::{Quorum, Set},
+    ordered::{Committee, Quorum},
 };
 use rand::rngs::StdRng;
 use rand_core::{CryptoRng, SeedableRng};
@@ -93,30 +93,20 @@ use std::{
 
 /// The role-specific data for a BLS12-381 threshold scheme participant.
 #[derive(Clone, Debug)]
-enum Role<P: PublicKey, V: Variant> {
+enum Role<V: Variant> {
     Signer {
-        /// Participants in the committee.
-        participants: Set<P>,
         /// The public polynomial, used for the group identity, and partial signatures.
         polynomial: Sharing<V>,
         /// Local share used to generate partial signatures.
         share: Share,
-        /// Pre-computed namespaces for domain separation.
-        namespace: Namespace,
     },
     Verifier {
-        /// Participants in the committee.
-        participants: Set<P>,
         /// The public polynomial, used for the group identity, and partial signatures.
         polynomial: Sharing<V>,
-        /// Pre-computed namespaces for domain separation.
-        namespace: Namespace,
     },
     CertificateVerifier {
         /// Public identity of the committee (constant across reshares).
         identity: V::Public,
-        /// Pre-computed namespaces for domain separation.
-        namespace: Namespace,
     },
 }
 
@@ -125,12 +115,12 @@ enum Role<P: PublicKey, V: Variant> {
 /// This scheme produces both vote signatures and per-round seed signatures.
 /// The seed can be extracted from certificates using the [`Seedable`] trait.
 ///
-/// It is possible for a node to play one of the following roles: a signer (with its share),
-/// a verifier (with evaluated public polynomial), or an external verifier that
-/// only checks recovered certificates.
+/// Instances can sign, verify partial signatures, or verify recovered certificates.
 #[derive(Clone, Debug)]
 pub struct Scheme<P: PublicKey, V: Variant> {
-    role: Role<P, V>,
+    participants: Committee<P>,
+    namespace: Namespace,
+    role: Role<V>,
 }
 
 impl<P: PublicKey, V: Variant> Scheme<P, V> {
@@ -140,7 +130,8 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// The polynomial can be evaluated to obtain public verification keys for partial
     /// signatures produced by committee members.
     ///
-    /// Returns `None` if the share's public key does not match any participant.
+    /// Returns `None` if the committee is non-uniform or the share's public key does not match any
+    /// participant.
     ///
     /// # Panics
     ///
@@ -148,15 +139,18 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// committee, or if the share index does not identify a committee participant.
     ///
     /// * `namespace` - base namespace for domain separation
-    /// * `participants` - ordered set of participant identity keys
+    /// * `participants` - ordered committee of participant identity keys and weights
     /// * `polynomial` - public polynomial for threshold verification
     /// * `share` - local threshold share for signing
     pub fn signer(
         namespace: &[u8],
-        participants: Set<P>,
+        participants: Committee<P>,
         polynomial: Sharing<V>,
         share: Share,
     ) -> Option<Self> {
+        if !participants.is_uniform() {
+            return None;
+        }
         assert_eq!(
             polynomial.total().get() as usize,
             participants.len(),
@@ -173,12 +167,9 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
             .expect("share index must match participant indices");
         if partial_public == share.public::<V>() {
             Some(Self {
-                role: Role::Signer {
-                    participants,
-                    polynomial,
-                    share,
-                    namespace: Namespace::new(namespace),
-                },
+                participants,
+                namespace: Namespace::new(namespace),
+                role: Role::Signer { polynomial, share },
             })
         } else {
             None
@@ -191,15 +182,24 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// The polynomial can be evaluated to obtain public verification keys for partial
     /// signatures produced by committee members.
     ///
+    /// Returns `None` if the committee is non-uniform.
+    ///
     /// # Panics
     ///
     /// Panics if the polynomial's participant count or degree does not match the
     /// committee.
     ///
     /// * `namespace` - base namespace for domain separation
-    /// * `participants` - ordered set of participant identity keys
+    /// * `participants` - ordered committee of participant identity keys and weights
     /// * `polynomial` - public polynomial for threshold verification
-    pub fn verifier(namespace: &[u8], participants: Set<P>, polynomial: Sharing<V>) -> Self {
+    pub fn verifier(
+        namespace: &[u8],
+        participants: Committee<P>,
+        polynomial: Sharing<V>,
+    ) -> Option<Self> {
+        if !participants.is_uniform() {
+            return None;
+        }
         assert_eq!(
             polynomial.total().get() as usize,
             participants.len(),
@@ -212,40 +212,44 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         );
         polynomial.precompute_partial_publics();
 
-        Self {
-            role: Role::Verifier {
-                participants,
-                polynomial,
-                namespace: Namespace::new(namespace),
-            },
-        }
+        Some(Self {
+            participants,
+            namespace: Namespace::new(namespace),
+            role: Role::Verifier { polynomial },
+        })
     }
 
     /// Creates a verifier that only checks recovered certificates.
     ///
     /// This lightweight verifier can authenticate recovered threshold certificates but cannot
     /// verify individual votes or partial signatures.
+    /// After construction, `participants` is retained for [`Self::participants`] and is not
+    /// consulted during certificate verification. Callers must ensure it corresponds to
+    /// `identity`.
     ///
     /// * `namespace` - base namespace for domain separation
+    /// * `participants` - ordered committee of participant identity keys and weights
     /// * `identity` - public identity of the committee (constant across reshares)
-    pub fn certificate_verifier(namespace: &[u8], identity: V::Public) -> Self {
-        Self {
-            role: Role::CertificateVerifier {
-                identity,
-                namespace: Namespace::new(namespace),
-            },
+    ///
+    /// Returns `None` if the committee is non-uniform.
+    pub fn certificate_verifier(
+        namespace: &[u8],
+        participants: Committee<P>,
+        identity: V::Public,
+    ) -> Option<Self> {
+        if !participants.is_uniform() {
+            return None;
         }
+        Some(Self {
+            participants,
+            namespace: Namespace::new(namespace),
+            role: Role::CertificateVerifier { identity },
+        })
     }
 
-    /// Returns the ordered set of participant public identity keys in the committee.
-    pub fn participants(&self) -> &Set<P> {
-        match &self.role {
-            Role::Signer { participants, .. } => participants,
-            Role::Verifier { participants, .. } => participants,
-            Role::CertificateVerifier { .. } => {
-                panic!("can only be called for signer and verifier")
-            }
-        }
+    /// Returns the ordered committee of participant public identity keys and weights.
+    pub const fn participants(&self) -> &Committee<P> {
+        &self.participants
     }
 
     /// Returns the public identity of the committee (constant across reshares).
@@ -278,11 +282,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
 
     /// Returns the pre-computed namespaces.
     const fn namespace(&self) -> &Namespace {
-        match &self.role {
-            Role::Signer { namespace, .. } => namespace,
-            Role::Verifier { namespace, .. } => namespace,
-            Role::CertificateVerifier { namespace, .. } => namespace,
-        }
+        &self.namespace
     }
 
     /// Encrypts a message for a target round using Timelock Encryption ([TLE](tle)).
@@ -710,7 +710,7 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         }
     }
 
-    fn participants(&self) -> &Set<Self::PublicKey> {
+    fn participants(&self) -> &Committee<Self::PublicKey> {
         self.participants()
     }
 
@@ -961,13 +961,39 @@ mod tests {
     };
     use commonware_math::algebra::{Additive, CryptoGroup, Random};
     use commonware_parallel::Sequential;
-    use commonware_utils::{N3f1, N5f1, NZU32, test_rng};
+    use commonware_utils::{
+        N3f1, N5f1, NZU32, TryCollect,
+        ordered::{Committee, Set},
+        test_rng,
+    };
     use rand::{SeedableRng, rngs::StdRng};
 
     const NAMESPACE: &[u8] = b"bls-threshold-signing-scheme";
 
     type Scheme<V> = super::Scheme<ed25519::PublicKey, V>;
     type Signature<V> = super::Signature<V>;
+
+    fn committee(
+        participants: &Set<ed25519::PublicKey>,
+        weights: impl IntoIterator<Item = u64>,
+    ) -> Committee<ed25519::PublicKey> {
+        participants
+            .iter()
+            .cloned()
+            .zip(weights)
+            .try_collect()
+            .expect("committee must be valid")
+    }
+
+    fn uniform_committee(
+        participants: &Set<ed25519::PublicKey>,
+        weight: u64,
+    ) -> Committee<ed25519::PublicKey> {
+        committee(
+            participants,
+            std::iter::repeat_n(weight, participants.len()),
+        )
+    }
 
     fn setup_signers<V: Variant>(n: u32, seed: u64) -> (Vec<Scheme<V>>, Scheme<V>) {
         let mut rng = StdRng::seed_from_u64(seed);
@@ -994,7 +1020,7 @@ mod tests {
         shares[0].index = Participant::new(999);
         Scheme::<V>::signer(
             NAMESPACE,
-            participants.keys().clone(),
+            uniform_committee(participants.keys(), 1),
             polynomial,
             shares[0].clone(),
         );
@@ -1018,7 +1044,7 @@ mod tests {
             dkg::deal_anonymous::<V, N3f1>(&mut rng, Mode::NonZeroCounter, NZU32!(4));
         Scheme::<V>::signer(
             NAMESPACE,
-            participants.keys().clone(),
+            uniform_committee(participants.keys(), 1),
             polynomial,
             shares[0].clone(),
         );
@@ -1041,7 +1067,11 @@ mod tests {
         let participants = ed25519_participants(&mut rng, 5);
         let (polynomial, _) =
             dkg::deal_anonymous::<V, N3f1>(&mut rng, Mode::NonZeroCounter, NZU32!(4));
-        Scheme::<V>::verifier(NAMESPACE, participants.keys().clone(), polynomial);
+        Scheme::<V>::verifier(
+            NAMESPACE,
+            uniform_committee(participants.keys(), 1),
+            polynomial,
+        );
     }
 
     #[test]
@@ -1067,7 +1097,7 @@ mod tests {
 
         Scheme::<V>::signer(
             NAMESPACE,
-            participants.keys().clone(),
+            uniform_committee(participants.keys(), 1),
             polynomial,
             shares[0].clone(),
         );
@@ -1094,7 +1124,11 @@ mod tests {
         let (polynomial, _) =
             dkg::deal_anonymous::<V, N5f1>(&mut rng, Mode::NonZeroCounter, NZU32!(4));
 
-        Scheme::<V>::verifier(NAMESPACE, participants.keys().clone(), polynomial);
+        Scheme::<V>::verifier(
+            NAMESPACE,
+            uniform_committee(participants.keys(), 1),
+            polynomial,
+        );
     }
 
     #[test]
@@ -1107,6 +1141,65 @@ mod tests {
     #[should_panic(expected = "polynomial threshold must equal quorum")]
     fn test_verifier_validates_polynomial_degree_min_sig() {
         verifier_validates_polynomial_degree::<MinSig>();
+    }
+
+    fn roles_reject_nonuniform_committees<V: Variant>() {
+        let mut rng = test_rng();
+        let participants = ed25519_participants(&mut rng, 4);
+        let participants = committee(participants.keys(), [1, 1, 1, 2]);
+        let (polynomial, shares) =
+            dkg::deal_anonymous::<V, N3f1>(&mut rng, Mode::NonZeroCounter, NZU32!(4));
+        let identity = *polynomial.public();
+
+        assert!(
+            Scheme::<V>::signer(
+                NAMESPACE,
+                participants.clone(),
+                polynomial.clone(),
+                shares[0].clone(),
+            )
+            .is_none()
+        );
+        assert!(Scheme::<V>::verifier(NAMESPACE, participants.clone(), polynomial).is_none());
+        assert!(Scheme::<V>::certificate_verifier(NAMESPACE, participants, identity).is_none());
+    }
+
+    #[test]
+    fn test_roles_reject_nonuniform_committees() {
+        roles_reject_nonuniform_committees::<MinPk>();
+        roles_reject_nonuniform_committees::<MinSig>();
+    }
+
+    fn roles_accept_uniform_non_unit_committees<V: Variant>() {
+        let mut rng = test_rng();
+        let participants = ed25519_participants(&mut rng, 4);
+        let participants = uniform_committee(participants.keys(), 7);
+        let (polynomial, shares) =
+            dkg::deal_anonymous::<V, N3f1>(&mut rng, Mode::NonZeroCounter, NZU32!(4));
+        let identity = *polynomial.public();
+
+        let signer = Scheme::<V>::signer(
+            NAMESPACE,
+            participants.clone(),
+            polynomial.clone(),
+            shares[0].clone(),
+        )
+        .expect("uniform non-unit committee must produce a signer");
+        let verifier = Scheme::<V>::verifier(NAMESPACE, participants.clone(), polynomial)
+            .expect("uniform non-unit committee must produce a verifier");
+        let certificate_verifier =
+            Scheme::<V>::certificate_verifier(NAMESPACE, participants.clone(), identity)
+                .expect("uniform non-unit committee must produce a certificate verifier");
+
+        assert_eq!(signer.participants(), &participants);
+        assert_eq!(verifier.participants(), &participants);
+        assert_eq!(certificate_verifier.participants(), &participants);
+    }
+
+    #[test]
+    fn test_roles_accept_uniform_non_unit_committees() {
+        roles_accept_uniform_non_unit_committees::<MinPk>();
+        roles_accept_uniform_non_unit_committees::<MinSig>();
     }
 
     #[test]
@@ -1738,8 +1831,12 @@ mod tests {
             .assemble(non_empty![@votes], &Sequential)
             .expect("assemble certificate");
 
-        let certificate_verifier =
-            Scheme::<V>::certificate_verifier(NAMESPACE, *schemes[0].identity());
+        let certificate_verifier = Scheme::<V>::certificate_verifier(
+            NAMESPACE,
+            schemes[0].participants().clone(),
+            *schemes[0].identity(),
+        )
+        .expect("uniform committee must produce a certificate verifier");
         assert!(
             certificate_verifier
                 .sign(Subject::Finalize {
@@ -1766,8 +1863,12 @@ mod tests {
 
     fn certificate_verifier_panics_on_vote<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(4, 37);
-        let certificate_verifier =
-            Scheme::<V>::certificate_verifier(NAMESPACE, *schemes[0].identity());
+        let certificate_verifier = Scheme::<V>::certificate_verifier(
+            NAMESPACE,
+            schemes[0].participants().clone(),
+            *schemes[0].identity(),
+        )
+        .expect("uniform committee must produce a certificate verifier");
         let proposal = sample_proposal(Epoch::new(0), View::new(15), 8);
         let vote = schemes[1]
             .sign(Subject::Finalize {
@@ -2007,7 +2108,13 @@ mod tests {
 
     fn encrypt_with_identity_returns_error<V: Variant>() {
         let mut rng = test_rng();
-        let verifier = Scheme::<V>::certificate_verifier(NAMESPACE, V::Public::zero());
+        let (schemes, _) = setup_signers::<V>(4, 61);
+        let verifier = Scheme::<V>::certificate_verifier(
+            NAMESPACE,
+            schemes[0].participants().clone(),
+            V::Public::zero(),
+        )
+        .expect("uniform committee must produce a certificate verifier");
         let target = Round::new(Epoch::new(333), View::new(10));
 
         assert!(matches!(

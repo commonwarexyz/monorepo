@@ -194,7 +194,7 @@ where
         self.inner.me()
     }
 
-    fn participants(&self) -> &commonware_utils::ordered::Set<Self::PublicKey> {
+    fn participants(&self) -> &commonware_utils::ordered::Committee<Self::PublicKey> {
         self.inner.participants()
     }
 
