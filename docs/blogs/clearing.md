@@ -11,7 +11,9 @@ image: "https://commonware.xyz/imgs/clearing.png"
 katex: true
 ---
 
-*Revised 9/2/26. The walkthrough describes the current design. Earlier revisions are listed in the [Changelog](#changelog) at the end.*
+*Update (9/2/26): Each payer now signs one cumulative endpoint per epoch that covers every recipient it pays (many of which can now be paid at once). The close shrinks to one row per changed account and one entry per edge (each entry lives in its payer's own vector, so payments to a popular recipient never contend). Validators retain their slices of the state across closes and are dealt only the delta.*
+
+*Update (8/20/26): Clearing now uses a 32-byte commitment and BLS12-381 multisignatures for the commitment certificate.*
 
 \$0.000001 payments cost more to replicate, settle onchain, and index than they're worth. Yet your agent will need to make millions of them over the coming years.
 
@@ -688,13 +690,3 @@ Figure 6: The encodings, live. Below mean out-degree one, only $E$ accounts send
 The fresh tree is intentionally conventional. Both state roots are rebuilt from ordered streams, a simple bolt-on to an existing ordered database, rather than maintained as a versioned authenticated trie. When only the root is needed, a known leaf count lets construction stream bounded subtrees through parallel hashing workers while retaining one subtree's working buffers plus a logarithmic frontier, so choosing the subtree size bounds the builder's memory independently of the total account count. Proof-producing close assembly retains the Merkle levels needed for slice openings. Neither requires maintaining durable authenticated paths for every pending root. In exchange, validators receive evidence for the complete live state rather than only a sparse update. A preconfirmation still cannot arrive in less than one round trip to the operator that serializes spending, and a close cannot quietly drop a payment: it must agree with every acknowledgment a holder retains, or a single retained entry receipt proves the fault.
 
 When the close is clean, those involved keep the receipts. The settlement chain only keeps the change.
-
-## Changelog
-
-*Update (8/20/26): Bajillion now uses a 32-byte commitment and BLS12-381 multisignatures for the commitment certificate.*
-
-*Update (8/27/26): Bajillion sends now batch entries. One signature and one cumulative endpoint pay many recipients, acknowledged atomically with one receipt per entry. Withdrawals now settle all or nothing and can ride the close directly, so an uncensored exit costs one onchain transaction: the claim. Admission and close coverage are stronger, and finalized claims and paired challenge evidence are more compact.*
-
-*Update (9/2/26): Dealing encodes each slice's rows, entries, and transpose entries once and shares those chunks across every validator span, so the operator's deal cost follows the corpus rather than its egress, and coverage boundary fields ride as varints. All timings are re-measured on this design.*
-
-*Update (9/1/26): Bajillion's close is now a sender vector. Each sending row carries one payer-signed cumulative vector endpoint instead of per-edge receipts, the operator's acceptance is aggregated into one countersignature per slice, and three acknowledgment challenges replace the four receipt challenges. The posted close ships movers and edges only against reader-held state, and validators retain their key intervals so dealings travel without unchanged leaves. Each validator's slices are contiguous and dealt as one proof slice per span, so the accumulator start states and range openings ship once per validator, and sequence numbers, amounts, counts, and coverage boundary fields ride as varints. The walkthrough above describes this design. Sizes and timings are re-measured on it, including a new matrix that varies the active accounts under a fixed account set.*
