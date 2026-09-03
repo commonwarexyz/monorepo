@@ -4,7 +4,7 @@ use commonware_runtime::{
     telemetry::metrics::{Metric, Registered, Registration},
 };
 use commonware_utils::NZUsize;
-use criterion::{BatchSize, Criterion, Throughput, criterion_group};
+use criterion::{BatchSize, Criterion, Throughput, criterion_group, criterion_main};
 use futures::pin_mut;
 use std::{
     collections::VecDeque,
@@ -409,3 +409,4 @@ criterion_group! {
         bench_overflow_replace,
         bench_concurrent_enqueue,
 }
+criterion_main!(benches);
