@@ -218,16 +218,27 @@ where
         // Finality hints drive the synchronizer's emission and nothing else re-discovers the
         // finality frontier, so they survive pressure: keep the newest per kind. Other hints are
         // advisory; missing history is recovered through backfill.
-        let Some((kind, view)) = finality_hint(activity) else {
+        let Some((kind, view, richness)) = finality_hint(activity) else {
             return true;
         };
         if let Some(position) = overflow.iter().position(|retained| {
-            matches!(&retained.request, Request::Hint(retained) if finality_hint(retained).is_some_and(|(retained_kind, _)| retained_kind == kind))
+            matches!(&retained.request, Request::Hint(retained) if finality_hint(retained).is_some_and(|(retained_kind, ..)| retained_kind == kind))
         }) {
             let Request::Hint(retained) = &overflow[position].request else {
                 unreachable!("the retained command was matched as a hint");
             };
-            if finality_hint(retained).is_some_and(|(_, retained_view)| retained_view >= view) {
+            // Keep the fact that dominates by (view, settlement), where settlement is the vote
+            // count a finality fact carries. A LeaderFinalityUpdated advance shares the view of the
+            // LeaderFinalized it supersedes but carries more votes, so a plain view comparison would
+            // drop the settling advance under ingress pressure and strand the ordering sweep on
+            // unsettled tips. Comparing (view, votes) keeps the richer fact regardless of arrival
+            // order; FinalityFact is self-contained and both variants route identically, so
+            // replacing the stale entry is safe.
+            let dominates = finality_hint(retained)
+                .is_some_and(|(_, retained_view, retained_richness)| {
+                    (retained_view, retained_richness) >= (view, richness)
+                });
+            if dominates {
                 return true;
             }
             overflow.remove(position);
@@ -239,13 +250,13 @@ where
 
 /// Classifies a reporter hint that advances the finality frontier: `0` for a finality fact, `1`
 /// for an L-QC, with the view it speaks for.
-fn finality_hint<V: Variant, D: Digest>(activity: &Activity<V, D>) -> Option<(u8, View)> {
+fn finality_hint<V: Variant, D: Digest>(activity: &Activity<V, D>) -> Option<(u8, View, usize)> {
     match activity {
         Activity::LeaderFinalized { fact } | Activity::LeaderFinalityUpdated { fact } => {
-            Some((0, fact.round().view()))
+            Some((0, fact.round().view(), fact.votes()))
         }
         Activity::ProtocolAccepted { artifact, .. } => match artifact.as_ref() {
-            Artifact::Lqc(proof) => Some((1, proof.view())),
+            Artifact::Lqc(proof) => Some((1, proof.view(), 0)),
             _ => None,
         },
         _ => None,
@@ -580,6 +591,58 @@ mod tests {
             panic!("the newest finality fact is retained");
         };
         assert_eq!(fact.round().view(), View::new(9));
+    }
+
+    #[test]
+    fn pressure_keeps_the_latest_same_view_advance() {
+        use crate::{
+            multimmit::{
+                machine::{ArtifactId, FinalityFact, FinalityId},
+                types::Activity,
+            },
+            types::{Epoch, Round, View},
+        };
+        let fact = |view: u64, votes: usize| {
+            FinalityFact::for_test(
+                FinalityId::Lqc(ArtifactId::new(Sha256::hash(&[&view.to_be_bytes()]))),
+                Round::new(Epoch::new(1), View::new(view)),
+                Sha256::hash(&[b"leader"]),
+                CertificateId::new(Sha256::hash(&[b"parent"])),
+                votes,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            )
+        };
+        let mut overflow = VecDeque::new();
+        // A LeaderFinalized for view 5 with a bare quorum of votes is retained first.
+        <TestCommand as UnreliablePolicy>::handle(
+            &mut overflow,
+            TestCommand::new(Request::Hint(Activity::LeaderFinalized { fact: fact(5, 41) })),
+        );
+        // A same-view advance carries more votes (extension settlement); it must supersede the
+        // earlier finalized rather than be dropped, which the plain view comparison did.
+        <TestCommand as UnreliablePolicy>::handle(
+            &mut overflow,
+            TestCommand::new(Request::Hint(Activity::LeaderFinalityUpdated { fact: fact(5, 47) })),
+        );
+        assert_eq!(overflow.len(), 1);
+        let Request::Hint(Activity::LeaderFinalityUpdated { fact: kept }) = &overflow[0].request
+        else {
+            panic!("the same-view advance must be retained over the earlier finalized");
+        };
+        assert_eq!(kept.votes(), 47, "the richer same-view fact is kept");
+        // A late, stale finalized for the same view (fewer votes) must NOT evict the richer advance.
+        <TestCommand as UnreliablePolicy>::handle(
+            &mut overflow,
+            TestCommand::new(Request::Hint(Activity::LeaderFinalized { fact: fact(5, 41) })),
+        );
+        assert_eq!(overflow.len(), 1);
+        let Request::Hint(Activity::LeaderFinalityUpdated { fact: kept }) = &overflow[0].request
+        else {
+            panic!("a stale same-view finalized must not evict the richer advance");
+        };
+        assert_eq!(kept.votes(), 47, "content comparison is arrival-order independent");
     }
 
     #[test]
