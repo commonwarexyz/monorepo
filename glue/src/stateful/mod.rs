@@ -82,7 +82,8 @@
 //! then replays forward via [`Application::apply`] to fill the gap. Each
 //! replayed block is inserted into the pending map immediately so that
 //! partial progress survives timeouts. Consensus may build on a block before
-//! it is certified, so a replayed ancestor is not guaranteed to be valid.
+//! it is certified (for example, with stable leaders), so a replayed ancestor
+//! is not guaranteed to be valid.
 //! Replayed state is reusable as parent state but is never a verification
 //! verdict: verifying a replayed block still runs [`Application::verify`].
 //!
@@ -238,10 +239,9 @@ where
 
     /// Verify a block received from a peer, relative to its ancestry.
     ///
-    /// Called before the node votes to finalize the block. Under deferred
-    /// verification the notarize vote may already have been cast. The
-    /// implementation should execute the block against the provided batches
-    /// and merkleize them.
+    /// Called before the node votes to finalize the block (the notarize vote
+    /// may already have been cast). The implementation should execute the
+    /// block against the provided batches and merkleize them.
     ///
     /// This future should not resolve until the implementation can produce a
     /// stable verdict. Return [`None`] only when the block is permanently
