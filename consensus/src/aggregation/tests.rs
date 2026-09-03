@@ -28,8 +28,12 @@ use commonware_runtime::{
     deterministic::{self, Context},
 };
 use commonware_utils::{
-    NZU16, NZUsize, NonZeroDuration, channel::oneshot, non_empty, ordered::Quorum as _,
-    probability, sync::Mutex,
+    NZU16, NZUsize, NonZeroDuration, TryCollect,
+    channel::oneshot,
+    non_empty,
+    ordered::{Committee, Quorum as _},
+    probability,
+    sync::Mutex,
 };
 use futures::future::join_all;
 use std::{
@@ -1971,4 +1975,80 @@ where
 #[should_panic(expected = "aggregation journal committee mismatch")]
 fn test_journal_rejects_committee_mismatch() {
     journal_committee_mismatch(scheme::ed25519::fixture);
+}
+
+#[test_traced("INFO")]
+fn test_journal_rejects_reweighted_committee() {
+    deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
+        let fixture = scheme::ed25519::fixture(&mut context, NAMESPACE, 4);
+        let committee = |weights: [u64; 4]| {
+            fixture
+                .participants
+                .iter()
+                .cloned()
+                .zip(weights)
+                .try_collect::<Committee<_>>()
+                .unwrap()
+        };
+        let original = scheme::ed25519::Scheme::verifier(NAMESPACE, committee([4, 1, 1, 1]));
+        let reweighted = scheme::ed25519::Scheme::verifier(NAMESPACE, committee([1, 4, 1, 1]));
+        let epoch = Epoch::new(17);
+        let position = Height::new(140);
+        let certificate = certificate(&fixture, epoch, position);
+        // Both committees have the same total weight and accept this certificate.
+        // The journal identity must still distinguish the weight assignments.
+        for scheme in [&original, &reweighted] {
+            assert!(certificate.verify_for(
+                &mut context,
+                scheme,
+                epoch,
+                position,
+                position,
+                &Sequential,
+            ));
+        }
+        let mut cfg = JournalConfig {
+            identity: JournalIdentity::new::<_, Sha256Digest>(
+                &original,
+                epoch,
+                position,
+                position,
+                NonZeroU64::new(1).unwrap(),
+            ),
+            partition: "aggregation-reweighted-committee".into(),
+            write_buffer: NZUsize!(4096),
+            replay_buffer: NZUsize!(4096),
+            heights_per_section: NonZeroU64::new(4).unwrap(),
+            compression: None,
+            page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+        };
+        let (mut journal, _) = Journal::<_, _, Sha256Digest>::init(
+            context.child("original"),
+            cfg.clone(),
+            &mut context,
+            &original,
+            &Sequential,
+        )
+        .await
+        .unwrap();
+        journal.append(certificate).await.unwrap();
+        drop(journal);
+
+        cfg.identity = JournalIdentity::new::<_, Sha256Digest>(
+            &reweighted,
+            epoch,
+            position,
+            position,
+            NonZeroU64::new(1).unwrap(),
+        );
+        let reopened = Journal::<_, _, Sha256Digest>::init(
+            context.child("reweighted"),
+            cfg,
+            &mut context,
+            &reweighted,
+            &Sequential,
+        )
+        .await;
+        assert!(matches!(reopened, Err(JournalError::CommitteeMismatch)));
+    });
 }

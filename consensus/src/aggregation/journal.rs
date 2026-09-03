@@ -29,7 +29,7 @@ const COMMITTEE_DOMAIN: &[u8] = b"_COMMONWARE_CONSENSUS_AGGREGATION_JOURNAL_COMM
 pub struct JournalIdentity {
     /// Signing namespace digest.
     pub namespace: RecoveryNamespace,
-    /// Digest of the ordered committee.
+    /// Digest of participant keys and weights in committee order.
     pub committee: Sha256Digest,
     /// Epoch represented by the journal.
     pub epoch: Epoch,
@@ -54,7 +54,8 @@ impl JournalIdentity {
         S: scheme::Scheme<D>,
         D: Digest,
     {
-        let participants = scheme.participants().encode();
+        let committee = scheme.participants();
+        let participants = (committee.as_ref(), committee.weights()).encode();
         Self {
             namespace: scheme.recovery_namespace(),
             committee: Sha256::hash(&[COMMITTEE_DOMAIN, participants.as_ref()]),
