@@ -380,7 +380,8 @@ where
     }
 
     /// Lends only the journals touched by one admission. Until completion, the catalog may
-    /// plan immutable body reads but must not perform another storage mutation.
+    /// read retained block indexes and finalized block metadata or plan immutable body reads,
+    /// but must not perform another storage mutation or access the borrowed journals.
     /// Dropping or failing the operation makes this store unusable.
     #[allow(clippy::type_complexity)]
     pub(in crate::multimmit::marshal) fn start_admission(
@@ -733,7 +734,7 @@ where
             .ok_or_else(|| Error::storage("finalized block reference is invalid"))
     }
 
-    /// Returns a header still covered by pending custody.
+    /// Returns an indexed pending header without proving the admission is durable.
     pub(in crate::multimmit::marshal) fn pending_block_header(
         &self,
         reference: BlockRef<H::Digest>,
