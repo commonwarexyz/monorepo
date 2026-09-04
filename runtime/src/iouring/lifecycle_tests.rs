@@ -371,3 +371,98 @@ fn startup_failure_survives_rejected_payload_destructor_panic() {
     );
     assert_eq!(observed.load(Ordering::SeqCst), 1);
 }
+
+#[test]
+fn creation_failure_in_caught_task_leaves_runner_usable() {
+    for dedicated in [false, true] {
+        Runner::new(config().with_catch_panics(true)).start(|context| async move {
+            let caller = context.child("launch_caller");
+            let caller = if dedicated {
+                caller.dedicated()
+            } else {
+                caller
+            };
+            let result = caller
+                .spawn(|context| async move {
+                    context.shared.fail_launch.store(true, Ordering::Relaxed);
+                    context
+                        .child("failed_launch")
+                        .dedicated()
+                        .spawn(|_| async {})
+                        .await
+                        .unwrap();
+                })
+                .await;
+            assert!(matches!(result, Err(Error::Exited)));
+            assert_eq!(
+                context
+                    .child("survivor")
+                    .spawn(|_| async { 7 })
+                    .await
+                    .unwrap(),
+                7
+            );
+        });
+    }
+}
+
+#[test]
+fn ready_future_destructor_uses_selected_worker_poll_panic_policy() {
+    struct ReadyDrop {
+        polls: Arc<AtomicUsize>,
+        drops: Arc<AtomicUsize>,
+    }
+
+    impl Future for ReadyDrop {
+        type Output = ();
+
+        fn poll(self: Pin<&mut Self>, _: &mut TaskContext<'_>) -> Poll<()> {
+            assert_eq!(self.polls.fetch_add(1, Ordering::SeqCst), 0);
+            Poll::Ready(())
+        }
+    }
+
+    impl Drop for ReadyDrop {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+            panic!("ready future destructor failed");
+        }
+    }
+
+    for catch in [false, true] {
+        for dedicated in [false, true] {
+            let polls = Arc::new(AtomicUsize::new(0));
+            let drops = Arc::new(AtomicUsize::new(0));
+            let future = ReadyDrop {
+                polls: polls.clone(),
+                drops: drops.clone(),
+            };
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                Runner::new(config().with_catch_panics(catch)).start(|context| async move {
+                    let child = context.child("ready_drop");
+                    let child = if dedicated { child.dedicated() } else { child };
+                    // The selected-worker async wrapper destroys this completed
+                    // future inside its poll, where user panic policy applies.
+                    let result = child.spawn(move |_| future).await;
+                    if catch {
+                        assert!(matches!(result, Err(Error::Exited)));
+                        context.child("survivor").spawn(|_| async {}).await.unwrap();
+                    } else {
+                        futures::future::pending::<()>().await;
+                    }
+                });
+            }));
+            if catch {
+                assert!(result.is_ok());
+            } else {
+                let panic = result.expect_err("uncaught poll failure must fail the runner");
+                assert_eq!(
+                    extract_panic_message(&*panic),
+                    "ready future destructor failed"
+                );
+            }
+            assert_eq!(polls.load(Ordering::SeqCst), 1);
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+        }
+    }
+}
