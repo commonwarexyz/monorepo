@@ -222,6 +222,9 @@ where
     /// The size of the write buffer to use for each blob in the journal.
     pub write_buffer: NonZeroUsize,
 
+    /// The maximum number of journal blobs to keep open per tier.
+    pub max_open_blobs: NonZeroUsize,
+
     /// Page cache for the journal.
     pub page_cache: CacheRef,
 

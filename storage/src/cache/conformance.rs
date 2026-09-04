@@ -29,6 +29,7 @@ impl StorageWorkload for CacheWorkload {
             codec_config: (RangeCfg::new(0..256), ()),
             items_per_blob: NZU64!(16),
             write_buffer: NZUsize!(1024),
+            max_open_blobs: NZUsize!(64),
             replay_buffer: NZUsize!(1024),
             page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
         };

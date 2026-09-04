@@ -416,6 +416,7 @@ where
 
     let blocker = oracle.control(validator.clone());
     let engine_cfg = config::Config {
+        max_open_blobs: NZUsize!(64),
         blocker,
         scheme,
         elector,
@@ -666,6 +667,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
 
             let blocker = oracle.control(validator.clone());
             let engine_cfg = config::Config {
+                max_open_blobs: NZUsize!(64),
                 blocker,
                 scheme: scheme.clone(),
                 elector: primary_elector,

@@ -1888,7 +1888,9 @@ impl TestHarness for StandardHarness {
             prunable_items_per_section: NZU64!(10),
             replay_buffer: NZUsize!(1024),
             key_write_buffer: NZUsize!(1024),
+            key_max_open_blobs: NZUsize!(64),
             value_write_buffer: NZUsize!(1024),
+            value_max_open_blobs: NZUsize!(64),
             page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             strategy: Sequential,
         };
@@ -1953,7 +1955,9 @@ impl TestHarness for StandardHarness {
                 codec_config: S::certificate_codec_config_unbounded(),
                 replay_buffer: config.replay_buffer,
                 freezer_key_write_buffer: config.key_write_buffer,
+                freezer_key_max_open_blobs: NZUsize!(64),
                 freezer_value_write_buffer: config.value_write_buffer,
+                freezer_value_max_open_blobs: NZUsize!(64),
                 ordinal_write_buffer: config.key_write_buffer,
             },
         )
@@ -1992,7 +1996,9 @@ impl TestHarness for StandardHarness {
                 codec_config: config.block_codec_config,
                 replay_buffer: config.replay_buffer,
                 freezer_key_write_buffer: config.key_write_buffer,
+                freezer_key_max_open_blobs: NZUsize!(64),
                 freezer_value_write_buffer: config.value_write_buffer,
+                freezer_value_max_open_blobs: NZUsize!(64),
                 ordinal_write_buffer: config.key_write_buffer,
             },
         )
@@ -2120,7 +2126,9 @@ impl TestHarness for StandardHarness {
             prunable_items_per_section: NZU64!(10),
             replay_buffer: NZUsize!(1024),
             key_write_buffer: NZUsize!(1024),
+            key_max_open_blobs: NZUsize!(64),
             value_write_buffer: NZUsize!(1024),
+            value_max_open_blobs: NZUsize!(64),
             page_cache: page_cache.clone(),
             strategy: Sequential,
         };
@@ -2166,7 +2174,9 @@ impl TestHarness for StandardHarness {
                 codec_config: S::certificate_codec_config_unbounded(),
                 items_per_section: NZU64!(10),
                 key_write_buffer: config.key_write_buffer,
+                key_max_open_blobs: NZUsize!(64),
                 value_write_buffer: config.value_write_buffer,
+                value_max_open_blobs: NZUsize!(64),
                 replay_buffer: config.replay_buffer,
             },
         )
@@ -2185,7 +2195,9 @@ impl TestHarness for StandardHarness {
                 codec_config: config.block_codec_config,
                 items_per_section: NZU64!(10),
                 key_write_buffer: config.key_write_buffer,
+                key_max_open_blobs: NZUsize!(64),
                 value_write_buffer: config.value_write_buffer,
+                value_max_open_blobs: NZUsize!(64),
                 replay_buffer: config.replay_buffer,
             },
         )
@@ -2680,7 +2692,9 @@ impl TestHarness for CodingHarness {
             prunable_items_per_section: NZU64!(10),
             replay_buffer: NZUsize!(1024),
             key_write_buffer: NZUsize!(1024),
+            key_max_open_blobs: NZUsize!(64),
             value_write_buffer: NZUsize!(1024),
+            value_max_open_blobs: NZUsize!(64),
             page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             strategy: Sequential,
         };
@@ -2733,7 +2747,9 @@ impl TestHarness for CodingHarness {
                 codec_config: S::certificate_codec_config_unbounded(),
                 replay_buffer: config.replay_buffer,
                 freezer_key_write_buffer: config.key_write_buffer,
+                freezer_key_max_open_blobs: NZUsize!(64),
                 freezer_value_write_buffer: config.value_write_buffer,
+                freezer_value_max_open_blobs: NZUsize!(64),
                 ordinal_write_buffer: config.key_write_buffer,
             },
         )
@@ -2772,7 +2788,9 @@ impl TestHarness for CodingHarness {
                 codec_config: config.block_codec_config,
                 replay_buffer: config.replay_buffer,
                 freezer_key_write_buffer: config.key_write_buffer,
+                freezer_key_max_open_blobs: NZUsize!(64),
                 freezer_value_write_buffer: config.value_write_buffer,
+                freezer_value_max_open_blobs: NZUsize!(64),
                 ordinal_write_buffer: config.key_write_buffer,
             },
         )
@@ -2952,7 +2970,9 @@ impl TestHarness for CodingHarness {
             prunable_items_per_section: NZU64!(10),
             replay_buffer: NZUsize!(1024),
             key_write_buffer: NZUsize!(1024),
+            key_max_open_blobs: NZUsize!(64),
             value_write_buffer: NZUsize!(1024),
+            value_max_open_blobs: NZUsize!(64),
             page_cache: page_cache.clone(),
             strategy: Sequential,
         };
@@ -3003,7 +3023,9 @@ impl TestHarness for CodingHarness {
                 codec_config: S::certificate_codec_config_unbounded(),
                 items_per_section: NZU64!(10),
                 key_write_buffer: config.key_write_buffer,
+                key_max_open_blobs: NZUsize!(64),
                 value_write_buffer: config.value_write_buffer,
+                value_max_open_blobs: NZUsize!(64),
                 replay_buffer: config.replay_buffer,
             },
         )
@@ -3022,7 +3044,9 @@ impl TestHarness for CodingHarness {
                 codec_config: config.block_codec_config,
                 items_per_section: NZU64!(10),
                 key_write_buffer: config.key_write_buffer,
+                key_max_open_blobs: NZUsize!(64),
                 value_write_buffer: config.value_write_buffer,
+                value_max_open_blobs: NZUsize!(64),
                 replay_buffer: config.replay_buffer,
             },
         )

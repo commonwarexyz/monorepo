@@ -113,6 +113,7 @@ impl<
                 view_retention: cfg.view_retention,
                 replay_buffer: cfg.replay_buffer,
                 write_buffer: cfg.write_buffer,
+                max_open_blobs: cfg.max_open_blobs,
                 page_cache: cfg.page_cache,
             },
         );

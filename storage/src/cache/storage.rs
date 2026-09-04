@@ -94,6 +94,7 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
                 codec_config: cfg.codec_config,
                 page_cache: cfg.page_cache,
                 write_buffer: cfg.write_buffer,
+                max_open_blobs: cfg.max_open_blobs,
             },
         )
         .await?;

@@ -155,6 +155,8 @@
 //!         items_per_section: NZU64!(1024),
 //!         key_write_buffer: NZUsize!(1024 * 1024),
 //!         value_write_buffer: NZUsize!(1024 * 1024),
+//!         key_max_open_blobs: NZUsize!(64),
+//!         value_max_open_blobs: NZUsize!(64),
 //!         replay_buffer: NZUsize!(4096),
 //!     };
 //!     let mut archive = Archive::init(context, cfg).await.unwrap();
@@ -215,6 +217,12 @@ pub struct Config<T: Translator, C> {
 
     /// The buffer size to use when replaying a [commonware_runtime::Blob].
     pub replay_buffer: NonZeroUsize,
+
+    /// The maximum number of key journal blobs to keep open per tier.
+    pub key_max_open_blobs: NonZeroUsize,
+
+    /// The maximum number of value journal blobs to keep open per tier.
+    pub value_max_open_blobs: NonZeroUsize,
 }
 
 #[cfg(test)]
@@ -276,7 +284,9 @@ mod tests {
             codec_config: (),
             compression: None,
             key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+            key_max_open_blobs: NZUsize!(64),
             value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+            value_max_open_blobs: NZUsize!(64),
             replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             items_per_section,
         }
@@ -2154,7 +2164,9 @@ mod tests {
                 codec_config: (),
                 compression: Some(3),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_max_open_blobs: NZUsize!(64),
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_max_open_blobs: NZUsize!(64),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
             };
@@ -2186,7 +2198,9 @@ mod tests {
                 codec_config: (),
                 compression: None,
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_max_open_blobs: NZUsize!(64),
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_max_open_blobs: NZUsize!(64),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
             };
@@ -2223,7 +2237,9 @@ mod tests {
                 codec_config: (),
                 compression: None,
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_max_open_blobs: NZUsize!(64),
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_max_open_blobs: NZUsize!(64),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
             };
@@ -2289,7 +2305,9 @@ mod tests {
                 codec_config: (),
                 compression: None,
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_max_open_blobs: NZUsize!(64),
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_max_open_blobs: NZUsize!(64),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
             };
@@ -2349,7 +2367,9 @@ mod tests {
                 codec_config: (),
                 compression: None,
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_max_open_blobs: NZUsize!(64),
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_max_open_blobs: NZUsize!(64),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(1), // no mask - each item is its own section
             };
@@ -2461,7 +2481,9 @@ mod tests {
                 codec_config: (),
                 compression: None,
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_max_open_blobs: NZUsize!(64),
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_max_open_blobs: NZUsize!(64),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(items_per_section),
             };
@@ -2525,7 +2547,9 @@ mod tests {
                 codec_config: (),
                 compression: None,
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_max_open_blobs: NZUsize!(64),
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_max_open_blobs: NZUsize!(64),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(items_per_section),
             };
@@ -2634,7 +2658,9 @@ mod tests {
                 codec_config: (),
                 compression: None,
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_max_open_blobs: NZUsize!(64),
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_max_open_blobs: NZUsize!(64),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(1),
             };
@@ -2686,7 +2712,9 @@ mod tests {
                 codec_config: (),
                 compression: None,
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_max_open_blobs: NZUsize!(64),
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_max_open_blobs: NZUsize!(64),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(1),
             };
@@ -2822,7 +2850,9 @@ mod tests {
                 codec_config: (),
                 compression: None,
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_max_open_blobs: NZUsize!(64),
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_max_open_blobs: NZUsize!(64),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(1),
             };

@@ -192,6 +192,7 @@ where
                 codec_config: max_participants,
                 page_cache,
                 write_buffer: WRITE_BUFFER,
+                max_open_blobs: NZUsize!(64),
             },
         )
         .await

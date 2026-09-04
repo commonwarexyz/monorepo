@@ -242,6 +242,7 @@ fn main() {
                 floor: Floor::Genesis(application::genesis::<Sha256>()),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
+                max_open_blobs: NZUsize!(64),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(10),
