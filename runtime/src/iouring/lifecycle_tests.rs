@@ -311,3 +311,63 @@ fn worker_releases_storage_and_durable_io_before_tracking_ends() {
     drop(contender);
     fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+// Retain the task handle to check its result after the runner closes its mailbox.
+#[allow(clippy::async_yields_async)]
+fn queued_foreign_task_disposal_is_contained_at_shutdown() {
+    struct PanickingDrop(Arc<AtomicUsize>);
+
+    impl Drop for PanickingDrop {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            panic!("queued task destructor failed");
+        }
+    }
+
+    for catch in [false, true] {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let payload = PanickingDrop(drops.clone());
+        let handle = Runner::new(config().with_catch_panics(catch)).start(|context| async move {
+            let remote = context.child("queued_foreign");
+            // Joining only the publisher leaves its accepted cell in the
+            // mailbox when this root completes its first poll.
+            thread::spawn(move || {
+                remote.spawn(move |_| async move {
+                    let _payload = payload;
+                    panic!("queued task must not be polled");
+                })
+            })
+            .join()
+            .unwrap()
+        });
+        assert!(matches!(
+            futures::executor::block_on(handle),
+            Err(Error::Closed)
+        ));
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[test]
+fn startup_failure_survives_rejected_payload_destructor_panic() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let observed = drops.clone();
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        Runner::new(config().with_catch_panics(true)).start(|context| async move {
+            let payload = RejectedPayload {
+                registry: context.shared.workers.clone(),
+                drops,
+                panic_on_drop: true,
+            };
+            context.shared.fail_startup.store(true, Ordering::Relaxed);
+            assert!(context.shared.launch(Task::boxed(payload)).is_ok());
+            futures::future::pending::<()>().await;
+        });
+    }));
+    let panic = result.expect_err("native startup failure must fail the runner");
+    assert!(
+        extract_panic_message(&*panic).contains("injected native worker initialization failure")
+    );
+    assert_eq!(observed.load(Ordering::SeqCst), 1);
+}

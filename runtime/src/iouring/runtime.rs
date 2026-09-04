@@ -1030,7 +1030,7 @@ impl Deferred {
         mem::swap(self, &mut local.deferred);
     }
 
-    fn is_empty(&self) -> bool {
+    const fn is_empty(&self) -> bool {
         self.wakes.is_empty()
             && self.drops.is_empty()
             && self.outputs.is_empty()
@@ -2197,6 +2197,8 @@ mod tests {
             remaining: usize,
             drops: Arc<AtomicUsize>,
         }
+        // This waker owns a reentrant destructor, which Waker::noop cannot model.
+        #[allow(clippy::manual_noop_waker)]
         impl std::task::Wake for Chain {
             fn wake(self: Arc<Self>) {}
         }

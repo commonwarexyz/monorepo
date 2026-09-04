@@ -42,16 +42,16 @@ impl<T> Slab<T> {
     /// Select the next identity without allocating or changing slot ownership.
     /// The caller must insert it before any other insertion on this slab.
     pub(super) fn next_id(&self) -> Id {
-        match self.free {
-            Some(index) => Id {
-                index,
-                generation: self.slots[index].generation,
-            },
-            None => Id {
+        self.free.map_or(
+            Id {
                 index: self.slots.len(),
                 generation: 0,
             },
-        }
+            |index| Id {
+                index,
+                generation: self.slots[index].generation,
+            },
+        )
     }
 
     /// Insert at a previously selected identity without replacing a live value.
@@ -121,7 +121,7 @@ impl<T> Slab<T> {
     }
 
     /// Number of allocated slots, including vacant and exhausted slots.
-    pub(super) fn slots_len(&self) -> usize {
+    pub(super) const fn slots_len(&self) -> usize {
         self.slots.len()
     }
 

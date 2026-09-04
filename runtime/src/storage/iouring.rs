@@ -1347,6 +1347,8 @@ mod tests {
     }
 
     #[test]
+    // Return the admission future so it can be observed after worker shutdown.
+    #[allow(clippy::async_yields_async)]
     fn test_pending_start_sync_observes_worker_closure() {
         let (read, sync, directory) = iouring::Runner::new(
             iouring::Config::default().with_ring_config(iouring::RingConfig {
