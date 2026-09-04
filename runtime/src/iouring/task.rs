@@ -22,6 +22,7 @@
 use super::{
     mailbox::{Mailbox, Message},
     runtime,
+    slab::{Id, Slab},
 };
 use futures::task::{ArcWake, waker};
 use std::{
@@ -107,7 +108,7 @@ pub(super) fn register(
 ) -> Result<(), Pin<Box<dyn Runnable>>> {
     if let Some(local) = runtime::current() {
         let id = {
-            let mut state = local.borrow_mut();
+            let state = local.borrow();
             if std::ptr::eq(Arc::as_ptr(&state.mailbox), mailbox.as_ptr()) {
                 if state.closing {
                     return Err(cell);
@@ -137,12 +138,7 @@ pub(super) fn register(
 
 /// Full-width identity carried by ready tokens and routing wakers.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct TaskId {
-    /// Index in the owning worker's arena.
-    index: usize,
-    /// Generation of this occupation of the slot.
-    generation: u64,
-}
+pub(super) struct TaskId(Id);
 
 /// Erased scheduling boundary for an otherwise concrete wrapped future.
 pub(super) trait Runnable: Send {
@@ -183,14 +179,10 @@ pub(super) enum State {
     Running,
     /// A wake occurred during the current poll.
     Notified,
-    /// No task occupies this slot.
-    Complete,
 }
 
 /// One generational slot. A running cell and waker live on the worker's stack.
 struct Entry {
-    /// Current slot identity, never wrapped.
-    generation: u64,
     /// Owner-local notification state.
     state: State,
     /// Task allocation when it is not being polled.
@@ -213,71 +205,43 @@ pub(super) struct Running {
 #[derive(Default)]
 pub(super) struct Tasks {
     /// Generational slots owned by this worker.
-    entries: Vec<Entry>,
-    /// Vacant slots whose generations still have room to advance.
-    free: Vec<usize>,
+    entries: Slab<Entry>,
     /// FIFO notifications, including harmless stale tokens.
     ready: VecDeque<TaskId>,
 }
 
 impl Tasks {
-    /// Reserve a slot and queue space before constructing its routing waker.
-    ///
-    /// The caller constructs the waker outside Local, then calls `insert`
-    /// without permitting another insertion between these operations.
-    pub(super) fn reserve(&mut self) -> TaskId {
-        self.ready.reserve(1);
-        if let Some(&index) = self.free.last() {
-            TaskId {
-                index,
-                generation: self.entries[index].generation,
-            }
-        } else {
-            self.entries.reserve(1);
-            TaskId {
-                index: self.entries.len(),
-                generation: 0,
-            }
-        }
+    /// Select an identity before constructing its routing waker outside Local.
+    /// No other insertion may occur before the matching `insert` call.
+    pub(super) fn reserve(&self) -> TaskId {
+        TaskId(self.entries.next_id())
     }
 
-    /// Insert previously reserved ownership without invoking any callback.
+    /// Insert previously selected ownership without invoking any callback.
     pub(super) fn insert(&mut self, id: TaskId, cell: Pin<Box<dyn Runnable>>, waker: Waker) {
-        let entry = Entry {
-            generation: id.generation,
-            state: State::Queued,
-            cell: Some(cell),
-            cached_waker: Some(waker),
-        };
-        if id.index == self.entries.len() {
-            self.entries.push(entry);
-        } else {
-            assert_eq!(self.free.pop(), Some(id.index));
-            assert_eq!(self.entries[id.index].generation, id.generation);
-            assert_eq!(self.entries[id.index].state, State::Complete);
-            self.entries[id.index] = entry;
-        }
+        self.entries.insert_at(
+            id.0,
+            Entry {
+                state: State::Queued,
+                cell: Some(cell),
+                cached_waker: Some(waker),
+            },
+        );
         self.ready.push_back(id);
     }
 
     /// Record a notification, coalescing queued and poll-local duplicates.
     pub(super) fn wake(&mut self, id: TaskId) {
-        // Reserve before changing state so allocation failure cannot leave an
-        // entry marked Queued without its corresponding ready token.
-        self.ready.reserve(1);
-        let Some(entry) = self.entries.get_mut(id.index) else {
+        let Some(entry) = self.entries.get_mut(id.0) else {
             return;
         };
-        if entry.generation != id.generation {
-            return;
-        }
         match entry.state {
             State::Idle => {
                 entry.state = State::Queued;
                 self.ready.push_back(id);
             }
             State::Running => entry.state = State::Notified,
-            State::Queued | State::Notified | State::Complete => {}
+            State::Queued | State::Notified => {}
         }
     }
 
@@ -287,8 +251,8 @@ impl Tasks {
     /// `is_ready` to distinguish an exhausted lane from remaining stale tokens.
     pub(super) fn take(&mut self) -> Option<Running> {
         let id = self.ready.pop_front()?;
-        let entry = self.entries.get_mut(id.index)?;
-        if entry.generation != id.generation || entry.state != State::Queued {
+        let entry = self.entries.get_mut(id.0)?;
+        if entry.state != State::Queued {
             return None;
         }
         entry.state = State::Running;
@@ -301,9 +265,10 @@ impl Tasks {
 
     /// Restore a pending cell, preserving a notification raised during polling.
     pub(super) fn pending(&mut self, task: Running) {
-        self.ready.reserve(1);
-        let entry = &mut self.entries[task.id.index];
-        assert_eq!(entry.generation, task.id.generation);
+        let entry = self
+            .entries
+            .get_mut(task.id.0)
+            .expect("running task missing");
         entry.state = match entry.state {
             State::Running => State::Idle,
             State::Notified => {
@@ -318,15 +283,11 @@ impl Tasks {
 
     /// Retire a poll-local task before its cell and waker are destroyed.
     pub(super) fn complete(&mut self, id: TaskId) {
-        self.free.reserve(1);
-        let entry = &mut self.entries[id.index];
-        assert_eq!(entry.generation, id.generation);
+        let entry = self.entries.get(id.0).expect("running task missing");
         assert!(matches!(entry.state, State::Running | State::Notified));
-        entry.state = State::Complete;
-        if let Some(next) = entry.generation.checked_add(1) {
-            entry.generation = next;
-            self.free.push(id.index);
-        }
+        // The poll-local Running owns both callback-bearing values.
+        debug_assert!(entry.cell.is_none() && entry.cached_waker.is_none());
+        self.entries.remove(id.0);
     }
 
     /// Whether at least one token remains, including stale tokens.
@@ -338,20 +299,19 @@ impl Tasks {
     pub(super) fn clear(&mut self, retired: &mut Vec<Running>) {
         retired.reserve(self.entries.len());
         self.ready.clear();
-        for (index, entry) in self.entries.iter_mut().enumerate() {
+        for index in 0..self.entries.slots_len() {
+            let Some(id) = self.entries.id_at(index) else {
+                continue;
+            };
+            let mut entry = self.entries.remove(id).unwrap();
             if let Some(cell) = entry.cell.take() {
                 retired.push(Running {
-                    id: TaskId {
-                        index,
-                        generation: entry.generation,
-                    },
+                    id: TaskId(id),
                     cell,
                     waker: entry.cached_waker.take().expect("stored cell has a waker"),
                 });
             }
-            entry.state = State::Complete;
         }
-        self.free.clear();
     }
 }
 
@@ -448,8 +408,8 @@ mod tests {
         tasks.complete(id);
         drop(task);
         let next = insert(&mut tasks);
-        assert_eq!(id.index, next.index);
-        assert_ne!(id.generation, next.generation);
+        assert_eq!(id.0.index, next.0.index);
+        assert_ne!(id.0.generation, next.0.generation);
         tasks.wake(id);
         let task = tasks.take().unwrap();
         assert_eq!(task.id, next);
@@ -464,13 +424,10 @@ mod tests {
         let mut tasks = Tasks::default();
         let id = insert(&mut tasks);
         let task = tasks.take().unwrap();
-        tasks.entries[id.index].generation = u64::MAX;
-        tasks.complete(TaskId {
-            generation: u64::MAX,
-            ..id
-        });
+        let exhausted = TaskId(tasks.entries.set_generation(id.0, u64::MAX));
+        tasks.complete(exhausted);
         drop(task);
-        assert_ne!(insert(&mut tasks).index, id.index);
+        assert_ne!(insert(&mut tasks).0.index, id.0.index);
     }
 
     #[test]

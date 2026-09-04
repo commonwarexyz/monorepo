@@ -23,6 +23,7 @@ use super::{
     mailbox::{Mailbox, Message},
     request::{Request, RequestOutput},
     runtime::{self, Local},
+    slab::{Id, Slab},
     waiter::{Observer, WaiterId},
 };
 use crate::Error;
@@ -39,12 +40,7 @@ use std::{
 
 /// Full-width observer identity, independent of the kernel's packed waiter ID.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct OperationId {
-    /// Index in the owning worker's ordinary result slab.
-    pub(super) index: usize,
-    /// Slot incarnation validated before any waiter or result access.
-    pub(super) generation: u64,
-}
+pub(super) struct OperationId(pub(super) Id);
 
 /// Contents retained for a live ordinary observer.
 pub(super) enum EntryState {
@@ -59,87 +55,38 @@ pub(super) enum EntryState {
     Ready(RequestOutput),
 }
 
-/// One reusable result slot.
-struct Entry {
-    /// Current generation, retired rather than wrapped on exhaustion.
-    generation: u64,
-    /// Present while the observer owns this slot.
-    state: Option<EntryState>,
-    /// Next reusable slot while vacant.
-    next_free: Option<usize>,
-}
-
 /// Ordinary observer state owned exclusively by one worker.
 #[derive(Default)]
 pub(super) struct Operations {
     /// Growable result storage that is not bounded by ring capacity.
-    entries: Vec<Entry>,
-    /// Head of vacant slots eligible for another generation.
-    free: Option<usize>,
+    entries: Slab<EntryState>,
 }
 
 impl Operations {
-    /// Reserve insertion space before the driver consumes waiter capacity.
-    fn reserve(&mut self) -> OperationId {
-        match self.free {
-            Some(index) => OperationId {
-                index,
-                generation: self.entries[index].generation,
-            },
-            None => {
-                self.entries.reserve(1);
-                OperationId {
-                    index: self.entries.len(),
-                    generation: 0,
-                }
-            }
-        }
+    /// Select the observer identity before pairing it with a driver waiter.
+    fn next_id(&self) -> OperationId {
+        OperationId(self.entries.next_id())
     }
 
-    /// Install the waiter and observer together after both allocations succeed.
+    /// Install the waiter association before releasing the local borrow.
     fn insert(&mut self, id: OperationId, waiter_id: WaiterId, waker: Waker) {
-        let state = Some(EntryState::Pending {
-            waiter_id,
-            waker: Some(waker),
-        });
-        if id.index == self.entries.len() {
-            self.entries.push(Entry {
-                generation: id.generation,
-                state,
-                next_free: None,
-            });
-        } else {
-            assert_eq!(self.free, Some(id.index));
-            let entry = &mut self.entries[id.index];
-            assert_eq!(entry.generation, id.generation);
-            assert!(entry.state.is_none());
-            self.free = entry.next_free.take();
-            entry.state = state;
-        }
+        self.entries.insert_at(
+            id.0,
+            EntryState::Pending {
+                waiter_id,
+                waker: Some(waker),
+            },
+        );
     }
 
     /// Inspect a live full-width identity without following stale waiter IDs.
     fn get_mut(&mut self, id: OperationId) -> Option<&mut EntryState> {
-        let entry = self.entries.get_mut(id.index)?;
-        if entry.generation != id.generation {
-            return None;
-        }
-        entry.state.as_mut()
+        self.entries.get_mut(id.0)
     }
 
     /// Recycle only the observer slot, returning all owned values untouched.
     fn take(&mut self, id: OperationId) -> Option<EntryState> {
-        let entry = self.entries.get_mut(id.index)?;
-        if entry.generation != id.generation {
-            return None;
-        }
-        let state = entry.state.take()?;
-        if let Some(generation) = entry.generation.checked_add(1) {
-            entry.generation = generation;
-            entry.next_free = self.free;
-            self.free = Some(id.index);
-        }
-        Some(state)
+        self.entries.remove(id.0)
     }
 }
 
@@ -351,7 +298,7 @@ impl Future for Operation {
                     .can_admit(local.driver.as_ref().unwrap().free_slots()),
             };
             if granted {
-                let id = local.operations.reserve();
+                let id = local.operations.next_id();
                 let waiter = local
                     .driver
                     .as_mut()
@@ -551,7 +498,6 @@ pub(super) fn cancel(mailbox: &Weak<Mailbox>, message: Message) {
                 Message::CancelAdmission(id) => local.cancel_admission(id),
                 Message::OrphanOperation(id) => local.orphan_operation(id),
                 Message::CancelTimer(id) => {
-                    local.deferred.drops.reserve(1);
                     if let Some(waker) = local.timers.cancel(id) {
                         local.deferred.drops.push(waker);
                     }
@@ -574,12 +520,12 @@ impl Local {
             .as_ref()
             .expect("driver present during local access")
             .free_slots();
-        self.admissions.reconcile(self.now, free, &mut self.deferred.wakes);
+        self.admissions
+            .reconcile(self.now, free, &mut self.deferred.wakes);
     }
 
     /// Release an admission reservation and immediately grant its successor.
     pub(super) fn cancel_admission(&mut self, id: AdmissionId) {
-        self.deferred.drops.reserve(1);
         if let Some(waker) = self.admissions.cancel(id) {
             self.deferred.drops.push(waker);
         }
@@ -590,8 +536,6 @@ impl Local {
 
     /// Detach an observer before changing its waiter's cancellation state.
     pub(super) fn orphan_operation(&mut self, id: OperationId) {
-        self.deferred.drops.reserve(1);
-        self.deferred.outputs.reserve(1);
         match self.operations.take(id) {
             Some(EntryState::Pending { waiter_id, waker }) => {
                 if let Some(waker) = waker {
@@ -610,10 +554,6 @@ impl Local {
 
     /// Transfer terminal results out of bounded waiter capacity before waking.
     pub(super) fn apply_completions(&mut self) {
-        self.deferred.wakes.reserve(self.completed.len());
-        self.deferred.outputs.reserve(self.completed.len());
-        self.deferred.resources.reserve(self.completed.len());
-        self.deferred.sync_results.reserve(self.completed.len());
         for completed in self.completed.drain(..) {
             self.deferred.resources.push(completed.retired);
             match completed.observer {
@@ -649,12 +589,10 @@ impl Local {
 
     /// Remove all ordinary observers, including futures retained outside workers.
     pub(super) fn close_operations(&mut self) {
-        for index in 0..self.operations.entries.len() {
-            let id = OperationId {
-                index,
-                generation: self.operations.entries[index].generation,
-            };
-            self.orphan_operation(id);
+        for index in 0..self.operations.entries.slots_len() {
+            if let Some(id) = self.operations.entries.id_at(index) {
+                self.orphan_operation(OperationId(id));
+            }
         }
     }
 }
@@ -806,7 +744,10 @@ mod tests {
                     local.now += Duration::from_secs(120);
                     local.reconcile_admissions();
                     let Local {
-                        now, timers, deferred, ..
+                        now,
+                        timers,
+                        deferred,
+                        ..
                     } = &mut *local;
                     timers.expire(*now, &mut deferred.wakes);
                 }),
@@ -1017,13 +958,7 @@ mod tests {
             );
             let local = retained_local.unwrap();
             let local = local.borrow();
-            assert!(
-                local
-                    .operations
-                    .entries
-                    .iter()
-                    .all(|entry| entry.state.is_none())
-            );
+            assert_eq!(local.operations.entries.len(), 0);
             assert!(local.driver.is_none());
             assert!(runtime::current().is_none());
             assert_eq!(Arc::strong_count(&fd), 1);
@@ -1176,7 +1111,7 @@ mod tests {
     #[test]
     fn retained_result_survives_waiter_reuse() {
         let mut operations = Operations::default();
-        let first = operations.reserve();
+        let first = operations.next_id();
         let waiter = WaiterId::new(0, 0);
         operations.insert(first, waiter, Waker::noop().clone());
         let old = mem::replace(
@@ -1187,7 +1122,7 @@ mod tests {
 
         // The next operation can use the same bounded waiter while the earlier
         // output remains in its independent observer slot.
-        let second = operations.reserve();
+        let second = operations.next_id();
         operations.insert(second, WaiterId::new(0, 1), Waker::noop().clone());
         assert_ne!(first, second);
         assert!(matches!(
@@ -1203,13 +1138,13 @@ mod tests {
     #[test]
     fn delayed_drop_cannot_alias_recycled_result_slot() {
         let mut operations = Operations::default();
-        let first = operations.reserve();
+        let first = operations.next_id();
         operations.insert(first, WaiterId::new(0, 0), Waker::noop().clone());
         drop(operations.take(first));
-        let second = operations.reserve();
+        let second = operations.next_id();
         operations.insert(second, WaiterId::new(0, 1), Waker::noop().clone());
-        assert_eq!(first.index, second.index);
-        assert_ne!(first.generation, second.generation);
+        assert_eq!(first.0.index, second.0.index);
+        assert_ne!(first.0.generation, second.0.generation);
         assert!(operations.take(first).is_none());
         assert!(operations.get_mut(second).is_some());
     }
@@ -1217,13 +1152,10 @@ mod tests {
     #[test]
     fn exhausted_result_generation_retires_slot() {
         let mut operations = Operations::default();
-        let id = operations.reserve();
+        let id = operations.next_id();
         operations.insert(id, WaiterId::new(0, 0), Waker::noop().clone());
-        operations.entries[id.index].generation = u64::MAX;
-        drop(operations.take(OperationId {
-            generation: u64::MAX,
-            ..id
-        }));
-        assert_ne!(operations.reserve().index, id.index);
+        let exhausted = OperationId(operations.entries.set_generation(id.0, u64::MAX));
+        drop(operations.take(exhausted));
+        assert_ne!(operations.next_id().0.index, id.0.index);
     }
 }

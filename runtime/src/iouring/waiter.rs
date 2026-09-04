@@ -553,10 +553,10 @@ mod tests {
     /// Build a `Sync` request backed by a socket fd so waiter tests can
     /// exercise slot lifecycle without touching the filesystem.
     fn operation() -> OperationId {
-        OperationId {
+        OperationId(crate::iouring::slab::Id {
             index: 0,
             generation: 0,
-        }
+        })
     }
 
     fn observer() -> Observer {

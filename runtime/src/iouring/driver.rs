@@ -720,10 +720,10 @@ mod tests {
     }
 
     fn operation(generation: u64) -> OperationId {
-        OperationId {
+        OperationId(crate::iouring::slab::Id {
             index: 0,
             generation,
-        }
+        })
     }
 
     fn recv(fd: UnixStream, len: usize, exact: bool, deadline: Option<Instant>) -> Request {

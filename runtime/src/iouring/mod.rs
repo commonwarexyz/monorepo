@@ -34,8 +34,9 @@
 //!
 //! The runner closes admission, aborts supervised tasks, and retires kernel
 //! requests before returning. Admitted writes and syncs finish even if their
-//! callers are gone. Shutdown waits for accepted worker runtime cleanup and failure publication.
-//! Native thread-local destruction may follow. Shutdown has no time limit.
+//! callers are gone. Shutdown waits for every accepted worker to finish runtime
+//! cleanup and failure publication, with no time limit. Native TLS destruction
+//! may follow that boundary.
 //!
 //! # Examples
 //!
@@ -55,6 +56,7 @@ mod mailbox;
 pub(crate) mod operation;
 pub(crate) mod request;
 mod runtime;
+mod slab;
 mod sleep;
 pub(crate) mod sockaddr;
 mod spinner;

@@ -19,6 +19,7 @@
 use super::{
     mailbox::{Mailbox, Message},
     operation, runtime,
+    slab::{Id, Slab},
     timeout::TimeoutWheel,
 };
 use std::{
@@ -174,12 +175,7 @@ impl Drop for Sleep {
 
 /// Full-width identity for one sleeper registration.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub(super) struct TimerId {
-    /// Slab slot containing this registration.
-    index: usize,
-    /// Slot incarnation, checked before every lookup.
-    generation: u64,
-}
+pub(super) struct TimerId(Id);
 
 /// Live deadline and the sleeping caller's latest waker.
 struct Registration {
@@ -189,27 +185,13 @@ struct Registration {
     waker: Waker,
 }
 
-/// One reusable timer slot.
-struct Entry {
-    /// Current incarnation of this slot.
-    generation: u64,
-    /// Present only while the timer is live.
-    registration: Option<Registration>,
-    /// Next reusable slot when vacant and not generation-exhausted.
-    next_free: Option<usize>,
-}
-
 /// Growable timer registrations and their earliest-first deadline heap.
 #[derive(Default)]
 pub(super) struct Timers {
     /// Slots owned exclusively by this worker.
-    entries: Vec<Entry>,
-    /// Head of the reusable slot list.
-    free: Option<usize>,
+    entries: Slab<Registration>,
     /// Deadline records, including lazily removed stale registrations.
     deadlines: BinaryHeap<Reverse<(Instant, TimerId)>>,
-    /// Number of live registrations.
-    len: usize,
 }
 
 impl Timers {
@@ -224,43 +206,16 @@ impl Timers {
     /// Repeated pending polls refresh this registration instead of inserting a
     /// second timer or changing the original absolute deadline.
     pub fn insert(&mut self, deadline: Instant, waker: Waker) -> TimerId {
-        if self.free.is_none() {
-            self.entries.reserve(1);
-        }
-        self.deadlines.reserve(1);
-        let index = if let Some(index) = self.free {
-            self.free = self.entries[index].next_free;
-            index
-        } else {
-            let index = self.entries.len();
-            self.entries.push(Entry {
-                generation: 0,
-                registration: None,
-                next_free: None,
-            });
-            index
-        };
-        let entry = &mut self.entries[index];
-        let id = TimerId {
-            index,
-            generation: entry.generation,
-        };
-        entry.registration = Some(Registration { deadline, waker });
-        entry.next_free = None;
+        let id = TimerId(self.entries.insert(Registration { deadline, waker }));
         self.deadlines.push(Reverse((deadline, id)));
-        self.len += 1;
         id
     }
 
     /// Whether a live registration already holds an equivalent observer.
     pub fn will_wake(&self, id: TimerId, waker: &Waker) -> bool {
-        self.contains(id)
-            && self.entries[id.index]
-                .registration
-                .as_ref()
-                .unwrap()
-                .waker
-                .will_wake(waker)
+        self.entries
+            .get(id.0)
+            .is_some_and(|entry| entry.waker.will_wake(waker))
     }
 
     /// Refresh a registered sleeper's waker and return the displaced waker.
@@ -269,10 +224,9 @@ impl Timers {
     /// future first checks its deadline and worker closure, so a missing live
     /// registration after those checks is an invariant failure.
     pub fn refresh(&mut self, id: TimerId, waker: Waker) -> Result<Waker, Waker> {
-        if !self.contains(id) {
+        let Some(registration) = self.entries.get_mut(id.0) else {
             return Err(waker);
-        }
-        let registration = self.entries[id.index].registration.as_mut().unwrap();
+        };
         Ok(std::mem::replace(&mut registration.waker, waker))
     }
 
@@ -283,7 +237,7 @@ impl Timers {
         if !self.contains(id) {
             return None;
         }
-        let waker = self.remove(id.index);
+        let waker = self.remove(id.0.index);
         self.compact();
         Some(waker)
     }
@@ -298,11 +252,8 @@ impl Timers {
             if deadline > now {
                 break;
             }
-            // Reserve before detaching the waker. Pending future timers do
-            // not need action storage until a service pass expires them.
-            wakes.reserve(1);
             let Reverse((_, id)) = self.deadlines.pop().unwrap();
-            wakes.push(self.remove(id.index));
+            wakes.push(self.remove(id.0.index));
         }
         self.compact();
     }
@@ -323,9 +274,9 @@ impl Timers {
     /// Closure owns registration cleanup even when a sleep future escapes its
     /// worker. The caller drops each detached waker after releasing Local.
     pub fn clear(&mut self, drops: &mut Vec<Waker>) {
-        drops.reserve(self.len);
-        for index in 0..self.entries.len() {
-            if self.entries[index].registration.is_some() {
+        drops.reserve(self.entries.len());
+        for index in 0..self.entries.slots_len() {
+            if self.entries.id_at(index).is_some() {
                 drops.push(self.remove(index));
             }
         }
@@ -334,38 +285,26 @@ impl Timers {
 
     /// Validate both presence and the complete slot generation.
     fn contains(&self, id: TimerId) -> bool {
-        self.entries
-            .get(id.index)
-            .is_some_and(|entry| entry.generation == id.generation && entry.registration.is_some())
+        self.entries.get(id.0).is_some()
     }
 
     /// Retire a live slot without invoking its waker.
     fn remove(&mut self, index: usize) -> Waker {
-        let entry = &mut self.entries[index];
-        let registration = entry.registration.take().unwrap();
-        if let Some(generation) = entry.generation.checked_add(1) {
-            entry.generation = generation;
-            entry.next_free = self.free;
-            self.free = Some(index);
-        }
-        self.len -= 1;
-        registration.waker
+        let id = self.entries.id_at(index).expect("removing a free timer");
+        self.entries.remove(id).unwrap().waker
     }
 
     /// Rebuild once stale entries exceed both 64 and the live timer count.
     fn compact(&mut self) {
-        let stale = self.deadlines.len() - self.len;
-        if stale <= 64 || stale <= self.len {
+        let stale = self.deadlines.len() - self.entries.len();
+        if stale <= 64 || stale <= self.entries.len() {
             return;
         }
         let entries = &self.entries;
         self.deadlines.retain(|&Reverse((deadline, id))| {
-            let entry = &entries[id.index];
-            entry.generation == id.generation
-                && entry
-                    .registration
-                    .as_ref()
-                    .is_some_and(|registration| registration.deadline == deadline)
+            entries
+                .get(id.0)
+                .is_some_and(|entry| entry.deadline == deadline)
         });
         self.deadlines.shrink_to_fit();
     }
@@ -445,7 +384,7 @@ mod tests {
         assert_eq!(counter.0.load(Ordering::Relaxed), 1);
         timers.expire(later, &mut wakes);
         assert_eq!(timers.next_deadline(), None);
-        assert_eq!(timers.len, 0);
+        assert_eq!(timers.entries.len(), 0);
         wakes.pop().unwrap().wake();
         assert_eq!(counter.0.load(Ordering::Relaxed), 2);
     }
@@ -459,7 +398,7 @@ mod tests {
         let id = timers.insert(now, Waker::from(first.clone()));
         let displaced = timers.refresh(id, Waker::from(second.clone())).unwrap();
         assert_eq!(Arc::strong_count(&first), 2);
-        assert_eq!(timers.len, 1);
+        assert_eq!(timers.entries.len(), 1);
         assert_eq!(timers.deadlines.len(), 1);
         drop(displaced);
         assert_eq!(Arc::strong_count(&first), 1);
@@ -480,7 +419,7 @@ mod tests {
         let mut wakes = Vec::new();
         timers.expire(now, &mut wakes);
         assert_eq!(wakes.len(), 1024);
-        assert_eq!(timers.len, 0);
+        assert_eq!(timers.entries.len(), 0);
         assert_eq!(timers.next_deadline(), None);
     }
 
@@ -492,8 +431,8 @@ mod tests {
         let old = timers.insert(now, Waker::noop().clone());
         drop(timers.cancel(old));
         let current = timers.insert(later, Waker::noop().clone());
-        assert_eq!(old.index, current.index);
-        assert_ne!(old.generation, current.generation);
+        assert_eq!(old.0.index, current.0.index);
+        assert_ne!(old.0.generation, current.0.generation);
         assert!(timers.cancel(old).is_none());
         assert!(timers.refresh(old, Waker::noop().clone()).is_err());
         assert_eq!(timers.next_deadline(), Some(later));
@@ -508,14 +447,10 @@ mod tests {
         let now = Instant::now();
         let mut timers = Timers::new();
         let id = timers.insert(now, Waker::noop().clone());
-        timers.entries[id.index].generation = u64::MAX;
-        let exhausted = TimerId {
-            index: id.index,
-            generation: u64::MAX,
-        };
+        let exhausted = TimerId(timers.entries.set_generation(id.0, u64::MAX));
         drop(timers.cancel(exhausted));
         let next = timers.insert(now, Waker::noop().clone());
-        assert_ne!(exhausted.index, next.index);
+        assert_ne!(exhausted.0.index, next.0.index);
         assert!(!timers.contains(exhausted));
     }
 
@@ -527,9 +462,9 @@ mod tests {
         for _ in 0..1000 {
             let id = timers.insert(now + Duration::from_secs(1), Waker::noop().clone());
             drop(timers.cancel(id));
-            assert!(timers.deadlines.len() <= timers.len + 64);
+            assert!(timers.deadlines.len() <= timers.entries.len() + 64);
         }
-        assert_eq!(timers.entries.len(), 2);
+        assert_eq!(timers.entries.slots_len(), 2);
         assert_eq!(timers.next_deadline(), Some(now));
         drop(timers.cancel(oldest));
         assert_eq!(timers.next_deadline(), None);
@@ -551,7 +486,7 @@ mod tests {
         timers.clear(&mut actions);
         assert_eq!(actions.len(), 1);
         assert_eq!(timers.next_deadline(), None);
-        assert_eq!(timers.len, 0);
+        assert_eq!(timers.entries.len(), 0);
         assert!(timers.cancel(id).is_none());
         assert_eq!(Arc::strong_count(&counter), 2);
         assert_eq!(counter.0.load(Ordering::Relaxed), 0);
