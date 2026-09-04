@@ -44,11 +44,15 @@ use commonware_actor::{
 use commonware_codec::{Codec, EncodeSize as _};
 use commonware_cryptography::{Digest, Digestible, Hasher, bls12381::primitives::variant::Variant};
 use commonware_runtime::{Handle, Metrics as RuntimeMetrics, Spawner};
-use commonware_utils::{cache::Clock, channel::oneshot, futures::Pool};
+use commonware_utils::{
+    cache::Clock,
+    channel::oneshot,
+    futures::{AbortablePool, Aborter, OptionFuture, Pool},
+};
 use std::{
     collections::{BTreeMap, VecDeque},
     fmt::Display,
-    future::Future,
+    future::{Future, pending},
     marker::PhantomData,
     num::NonZeroUsize,
     sync::Arc,
@@ -290,10 +294,10 @@ where
         id: CertificateId<H::Digest>,
     ) -> impl Future<Output = Result<bool, Self::Error>> + Send;
     fn header_segments(
-        &mut self,
+        &self,
         requests: Vec<(BlockRef<H::Digest>, usize)>,
         max_bytes: usize,
-    ) -> impl Future<Output = Result<HeaderSegments<H::Digest>, Self::Error>> + Send;
+    ) -> impl Future<Output = Result<HeaderSegments<H::Digest>, Self::Error>> + Send + 'static;
     fn start_commit(
         &mut self,
         batch: catalog::Commit<H, V>,
@@ -370,12 +374,13 @@ where
         Self::final_lqc(self, id).await
     }
 
-    async fn header_segments(
-        &mut self,
+    fn header_segments(
+        &self,
         requests: Vec<(BlockRef<H::Digest>, usize)>,
         max_bytes: usize,
-    ) -> Result<Vec<Vec<TransactionBlockHeader<H::Digest>>>, Self::Error> {
-        Self::header_segments(self, requests, max_bytes).await
+    ) -> impl Future<Output = Result<HeaderSegments<H::Digest>, Self::Error>> + Send + 'static {
+        let catalog = self.clone();
+        async move { Self::header_segments(&catalog, requests, max_bytes).await }
     }
 
     async fn start_commit(
@@ -981,6 +986,29 @@ where
         Ok(())
     }
 
+    /// Retains concurrent input without crossing an ordered floor-install barrier.
+    async fn receive_during_sync(&mut self) -> Result<Option<BlockRef<H::Digest>>, Error> {
+        if self.commands.is_none() || self.deferred.floor.is_some() || self.deferred.closed {
+            return pending().await;
+        }
+        let command = self
+            .commands
+            .as_mut()
+            .expect("a running synchronizer owns its mailbox")
+            .recv()
+            .await;
+        let Some(command) = command else {
+            self.deferred.closed = true;
+            return Ok(None);
+        };
+        let header = match &command {
+            Command::Header(_, header) => Some(header.block_ref::<H>()),
+            _ => None,
+        };
+        self.defer_command(command)?;
+        Ok(header)
+    }
+
     async fn wait_for_commit_slot(&mut self) -> Result<(), Error> {
         while self.pending_commits.len() >= COMMIT_WINDOW {
             if self.commands.is_none() || self.deferred.floor.is_some() || self.deferred.closed {
@@ -1279,11 +1307,8 @@ where
                     "tip-history opening does not extend its recovery window",
                 ));
             }
-            let opening_outputs = Self::opening_output_count(
-                &ordered,
-                link.record.tips(),
-                link.record.proposed(),
-            )?;
+            let opening_outputs =
+                Self::opening_output_count(&ordered, link.record.tips(), link.record.proposed())?;
             let window_outputs = outputs
                 .checked_add(opening_outputs)
                 .ok_or(Error::OutputExhausted)?;
@@ -1595,59 +1620,74 @@ where
             .enumerate()
             .filter_map(|(chain, walk)| walk.ancestry.next().map(|_| chain))
             .collect::<VecDeque<_>>();
-        let mut fetches: Pool<'static, ProducerFetch<H>> = Pool::default();
-        let mut completed_fetches = Vec::with_capacity(self.backfill_concurrency);
-        while !ready.is_empty() || !fetches.is_empty() {
-            let available = self.backfill_concurrency.saturating_sub(fetches.len());
-            if available > 0 && !ready.is_empty() {
-                let mut scheduled = Vec::with_capacity(available.min(ready.len()));
-                while scheduled.len() < available {
-                    let Some(chain) = ready.pop_front() else {
-                        break;
-                    };
-                    let request = walks[chain]
-                        .ancestry
-                        .next()
-                        .ok_or(Error::Invalid("scheduled producer walk is complete"))?;
-                    if let Some(header) = self.headers.get(&request).cloned() {
-                        self.accept_producer_header(&mut walks, chain, request, &header)
-                            .await?;
-                        if walks[chain].ancestry.next().is_some() {
-                            ready.push_back(chain);
-                        }
-                        continue;
+        let mut fetches: AbortablePool<'static, ProducerFetch<H>> = AbortablePool::default();
+        let mut aborters: Vec<Option<Aborter>> = (0..walks.len()).map(|_| None).collect();
+        let mut local = OptionFuture::default();
+        let mut scheduled: Vec<(usize, BlockRef<H::Digest>, usize)> = Vec::new();
+        loop {
+            // A walk only moves toward older ancestors. A lookup whose exact request has been
+            // passed cannot contribute to that walk, even if its catalog reply arrives later.
+            if local.is_some()
+                && scheduled
+                    .iter()
+                    .all(|(chain, request, _)| walks[*chain].ancestry.next() != Some(*request))
+            {
+                *local = None;
+                scheduled.clear();
+            }
+            let available = if local.is_none() {
+                self.backfill_concurrency.saturating_sub(fetches.len())
+            } else {
+                0
+            };
+            let mut requests = Vec::with_capacity(available.min(ready.len()));
+            let mut advanced = false;
+            for _ in 0..ready.len() {
+                let chain = ready.pop_front().expect("the ready walk count is fixed");
+                let request = walks[chain]
+                    .ancestry
+                    .next()
+                    .ok_or(Error::Invalid("scheduled producer walk is complete"))?;
+                if let Some(header) = self.headers.get(&request).cloned() {
+                    self.accept_producer_header(&mut walks, chain, request, &header)
+                        .await?;
+                    if walks[chain].ancestry.next().is_some() {
+                        ready.push_back(chain);
                     }
-                    scheduled.push((
+                    advanced = true;
+                } else if requests.len() < available {
+                    requests.push((
                         chain,
                         request,
                         walks[chain].ancestry.remaining().min(MAX_SEGMENT_ITEMS),
                     ));
+                } else {
+                    ready.push_back(chain);
                 }
-                if scheduled.is_empty() {
-                    continue;
-                }
-                let local = {
-                    let mut local = Box::pin(
-                        self.catalog.header_segments(
-                            scheduled
-                                .iter()
-                                .map(|(_, request, max_items)| (*request, *max_items))
-                                .collect(),
-                            usize::MAX,
-                        ),
-                    );
-                    loop {
-                        if fetches.is_empty() {
-                            break local.await;
-                        }
-                        commonware_macros::select! {
-                            fetched = fetches.next_completed() => completed_fetches.push(fetched),
-                            result = &mut local => break result,
-                        };
-                    }
-                };
-                let local = local.map_err(|error| Error::Catalog(message(error)))?;
-                for (chain, request, result) in completed_fetches.drain(..) {
+            }
+            if !requests.is_empty() {
+                *local = Some(Box::pin(
+                    self.catalog.header_segments(
+                        requests
+                            .iter()
+                            .map(|(_, request, max_items)| (*request, *max_items))
+                            .collect(),
+                        usize::MAX,
+                    ),
+                ));
+                scheduled = requests;
+            }
+            if advanced {
+                continue;
+            }
+            if ready.is_empty() && fetches.is_empty() && local.is_none() {
+                break;
+            }
+
+            commonware_macros::select! {
+                fetched = fetches.next_completed() => {
+                    let Ok((chain, request, result)) = fetched else { continue; };
+                    aborters[chain] = None;
                     self.accept_producer_headers(
                         &mut walks,
                         &mut ready,
@@ -1656,36 +1696,51 @@ where
                         result.map_err(Error::Fetch)?.as_slice(),
                     )
                     .await?;
-                }
-                if local.len() != scheduled.len() {
-                    return Err(Error::Invalid("catalog header batch cardinality mismatch"));
-                }
-                for ((chain, request, _), headers) in scheduled.into_iter().zip(local) {
-                    if !headers.is_empty() {
-                        self.accept_producer_headers(
-                            &mut walks, &mut ready, chain, request, &headers,
-                        )
-                        .await?;
+                },
+                result = &mut local => {
+                    *local = None;
+                    let headers = result.map_err(|error| Error::Catalog(message(error)))?;
+                    if headers.len() != scheduled.len() {
+                        return Err(Error::Invalid("catalog header batch cardinality mismatch"));
+                    }
+                    for ((chain, request, _), headers) in scheduled.drain(..).zip(headers) {
+                        if walks[chain].ancestry.next() != Some(request) {
+                            continue;
+                        }
+                        if !headers.is_empty() {
+                            self.accept_producer_headers(
+                                &mut walks, &mut ready, chain, request, &headers,
+                            ).await?;
+                            continue;
+                        }
+                        let mut fetcher = self.fetcher.clone();
+                        aborters[chain] = Some(fetches.push(async move {
+                            let result = fetcher.headers(reason, request).await.map_err(message);
+                            (chain, request, result)
+                        }));
+                    }
+                },
+                command = self.receive_during_sync() => {
+                    let Some(reference) = command? else { continue; };
+                    let chain = reference.chain().get() as usize;
+                    if walks.get(chain).and_then(|walk| walk.ancestry.next()) != Some(reference) {
                         continue;
                     }
-                    let mut fetcher = self.fetcher.clone();
-                    fetches.push(async move {
-                        let result = fetcher.headers(reason, request).await.map_err(message);
-                        (chain, request, result)
+                    let fetching = aborters[chain].take().is_some();
+                    let looking_up = scheduled.iter().any(|(candidate, request, _)| {
+                        *candidate == chain && *request == reference
                     });
-                }
-                continue;
+                    if fetching || looking_up {
+                        // The hint authenticates ancestry, not custody. Body lookup and durable
+                        // publication still follow the completed walk's exact output plan.
+                        let header = self.headers.get(&reference).cloned()
+                            .expect("the received header is cached");
+                        self.accept_producer_headers(
+                            &mut walks, &mut ready, chain, reference, &[header],
+                        ).await?;
+                    }
+                },
             }
-
-            let (chain, request, result) = fetches.next_completed().await;
-            self.accept_producer_headers(
-                &mut walks,
-                &mut ready,
-                chain,
-                request,
-                result.map_err(Error::Fetch)?.as_slice(),
-            )
-            .await?;
         }
 
         walks
@@ -1912,6 +1967,7 @@ where
                             .inc_by(u64::try_from(fetched).unwrap_or(u64::MAX));
                     }
                 },
+                command = self.receive_during_sync() => { command?; },
             }
         }
         if let Some(metrics) = &self.metrics {
@@ -2541,7 +2597,11 @@ mod tests {
     use commonware_runtime::{Clock as _, Runner as _, Supervisor as _, deterministic};
     use commonware_utils::sync::Mutex;
     use futures::executor::block_on;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use rstest::rstest;
+    use std::{
+        sync::atomic::{AtomicUsize, Ordering},
+        time::Duration,
+    };
 
     type TestBody = EmptyBlock<Sha256>;
     type TestBlock = TransactionBlock<Sha256, TestBody>;
@@ -2626,6 +2686,11 @@ mod tests {
     type MockLqcEntry = (CertificateId<Sha256Digest>, Arc<Lqc<MinPk, Sha256Digest>>);
     type MockBlocks = Arc<Mutex<BTreeMap<BlockRef<Sha256Digest>, Arc<TestBlock>>>>;
 
+    struct HeaderGate {
+        started: oneshot::Sender<()>,
+        release: oneshot::Receiver<()>,
+    }
+
     #[derive(Clone, Default)]
     struct MockFetcher {
         lqcs: Vec<MockLqcEntry>,
@@ -2645,6 +2710,7 @@ mod tests {
         fetch_delay_by_height: bool,
         range_limit: Option<usize>,
         gates: Option<Arc<FetchGates>>,
+        header_gate: Arc<Mutex<Option<HeaderGate>>>,
         fetch_requires: Option<(BlockRef<Sha256Digest>, usize)>,
     }
 
@@ -2691,6 +2757,11 @@ mod tests {
             _reason: FetchReason,
             mut reference: BlockRef<Sha256Digest>,
         ) -> Result<HeaderSegment<Sha256Digest>, Self::Error> {
+            let gate = self.header_gate.lock().take();
+            if let Some(gate) = gate {
+                gate.started.send(()).map_err(|_| MockError)?;
+                gate.release.await.map_err(|_| MockError)?;
+            }
             let chain = self
                 .blocks
                 .get(reference.chain().get() as usize)
@@ -2857,6 +2928,7 @@ mod tests {
         block_batches: Arc<Mutex<Vec<Vec<BlockRef<Sha256Digest>>>>>,
         block_calls: Arc<AtomicUsize>,
         header_limits: Arc<Mutex<Vec<Vec<usize>>>>,
+        header_gate: Arc<Mutex<Option<HeaderGate>>>,
         outputs: Vec<BlockRef<Sha256Digest>>,
         handoff: Vec<BlockRef<Sha256Digest>>,
         batches: Vec<usize>,
@@ -2934,33 +3006,44 @@ mod tests {
             Ok(self.selected.contains(&id))
         }
 
-        async fn header_segments(
-            &mut self,
+        fn header_segments(
+            &self,
             requests: Vec<(BlockRef<Sha256Digest>, usize)>,
             _max_bytes: usize,
-        ) -> Result<Vec<Vec<TransactionBlockHeader<Sha256Digest>>>, Self::Error> {
-            self.header_limits
-                .lock()
-                .push(requests.iter().map(|(_, max_items)| *max_items).collect());
-            Ok(requests
-                .into_iter()
-                .map(|(mut reference, max_items)| {
-                    let mut headers = Vec::new();
-                    while headers.len() < max_items {
-                        let Some(block) = self.blocks.lock().get(&reference).cloned() else {
-                            break;
-                        };
-                        let header = block.header().clone();
-                        reference = BlockRef::new(
-                            reference.chain(),
-                            Height::new(reference.height().get().saturating_sub(1)),
-                            header.parent(),
-                        );
-                        headers.push(header);
-                    }
-                    headers
-                })
-                .collect())
+        ) -> impl Future<Output = Result<HeaderSegments<Sha256Digest>, Self::Error>> + Send + 'static
+        {
+            let gate = Arc::clone(&self.header_gate);
+            let limits = Arc::clone(&self.header_limits);
+            let blocks = Arc::clone(&self.blocks);
+            async move {
+                let gate = gate.lock().take();
+                if let Some(gate) = gate {
+                    gate.started.send(()).map_err(|_| MockError)?;
+                    gate.release.await.map_err(|_| MockError)?;
+                }
+                limits
+                    .lock()
+                    .push(requests.iter().map(|(_, max_items)| *max_items).collect());
+                Ok(requests
+                    .into_iter()
+                    .map(|(mut reference, max_items)| {
+                        let mut headers = Vec::new();
+                        while headers.len() < max_items {
+                            let Some(block) = blocks.lock().get(&reference).cloned() else {
+                                break;
+                            };
+                            let header = block.header().clone();
+                            reference = BlockRef::new(
+                                reference.chain(),
+                                Height::new(reference.height().get().saturating_sub(1)),
+                                header.parent(),
+                            );
+                            headers.push(header);
+                        }
+                        headers
+                    })
+                    .collect())
+            }
         }
 
         async fn start_commit(
@@ -3186,6 +3269,7 @@ mod tests {
                 block_batches: Arc::default(),
                 block_calls: Arc::new(AtomicUsize::new(0)),
                 header_limits: Arc::default(),
+                header_gate: Arc::default(),
                 outputs: Vec::new(),
                 handoff: Vec::new(),
                 batches: Vec::new(),
@@ -3457,6 +3541,173 @@ mod tests {
                     (2, 3),
                 ]
             );
+        });
+    }
+
+    #[rstest]
+    #[case::catalog(true, false)]
+    #[case::resolver(false, false)]
+    #[case::partial_catalog_reply(true, true)]
+    fn authenticated_header_wakes_active_producer_walk(#[case] local: bool, #[case] partial: bool) {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let chains = if partial { 2 } else { 1 };
+            let committee = committee(59, chains, Limits::new(1, 1).unwrap());
+            let epoch = committee.config.epoch();
+            let bases = (0..chains).map(|index| base(index, 0)).collect::<Vec<_>>();
+            let blocks = bases
+                .iter()
+                .map(|base| chain(epoch, *base, 1))
+                .collect::<Vec<_>>();
+            let tips = blocks.iter().map(|chain| tip(chain)).collect::<Vec<_>>();
+            let reference = tips[0];
+            let history = digest(b"live header history", 0);
+            let record = Arc::new(TipRecord::at_tips(history, tips.clone()).unwrap());
+            let commitment = record.commitment::<Sha256>();
+            let mut actor = actor(
+                checkpoint(epoch, history, bases.clone(), bases.clone()),
+                blocks.clone(),
+                committee.codec(),
+                8,
+            )
+            .await;
+            if partial {
+                actor.catalog.blocks.lock().extend(
+                    blocks
+                        .iter()
+                        .flatten()
+                        .map(|block| (block.reference(), Arc::clone(block))),
+                );
+            }
+            actor.fetcher.catalog_block_calls = Some(Arc::clone(&actor.catalog.block_calls));
+            let (started, blocked) = oneshot::channel();
+            let (release, response) = oneshot::channel();
+            let mut release = Some(release);
+            let gate = if local {
+                &actor.catalog.header_gate
+            } else {
+                &actor.fetcher.header_gate
+            };
+            *gate.lock() = Some(HeaderGate {
+                started,
+                release: response,
+            });
+            let (commands, receiver) =
+                mailbox::new(context.child("commands"), NonZeroUsize::new(2).unwrap());
+            actor.commands = Some(receiver);
+            let mut opening = Box::pin(commit_opening(
+                &mut actor,
+                HistoryLink { commitment, record },
+            ));
+            commonware_macros::select! {
+                _ = &mut opening => panic!("producer walk completed before the header response"),
+                result = blocked => result.unwrap(),
+                _ = context.sleep(Duration::from_secs(1)) => {
+                    panic!("producer walk never requested its missing header")
+                },
+            }
+
+            let mismatched = TransactionBlockHeader::new(
+                epoch,
+                reference.chain(),
+                reference.height(),
+                bases[0].digest(),
+                digest(b"other authenticated body", 0),
+            )
+            .unwrap();
+            let [mismatched, matching] =
+                [mismatched, blocks[0][0].header().clone()].map(|header| {
+                    let signed = committee.signers[0].sign_transaction_block(header).unwrap();
+                    assert!(committee.verifier.verify_transaction_block(&signed));
+                    signed.header().clone()
+                });
+            assert_ne!(mismatched.block_ref::<Sha256>(), reference);
+            assert_eq!(
+                commands.enqueue(Command::Header(Span::none(), mismatched)),
+                Feedback::Ok
+            );
+            commonware_macros::select! {
+                _ = &mut opening => panic!("a mismatched header advanced the producer walk"),
+                _ = context.sleep(Duration::from_millis(10)) => {},
+            }
+            assert_eq!(
+                commands.enqueue(Command::Header(Span::none(), matching)),
+                Feedback::Ok
+            );
+            if partial {
+                commonware_macros::select! {
+                    _ = &mut opening => panic!("the unresolved chain did not retain its lookup"),
+                    _ = context.sleep(Duration::from_millis(10)) => {},
+                }
+                release.take().unwrap().send(()).unwrap();
+            }
+            commonware_macros::select! {
+                _ = &mut opening => {},
+                _ = context.sleep(Duration::from_millis(100)) => {
+                    panic!("matching authenticated header did not wake the active producer walk")
+                },
+            }
+            drop(opening);
+            if let Some(release) = release {
+                assert!(
+                    release.is_closed(),
+                    "the obsolete header request was not canceled"
+                );
+            }
+
+            assert_eq!(actor.catalog.outputs, tips);
+            assert_eq!(actor.catalog.block_calls.load(Ordering::Relaxed), 1);
+            if partial {
+                assert_eq!(actor.fetcher.block_calls.load(Ordering::Relaxed), 0);
+                assert!(actor.catalog.handoff.is_empty());
+            } else {
+                assert_eq!(actor.fetcher.block_calls.load(Ordering::Relaxed), 1);
+                assert!(actor.fetcher.fetch_batch_starts.lock()[0] > 0);
+                assert_eq!(actor.catalog.handoff, vec![reference]);
+            }
+            actor.finish_commits().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn ready_ancestry_completions_precede_optional_hints() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let committee = committee(61, 1, Limits::new(2, 1).unwrap());
+            let epoch = committee.config.epoch();
+            let base = base(0, 0);
+            let blocks = chain(epoch, base, 2);
+            let history = digest(b"ready ancestry history", 0);
+            let record =
+                Arc::new(TipRecord::at_tips(history, vec![blocks[0].reference()]).unwrap());
+            let commitment = record.commitment::<Sha256>();
+            let mut actor = actor(
+                checkpoint(epoch, history, vec![base], vec![base]),
+                vec![blocks.clone()],
+                committee.codec(),
+                8,
+            )
+            .await;
+            actor
+                .catalog
+                .blocks
+                .lock()
+                .insert(blocks[0].reference(), Arc::clone(&blocks[0]));
+            let signed = committee.signers[0]
+                .sign_transaction_block(blocks[1].header().clone())
+                .unwrap();
+            assert!(committee.verifier.verify_transaction_block(&signed));
+            let (commands, receiver) = mailbox::new(context.child("commands"), NonZeroUsize::MIN);
+            actor.commands = Some(receiver);
+            assert_eq!(
+                commands.enqueue(Command::Header(Span::none(), signed.header().clone())),
+                Feedback::Ok
+            );
+            commit_opening(&mut actor, HistoryLink { commitment, record }).await;
+            assert_eq!(actor.catalog.outputs, vec![blocks[0].reference()]);
+            assert!(
+                actor.headers.get(&blocks[1].reference()).is_none(),
+                "an optional hint was processed before ready synchronization work"
+            );
+            actor.finish_commits().await.unwrap();
         });
     }
 
