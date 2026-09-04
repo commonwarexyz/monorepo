@@ -46,8 +46,9 @@
 //! The mailbox's hybrid waker retains the eventfd used by the multishot PollAdd.
 //! Wake CQEs acknowledge readiness and schedule rearm when MORE is absent.
 //! Every blocking ring wait checks rearm and uses the same arm-and-recheck
-//! publication handshake as futex parking. The caller temporarily removes the
-//! driver from Local before blocking, so no local borrow crosses a sleep.
+//! publication handshake as futex parking. Synchronous parking keeps the driver
+//! in Local and invokes no user callbacks. The local borrow ends before result
+//! publication or error handling.
 //!
 //! Closing admission detaches ordinary observation and requests eligible
 //! cancellation. The worker keeps servicing the driver until all logical
@@ -164,10 +165,11 @@ impl Driver {
             !self.state.waiters.is_full(),
             "io_uring waiter capacity exhausted"
         );
-        self.state.ready_queue.reserve(1);
-        self.state.pending_deadlines.reserve(1);
+        let timed = request.deadline().is_some();
         let id = self.state.waiters.insert(request, None, observer);
-        self.state.pending_deadlines.push_back(id);
+        if timed {
+            self.state.pending_deadlines.push_back(id);
+        }
         self.state.ready_queue.push_back(id);
         id
     }
@@ -214,7 +216,6 @@ impl Driver {
             return;
         }
         if !self.state.waiters.retains_on_orphan(id) {
-            completed.reserve(1);
             self.state.cancel(id, completed);
         }
     }
@@ -238,9 +239,6 @@ impl Driver {
         defer_kernel_service: bool,
         completed: &mut Vec<Completed>,
     ) -> Result<bool, std::io::Error> {
-        completed.reserve(self.state.waiters.len());
-        self.state.ready_queue.reserve(self.state.waiters.len());
-        self.state.pending_cancels.reserve(self.state.waiters.len());
         let mut woke = self.state.reap(&mut self.ring, completed);
         self.state.advance_timeouts(now, completed);
         self.state.register_deadlines(now, completed);
@@ -269,7 +267,7 @@ impl Driver {
         Ok(woke)
     }
 
-    /// Perform the idle ring wait with no Local borrow held by the caller.
+    /// Perform the synchronous idle ring wait while retaining Local ownership.
     ///
     /// Returns `false` when rearm needs another service turn or the publication
     /// handshake rejects sleeping. A skipped wait does not satisfy a deferred
@@ -325,7 +323,6 @@ impl State {
     /// Request one cancellation attempt or retire an unsubmitted operation.
     fn cancel(&mut self, id: WaiterId, completed: &mut Vec<Completed>) {
         let tick = self.waiters.target_tick(id);
-        self.pending_cancels.reserve(1);
         if !self.waiters.cancel(id) {
             return;
         }

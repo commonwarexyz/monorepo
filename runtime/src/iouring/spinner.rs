@@ -107,7 +107,12 @@ impl Spinner {
             cfg.budget_us,
             cfg.max_budget_us,
         );
-        let iters_per_us = calibrate(probe);
+        // Disabled workers never spin, so calibration cannot affect their policy.
+        let iters_per_us = if cfg.budget_us == 0 {
+            0
+        } else {
+            calibrate(probe)
+        };
         let min_budget = cfg.budget_us.saturating_mul(iters_per_us);
         Self {
             budget: min_budget,
@@ -316,7 +321,9 @@ mod tests {
 
     #[test]
     fn test_disabled_spinner() {
-        let mut s = Spinner::new(&Config::disabled(), || false);
+        let mut s = Spinner::new(&Config::disabled(), || {
+            panic!("disabled spinning must skip calibration")
+        });
         assert!(!s.spin(|| true));
     }
 }
