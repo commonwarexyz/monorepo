@@ -1,0 +1,718 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta content="text/html; charset=utf-8" http-equiv="Content-Type">
+    <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1" />
+    <link rel="preload" href="/style.css" as="style">
+    <link rel="preload" href="/shared.js" as="script">
+    <link rel="icon" href="/favicon.ico" type="image/x-icon">
+
+    <title>commonware > Scalable Private Payments</title>
+    <meta name="description" content="Every private payment system has
+an ever growing global nullifier set. We design a payment system where
+state only grows with the number of accounts.">
+    <meta name="author" content="Guru Vamsi Policharla">
+    <meta name="keywords" content="commonware, open source, common goods, software, internet, ownership, trust, blockchain, decentralization, crypto">
+
+    <meta property="og:url" content="https://commonware.xyz/blogs/private-payments" />
+    <meta property="og:type" content="article" />
+    <meta property="og:site_name" content="commonware" />
+    <meta property="og:image" content="https://commonware.xyz/imgs/private-payments.png" />
+    <meta property="og:title" content="Scalable Private Payments" />
+    <meta property="og:description" content="Every private payment
+system has an ever growing global nullifier set. We design a payment
+system where state only grows with the number of accounts." />
+    <meta property="article:author" content="Guru Vamsi Policharla" />
+    <meta property="article:published_time" content="2026-09-03T00:00:00Z" />
+    <meta property="article:modified_time" content="2026-09-03T00:00:00Z" />
+
+    <link rel="canonical" href="https://commonware.xyz/blogs/private-payments" />
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta property="twitter:domain" content="commonware.xyz" />
+    <meta property="twitter:url" content="https://commonware.xyz/blogs/private-payments" />
+    <meta property="twitter:title" content="Scalable Private
+Payments" />
+    <meta property="twitter:description" content="Every private payment
+system has an ever growing global nullifier set. We design a payment
+system where state only grows with the number of accounts." />
+    <meta property="twitter:image" content="https://commonware.xyz/imgs/private-payments.png" />
+    <meta property="twitter:site" content="@commonwarexyz" />
+        <meta property="twitter:creator" content="https://x.com/guruvamsip" />
+    
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/katex.min.js"
+        onload="document.querySelectorAll('.math').forEach(function (el) {
+            katex.render(el.textContent, el, {
+                displayMode: el.classList.contains('display'),
+                throwOnError: false
+            });
+        });"></script>
+    
+    <link rel="stylesheet" type="text/css" href="/style.css">
+</head>
+
+<body>
+    <div id="logo-placeholder">
+        <div class="logo-line">
+            <span class="edge-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="edge-logo-symbol">*</span>
+        </div>
+        <div class="logo-line">
+            <span class="vertical-logo-symbol">|</span>
+            <span class="logo-text"> commonware </span>
+            <span class="vertical-logo-symbol"> </span>
+        </div>
+        <div class="logo-line">
+            <span class="edge-logo-symbol">*</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">*</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="edge-logo-symbol">+</span>
+        </div>
+    </div>
+    <div class="content">
+        <h1>Scalable Private Payments</h1>
+        <div class="meta">
+
+                        <div class="author">By <a href="https://x.com/guruvamsip">Guru
+Vamsi Policharla</a></div>
+                        <div class="date">September 3rd, 2026</div>
+        </div>
+        <link rel="stylesheet" href="private-payments.css">
+        <div class="live-box">
+            Since you opened this page, a ledger running at 1M private payments/s would
+            have added <span class="live" id="live-bytes">0 MB</span> of nullifiers, across
+            <span class="live" id="live-txs">0</span> transactions.
+        </div>
+        <p>A few years ago when I first started thinking about private
+        payments, I wanted to understand what throughput can we sustain
+        for private payments? And the answer I typically got was a few
+        hundred to a thousand private payments per second. This made no
+        sense to me because there are experiments handling 100K+ TPS for
+        regular payments. Surely cryptography was not the bottleneck? We
+        can verify ~1000 Groth16 per second on a <em>single thread</em>.
+        So what’s stopping us from scaling?</p>
+        <p>I never got a satisfactory answer and always left feeling
+        like the problems could be overcome with better engineering. But
+        at least cryptography was not the bottleneck. Right?</p>
+        <div data-align="center">
+        <blockquote>
+        <p><strong><em>At commonware, the situation flipped. The chain
+        is <a
+        href="https://x.com/_patrickogrady/status/2077449338230640739?s=20">really
+        fast</a>. <a
+        href="https://commonware.xyz/blogs/pipelining-simplex">Scarily
+        fast</a>.</em></strong><br> <strong><em>It very quickly turned
+        into: how will the cryptography keep up with the
+        chain?!</em></strong></p>
+        </blockquote>
+        </div>
+        <p>Our goal is to build extremely high throughput private
+        payments (1M+ TPS) with low latency. Assuming every payment is
+        <span class="math inline">\approx 200</span> bytes and takes
+        <span class="math inline">0.5-1</span> ms to verify (using <a
+        href="https://eprint.iacr.org/2016/260">Groth16</a> say), this
+        requires massive amounts of:</p>
+        <ul>
+        <li><strong>bandwidth:</strong> leaders disseminate <u>200 MB of
+        data, every second</u></li>
+        <li><strong>storage:</strong> the nullifier set (32 bytes per
+        transaction) grows by <u>a petabyte every year</u></li>
+        <li><strong>compute:</strong> equivalent of <u>500-1000
+        dedicated CPU cores</u>/validator</li>
+        </ul>
+        <p>Sure you can always throw more threads at the problem and use
+        bigger machines but that’s just not how commonware operates. We
+        want the BEST solution at the LOWEST price point. Below we
+        present our design for a private payment scheme where:</p>
+        <ul>
+        <li><strong>a million transactions</strong> can be verified on
+        an M5 Macbook Pro (18 cores)</li>
+        <li>validator storage grows <strong>logarithmically in
+        #(transactions)</strong> and linearly in #(accounts)</li>
+        <li>work done by users <strong>only depends on the transactions
+        they are involved in</strong></li>
+        </ul>
+        <h2 id="our-construction">Our Construction</h2>
+        <p>As a working example we have four accounts paying each other
+        using a random stream of payments. Additionally, we have four
+        panels which display all communication between parties,
+        (potentially private) account balances, transactions posted to
+        the ledger and the storage of each party.</p>
+        <div id="sim" role="region" aria-label="A bank to our construction.">
+            <noscript>
+                <style>
+                    #sim-source { display: block; }
+                </style>
+            </noscript>
+        </div>
+        <div id="sim-source">
+        <h3 id="a-bank">A Bank</h3>
+        <p>A centralized party maintains custody of all funds and
+        applies all changes to balances. The bank is an intermediary in
+        every transfer and is aware of who pays whom, and how much.</p>
+        <h3 id="ecash">ecash</h3>
+        <p>David Chaum introduced <a
+        href="https://chaum.com/wp-content/uploads/2022/01/Chaum-blind-signatures.pdf">ecash</a>
+        – the first payment system to achieve <em>unlinkability</em>
+        between the sender and receiver. The bank authorizes the
+        withdrawal of a single unit (say 1$) through a <em>blind
+        signature</em>, which the sender can provide to a receiver who
+        can then redeem the signature on the coin for 1$.</p>
+        <p>Since the communication between the sender and receiver is
+        hidden, the system hides who paid whom but the central
+        authority/bank can still see balances and inflows/outflows of an
+        account. However, the bank must remember a unique nullifier for
+        every coin that was ever redeemed.</p>
+        <p>Note that in this construction provides a very weak form of
+        privacy if the amounts debited/credited are different across
+        different transactions as it’s effectively a finger print for
+        the sender-receiver pair.</p>
+        <h3 id="decentralized-ecash">Decentralized ecash</h3>
+        <p>In order to provide much faster confirmations, and scale with
+        confidence, the most natural strategy is to use a consensus
+        algorithm that provides byzantine fault tolerance. The bank can
+        be replaced by a committee of validators and if designed
+        correctly (see <a
+        href="https://commonware.xyz/blogs/multimmit">Multimmit</a> for
+        example), payments from different parts of the world can be
+        <em>simultaneously</em> ingested into the log, providing much
+        faster confirmations with a truly global payment network.</p>
+        <p>However this introduces additional privacy concerns: anyone
+        reading the ledger, sees every balance and every account’s
+        inflow and outflow. Even if the committee is trusted to run the
+        ledger, users may not want to share their balances with the
+        world.</p>
+        <h3 id="hide-balances">Hide balances</h3>
+        <p>Cryptographic commitments coupled with zero-knowledge proofs
+        allow us to both hide balances and <em>verifiably</em> (but in
+        zero-knowledge) update them when a transfer occurs. In fact, <a
+        href="https://eprint.iacr.org/2019/191">Zether</a> follows this
+        recipe, but a payment updates the sender and the receiver in one
+        transaction, so the ledger still sees who paid whom. We can take
+        this one step further by <em>decoupling</em> the updates to
+        sender and receiver balances – as done in ecash – to
+        additionally hide who paid whom.</p>
+        <p>Concretely, we can prove during:</p>
+        <ul>
+        <li><strong>send</strong>: the new account commitment is the old
+        one minus <span class="math inline">v</span>, and the on-chain
+        receipt (another commitment) signed by the validators opens to
+        <span class="math inline">(v, A \to B)</span>.</li>
+        <li><strong>receive</strong>: the new account commitment is the
+        old one plus <span class="math inline">v</span>, I hold a
+        validator signature on some receipt for <span
+        class="math inline">(v, \cdot \to B)</span>, and reveal some
+        deterministic (yet random looking) nullifier.</li>
+        </ul>
+        <p>Balances and amounts are now hidden from the ledger, but it
+        still reveals which particular account sent/received funds.</p>
+        <h3 id="hide-operations">Hide operations</h3>
+        <p>On the face of it, leaking whether a user sent or received
+        money seems innocuous but the ledger additionally provides an
+        <strong><em>ordering</em></strong> for these operations. As we
+        will see <a href="#histories">later</a> in the blog, this
+        greatly reduces the number of different “realities” that could
+        have taken place. Hiding whether we are sending/receiving funds
+        is actually quite straightforward – simply prove a strict
+        disjunction of the send and receive relations.</p>
+        <p>Of course this also means that every send and receive carries
+        both a receipt and a nullifier and when naively done, the prover
+        pays the cost of both relations. In practice, this can be
+        optimized to reduce the redundant work being performed. The
+        ledger now only reveals that an account came online and
+        performed some action – send/receive.</p>
+        <p>Note the cost in the storage panel: the nullifier set grows
+        twice as fast.</p>
+        <h3 id="scaling-prune-receipts">Scaling: prune receipts</h3>
+        <p>We now focus on scaling the system and insist on three
+        restrictions:</p>
+        <ol type="1">
+        <li><strong>Bounded state:</strong> validators store state
+        proportional to the number of accounts, not the number of
+        transactions</li>
+        <li><strong>Constant work:</strong> validators only do a
+        constant amount of work per transaction, independent of the
+        number of accounts (or anonymity sets)</li>
+        <li><strong>Fully offline users:</strong> a user can be offline
+        indefinitely and return knowing only its secrets and the current
+        state, without reading any past transactions</li>
+        </ol>
+        <p>First, instead of signing every single transaction, the
+        committee can accumulate receipts in a Merkle Mountain Range and
+        just sign the root (see Peter’s <a
+        href="https://github.com/opentimestamps/opentimestamps-server/blob/master/doc/merkle-mountain-range.md">doc</a>
+        or Roberto’s <a href="https://commonware.xyz/blogs/mmr">blog</a>
+        for an explainer). The receive proof can be modified to
+        additionally prove knowledge of a merkle tree opening.</p>
+        <p>Thus, validators only need to maintain the peaks of the
+        receipt MMR, which grow logarithmically in the number of
+        transactions.</p>
+        <h3 id="scaling-delegate-nullifiers">Scaling: delegate
+        nullifiers</h3>
+        <p>Now we tackle the nullifier set. Unlike receipts where we
+        want to prove <em>membership</em> to claim them, we want to
+        prove <em>non-membership</em> of nullifiers to prevent double
+        spending. MMR’s do not support (efficient) non-membership proofs
+        so we cannot simply “forget” previous nullifiers.</p>
+        <p>The <a href="https://tachyon.z.cash/">Tachyon project</a>
+        uses <a href="https://eprint.iacr.org/2025/2031">oblivious
+        synchronization</a> to get around this issue. Here, validators
+        periodically offload their nullifier set and users will ask
+        untrusted services to create proofs that their coins have so far
+        not been spent. Importantly, these services cannot link clients
+        to their transactions when they eventually spend their coins.
+        However, this requires every unspent shielded note to
+        <em>continually</em> synchronize non-membership proofs with the
+        ledger – hence users cannot be truly offline if they have
+        unspent coins.</p>
+        <p>We have the benefit of working in the account based model and
+        albeit providing less <em>on-chain</em> privacy than Zcash, it
+        allows us to <strong>efficiently delegate</strong> nullifier
+        storage. Each user remembers the nullifiers for any transactions
+        they received, accumulates them into an <a
+        href="https://eprint.iacr.org/2021/1263">indexed merkle tree</a>
+        and stores the root inside their account commitment. Using
+        zero-knowledge proofs they show that it was correctly updated
+        whenever they receive funds.</p>
+        <p>Validator storage now grows with accounts, not transactions.
+        Great.</p>
+        <p>But eventually… the nullifier set will grow too big for users
+        to manage as well.</p>
+        <h3 id="scaling-prune-nullifiers">Scaling: prune nullifiers</h3>
+        <p>Now for the final optimization. Users can actually prune
+        their nullifier sets as well! We divide the ledger into epochs
+        and introduce a second MMR which stores the roots of nullifier
+        trees from previous epochs. Storage only grows logarithmically
+        in the number of epochs plus the number of nullifiers in the
+        current epoch.</p>
+        <p>Note that this means claiming a receipt from an old epoch is
+        more expensive as they would need to update the MMR which
+        requires retrieving the old roots and nullifiers.</p>
+        <p>In practice, we expect that this rarely happens as in typical
+        transactions the seller will only hand over the goods when they
+        have a receipt in-hand in which case they know all the receipts
+        they need to claim before closing out the epoch.</p>
+        </div>
+        <h2 id="the-full-construction">The full construction</h2>
+        <p><strong>Accounts.</strong> Every account is represented by a
+        single commitment</p>
+        <p><span class="math display">
+        \mathsf{com}_A = \mathsf{Com}_{\mathsf{acct}}\big(b_A,\
+        \kappa_A,\ \mathsf{root}_{\mathsf{null}}(A);\ r_A\big)
+        </span></p>
+        <p>to its balance <span class="math inline">b_A</span>, a secret
+        PRF key <span class="math inline">\kappa_A</span>, and the root
+        <span
+        class="math inline">\mathsf{root}_{\mathsf{null}}(A)</span> of
+        the account’s nullifier tree. With epoch based pruning, we store
+        another root for the MMR of nullifier tree roots.</p>
+        <p><strong>Validators maintain:</strong></p>
+        <ul>
+        <li>the account commitments <span
+        class="math inline">\mathsf{Acct}[A] =
+        \mathsf{com}_A</span></li>
+        <li>the frontier of the receipt MMR</li>
+        </ul>
+        <p><strong>Receipts:</strong> A payment of <span
+        class="math inline">v</span> from <span
+        class="math inline">\mathsf{Sen}</span> to <span
+        class="math inline">\mathsf{Rec}</span> is recorded on chain as
+        a hiding commitment (receipt):</p>
+        <p><span class="math display">
+        \rho = \mathsf{Com}_{\mathsf{rec}}\big(v,\ \mathsf{Sen},\
+        \mathsf{Rec},\ 1;\ r&#39;&#39;\big),
+        </span></p>
+        <p>whose last entry demarcates whether it’s a real receipt
+        (coming from the send branch) or a dummy receipt (coming from
+        the receive branch). The position <span
+        class="math inline">\mathsf{pid}</span> at which the ledger
+        inserts <span class="math inline">\rho</span> into the MMR is
+        the payment’s identifier and determines its nullifier,</p>
+        <p><span class="math display">
+        \mathsf{null} =
+        \mathsf{CRPRF}_{\kappa_{\mathsf{Rec}}}(\mathsf{recv},
+        \mathsf{pid}),
+        </span></p>
+        <p>derived under the <em>receiver’s</em> committed key.
+        Positions are unique, so distinct receipts collide with
+        negligible probability thereby preventing <a
+        href="cite%20here">Faerie Gold attacks</a>. Note that the
+        nullifier is never actually published on chain, it will be
+        inserted into the tree maintained inside the account commitment.
+        This means that a sender does not learn when a payment was
+        claimed.</p>
+        <p>A send/receive is a strict disjunctive proof of the following
+        relations, where only one branch is every proved at a time:</p>
+        <p><strong>If it is a send</strong>, the proof shows that:</p>
+        <ul>
+        <li>the balance was updated correctly: <span
+        class="math inline">\mathsf{com} =
+        \mathsf{Com}_{\mathsf{acct}}(b,\kappa,\mathsf{root}_{\mathsf{null}};r)
+        \wedge \mathsf{com}&#39; =
+        \mathsf{Com}_{\mathsf{acct}}(b-v,\kappa,\mathsf{root}_{\mathsf{null}};r&#39;)</span></li>
+        <li>receipt was created correctly: <span
+        class="math inline">\rho =
+        \mathsf{Com}_{\mathsf{rec}}(v,\mathsf{Sen},\mathsf{Rec},1;r&#39;&#39;)</span></li>
+        <li>no overflows: <span class="math inline">0 \le v \le b</span>
+        and <span class="math inline">b,\,v,\,b-v \in
+        \mathcal{B}</span></li>
+        </ul>
+        <p>Once the send transaction lands, the sender reads off its
+        position <span class="math inline">\mathsf{pid}</span> and
+        forwards the opening of <span class="math inline">\rho</span>
+        together with <span class="math inline">\mathsf{pid}</span> to
+        the receiver over a private channel.</p>
+        <p><strong>If it is a receive</strong>, the proof shows
+        that:</p>
+        <ul>
+        <li>the balance was updated correctly: <span
+        class="math inline">\mathsf{com} =
+        \mathsf{Com}_{\mathsf{acct}}(b,\kappa,\mathsf{root}_{\mathsf{null}};r)
+        \wedge \mathsf{com}&#39; =
+        \mathsf{Com}_{\mathsf{acct}}(b+v,\kappa,\mathsf{root}_{\mathsf{null}}&#39;;r&#39;)</span></li>
+        <li>claiming a receipt addressed to me: <span
+        class="math inline">\mathsf{MMR.Verify}(\mathsf{root}_\rho,\rho^\star,\mathsf{pid},\pi_{\mathsf{mmr}})=1
+        \wedge \rho^\star =
+        \mathsf{Com}_{\mathsf{rec}}(v,\mathsf{Sen},\mathsf{Rec},1;r&#39;&#39;)</span></li>
+        <li>nullifer did not appear: <span
+        class="math inline">\mathsf{null} =
+        \mathsf{CRPRF}_\kappa(\mathsf{recv},\mathsf{pid}) \wedge
+        \mathsf{MT.AccVerifyInsert}(\mathsf{root}_{\mathsf{null}},\mathsf{null},\pi_{\mathsf{mt}})=\mathsf{root}_{\mathsf{null}}&#39;</span></li>
+        <li>published a dummy receipt <span class="math inline">\rho =
+        \mathsf{Com}_{\mathsf{rec}}(\cdot,\cdot,\cdot,0;\cdot)</span></li>
+        </ul>
+        <p><strong>Wallets maintain.</strong> The opening of its account
+        commitment (balance, PRF key, randomness), the nullifiers of the
+        current epoch together with their indexed Merkle tree, one root
+        per past epoch, and the openings of any receipts it has been
+        handed but not yet claimed.</p>
+        <p>When the sender and receiver are both online which is
+        typically the case in e-commerce, the buyer can provide the
+        seller with confirmation that a receipt has landed on chain and
+        the seller can collect the receipt’s opening to claim it at some
+        point in the future. However, this is challenging when the
+        receiver is not online in applications such as payments between
+        friends or payroll. One option is to use existing communication
+        channels such as end-to-end encrypted messaging or email to
+        share the receipt opening, thereby using the rest of the
+        conversation as cover traffic.</p>
+        <p>Note that a private channel is not strictly required as the
+        sender could always encrypt the opening to the receiver and post
+        it on chain alongside the transaction. But every wallet would
+        have to trial-decrypt every incoming transaction to find the
+        ones designated for it. We do not expect this approach to scale
+        as it is linear work in the throughput of the whole ledger.</p>
+        <h2 id="histories">Indistinguishable Send/Receive</h2>
+        <p>We analyze the leakage in our private payment scheme under
+        two different leakage functions to highlight the benefits of
+        obfuscating the operation.</p>
+        <ul>
+        <li><code>L_unl</code>: the ledger sees the acting account and
+        the operation send/receive</li>
+        <li><code>L_ind</code>: the ledger sees only sees the acting
+        account</li>
+        </ul>
+        <p>To provide a quantitative comparison of the privacy
+        guarantees we compute the number of causally possible
+        <em>histories</em> that a sequence of transactions can have. In
+        the interactive demo below, for a given sequence of
+        transactions, we represent all possible histories as a
+        root-to-leaf path.</p>
+        <div id="controls" class="panel">
+            <div class="control-row">
+                <label for="acct">Account</label>
+                <select id="acct"></select>
+                <label for="op">Operation</label>
+                <select id="op">
+                    <option value="send">send to</option>
+                    <option value="recv">receive</option>
+                </select>
+                <select id="target"></select>
+                <button id="add">add</button>
+            </div>
+            <div class="control-row">
+                <button id="undo">undo</button>
+                <button id="clear">clear</button>
+                <button id="random">random</button>
+                <label for="rand-n" class="inline">length</label>
+                <input id="rand-n" type="number" min="1" max="14" value="6">
+                <label for="num-accts" class="inline">accounts</label>
+                <input id="num-accts" type="number" min="2" max="6">
+                <input id="allow-self" type="checkbox" class="inline">
+                <label for="allow-self">allow self-payments</label>
+            </div>
+            <div id="status" class="status"></div>
+        </div>
+        <p>Each leakage function’s columns show what it sees of a
+        transaction and how many histories are consistent with
+        everything it has seen so far. With self-payments allowed, the
+        <code>L_ind</code> count depends only on the length <span
+        class="math inline">n</span> of the log: a history is a partial
+        matching of the <span class="math inline">n</span> positions
+        into send-claim pairs, and these are counted by the telephone
+        numbers <span class="math inline">T(n) = 1, 2, 4, 10, 26, 76,
+        232, \ldots</span>, with</p>
+        <p><span class="math display">
+        T(n) = T(n-1) + (n-1)\,T(n-2).
+        </span></p>
+        <table id="log">
+            <thead>
+                <tr>
+                    <th rowspan="2">t</th>
+                    <th rowspan="2">what happened</th>
+                    <th colspan="2"><code>L_unl</code></th>
+                    <th colspan="2"><code>L_ind</code></th>
+                </tr>
+                <tr>
+                    <th>sees</th><th class="num">histories</th>
+                    <th>sees</th><th class="num">histories</th>
+                </tr>
+            </thead>
+            <tbody></tbody>
+        </table>
+        <div id="trees" class="tree-row"></div>
+        <div class="image-caption">
+        <p>One level per transaction; each root-to-leaf path is a
+        history, and the one that happened is highlighted. Node labels:
+        <span class="math inline">S</span> is a send; <span
+        class="math inline">R_i</span> is a receive claiming the receipt
+        published at <span class="math inline">t_i</span>. The first six
+        levels are drawn in full; beyond that, each level shows only its
+        number of consistent histories. Amounts and the recipients of
+        unclaimed receipts are hidden under both leakage functions.</p>
+        </div>
+        <p><strong>Comparison to shielded notes.</strong> <a
+        href="https://eprint.iacr.org/2014/349">Ledger
+        indistinguishability</a> in shielded notes guarantees that the
+        ledger learns nothing about who is transacting. Our ledger, by
+        contrast, always names the account that acted but is able to
+        handle nullifiers more efficiently. Thus the
+        <strong>onchain</strong> privacy in shielded notes is stronger
+        than our protocol.</p>
+        <p>In a real world deployment however, the gap may be narrower.
+        Typically, wallet don’t talk to the ledger directly and go
+        through intermediary RPC nodes which sees which client submitted
+        each transaction and when. Whoever runs it holds a table mapping
+        users to the transactions they broadcast, which is precisely the
+        <em>acting account</em> that <code>L_ind</code> leaks.</p>
+        <script src="private-payments.sim.js"></script>
+        <script src="private-payments.histories.js"></script>
+        <h2 id="early-benchmarks">Early Benchmarks</h2>
+        <p>A prototype of our payment system where the NIZK is
+        instantiated with <a
+        href="https://commonware.xyz/blogs/batch-pari">Pari + batch
+        verification</a> can be found <a
+        href="https://github.com/guruvamsi-policharla/zk-pari/tree/vanishing-poly-zk">here</a>.
+        Pari is not zero-knowledge as described in the <a
+        href="https://eprint.iacr.org/2024/1245">original paper</a>. We
+        use masking polynomials to add zk while ensuring the the proof
+        size remains unchanged <span class="math inline">2 \mathbb{G}_1
+        + \mathbb{F}</span> and there is minimal overhead on the
+        proving/verification time. All numbers below are on an M5
+        MacBook Pro (6 performance + 12 efficiency cores, 48 GB RAM)
+        over BLS12-381, single-threaded unless stated, and exclude
+        deserialization and subgroup checks.</p>
+        <p><strong>Batch Verification.</strong> Verifying a proof takes
+        about <span class="math inline">0.7</span> ms regardless of
+        circuit size. But with batch verification, this can be brought
+        down significantly. At <span class="math inline">N =
+        65{,}536</span> the three MSMs account for over 90% of the 729
+        ms total time. Computing the Fiat-Shamir challenges take 34 ms,
+        the statement evaluations 24 ms (with inversions batched across
+        proofs), and the final pairing under a millisecond.</p>
+        <p><strong>Throughput.</strong> Batches are independent, so we
+        shard them across threads with nothing shared, each thread
+        verifying its own 80,000-proof chunk. Scaling is sub-linear
+        because the efficiency cores are slower, but it crosses a
+        million transactions per second on the laptop, where a
+        transaction is a single send or receive.</p>
+        <div class="table-row">
+        <div class="table-col">
+        <table>
+        <thead>
+        <tr>
+        <th style="text-align: center;">Batch size <span
+        class="math inline">N</span></th>
+        <th style="text-align: center;">Verify (amortized)</th>
+        <th style="text-align: center;">Speedup</th>
+        </tr>
+        </thead>
+        <tbody>
+        <tr>
+        <td style="text-align: center;">1</td>
+        <td style="text-align: center;">696 <span
+        class="math inline">\mu</span>s</td>
+        <td style="text-align: center;">–</td>
+        </tr>
+        <tr>
+        <td style="text-align: center;">256</td>
+        <td style="text-align: center;">29.4 <span
+        class="math inline">\mu</span>s</td>
+        <td style="text-align: center;"><span
+        class="math inline">24\times</span></td>
+        </tr>
+        <tr>
+        <td style="text-align: center;">4,096</td>
+        <td style="text-align: center;">15.6 <span
+        class="math inline">\mu</span>s</td>
+        <td style="text-align: center;"><span
+        class="math inline">46\times</span></td>
+        </tr>
+        <tr>
+        <td style="text-align: center;">65,536</td>
+        <td style="text-align: center;">11.2 <span
+        class="math inline">\mu</span>s</td>
+        <td style="text-align: center;"><span
+        class="math inline">64\times</span></td>
+        </tr>
+        </tbody>
+        </table>
+        </div>
+        <div class="table-col">
+        <table>
+        <thead>
+        <tr>
+        <th style="text-align: center;">Threads</th>
+        <th style="text-align: center;">Transactions / s</th>
+        </tr>
+        </thead>
+        <tbody>
+        <tr>
+        <td style="text-align: center;">1</td>
+        <td style="text-align: center;">86,532</td>
+        </tr>
+        <tr>
+        <td style="text-align: center;">4</td>
+        <td style="text-align: center;">314,710</td>
+        </tr>
+        <tr>
+        <td style="text-align: center;">8</td>
+        <td style="text-align: center;">537,862</td>
+        </tr>
+        <tr>
+        <td style="text-align: center;">16</td>
+        <td style="text-align: center;">970,676</td>
+        </tr>
+        <tr>
+        <td style="text-align: center;">18</td>
+        <td style="text-align: center;">1,017,948</td>
+        </tr>
+        </tbody>
+        </table>
+        </div>
+        </div>
+        <p><strong>Proving.</strong> The circuits use Pedersen hashes
+        over Jubjub for Merkle nodes, and account/receipt commitments,
+        and SHA-256 for the collision resistant PRF. As expected a send
+        is cheaper than a receive as it does not have to prove merkle
+        openings. In receive is where the cost sits, since it also
+        verifies a depth-40 MMR opening and an insertion into the
+        nullifier tree. The operation-hiding relation <span
+        class="math inline">\mathcal R_{\mathsf{op}}</span> is
+        <em>not</em> the sum of the two: send is structurally a
+        sub-relation of receive, so the circuit instantiates each shared
+        gadget once and lets the branch bit multiplex only the inputs,
+        adding about 8K constraints on top of receive. <span
+        class="math inline">d</span> is the depth of the user’s
+        nullifier tree.</p>
+        <table>
+        <colgroup>
+        <col style="width: 15%" />
+        <col style="width: 21%" />
+        <col style="width: 21%" />
+        <col style="width: 21%" />
+        <col style="width: 21%" />
+        </colgroup>
+        <thead>
+        <tr>
+        <th style="text-align: left;">Circuit</th>
+        <th style="text-align: right;">R1CS</th>
+        <th style="text-align: right;">SR1CS</th>
+        <th style="text-align: right;">Prove</th>
+        <th style="text-align: right;">Verify</th>
+        </tr>
+        </thead>
+        <tbody>
+        <tr>
+        <td style="text-align: left;"><span class="math inline">\mathcal
+        R_{\mathsf{send}}</span></td>
+        <td style="text-align: right;">19,293</td>
+        <td style="text-align: right;">38,595</td>
+        <td style="text-align: right;">1.6 s</td>
+        <td style="text-align: right;">748 <span
+        class="math inline">\mu</span>s</td>
+        </tr>
+        <tr>
+        <td style="text-align: left;"><span class="math inline">\mathcal
+        R_{\mathsf{recv}}</span>, <span class="math inline">d =
+        10</span></td>
+        <td style="text-align: right;">370,020</td>
+        <td style="text-align: right;">740,049</td>
+        <td style="text-align: right;">20.9 s</td>
+        <td style="text-align: right;">760 <span
+        class="math inline">\mu</span>s</td>
+        </tr>
+        <tr>
+        <td style="text-align: left;"><span class="math inline">\mathcal
+        R_{\mathsf{recv}}</span>, <span class="math inline">d =
+        20</span></td>
+        <td style="text-align: right;">497,360</td>
+        <td style="text-align: right;">994,729</td>
+        <td style="text-align: right;">21.9 s</td>
+        <td style="text-align: right;">750 <span
+        class="math inline">\mu</span>s</td>
+        </tr>
+        <tr>
+        <td style="text-align: left;"><span class="math inline">\mathcal
+        R_{\mathsf{op}}</span>, <span class="math inline">d =
+        10</span></td>
+        <td style="text-align: right;">378,369</td>
+        <td style="text-align: right;">756,749</td>
+        <td style="text-align: right;">21.0 s</td>
+        <td style="text-align: right;">743 <span
+        class="math inline">\mu</span>s</td>
+        </tr>
+        <tr>
+        <td style="text-align: left;"><span class="math inline">\mathcal
+        R_{\mathsf{op}}</span>, <span class="math inline">d =
+        20</span></td>
+        <td style="text-align: right;">505,709</td>
+        <td style="text-align: right;">1,011,429</td>
+        <td style="text-align: right;">21.6 s</td>
+        <td style="text-align: right;">756 <span
+        class="math inline">\mu</span>s</td>
+        </tr>
+        </tbody>
+        </table>
+        <p>We note that the prover time can be halved by increasing the
+        proof size by 1 field element (32 bytes), and we expect the
+        number of constraints to come down as we optimize circuits.</p>
+        <div id="footer-placeholder"></div>
+        <script src="/shared.js"></script>
+</body>
+
+</html>
