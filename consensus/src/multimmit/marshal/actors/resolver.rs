@@ -33,6 +33,7 @@ use std::{
     fmt::Display,
     future::pending,
     num::{NonZeroU16, NonZeroUsize},
+    slice,
     sync::{Arc, mpsc::TryRecvError},
 };
 use tracing::{Instrument as _, Span, info_span};
@@ -1509,6 +1510,25 @@ where
         delivery: Option<&Delivery<Key<H::Digest>, Subscriber>>,
         artifact: Artifact<H, V, B>,
     ) -> bool {
+        // An authenticated body also proves its header. Ancestry waiters need no additional
+        // network response or durability fence to use that proof.
+        let blocks = match &artifact {
+            Artifact::Block(_, block) => slice::from_ref(block),
+            Artifact::Blocks(_, blocks) => blocks.as_slice(),
+            _ => &[],
+        };
+        for block in blocks {
+            let reference = block.reference();
+            if self
+                .pending_by_key
+                .contains_key(&Key::producer_headers(reference))
+            {
+                self.complete(
+                    None,
+                    Artifact::Headers(reference, Arc::new(vec![block.header().clone()])),
+                );
+            }
+        }
         let key = artifact.key();
         let complete = delivery.is_none_or(|delivery| {
             delivery
@@ -2252,6 +2272,7 @@ mod tests {
     };
     use commonware_storage::{Context as StorageContext, translator::TwoCap};
     use commonware_utils::{NZU16, NZUsize, vec::NonEmptyVec};
+    use futures::future::Either;
     use std::{
         num::{NonZeroU32, NonZeroU64},
         sync::atomic::{AtomicUsize, Ordering},
@@ -2748,6 +2769,206 @@ mod tests {
             assert!(resolver_handle.await.is_ok());
             assert!(catalog_handle.await.is_ok());
         });
+    }
+
+    #[test]
+    fn header_fetch_accepts_late_durable_body_admission() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let committee = Committee::<MinPk>::new(57, 6, Limits::new(2, 1).unwrap());
+            let blocks = producer_chain(&committee, 2);
+            let head = blocks[1].reference();
+            let fetches = Arc::new(AtomicUsize::new(0));
+            let (_, client, catalog, _, _, resolver_handle, catalog_handle) = open_test_actor(
+                &context,
+                &committee,
+                "late_header_body_admission_test",
+                "resolver",
+                NZUsize!(1024 * 1024),
+                CountingResolver {
+                    fetches: Arc::clone(&fetches),
+                    feedback: Feedback::Ok,
+                },
+                NZUsize!(16),
+            )
+            .await;
+            catalog
+                .admit_block(blocks[0].reference(), Arc::clone(&blocks[0]))
+                .await
+                .unwrap();
+
+            let (reply, headers) = oneshot::channel();
+            assert!(
+                client
+                    .commands
+                    .enqueue(Command::Fetch(
+                        Span::none(),
+                        Pending::Headers(head, reply),
+                        FetchReason::Finality,
+                    ))
+                    .accepted()
+            );
+            client.barrier().await;
+            assert_eq!(fetches.load(Ordering::Relaxed), 1);
+
+            catalog
+                .admit_block(head, Arc::clone(&blocks[1]))
+                .await
+                .unwrap();
+            let custody = catalog.wait_for_custody(vec![head]).await.unwrap();
+            assert_eq!(custody[0].as_ref().unwrap().reference(), head);
+            client
+                .admitted_block(head, Arc::clone(&blocks[1]))
+                .await
+                .unwrap();
+
+            let headers = select! {
+                result = headers => result.unwrap().unwrap(),
+                _ = context.sleep(Duration::from_millis(100)) => {
+                    panic!("locally durable body did not complete its pending header fetch")
+                },
+            };
+            assert_eq!(headers.first(), Some(blocks[1].header()));
+            assert!(
+                validate_header_segment::<Sha256>(
+                    committee.config.epoch(),
+                    head,
+                    headers.as_ref().clone(),
+                )
+                .is_some()
+            );
+            assert_eq!(fetches.load(Ordering::Relaxed), 1);
+
+            drop(client);
+            drop(catalog);
+            assert!(resolver_handle.await.is_ok());
+            assert!(catalog_handle.await.is_ok());
+        });
+    }
+
+    #[test]
+    fn peer_bodies_complete_only_exact_header_fetches() {
+        for range in [false, true] {
+            deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+                let committee = Committee::<MinPk>::new(58, 6, Limits::new(2, 1).unwrap());
+                let blocks = producer_chain(&committee, 3);
+                let expected = blocks
+                    .iter()
+                    .rev()
+                    .take(if range { 2 } else { 1 })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let references = expected
+                    .iter()
+                    .map(|block| block.reference())
+                    .collect::<Vec<_>>();
+                let head = references[0];
+                let other = BlockRef::new(
+                    head.chain(),
+                    head.height(),
+                    Sha256::hash(&[b"different producer header"]),
+                );
+                let fetches = Arc::new(AtomicUsize::new(0));
+                let (mut bridge, client, catalog, generation, _, resolver_handle, catalog_handle) =
+                    open_test_actor(
+                        &context,
+                        &committee,
+                        "peer_body_header_completion_test",
+                        "resolver",
+                        NZUsize!(1024 * 1024),
+                        CountingResolver {
+                            fetches: Arc::clone(&fetches),
+                            feedback: Feedback::Ok,
+                        },
+                        NZUsize!(16),
+                    )
+                    .await;
+
+                let mut headers = Vec::new();
+                for reference in references.iter().copied().chain([other]) {
+                    let (reply, receiver) = oneshot::channel();
+                    assert!(
+                        client
+                            .commands
+                            .enqueue(Command::Fetch(
+                                Span::none(),
+                                Pending::Headers(reference, reply),
+                                FetchReason::Finality,
+                            ))
+                            .accepted()
+                    );
+                    headers.push(receiver);
+                }
+                let body_request = headers.len() as u64;
+                let (pending, response, key, value) = if range {
+                    let (reply, receiver) = oneshot::channel();
+                    (
+                        Pending::Blocks(Arc::new(references.clone()), reply),
+                        Either::Left(receiver),
+                        Key::producer_blocks(head, NonZeroU16::new(2).unwrap()),
+                        expected.encode(),
+                    )
+                } else {
+                    let (reply, receiver) = oneshot::channel();
+                    (
+                        Pending::Block(head, BlockMode::Fetch, reply),
+                        Either::Right(receiver),
+                        Key::producer_block(head.chain(), head.digest()),
+                        expected[0].encode(),
+                    )
+                };
+                assert!(
+                    client
+                        .commands
+                        .enqueue(Command::Fetch(Span::none(), pending, FetchReason::FinalizedBody))
+                        .accepted()
+                );
+                client.barrier().await;
+                assert_eq!(fetches.load(Ordering::Relaxed), headers.len() + 1);
+                assert_eq!(
+                    bridge
+                        .deliver(keyed_delivery(key, subscriber(&generation, body_request)), value)
+                        .await
+                        .unwrap(),
+                    Outcome::Complete
+                );
+                let received = match response {
+                    Either::Left(response) => response.await.unwrap().unwrap().as_ref().clone(),
+                    Either::Right(response) => vec![response.await.unwrap().unwrap()],
+                };
+                assert_eq!(received, expected);
+
+                let mut unmatched = headers.pop().unwrap();
+                for (receiver, block) in headers.into_iter().zip(&expected) {
+                    let headers = select! {
+                        result = receiver => result.unwrap().unwrap(),
+                        _ = context.sleep(Duration::from_millis(100)) => {
+                            panic!("peer body did not complete its pending header fetch (range={range})")
+                        },
+                    };
+                    assert_eq!(headers.first(), Some(block.header()));
+                    assert!(
+                        validate_header_segment::<Sha256>(
+                            committee.config.epoch(),
+                            block.reference(),
+                            headers.as_ref().clone(),
+                        )
+                        .is_some()
+                    );
+                }
+                select! {
+                    result = &mut unmatched => {
+                        panic!("peer body completed a different header head: {result:?}")
+                    },
+                    _ = context.sleep(Duration::from_millis(100)) => {},
+                }
+                drop(unmatched);
+                drop(client);
+                drop(bridge);
+                drop(catalog);
+                assert!(resolver_handle.await.is_ok());
+                assert!(catalog_handle.await.is_ok());
+            });
+        }
     }
 
     #[test]
