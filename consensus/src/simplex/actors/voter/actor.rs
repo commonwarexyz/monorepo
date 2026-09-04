@@ -254,8 +254,12 @@ impl<
     /// The append is not immediately durable. All appends in an event loop
     /// iteration target the view being processed and are synced together by
     /// [Self::sync_journal].
-    async fn append_journal(mut self, view: View, artifact: Artifact<S, D>) -> Self {
+    ///
+    /// Inert until replay attaches the journal, so handlers called during
+    /// replay do not re-journal the artifacts they restore.
+    async fn append_journal(mut self, artifact: Artifact<S, D>) -> Self {
         if self.journal.is_some() {
+            let view = artifact.view();
             rebind(&mut self.journal, |journal| {
                 journal.append(view.get(), &artifact)
             })
@@ -468,9 +472,7 @@ impl<
 
         // Persist the nullify if it is a first attempt
         if !retry {
-            self = self
-                .append_journal(nullify.view(), Artifact::Nullify(nullify.clone()))
-                .await;
+            self = self.append_journal(Artifact::Nullify(nullify.clone())).await;
             return (self, Some((nullify, None)));
         }
 
@@ -484,23 +486,21 @@ impl<
 
     /// Tracks a verified nullification certificate if it is new.
     async fn handle_nullification(mut self, nullification: Nullification<S>) -> Self {
-        let view = nullification.view();
         let artifact = Artifact::Nullification(nullification.clone());
 
         // Add verified nullification to journal
         if !self.state.add_nullification(nullification) {
             return self;
         }
-        self.append_journal(view, artifact).await
+        self.append_journal(artifact).await
     }
 
     /// Records a notarization certificate and blocks any equivocating leader.
     async fn handle_notarization(mut self, notarization: Notarization<S, D>) -> Self {
-        let view = notarization.view();
         let artifact = Artifact::Notarization(notarization.clone());
         let (added, equivocator) = self.state.add_notarization(notarization);
         if added {
-            self = self.append_journal(view, artifact).await;
+            self = self.append_journal(artifact).await;
         }
         self.block_equivocator(equivocator);
         self
@@ -524,7 +524,7 @@ impl<
         // iteration's broadcast phase. If lost to a crash before then, certification
         // is re-requested on restart.
         let artifact = Artifact::Certification(Rnd::new(self.state.epoch(), view), success);
-        self = self.append_journal(view, artifact).await;
+        self = self.append_journal(artifact).await;
 
         (self, Some(notarization))
     }
@@ -536,11 +536,10 @@ impl<
     /// gate, replay restores the blocked gate (which is safe) and it heals
     /// again as soon as peers redeliver any covering finalization.
     async fn handle_finalization(mut self, finalization: Finalization<S, D>) -> Self {
-        let view = finalization.view();
         let artifact = Artifact::Finalization(finalization.clone());
         let (added, equivocator) = self.state.add_finalization(finalization);
         if added {
-            self = self.append_journal(view, artifact).await;
+            self = self.append_journal(artifact).await;
         }
         self.block_equivocator(equivocator);
         self
@@ -554,9 +553,7 @@ impl<
         };
 
         // Record the vote locally before sharing it.
-        self = self
-            .append_journal(notarize.view(), Artifact::Notarize(notarize.clone()))
-            .await;
+        self = self.append_journal(Artifact::Notarize(notarize.clone())).await;
         (self, Some(notarize))
     }
 
@@ -621,9 +618,7 @@ impl<
         };
 
         // Record the vote locally before sharing it.
-        self = self
-            .append_journal(finalize.view(), Artifact::Finalize(finalize.clone()))
-            .await;
+        self = self.append_journal(Artifact::Finalize(finalize.clone())).await;
         (self, Some(finalize))
     }
 

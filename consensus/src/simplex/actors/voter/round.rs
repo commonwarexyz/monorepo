@@ -1295,7 +1295,7 @@ mod tests {
         round.set_leader(Participant::new(0));
         round.replay(&Artifact::Notarize(notarize_local));
 
-        // Proposal should be restored as verified (we are the leader).
+        // Proposal should be restored as verified.
         assert_eq!(round.proposal.proposal(), Some(&proposal));
         assert_eq!(round.proposal.status(), ProposalStatus::Verified);
         assert!(round.broadcast_notarize);
