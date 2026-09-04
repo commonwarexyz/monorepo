@@ -1,9 +1,12 @@
 use super::{Config, Error, Mailbox, Message};
-use crate::authenticated::{
-    channels::{self, Channels},
-    data::EncodedData,
-    lookup::{metrics, types},
-    relay::{Message as RelayMessage, Prioritized, Relay, try_recv},
+use crate::{
+    Channel,
+    authenticated::{
+        channels::{self, Channels},
+        data::EncodedData,
+        lookup::{metrics, types},
+        relay::{Message as RelayMessage, Prioritized, Relay, try_recv},
+    },
 };
 use commonware_actor::mailbox;
 use commonware_codec::Decode;
@@ -11,7 +14,8 @@ use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
     BufferPooler, Clock, Handle, IoBufs, Metrics, Quota, RateLimiter, Sink, Spawner, Stream,
-    iobuf::EncodeExt, telemetry::metrics::CounterFamily,
+    iobuf::EncodeExt,
+    telemetry::metrics::{CounterFamily, raw},
 };
 use commonware_stream::encrypted::{Receiver, Sender};
 use commonware_utils::{channel::ring, time::SYSTEM_TIME_PRECISION};
@@ -19,6 +23,32 @@ use futures::{FutureExt as _, StreamExt as _};
 use rand_core::CryptoRng;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tracing::debug;
+
+/// Counters for one peer, resolved once so per-message increments skip the label lookup.
+struct Counters {
+    ping: raw::Counter,
+    data: HashMap<Channel, raw::Counter>,
+}
+
+impl Counters {
+    fn new<C: PublicKey>(
+        family: &CounterFamily<metrics::Message<C>>,
+        peer: &C,
+        channels: impl IntoIterator<Item = Channel>,
+    ) -> Self {
+        Self {
+            ping: family.get_or_create_owned(&metrics::Message::new_ping(peer)),
+            data: channels
+                .into_iter()
+                .map(|channel| {
+                    let counter =
+                        family.get_or_create_owned(&metrics::Message::new_data(peer, channel));
+                    (channel, counter)
+                })
+                .collect(),
+        }
+    }
+}
 
 pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
     context: E,
@@ -59,26 +89,18 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
     }
 
     /// Converts pre-encoded data into an outbound metric/payload pair.
-    fn prepare_data<V>(
-        peer: &C,
+    fn prepare_data<'a, V>(
+        sent: &'a Counters,
         msg: EncodedData,
         rate_limits: &HashMap<u64, V>,
-    ) -> (metrics::Message<C>, IoBufs) {
+    ) -> (&'a raw::Counter, IoBufs) {
         let encoded = msg.validate_channel(rate_limits);
-        (
-            metrics::Message::new_data(peer, encoded.channel),
-            encoded.payload,
-        )
+        (&sent.data[&encoded.channel], encoded.payload)
     }
 
     /// Records the send metric and appends the payload to the batch.
-    fn push_batched(
-        sent_messages: &CounterFamily<metrics::Message<C>>,
-        batch: &mut Vec<IoBufs>,
-        metric: metrics::Message<C>,
-        payload: IoBufs,
-    ) {
-        sent_messages.get_or_create(&metric).inc();
+    fn push_batched(batch: &mut Vec<IoBufs>, metric: &raw::Counter, payload: IoBufs) {
+        metric.inc();
         batch.push(payload);
     }
 
@@ -100,7 +122,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
         high: &mut mailbox::UnreliableReceiver<RelayMessage<EncodedData>>,
         low: &mut mailbox::UnreliableReceiver<RelayMessage<EncodedData>>,
         rate_limits: &HashMap<u64, V>,
-        sent_messages: &CounterFamily<metrics::Message<C>>,
+        sent: &Counters,
     ) -> Result<(), Error> {
         while batch.len() < batch_size {
             if let Some(msg) = Self::try_recv_control(control) {
@@ -109,13 +131,13 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                 }
             }
             if let Some(msg) = try_recv(high) {
-                let (metric, payload) = Self::prepare_data(peer, msg, rate_limits);
-                Self::push_batched(sent_messages, batch, metric, payload);
+                let (metric, payload) = Self::prepare_data(sent, msg, rate_limits);
+                Self::push_batched(batch, metric, payload);
                 continue;
             }
             if let Some(msg) = try_recv(low) {
-                let (metric, payload) = Self::prepare_data(peer, msg, rate_limits);
-                Self::push_batched(sent_messages, batch, metric, payload);
+                let (metric, payload) = Self::prepare_data(sent, msg, rate_limits);
+                Self::push_batched(batch, metric, payload);
                 continue;
             }
             break;
@@ -160,6 +182,11 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
         }
         let rate_limits = Arc::new(rate_limits);
         let pool = self.context.network_buffer_pool().clone();
+        let sent = Counters::new(&self.sent_messages, &peer, rate_limits.keys().copied());
+        let received = Counters::new(&self.received_messages, &peer, rate_limits.keys().copied());
+        let received_invalid = self
+            .received_messages
+            .get_or_create_owned(&metrics::Message::new_invalid(&peer));
 
         // Use half the ping frequency for rate limiting to allow for timing
         // jitter at message boundaries.
@@ -186,9 +213,8 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                         // Periodically send a ping to the peer, batching
                         // any already-queued messages into the same write.
                         Self::push_batched(
-                            &self.sent_messages,
                             &mut batch,
-                            metrics::Message::new_ping(&peer),
+                            &sent.ping,
                             types::Message::Ping.encode_with_pool(&pool),
                         );
                         Self::extend_send_many(
@@ -199,7 +225,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                             high,
                             low,
                             &rate_limits,
-                            &self.sent_messages,
+                            &sent,
                         )?;
                         conn_sender
                             .send_many(batch.drain(..))
@@ -218,13 +244,8 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                             },
                             Prioritized::Data(encoded) => {
                                 let (metric, payload) =
-                                    Self::prepare_data(&peer, encoded, &rate_limits);
-                                Self::push_batched(
-                                    &self.sent_messages,
-                                    &mut batch,
-                                    metric,
-                                    payload,
-                                );
+                                    Self::prepare_data(&sent, encoded, &rate_limits);
+                                Self::push_batched(&mut batch, metric, payload);
                             }
                         }
                         Self::extend_send_many(
@@ -235,7 +256,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                             high,
                             low,
                             &rate_limits,
-                            &self.sent_messages,
+                            &sent,
                         )?;
                         conn_sender
                             .send_many(batch.drain(..))
@@ -261,9 +282,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                             Ok(msg) => msg,
                             Err(err) => {
                                 debug!(?err, ?peer, "failed to decode message");
-                                self.received_messages
-                                    .get_or_create(&metrics::Message::new_invalid(&peer))
-                                    .inc();
+                                received_invalid.inc();
                                 return Err(Error::DecodeFailed(err));
                             }
                         };
@@ -271,26 +290,30 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                         // Validate channel and resolve rate limiter before emitting
                         // any channel-labeled metrics (to avoid unbounded cardinality
                         // from attacker-controlled channel values).
-                        let (metric, rate_limiter) = match &msg {
+                        let (metric, kind, rate_limiter) = match &msg {
                             types::Message::Data(data) => match rate_limits.get(&data.channel) {
-                                Some(rate_limit) => {
-                                    (metrics::Message::new_data(&peer, data.channel), rate_limit)
-                                }
+                                Some(rate_limit) => (
+                                    &received.data[&data.channel],
+                                    metrics::MessageType::Data(data.channel),
+                                    rate_limit,
+                                ),
                                 None => {
                                     debug!(?peer, channel = data.channel, "invalid channel");
-                                    self.received_messages
-                                        .get_or_create(&metrics::Message::new_invalid(&peer))
-                                        .inc();
+                                    received_invalid.inc();
                                     return Err(Error::InvalidChannel);
                                 }
                             },
-                            types::Message::Ping => {
-                                (metrics::Message::new_ping(&peer), &ping_rate_limiter)
-                            }
+                            types::Message::Ping => (
+                                &received.ping,
+                                metrics::MessageType::Ping,
+                                &ping_rate_limiter,
+                            ),
                         };
-                        self.received_messages.get_or_create(&metric).inc();
+                        metric.inc();
                         if let Err(wait_until) = rate_limiter.check() {
-                            self.rate_limited.get_or_create(&metric).inc();
+                            self.rate_limited
+                                .get_or_create(&metrics::Message::new(&peer, kind))
+                                .inc();
                             let wait_duration = wait_until.wait_time_from(context.now());
                             context.sleep(wait_duration).await;
                         }
@@ -604,6 +627,8 @@ mod tests {
                 "second send failed"
             );
 
+            let sent_data =
+                format!("sent_messages_total{{peer=\"{local_pk}\",message=\"data_0\"}}");
             let peer_handle = context.child("task").spawn(move |_context| async move {
                 peer_actor
                     .run(local_pk.clone(), (remote_sender, remote_receiver), channels)
@@ -626,6 +651,7 @@ mod tests {
             };
             assert_eq!(second.message, IoBuf::from(b"second"));
             assert_eq!(sends.load(Ordering::Relaxed), 1);
+            assert!(context.encode().contains(&format!("{sent_data} 2")));
 
             peer_mailbox.kill();
             let result = peer_handle.await.expect("peer task failed");

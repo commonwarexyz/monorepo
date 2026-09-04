@@ -38,7 +38,7 @@ pub struct Message<P: PublicKey> {
 }
 
 impl<P: PublicKey> Message<P> {
-    fn new(peer: &P, message: MessageType) -> Self {
+    pub(crate) fn new(peer: &P, message: MessageType) -> Self {
         Self {
             peer: peer.clone(),
             message,

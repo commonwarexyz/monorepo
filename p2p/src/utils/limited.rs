@@ -117,16 +117,14 @@ where
                 Ok(()) => Recipients::One(peer),
                 Err(not_until) => return Err(not_until.earliest_possible()),
             },
-            Recipients::Some(peers) => {
-                let (allowed, max_retry) = filter_rate_limited(peers.iter(), &state.rate_limit);
-                if allowed.is_empty() {
-                    match max_retry {
-                        Some(retry) => return Err(retry),
-                        None => Recipients::Some(Vec::new()),
-                    }
-                } else {
-                    Recipients::Some(allowed)
+            Recipients::Some(mut peers) => {
+                let max_retry = retain_rate_limited(&mut peers, &state.rate_limit);
+                if peers.is_empty()
+                    && let Some(retry) = max_retry
+                {
+                    return Err(retry);
                 }
+                Recipients::Some(peers)
             }
             Recipients::All => {
                 let (allowed, max_retry) =
@@ -148,6 +146,28 @@ where
             sender: &mut self.sender,
         })
     }
+}
+
+/// Removes rate-limited peers in place, returning the latest retry time among
+/// those removed.
+fn retain_rate_limited<K, C>(
+    peers: &mut Vec<K>,
+    rate_limit: &KeyedRateLimiter<K, C>,
+) -> Option<SystemTime>
+where
+    K: PublicKey,
+    C: Clock,
+{
+    let mut max_retry = None;
+    peers.retain(|p| match rate_limit.check_key(p) {
+        Ok(()) => true,
+        Err(not_until) => {
+            let earliest = not_until.earliest_possible();
+            max_retry = Some(max_retry.map_or(earliest, |current| cmp::max(current, earliest)));
+            false
+        }
+    });
+    max_retry
 }
 
 /// Filters peers by rate limit, returning those that pass and the latest retry
