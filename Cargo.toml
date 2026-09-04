@@ -43,6 +43,7 @@ members = [
     "consensus/fuzz",
     "cryptography/fuzz",
     "cryptography/curve25519/fuzz",
+    "glue/fuzz",
     "math/fuzz",
     "p2p/fuzz",
     "resolver/fuzz",

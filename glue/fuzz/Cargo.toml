@@ -1,0 +1,57 @@
+[package]
+name = "commonware-glue-fuzz"
+version.workspace = true
+publish = false
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = [ "mocks" ]
+mocks = [
+	"commonware-consensus/mocks",
+	"commonware-cryptography/mocks",
+	"commonware-p2p/mocks",
+	"commonware-resolver/mocks",
+]
+
+[package.metadata]
+cargo-fuzz = true
+
+# `cargo fuzz` sets `--cfg fuzzing`; declare it so non-fuzz builds don't warn.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
+
+[dependencies]
+arbitrary = { workspace = true, features = ["derive"] }
+commonware-actor.workspace = true
+commonware-broadcast.workspace = true
+commonware-codec.workspace = true
+commonware-consensus = { workspace = true, features = ["mocks"] }
+commonware-cryptography = { workspace = true, features = ["mocks"] }
+commonware-glue.workspace = true
+commonware-macros.workspace = true
+commonware-p2p = { workspace = true, features = ["mocks"] }
+commonware-parallel.workspace = true
+commonware-resolver = { workspace = true, features = ["mocks"] }
+commonware-runtime = { workspace = true, features = ["test-utils"] }
+commonware-storage.workspace = true
+commonware-utils = { workspace = true, features = ["arbitrary"] }
+futures.workspace = true
+libfuzzer-sys.workspace = true
+rand.workspace = true
+rand_core.workspace = true
+tracing.workspace = true
+
+[[bin]]
+name = "stateful_cert_mock_twins"
+path = "fuzz_targets/stateful_cert_mock_twins.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "stateful_cert_mock_restarts"
+path = "fuzz_targets/stateful_cert_mock_restarts.rs"
+test = false
+doc = false
+bench = false
