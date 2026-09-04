@@ -457,13 +457,13 @@ impl<E: Context, D: Digest, const N: usize, S: Strategy> MerkleizedBitMap<E, D, 
     ///
     /// # Errors
     ///
-    /// Returns [Error::BitOutOfBounds] if `bit` is out of bounds.
+    /// Returns [Error::BitOutOfBounds] if `bit` isn't in [self.pruned_bits(), self.len())
     pub async fn proof(
         &self,
         hasher: &impl Hasher<mmr::Family, Digest = D>,
         bit: u64,
     ) -> Result<(Proof<D>, [u8; N]), Error> {
-        if bit >= self.len() {
+        if bit < self.pruned_bits() || bit >= self.len() {
             return Err(Error::BitOutOfBounds(bit, self.len()));
         }
 
@@ -1249,6 +1249,40 @@ mod tests {
             // Valid proof should work
             assert!(bitmap.proof(&hasher, 0).await.is_ok());
             assert!(bitmap.proof(&hasher, 255).await.is_ok());
+        });
+    }
+
+    #[test_traced]
+    fn test_bitmap_proof_pruned_bit_out_of_bounds() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let hasher = StandardHasher::<Sha256>::new(ForwardFold);
+            let bitmap: TestMerkleizedBitMap<SHA256_SIZE> =
+                TestMerkleizedBitMap::init(context.child("bitmap"), "test", Sequential, &hasher)
+                    .await
+                    .unwrap();
+
+            // Two complete chunks (bits 0..512).
+            let mut dirty = bitmap.into_dirty();
+            dirty.push_chunk(&test_chunk(b"chunk0"));
+            dirty.push_chunk(&test_chunk(b"chunk1"));
+            let mut bitmap = dirty.merkleize(&hasher).unwrap();
+
+            // Prune the first chunk (bits 0..256).
+            bitmap.prune_to_bit(256).unwrap();
+            assert_eq!(bitmap.pruned_bits(), 256);
+
+            // Proof for a pruned bit should fail with BitOutOfBounds, not panic.
+            let result = bitmap.proof(&hasher, 0).await;
+            assert!(matches!(result, Err(Error::BitOutOfBounds(offset, size))
+                    if offset == 0 && size == 512));
+            let result = bitmap.proof(&hasher, 255).await;
+            assert!(matches!(result, Err(Error::BitOutOfBounds(offset, size))
+                    if offset == 255 && size == 512));
+
+            // Proofs for retained bits still work.
+            assert!(bitmap.proof(&hasher, 256).await.is_ok());
+            assert!(bitmap.proof(&hasher, 511).await.is_ok());
         });
     }
 }
