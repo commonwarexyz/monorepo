@@ -612,6 +612,11 @@ impl<B: Blob> Writer<B> {
         self.view().try_read_ranges_sync_into(buf, ranges)
     }
 
+    /// Warm the page cache for sorted, non-overlapping `(offset, len)` byte ranges.
+    pub async fn warm_ranges(&self, ranges: &[(u64, usize)]) -> Result<(), Error> {
+        self.view().warm_ranges(ranges).await
+    }
+
     /// Reads bytes starting at `offset` into `buf`.
     pub async fn read_into(&self, buf: &mut [u8], offset: u64) -> Result<(), Error> {
         self.view().read_into(buf, offset).await

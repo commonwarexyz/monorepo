@@ -68,6 +68,28 @@ const DATA_SUFFIX: &str = "_data";
 /// Suffix appended to the base partition name for the offsets journal.
 const OFFSETS_SUFFIX: &str = "_offsets";
 
+/// Byte ranges to warm on one blob's pages before decoding: `(blob, handle, ranges)`.
+type WarmRanges<'a, 'b, B> = (u64, &'a Blob<'b, B>, Vec<(u64, usize)>);
+
+/// Compute the byte range to warm for one run of consecutive frames at `offsets`, from the first
+/// frame's start through the first byte of the last frame. `offsets` are persisted data: runs whose
+/// endpoints are not increasing return [Error::Corruption], and ranges that do not fit in a `usize`
+/// return [Error::OffsetOverflow].
+fn warm_range(blob: u64, offsets: &[u64]) -> Result<(u64, usize), Error> {
+    let start = offsets[0];
+    let last = offsets[offsets.len() - 1];
+    if offsets.len() > 1 && last <= start {
+        return Err(Error::Corruption(format!(
+            "non-increasing offsets in blob {blob}: {start} >= {last}"
+        )));
+    }
+    let len = (last - start)
+        .checked_add(1)
+        .and_then(|len| usize::try_from(len).ok())
+        .ok_or(Error::OffsetOverflow)?;
+    Ok((start, len))
+}
+
 /// Decode one varint-framed item from the head of `bytes`, whose encoded length must be exactly
 /// `frame_len` (the gap to the next frame's offset). Returns `None` on any mismatch or decode
 /// failure. The async read path reports such errors.
@@ -714,6 +736,24 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
             }
             group_start = group_end;
         }
+
+        // Warm the pages the runs will touch with coalesced blob reads before decoding: the
+        // per-run reads below then hit the page cache instead of faulting page by page. Each
+        // run's last frame has an unknown length, so its range extends only through the page
+        // holding its first byte; the rest of the frame usually shares that page.
+        let mut warm: Vec<WarmRanges<'_, '_, E::Blob>> = Vec::new();
+        for (run_start, run_end, blob, handle) in &runs {
+            let range = warm_range(*blob, &miss_offsets[*run_start..*run_end])?;
+            match warm.last_mut() {
+                Some((last_blob, _, ranges)) if last_blob == blob => ranges.push(range),
+                _ => warm.push((*blob, handle, vec![range])),
+            }
+        }
+        try_join_all(
+            warm.iter()
+                .map(|(_, handle, ranges)| handle.warm_ranges(ranges)),
+        )
+        .await?;
 
         let run_items = try_join_all(runs.iter().map(|(run_start, run_end, blob, handle)| {
             self.read_consecutive(handle, *blob, &miss_offsets[*run_start..*run_end])
@@ -2584,6 +2624,31 @@ mod tests {
     use commonware_utils::{NZU16, NZU64, NZUsize, probability, sequence::FixedBytes};
     use futures::StreamExt as _;
     use std::num::NonZeroU16;
+
+    /// Malformed persisted offsets surface as errors from `warm_range`, never as panics.
+    #[test]
+    fn test_warm_range_rejects_malformed_offsets() {
+        // A singleton run warms one byte and a longer run spans through the last frame's
+        // first byte.
+        assert_eq!(warm_range(0, &[10]).unwrap(), (10, 1));
+        assert_eq!(warm_range(0, &[10, 25, 40]).unwrap(), (10, 31));
+
+        // Non-increasing endpoints are corruption.
+        assert!(matches!(
+            warm_range(0, &[40, 10]),
+            Err(Error::Corruption(_))
+        ));
+        assert!(matches!(
+            warm_range(0, &[40, 40]),
+            Err(Error::Corruption(_))
+        ));
+
+        // A range too large for the platform is an overflow error.
+        assert!(matches!(
+            warm_range(0, &[0, u64::MAX]),
+            Err(Error::OffsetOverflow)
+        ));
+    }
 
     // Use some jank sizes to exercise boundary conditions.
     const PAGE_SIZE: NonZeroU16 = NZU16!(101);
