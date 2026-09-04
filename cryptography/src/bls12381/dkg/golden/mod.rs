@@ -158,23 +158,30 @@ const NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_BLS12381_GOLDEN_DKG";
 /// [`Error::DkgFailed`] is the only error that can occur through no fault of the
 /// caller (e.g. too few valid dealings). The other variants indicate configuration
 /// or usage mistakes.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// Too few valid dealings to complete the protocol.
+    #[error("too few valid dealings")]
     DkgFailed,
     /// The configured number of dealers is invalid.
+    #[error("invalid number of dealers: {0}")]
     NumDealers(usize),
     /// The configured number of players is invalid.
+    #[error("invalid number of players: {0}")]
     NumPlayers(usize),
     /// A reshare round requires the dealer's previous share, but none was provided.
+    #[error("missing dealer share for reshare")]
     MissingDealerShare,
     /// The caller's key is not in the set of dealers.
+    #[error("unknown dealer: {0}")]
     UnknownDealer(String),
     /// The caller's key is not in the set of players.
+    #[error("unknown player")]
     UnknownPlayer,
     /// The configured number of players exceeds the maximum supported by the
     /// provided [`Setup`]. Build a larger [`Setup`] (see [`Setup::new`]) or
     /// pre-check via [`Setup::supports`].
+    #[error("unsupported number of players: {num_players} (max {max})")]
     UnsupportedNumPlayers {
         /// Maximum players supported by the [`Setup`].
         max: u32,
