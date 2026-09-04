@@ -160,6 +160,7 @@ impl IoBufs {
     /// io_uring requests retain every buffer until kernel retirement and keep a
     /// separate progress cursor. Indexing avoids rescanning the consumed prefix
     /// each time a partial completion needs another submission.
+    #[commonware_macros::stability(ALPHA)]
     #[cfg(all(target_os = "linux", feature = "iouring"))]
     pub(crate) fn chunk_at(&self, index: usize) -> Option<&[u8]> {
         match &self.inner {

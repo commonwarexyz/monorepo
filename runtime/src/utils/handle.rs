@@ -163,6 +163,7 @@ where
     ///
     /// As with the Tokio wrapper, user futures must preserve their polling
     /// Context so Abortable retains the runtime's cancellation waker.
+    #[commonware_macros::stability(ALPHA)]
     #[cfg(all(feature = "iouring", target_os = "linux"))]
     #[inline(always)]
     pub(crate) fn init_local<F>(
@@ -336,6 +337,7 @@ where
 }
 
 /// Cleanup retained by a native task even before the task's first poll.
+#[commonware_macros::stability(ALPHA)]
 #[cfg(all(feature = "iouring", target_os = "linux"))]
 struct LocalCleanup {
     /// Consumed parent whose descendants stop when this task exits.
@@ -344,6 +346,7 @@ struct LocalCleanup {
     metric: Option<MetricHandle>,
 }
 
+#[commonware_macros::stability(ALPHA)]
 #[cfg(all(feature = "iouring", target_os = "linux"))]
 impl LocalCleanup {
     /// Close supervision and finish metrics before publishing a task result.
@@ -357,6 +360,7 @@ impl LocalCleanup {
     }
 }
 
+#[commonware_macros::stability(ALPHA)]
 #[cfg(all(feature = "iouring", target_os = "linux"))]
 impl Drop for LocalCleanup {
     fn drop(&mut self) {
@@ -456,6 +460,7 @@ impl Panicker {
     }
 
     /// Report a native worker failure independently of user task panic policy.
+    #[commonware_macros::stability(ALPHA)]
     #[cfg(all(feature = "iouring", target_os = "linux"))]
     pub(crate) fn notify_fatal(&self, panic: Panic) {
         self.send(panic);
@@ -477,6 +482,7 @@ pub(crate) struct Panicked {
 
 impl Panicked {
     /// Poll a native root interrupt without unwinding through its user future.
+    #[commonware_macros::stability(ALPHA)]
     #[cfg(all(feature = "iouring", target_os = "linux"))]
     pub(crate) fn poll_panic(&mut self, cx: &mut Context<'_>) -> Poll<Option<Panic>> {
         Pin::new(&mut self.receiver).poll(cx).map(Result::ok)
@@ -486,6 +492,7 @@ impl Panicked {
     ///
     /// The native runner calls this after its worker completion barrier, so no
     /// accepted worker still has an unfinished failure publication.
+    #[commonware_macros::stability(ALPHA)]
     #[cfg(all(feature = "iouring", target_os = "linux"))]
     pub(crate) fn close(&mut self) -> Option<Panic> {
         self.receiver.close();
@@ -550,6 +557,7 @@ mod tests {
 
     const METRIC_PREFIX: &str = "runtime_tasks_running{";
 
+    #[commonware_macros::stability(ALPHA)]
     #[cfg(all(feature = "iouring", target_os = "linux"))]
     #[test]
     fn local_task_cleanup_covers_unpolled_and_completed_tasks() {
