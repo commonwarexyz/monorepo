@@ -960,9 +960,9 @@ pub(crate) mod test {
             positions.iter().map(|_| None).collect()
         }
 
-        fn replay(
+        fn replay_range(
             &self,
-            start_pos: u64,
+            range: std::ops::Range<u64>,
             buffer: NonZeroUsize,
             read_options: ReadOptions,
         ) -> impl Future<
@@ -971,7 +971,7 @@ pub(crate) mod test {
                 JournalError,
             >,
         > + Send {
-            self.0.replay(start_pos, buffer, read_options)
+            self.0.replay_range(range, buffer, read_options)
         }
     }
 

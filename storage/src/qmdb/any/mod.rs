@@ -136,10 +136,11 @@ pub struct Config<T: Translator, J, S: Strategy, B = ()> {
     /// Size (in bytes) of the read buffer used to replay the log during init.
     pub init_buffer: NonZeroUsize,
 
-    /// The index's snapshot-build concurrency (see [crate::qmdb::SnapshotBuild::Concurrency]):
-    /// `()` for index types that build serially, and the number of build tasks (including the
-    /// init task itself, which replays and routes the log, so `1` builds entirely on the init
-    /// task) for index types that build in parallel.
+    /// The index's snapshot-build concurrency (see [crate::qmdb::SnapshotBuild::Concurrency]): `()`
+    /// for index types that build serially, and the number of build tasks for index types that
+    /// build in parallel. A value of `1` builds the index entirely on the init task. Values of
+    /// `2` and `3` decode on the init task and insert on one or two workers. Larger values split
+    /// between spawned decode and insert tasks while the init task merely forwards batches.
     pub init_concurrency: B,
 }
 
@@ -1316,7 +1317,9 @@ pub(crate) mod test {
     };
     use commonware_macros::{test_group, test_traced};
     use commonware_parallel::{Sequential, Strategy};
-    use commonware_runtime::{Runner as _, deterministic};
+    use commonware_runtime::{Clock as _, Metrics as _, Runner as _, deterministic};
+    use core::time::Duration;
+    use futures::{pin_mut, poll};
 
     // Type aliases for all 12 MMR variants (all use OneCap for collision coverage).
     type UnorderedFixed =
@@ -1633,6 +1636,71 @@ pub(crate) mod test {
         let (db, range) = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
         (db, range)
+    }
+
+    /// Dropping an in-flight parallel init (e.g. losing a select against a timeout) aborts
+    /// its snapshot workers and decoders rather than leaving them running until they happen
+    /// to observe a closed channel.
+    #[test_traced("INFO")]
+    fn test_parallel_init_aborted_on_cancel() {
+        /// Sum of the runtime's running-task gauges for snapshot build tasks.
+        fn running_build_tasks(metrics: &str) -> u64 {
+            metrics
+                .lines()
+                .filter(|line| {
+                    line.starts_with("runtime_tasks_running{")
+                        && (line.contains("snapshot_worker") || line.contains("snapshot_decoder"))
+                })
+                .filter_map(|line| line.rsplit_once(' ')?.1.trim().parse::<u64>().ok())
+                .sum()
+        }
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let ctx = context.child("db");
+            let cfg =
+                || fixed_db_config_full::<OneCap, _, _>("cancel", &ctx, Sequential, NZUsize!(4));
+
+            // Persist enough operations that the reopen's build spans many decode chunks.
+            let db: UnorderedFixedP1 = UnorderedFixedP1::init(ctx.child("storage"), cfg())
+                .await
+                .unwrap();
+            let mut batch = db.new_batch();
+            for i in 0..2_000u64 {
+                batch = batch.write(key(i), Some(key(i)));
+            }
+            let merkleized = batch.merkleize(&db, None).await.unwrap();
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.commit().await.unwrap();
+            let db = db.sync().await.unwrap();
+            drop(db);
+
+            {
+                // Poll the reopen just enough for the build's tasks to spawn. Workers and
+                // decoders only progress while the coordinator (inside this future) is
+                // polled, so pausing here holds the build mid-flight.
+                let init = UnorderedFixedP1::init(ctx.child("storage"), cfg());
+                pin_mut!(init);
+                let mut spawned = false;
+                for _ in 0..10_000 {
+                    if poll!(&mut init).is_ready() {
+                        panic!("init completed before it could be cancelled");
+                    }
+                    context.sleep(Duration::from_millis(1)).await;
+                    if running_build_tasks(&context.encode()) > 0 {
+                        spawned = true;
+                        break;
+                    }
+                }
+                assert!(spawned, "build tasks never spawned");
+            }
+
+            // Leaving the scope dropped the init future. Give the runtime a beat to reap
+            // the aborted tasks.
+            context.sleep(Duration::from_millis(10)).await;
+            let metrics = context.encode();
+            assert_eq!(running_build_tasks(&metrics), 0, "{metrics}");
+        });
     }
 
     /// An empty batch (no mutations) still produces a valid commit.

@@ -279,6 +279,82 @@ where
             HandleState::Completion { .. } => None,
         }
     }
+
+    /// Wrap this handle so the task is aborted if the wrapper is dropped before being joined.
+    #[commonware_macros::stability(ALPHA)]
+    pub const fn abort_on_drop(self) -> AbortOnDrop<T> {
+        AbortOnDrop(Some(self))
+    }
+}
+
+/// Aborts a task if dropped before being joined.
+///
+/// Supervision ties spawned tasks to their spawning task's lifetime, but work spawned from a plain
+/// future outlives that future's drop. Wrapping the handle (see [`Handle::abort_on_drop`]) ties the
+/// task to the guard instead, so cancelling the future holding it cannot leave the task running.
+/// Dropping the guard only signals the abort. Use [`AbortOnDrop::abort`] to also await the
+/// task's exit.
+#[commonware_macros::stability(ALPHA)]
+pub struct AbortOnDrop<T: Send + 'static>(Option<Handle<T>>);
+
+#[commonware_macros::stability(ALPHA)]
+impl<T: Send + 'static> AbortOnDrop<T> {
+    /// Abort the task, then join it.
+    pub async fn abort(mut self) {
+        let handle = self.0.take().expect("handle joined once");
+        handle.abort();
+        let _ = handle.await;
+    }
+
+    /// Join the task.
+    pub async fn join(mut self) -> Result<T, Error> {
+        // Poll the handle by reference: the guard must keep owning it so dropping this future
+        // mid-join still aborts the task.
+        let handle = self.0.as_mut().expect("handle joined once");
+        let result = handle.await;
+        self.0 = None;
+        result
+    }
+}
+
+#[commonware_macros::stability(ALPHA)]
+impl<T, E1> AbortOnDrop<Result<T, E1>>
+where
+    T: Send + 'static,
+    E1: Send + 'static,
+{
+    /// Join `guards` in order, collecting each task's output. On the first failure (a task
+    /// error or a failed join), abort and join every remaining guard before surfacing it,
+    /// so no task outlives the failure (dropping a guard only signals the abort without
+    /// awaiting it). Joining in order makes the surfaced failure deterministic.
+    pub async fn join_all<E2>(guards: Vec<Self>) -> Result<Vec<T>, E2>
+    where
+        E2: From<E1> + From<Error>,
+    {
+        let mut joined = Vec::with_capacity(guards.len());
+        let mut failure: Option<E2> = None;
+        for guard in guards {
+            if failure.is_some() {
+                guard.abort().await;
+                continue;
+            }
+            match guard.join().await {
+                Ok(Ok(output)) => joined.push(output),
+                Ok(Err(err)) => failure = Some(err.into()),
+                Err(err) => failure = Some(err.into()),
+            }
+        }
+        failure.map_or_else(|| Ok(joined), Err)
+    }
+}
+
+#[commonware_macros::stability(ALPHA)]
+impl<T: Send + 'static> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        if let Some(handle) = &self.0 {
+            handle.abort();
+        }
+    }
 }
 
 impl<T> Future for Handle<T>

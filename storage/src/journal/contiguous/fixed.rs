@@ -190,22 +190,27 @@ fn replay_stream<'a, B: RBlob, A: CodecFixedShared>(
     blobs: &Blobs<'a, B>,
     bounds: Range<u64>,
     items_per_blob: NonZeroU64,
-    start_pos: u64,
+    range: Range<u64>,
     buffer: NonZeroUsize,
     read_options: ReadOptions,
 ) -> Result<impl Stream<Item = Result<(u64, A), Error>> + Send + use<'a, B, A>, Error> {
-    if start_pos > bounds.end {
-        return Err(Error::ItemOutOfRange(start_pos));
+    if range.start > range.end || range.end > bounds.end {
+        return Err(Error::ItemOutOfRange(if range.start > range.end {
+            range.start
+        } else {
+            range.end
+        }));
     }
-    if start_pos < bounds.start {
-        return Err(Error::ItemPruned(start_pos));
+    if range.start < bounds.start {
+        return Err(Error::ItemPruned(range.start));
     }
 
     let mut states = Vec::new();
-    if start_pos < bounds.end {
+    if range.start < range.end {
         let items_per_blob = items_per_blob.get();
+        let start_pos = range.start;
         let start_blob = super::position_to_blob(start_pos, items_per_blob);
-        let end_blob = super::position_to_blob(bounds.end - 1, items_per_blob);
+        let end_blob = super::position_to_blob(range.end - 1, items_per_blob);
         let items_per_batch = (buffer.get() / A::SIZE).max(1);
 
         for blob in start_blob..=end_blob {
@@ -217,7 +222,7 @@ fn replay_stream<'a, B: RBlob, A: CodecFixedShared>(
             } else {
                 blob_first
             };
-            let blob_end = super::blob_end_position(blob, items_per_blob, bounds.end);
+            let blob_end = super::blob_end_position(blob, items_per_blob, range.end);
             let offset = (first_pos - blob_first)
                 .checked_mul(A::SIZE as u64)
                 .ok_or(Error::OffsetOverflow)?;
@@ -1609,9 +1614,9 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
         self.probe_items(positions)
     }
 
-    async fn replay(
+    async fn replay_range(
         &self,
-        start_pos: u64,
+        range: Range<u64>,
         buffer: NonZeroUsize,
         read_options: ReadOptions,
     ) -> Result<impl Stream<Item = Result<(u64, A), Error>> + Send, Error> {
@@ -1619,7 +1624,7 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
             &self.blobs,
             self.bounds.clone(),
             self.items_per_blob,
-            start_pos,
+            range,
             buffer,
             read_options,
         )
@@ -1649,9 +1654,9 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Inner<E, A> {
         self.reader().probe_items(positions)
     }
 
-    async fn replay(
+    async fn replay_range(
         &self,
-        start_pos: u64,
+        range: Range<u64>,
         buffer: NonZeroUsize,
         read_options: ReadOptions,
     ) -> Result<impl Stream<Item = Result<(u64, A), Error>> + Send, Error> {
@@ -1660,7 +1665,7 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Inner<E, A> {
             &blobs,
             self.bounds.clone(),
             self.items_per_blob,
-            start_pos,
+            range,
             buffer,
             read_options,
         )
@@ -1690,13 +1695,13 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Journal<E, A> {
         super::Contiguous::try_read_many_sync(&*self.0, positions)
     }
 
-    async fn replay(
+    async fn replay_range(
         &self,
-        start_pos: u64,
+        range: Range<u64>,
         buffer: NonZeroUsize,
         read_options: ReadOptions,
     ) -> Result<impl Stream<Item = Result<(u64, A), Error>> + Send, Error> {
-        super::Contiguous::replay(&*self.0, start_pos, buffer, read_options).await
+        super::Contiguous::replay_range(&*self.0, range, buffer, read_options).await
     }
 }
 
@@ -2865,6 +2870,74 @@ mod tests {
                     assert_eq!(i as u64, *pos - START_POS);
                 }
             }
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// `replay_range` yields exactly the requested positions, spanning blob boundaries, and
+    /// validates the range against `bounds()`.
+    #[test_traced]
+    fn test_fixed_journal_replay_range() {
+        const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(7);
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, ITEMS_PER_BLOB);
+            let mut journal = Journal::init(context.child("storage"), cfg.clone())
+                .await
+                .expect("failed to initialize journal");
+
+            // Fill ten blobs and part of the eleventh.
+            let total = ITEMS_PER_BLOB.get() * 10 + 3;
+            for i in 0u64..total {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+
+            // A mid-journal range crossing several blob boundaries yields exactly [start, end).
+            let (start, end) = (12u64, 40u64);
+            {
+                let stream = journal
+                    .replay_range(start..end, NZUsize!(1024), ReadOptions::default())
+                    .await
+                    .expect("failed to replay range");
+                pin_mut!(stream);
+                let mut next = start;
+                while let Some(result) = stream.next().await {
+                    let (pos, item) = result.expect("failed to read item");
+                    assert_eq!(pos, next);
+                    assert_eq!(item, test_digest(pos));
+                    next += 1;
+                }
+                assert_eq!(next, end);
+            }
+
+            // An empty range yields an empty stream.
+            {
+                let stream = journal
+                    .replay_range(5..5, NZUsize!(1024), ReadOptions::default())
+                    .await
+                    .expect("failed to replay empty range");
+                pin_mut!(stream);
+                assert!(stream.next().await.is_none());
+            }
+
+            // A range past the journal's end is rejected.
+            let err = journal
+                .replay_range(0..total + 1, NZUsize!(1024), ReadOptions::default())
+                .await
+                .map(|_| ())
+                .unwrap_err();
+            assert!(matches!(err, Error::ItemOutOfRange(pos) if pos == total + 1));
+
+            // An inverted range is rejected.
+            #[allow(clippy::reversed_empty_ranges)]
+            let err = journal
+                .replay_range(10..5, NZUsize!(1024), ReadOptions::default())
+                .await
+                .map(|_| ())
+                .unwrap_err();
+            assert!(matches!(err, Error::ItemOutOfRange(10)));
 
             journal.destroy().await.unwrap();
         });

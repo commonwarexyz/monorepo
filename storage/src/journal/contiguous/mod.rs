@@ -188,11 +188,30 @@ pub trait Contiguous: Send + Sync {
     /// async read paths are the sole error authority for declined positions.
     fn try_read_many_sync(&self, positions: &[u64]) -> Vec<Option<Self::Item>>;
 
-    /// Return a stream of all items starting from `start_pos`, bounded by `bounds()`.
+    /// Return a stream of the items in `range`, in position order. `range` must fall within
+    /// `bounds()`. An empty range within `bounds()` yields an empty stream.
     ///
     /// `buffer` controls the replay byte budget for each chunk. Every backing blob read from
     /// sealed history uses `read_options`. Backing reads from the live writable tip instead use
     /// [ReadOptions::DONT_CACHE] on page-cache misses because the cache retains the fetched pages.
+    ///
+    /// # Errors
+    ///
+    /// Returns [Error::ItemPruned] if `range.start` precedes `bounds().start`, or
+    /// [Error::ItemOutOfRange] if `range.end` exceeds `bounds().end` or the range is inverted
+    /// (`start > end`).
+    fn replay_range(
+        &self,
+        range: Range<u64>,
+        buffer: NonZeroUsize,
+        read_options: ReadOptions,
+    ) -> impl Future<
+        Output = Result<impl Stream<Item = Result<(u64, Self::Item), Error>> + Send, Error>,
+    > + Send;
+
+    /// Return a stream of all items starting from `start_pos`, bounded by `bounds()`.
+    ///
+    /// See [`replay_range`](Self::replay_range) for the `buffer` and `read_options` contract.
     fn replay(
         &self,
         start_pos: u64,
@@ -200,7 +219,12 @@ pub trait Contiguous: Send + Sync {
         read_options: ReadOptions,
     ) -> impl Future<
         Output = Result<impl Stream<Item = Result<(u64, Self::Item), Error>> + Send, Error>,
-    > + Send;
+    > + Send {
+        async move {
+            self.replay_range(start_pos..self.bounds().end, buffer, read_options)
+                .await
+        }
+    }
 }
 
 /// Items to append via [`Mutable::append_many`].
