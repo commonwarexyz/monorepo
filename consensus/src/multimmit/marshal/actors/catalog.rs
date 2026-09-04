@@ -1429,14 +1429,28 @@ where
         let mut commands_open = true;
         let mut delivery_cursors_open = true;
         loop {
-            if self.start_admission_sync().await? {
+            let started = self.clock.current();
+            let admission = self.start_admission_sync().await;
+            if !matches!(admission, Ok(false)) {
+                self.metrics
+                    .work("internal", "admission_start", started, self.clock.current());
+            }
+            if admission? {
                 continue;
             }
 
             if delivery_cursors_open {
                 match self.delivery_cursors.try_recv() {
                     Ok(control) => {
-                        self.process_delivery_cursor(control)?;
+                        let started = self.clock.current();
+                        let result = self.process_delivery_cursor(control);
+                        self.metrics.work(
+                            "completion",
+                            "delivery_cursor",
+                            started,
+                            self.clock.current(),
+                        );
+                        result?;
                         continue;
                     }
                     Err(TryRecvError::Disconnected) => delivery_cursors_open = false,
@@ -1483,7 +1497,12 @@ where
                 return Ok(());
             }
 
-            match next_catalog_event(
+            let waiting_for = self
+                .deferred
+                .as_ref()
+                .map_or("event", |command| command.command.kind());
+            let started = self.clock.current();
+            let event = next_catalog_event(
                 self.durability.next_completed(),
                 self.delivery_cursors.recv(),
                 self.metadata_reads.next_completed(),
@@ -1493,38 +1512,64 @@ where
                 delivery_cursors_open,
                 commands_open && self.deferred.is_none(),
             )
-            .await
-            {
-                CatalogEvent::Durability(completion) => {
-                    self.complete_durability(completion).await?;
+            .await;
+            self.metrics
+                .work("wait", waiting_for, started, self.clock.current());
+            let operation = match &event {
+                CatalogEvent::Durability(DurabilityCompletion::Admission(_)) => Some("admission"),
+                CatalogEvent::Durability(DurabilityCompletion::CommitArchives(_, _)) => {
+                    Some("commit_archives")
                 }
-                CatalogEvent::DeliveryCursor(Some(control)) => {
-                    self.process_delivery_cursor(control)?;
+                CatalogEvent::Durability(DurabilityCompletion::CommitCheckpoint(_, _)) => {
+                    Some("checkpoint")
                 }
-                CatalogEvent::DeliveryCursor(None) => delivery_cursors_open = false,
-                CatalogEvent::Metadata(completion) => {
-                    self.complete_metadata(completion)?;
-                }
-                CatalogEvent::Seal((sealed, result)) => {
-                    result?;
-                    let pinned = self.pinned_body_segments();
-                    let reclaimed = self.stores.finish_pending_seals(sealed, &pinned).await?;
-                    self.materializer.release_readers(reclaimed);
-                }
-                CatalogEvent::Materialization(completion) => {
-                    let completed = completion?;
-                    self.update_materialization_metrics();
-                    if let Some(completed) = completed {
-                        let available = self.complete_materialization(completed)?;
-                        self.retry_body_waiters(&available)?;
+                CatalogEvent::DeliveryCursor(Some(_)) => Some("delivery_cursor"),
+                CatalogEvent::Metadata(_) => Some("metadata"),
+                CatalogEvent::Seal(_) => Some("seal"),
+                CatalogEvent::Materialization(_) => Some("materialization"),
+                CatalogEvent::Command(_) | CatalogEvent::DeliveryCursor(None) => None,
+            };
+            let started = self.clock.current();
+            let result = async {
+                match event {
+                    CatalogEvent::Durability(completion) => {
+                        self.complete_durability(completion).await?;
                     }
+                    CatalogEvent::DeliveryCursor(Some(control)) => {
+                        self.process_delivery_cursor(control)?;
+                    }
+                    CatalogEvent::DeliveryCursor(None) => delivery_cursors_open = false,
+                    CatalogEvent::Metadata(completion) => {
+                        self.complete_metadata(completion)?;
+                    }
+                    CatalogEvent::Seal((sealed, result)) => {
+                        result?;
+                        let pinned = self.pinned_body_segments();
+                        let reclaimed = self.stores.finish_pending_seals(sealed, &pinned).await?;
+                        self.materializer.release_readers(reclaimed);
+                    }
+                    CatalogEvent::Materialization(completion) => {
+                        let completed = completion?;
+                        self.update_materialization_metrics();
+                        if let Some(completed) = completed {
+                            let available = self.complete_materialization(completed)?;
+                            self.retry_body_waiters(&available)?;
+                        }
+                    }
+                    CatalogEvent::Command(Some(mut command)) => {
+                        self.note_intake(&mut command);
+                        self.process_command(command).await?;
+                    }
+                    CatalogEvent::Command(None) => commands_open = false,
                 }
-                CatalogEvent::Command(Some(mut command)) => {
-                    self.note_intake(&mut command);
-                    self.process_command(command).await?;
-                }
-                CatalogEvent::Command(None) => commands_open = false,
+                Ok::<_, Error>(())
             }
+            .await;
+            if let Some(operation) = operation {
+                self.metrics
+                    .work("completion", operation, started, self.clock.current());
+            }
+            result?;
         }
     }
 
@@ -1543,12 +1588,15 @@ where
     }
 
     async fn process_command(&mut self, command: TracedCommand<H, V, B>) -> Result<(), Error> {
+        let operation = command.command.kind();
         let span = info_span!(
             parent: &command.span,
             "multimmit.marshal.catalog.process",
-            command = command.command.kind(),
+            command = operation,
+            handler_ns = tracing::field::Empty,
         );
-        async {
+        let started = self.clock.current();
+        let result = async {
             let TracedCommand { command, span, .. } = command;
             match command {
                 Command::Admit(write, sync, reply) => {
@@ -1557,8 +1605,21 @@ where
                 command => self.process(command).await,
             }
         }
-        .instrument(span)
-        .await
+        .instrument(span.clone())
+        .await;
+        let finished = self.clock.current();
+        self.metrics.work("command", operation, started, finished);
+        span.record(
+            "handler_ns",
+            u64::try_from(
+                finished
+                    .duration_since(started)
+                    .unwrap_or_default()
+                    .as_nanos(),
+            )
+            .unwrap_or(u64::MAX),
+        );
+        result
     }
 
     fn process_delivery_cursor(&mut self, control: DeliveryCursorControl) -> Result<(), Error> {
@@ -5763,6 +5824,22 @@ mod tests {
                 metric_total(&metrics, "admission_command_dwell_duration_count") >= 2,
                 "both stage commands record admission dwell"
             );
+            assert!(
+                metric_sum(
+                    &metrics,
+                    "work_nanoseconds_total",
+                    Some("source=\"wait\",operation=\"prune\"")
+                ) >= 1_000_000,
+                "the deferred prune wait is separate from command execution"
+            );
+            assert!(
+                metric_sum(
+                    &metrics,
+                    "work_calls_total",
+                    Some("source=\"command\",operation=\"admit\"")
+                ) >= 2,
+                "admission handlers are counted independently of background durability"
+            );
 
             drop(client);
             assert!(handle.await.is_ok());
@@ -7367,8 +7444,9 @@ mod tests {
                 limits,
             );
             let genesis = committee.config.genesis();
-            let base = TipRecord::at_tips(genesis_history::<Sha256>(genesis), genesis.tips().to_vec())
-                .unwrap();
+            let base =
+                TipRecord::at_tips(genesis_history::<Sha256>(genesis), genesis.tips().to_vec())
+                    .unwrap();
             let record = Arc::new(
                 TipRecord::at_tips(base.commitment::<Sha256>(), genesis.tips().to_vec()).unwrap(),
             );

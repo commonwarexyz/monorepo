@@ -9,6 +9,7 @@ use commonware_runtime::{
         MetricsExt as _, histogram,
     },
 };
+use std::time::SystemTime;
 
 /// Buckets for catalog intake stalls, in seconds.
 ///
@@ -51,6 +52,12 @@ struct ReaderSourceLabel {
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct CutTriggerLabel {
     trigger: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct CatalogWorkLabel {
+    source: &'static str,
+    operation: &'static str,
 }
 
 /// Cold body reader acquisitions by source.
@@ -97,6 +104,8 @@ pub(in crate::multimmit::marshal) struct Catalog {
     ///
     /// Admission throughput is capped by this dwell, so it is the per-node intake signal.
     pub admission_command_dwell: Histogram,
+    work_nanoseconds: CounterFamily<CatalogWorkLabel>,
+    work_calls: CounterFamily<CatalogWorkLabel>,
     cut_triggers: CounterFamily<CutTriggerLabel>,
     committed_count: Gauge,
     block_cache_items: Gauge,
@@ -268,6 +277,14 @@ impl Catalog {
                 "Time an admission command waits between mailbox enqueue and catalog intake",
                 STALL,
             ),
+            work_nanoseconds: context.family(
+                "work_nanoseconds",
+                "Catalog owner wall time by fixed source and operation, including inline waits but excluding independent background work",
+            ),
+            work_calls: context.family(
+                "work_calls",
+                "Catalog owner turns by fixed source and operation",
+            ),
             cut_triggers: context.family(
                 "admission_cut_triggers",
                 "Admission cuts started, by what made the pending cut ripe",
@@ -313,6 +330,23 @@ impl Catalog {
 
     pub(in crate::multimmit::marshal) fn progress(&self, committed: Option<OutputIndex>) {
         let _ = self.committed_count.try_set(count(committed));
+    }
+
+    /// Accounts for disjoint owner turns, including event waits labeled by the deferred command.
+    /// Labels come only from catalog command kinds and fixed internal event names.
+    pub(in crate::multimmit::marshal) fn work(
+        &self,
+        source: &'static str,
+        operation: &'static str,
+        start: SystemTime,
+        end: SystemTime,
+    ) {
+        let labels = CatalogWorkLabel { source, operation };
+        let nanos = end.duration_since(start).unwrap_or_default().as_nanos();
+        self.work_nanoseconds
+            .get_or_create(&labels)
+            .inc_by(u64::try_from(nanos).unwrap_or(u64::MAX));
+        self.work_calls.get_or_create(&labels).inc();
     }
 
     pub(in crate::multimmit::marshal) fn cut_trigger(&self, trigger: &'static str) {
