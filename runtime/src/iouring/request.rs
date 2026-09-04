@@ -881,17 +881,13 @@ impl WriteAtRequest {
             WriteBuffers::Single { buf, offset } => {
                 let bytes = &buf.as_ref()[*offset..];
                 let ptr = bytes.as_ptr();
-                let remaining = bytes.len();
-                opcode::Write::new(
-                    fd,
-                    ptr,
-                    remaining
-                        .try_into()
-                        .expect("single-buffer SQE length exceeds u32"),
-                )
-                .offset(file_offset)
-                .rw_flags(rw_flags)
-                .build()
+                // A logical write can exceed the SQE length field. Submit its
+                // representable prefix and retain the remainder for later CQEs.
+                let len = bytes.len().min(u32::MAX as usize) as u32;
+                opcode::Write::new(fd, ptr, len)
+                    .offset(file_offset)
+                    .rw_flags(rw_flags)
+                    .build()
             }
             WriteBuffers::Vectored {
                 bufs,
@@ -1850,6 +1846,47 @@ mod tests {
         assert!(!supported.load(Ordering::Relaxed));
         assert_eq!(first.rw_flags(), 0);
         assert_eq!(second.rw_flags(), 0);
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn test_large_single_write_preserves_progress_and_durability() {
+        // Keep one demand-paged zero allocation across the durability variants.
+        // Simulated CQEs advance cursors without reading the large payload.
+        let len = u32::MAX as usize + 1;
+        let buf = IoBuf::from(vec![0; len]);
+        let active = WaiterState::Active { target_tick: None };
+        for state in [
+            WriteAtState::Writing,
+            WriteAtState::WritingSync,
+            WriteAtState::WritingBeforeSync,
+        ] {
+            let trailing_sync = state == WriteAtState::WritingBeforeSync;
+            let mut write = WriteAtRequest {
+                file: make_file_fd(),
+                offset: 0,
+                written: 0,
+                write: IoBufs::from(buf.clone()).into(),
+                state,
+                cache: Cache::Enabled,
+                result: None,
+            };
+            for _ in 0..2 {
+                assert_eq!(write.build_sqe().get_opcode(), opcode::Write::CODE as u32);
+                assert!(!write.on_cqe(active, i32::MAX));
+            }
+            assert_eq!(write.write.remaining_len(), 2);
+            assert_eq!(write.build_sqe().get_opcode(), opcode::Write::CODE as u32);
+            assert_eq!(write.on_cqe(active, 2), !trailing_sync);
+            assert_eq!(write.written, len);
+            assert!(write.write.is_complete());
+            if trailing_sync {
+                assert!(write.result.is_none());
+                assert_eq!(write.build_sqe().get_opcode(), opcode::Fsync::CODE as u32);
+                assert!(write.on_cqe(active, 0));
+            }
+            assert!(matches!(write.result, Some(Ok(()))));
+        }
     }
 
     #[test]

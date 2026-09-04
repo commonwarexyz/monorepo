@@ -370,6 +370,12 @@ impl crate::Blob for Blob {
             return Ok(());
         }
 
+        // Validate the entire range before admission. This excludes io_uring's
+        // current-position sentinel and keeps partial-write offsets in range.
+        offset
+            .checked_add(bufs.len() as u64)
+            .ok_or(Error::OffsetOverflow)?;
+
         let cache = if options.contains(WriteOptions::DONT_CACHE) {
             Cache::Disabled(self.dont_cache_supported.clone())
         } else {
@@ -495,6 +501,32 @@ mod tests {
         let _ = std::fs::remove_dir_all(&storage_directory);
         std::fs::create_dir_all(&storage_directory).unwrap();
         storage_directory
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn test_large_contiguous_write_returns_kernel_error() {
+        let directory = create_test_directory();
+        let hold = Hold::acquire(&directory).unwrap();
+        let mut registry = Registry::default();
+        let blob = Blob::new(
+            "partition".into(),
+            b"large",
+            File::options().write(true).open("/dev/full").unwrap(),
+            hold,
+            test_pool(&mut registry),
+            0,
+        );
+        // Zeroed allocation stays demand-paged on Linux. The erroring device
+        // exercises real submission without copying or storing gigabytes.
+        let buf = IoBuf::from(vec![0; u32::MAX as usize + 1]);
+        iouring::Runner::default().start(|_| async move {
+            assert!(matches!(
+                blob.write_at(0, buf, WriteOptions::default()).await,
+                Err(Error::WriteFailed)
+            ));
+        });
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -1110,6 +1142,33 @@ mod tests {
 
             let _ = std::fs::remove_dir_all(&storage_directory);
         });
+    }
+
+    #[test]
+    fn test_write_range_overflow_before_admission() {
+        for options in [WriteOptions::default(), WriteOptions::SYNC] {
+            for chunks in [IOVEC_BATCH_SIZE + 1, 1, 2] {
+                iouring::Runner::default().start(|_| async {
+                    let (storage, directory) = create_test_storage();
+                    let (blob, _) = storage.open("partition", b"range").await.unwrap();
+                    // The physical offset must never become io_uring's current
+                    // file-position sentinel, including writes needing restaging.
+                    let offset = u64::MAX - blob.data_offset;
+                    blob.write_at(offset, IoBufs::default(), options)
+                        .await
+                        .unwrap();
+                    let bufs =
+                        IoBufs::from((0..chunks).map(|_| IoBuf::from(b"x")).collect::<Vec<_>>());
+                    assert!(matches!(
+                        blob.write_at(offset, bufs, options).await,
+                        Err(Error::OffsetOverflow)
+                    ));
+                    drop(blob);
+                    drop(storage);
+                    std::fs::remove_dir_all(directory).unwrap();
+                });
+            }
+        }
     }
 
     #[test]
