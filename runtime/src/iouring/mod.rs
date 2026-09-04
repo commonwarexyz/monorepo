@@ -404,6 +404,15 @@ impl Handle {
         cache: Cache,
     ) -> Result<IoBufMut, (IoBufMut, Error)> {
         assert!(len <= buf.capacity(), "read_at len exceeds buffer capacity");
+
+        // Reject up front if `offset + len` cannot be represented as a `u64`.
+        // Each retry after a partial read advances the SQE offset by
+        // `offset + read` (`read <= len`), so bounding `offset + len` here
+        // guarantees that arithmetic can never wrap.
+        if offset.checked_add(len as u64).is_none() {
+            return Err((buf, Error::OffsetOverflow));
+        }
+
         let (tx, rx) = oneshot::channel();
         let request = Request::ReadAt(ReadAtRequest {
             file,
@@ -444,6 +453,14 @@ impl Handle {
         options: WriteOptions,
         cache: Cache,
     ) -> Result<(), Error> {
+        // Reject up front if `offset + bufs.len()` cannot be represented as a
+        // `u64`. Each retry after a partial write advances the SQE offset by
+        // `offset + written` (`written <= bufs.len()`), so bounding
+        // `offset + bufs.len()` here guarantees that arithmetic can never wrap.
+        if offset.checked_add(bufs.len() as u64).is_none() {
+            return Err(Error::OffsetOverflow);
+        }
+
         let state = if !options.contains(WriteOptions::SYNC) {
             WriteAtState::Writing
         } else if bufs.chunk_count() <= IOVEC_BATCH_SIZE {
@@ -3166,6 +3183,55 @@ mod tests {
         assert!(iouring.waiters.is_empty());
         assert_eq!(ring.submission().len(), 0);
         assert_eq!(iouring.timeout_wheel.next_deadline(), None);
+    }
+
+    #[tokio::test]
+    async fn test_read_at_rejects_offset_plus_len_overflow() {
+        // `offset + len` overflowing `u64` would let a later partial-read
+        // retry's `offset + read` SQE computation wrap around, redirecting
+        // the read to an unintended file position. This must be rejected
+        // before the request is ever enqueued for submission.
+        let mut registry = Registry::default();
+        let (handle, _iouring) = IoUringLoop::new(Config::default(), &mut registry);
+        let (sock_left, _sock_right) = UnixStream::pair().unwrap();
+        // SAFETY: `sock_left` is a valid owned fd and is transferred into `File`.
+        let file = unsafe { std::fs::File::from_raw_fd(sock_left.into_raw_fd()) };
+
+        let result = handle
+            .read_at(
+                Arc::new(file),
+                u64::MAX - 1,
+                4,
+                IoBufMut::with_capacity(4),
+                Cache::Enabled,
+            )
+            .await;
+
+        assert!(matches!(result, Err((_, Error::OffsetOverflow))));
+    }
+
+    #[tokio::test]
+    async fn test_write_at_rejects_offset_plus_len_overflow() {
+        // Same reasoning as the read_at case above, but for the write path's
+        // `offset + written` SQE computation.
+        let mut registry = Registry::default();
+        let (handle, _iouring) = IoUringLoop::new(Config::default(), &mut registry);
+        let (sock_left, _sock_right) = UnixStream::pair().unwrap();
+        // SAFETY: `sock_left` is a valid owned fd and is transferred into `File`.
+        let file = unsafe { std::fs::File::from_raw_fd(sock_left.into_raw_fd()) };
+        let bufs = IoBufs::from(IoBuf::from(vec![0u8; 4]));
+
+        let result = handle
+            .write_at(
+                Arc::new(file),
+                u64::MAX - 1,
+                bufs,
+                WriteOptions::default(),
+                Cache::Enabled,
+            )
+            .await;
+
+        assert!(matches!(result, Err(Error::OffsetOverflow)));
     }
 
     #[tokio::test]
