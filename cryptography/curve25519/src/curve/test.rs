@@ -1,7 +1,12 @@
 //! Property suites shared by field and group backends.
 
-use super::{Backend, F, FBackend, FVec, GAffineVec, GBackend, GVec, LANES, MASK_51, WithBackend};
+use super::{
+    Backend, F, FBackend, FVec, G, GAffine, GAffineVec, GBackend, GVec, LANES, MASK_51, WithBackend,
+};
+#[cfg(test)]
+use crate::test::ZIP215_POINTS;
 use arbitrary::{Arbitrary, Unstructured};
+use core::array;
 
 const MASK_52: u64 = (1 << 52) - 1;
 
@@ -350,6 +355,36 @@ fn backend_at_bounds() {
                 backend.square(max),
                 "backend square at bound",
             );
+            // These coordinates need not form a curve point: compare the complete formulas
+            // coordinate-wise to exercise their loose-intermediate bounds.
+            let point = GVec {
+                x: max,
+                y: max,
+                t: max,
+                z: max,
+            };
+            let affine = GAffineVec {
+                x: max,
+                y: max,
+                t2d: max,
+            };
+            for (actual, expected) in [
+                (backend.g_add(point, point), reference.g_add(point, point)),
+                (
+                    backend.g_add_mixed(point, affine),
+                    reference.g_add_mixed(point, affine),
+                ),
+                (backend.g_double(point), reference.g_double(point)),
+            ] {
+                for (actual, expected) in [
+                    (actual.x, expected.x),
+                    (actual.y, expected.y),
+                    (actual.t, expected.t),
+                    (actual.z, expected.z),
+                ] {
+                    assert_f_eq(actual, expected, "group formula at bound");
+                }
+            }
         }
     }
 
@@ -419,14 +454,31 @@ fn fuzz_group_matches_portable<B: Backend>(
     backend: B,
 ) -> arbitrary::Result<()> {
     let reference = super::portable::Backend::new();
-    let scalar = u.arbitrary::<u16>()?;
-    let basepoint = basepoint(reference);
-    let point = scale(reference, basepoint, u32::from(scalar));
-    let affine_basepoint = GAffineVec {
-        x: basepoint.x,
-        y: basepoint.y,
-        t2d: reference.mul(basepoint.t, FVec::splat(F::EDWARDS_D2)),
-    };
+    let encodings: [[u8; 32]; LANES] = u.arbitrary()?;
+    let decoded = GAffine::decompress_batch(backend, &encodings);
+    let lanes = array::from_fn(|i| {
+        let scalar = GAffine::decompress(&encodings[i]);
+        assert_eq!(
+            decoded[i].map(|point| point.to_extended().to_bytes()),
+            scalar.map(|point| point.to_extended().to_bytes()),
+            "decompression lane {i}",
+        );
+        scalar.unwrap_or(GAffine::IDENTITY)
+    });
+    let affine = GAffineVec::transpose(lanes);
+    let rhs = GVec::transpose(lanes.map(GAffine::to_extended));
+    let scales = arbitrary_fvec(u)?
+        .untranspose()
+        .map(|scale| if scale.is_zero() { F::ONE } else { scale });
+    let point = GVec::transpose(array::from_fn(|i| {
+        let point = lanes[(i + 1) % LANES].to_extended();
+        G {
+            x: point.x.mul(scales[i]),
+            y: point.y.mul(scales[i]),
+            t: point.t.mul(scales[i]),
+            z: point.z.mul(scales[i]),
+        }
+    }));
     assert_g_eq(
         reference,
         reference.g_double(point),
@@ -435,17 +487,118 @@ fn fuzz_group_matches_portable<B: Backend>(
     );
     assert_g_eq(
         reference,
-        reference.g_add(point, basepoint),
-        backend.g_add(point, basepoint),
+        reference.g_add(point, rhs),
+        backend.g_add(point, rhs),
         "backend addition",
     );
     assert_g_eq(
         reference,
-        reference.g_add_mixed(point, affine_basepoint),
-        backend.g_add_mixed(point, affine_basepoint),
+        reference.g_add_mixed(point, affine),
+        backend.g_add_mixed(point, affine),
         "backend mixed addition",
     );
     Ok(())
+}
+
+#[cfg(test)]
+#[test]
+fn noncanonical_field_encodings() {
+    let mut p = [0xff; 32];
+    p[0] = 0xed;
+    p[31] = 0x7f;
+    for offset in 0..19 {
+        let mut canonical = [0; 32];
+        canonical[0] = offset;
+        for sign in [0, 0x80] {
+            let mut encoded = p;
+            encoded[0] += offset;
+            encoded[31] |= sign;
+            assert_eq!(F::from_bytes(&encoded).to_bytes(), canonical);
+        }
+    }
+    let mut p_minus_one = p;
+    p_minus_one[0] -= 1;
+    assert_eq!(F::from_bytes(&p_minus_one).to_bytes(), p_minus_one);
+    assert_eq!(F::ZERO.sub(F::ONE).to_bytes(), p_minus_one);
+}
+
+#[cfg(test)]
+#[test]
+fn zip215_decompression_and_group_laws() {
+    struct Check;
+
+    impl WithBackend for Check {
+        type Output = ();
+
+        fn call<B: Backend>(self, backend: B) {
+            let reference = super::portable::Backend::new();
+            let mut encodings = ZIP215_POINTS.to_vec();
+            for offset in 0..19 {
+                for sign in [0, 0x80] {
+                    let mut encoding = [0xff; 32];
+                    encoding[0] = 0xed + offset;
+                    encoding[31] = 0x7f | sign;
+                    encodings.push(encoding);
+                }
+            }
+            for chunk in encodings.chunks(LANES) {
+                let bytes = array::from_fn(|i| chunk[i % chunk.len()]);
+                let decoded = GAffine::decompress_batch(backend, &bytes);
+                let lanes = array::from_fn(|i| {
+                    let scalar = GAffine::decompress(&bytes[i]);
+                    assert_eq!(
+                        decoded[i].map(|p| p.to_extended().to_bytes()),
+                        scalar.map(|p| p.to_extended().to_bytes())
+                    );
+                    scalar.unwrap_or(GAffine::IDENTITY)
+                });
+                let p = GVec::transpose(lanes.map(GAffine::to_extended));
+                let q = GVec::transpose(array::from_fn(|i| lanes[(i + 1) % LANES].to_extended()));
+                assert_g_eq(
+                    reference,
+                    backend.g_add(p, q),
+                    reference.g_add(p, q),
+                    "ZIP215 addition",
+                );
+                assert_g_eq(
+                    reference,
+                    backend.g_double(p),
+                    reference.g_double(p),
+                    "ZIP215 doubling",
+                );
+                assert_g_eq(
+                    reference,
+                    backend.g_add_mixed(q, GAffineVec::transpose(lanes)),
+                    reference.g_add(q, p),
+                    "ZIP215 mixed addition",
+                );
+            }
+        }
+    }
+
+    Check.call(super::portable::Backend::new());
+    super::with_backend(Check);
+}
+
+#[cfg(test)]
+#[test]
+fn secret_scalar_multiplication_matches_public() {
+    commonware_invariants::minifuzz::Builder::default()
+        .with_seed(0)
+        .with_search_limit(32)
+        .test(|u| {
+            let scalar: [u8; 32] = u.arbitrary()?;
+            let torsion = GAffine::decompress(u.choose(&ZIP215_POINTS)?)
+                .unwrap()
+                .to_extended();
+            let point = GAffine::BASEPOINT.to_extended().add(torsion);
+            let bits = (0..256).rev().map(|i| scalar[i / 8] >> (i % 8) & 1 == 1);
+            assert_eq!(
+                point.scalar_mul_secret(&scalar).to_bytes(),
+                point.scalar_mul(bits).to_bytes()
+            );
+            Ok(())
+        });
 }
 
 /// Checks the runtime dispatch path as one multi-operation computation.

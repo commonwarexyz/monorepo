@@ -22,6 +22,10 @@
 #[cfg(test)]
 mod vectors;
 
+/// ZIP215 point encodings shared with the curve property tests.
+#[cfg(test)]
+pub(crate) const ZIP215_POINTS: [[u8; 32]; 14] = vectors::ZIP215_POINTS;
+
 use crate::{
     key_exchange::{PublicKey as ExchangePublicKey, SecretKey},
     signing::{BatchVerifier, Signature, SigningKey, VerifyingKey},
