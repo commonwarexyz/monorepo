@@ -41,10 +41,10 @@ where
 
         for loc in locs {
             let op = self.log.read(*loc).await?;
-            match &op {
+            match op {
                 Operation::Update(Update(k, value)) => {
-                    if k == key {
-                        return Ok(Some((value.clone(), loc)));
+                    if k == *key {
+                        return Ok(Some((value, loc)));
                     }
                 }
                 _ => unreachable!("location {loc} does not reference update operation"),

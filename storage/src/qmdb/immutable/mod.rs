@@ -411,18 +411,22 @@ where
 
         let ops = self.journal.read_many(&positions).await?;
 
-        for &(key_idx, pos) in &candidates {
-            if results[key_idx].is_some() {
-                continue;
-            }
-            let op_idx = positions
-                .binary_search(&pos)
-                .expect("position was deduped from candidates");
-            let Operation::Set(k, v) = &ops[op_idx] else {
-                return Err(Error::UnexpectedData(Location::new(pos)));
+        let groups = candidates.chunk_by(|a, b| a.1 == b.1);
+        for (op, group) in ops.into_iter().zip(groups) {
+            let Operation::Set(k, v) = op else {
+                return Err(Error::UnexpectedData(Location::new(group[0].1)));
             };
-            if k == keys[key_idx] {
-                results[key_idx] = Some(v.clone());
+            let mut pending = None;
+            for &(key_idx, _) in group {
+                if results[key_idx].is_some() || k != *keys[key_idx] {
+                    continue;
+                }
+                if let Some(prev) = pending.replace(key_idx) {
+                    results[prev] = Some(v.clone());
+                }
+            }
+            if let Some(last) = pending {
+                results[last] = Some(v);
             }
         }
 
@@ -3842,6 +3846,37 @@ pub(super) mod tests {
         let child = parent.new_batch::<Sha256>().set(k3, v3_new);
         let results = child.get_many(&[&k1, &k3, &k_missing], &db).await.unwrap();
         assert_eq!(results, vec![Some(v1), Some(v3_new), None]);
+
+        db.destroy().await.unwrap();
+    }
+
+    /// `get_many` fills every slot of a repeated key.
+    #[boxed]
+    pub(crate) async fn run_get_many_duplicate_keys<F: Family, V, C>(
+        context: deterministic::Context,
+        open_db: impl Fn(
+            deterministic::Context,
+        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+    ) where
+        V: ValueEncoding<Value = Digest>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
+        C::Item: EncodeShared,
+    {
+        let db = open_db(context.child("db")).await;
+
+        let key = Sha256::fill(1u8);
+        let value = Sha256::fill(11u8);
+        let k_missing = Sha256::fill(99u8);
+        let merkleized = db
+            .new_batch()
+            .set(key, value)
+            .merkleize(&db, None, db.inactivity_floor_loc())
+            .await;
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.commit().await.unwrap();
+
+        let results = db.get_many(&[&key, &k_missing, &key, &key]).await.unwrap();
+        assert_eq!(results, vec![Some(value), None, Some(value), Some(value)]);
 
         db.destroy().await.unwrap();
     }
