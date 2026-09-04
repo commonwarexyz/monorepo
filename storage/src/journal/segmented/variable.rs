@@ -87,6 +87,7 @@ use crate::journal::{
         FrameInfo, decode_item, decode_length_prefix, encode_frame_into, find_frame, read_frame_at,
     },
 };
+use bytes::Bytes;
 use commonware_codec::{Codec, CodecShared, varint::MAX_U32_VARINT_SIZE};
 use commonware_runtime::{
     Blob, Buf, Error as RError, Handle, IoBuf, Metrics, ReadOptions, Storage,
@@ -304,7 +305,7 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
             return None;
         }
         decode_item::<V>(
-            &buf[varint_len..varint_len + data_len],
+            Bytes::from(buf).slice(varint_len..),
             &self.codec_config,
             compressed,
         )

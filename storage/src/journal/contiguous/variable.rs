@@ -31,6 +31,7 @@ use crate::{
         },
     },
 };
+use bytes::Bytes;
 use commonware_codec::{Codec, CodecShared, varint::MAX_U32_VARINT_SIZE};
 use commonware_macros::boxed;
 use commonware_runtime::{
@@ -68,22 +69,20 @@ const DATA_SUFFIX: &str = "_data";
 /// Suffix appended to the base partition name for the offsets journal.
 const OFFSETS_SUFFIX: &str = "_offsets";
 
-/// Decode one varint-framed item from the head of `bytes`, whose encoded length must be exactly
-/// `frame_len` (the gap to the next frame's offset). Returns `None` on any mismatch or decode
-/// failure. The async read path reports such errors.
+/// Decode one varint-framed item from `bytes`, whose length must be exactly the frame's encoded
+/// length (the gap to the next frame's offset). Returns `None` on any mismatch or decode failure.
+/// The async read path reports such errors.
 fn decode_frame_from_span<V: CodecShared>(
-    bytes: &[u8],
-    frame_len: usize,
+    bytes: Bytes,
     codec_config: &V::Cfg,
     compressed: bool,
 ) -> Option<V> {
-    let mut cursor = Cursor::new(bytes);
+    let mut cursor = Cursor::new(bytes.as_ref());
     let (size, varint_len) = decode_length_prefix(&mut cursor).ok()?;
-    let actual_len = size.checked_add(varint_len)?;
-    if actual_len != frame_len || frame_len > bytes.len() {
+    if size.checked_add(varint_len)? != bytes.len() {
         return None;
     }
-    decode_item::<V>(&bytes[varint_len..frame_len], codec_config, compressed).ok()
+    decode_item::<V>(bytes.slice(varint_len..), codec_config, compressed).ok()
 }
 
 /// One step of walking varint frames over a blob's bytes during recovery.
@@ -494,8 +493,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         let start = offsets[0];
         let end = offsets[offsets.len() - 1];
         let range_len = usize::try_from(end - start).map_err(|_| Error::OffsetOverflow)?;
-        let bytes = blob_handle.read_at(start, range_len).await?.coalesce();
-        let bytes = bytes.as_ref();
+        let bytes = Bytes::from(blob_handle.read_at(start, range_len).await?.coalesce());
 
         let mut items = Vec::with_capacity(offsets.len());
         let mut local_offset = 0usize;
@@ -526,7 +524,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
                 .checked_add(item_len)
                 .ok_or(Error::OffsetOverflow)?;
             items.push(decode_item::<V>(
-                &bytes[data_start..data_end],
+                bytes.slice(data_start..data_end),
                 &self.codec_config,
                 self.compressed,
             )?);
@@ -540,7 +538,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
 
     /// Read the varint-framed item for `position` at byte `offset` from cached bytes, returning
     /// `None` on any miss.
-    fn try_read_frame_sync(&self, position: u64, offset: u64, buf: &mut Vec<u8>) -> Option<V> {
+    fn try_read_frame_sync(&self, position: u64, offset: u64) -> Option<V> {
         let blob = self
             .data
             .get(position_to_blob(position, self.items_per_blob.get()))?;
@@ -585,12 +583,12 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         }
 
         // Otherwise try reading the full item from cache.
-        buf.resize(item_len, 0);
-        if !blob.try_read_sync_into(buf, offset) {
+        let mut buf = vec![0u8; item_len];
+        if !blob.try_read_sync_into(&mut buf, offset) {
             return None;
         }
         decode_item::<V>(
-            &buf[varint_len..varint_len + data_len],
+            Bytes::from(buf).slice(varint_len..),
             &self.codec_config,
             self.compressed,
         )
@@ -795,7 +793,6 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
             }
         }
 
-        let mut buf = Vec::new();
         let mut hits = 0u64;
 
         // Serve known-extent frames: one batched cache read per data blob group.
@@ -819,19 +816,20 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
                 .map(|&(_, offset, len)| (offset, len))
                 .collect();
             let total: usize = ranges.iter().map(|&(_, len)| len).sum();
-            buf.resize(total, 0);
+            let mut buf = vec![0u8; total];
             let missed = blob.try_read_ranges_sync_into(&mut buf, &ranges);
+            let buf = Bytes::from(buf);
             let mut missed = missed.into_iter().peekable();
             let mut local = 0usize;
             for (range_idx, &(idx, _, len)) in group.iter().enumerate() {
-                let slot = &buf[local..local + len];
+                let slot = buf.slice(local..local + len);
                 local += len;
                 if missed.peek() == Some(&range_idx) {
                     missed.next();
                     continue;
                 }
                 if let Some(item) =
-                    decode_frame_from_span(slot, len, &self.codec_config, self.compressed)
+                    decode_frame_from_span(slot, &self.codec_config, self.compressed)
                 {
                     out[idx] = Some(item);
                     hits += 1;
@@ -840,9 +838,8 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         }
 
         // Per-frame path for frames whose extent is unknown.
-        let mut frame_buf = Vec::new();
         for (idx, offset) in singles {
-            if let Some(item) = self.try_read_frame_sync(positions[idx], offset, &mut frame_buf) {
+            if let Some(item) = self.try_read_frame_sync(positions[idx], offset) {
                 out[idx] = Some(item);
                 hits += 1;
             }
@@ -972,13 +969,12 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
         // possible. On a data-frame miss the resolved offset is reused by the async path so the
         // offsets journal is not consulted twice.
         let cached_offset = self.offsets.try_read_sync(position);
-        if let Some(offset) = cached_offset {
-            let mut buf = Vec::new();
-            if let Some(item) = self.try_read_frame_sync(position, offset, &mut buf) {
-                self.metrics.cache_hits.inc();
-                self.metrics.items_read.inc();
-                return Ok(item);
-            }
+        if let Some(offset) = cached_offset
+            && let Some(item) = self.try_read_frame_sync(position, offset)
+        {
+            self.metrics.cache_hits.inc();
+            self.metrics.items_read.inc();
+            return Ok(item);
         }
 
         let _timer = self.metrics.read_timer();
@@ -1010,8 +1006,7 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
     fn try_read_sync(&self, position: u64) -> Option<V> {
         self.validate_readable(position).ok()?;
         let offset = self.offsets.try_read_sync(position)?;
-        let mut buf = Vec::new();
-        let item = self.try_read_frame_sync(position, offset, &mut buf)?;
+        let item = self.try_read_frame_sync(position, offset)?;
         self.metrics.cache_hits.inc();
         self.metrics.items_read.inc();
         Some(item)

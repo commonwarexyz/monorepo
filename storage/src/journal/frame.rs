@@ -4,6 +4,7 @@
 //! zstd-compressed) encoded item.
 
 use super::Error;
+use bytes::Bytes;
 use commonware_codec::{
     Codec, EncodeSize, ReadExt as _, Write as _,
     varint::{MAX_U32_VARINT_SIZE, UInt},
@@ -117,7 +118,7 @@ pub(super) fn decode_item<V: Codec>(
     if compressed {
         let decompressed =
             decode_all(item_data.reader()).map_err(|_| Error::DecompressionFailed)?;
-        V::decode_cfg(decompressed.as_ref(), cfg).map_err(Error::Codec)
+        V::decode_cfg(Bytes::from(decompressed), cfg).map_err(Error::Codec)
     } else {
         V::decode_cfg(item_data, cfg).map_err(Error::Codec)
     }
@@ -137,7 +138,7 @@ pub(super) async fn read_frame_at<V: Codec>(
             IoBufMut::with_capacity(MAX_U32_VARINT_SIZE),
         )
         .await?;
-    let buf = buf.freeze();
+    let buf = Bytes::from(buf.freeze());
     let mut cursor = Cursor::new(buf.slice(..available));
     let (next_offset, item_info) = find_frame(&mut cursor, offset)?;
 
@@ -164,6 +165,7 @@ pub(super) async fn read_frame_at<V: Codec>(
                 .and_then(|offset| offset.checked_add(prefix_len as u64))
                 .ok_or(Error::OffsetOverflow)?;
             let remainder = reader.read_at(read_offset, total_len - prefix_len).await?;
+            let remainder = Bytes::from(remainder.coalesce());
             let decoded = decode_item::<V>(prefix.chain(remainder), cfg, compressed)?;
             (total_len as u32, decoded)
         }
