@@ -168,134 +168,133 @@ Vamsi Policharla</a></div>
         account. However, the bank must remember a unique nullifer for
         every coin that was ever redeemed.</p>
         <h3 id="decentralized-ecash">Decentralized ecash</h3>
-        <p>Replace the bank with a fault-tolerant committee of
-        validators. Sends and receives become transactions, the coin’s
-        signature is issued by the committee, and the account table and
-        the nullifier set move with it. This buys fault tolerance and,
-        designed with care, confirmation latency competitive with a
-        round trip to a bank (<a href="/blogs/multimmit">Multimmit</a>).
-        But the ledger panel has not changed: every validator, and
-        anyone reading the ledger, sees every balance and every
-        account’s inflow and outflow. Even if the committee is trusted
-        to run the ledger, users may not want to share their balances
-        with all of it. So hide them.</p>
+        <p>In order to provide much faster confirmations, and scale with
+        confidence, the most natural strategy is to use a consensus
+        algorithm that provides byzantine fault tolerance. The bank can
+        be replaced a committee of validators and if designed correctly
+        (see <a
+        href="https://commonware.xyz/blogs/multimmit">Multimmit</a> for
+        example), payments from different parts of the world can be
+        <em>simulatenously</em> ingested into the log. Providing must
+        faster confirmations with a truly global payment network.</p>
+        <p>However this introduces additional privacy concerns: anyone
+        reading the ledger, sees every balance and every account’s
+        inflow and outflow. Even if the committee is trusted to run the
+        ledger, users may not want to share their balances with the
+        world.</p>
         <h3 id="hide-balances">Hide balances</h3>
-        <p>Replace each balance with a hiding commitment to the balance
-        and a secret key, and let users update their own commitments
-        with a zero-knowledge proof; validators only verify. The coin
-        becomes a commitment too, a <em>receipt</em> that binds the
-        amount, the sender, and the receiver, and since it hides its
-        contents an ordinary validator signature on it does what the
-        blind signature did. The two transactions prove minimal
-        statements:</p>
+        <p>Cryptographic commitments coupled with zero-knowledge proofs
+        allow us to both hide balances and <em>verifiably</em> (but in
+        zero-knowledge) update them when a transfer occurs. In fact, <a
+        href="https://eprint.iacr.org/2019/191">Zether</a> follows this
+        recipie, but a payment updates the sender and the receiver in
+        one transaction, so the ledger still sees who paid whom. We can
+        take this one step further by <em>decoupling</em> the updates to
+        sender and receiver balances – as done in ecash – to
+        additionally hide who paid whom.</p>
+        <p>Concretely, we can prove during:</p>
         <ul>
-        <li><strong>send</strong>: the new commitment is the old one
-        minus <span class="math inline">v</span>, and the receipt opens
-        to <span class="math inline">(v, A \to B)</span>, with <span
-        class="math inline">0 \le v \le \mathsf{balance}</span>.</li>
-        <li><strong>receive</strong>: the new commitment is the old one
-        plus <span class="math inline">v</span>, I hold a validator
-        signature on some receipt for <span class="math inline">(v,
-        \cdot \to B)</span>, and this nullifier is derived from that
-        receipt under my committed key.</li>
+        <li><strong>send</strong>: the new account commitment is the old
+        one minus <span class="math inline">v</span>, and the on-chain
+        receipt (another commitment) signed by the validators opens to
+        <span class="math inline">(v, A \to B)</span>.</li>
+        <li><strong>receive</strong>: the new account commitment is the
+        old one plus <span class="math inline">v</span>, I hold a
+        validator signature on some receipt for <span
+        class="math inline">(v, \cdot \to B)</span>, and reveal some
+        deterministic (yet random looking) nullifier.</li>
         </ul>
-        <p>The nullifier is the price of hiding <em>which</em> signed
-        receipt is being claimed: validators never see the receipt
-        again, so they keep the set of nullifiers and reject repeats. It
-        plays exactly the role the coin’s nullifier played in ecash, and
-        the storage panel is unchanged. Balances and amounts are gone
-        from the ledger, but a send still carries a receipt and a
-        receive a nullifier, so it still shows who sent and who
-        received.</p>
+        <p>Balances and amounts are now hidden from the ledger, but it
+        still reveals which particular account sent/received funds.</p>
         <h3 id="hide-operations">Hide operations</h3>
-        <p>Whether a transaction is a send or a receive is one bit, and
-        zero knowledge removes it: give both transactions the same
-        public form, a new commitment, a receipt, a nullifier, and a
-        proof, and prove a disjunction. Either this is a valid send, the
-        receipt is genuine and the nullifier is a fresh dummy, or it is
-        a valid receive, the receipt is a dummy of a fixed form that can
-        never be claimed, and the nullifier belongs to the receipt being
-        consumed. The two kinds of row in the ledger are now
-        indistinguishable, and the observer learns only that <span
-        class="math inline">X</span> acted. The <a
-        href="#histories">consistent-histories</a> section below shows
-        how much that one bit is worth.</p>
-        <p>Note the cost in the storage panel: every transaction now
-        publishes a nullifier, real or dummy, so the set grows twice as
-        fast.</p>
-        <h3 id="prune-receipts">Prune receipts</h3>
-        <p>This is the privacy we settle for: the observer learns which
-        account acted, and nothing else. Now scale it. At a million
-        transactions per second every validator receives about 200 MB of
-        transaction data each second, the nullifier set grows by a
-        petabyte a year and must sit in fast storage because every
-        transaction is checked against it, and at 0.5 to 1 ms per proof
-        verification alone occupies 500 to 1000 cores. Bandwidth is the
-        tractable one, since erasure-coded dissemination lets a proposer
-        use the whole network’s egress; storage and compute are the
-        problem.</p>
-        <p>Start with the receipts. A committee signature on every
-        receipt is a threshold signature per transaction, so instead
-        accumulate receipts in a Merkle Mountain Range and sign once per
-        block. Validators keep only the frontier, a logarithmic number
-        of hashes that suffices to append and to compute the root, and a
-        short window of recent roots; the receive relation names one of
-        them and proves membership of the receipt under it. The receipt
-        itself, its position, and its opening live with the two parties:
-        the sender hands them over off the ledger, exactly as it handed
-        over the coin at the start.</p>
-        <h3 id="delegate-nullifier-storage">Delegate nullifier
-        storage</h3>
-        <p>The petabyte is the nullifier set, and it exists because
-        validators do the crediting. But a receipt is committed to its
-        recipient, so only <span class="math inline">B</span> can ever
-        claim it, and only <span class="math inline">B</span> needs to
-        remember which receipts it has claimed. Move the set into <span
-        class="math inline">B</span>’s account: the commitment now also
-        commits to the root of <span class="math inline">B</span>’s own
-        Merkle tree of nullifiers, the nullifier is derived from the
-        receipt’s position under <span class="math inline">B</span>’s
-        committed key and is never published, and the receive relation
-        proves that it was absent from the old tree and is present in
-        the new one. Positions are unique, so no sender can collide with
-        another’s payment, and <span class="math inline">A</span>, who
-        does not know <span class="math inline">B</span>’s key, never
-        learns when its payment was claimed. Watch the nullifier tree
-        leave the validators’ side and reappear on the users’ side, one
-        tree per account, appended in insertion order and threaded in
-        sorted order: whoever credits keeps the list, as the bank did at
-        the start, and now that is the receiver.</p>
+        <p>On the face of it, leaking whether I sent or received money
+        seem innocuous but the ledger additionally provides an
+        <strong><em>ordering</em></strong> for these operations. As we
+        will see <a href="#histories">later</a> in the blog, this
+        greatly reduces the number of different “realities” that could
+        have taken place. Hiding whether we are sending/receiving funds
+        is actually quite straightforward – simply prove a strict
+        disjunction of the send and receive relations.</p>
+        <p>Of course this also means that every send and receive carries
+        both a receipt and a nullifier and when naively done, the prover
+        pays the cost of both relations. In practice, this can be
+        optimized to reduce the redundant work being performed. The
+        ledger now only reveals that an account can online and performed
+        some action – send/receive.</p>
+        <p>Note the cost in the storage panel: the nullifier set grows
+        twice as fast.</p>
+        <h3 id="scaling-prune-receipts">Scaling: prune receipts</h3>
+        <p>We now focus on scaling the system and insist on three
+        restrictions:</p>
+        <ol type="1">
+        <li><strong>Bounded state:</strong> validators store state
+        proportional to the number of accounts, not the number of
+        transactions</li>
+        <li><strong>Constant work:</strong> validators only do a
+        constant amount of work per transaction, independent of the
+        number of accounts (or anonymity sets)</li>
+        <li><strong>Fully offline users:</strong> a user can be offline
+        indefinitely and return knowing only its secrets and the current
+        state, without reading any past transactions</li>
+        </ol>
+        <p>First, instead of signing every single transaction, the
+        committee can accumulate receipts in a Merkle Mountain Range and
+        just sign the root (see Peter’s <a
+        href="https://github.com/opentimestamps/opentimestamps-server/blob/master/doc/merkle-mountain-range.md">doc</a>
+        or Roberto’s <a href="https://commonware.xyz/blogs/mmr">blog</a>
+        for an explainer). The receive proof can be modified to
+        additionally prove knowledge of a merkle tree opening.</p>
+        <p>Thus, validators only need maintain the roots of the receipt
+        MMR which grows logartihmically in the number of
+        transactions.</p>
+        <h3 id="scaling-delegate-nullifiers">Scaling: delegate
+        nullifiers</h3>
+        <p>Now we tackle the nullifier set. Unlike receipts where want
+        to prove <em>membership</em> to claim them, we want to prove
+        <em>non-membership</em> of nullifiers to prevent double
+        spending. MMR’s do not support (efficient) non-membership proofs
+        so we cannot simply “forget” previous nullifiers.</p>
+        <p>The <a href="https://tachyon.z.cash/">Tachyon project</a>
+        uses <a href="https://eprint.iacr.org/2025/2031">oblivious
+        synchronization</a> to get around this issue. Here, validators
+        periodically offload their nullifier set and users will ask
+        untrusted services to create proofs that their coins have so far
+        not been spent. Importantly, these services cannot link clients
+        to their transactions when they eventually spend their coins.
+        However, this requires every unspent shielded note to
+        <em>continually</em> synchronize non-membership proofs with the
+        ledger – hence users cannot be truly offline if they have
+        unspent coins.</p>
+        <p>We have the benefit of working in the account based model and
+        albeit providing less <em>on-chain</em> privacy that Zcash, it
+        allows us to <strong>efficiently delegate</strong> nullifier
+        storage. Each user remembers the nullifers for any transactions
+        that received, accumulates them into an <a
+        href="https://eprint.iacr.org/2021/1263">indexed merkle tree</a>
+        and stores the root inside their account commitment. Using
+        zero-knowledge proofs they show that it was correctly updated
+        whenever they carry receive funds.</p>
         <p>Validator storage now grows with accounts, not transactions.
-        Compute is handled by the proof system: ZK-Pari proofs are two
-        group elements and a field element, and a batch of <span
-        class="math inline">N</span> of them verifies with three
-        multi-scalar multiplications and three pairings, a million per
-        second on 18 cores. One thing still grows, though: each user’s
-        own tree holds every nullifier it has ever received.</p>
-        <h3 id="prune-nullifiers">Prune nullifiers</h3>
-        <p>Divide the ledger into epochs. A receipt’s position fixes the
-        block it was recorded in, and so its epoch, which gates senders
-        to the current epoch: nobody can manufacture a receipt that
-        belongs to the past. The receiver now keeps one nullifier tree
-        per epoch and, in its account commitment, a second tree whose
-        leaves are the epoch roots, appended once per epoch like an MMR.
-        A receive proves the insertion in the tree of the receipt’s
-        epoch and the update of that one leaf.</p>
-        <p>Honest senders deliver receipts as soon as they are recorded,
-        so once an epoch has ended the receiver expects nothing more
-        from it and can drop that epoch’s nullifiers, keeping only the
-        root (a sender that withheld a receipt across the boundary can
-        still be accommodated from cold storage, but never on the common
-        path). Watch each user’s tree empty at the epoch boundary while
-        its root joins the user’s own small mountain range of epoch
-        roots. What everyone keeps at hand is now bounded by activity
-        within an epoch: validators by the number of accounts, users by
-        one epoch of receipts and one hash per epoch. Nothing grows with
-        lifetime history, and the observer still learns only who acted.
-        What that one hidden bit buys is the subject of the rest of this
-        page.</p>
+        Great.</p>
+        <p>But eventually… the nullifier set will grow too big for users
+        to manage as well.</p>
+        <h3 id="scaling-prune-nullifiers">Scaling: prune nullifiers</h3>
+        <p>Now for the final optimization. Users can actually prune
+        their nullifier sets as well! We divide the ledger into epochs
+        and introduce a second MMR which store the roots of nullifier
+        trees from previous epochs. Storage only grows logarithmically
+        in the number of epochs plus the number of nullifiers in the
+        current epoch.</p>
+        <p>Note that this means claiming a receipt from an old epoch is
+        more expensive as they would need to update the MMR which
+        requires retreiving the old roots and nullifiers.</p>
+        <p>In practice, we expect that this rarely happens as in typical
+        transactions the seller will only hand over the goods when they
+        have a receipt in-hand in which case they know all the receipts
+        they need to claim before closing out the epoch.</p>
         </div>
         <h2 id="histories">Chapter 2: How many histories?</h2>
+        <!-- todo: update below this -->
         <p>In our private payment scheme a payment is two transactions:
         the sender publishes a receipt, and the receiver later claims
         it. Validators learn which account acts, and nothing about
