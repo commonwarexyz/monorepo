@@ -18,7 +18,7 @@ use crate::{
                 },
                 blocks::{BlockMeta, FinalBlock, FinalBlockMeta, validated_reference},
                 checkpoint::{CatalogState, Checkpoint, Prune, next_lqc_index},
-                pending::{BodyReadGroup, BodyReader, PendingBlocks},
+                pending::{Append, BodyReadGroup, BodyReader, PendingBlocks},
                 temporary::{ReadPlan as TemporaryReadPlan, TemporaryArchive},
             },
             types::OutputIndex,
@@ -35,7 +35,10 @@ use commonware_cryptography::{Digestible, Hasher, bls12381::primitives::variant:
 use commonware_runtime::Handle;
 use commonware_storage::{Context, metadata::Metadata, translator::Translator};
 use commonware_utils::sequence::Unit;
-use futures::future::try_join_all;
+use futures::{
+    FutureExt as _,
+    future::{BoxFuture, try_join_all},
+};
 use std::{collections::BTreeSet, sync::Arc};
 
 type SharedLqc<V, H> = Shared<Lqc<V, <H as Hasher>::Digest>>;
@@ -52,6 +55,22 @@ pub(in crate::multimmit::marshal) type PendingLqc<T, E, H, V> =
     TemporaryArchive<T, E, <H as Hasher>::Digest, SharedLqc<V, H>>;
 pub(in crate::multimmit::marshal) type PendingHistory<T, E, H> =
     TemporaryArchive<T, E, <H as Hasher>::Digest, SharedHistory<H>>;
+
+/// Mutable journals returned by one admission operation.
+pub(in crate::multimmit::marshal) enum AdmissionWrite<T, E, H, V, B>
+where
+    T: Translator,
+    E: Context,
+    H: Hasher,
+    V: Variant,
+    B: Codec + Digestible<Digest = H::Digest>,
+{
+    Lqc(PendingLqc<T, E, H, V>),
+    History(PendingHistory<T, E, H>),
+    Block(Option<Append<E, H, B>>),
+    #[cfg(test)]
+    Finality(PendingLqc<T, E, H, V>, PendingHistory<T, E, H>),
+}
 
 pub(in crate::multimmit::marshal) type FinalBlockReadRequest<H> =
     ArchiveReadRequest<<H as Hasher>::Digest>;
@@ -304,9 +323,9 @@ where
         Ok(())
     }
 
-    pub(in crate::multimmit::marshal) async fn buffer_admissions(
-        &mut self,
-        writes: Vec<(Admission<H, V, B>, bool)>,
+    pub(in crate::multimmit::marshal) fn admission_footprint(
+        &self,
+        writes: &[(Admission<H, V, B>, bool)],
     ) -> Result<Option<AdmissionFootprint>, Error> {
         let pending_blocks = self
             .pending_blocks
@@ -328,15 +347,13 @@ where
             });
         for (write, durable) in writes {
             match write {
-                Admission::Lqc(view, id, proof) => {
-                    self.put_pending_lqc(view, id, proof).await?;
-                    if durable {
+                Admission::Lqc(..) => {
+                    if *durable {
                         footprint.as_mut().expect("durable footprint exists").lqc = true;
                     }
                 }
-                Admission::History(view, commitment, record) => {
-                    self.put_pending_history(view, commitment, record).await?;
-                    if durable {
+                Admission::History(..) => {
+                    if *durable {
                         footprint
                             .as_mut()
                             .expect("durable footprint exists")
@@ -344,28 +361,14 @@ where
                     }
                 }
                 #[cfg(test)]
-                Admission::Finality {
-                    view,
-                    id,
-                    proof,
-                    history,
-                } => {
-                    let commitment = proof.leader().history();
-                    self.put_pending_lqc(view, id, proof).await?;
-                    self.put_pending_history(view, commitment, history).await?;
-                    if durable {
+                Admission::Finality { .. } => {
+                    if *durable {
                         let footprint = footprint.as_mut().expect("durable footprint exists");
                         footprint.lqc = true;
                         footprint.history = true;
                     }
                 }
-                Admission::Block(reference, block) => {
-                    self.pending_blocks
-                        .as_mut()
-                        .expect("catalog owns pending blocks")
-                        .put(reference, block)
-                        .await
-                        .map_err(Error::storage)?;
+                Admission::Block(_, _) => {
                     footprint
                         .as_mut()
                         .expect("block admission creates a durability footprint")
@@ -374,6 +377,110 @@ where
             }
         }
         Ok(footprint)
+    }
+
+    /// Lends only the journals touched by one admission. Until completion, the catalog may
+    /// plan immutable body reads but must not perform another storage mutation.
+    /// Dropping or failing the operation makes this store unusable.
+    #[allow(clippy::type_complexity)]
+    pub(in crate::multimmit::marshal) fn start_admission(
+        &mut self,
+        write: Admission<H, V, B>,
+    ) -> Result<BoxFuture<'static, Result<AdmissionWrite<T, E, H, V, B>, Error>>, Error> {
+        // Keep the owned journal operation out of the catalog actor's stack frame.
+        Ok(match write {
+            Admission::Lqc(view, id, proof) => {
+                let lqc = self.pending_lqc.take().expect("catalog owns pending LQCs");
+                async move {
+                    let (store, _) = lqc
+                        .put(view.get(), id.get(), Shared::new(proof))
+                        .await
+                        .map_err(Error::storage)?;
+                    Ok(AdmissionWrite::Lqc(store))
+                }
+                .boxed()
+            }
+            Admission::History(view, commitment, record) => {
+                let history = self
+                    .pending_history
+                    .take()
+                    .expect("catalog owns pending history");
+                async move {
+                    let (store, _) = history
+                        .put(view.get(), commitment, Shared::new(record))
+                        .await
+                        .map_err(Error::storage)?;
+                    Ok(AdmissionWrite::History(store))
+                }
+                .boxed()
+            }
+            Admission::Block(reference, value) => {
+                let block = self
+                    .pending_blocks
+                    .as_mut()
+                    .expect("catalog owns pending blocks")
+                    .start_put(reference, value)
+                    .map_err(Error::storage)?;
+                async move {
+                    let completed = match block {
+                        Some(block) => Some(block.await.map_err(Error::storage)?),
+                        None => None,
+                    };
+                    Ok(AdmissionWrite::Block(completed))
+                }
+                .boxed()
+            }
+            #[cfg(test)]
+            Admission::Finality {
+                view,
+                id,
+                proof,
+                history: record,
+            } => {
+                let lqc = self.pending_lqc.take().expect("catalog owns pending LQCs");
+                let history = self
+                    .pending_history
+                    .take()
+                    .expect("catalog owns pending history");
+                async move {
+                    let commitment = proof.leader().history();
+                    let (lqc, _) = lqc
+                        .put(view.get(), id.get(), Shared::new(proof))
+                        .await
+                        .map_err(Error::storage)?;
+                    let (history, _) = history
+                        .put(view.get(), commitment, Shared::new(record))
+                        .await
+                        .map_err(Error::storage)?;
+                    Ok(AdmissionWrite::Finality(lqc, history))
+                }
+                .boxed()
+            }
+        })
+    }
+
+    /// Returns journal ownership and publishes any completed block metadata into custody indexes.
+    pub(in crate::multimmit::marshal) fn finish_admission(
+        &mut self,
+        write: AdmissionWrite<T, E, H, V, B>,
+    ) -> Result<(), Error> {
+        match write {
+            AdmissionWrite::Lqc(store) => self.pending_lqc = Some(store),
+            AdmissionWrite::History(store) => self.pending_history = Some(store),
+            AdmissionWrite::Block(Some(append)) => self
+                .pending_blocks
+                .as_mut()
+                .expect("catalog owns pending blocks")
+                .finish_put(append)
+                .map_err(Error::storage)?,
+            AdmissionWrite::Block(None) => {}
+            #[cfg(test)]
+            AdmissionWrite::Finality(lqc, history) => {
+                self.pending_lqc = Some(lqc);
+                self.pending_history = Some(history);
+            }
+        }
+        Ok(())
     }
 
     /// Starts the exact temporary-archive durability cut accumulated by the catalog.
@@ -471,39 +578,6 @@ where
             .finish_seals(segments, pinned)
             .await
             .map_err(Error::storage)
-    }
-
-    async fn put_pending_lqc(
-        &mut self,
-        view: View,
-        id: CertificateId<H::Digest>,
-        proof: Arc<Lqc<V, H::Digest>>,
-    ) -> Result<(), Error> {
-        let store = self.pending_lqc.take().expect("catalog owns pending LQCs");
-        let (store, _) = store
-            .put(view.get(), id.get(), Shared::new(proof))
-            .await
-            .map_err(Error::storage)?;
-        self.pending_lqc = Some(store);
-        Ok(())
-    }
-
-    async fn put_pending_history(
-        &mut self,
-        view: View,
-        commitment: H::Digest,
-        record: Arc<TipRecord<H::Digest>>,
-    ) -> Result<(), Error> {
-        let store = self
-            .pending_history
-            .take()
-            .expect("catalog owns pending history");
-        let (store, _) = store
-            .put(view.get(), commitment, Shared::new(record))
-            .await
-            .map_err(Error::storage)?;
-        self.pending_history = Some(store);
-        Ok(())
     }
 
     pub(in crate::multimmit::marshal) async fn lqc(

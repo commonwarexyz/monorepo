@@ -708,7 +708,7 @@ where
         )));
     }
     metrics.progress(progress.acknowledged);
-    loop {
+    'delivery: loop {
         if let Some(mut next) = pending.next(progress.acknowledged)? {
             'fill: while pending.has_capacity() && is_committed(next, progress.committed) {
                 if let Some((block, encoded_len)) = cache.take_hot(next)
@@ -723,28 +723,48 @@ where
                     continue;
                 }
                 let mut refs = cache.take_refs(next, pending.remaining(), bounds.delivery_bytes);
-                if refs.is_empty() {
-                    refs = catalog
-                        .output_refs(
-                            next,
-                            cache.cold_prefix(next, pending.remaining()),
-                            bounds.delivery_bytes,
-                        )
-                        .await?;
-                }
-                if refs.is_empty() {
-                    return Err(Error::Missing(next));
-                }
-                let materialize = info_span!(
-                    "multimmit.marshal.delivery.materialize",
-                    start = next.get(),
-                    outputs = refs.len(),
-                );
-                let outputs = bodies
-                    .materialize(&refs)
-                    .instrument(materialize)
-                    .await
-                    .map_err(|error| Error::Catalog(catalog::Error::storage(error)))?;
+                let max_items = cache.cold_prefix(next, pending.remaining());
+                let generation = progress.generation;
+                let outputs = {
+                    let fetch = async {
+                        if refs.is_empty() {
+                            refs = catalog
+                                .output_refs(next, max_items, bounds.delivery_bytes)
+                                .await?;
+                        }
+                        if refs.is_empty() {
+                            return Err(Error::Missing(next));
+                        }
+                        let materialize = info_span!(
+                            "multimmit.marshal.delivery.materialize",
+                            start = next.get(),
+                            outputs = refs.len(),
+                        );
+                        let outputs = bodies
+                            .materialize(&refs)
+                            .instrument(materialize)
+                            .await
+                            .map_err(|error| Error::Catalog(catalog::Error::storage(error)))?;
+                        Ok::<_, Error>(outputs)
+                    };
+                    let mut fetch = std::pin::pin!(fetch);
+                    // Reset notifications supersede both descriptor lookup and body reads. Apply a
+                    // queued reset before interpreting a result from the superseded generation.
+                    loop {
+                        select! {
+                            command = commands.recv() => {
+                                let Some(command) = command else { return Ok(()); };
+                                let reset = matches!(command, Command::Reset { .. });
+                                handle_command(&catalog, &mut store, command, &mut pending,
+                                    &mut cache, &metrics, &mut progress).await?;
+                                if reset || progress.generation != generation {
+                                    continue 'delivery;
+                                }
+                            },
+                            outputs = &mut fetch => break outputs?,
+                        }
+                    }
+                };
                 metrics
                     .stored_outputs
                     .inc_by(u64::try_from(outputs.len()).unwrap_or(u64::MAX));

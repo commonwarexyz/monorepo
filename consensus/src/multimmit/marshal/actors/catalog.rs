@@ -4,6 +4,8 @@
 //! bounded background slots. Finalized checkpoints are published last, making recovery depend on
 //! one authoritative cut. Its block cache is advisory: every cache miss is answered from durable
 //! custody without changing observable behavior.
+//! Committed body reads can proceed while admission owns its mutable journals; ordinary requests
+//! retain mailbox ordering, and destructive transitions wait for journal ownership to return.
 
 use super::{
     delivery::{self, DeliveryClient},
@@ -711,26 +713,29 @@ impl Policy for DeliveryCursorControl {
     }
 }
 
-enum CatalogEvent<D, A, R, M, S, C> {
+enum CatalogEvent<D, A, R, M, S, C, Q> {
     Durability(D),
     DeliveryCursor(A),
     Metadata(R),
     Materialization(M),
     Seal(S),
     Command(C),
+    CommittedRead(Q),
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn next_catalog_event<D, A, R, M, S, C>(
+async fn next_catalog_event<D, A, R, M, S, C, Q>(
     durability: D,
     acknowledgement: A,
     metadata: R,
     materialization: M,
     seal: S,
     command: C,
+    committed_read: Q,
     accept_acknowledgements: bool,
     accept_commands: bool,
-) -> CatalogEvent<D::Output, A::Output, R::Output, M::Output, S::Output, C::Output>
+    accept_committed_reads: bool,
+) -> CatalogEvent<D::Output, A::Output, R::Output, M::Output, S::Output, C::Output, Q::Output>
 where
     D: Future,
     A: Future,
@@ -738,6 +743,7 @@ where
     M: Future,
     S: Future,
     C: Future,
+    Q: Future,
 {
     let acknowledgement = async move {
         if accept_acknowledgements {
@@ -753,6 +759,13 @@ where
             pending().await
         }
     };
+    let committed_read = async move {
+        if accept_committed_reads {
+            committed_read.await
+        } else {
+            pending().await
+        }
+    };
     select! {
         completion = durability => CatalogEvent::Durability(completion),
         acknowledgement = acknowledgement => CatalogEvent::DeliveryCursor(acknowledgement),
@@ -760,6 +773,7 @@ where
         completion = materialization => CatalogEvent::Materialization(completion),
         completion = seal => CatalogEvent::Seal(completion),
         command = command => CatalogEvent::Command(command),
+        read = committed_read => CatalogEvent::CommittedRead(read),
     }
 }
 #[cfg(test)]
@@ -988,6 +1002,7 @@ where
 {
     commands: mailbox::Sender<TracedCommand<H, V, B>>,
     delivery_cursors: mailbox::Sender<DeliveryCursorControl>,
+    committed_reads: mailbox::Sender<TracedCommand<H, V, B>>,
     admission_capacity: usize,
     /// Reads the runtime clock at enqueue so the actor can measure mailbox dwell.
     now: EnqueueClock,
@@ -1009,6 +1024,7 @@ where
         Self {
             commands: self.commands.clone(),
             delivery_cursors: self.delivery_cursors.clone(),
+            committed_reads: self.committed_reads.clone(),
             admission_capacity: self.admission_capacity,
             now: self.now.clone(),
         }
@@ -1062,6 +1078,20 @@ where
             => |reply| Command::Promoted(frontiers, reply);
         progress() -> Progress<H::Digest> => Command::Progress;
         checkpoint() -> Checkpoint<H::Digest> => Command::Checkpoint;
+    }
+
+    /// Reads already-committed custody independently of queued admissions. Callers must have
+    /// obtained these exact references from a published checkpoint before issuing the request.
+    pub(in crate::multimmit::marshal) async fn committed_bodies(
+        &self,
+        references: Vec<BlockRef<H::Digest>>,
+    ) -> Result<BodyValues<H, B>, Error> {
+        let (reply, receiver) = oneshot::channel();
+        let command = TracedCommand::stamped(Command::Bodies(references, reply), (self.now)());
+        if self.committed_reads.enqueue(command) == Feedback::Closed {
+            return Err(Error::Closed);
+        }
+        receiver.await.unwrap_or(Err(Error::Closed))
     }
 
     /// Publishes an already durable delivery cursor to catalog's progress and pruning mirror.
@@ -1341,6 +1371,8 @@ where
     pending_delivery_bytes: u64,
     commands: mailbox::Receiver<TracedCommand<H, V, B>>,
     delivery_cursors: mailbox::Receiver<DeliveryCursorControl>,
+    committed_reads: mailbox::Receiver<TracedCommand<H, V, B>>,
+    committed_reads_open: bool,
     deferred: Option<TracedCommand<H, V, B>>,
     durability: Pool<'static, DurabilityCompletion<H::Digest>>,
     metadata_reads: Pool<'static, MetadataCompletion<E, H>>,
@@ -1458,6 +1490,16 @@ where
                 }
             }
 
+            // Service at most one independent read before returning to mutable work. A floor
+            // installation closes intake while its existing readers drain.
+            if self.accept_committed_reads() {
+                match self.committed_reads.try_recv() {
+                    Ok(read) => self.process_command(read).await?,
+                    Err(TryRecvError::Disconnected) => self.committed_reads_open = false,
+                    Err(TryRecvError::Empty) => {}
+                }
+            }
+
             if let Some(command) = self.deferred.take() {
                 if self.command_ready(&command.command) {
                     self.process_command(command).await?;
@@ -1485,6 +1527,7 @@ where
 
             if !commands_open
                 && !delivery_cursors_open
+                && !self.committed_reads_open
                 && self.deferred.is_none()
                 && self.pending_admission.is_none()
                 && !self.admission_active
@@ -1502,6 +1545,7 @@ where
                 .as_ref()
                 .map_or("event", |command| command.command.kind());
             let started = self.clock.current();
+            let accept_committed_reads = self.accept_committed_reads();
             let event = next_catalog_event(
                 self.durability.next_completed(),
                 self.delivery_cursors.recv(),
@@ -1509,8 +1553,10 @@ where
                 self.materializer.complete_next(),
                 self.seals.next_completed(),
                 self.commands.recv(),
+                self.committed_reads.recv(),
                 delivery_cursors_open,
                 commands_open && self.deferred.is_none(),
+                accept_committed_reads,
             )
             .await;
             self.metrics
@@ -1527,7 +1573,9 @@ where
                 CatalogEvent::Metadata(_) => Some("metadata"),
                 CatalogEvent::Seal(_) => Some("seal"),
                 CatalogEvent::Materialization(_) => Some("materialization"),
-                CatalogEvent::Command(_) | CatalogEvent::DeliveryCursor(None) => None,
+                CatalogEvent::Command(_)
+                | CatalogEvent::CommittedRead(_)
+                | CatalogEvent::DeliveryCursor(None) => None,
             };
             let started = self.clock.current();
             let result = async {
@@ -1549,18 +1597,15 @@ where
                         self.materializer.release_readers(reclaimed);
                     }
                     CatalogEvent::Materialization(completion) => {
-                        let completed = completion?;
-                        self.update_materialization_metrics();
-                        if let Some(completed) = completed {
-                            let available = self.complete_materialization(completed)?;
-                            self.retry_body_waiters(&available)?;
-                        }
+                        self.finish_materialization(completion)?;
                     }
                     CatalogEvent::Command(Some(mut command)) => {
                         self.note_intake(&mut command);
                         self.process_command(command).await?;
                     }
                     CatalogEvent::Command(None) => commands_open = false,
+                    CatalogEvent::CommittedRead(Some(read)) => self.process_command(read).await?,
+                    CatalogEvent::CommittedRead(None) => self.committed_reads_open = false,
                 }
                 Ok::<_, Error>(())
             }
@@ -1571,6 +1616,70 @@ where
             }
             result?;
         }
+    }
+
+    fn accept_committed_reads(&self) -> bool {
+        self.committed_reads_open
+            && self.body_waiters.len() < self.body_waiter_capacity
+            && self
+                .deferred
+                .as_ref()
+                .is_none_or(|command| !command.command.body_barrier())
+    }
+
+    /// Drives immutable reads while one admission exclusively owns its mutable journals.
+    /// No durability completion, prune, installation, or other mutation runs in this interval.
+    async fn write_admission(&mut self, write: Admission<H, V, B>) -> Result<(), Error> {
+        let write = self.stores.start_admission(write)?;
+        let mut write = std::pin::pin!(write);
+        loop {
+            let accept_reads = self.accept_committed_reads();
+            let read = async {
+                if accept_reads {
+                    self.committed_reads.recv().await
+                } else {
+                    pending().await
+                }
+            };
+            select! {
+                result = &mut write => return self.stores.finish_admission(result?),
+                completion = self.materializer.complete_next() => {
+                    self.finish_materialization(completion).map_err(Error::storage)?;
+                },
+                read = read => {
+                    let Some(read) = read else {
+                        self.committed_reads_open = false;
+                        continue;
+                    };
+                    let Command::Bodies(references, reply) = read.command else {
+                        unreachable!("the committed read lane carries only body requests");
+                    };
+                    let span = info_span!(parent: &read.span, "multimmit.marshal.catalog.process",
+                        command = "bodies", handler_ns = tracing::field::Empty);
+                    let started = self.clock.current();
+                    let result = {
+                        let _guard = span.enter();
+                        self.process_bodies(references, reply)
+                    };
+                    span.record("handler_ns", u64::try_from(self.clock.current()
+                        .duration_since(started).unwrap_or_default().as_nanos()).unwrap_or(u64::MAX));
+                    result.map_err(Error::storage)?;
+                },
+            }
+        }
+    }
+
+    fn finish_materialization(
+        &mut self,
+        completion: Result<Option<CompletedRequest<H, B>>, Error>,
+    ) -> Result<(), Error> {
+        let completed = completion?;
+        self.update_materialization_metrics();
+        if let Some(completed) = completed {
+            let available = self.complete_materialization(completed)?;
+            self.retry_body_waiters(&available)?;
+        }
+        Ok(())
     }
 
     /// Records mailbox dwell for a stamped command at its first intake.
@@ -1854,6 +1963,9 @@ where
         }
         while let Ok(control) = self.delivery_cursors.try_recv() {
             control.fail(error.clone());
+        }
+        while let Ok(read) = self.committed_reads.try_recv() {
+            read.fail(error.clone());
         }
         std::mem::replace(&mut self.commit_state, CommitState::Idle).fail(error);
     }
@@ -2364,7 +2476,15 @@ where
             return Ok(());
         }
         let admitted = writes.len();
-        let footprint = match self.stores.buffer_admissions(writes).await {
+        let footprint = match async {
+            let footprint = self.stores.admission_footprint(&writes)?;
+            for (write, _) in writes {
+                self.write_admission(write).await?;
+            }
+            Ok::<_, Error>(footprint)
+        }
+        .await
+        {
             Ok(footprint) => footprint,
             Err(error) => {
                 for reply in durable.into_iter().chain(buffered) {
@@ -3542,10 +3662,13 @@ where
     let (commands, receiver) = mailbox::new(context.child("mailbox"), capacity);
     let (delivery_cursors, delivery_cursor_receiver) =
         mailbox::new(context.child("delivery_cursor_mailbox"), NonZeroUsize::MIN);
+    let (committed_reads, committed_read_receiver) =
+        mailbox::new(context.child("committed_read_mailbox"), capacity);
     let enqueue_clock = context.child("enqueue_clock");
     let client = CatalogClient {
         commands,
         delivery_cursors,
+        committed_reads,
         admission_capacity: admission_cut_capacity.get(),
         now: Arc::new(move || enqueue_clock.current()),
     };
@@ -3579,6 +3702,8 @@ where
             pending_delivery_bytes: 0,
             commands: receiver,
             delivery_cursors: delivery_cursor_receiver,
+            committed_reads: committed_read_receiver,
+            committed_reads_open: true,
             deferred: None,
             durability: Pool::default(),
             metadata_reads: Pool::default(),
@@ -4298,6 +4423,114 @@ mod tests {
             let materialized_live = metric_total(&context.encode(), "materialized_bodies_total");
             assert_eq!(materialized_live, materialized_after);
 
+            drop(client);
+            assert!(handle.await.is_ok());
+        });
+    }
+
+    #[rstest::rstest]
+    #[case(false)]
+    #[case(true)]
+    fn committed_body_read_completes_during_segment_open(#[case] sealed: bool) {
+        deterministic::Runner::default().start(|context| async move {
+            let committee = Committee::<MinPk>::new_with_namespace_and_producers(
+                81,
+                b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_READ_DURING_APPEND",
+                6,
+                (0..4).map(Participant::new).collect(),
+                Limits::new(2, 2).unwrap(),
+            );
+            let configure = || {
+                let mut config = config(&context, &committee);
+                set_capacity(&mut config, 1);
+                config
+            };
+            let first = producer_block(&committee, 0, 81);
+            let next = producer_block(&committee, 1, 82);
+            let (client, handle, _delivery) =
+                spawn_catalog(configure(), context.child("initial")).await;
+            client
+                .admit_block(first.reference(), first.clone())
+                .await
+                .unwrap();
+            if sealed {
+                let tail = producer_block(&committee, 2, 83);
+                client.admit_block(tail.reference(), tail).await.unwrap();
+            }
+            let current = client.checkpoint().await.unwrap();
+            let mut emitted = current.emitted().to_vec();
+            emitted[0] = first.reference();
+            client
+                .commit(Commit {
+                    selected: Vec::new(),
+                    history: Vec::new(),
+                    outputs: vec![output_row(OutputIndex::ZERO, &first)],
+                    checkpoint: Checkpoint::new(
+                        current.epoch(),
+                        current.generation(),
+                        current.archive_layout(),
+                        current.floor(),
+                        current.history(),
+                        current.history_index(),
+                        current.ordered().to_vec(),
+                        emitted,
+                        Some(OutputIndex::ZERO),
+                    )
+                    .unwrap(),
+                })
+                .await
+                .unwrap();
+            let refs = client
+                .output_refs(OutputIndex::ZERO, NZUsize!(1), NZUsize!(1024))
+                .await
+                .unwrap();
+            drop(client);
+            assert!(handle.await.is_ok());
+
+            let syncs = PendingSyncs::default();
+            let delayed = DelayedSyncContext {
+                inner: context.child("delayed"),
+                pending: syncs.clone(),
+            };
+            let (client, handle, _delivery) = drive_pending_syncs(
+                &syncs,
+                spawn_catalog(configure(), delayed.child("reopened")),
+            )
+            .await;
+            syncs.arm();
+            let mut admission = Box::pin(client.stage_block(next));
+            for _ in 0..100 {
+                if syncs.calls() > 0 {
+                    break;
+                }
+                select! {
+                    _ = &mut admission => panic!("append completed before opening its segment"),
+                    _ = context.sleep(std::time::Duration::from_millis(1)) => {},
+                }
+            }
+            assert!(syncs.calls() > 0, "new segment did not reach storage");
+            let mut ordinary = Box::pin(client.block(first.reference()));
+            select! {
+                _ = &mut ordinary => panic!("ordinary read overtook the admission"),
+                _ = context.sleep(std::time::Duration::from_millis(1)) => {},
+            }
+            let bodies = promoter::Bodies::new(client.clone(), None);
+            let mut read = Box::pin(bodies.materialize(&refs));
+            select! {
+                result = &mut read => assert_eq!(result.unwrap()[0].as_ref(), first.as_ref()),
+                _ = context.sleep(std::time::Duration::from_millis(10)) => {
+                    panic!("committed body read waited for unrelated segment-open I/O");
+                },
+            }
+            assert_eq!(
+                metric_total(&context.encode(), "materialized_bodies_total"),
+                1
+            );
+            syncs.unblock();
+            admission.await.unwrap().wait().await.unwrap();
+            assert_eq!(ordinary.await.unwrap().as_deref(), Some(first.as_ref()));
+            drop(read);
+            drop(bodies);
             drop(client);
             assert!(handle.await.is_ok());
         });
@@ -6851,6 +7084,178 @@ mod tests {
 
             delivery_handle.abort();
             let _ = delivery_handle.await;
+            drop(client);
+            assert!(catalog_handle.await.is_ok());
+        });
+    }
+
+    #[test]
+    fn delivery_reset_preempts_cold_materialization() {
+        deterministic::Runner::default().start(|context| async move {
+            let committee = Committee::<MinPk>::new_with_namespace_and_producers(
+                84,
+                b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_COLD_RESET",
+                6,
+                (0..4).map(Participant::new).collect(),
+                Limits::new(2, 2).unwrap(),
+            );
+            let reads = PendingReads::default();
+            let delayed = DelayedReadContext {
+                inner: context.child("delayed"),
+                pending: reads.clone(),
+            };
+            let mut config = config(&context, &committee);
+            config.max_hot_block_bytes =
+                NonZeroUsize::new(delivery::descriptor_bytes::<Sha256Digest>() as usize).unwrap();
+            let bounds = delivery::Bounds {
+                pending_acks: config.max_pending_acks,
+                delivery_bytes: config.max_delivery_bytes,
+                hot_block_bytes: config.max_hot_block_bytes,
+            };
+            let (delivery_client, commands) = delivery::channel(delayed.child("delivery_mailbox"));
+            let control = delivery_client.clone();
+            let (client, catalog_handle, _, _, store) = config
+                .spawn::<_, Sha256>(delayed.child("catalog"), delivery_client)
+                .await
+                .unwrap();
+            let block = producer_block(&committee, 0, 84);
+            client
+                .admit_block(block.reference(), block.clone())
+                .await
+                .unwrap();
+            let current = client.checkpoint().await.unwrap();
+            let mut emitted = current.emitted().to_vec();
+            emitted[0] = block.reference();
+            client
+                .commit(Commit {
+                    selected: Vec::new(),
+                    history: Vec::new(),
+                    outputs: vec![output_row(OutputIndex::ZERO, &block)],
+                    checkpoint: Checkpoint::new(
+                        current.epoch(),
+                        current.generation(),
+                        current.archive_layout(),
+                        current.floor(),
+                        current.history(),
+                        current.history_index(),
+                        current.ordered().to_vec(),
+                        emitted,
+                        Some(OutputIndex::ZERO),
+                    )
+                    .unwrap(),
+                })
+                .await
+                .unwrap();
+            let gate = reads.arm();
+            let reporter = TestReporter::default();
+            let delivery_handle = delivery::spawn(
+                delayed.child("delivery"),
+                store,
+                client.clone(),
+                promoter::Bodies::new(client.clone(), None),
+                reporter.clone(),
+                commands,
+                bounds,
+            );
+            gate.blocked.await.unwrap();
+            let reset = control
+                .reset(current.generation(), Some(OutputIndex::ZERO))
+                .unwrap();
+            select! {
+                applied = reset.wait() => assert!(!applied),
+                _ = context.sleep(std::time::Duration::from_millis(10)) => {
+                    panic!("delivery reset waited for a superseded cold read");
+                },
+            }
+            gate.release.send(()).unwrap();
+            for _ in 0..10 {
+                context.sleep(std::time::Duration::from_millis(1)).await;
+            }
+            assert!(!reporter.contains(OutputIndex::ZERO));
+            assert_eq!(client.progress().await.unwrap().acknowledged, None);
+            assert!(delivery_handle.await.unwrap().is_err());
+            drop(control);
+            drop(client);
+            assert!(catalog_handle.await.is_ok());
+        });
+    }
+
+    #[test]
+    fn floor_install_supersedes_queued_committed_body_read() {
+        deterministic::Runner::default().start(|context| async move {
+            let committee = Committee::<MinPk>::new_with_namespace_and_producers(
+                85, b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_READ_INSTALL",
+                6, (0..4).map(Participant::new).collect(), Limits::new(2, 2).unwrap(),
+            );
+            let blocks = (0..2).map(|chain| producer_block(&committee, chain, 85 + u64::from(chain))).collect::<Vec<_>>();
+            let syncs = PendingSyncs::default();
+            let delayed = DelayedSyncContext { inner: context.child("delayed"), pending: syncs.clone() };
+            let mut config = config(&context, &committee);
+            config.max_commit_outputs = NZUsize!(2);
+            config.max_pending_acks = NZUsize!(1);
+            config.max_hot_block_bytes = NonZeroUsize::new(
+                blocks[0].encode_size() + delivery::descriptor_bytes::<Sha256Digest>() as usize,
+            ).unwrap();
+            let bounds = delivery::Bounds {
+                pending_acks: config.max_pending_acks, delivery_bytes: config.max_delivery_bytes,
+                hot_block_bytes: config.max_hot_block_bytes,
+            };
+            let (delivery_client, commands) = delivery::channel(delayed.child("delivery_mailbox"));
+            let (client, catalog_handle, _, _, store) = drive_pending_syncs(&syncs,
+                config.spawn::<_, Sha256>(delayed.child("catalog"), delivery_client),
+            ).await.unwrap();
+            let reporter = TestReporter::default();
+            let delivery_handle = delivery::spawn(delayed.child("delivery"), store, client.clone(),
+                promoter::Bodies::new(client.clone(), None), reporter.clone(), commands, bounds);
+            drive_pending_syncs(&syncs, client.stage_blocks(&blocks)).await.unwrap();
+            let current = client.checkpoint().await.unwrap();
+            let mut emitted = current.emitted().to_vec();
+            for block in &blocks { emitted[block.reference().chain().get() as usize] = block.reference(); }
+            let token = drive_pending_syncs(&syncs, client.start_commit(Commit {
+                selected: Vec::new(), history: Vec::new(),
+                outputs: blocks.iter().enumerate().map(|(i, block)| output_row(OutputIndex::new(i as u64), block)).collect(),
+                checkpoint: Checkpoint::new(current.epoch(), current.generation(), current.archive_layout(),
+                    current.floor(), current.history(), current.history_index(), current.ordered().to_vec(),
+                    emitted.clone(), Some(OutputIndex::new(1))).unwrap(),
+            }, vec![delivery::DurableOutput { index: OutputIndex::ZERO, block: blocks[0].clone(),
+                encoded_len: blocks[0].encode_size() as u64 }])).await.unwrap();
+            drive_pending_syncs(&syncs, token.wait()).await.unwrap();
+            wait_for_report(&context, &reporter, OutputIndex::ZERO).await;
+
+            let genesis = committee.config.genesis();
+            let base = TipRecord::at_tips(genesis_history::<Sha256>(genesis), genesis.tips().to_vec()).unwrap();
+            let record = Arc::new(TipRecord::at_tips(base.commitment::<Sha256>(), genesis.tips().to_vec()).unwrap());
+            let leader = committee.leader_block_with_parent(5, &committee.vqc(3));
+            let votes = (0..committee.codec().view_quorum()).map(|signer| committee.vote(signer, &leader)).collect::<Vec<_>>();
+            let proof = Arc::new(committee.verifier.assemble_lqc::<Sha256, _>(leader.block().clone(), &votes, &Sequential).unwrap());
+            let target = checkpoint(&committee, 1, proof.id::<Sha256>(), record.commitment::<Sha256>(),
+                0, emitted, Some(OutputIndex::new(1)));
+
+            syncs.arm();
+            let staged = client.stage_block(producer_block(&committee, 2, 87)).await.unwrap();
+            client.progress().await.unwrap();
+            assert!(syncs.calls() > 0);
+            let mut install = Box::pin(client.install(target, install_prune(proof.view()), proof, record));
+            select! {
+                _ = &mut install => panic!("installation overtook admission durability"),
+                _ = context.sleep(std::time::Duration::from_millis(1)) => {},
+            }
+            assert!(reporter.acknowledge(OutputIndex::ZERO));
+            context.sleep(std::time::Duration::from_millis(1)).await;
+            assert!(!reporter.contains(OutputIndex::new(1)));
+            syncs.unblock();
+            select! {
+                result = &mut install => result.unwrap(),
+                _ = context.sleep(std::time::Duration::from_secs(1)) => panic!("installation did not reset the pending cold read"),
+            }
+            staged.wait().await.unwrap();
+            let progress = client.progress().await.unwrap();
+            assert_eq!(progress.generation, 1);
+            assert_eq!(progress.acknowledged, Some(OutputIndex::new(1)));
+            assert!(!reporter.contains(OutputIndex::new(1)));
+            delivery_handle.abort();
+            let _ = delivery_handle.await;
+            drop(install);
             drop(client);
             assert!(catalog_handle.await.is_ok());
         });
