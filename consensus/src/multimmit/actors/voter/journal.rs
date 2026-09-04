@@ -44,7 +44,7 @@ use crate::multimmit::machine::{BarrierId, Change, Cursor, EffectId};
 use crate::{
     LATENCY,
     multimmit::{
-        machine::{BarrierAck, PersistJob},
+        machine::{BarrierAck, MAX_INFLIGHT_BARRIERS, PersistJob},
         storage::{JournalError, SafetyJournal},
     },
 };
@@ -77,7 +77,7 @@ use tracing::{Instrument as _, Span};
 type TryAppend<V, D> = Result<Response<Durable<V, D>>, Admission<Append<V, D>>>;
 
 /// Maximum uncovered barriers allowed before a prefix sync is forced.
-pub(super) const MAX_UNSYNCED: usize = 8;
+pub(super) const MAX_UNSYNCED: usize = MAX_INFLIGHT_BARRIERS;
 
 const PREFIX_DEPTH_BUCKETS: [f64; 10] = [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0];
 
@@ -1540,6 +1540,7 @@ mod tests {
     #[test]
     fn performance_gate_prefix_pipeline() {
         deterministic::Runner::default().start(|context| async move {
+            const TAIL_BARRIERS: usize = 8;
             const FIRST_SYNC_LATENCY: Duration = Duration::from_millis(25);
             const TAIL_SYNC_LATENCY: Duration = Duration::from_millis(10);
             const EXPECTED_URGENT_TAIL_DELAY: Duration = Duration::from_millis(22);
@@ -1574,17 +1575,17 @@ mod tests {
                     (started_at, released_at)
                 });
 
-            let tail_bytes = (2..=MAX_UNSYNCED as u64 + 1)
+            let tail_bytes = (2..=TAIL_BARRIERS as u64 + 1)
                 .map(|barrier| {
                     encoded_size(&job(
                         epoch,
                         barrier,
                         barrier - 1,
-                        barrier == MAX_UNSYNCED as u64 + 1,
+                        barrier == TAIL_BARRIERS as u64 + 1,
                     ))
                 })
                 .sum::<usize>();
-            let mut tail = Vec::with_capacity(MAX_UNSYNCED);
+            let mut tail = Vec::with_capacity(TAIL_BARRIERS);
             let mut tail_append_gate = gates.arm_after_append();
             tail.push(
                 client
@@ -1593,7 +1594,7 @@ mod tests {
             );
             let tail_appended_at = tail_append_gate.wait_entered_at().await;
             tail_append_gate.release();
-            for barrier in 3..=MAX_UNSYNCED as u64 {
+            for barrier in 3..=TAIL_BARRIERS as u64 {
                 tail.push(
                     client
                         .try_append(Span::none(), job(epoch, barrier, barrier - 1, false))
@@ -1605,7 +1606,7 @@ mod tests {
                 client
                     .try_append(
                         Span::none(),
-                        job(epoch, MAX_UNSYNCED as u64 + 1, MAX_UNSYNCED as u64, true),
+                        job(epoch, TAIL_BARRIERS as u64 + 1, TAIL_BARRIERS as u64, true),
                     )
                     .unwrap(),
             );
@@ -1622,21 +1623,21 @@ mod tests {
             assert_eq!(client.metrics().start_syncs.get(), 1);
             assert_eq!(
                 client.metrics().appended_barriers.get(),
-                MAX_UNSYNCED as u64 + 1
+                TAIL_BARRIERS as u64 + 1
             );
             assert_eq!(
                 usize::try_from(client.metrics().pending_barriers.get()).unwrap(),
-                MAX_UNSYNCED + 1
+                TAIL_BARRIERS + 1
             );
             assert_eq!(
                 usize::try_from(client.metrics().uncovered_barriers.get()).unwrap(),
-                MAX_UNSYNCED
+                TAIL_BARRIERS
             );
             assert_eq!(client.metrics().covered_barriers.get(), 1);
             assert_eq!(client.metrics().sync_in_flight.get(), 1);
             assert_eq!(
                 client.metrics().appended_events.get(),
-                MAX_UNSYNCED as u64 + 1
+                TAIL_BARRIERS as u64 + 1
             );
             assert_eq!(
                 usize::try_from(client.metrics().appended_bytes.get()).unwrap(),
@@ -1670,10 +1671,13 @@ mod tests {
             );
             assert_eq!(
                 usize::try_from(client.metrics().covered_barriers.get()).unwrap(),
-                MAX_UNSYNCED
+                TAIL_BARRIERS
             );
             assert_eq!(client.metrics().uncovered_barriers.get(), 0);
-            assert_eq!(client.metrics().max_prefix_depth.get(), MAX_UNSYNCED as i64);
+            assert_eq!(
+                client.metrics().max_prefix_depth.get(),
+                TAIL_BARRIERS as i64
+            );
             assert_eq!(
                 usize::try_from(client.metrics().max_unsynced_bytes.get()).unwrap(),
                 tail_bytes
@@ -1685,7 +1689,12 @@ mod tests {
                     .unwrap()
                     .as_millis()
             );
-            assert_histogram(&context, "owner_prefix_depth", 2, (MAX_UNSYNCED + 1) as f64);
+            assert_histogram(
+                &context,
+                "owner_prefix_depth",
+                2,
+                (TAIL_BARRIERS + 1) as f64,
+            );
             assert_histogram(
                 &context,
                 "owner_urgent_tail_latency",
@@ -1695,7 +1704,7 @@ mod tests {
             assert_eq!(
                 client.metrics().start_syncs.get() as f64
                     / client.metrics().appended_barriers.get() as f64,
-                2.0 / (MAX_UNSYNCED as f64 + 1.0),
+                2.0 / (TAIL_BARRIERS as f64 + 1.0),
                 "nine appends must require exactly two prefix syncs"
             );
 
@@ -1725,7 +1734,7 @@ mod tests {
             }
             assert_eq!(
                 client.metrics().durable_barriers.get(),
-                MAX_UNSYNCED as u64 + 1
+                TAIL_BARRIERS as u64 + 1
             );
             assert_eq!(client.metrics().pending_barriers.get(), 0);
             assert_eq!(client.metrics().pending_bytes.get(), 0);
@@ -1733,7 +1742,7 @@ mod tests {
             assert_histogram(
                 &context,
                 "owner_barrier_latency",
-                MAX_UNSYNCED as u64 + 1,
+                TAIL_BARRIERS as u64 + 1,
                 EXPECTED_RELEASE_LATENCY_SUM.as_secs_f64(),
             );
             finish(client, monitor, &pending).await;
@@ -1972,7 +1981,7 @@ mod tests {
     }
 
     #[test]
-    fn nonurgent_count_flushes_at_eight() {
+    fn nonurgent_count_flushes_at_core_pipeline_limit() {
         deterministic::Runner::default().start(|context| async move {
             let epoch = Epoch::new(8);
             let (context, journal, pending, baseline) =
@@ -1985,7 +1994,7 @@ mod tests {
                 Duration::from_secs(3600),
             );
             let mut responses = Vec::new();
-            for barrier in 1..MAX_UNSYNCED as u64 {
+            for barrier in 1..MAX_INFLIGHT_BARRIERS as u64 {
                 responses.push(
                     client
                         .try_append(Span::none(), job(epoch, barrier, barrier - 1, false))
@@ -1998,29 +2007,47 @@ mod tests {
             assert_eq!(client.metrics().start_syncs.get(), 0);
             assert_eq!(
                 client.metrics().appended_barriers.get(),
-                MAX_UNSYNCED as u64 - 1
+                MAX_INFLIGHT_BARRIERS as u64 - 1
             );
             assert_eq!(
                 usize::try_from(client.metrics().uncovered_barriers.get()).unwrap(),
-                MAX_UNSYNCED - 1
+                MAX_INFLIGHT_BARRIERS - 1
             );
 
             responses.push(
                 client
                     .try_append(
                         Span::none(),
-                        job(epoch, MAX_UNSYNCED as u64, MAX_UNSYNCED as u64 - 1, false),
+                        job(
+                            epoch,
+                            MAX_INFLIGHT_BARRIERS as u64,
+                            MAX_INFLIGHT_BARRIERS as u64 - 1,
+                            false,
+                        ),
                     )
                     .unwrap(),
             );
-            wait_for_starts(&pending, baseline + 1).await;
+            select! {
+                () = wait_for_starts(&pending, baseline + 1) => {},
+                () = context.sleep(Duration::from_millis(25)) => {
+                    panic!("a full core pipeline must flush without waiting for its age limit");
+                },
+            }
             assert_eq!(client.metrics().start_syncs.get(), 1);
             assert_eq!(
                 client.metrics().appended_barriers.get(),
-                MAX_UNSYNCED as u64
+                MAX_INFLIGHT_BARRIERS as u64
             );
-            assert_histogram(&context, "owner_prefix_depth", 1, MAX_UNSYNCED as f64);
-            assert_eq!(client.metrics().covered_barriers.get(), MAX_UNSYNCED as i64);
+            assert_histogram(
+                &context,
+                "owner_prefix_depth",
+                1,
+                MAX_INFLIGHT_BARRIERS as f64,
+            );
+            assert_eq!(
+                client.metrics().covered_barriers.get(),
+                MAX_INFLIGHT_BARRIERS as i64
+            );
             assert_eq!(client.metrics().uncovered_barriers.get(), 0);
             release_next(&pending).await;
             for (index, response) in responses.into_iter().enumerate() {
