@@ -518,6 +518,10 @@
     color: #d9251c;
 }
 
+.sim-counter .v {
+    white-space: pre-line;
+}
+
 .sim-counter .n {
     color: gray;
     font-size: 0.85em;

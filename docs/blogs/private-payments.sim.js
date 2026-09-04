@@ -83,7 +83,7 @@
             switch (step) {
                 case 0: return `${X} pays ${p.to} ${p.v}`;
                 case 1: case 2: return `${X} sends ${p.v}`;
-                case 3: return `${X}: new commitment, receipt ${p.rho}, proof`;
+                case 3: return `${X}: commitment, receipt, proof`;
                 case 4: return `${X}: commitment, receipt, nullifier, proof`;
                 case 5: return `${X}: commitment, receipt, nullifier, root, proof`;
                 default: return `${X}: commitment, receipt, root, proof`;
@@ -91,7 +91,7 @@
         }
         switch (step) {
             case 1: case 2: return `${X} receives ${p.v}, nullifier ${p.nf}`;
-            case 3: return `${X}: new commitment, nullifier ${p.nf}, proof`;
+            case 3: return `${X}: commitment, nullifier, proof`;
             case 4: return `${X}: commitment, receipt, nullifier, proof`;
             case 5: return `${X}: commitment, receipt, nullifier, root, proof`;
             default: return `${X}: commitment, receipt, root, proof`;
@@ -101,43 +101,43 @@
     // The three boxes under the stage. `hl` marks what changed at this step.
     const BOXES = [
         {
-            store: { v: 'one balance per account', n: 'fixed; nothing per payment' },
+            store: { v: 'one balance per account'},
             work: { v: 'the bank applies every payment' },
-            learn: { v: 'everything: who paid whom, how much, every balance', n: 'the bank is inside every payment', hl: true },
+            learn: { v: 'who paid whom, how much', hl: true },
         },
         {
-            store: { v: 'balances, plus every nullifier', n: '0.5 PB a year at 1M TPS, never pruned', hl: true },
-            work: { v: 'the bank signs every coin, checks every nullifier' },
-            learn: { v: 'who sent, who received, amounts', n: 'not who paid whom: the blind signature breaks the link', hl: true },
+            store: { v: 'nullifier for every transfer', n: '+ account balances, ~1 PB/year @1M TPS', hl: true },
+            work: { v: 'signature for every transfer' },
+            learn: { v: 'who sent, who received, amounts', n: 'not who paid whom', hl: true },
         },
         {
-            store: { v: 'balances, plus every nullifier' },
-            work: { v: 'the committee signs every coin, checks every nullifier', n: 'a threshold signature per coin', hl: true },
-            learn: { v: 'who sent, who received, amounts', n: 'now every validator sees every balance', hl: true },
+            store: { v: 'nullifier for every transfer', n: '+ account balances' },
+            work: { v: 'signature for every transfer', n: '(threshold signature)', hl: true },
+            learn: { v: 'who sent, who received, amounts', n: 'visible to anyone (not just the bank)', hl: true },
         },
         {
-            store: { v: 'commitments, plus every nullifier', n: 'the same list as before, now the only thing per payment' },
-            work: { v: 'verify a proof per transaction, sign every receipt', hl: true },
+            store: { v: 'nullifier for every receive, receipt for every send', hl: true},
+            work: { v: 'verify a proof per transaction, signature per transaction', hl: true },
             learn: { v: 'who sent, who received', n: 'amounts and balances hidden', hl: true },
         },
         {
-            store: { v: 'commitments, plus a nullifier per send/receive', n: 'doubled: 1 PB a year; sends publish a dummy', hl: true },
-            work: { v: 'verify a proof per transaction, sign every receipt' },
-            learn: { v: 'who acted', n: 'send and receive are indistinguishable', hl: true },
+            store: { v: 'nullifier and receipt for every send/receive', hl: true },
+            work: { v: 'verify a proof per transaction, signature per send/receive' },
+            learn: { v: 'who acted', n: 'send/receive are indistinguishable', hl: true },
         },
         {
-            store: { v: 'commitments, a nullifier per send/receive, the frontier', n: 'receipts live with the two parties' },
-            work: { v: 'verify a proof per transaction, sign one root per block', n: 'no per-receipt signature', hl: true },
+            store: { v: 'MMR, nullifier per send/receive', hl: true},
+            work: { v: 'verify a proof per transaction, sign one root per block', hl: true },
             learn: { v: 'who acted' },
         },
         {
-            store: { v: 'validators: commitments and frontier. users: every nullifier ever received', n: 'validators: 32 B per account + log n', hl: true },
-            work: { v: 'verify proofs, in batches', n: 'ZK-Pari: a million a second on 18 cores', hl: true },
+            store: { v: 'validators: MMR \n users: every nullifier received', hl: true },
+            work: { v: 'verify a proof per transaction, sign one root per block'},
             learn: { v: 'who acted' },
         },
         {
-            store: { v: 'validators: commitments and frontier. users: recent nullifiers + one root per epoch', n: 'nothing grows with lifetime activity', hl: true },
-            work: { v: 'verify proofs, in batches' },
+            store: { v: 'validators: MMR \n users: epoch nullifiers + MMR', hl: true },
+            work: { v: 'verify a proof per transaction, sign one root per block'},
             learn: { v: 'who acted' },
         },
     ];
@@ -391,7 +391,7 @@
                 case 4: return 'One nullifier per send or receive now, real for receives and a dummy for sends, so the set grows twice as fast.';
                 case 5: return `Left: the receipt MMR. Receipts accumulate in perfect binary trees and validators only need to store the peaks (dots) to extend the tree. Right: the nullifier set as an indexed Merkle tree.`;
                 case 6: return `Validators only store the MMR frontier and delegate nullifier storage to users. Each user maintains an indexed merkle tree of nullifiers of every receipt it has claimed.`;
-                default: return `Users periodically prune nullifiers by adding the current epochs's nullifier tree root to an MMR (left, one leaf per epoch) and only maintain a tree of nullifiers claimed in the current epoch (right).`;
+                default: return `Users periodically prune nullifiers by appending the closed epoch's nullifier-tree root to an MMR (left, only the peaks are kept) and keep only the nullifiers claimed in the current epoch (right).`;
             }
         });
 
@@ -796,14 +796,14 @@
                 label(g, X0, Y0, 'validator storage', 'sim-h left');
                 label(g, X0, Y0 + 62, 'commitments: one per account', 'sim-seg-label');
                 label(g, X0, Y0 + 112, `receipt MMR: ${nTx}`, 'sim-h left blue');
-                label(g, X0, Y0 + 130, `kept: the ${peaks} peaks only`, 'sim-seg-label sim-muted');
+                label(g, X0, Y0 + 130, `only store ${peaks} peaks`, 'sim-seg-label sim-muted');
                 el('line', { x1: ux - 24, y1: Y0 - 14, x2: ux - 24, y2: bottom, class: 'sim-divider' }, g);
                 if (!perUser) {
                     label(g, ux, Y0, `nullifier tree: ${nTx}`, 'sim-h left red');
                     label(g, ux, Y0 + 18, 'nullifiers committed via indexed Merkle tree', 'sim-seg-label sim-muted');
                     return;
                 }
-                label(g, ux, Y0, 'users keep', 'sim-h left');
+                label(g, ux, Y0, 'user storage', 'sim-h left');
                 // One cell per user, in a 2x2 grid, each with its own heading.
                 ACCOUNTS.forEach((a, i) => {
                     const cell = userCell(ux, uw, Y0, bottom, i);
@@ -815,8 +815,11 @@
                     } else {
                         // The MMR of closed-epoch roots is captioned beneath itself; the header
                         // carries only the count for the open epoch, so the two never collide.
+                        const epochPeaks = epoch.toString(2).split('1').length - 1;
                         label(g, cell.x + cell.w, cell.y + 11, `this epoch: ${c.recvByClaimEpoch[a][epoch] || 0}`, 'sim-seg-label right red');
-                        label(g, cell.x + MMR_PAD + (epochStrip(cell) - MMR_PAD) / 2, cell.y + cell.h - 4, `${epoch} epoch root${epoch === 1 ? '' : 's'}`, 'sim-tiny center blue');
+                        if (epoch > 0) {
+                            label(g, cell.x + MMR_PAD + (epochStrip(cell) - MMR_PAD) / 2, cell.y + cell.h - 4, `${epochPeaks} peak${epochPeaks === 1 ? '' : 's'}`, 'sim-tiny center blue');
+                        }
                     }
                 });
             });

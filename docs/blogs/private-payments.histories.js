@@ -470,15 +470,16 @@ function addTx() {
 }
 
 function loadExample() {
-    // The running example of the paper: (A->B), (B->A), (C->D), each receive
-    // following its send.
+    // The same three payments as the paper: (A->B), (B->A), (C->D). Sends
+    // land first so several receipts are outstanding when the receives
+    // begin; L_unl then has a real tree, not a single path.
     log = [
         { acct: 'A', op: 'send', to: 'B' },
-        { acct: 'B', op: 'recv', claims: 0 },
         { acct: 'B', op: 'send', to: 'A' },
-        { acct: 'A', op: 'recv', claims: 2 },
         { acct: 'C', op: 'send', to: 'D' },
-        { acct: 'D', op: 'recv', claims: 4 },
+        { acct: 'B', op: 'recv', claims: 0 },
+        { acct: 'A', op: 'recv', claims: 1 },
+        { acct: 'D', op: 'recv', claims: 2 },
     ];
     if (numAccts < 4) setNumAccts(4);
     renderAll();
