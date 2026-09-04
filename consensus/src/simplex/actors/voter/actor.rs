@@ -448,12 +448,6 @@ impl<
         }
     }
 
-    /// Persists our nullify vote to the journal for crash recovery.
-    async fn handle_nullify(self, nullify: Nullify<S>) -> Self {
-        self.append_journal(nullify.view(), Artifact::Nullify(nullify))
-            .await
-    }
-
     /// Handle a timeout.
     ///
     /// Builds a nullify vote for the current view (as many times as required
@@ -474,7 +468,9 @@ impl<
 
         // Persist the nullify if it is a first attempt
         if !retry {
-            self = self.handle_nullify(nullify.clone()).await;
+            self = self
+                .append_journal(nullify.view(), Artifact::Nullify(nullify.clone()))
+                .await;
             return (self, Some((nullify, None)));
         }
 
@@ -496,12 +492,6 @@ impl<
             return self;
         }
         self.append_journal(view, artifact).await
-    }
-
-    /// Persists our notarize vote to the journal for crash recovery.
-    async fn handle_notarize(self, notarize: Notarize<S, D>) -> Self {
-        self.append_journal(notarize.view(), Artifact::Notarize(notarize))
-            .await
     }
 
     /// Records a notarization certificate and blocks any equivocating leader.
@@ -539,12 +529,6 @@ impl<
         (self, Some(notarization))
     }
 
-    /// Persists our finalize vote to the journal for crash recovery.
-    async fn handle_finalize(self, finalize: Finalize<S, D>) -> Self {
-        self.append_journal(finalize.view(), Artifact::Finalize(finalize))
-            .await
-    }
-
     /// Stores a finalization certificate and guards against leader equivocation.
     ///
     /// The finalization is appended to the journal without an immediate sync.
@@ -570,7 +554,9 @@ impl<
         };
 
         // Record the vote locally before sharing it.
-        self = self.handle_notarize(notarize.clone()).await;
+        self = self
+            .append_journal(notarize.view(), Artifact::Notarize(notarize.clone()))
+            .await;
         (self, Some(notarize))
     }
 
@@ -635,7 +621,9 @@ impl<
         };
 
         // Record the vote locally before sharing it.
-        self = self.handle_finalize(finalize.clone()).await;
+        self = self
+            .append_journal(finalize.view(), Artifact::Finalize(finalize.clone()))
+            .await;
         (self, Some(finalize))
     }
 
@@ -1040,7 +1028,6 @@ impl<
                 self.state.replay(&artifact);
                 match artifact {
                     Artifact::Notarize(notarize) => {
-                        self = self.handle_notarize(notarize.clone()).await;
                         self.reporter.report(Activity::Notarize(notarize));
                     }
                     Artifact::Notarization(notarization) => {
@@ -1061,7 +1048,6 @@ impl<
                         }
                     }
                     Artifact::Nullify(nullify) => {
-                        self = self.handle_nullify(nullify.clone()).await;
                         self.reporter.report(Activity::Nullify(nullify));
                     }
                     Artifact::Nullification(nullification) => {
@@ -1070,7 +1056,6 @@ impl<
                         self.reporter.report(Activity::Nullification(nullification));
                     }
                     Artifact::Finalize(finalize) => {
-                        self = self.handle_finalize(finalize.clone()).await;
                         self.reporter.report(Activity::Finalize(finalize));
                     }
                     Artifact::Finalization(finalization) => {
