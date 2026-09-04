@@ -27,9 +27,12 @@ use commonware_cryptography::{Digest, Digestible, Hasher, bls12381::primitives::
 use commonware_macros::select;
 use commonware_resolver::{Consumer, Delivery, Fetch, Outcome, Resolver, p2p::Producer};
 use commonware_runtime::{Clock, Handle, Metrics as RuntimeMetrics, Spawner};
-use commonware_utils::{channel::oneshot, futures::Pool};
+use commonware_utils::{
+    channel::oneshot,
+    futures::{AbortablePool, Aborter, Pool},
+};
 use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque, btree_map::Entry},
     fmt::Display,
     future::pending,
     num::{NonZeroU16, NonZeroUsize},
@@ -576,7 +579,7 @@ where
     V: Variant,
     B: Codec + Digestible<Digest = H::Digest>,
 {
-    Recheck(RecheckCompletion<H, V, B>),
+    Recheck(Option<RecheckCompletion<H, V, B>>),
     Staging(StagingCompletion<H, B>),
     Canceled(u64),
     Command(Option<Command<H, V, B>>),
@@ -1127,9 +1130,10 @@ struct Actor<
     pending: BTreeMap<u64, Request<H, V, B>>,
     /// Exact artifact identity to every bounded waiter for that artifact.
     pending_by_key: BTreeMap<Key<H::Digest>, BTreeSet<u64>>,
-    rechecking: BTreeSet<Key<H::Digest>>,
+    /// Queued keys have no aborter; active reads belong to their remaining exact-key waiters.
+    rechecking: BTreeMap<Key<H::Digest>, Option<Aborter>>,
     queued_rechecks: VecDeque<Key<H::Digest>>,
-    rechecks: Pool<'static, RecheckCompletion<H, V, B>>,
+    rechecks: AbortablePool<'static, RecheckCompletion<H, V, B>>,
     admitting: BTreeSet<Key<H::Digest>>,
     queued_staging: VecDeque<StagingJob<H, B>>,
     queued_staging_bytes: u64,
@@ -1187,6 +1191,9 @@ where
         requests.remove(&request);
         if requests.is_empty() {
             self.pending_by_key.remove(&key);
+            if let Some(None) = self.rechecking.remove(&key) {
+                self.queued_rechecks.retain(|queued| *queued != key);
+            }
         }
         Some(pending)
     }
@@ -1295,7 +1302,7 @@ where
                         fetching: false,
                     },
                 );
-                if !self.rechecking.contains(&key) {
+                if !self.rechecking.contains_key(&key) {
                     self.start_fetch(request);
                 }
                 return;
@@ -1350,7 +1357,8 @@ where
             },
         );
         self.pending_by_key.entry(key).or_default().insert(request);
-        if self.rechecking.insert(key) {
+        if let Entry::Vacant(entry) = self.rechecking.entry(key) {
+            entry.insert(None);
             self.queued_rechecks.push_back(key);
         } else {
             self.metrics.local_recheck_coalesced.inc();
@@ -1381,7 +1389,7 @@ where
                     active = true;
                     if *mode == BlockMode::Wait {
                         *mode = BlockMode::Subscribe;
-                        if !self.rechecking.contains(&key) {
+                        if !self.rechecking.contains_key(&key) {
                             promote.push(request);
                         }
                     }
@@ -1431,10 +1439,6 @@ where
             let Some(key) = self.queued_rechecks.pop_front() else {
                 break;
             };
-            if !self.pending_by_key.contains_key(&key) {
-                self.rechecking.remove(&key);
-                continue;
-            }
             let mut requests = self
                 .pending_by_key
                 .get(&key)
@@ -1464,7 +1468,7 @@ where
             let bodies = self.bodies.clone();
             let max_value_bytes = self.config.max_value_bytes.get();
             self.metrics.local_rechecks.inc();
-            self.rechecks.push(
+            let aborter = self.rechecks.push(
                 async move {
                     RecheckCompletion {
                         key,
@@ -1480,11 +1484,12 @@ where
                 }
                 .instrument(recheck),
             );
+            *self.rechecking.get_mut(&key).expect("recheck is queued") = Some(aborter);
         }
     }
 
     fn complete_recheck(&mut self, completion: RecheckCompletion<H, V, B>) -> Result<(), Error> {
-        if !self.rechecking.remove(&completion.key) {
+        if self.rechecking.remove(&completion.key).is_none() {
             return Err(Error::Invalid("completed local recheck is not active"));
         }
         if let Some(artifact) = completion.result? {
@@ -1971,7 +1976,7 @@ where
                         }
                     };
                     select! {
-                        completion = self.rechecks.next_completed() => Event::Recheck(completion),
+                        completion = self.rechecks.next_completed() => Event::Recheck(completion.ok()),
                         completion = self.staging.next_completed() => Event::Staging(completion),
                         request = self.cancellations.next_completed() => Event::Canceled(request),
                         command = command => Event::Command(command),
@@ -1980,7 +1985,9 @@ where
             };
             let command = match event {
                 Event::Recheck(completion) => {
-                    self.complete_recheck(completion)?;
+                    if let Some(completion) = completion {
+                        self.complete_recheck(completion)?;
+                    }
                     #[cfg(test)]
                     self.complete_barriers();
                     self.metrics.pending(self.pending.len());
@@ -2178,9 +2185,9 @@ where
         generation: endpoint.generation,
         pending: BTreeMap::new(),
         pending_by_key: BTreeMap::new(),
-        rechecking: BTreeSet::new(),
+        rechecking: BTreeMap::new(),
         queued_rechecks: VecDeque::new(),
-        rechecks: Pool::default(),
+        rechecks: AbortablePool::default(),
         admitting: BTreeSet::new(),
         queued_staging: VecDeque::new(),
         queued_staging_bytes: 0,
@@ -2273,6 +2280,7 @@ mod tests {
     use commonware_storage::{Context as StorageContext, translator::TwoCap};
     use commonware_utils::{NZU16, NZUsize, vec::NonEmptyVec};
     use futures::future::Either;
+    use rstest::rstest;
     use std::{
         num::{NonZeroU32, NonZeroU64},
         sync::atomic::{AtomicUsize, Ordering},
@@ -4316,8 +4324,14 @@ mod tests {
         });
     }
 
-    #[test]
-    fn blocked_local_recheck_does_not_stall_independent_fetch() {
+    #[rstest]
+    #[case::spare_slot(false, false)]
+    #[case::completed_locally(true, false)]
+    #[case::canceled(false, true)]
+    fn blocked_local_recheck_does_not_stall_independent_fetch(
+        #[case] complete_locally: bool,
+        #[case] cancel_locally: bool,
+    ) {
         deterministic::Runner::default().start(|context| async move {
             let committee = Committee::<MinPk>::new(49, 6, Limits::new(2, 1).unwrap());
             let blocks: [Arc<TransactionBlock<Sha256, TestBody>>; 3] =
@@ -4389,7 +4403,8 @@ mod tests {
                         feedback: Feedback::Closed,
                     },
                     NZUsize!(16),
-                    NZUsize!(16),
+                    NonZeroUsize::new(if complete_locally || cancel_locally { 1 } else { 16 })
+                        .unwrap(),
                     NZUsize!(1),
                     NZUsize!(2),
                 )
@@ -4403,11 +4418,50 @@ mod tests {
                 _ = context.sleep(Duration::from_secs(1)) => panic!("local recheck never reached storage"),
             }
 
+            let mut shared = Box::pin(client.block(FetchReason::Explicit, blocks[0].reference()));
+            commonware_macros::select! {
+                result = &mut shared => panic!("shared recheck completed before its storage gate: {result:?}"),
+                _ = context.sleep(Duration::from_millis(10)) => {},
+            }
+            drop(shared);
+            commonware_macros::select! {
+                result = &mut local => panic!("canceling one caller completed another: {result:?}"),
+                _ = context.sleep(Duration::from_millis(10)) => {},
+            }
+
             let missing = BlockRef::new(
                 ChainId::new(1),
                 Height::new(1),
                 Sha256::hash(&[b"independent missing block"]),
             );
+            if complete_locally || cancel_locally {
+                let mut queued = Box::pin(client.block(FetchReason::Explicit, missing));
+                commonware_macros::select! {
+                    result = &mut queued => panic!("queued recheck bypassed the occupied slot: {result:?}"),
+                    _ = context.sleep(Duration::from_millis(10)) => {},
+                }
+                let metrics = context.encode();
+                assert!(metrics.contains("reopened_resolver_local_rechecks_queued 1"), "{metrics}");
+                drop(queued);
+                context.sleep(Duration::from_millis(10)).await;
+                let metrics = context.encode();
+                assert!(metrics.contains("reopened_resolver_local_rechecks_queued 0"), "{metrics}");
+            }
+
+            if complete_locally {
+                client
+                    .admitted_block(blocks[0].reference(), Arc::clone(&blocks[0]))
+                    .await
+                    .unwrap();
+                assert_eq!((&mut local).await.unwrap(), blocks[0]);
+            }
+            let mut local = if cancel_locally {
+                drop(local);
+                None
+            } else {
+                Some(local)
+            };
+
             let independent = commonware_macros::select! {
                 result = client.block(FetchReason::Explicit, missing) => result,
                 _ = context.sleep(Duration::from_millis(100)) => {
@@ -4417,8 +4471,11 @@ mod tests {
             assert!(matches!(independent, Err(Error::ResolverClosed)));
             assert_eq!(fetches.load(Ordering::Relaxed), 1);
 
-            gate.release.send(()).unwrap();
-            assert_eq!(local.await.unwrap(), blocks[0]);
+            let _ = gate.release.send(());
+            if !complete_locally && let Some(local) = local.as_mut() {
+                assert_eq!(local.await.unwrap(), blocks[0]);
+            }
+            drop(local);
             assert_eq!(fetches.load(Ordering::Relaxed), 1);
 
             drop(client);
