@@ -57,7 +57,7 @@ const WAKE_SIGNALLED_BIT: u32 = 1 << 2;
 const STATE_MASK: u32 = WAITING_ON_FUTEX_BIT | WAITING_ON_EVENTFD_BIT | WAKE_SIGNALLED_BIT;
 /// Mask covering just the current wait target bits.
 const WAITING_MASK: u32 = WAITING_ON_FUTEX_BIT | WAITING_ON_EVENTFD_BIT;
-/// Packed-state increment for one submitted operation (low bits are reserved).
+/// Packed-state increment for one published batch (low bits are reserved).
 const SUBMISSION_INCREMENT: u32 = 1 << STATE_BITS;
 /// Full sequence domain used by the packed submission counter (state >> 3).
 pub const SUBMISSION_SEQ_MASK: u32 = u32::MAX >> STATE_BITS;
@@ -94,23 +94,26 @@ impl Drop for ArmGuard<'_> {
     }
 }
 
-/// Shared wake state used by submitters and the io_uring loop.
+/// Shared wake state used by producers and the io_uring loop.
 ///
 /// `state` packs two values:
 /// - bits 0..2: wait target and wake state
 /// - bits 3..: submitted sequence (`submitted_seq`)
 ///
-/// Submitters always increment `submitted_seq` after enqueueing onto the MPSC. The
-/// loop tracks how many submissions it has drained from the MPSC (`processed_seq`,
-/// stored in loop-local state). After arming a wait target, the loop blocks only
+/// Producers increment `submitted_seq` after enqueueing work. A mailbox publishes
+/// exactly once on each empty-to-nonempty transition under its inbox mutex. The
+/// loop advances `processed_seq` once when transferring a nonempty batch into
+/// owner-local scratch, before applying its messages. After arming a wait target, the loop blocks only
 /// if the same post-arm snapshot still shows no latched wake and still carries
 /// the exact `submitted_seq == processed_seq` snapshot the loop armed against.
 ///
-/// The loop bounds the rounded channel/ring size strictly below half the packed
-/// sequence domain. That makes the modular delta `submitted_seq - processed_seq`
-/// directional: any non-zero delta smaller than half the domain means
-/// `submitted_seq` is ahead, while larger deltas mean the visible submission
-/// sequence is lagging behind requests the loop has already drained.
+/// The live published-minus-processed gap must remain below half the sequence
+/// domain. A mailbox has at most one published batch in its shared inbox and one
+/// transferred batch awaiting its processed increment, independently of message
+/// count. This makes the modular delta `submitted_seq - processed_seq`
+/// directional: a nonzero delta smaller than half the domain means publication
+/// is ahead. Individual submissions from a bounded channel satisfy the same
+/// requirement when its capacity stays below half the sequence domain.
 ///
 /// Blocking follows an arm-and-recheck protocol:
 /// - The loop first checks for a published-ahead delta, then arms a wait target.
@@ -253,11 +256,11 @@ impl Waker {
         }
     }
 
-    /// Publish one submitted operation and optionally wake the currently armed
+    /// Publish one queued batch and optionally wake the currently armed
     /// wait target.
     ///
-    /// Callers must invoke this only after successfully enqueueing work into
-    /// the MPSC channel.
+    /// Callers must invoke this only after successfully enqueueing work. A mailbox
+    /// uses [`Self::publish_deferred`] to signal outside its inbox mutex.
     ///
     /// The common unarmed path performs only one `fetch_add`. When a wait is
     /// armed and no wake has yet been claimed for that epoch, this caller
@@ -265,10 +268,25 @@ impl Waker {
     /// signals the armed wait target.
     #[inline]
     pub fn publish(&self) {
-        // Use `Release` so that when `pending()` later observes a published-ahead
-        // sequence delta with its `Acquire` load, a following
-        // `self.receiver.try_recv()` in `fill_submission_queue()` must observe
-        // the corresponding request.
+        if self.publish_deferred() {
+            self.wake();
+        }
+    }
+
+    /// Publish queued work and return whether signaling must follow.
+    ///
+    /// Mailbox producers call this under the inbox mutex only when adding the
+    /// first message of a batch. If it returns `true`, call [`Self::wake`] after
+    /// unlocking while retaining ownership of this waker. The owner can consume
+    /// the batch before that call, so signaling rechecks the armed target and
+    /// claims the wake against its current epoch.
+    ///
+    /// Publication never invokes a syscall. An unarmed publication needs no
+    /// signal because the next arm-and-recheck observes the changed sequence.
+    #[inline]
+    pub fn publish_deferred(&self) -> bool {
+        // Pair publication with the owner's `pending()` acquire so queued work
+        // is visible before the owner attempts to transfer it.
         let prev = self
             .inner
             .state
@@ -278,11 +296,7 @@ impl Waker {
 
         // Fast path: the loop is not waiting, or another publisher already
         // claimed the wake for the current armed epoch.
-        if waiting == 0 || (prev & WAKE_SIGNALLED_BIT) != 0 {
-            return;
-        }
-
-        self.wake();
+        waiting != 0 && (prev & WAKE_SIGNALLED_BIT) == 0
     }
 
     /// Return whether any published submissions are still pending relative to
@@ -290,8 +304,8 @@ impl Waker {
     /// of that drained sequence.
     #[inline]
     pub fn pending(&self, processed_seq: u32) -> bool {
-        // Pair this `Acquire` with `publish()`'s `Release`. The rounded ring
-        // size is kept strictly below half the packed sequence domain, so a
+        // Pair this `Acquire` with publication's `Release`. The outstanding
+        // batch count stays below half the packed sequence domain, so a
         // non-zero modular delta smaller than that half-range unambiguously
         // means `published_seq` is ahead of `processed_seq`.
         let published_seq =
@@ -311,6 +325,20 @@ impl Waker {
     /// showed published work or a latched wake, or if a concurrent state
     /// change rejected the snapshot before the thread could sleep.
     pub fn park_idle(&self, processed_seq: u32) -> Option<Duration> {
+        self.park_idle_until(processed_seq, None)
+    }
+
+    /// Park while idle until notification or the optional absolute deadline.
+    ///
+    /// The futex timeout is computed immediately before sleeping. An elapsed
+    /// deadline, interruption, or timeout returns `None`, so timer expiry does
+    /// not count as a quick notification wake for adaptive spinning. Every
+    /// return clears the armed wait state, including skipped sleeps.
+    pub fn park_idle_until(
+        &self,
+        processed_seq: u32,
+        deadline: Option<Instant>,
+    ) -> Option<Duration> {
         // Arming only updates the packed wake state machine. It does not
         // publish queue memory or consume any out-of-band wake publication, so
         // `Relaxed` is sufficient on this RMW.
@@ -333,7 +361,7 @@ impl Waker {
             && ((snapshot >> STATE_BITS) & SUBMISSION_SEQ_MASK) == processed_seq
         {
             let before = Instant::now();
-            let slept = self.futex_wait(snapshot);
+            let slept = self.futex_wait(snapshot, deadline);
             self.clear_wait();
             slept.then(|| before.elapsed())
         } else {
@@ -593,48 +621,63 @@ impl Waker {
     /// while the word still equals that value, which closes the race between
     /// arming idle sleep and a concurrent publish or out-of-band wake.
     ///
-    /// Retries on `EINTR`. Treats `EAGAIN` as "state already changed before
-    /// the kernel slept".
+    /// Returns to the loop on `EINTR`, preserving the absolute deadline for the
+    /// next parking attempt. Treats `EAGAIN` as "state already changed before
+    /// the kernel slept" and `ETIMEDOUT` as a deadline service opportunity.
     ///
     /// Returns `true` only if the kernel actually blocked the thread and later
     /// resumed it. Returns `false` for stale-snapshot races, userspace
     /// equality mismatches, and unexpected futex wait failures.
     #[cfg(not(feature = "loom"))]
-    fn futex_wait(&self, snapshot: u32) -> bool {
-        loop {
-            // This is only a same-word equality check before entering the
-            // syscall. It relies only on modification order of this atomic, so
-            // `Relaxed` is sufficient.
-            if self.inner.state.load(Ordering::Relaxed) != snapshot {
-                return false;
-            }
+    fn futex_wait(&self, snapshot: u32, deadline: Option<Instant>) -> bool {
+        // This is only a same-word equality check before entering the
+        // syscall. It relies only on modification order of this atomic, so
+        // `Relaxed` is sufficient.
+        if self.inner.state.load(Ordering::Relaxed) != snapshot {
+            return false;
+        }
 
-            // SAFETY: `state` is a valid aligned futex word for the duration of
-            // the syscall.
-            let ret = unsafe {
-                libc::syscall(
-                    libc::SYS_futex,
-                    self.inner.state.as_ptr(),
-                    libc::FUTEX_WAIT | libc::FUTEX_PRIVATE_FLAG,
-                    snapshot,
-                    std::ptr::null::<libc::timespec>(),
-                )
-            };
-            if ret == 0 {
-                return true;
-            }
-            let err = std::io::Error::last_os_error();
-            match err.raw_os_error() {
-                Some(libc::EINTR) => continue,
-                Some(libc::EAGAIN) => return false,
-                _ => {
-                    // With a null timeout, documented timeout-specific errors do not
-                    // apply here. An unexpected futex wait error means the kernel
-                    // refused to block, so the safe fallback is to return to
-                    // userspace and re-check the packed state rather than panic.
-                    warn!("futex wait failed: {err}");
+        let timeout = match deadline {
+            Some(deadline) => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
                     return false;
                 }
+                Some(libc::timespec {
+                    tv_sec: remaining.as_secs().try_into().unwrap_or(libc::time_t::MAX),
+                    tv_nsec: remaining.subsec_nanos().into(),
+                })
+            }
+            None => None,
+        };
+        let timeout_ptr = timeout
+            .as_ref()
+            .map_or(std::ptr::null(), std::ptr::from_ref);
+
+        // SAFETY: `inner` retains the aligned atomic futex word throughout
+        // this call. `timeout_ptr` is null or references the initialized
+        // local timespec, which remains alive and unchanged until return.
+        let ret = unsafe {
+            libc::syscall(
+                libc::SYS_futex,
+                self.inner.state.as_ptr(),
+                libc::FUTEX_WAIT | libc::FUTEX_PRIVATE_FLAG,
+                snapshot,
+                timeout_ptr,
+            )
+        };
+        if ret == 0 {
+            return true;
+        }
+        let err = std::io::Error::last_os_error();
+        match err.raw_os_error() {
+            Some(libc::EINTR | libc::EAGAIN | libc::ETIMEDOUT) => false,
+            _ => {
+                // An unexpected futex wait error means the kernel
+                // refused to block, so the safe fallback is to return to
+                // userspace and re-check the packed state rather than panic.
+                warn!("futex wait failed: {err}");
+                false
             }
         }
     }
@@ -645,7 +688,13 @@ impl Waker {
     /// `futex_bucket`, so loom can explore the same lost-wake boundary that the
     /// kernel's atomic futex wait protects in production.
     #[cfg(feature = "loom")]
-    fn futex_wait(&self, snapshot: u32) -> bool {
+    fn futex_wait(&self, snapshot: u32, deadline: Option<Instant>) -> bool {
+        // Loom models publication races, not the kernel's timer queue. An
+        // already-due deadline exercises the no-sleep transition. Future timed
+        // waits use the same comparison protocol as untimed waits here.
+        if deadline.is_some_and(|deadline| deadline <= Instant::now()) {
+            return false;
+        }
         let mut guard = self.inner.futex_bucket.lock().unwrap();
         let mut slept = false;
         while self.inner.state.load(Ordering::Acquire) == snapshot {
@@ -710,6 +759,67 @@ pub mod tests {
         {
             waker.inner.eventfd_counter.load(Ordering::Relaxed)
         }
+    }
+
+    #[test]
+    fn test_timed_park_expiry_is_not_notification() {
+        let waker = Waker::new().unwrap();
+        let elapsed = Instant::now();
+        assert!(waker.park_idle_until(0, Some(elapsed)).is_none());
+        assert_eq!(state_bits(&waker), 0);
+
+        let deadline = Instant::now() + Duration::from_millis(2);
+        assert!(waker.park_idle_until(0, Some(deadline)).is_none());
+        assert!(Instant::now() >= deadline);
+        assert_eq!(state_bits(&waker), 0);
+        assert_eq!(submitted_seq(&waker), 0);
+        assert_eq!(eventfd_count(&waker), 0);
+    }
+
+    #[test]
+    fn test_timed_park_publication_race() {
+        let waker = Waker::new().unwrap();
+        let producer = std::thread::spawn({
+            let waker = waker.clone();
+            move || {
+                wait_until_futex_armed(&waker);
+                if waker.publish_deferred() {
+                    waker.wake();
+                }
+            }
+        });
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let _ = waker.park_idle_until(0, Some(deadline));
+        producer.join().unwrap();
+        assert!(waker.pending(0));
+        assert_eq!(state_bits(&waker) & WAITING_MASK, 0);
+        assert_eq!(eventfd_count(&waker), 0);
+    }
+
+    #[test]
+    fn test_deferred_signal_after_consumption_changes_wait_target() {
+        let waker = Waker::new().unwrap();
+        let arm = waker.arm(0);
+        assert!(arm.still_idle());
+        assert!(waker.publish_deferred());
+        assert!(waker.pending(0));
+        assert_eq!(eventfd_count(&waker), 0);
+        drop(arm);
+
+        // The owner has transferred the batch and switched to futex parking
+        // before the producer signals. The signal must target that new epoch.
+        let producer = std::thread::spawn({
+            let waker = waker.clone();
+            move || {
+                wait_until_futex_armed(&waker);
+                waker.wake();
+            }
+        });
+        let _ = waker.park_idle_until(1, Some(Instant::now() + Duration::from_secs(30)));
+        producer.join().unwrap();
+        assert!(!waker.pending(1));
+        assert_eq!(state_bits(&waker), 0);
+        assert_eq!(eventfd_count(&waker), 0);
     }
 
     #[test]
@@ -891,7 +1001,7 @@ pub mod tests {
         // block indefinitely. Returning here proves the userspace equality
         // check / futex EAGAIN path rejected the outdated snapshot without
         // ever committing to a real futex sleep.
-        assert!(!waker.futex_wait(snapshot));
+        assert!(!waker.futex_wait(snapshot, None));
         waker.clear_wait();
 
         // The publish should remain visible and the wait bits should be fully
@@ -1148,6 +1258,81 @@ mod loom_tests {
     };
     use rand::{Rng, RngExt as _};
     use rstest::rstest;
+
+    #[test]
+    fn batch_publication_and_delayed_signal() {
+        // The shared inbox publishes once for any number of appended messages.
+        // A producer can be delayed after unlocking while the owner transfers
+        // the batch, applies only part of its scratch, and observes a new batch.
+        // This models userspace ownership and waking, not kernel CQE delivery.
+        loom::model(|| {
+            let waker = Waker::new().unwrap();
+            let inbox = Arc::new(Mutex::new(Vec::new()));
+            let arm = waker.arm(0);
+            let producer = thread::spawn({
+                let waker = waker.clone();
+                let inbox = inbox.clone();
+                move || {
+                    for message in [1, 2] {
+                        let signal = {
+                            let mut inbox = inbox.lock().unwrap();
+                            let first = inbox.is_empty();
+                            inbox.push(message);
+                            first && waker.publish_deferred()
+                        };
+                        thread::yield_now();
+                        if signal {
+                            waker.wake();
+                        }
+                    }
+                }
+            });
+
+            let mut processed = 0;
+            let mut received = Vec::new();
+            let mut scratch = Vec::new();
+            while received.len() < 2 {
+                if scratch.is_empty() && waker.pending(processed) {
+                    let mut inbox = inbox.lock().unwrap();
+                    std::mem::swap(&mut *inbox, &mut scratch);
+                    if !scratch.is_empty() {
+                        processed = processed.wrapping_add(1) & SUBMISSION_SEQ_MASK;
+                    }
+                }
+                if !scratch.is_empty() {
+                    received.push(scratch.remove(0));
+                }
+                thread::yield_now();
+            }
+            drop(arm);
+            producer.join().unwrap();
+            assert_eq!(received, [1, 2]);
+            assert_eq!(submitted_seq(&waker), processed);
+            assert!((1..=2).contains(&processed));
+            assert!(!waker.pending(processed));
+            waker.acknowledge();
+        });
+    }
+
+    #[test]
+    fn deferred_signal_follows_new_futex_epoch() {
+        loom::model(|| {
+            let waker = Waker::new().unwrap();
+            let arm = waker.arm(0);
+            assert!(waker.publish_deferred());
+            drop(arm);
+
+            let producer = thread::spawn({
+                let waker = waker.clone();
+                move || waker.wake()
+            });
+            let _ = waker.park_idle_until(1, None);
+            producer.join().unwrap();
+            assert_eq!(submitted_seq(&waker), 1);
+            assert_eq!(state_bits(&waker), 0);
+            assert_eq!(eventfd_count(&waker), 0);
+        });
+    }
 
     // This module uses loom to model the waker's producer/loop protocol over
     // the packed atomic state word. The model keeps the production sequence and
@@ -1636,7 +1821,7 @@ mod loom_tests {
                 state_bits(&waker),
                 WAITING_ON_FUTEX_BIT | WAKE_SIGNALLED_BIT
             );
-            assert!(!waker.futex_wait(snapshot));
+            assert!(!waker.futex_wait(snapshot, None));
             waker.clear_wait();
             assert_eq!(state_bits(&waker), 0);
         });

@@ -190,7 +190,15 @@ mod waiter;
 use waiter::{CompletionOutcome, StageOutcome, WaiterId, Waiters};
 mod waker;
 use waker::{HALF_SUBMISSION_SEQUENCE_DOMAIN, SUBMISSION_SEQ_MASK, WAKE_USER_DATA, Waker};
+#[cfg(test)]
+mod admission;
+#[cfg(test)]
+mod callbacks;
+#[cfg(test)]
+mod sleep;
 mod spinner;
+#[cfg(test)]
+mod task;
 pub use spinner::Config as SpinnerConfig;
 use spinner::Spinner;
 
