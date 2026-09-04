@@ -1,4 +1,5 @@
 SITEMAP := sitemap.xml
+RSS := rss.xml
 MD_SOURCES := $(shell find . -name "*.md" -type f -not -path "./code/*")
 MD_TARGETS := $(MD_SOURCES:.md=.html)
 HTML_DEPS := $(shell find . -name "*.html" -type f ! -name "template.html")
@@ -33,14 +34,18 @@ mirror:
 sitemap:
 	python3 generate_sitemap.py
 
-# Deploy: mirror code and generate sitemap
-deploy: mirror sitemap
+# Generate RSS feed for blog posts
+rss:
+	python3 generate_rss.py
 
-# Build everything: markdown, mirror, and sitemap
-all: markdown mirror sitemap
+# Deploy: mirror code and generate discovery files
+deploy: mirror sitemap rss
+
+# Build everything: markdown, mirror, sitemap, and RSS
+all: markdown mirror sitemap rss
 
 # Clean all generated files
 clean:
-	rm -rf code $(MD_TARGETS) $(SITEMAP)
+	rm -rf code $(MD_TARGETS) $(SITEMAP) $(RSS)
 
-.PHONY: markdown mirror sitemap deploy all clean
+.PHONY: markdown mirror sitemap rss deploy all clean
