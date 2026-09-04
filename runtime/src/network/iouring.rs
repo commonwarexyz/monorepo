@@ -578,7 +578,7 @@ mod tests {
     use commonware_macros::{select, test_group};
     use std::{
         io::{Read, Write},
-        os::unix::net::UnixStream,
+        os::{fd::OwnedFd, unix::net::UnixStream},
         sync::Arc,
         time::{Duration, Instant},
     };
@@ -636,6 +636,33 @@ mod tests {
             sender.send(b"kept").await.unwrap();
             assert_eq!(receiver.recv(4).await.unwrap().coalesce(), b"kept"[..]);
         });
+    }
+
+    #[test]
+    fn test_pending_network_operations_observe_worker_closure() {
+        let (send, recv, peer) = iouring::Runner::default().start(|_| async {
+            let (socket, peer) = UnixStream::pair().unwrap();
+            let fd: Arc<OwnedFd> = Arc::new(socket.into());
+            let mut registry = Registry::default();
+            let mut sink = Sink::new(fd.clone(), Duration::from_secs(1));
+            let mut stream = Stream::new(fd, Duration::from_secs(1), 0, test_pool(&mut registry));
+            let mut send = Box::pin(async move { sink.send(b"x").await });
+            let mut recv = Box::pin(async move { stream.recv(1).await });
+            // Retain registered futures across shutdown, including their
+            // resources, before polling their original worker's closed state.
+            assert!(futures::poll!(send.as_mut()).is_pending());
+            assert!(futures::poll!(recv.as_mut()).is_pending());
+            (send, recv, peer)
+        });
+        assert!(matches!(
+            futures::executor::block_on(send),
+            Err(Error::SendFailed)
+        ));
+        assert!(matches!(
+            futures::executor::block_on(recv),
+            Err(Error::RecvFailed)
+        ));
+        drop(peer);
     }
 
     #[test]

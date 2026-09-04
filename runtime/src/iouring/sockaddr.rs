@@ -3,7 +3,7 @@
 //! A connect SQE stores a pointer, so its address must not move while the kernel
 //! can access it. Requests put [`SockAddr`] in a box and retain that box through
 //! the operation CQE, including when a cancellation acknowledgement arrives first.
-//! IPv4 and IPv6 conversions preserve network byte order and IPv6 interface scope.
+//! Conversions preserve address bytes, network-order ports, and IPv6 metadata.
 
 use std::net::SocketAddr;
 
@@ -29,7 +29,7 @@ impl From<SocketAddr> for SockAddr {
             SocketAddr::V6(address) => Self::V6(libc::sockaddr_in6 {
                 sin6_family: libc::AF_INET6 as libc::sa_family_t,
                 sin6_port: address.port().to_be(),
-                sin6_flowinfo: address.flowinfo().to_be(),
+                sin6_flowinfo: address.flowinfo(),
                 sin6_addr: libc::in6_addr {
                     s6_addr: address.ip().octets(),
                 },
@@ -85,11 +85,11 @@ mod tests {
                 SockAddr::V6(raw) => {
                     assert_eq!(raw.sin6_family, libc::AF_INET6 as libc::sa_family_t);
                     assert_eq!(len as usize, size_of::<libc::sockaddr_in6>());
-                    assert_eq!(raw.sin6_flowinfo.to_ne_bytes(), 0x12345_u32.to_be_bytes());
+                    assert_eq!(raw.sin6_flowinfo, 0x12345);
                     SocketAddr::V6(SocketAddrV6::new(
                         Ipv6Addr::from(raw.sin6_addr.s6_addr),
                         u16::from_be(raw.sin6_port),
-                        u32::from_be(raw.sin6_flowinfo),
+                        raw.sin6_flowinfo,
                         raw.sin6_scope_id,
                     ))
                 }

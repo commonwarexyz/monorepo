@@ -325,6 +325,12 @@ impl crate::Blob for Blob {
             return Ok(original_bufs.unwrap_or_else(|| io_buf.into()));
         }
 
+        // Exclude the current-position sentinel and keep every partial read's
+        // physical offset within the validated range.
+        offset
+            .checked_add(len as u64)
+            .ok_or(Error::OffsetOverflow)?;
+
         let cache = if options.contains(ReadOptions::DONT_CACHE) {
             Cache::Disabled(self.dont_cache_supported.clone())
         } else {
@@ -422,7 +428,20 @@ impl crate::Blob for Blob {
     }
 
     async fn sync(&self) -> Result<(), Error> {
-        self.start_sync().await.await
+        let output = Operation::new(Request::Sync(SyncRequest {
+            file: self.file.clone(),
+            result: None,
+        }))
+        .await?;
+        let RequestOutput::Sync(result) = output else {
+            unreachable!("sync request returned another output kind");
+        };
+        result.map_err(|error| match error {
+            Error::Io(error) => {
+                Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), error)
+            }
+            error => error,
+        })
     }
 
     async fn start_sync(&self) -> Handle<()> {
@@ -1172,6 +1191,28 @@ mod tests {
     }
 
     #[test]
+    fn test_read_range_overflow_before_admission() {
+        iouring::Runner::default().start(|_| async {
+            let (storage, directory) = create_test_storage();
+            let (blob, _) = storage.open("partition", b"read_range").await.unwrap();
+            let sentinel = u64::MAX - blob.data_offset;
+            for options in [ReadOptions::default(), ReadOptions::DONT_CACHE] {
+                // Empty reads need no physical offset, including the sentinel.
+                assert!(blob.read_at(sentinel, 0, options).await.unwrap().is_empty());
+                for (offset, len) in [(sentinel, 1), (sentinel - 1, 2)] {
+                    assert!(matches!(
+                        blob.read_at(offset, len, options).await,
+                        Err(Error::OffsetOverflow)
+                    ));
+                }
+            }
+            drop(blob);
+            drop(storage);
+            std::fs::remove_dir_all(directory).unwrap();
+        });
+    }
+
+    #[test]
     fn test_blob_offset_overflow_guards() {
         iouring::Runner::default().start(|_| async {
             // Verify logical offsets are checked before any filesystem or io_uring work.
@@ -1269,6 +1310,84 @@ mod tests {
 
             let _ = std::fs::remove_dir_all(&storage_directory);
         });
+    }
+
+    #[test]
+    fn test_pending_blob_operations_observe_worker_closure() {
+        let (read, write, sync, directory) = iouring::Runner::default().start(|_| async {
+            let (storage, directory) = create_test_storage();
+            let (blob, _) = storage.open("partition", b"closed").await.unwrap();
+            let reader = blob.clone();
+            let writer = blob.clone();
+            let mut read =
+                Box::pin(async move { reader.read_at(0, 1, ReadOptions::default()).await });
+            let mut write =
+                Box::pin(async move { writer.write_at(0, b"x", WriteOptions::default()).await });
+            let mut sync = Box::pin(async move { blob.sync().await });
+            // Register each operation before allowing worker shutdown. Keeping
+            // these futures tests closure of their original worker identity.
+            assert!(futures::poll!(read.as_mut()).is_pending());
+            assert!(futures::poll!(write.as_mut()).is_pending());
+            assert!(futures::poll!(sync.as_mut()).is_pending());
+            (read, write, sync, directory)
+        });
+        assert!(matches!(
+            futures::executor::block_on(read),
+            Err(Error::ReadFailed)
+        ));
+        assert!(matches!(
+            futures::executor::block_on(write),
+            Err(Error::WriteFailed)
+        ));
+        assert!(matches!(
+            futures::executor::block_on(sync),
+            Err(Error::Closed)
+        ));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn test_pending_start_sync_observes_worker_closure() {
+        let (read, sync, directory) = iouring::Runner::new(
+            iouring::Config::default().with_ring_config(iouring::RingConfig {
+                size: 1,
+                ..Default::default()
+            }),
+        )
+        .start(|_| async {
+            let (storage, directory) = create_test_storage();
+            let (blob, _) = storage.open("partition", b"pending_sync").await.unwrap();
+            let reader = blob.clone();
+            let mut read =
+                Box::pin(async move { reader.read_at(0, 1, ReadOptions::default()).await });
+            let mut sync = Box::pin(async move { blob.start_sync().await });
+            // The read occupies the only waiter without yielding to driver
+            // service, so start_sync must register pending admission.
+            assert!(futures::poll!(read.as_mut()).is_pending());
+            assert!(futures::poll!(sync.as_mut()).is_pending());
+            (read, sync, directory)
+        });
+        let handle = futures::executor::block_on(sync);
+        assert!(matches!(
+            futures::executor::block_on(handle),
+            Err(Error::Closed)
+        ));
+        drop(read);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn test_admitted_start_sync_completes_through_shutdown() {
+        let (handle, directory) = iouring::Runner::default().start(|_| async {
+            let (storage, directory) = create_test_storage();
+            let (blob, _) = storage.open("partition", b"admitted_sync").await.unwrap();
+            let handle = blob.start_sync().await;
+            // Admission returns before driver service. Shutdown must retire
+            // the detached sync and publish to this escaped completion handle.
+            (handle, directory)
+        });
+        futures::executor::block_on(handle).unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

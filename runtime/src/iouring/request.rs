@@ -524,6 +524,11 @@ pub(crate) struct SendRequest {
     pub(crate) result: Option<Result<(), Error>>,
 }
 
+/// Submit the representable prefix, leaving the remainder for a later SQE.
+fn scalar_len(remaining: usize) -> u32 {
+    remaining.min(u32::MAX as usize) as u32
+}
+
 impl SendRequest {
     /// Build the next socket send SQE for the remaining bytes.
     fn build_sqe(&mut self) -> SqueueEntry {
@@ -533,14 +538,7 @@ impl SendRequest {
                 let bytes = &buf.as_ref()[*offset..];
                 let ptr = bytes.as_ptr();
                 let remaining = bytes.len();
-                opcode::Send::new(
-                    fd,
-                    ptr,
-                    remaining
-                        .try_into()
-                        .expect("single-buffer SQE length exceeds u32"),
-                )
-                .build()
+                opcode::Send::new(fd, ptr, scalar_len(remaining)).build()
             }
             WriteBuffers::Vectored {
                 bufs,
@@ -625,14 +623,7 @@ impl RecvRequest {
         // offset <= len <= capacity.
         let ptr = unsafe { self.buf.as_mut_ptr().add(self.offset) };
         let remaining = self.len - self.offset;
-        opcode::Recv::new(
-            fd,
-            ptr,
-            remaining
-                .try_into()
-                .expect("single-buffer SQE length exceeds u32"),
-        )
-        .build()
+        opcode::Recv::new(fd, ptr, scalar_len(remaining)).build()
     }
 
     /// Classify one recv CQE and decide whether the logical request completes
@@ -714,16 +705,10 @@ impl ReadAtRequest {
         let remaining = self.len - self.read;
         let offset = self.offset + self.read as u64;
         let rw_flags = self.rw_flags();
-        opcode::Read::new(
-            fd,
-            ptr,
-            remaining
-                .try_into()
-                .expect("single-buffer SQE length exceeds u32"),
-        )
-        .offset(offset)
-        .rw_flags(rw_flags)
-        .build()
+        opcode::Read::new(fd, ptr, scalar_len(remaining))
+            .offset(offset)
+            .rw_flags(rw_flags)
+            .build()
     }
 
     /// Classify one read CQE and decide whether the logical request completes
@@ -1402,6 +1387,55 @@ mod tests {
             let _ = request.build_sqe(WaiterId::new(0, 0));
         });
         assert!(read_overread.is_err());
+    }
+
+    #[test]
+    fn test_scalar_length_prefix_boundary() {
+        for len in [0, 1, u32::MAX as usize - 1, u32::MAX as usize] {
+            assert_eq!(scalar_len(len), len as u32);
+        }
+        #[cfg(target_pointer_width = "64")]
+        for len in [u32::MAX as usize + 1, usize::MAX] {
+            assert_eq!(scalar_len(len), u32::MAX);
+        }
+    }
+
+    #[test]
+    fn test_scalar_builders_preserve_partial_progress() {
+        let deadline = Some(Instant::now());
+        let active = WaiterState::Active { target_tick: None };
+        let mut send = SendRequest {
+            fd: make_socket_fd(),
+            write: IoBufs::from(IoBuf::from(b"hello")).into(),
+            deadline,
+            result: None,
+        };
+        let mut recv = RecvRequest {
+            fd: make_socket_fd(),
+            buf: IoBufMut::with_capacity(5),
+            offset: 0,
+            len: 5,
+            exact: true,
+            deadline,
+            result: None,
+        };
+        let mut read = make_read_request(Cache::Enabled);
+        read.offset = 7;
+        // Real buffers remain valid while each builder advances to its suffix.
+        for progress in [2, 3] {
+            assert_eq!(send.build_sqe().get_opcode(), opcode::Send::CODE as u32);
+            assert_eq!(recv.build_sqe().get_opcode(), opcode::Recv::CODE as u32);
+            assert_eq!(read.build_sqe().get_opcode(), opcode::Read::CODE as u32);
+            assert_eq!(send.on_cqe(active, progress), progress == 3);
+            assert_eq!(recv.on_cqe(active, progress), progress == 3);
+            assert_eq!(read.on_cqe(active, progress), progress == 3);
+            assert_eq!(send.deadline, deadline);
+            assert_eq!(recv.deadline, deadline);
+        }
+        assert!(send.write.is_complete());
+        assert_eq!(recv.offset, 5);
+        assert_eq!(read.read, 5);
+        assert_eq!(read.offset, 7);
     }
 
     #[test]
