@@ -76,95 +76,39 @@ impl<T: Copy + PartialOrd> From<core::ops::RangeFull> for RangeCfg<T> {
     }
 }
 
-macro_rules! impl_from_nonzero {
-    ($nz_ty:ty, $ty:ty) => {
-        impl From<RangeCfg<$nz_ty>> for RangeCfg<$ty> {
-            fn from(value: RangeCfg<$nz_ty>) -> Self {
-                let start = match value.start {
-                    Bound::Included(nz) => Bound::Included(nz.get()),
-                    Bound::Excluded(nz) => Bound::Excluded(nz.get()),
-                    Bound::Unbounded => Bound::Unbounded,
-                };
-                let end = match value.end {
-                    Bound::Included(nz) => Bound::Included(nz.get()),
-                    Bound::Excluded(nz) => Bound::Excluded(nz.get()),
-                    Bound::Unbounded => Bound::Unbounded,
-                };
-                RangeCfg { start, end }
+macro_rules! impl_from {
+    ($from:ty => $to:ty, $f:expr) => {
+        impl From<RangeCfg<$from>> for RangeCfg<$to> {
+            fn from(value: RangeCfg<$from>) -> Self {
+                value.map($f)
             }
         }
     };
 }
 
-impl_from_nonzero!(NonZeroUsize, usize);
-impl_from_nonzero!(NonZeroU8, u8);
-impl_from_nonzero!(NonZeroU16, u16);
-impl_from_nonzero!(NonZeroU32, u32);
-impl_from_nonzero!(NonZeroU64, u64);
+impl_from!(NonZeroUsize => usize, |v| v.get());
+impl_from!(NonZeroU8 => u8, |v| v.get());
+impl_from!(NonZeroU16 => u16, |v| v.get());
+impl_from!(NonZeroU32 => u32, |v| v.get());
+impl_from!(NonZeroU64 => u64, |v| v.get());
 
-macro_rules! impl_from_nonzero_to_usize {
-    ($from_ty:ty) => {
-        impl From<RangeCfg<$from_ty>> for RangeCfg<usize> {
-            fn from(value: RangeCfg<$from_ty>) -> Self {
-                let start = match value.start {
-                    Bound::Included(v) => Bound::Included(
-                        usize::try_from(v.get()).expect("range start exceeds usize"),
-                    ),
-                    Bound::Excluded(v) => Bound::Excluded(
-                        usize::try_from(v.get()).expect("range start exceeds usize"),
-                    ),
-                    Bound::Unbounded => Bound::Unbounded,
-                };
-                let end = match value.end {
-                    Bound::Included(v) => {
-                        Bound::Included(usize::try_from(v.get()).expect("range end exceeds usize"))
-                    }
-                    Bound::Excluded(v) => {
-                        Bound::Excluded(usize::try_from(v.get()).expect("range end exceeds usize"))
-                    }
-                    Bound::Unbounded => Bound::Unbounded,
-                };
-                RangeCfg { start, end }
-            }
+impl_from!(NonZeroU8 => usize, |v| usize::from(v.get()));
+impl_from!(NonZeroU16 => usize, |v| usize::from(v.get()));
+impl_from!(NonZeroU32 => usize, |v| usize::try_from(v.get()).expect("range bound exceeds usize"));
+
+impl_from!(NonZeroU8 => NonZeroUsize, NonZeroUsize::from);
+impl_from!(NonZeroU16 => NonZeroUsize, NonZeroUsize::from);
+impl_from!(NonZeroU32 => NonZeroUsize, |v| NonZeroUsize::try_from(v).expect("range bound exceeds usize"));
+
+impl<T: Copy + PartialOrd> RangeCfg<T> {
+    /// Applies `f` to both bounds.
+    fn map<U: Copy + PartialOrd>(self, f: impl Fn(T) -> U) -> RangeCfg<U> {
+        RangeCfg {
+            start: self.start.map(&f),
+            end: self.end.map(&f),
         }
-    };
+    }
 }
-
-impl_from_nonzero_to_usize!(NonZeroU8);
-impl_from_nonzero_to_usize!(NonZeroU16);
-impl_from_nonzero_to_usize!(NonZeroU32);
-
-macro_rules! impl_nonzero_to_nonzero_usize {
-    ($from_ty:ty) => {
-        impl From<RangeCfg<$from_ty>> for RangeCfg<NonZeroUsize> {
-            fn from(value: RangeCfg<$from_ty>) -> Self {
-                let start = match value.start {
-                    Bound::Included(v) => Bound::Included(
-                        NonZeroUsize::try_from(v).expect("range start exceeds usize"),
-                    ),
-                    Bound::Excluded(v) => Bound::Excluded(
-                        NonZeroUsize::try_from(v).expect("range start exceeds usize"),
-                    ),
-                    Bound::Unbounded => Bound::Unbounded,
-                };
-                let end = match value.end {
-                    Bound::Included(v) => {
-                        Bound::Included(NonZeroUsize::try_from(v).expect("range end exceeds usize"))
-                    }
-                    Bound::Excluded(v) => {
-                        Bound::Excluded(NonZeroUsize::try_from(v).expect("range end exceeds usize"))
-                    }
-                    Bound::Unbounded => Bound::Unbounded,
-                };
-                RangeCfg { start, end }
-            }
-        }
-    };
-}
-
-impl_nonzero_to_nonzero_usize!(NonZeroU8);
-impl_nonzero_to_nonzero_usize!(NonZeroU16);
-impl_nonzero_to_nonzero_usize!(NonZeroU32);
 
 impl<T: Copy + PartialOrd> RangeCfg<T> {
     /// Creates a new `RangeCfg` from any type implementing `RangeBounds<T>`.
