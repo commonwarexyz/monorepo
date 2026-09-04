@@ -1946,6 +1946,88 @@ mod tests {
     }
 
     #[test]
+    fn readding_held_certificate_is_noop() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+            let mut state = State::new(
+                context,
+                Config {
+                    scheme: verifier.clone(),
+                    elector: round_robin(&verifier),
+                    epoch: Epoch::new(11),
+                    view_retention: ViewDelta::new(6),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(3),
+                    skip_budget: verifier.participants().len() as u64,
+                },
+            );
+            state.set_genesis(test_genesis());
+            let snapshot = |state: &State<_, _, _, _>, view: View| {
+                (
+                    state.current_view(),
+                    state.leader_index(view.next()),
+                    state.last_finalized(),
+                )
+            };
+
+            // Notarization
+            let view = View::new(3);
+            let proposal = Proposal::new(
+                Rnd::new(Epoch::new(11), view),
+                GENESIS_VIEW,
+                Sha256Digest::from([50u8; 32]),
+            );
+            let notarization = build_notarization(&verifier, &schemes, &proposal);
+            assert!(state.add_notarization(notarization.clone()).0);
+            assert_eq!(
+                state.broadcast_notarization(view),
+                Some(notarization.clone())
+            );
+            state.certify_candidates();
+            let before = snapshot(&state, view);
+            assert_eq!(state.add_notarization(notarization), (false, None));
+            assert_eq!(snapshot(&state, view), before);
+            let (ready, fetches) = state.certify_candidates();
+            assert!(ready.is_empty() && fetches.is_empty());
+
+            // Nullification
+            let view = View::new(4);
+            let nullification =
+                build_nullification(&verifier, &schemes, Rnd::new(Epoch::new(11), view));
+            assert!(state.add_nullification(nullification.clone()));
+            assert_eq!(
+                state.broadcast_nullification(view),
+                Some(nullification.clone())
+            );
+            let before = snapshot(&state, view);
+            assert!(!state.add_nullification(nullification));
+            assert_eq!(snapshot(&state, view), before);
+
+            // Finalization
+            let view = View::new(5);
+            let proposal = Proposal::new(
+                Rnd::new(Epoch::new(11), view),
+                GENESIS_VIEW,
+                Sha256Digest::from([51u8; 32]),
+            );
+            let finalization = build_finalization(&verifier, &schemes, &proposal);
+            assert!(state.add_finalization(finalization.clone()).0);
+            assert_eq!(
+                state.broadcast_finalization(view),
+                Some(finalization.clone())
+            );
+            let before = snapshot(&state, view);
+            assert_eq!(state.add_finalization(finalization), (false, None));
+            assert_eq!(snapshot(&state, view), before);
+        });
+    }
+
+    #[test]
     fn timeout_helpers_reuse_and_reset_deadlines() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {

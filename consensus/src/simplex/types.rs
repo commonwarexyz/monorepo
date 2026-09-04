@@ -2417,6 +2417,16 @@ impl<S: Scheme, D: Digest> Hash for Activity<S, D> {
     }
 }
 
+impl<S: Scheme, D: Digest> From<Certificate<S, D>> for Activity<S, D> {
+    fn from(cert: Certificate<S, D>) -> Self {
+        match cert {
+            Certificate::Notarization(v) => Self::Notarization(v),
+            Certificate::Nullification(v) => Self::Nullification(v),
+            Certificate::Finalization(v) => Self::Finalization(v),
+        }
+    }
+}
+
 impl<S: Scheme, D: Digest> Activity<S, D> {
     /// Indicates whether the activity is guaranteed to have been verified by consensus.
     pub const fn verified(&self) -> bool {

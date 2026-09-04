@@ -307,10 +307,6 @@ impl<
         sender: &mut WrappedSender<T, Vote<S, D>>,
         vote: Vote<S, D>,
     ) {
-        // Every nullify retry refreshes volatile batcher state. The first retry after
-        // replay may be the batcher's first copy of the vote.
-        batcher.constructed(vote.clone());
-
         // Update outbound metrics
         let metric = match &vote {
             Vote::Notarize(_) => metrics::Outbound::notarize(),
@@ -320,7 +316,11 @@ impl<
         self.outbound_messages.get_or_create(metric).inc();
 
         // Broadcast vote
-        sender.send(Recipients::All, vote, true);
+        sender.send_ref(Recipients::All, &vote, true);
+
+        // Every nullify retry refreshes volatile batcher state. The first retry after
+        // replay may be the batcher's first copy of the vote.
+        batcher.constructed(vote);
     }
 
     /// Send a certificate to every peer.
@@ -330,10 +330,10 @@ impl<
     fn broadcast_certificate<T: Sender>(
         &mut self,
         sender: &mut WrappedSender<T, Certificate<S, D>>,
-        certificate: Certificate<S, D>,
+        certificate: &Certificate<S, D>,
     ) {
         // Update outbound metrics
-        let metric = match &certificate {
+        let metric = match certificate {
             Certificate::Notarization(_) => metrics::Outbound::notarization(),
             Certificate::Nullification(_) => metrics::Outbound::nullification(),
             Certificate::Finalization(_) => metrics::Outbound::finalization(),
@@ -341,7 +341,7 @@ impl<
         self.outbound_messages.get_or_create(metric).inc();
 
         // Broadcast certificate
-        sender.send(Recipients::All, certificate, true);
+        sender.send_ref(Recipients::All, certificate, true);
     }
 
     /// Blocks an equivocator.
@@ -489,13 +489,18 @@ impl<
     /// Tracks a verified nullification certificate if it is new.
     async fn handle_nullification(mut self, nullification: Nullification<S>) -> Self {
         let view = nullification.view();
-        let artifact = Artifact::Nullification(nullification.clone());
+        let added = self.state.add_nullification(nullification);
 
-        // Add verified nullification to journal
-        if !self.state.add_nullification(nullification) {
-            return self;
+        // Journal only a new certificate.
+        if added {
+            let nullification = self
+                .state
+                .nullification(view)
+                .expect("round holds the certificate it just added");
+            let artifact = Artifact::Nullification(nullification.clone());
+            self = self.append_journal(view, artifact).await;
         }
-        self.append_journal(view, artifact).await
+        self
     }
 
     /// Persists our notarize vote to the journal for crash recovery.
@@ -507,9 +512,15 @@ impl<
     /// Records a notarization certificate and blocks any equivocating leader.
     async fn handle_notarization(mut self, notarization: Notarization<S, D>) -> Self {
         let view = notarization.view();
-        let artifact = Artifact::Notarization(notarization.clone());
         let (added, equivocator) = self.state.add_notarization(notarization);
+
+        // Journal only a new certificate.
         if added {
+            let notarization = self
+                .state
+                .notarization(view)
+                .expect("round holds the certificate it just added");
+            let artifact = Artifact::Notarization(notarization.clone());
             self = self.append_journal(view, artifact).await;
         }
         self.block_equivocator(equivocator);
@@ -553,9 +564,15 @@ impl<
     /// again as soon as peers redeliver any covering finalization.
     async fn handle_finalization(mut self, finalization: Finalization<S, D>) -> Self {
         let view = finalization.view();
-        let artifact = Artifact::Finalization(finalization.clone());
         let (added, equivocator) = self.state.add_finalization(finalization);
+
+        // Journal only a new certificate.
         if added {
+            let finalization = self
+                .state
+                .finalization(view)
+                .expect("round holds the certificate it just added");
+            let artifact = Artifact::Finalization(finalization.clone());
             self = self.append_journal(view, artifact).await;
         }
         self.block_equivocator(equivocator);
@@ -574,8 +591,9 @@ impl<
         (self, Some(notarize))
     }
 
-    /// Builds and records a notarization certificate once we can assemble it locally.
-    async fn prepare_notarization(
+    /// Takes the round's unbroadcast notarization certificate, if any, and tells the
+    /// resolver the view is complete.
+    fn prepare_notarization(
         mut self,
         resolver: &mut resolver::Mailbox<S, D>,
         view: View,
@@ -600,13 +618,12 @@ impl<
         if resolved != Resolved::Notarization {
             resolver.updated(Certificate::Notarization(notarization.clone()));
         }
-        // Update our local round with the certificate.
-        self = self.handle_notarization(notarization.clone()).await;
         (self, Some(notarization))
     }
 
-    /// Builds and records a nullification certificate if the round provides a candidate.
-    async fn prepare_nullification(
+    /// Takes the round's unbroadcast nullification certificate, if any, and tells the
+    /// resolver the view is complete.
+    fn prepare_nullification(
         mut self,
         resolver: &mut resolver::Mailbox<S, D>,
         view: View,
@@ -622,8 +639,6 @@ impl<
         if resolved != Resolved::Nullification {
             resolver.updated(Certificate::Nullification(nullification.clone()));
         }
-        // Track the certificate locally to avoid rebuilding it.
-        self = self.handle_nullification(nullification.clone()).await;
         (self, Some(nullification))
     }
 
@@ -639,8 +654,9 @@ impl<
         (self, Some(finalize))
     }
 
-    /// Builds and records a finalization certificate if the round provides a candidate.
-    async fn prepare_finalization(
+    /// Takes the round's unbroadcast finalization certificate, if any, and tells the
+    /// resolver the view is complete.
+    fn prepare_finalization(
         mut self,
         resolver: &mut resolver::Mailbox<S, D>,
         view: View,
@@ -661,8 +677,6 @@ impl<
         if resolved != Resolved::Finalization {
             resolver.updated(Certificate::Finalization(finalization.clone()));
         }
-        // Advance the consensus core with the finalization proof.
-        self = self.handle_finalization(finalization.clone()).await;
         (self, Some(finalization))
     }
 
@@ -846,7 +860,7 @@ impl<
         }
     }
 
-    /// Builds and records any votes or certificates that became available for `view`.
+    /// Builds and records votes, and collects unbroadcast certificates, for `view`.
     ///
     /// Returned artifacts must be synced through [Self::sync_journal] before
     /// [Self::notify] publishes them.
@@ -864,10 +878,10 @@ impl<
     ) -> (Self, Staged<S, D>) {
         let (notarize, notarization, nullification, finalize, finalization);
         (self, notarize) = self.prepare_notarize(view).await;
-        (self, notarization) = self.prepare_notarization(resolver, view, resolved).await;
-        (self, nullification) = self.prepare_nullification(resolver, view, resolved).await;
+        (self, notarization) = self.prepare_notarization(resolver, view, resolved);
+        (self, nullification) = self.prepare_nullification(resolver, view, resolved);
         (self, finalize) = self.prepare_finalize(view).await;
-        (self, finalization) = self.prepare_finalization(resolver, view, resolved).await;
+        (self, finalization) = self.prepare_finalization(resolver, view, resolved);
         (
             self,
             Staged {
@@ -916,7 +930,7 @@ impl<
 
             // Broadcast entry to help others enter the view (if on retry).
             if let Some(entry) = entry {
-                self.broadcast_certificate(certificate_sender, entry);
+                self.broadcast_certificate(certificate_sender, &entry);
             }
         }
         if let Some(notarize) = staged.notarize {
@@ -925,19 +939,15 @@ impl<
         }
         if let Some(notarization) = staged.notarization {
             debug!(proposal=?notarization.proposal, "broadcasting notarization");
-            self.broadcast_certificate(
-                certificate_sender,
-                Certificate::Notarization(notarization.clone()),
-            );
-            self.reporter.report(Activity::Notarization(notarization));
+            let certificate = Certificate::Notarization(notarization);
+            self.broadcast_certificate(certificate_sender, &certificate);
+            self.reporter.report(certificate.into());
         }
         if let Some(nullification) = staged.nullification {
             debug!(round=?nullification.round(), "broadcasting nullification");
-            self.broadcast_certificate(
-                certificate_sender,
-                Certificate::Nullification(nullification.clone()),
-            );
-            self.reporter.report(Activity::Nullification(nullification));
+            let certificate = Certificate::Nullification(nullification);
+            self.broadcast_certificate(certificate_sender, &certificate);
+            self.reporter.report(certificate.into());
         }
         if let Some(finalize) = staged.finalize {
             debug!(proposal=?finalize.proposal, "broadcasting finalize");
@@ -945,11 +955,9 @@ impl<
         }
         if let Some(finalization) = staged.finalization {
             debug!(proposal=?finalization.proposal, "broadcasting finalization");
-            self.broadcast_certificate(
-                certificate_sender,
-                Certificate::Finalization(finalization.clone()),
-            );
-            self.reporter.report(Activity::Finalization(finalization));
+            let certificate = Certificate::Finalization(finalization);
+            self.broadcast_certificate(certificate_sender, &certificate);
+            self.reporter.report(certificate.into());
         }
     }
 
