@@ -4880,6 +4880,111 @@ fn delayed_da_vote_signing_completion_retires_after_certification() {
 }
 
 #[test]
+fn certified_items_in_mixed_da_batches_do_not_exhaust_live_obligations() {
+    let profile = profile_with_resources(
+        Role::Validator(Participant::new(0)),
+        6,
+        4,
+        resources_with_capacities(512, 128),
+    );
+    let (mut machine, mut started) = start_profile(profile.clone());
+    while let Some(job) = started
+        .capabilities()
+        .iter()
+        .find_map(|effect| match effect {
+            Capability::Durability(DurabilityCapability::Persist(job)) => Some(job.clone()),
+            _ => None,
+        })
+    {
+        started = persist(&mut machine, &job);
+    }
+    let headers = (0..6)
+        .map(|chain| da_run_headers(&machine, chain, 16, "mixed certification"))
+        .collect::<Vec<_>>();
+
+    for round in 0..4 {
+        // Chain zero leaves one vote outstanding per batch, within its pipeline. Every other
+        // chain certifies its entire four-block run before the next batch is reserved.
+        let batch = (0..6)
+            .flat_map(|chain| {
+                let range = if chain == 0 {
+                    round..round + 1
+                } else {
+                    round * 4..(round + 1) * 4
+                };
+                headers[chain][range].iter().cloned()
+            })
+            .collect::<Vec<_>>();
+        let requests = batch
+            .iter()
+            .map(|header| {
+                SignRequest::DaVote(DaVoteRequest::new(Arc::new(SignedTransactionBlock::new(
+                    header.clone(),
+                    attestation(header.chain().get()),
+                ))))
+            })
+            .collect::<Vec<_>>();
+        let reserved = machine
+            .reserve_test_effect(DurableEffect::SignBatch(requests.into()))
+            .unwrap();
+        let signing = reserved
+            .capabilities()
+            .iter()
+            .find_map(|effect| match effect {
+                Capability::Durability(DurabilityCapability::Released(job))
+                    if matches!(job.request(), DurableEffect::SignBatch(_)) =>
+                {
+                    Some(job.clone())
+                }
+                _ => None,
+            })
+            .expect("the batch signing reservation is issued");
+        persist(&mut machine, &persist_job(&reserved));
+        let completed = machine
+            .step(Input::EffectCompleted(EffectCompletion::SignedBatch {
+                id: signing.id(),
+                generation: signing.generation(),
+                artifacts: batch
+                    .into_iter()
+                    .map(|header| Artifact::DaVote(DaVote::new(header, threshold_share(0))))
+                    .collect(),
+            }))
+            .unwrap();
+        let completed = settle(&mut machine, completed);
+        persist(&mut machine, &persist_job(&completed));
+
+        for (chain, headers) in headers.iter().enumerate().skip(1) {
+            let certificate = Artifact::DaCertificate(symbolic_da_certificate(
+                headers[(round + 1) * 4 - 1].clone(),
+                (round * 6 + chain) as u64,
+            ));
+            let verification = observe(&mut machine, certificate);
+            let certified = complete_with_step(&mut machine, &verification, true);
+            persist(&mut machine, &persist_job(&certified));
+        }
+        Machine::restore(profile.clone(), machine.live_snapshot_for_test())
+            .expect("partially certified batches remain recoverable");
+    }
+
+    let snapshot = machine.live_snapshot_for_test();
+    assert_eq!(snapshot.obligations().len(), 4);
+    assert!(
+        snapshot
+            .obligations()
+            .values()
+            .flat_map(PublicationObligation::discharges)
+            .count()
+            > machine.obligation_family_bounds().da
+    );
+    assert_eq!(snapshot.certified_tips()[0].height(), Height::zero());
+    assert!(
+        snapshot.certified_tips()[1..]
+            .iter()
+            .all(|tip| tip.height() == Height::new(16))
+    );
+}
+
+#[test]
 fn typed_obligation_family_bounds_match_their_retained_state() {
     let machine = active_machine(Role::Observer);
     let bounds = machine.obligation_family_bounds();

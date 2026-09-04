@@ -40,12 +40,15 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
 
     pub(super) fn publication_obligation_fits(&self, candidate: &PublicationObligation) -> bool {
         let mut counts = ObligationFamilyCounts::default();
+        // A batch can outlive its certified items. Family limits count outstanding duties;
+        // the artifact cache independently bounds every payload retained by the whole batch.
         for discharge in self
             .durable
             .obligations
             .values()
             .flat_map(PublicationObligation::discharges)
             .chain(candidate.discharges())
+            .filter(|discharge| !self.discharge_satisfied(**discharge, None, None, None))
         {
             match discharge {
                 PublicationDischarge::BlockCertifiedAtLeast { .. }
