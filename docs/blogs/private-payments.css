@@ -1,0 +1,542 @@
+/* Styles for the private-payments blog. Page-wide rules (body, headings, p,
+   code, tables, footer) come from /style.css; everything here is scoped to the
+   blog's widgets so it cannot leak into the rest of the site. */
+
+.lead {
+    font-size: 1.15em;
+    font-weight: bold;
+}
+
+.lead p {
+    line-height: 1.4;
+}
+
+.live {
+    background: #fffbe8;
+    border-bottom: 2px solid #d9251c;
+    font-variant-numeric: tabular-nums;
+    padding: 0 3px;
+    white-space: nowrap;
+}
+
+/* The live counter, boxed under the title. */
+.live-box {
+    background: #fffbe8;
+    border: 1px solid #d9251c;
+    border-left-width: 6px;
+    font-size: 1.15em;
+    line-height: 1.5;
+    margin: 20px 0 24px;
+    padding: 14px 18px;
+}
+
+.live-box .live {
+    background: none;
+    border-bottom: none;
+    color: #d9251c;
+    font-weight: bold;
+    padding: 0;
+}
+
+/* --- Widget controls ------------------------------------------------------ */
+
+.sim-stepper button,
+#controls button {
+    padding: 5px 8px;
+    margin: 0;
+    background-color: #0000ee;
+    color: white;
+    font-family: monospace;
+    font-size: 0.9em;
+    border-width: 0;
+    cursor: pointer;
+}
+
+.sim-stepper button:disabled,
+#controls button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.panel {
+    margin: 10px 0;
+    padding: 12px 15px;
+    background-color: #f5f5f5;
+    border: 1px solid #ddd;
+}
+
+.control-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+
+.control-row label {
+    font-size: 0.9em;
+    color: #444;
+}
+
+.control-row label.inline {
+    margin-left: 6px;
+}
+
+.control-row input[type="checkbox"].inline {
+    margin-left: 10px;
+}
+
+#controls select,
+#controls input[type="number"] {
+    font-family: monospace;
+    font-size: 0.9em;
+    padding: 4px 6px;
+    border: 1px solid #ccc;
+    background: white;
+}
+
+#controls input[type="number"] {
+    width: 4.5em;
+}
+
+#target {
+    width: 13em;
+}
+
+.status {
+    font-size: 0.85em;
+    color: gray;
+    font-style: italic;
+    min-height: 1.2em;
+}
+
+/* --- Log table ------------------------------------------------------------ */
+
+#log {
+    margin: 10px 0 20px 0;
+    font-size: 0.9em;
+}
+
+#log th,
+#log td {
+    padding: 6px 8px;
+    white-space: nowrap;
+}
+
+#log th code,
+#log td code {
+    background-color: transparent;
+    padding: 0;
+}
+
+#log th.num,
+#log td.num {
+    text-align: right;
+}
+
+#log thead tr:first-child th[colspan] {
+    text-align: center;
+}
+
+#log td.muted {
+    color: gray;
+}
+
+.summary {
+    margin: 5px 0 10px 0;
+}
+
+/* The trees sit side by side on one time axis; each scrolls sideways on its own. */
+.tree-row {
+    display: flex;
+    overflow: hidden;
+    border: 1px solid #ddd;
+    background: white;
+    margin: 10px 0 5px 0;
+}
+
+.tree-row .tree-col {
+    flex: 1 1 0;
+    min-width: 0;
+    border-left: 1px solid #eee;
+}
+
+.tree-row .tree-col.axis {
+    flex: none;
+    border-left: 0;
+}
+
+.tree-row .tree-col.narrow {
+    flex: 0 0 27%;
+}
+
+.tree-row .tree-head {
+    font-size: 0.85em;
+    color: #444;
+    height: 1.6em;
+    line-height: 1.6em;
+    padding: 4px 8px 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.tree-row svg {
+    display: block;
+    font-family: monospace;
+}
+
+.tree-row .empty {
+    padding: 15px;
+    color: gray;
+    font-style: italic;
+    font-size: 0.9em;
+}
+
+/* --- Simulation: ecash to our construction -------------------------------- */
+
+#sim-source {
+    display: none;
+}
+
+.sim-stepper {
+    align-items: center;
+    display: flex;
+    gap: 10px;
+    margin: 14px 0 6px;
+}
+
+.sim-title {
+    flex: 1;
+    font-weight: bold;
+}
+
+.sim-dots {
+    display: flex;
+    gap: 6px;
+}
+
+.sim-dot {
+    background: #ddd;
+    border-radius: 50%;
+    cursor: pointer;
+    display: inline-block;
+    height: 9px;
+    width: 9px;
+}
+
+.sim-dot.on {
+    background: #0000ee;
+}
+
+.sim-stage {
+    border: 1px solid #ddd;
+    background: white;
+    position: relative;
+}
+
+/* [?] markers in panel corners, with a tip that opens beneath them. */
+.sim-stage .sim-help {
+    background: white;
+    border: 1px solid #bbb;
+    border-radius: 50%;
+    color: #888;
+    cursor: help;
+    font: bold 10px/14px monospace;
+    height: 16px;
+    margin: 0;
+    padding: 0;
+    position: absolute;
+    text-align: center;
+    width: 16px;
+}
+
+.sim-stage .sim-help:hover,
+.sim-stage .sim-help.open {
+    border-color: #0000ee;
+    color: #0000ee;
+}
+
+.sim-tip {
+    background: #fffef5;
+    border: 1px solid #ccc;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.12);
+    color: #333;
+    display: none;
+    font-size: 12px;
+    line-height: 1.4;
+    max-width: 320px;
+    padding: 8px 10px;
+    position: absolute;
+    z-index: 2;
+}
+
+.sim-tip.show {
+    display: block;
+}
+
+.sim-svg {
+    display: block;
+    font-family: monospace;
+    width: 100%;
+}
+
+.sim-h {
+    font-size: 15px;
+    font-weight: bold;
+    text-anchor: middle;
+}
+.sim-h.red { fill: #d9251c; }
+.sim-h.blue { fill: #1f1fd1; }
+
+.sim-h.left { text-anchor: start; }
+.sim-h.right { text-anchor: end; }
+.sim-muted { fill: gray; font-weight: normal; }
+
+.sim-divider {
+    stroke: #e5e5e5;
+    stroke-width: 1;
+}
+
+.sim-box {
+    fill: white;
+    stroke: #d9251c;
+    stroke-width: 2;
+}
+
+.sim-spoke {
+    stroke: #e0e0e0;
+    stroke-width: 1.5;
+}
+
+.sim-handoff {
+    fill: none;
+    stroke: #1f1fd1;
+    stroke-dasharray: 5 4;
+    stroke-width: 1.5;
+    opacity: 0.6;
+}
+
+.sim-token {
+    fill: #1f1fd1;
+}
+
+.sim-token.hollow {
+    fill: white;
+    stroke: #1f1fd1;
+    stroke-width: 2;
+}
+
+.sim-node-label {
+    font-size: 14px;
+    text-anchor: middle;
+}
+
+.sim-node-label.bold { font-weight: bold; font-size: 16px; }
+
+.sim-seg-label.bold { font-weight: bold; }
+
+.sim-row {
+    font-size: 13px;
+}
+
+.sim-row.right { text-anchor: end; }
+
+.sim-rule {
+    stroke: #eee;
+    stroke-width: 1;
+}
+
+.sim-baseline {
+    stroke: #999;
+    stroke-width: 1;
+}
+
+.sim-seg-label {
+    font-size: 13px;
+}
+
+.sim-seg-label.center { text-anchor: middle; fill: gray; font-style: italic; }
+.sim-seg-label.right { text-anchor: end; }
+.sim-seg-label.dark { fill: #333; }
+
+/* Storage structures. */
+.sim-seg-label.red { fill: #d9251c; }
+.sim-seg-label.blue { fill: #1f1fd1; }
+
+.sim-tiny {
+    fill: #777;
+    font-size: 10px;
+}
+.sim-tiny.hot { fill: #d9251c; font-weight: bold; }
+.sim-tiny.blue { fill: #1f1fd1; }
+.sim-tiny.center { text-anchor: middle; }
+.sim-tiny.right { text-anchor: end; }
+
+.sim-cell {
+    fill: white;
+    stroke: #999;
+    stroke-width: 1;
+}
+
+.sim-cell-val {
+    fill: black;
+    font-size: 13px;
+    text-anchor: middle;
+}
+.sim-cell-val.hex { fill: #555; }
+
+.sim-nf {
+    fill: #d9251c;
+    opacity: 0.85;
+}
+
+.sim-mmr-body {
+    fill: #fafafa;
+    stroke: #bbb;
+    stroke-dasharray: 3 3;
+    stroke-width: 1;
+}
+
+.sim-peak {
+    fill: #1f1fd1;
+}
+
+.sim-edge {
+    fill: none;
+    stroke: #bbb;
+    stroke-width: 1;
+}
+
+.sim-leaf { fill: #d9251c; }
+.sim-leaf.empty { fill: white; stroke: #ccc; stroke-width: 1; }
+.sim-inner { fill: #555; }
+.sim-inner.empty { fill: white; stroke: #ccc; stroke-width: 1; }
+
+.sim-pane {
+    fill: white;
+    stroke: #e0e0e0;
+    stroke-width: 1;
+}
+
+.sim-flash {
+    fill: #ffd54a;
+    animation: sim-flash 0.7s ease-out both;
+    pointer-events: none;
+}
+
+@keyframes sim-flash {
+    0% { opacity: 0; }
+    15% { opacity: 0.9; }
+    100% { opacity: 0; }
+}
+
+/* The edge from a recomputed node to its parent lights up as the hash travels upward. */
+.sim-edge-hot {
+    fill: none;
+    stroke: #e0a800;
+    stroke-width: 2.5;
+    animation: sim-flash 0.6s ease-out both;
+    pointer-events: none;
+}
+
+/* The sorted-list pointer from the low leaf to the newly appended leaf. */
+.sim-link {
+    fill: none;
+    stroke: #e0a800;
+    stroke-width: 1.5;
+    stroke-dasharray: 3 2;
+    animation: sim-flash 1.8s ease-out both;
+    pointer-events: none;
+}
+
+/* The inserted leaf pops in. */
+.sim-leaf.pop {
+    animation: sim-pop 0.35s ease-out both;
+    transform-box: fill-box;
+    transform-origin: center;
+}
+
+@keyframes sim-pop {
+    from { transform: scale(0); }
+    60% { transform: scale(1.6); }
+    to { transform: scale(1); }
+}
+
+.sim-bal {
+    fill: #c8c8c8;
+    stroke: none;
+    transition: fill 0.4s, stroke 0.4s;
+}
+
+.sim-bal.flight {
+    fill: #1f1fd1;
+}
+
+.sim-bal.hidden {
+    fill: #f4f4f4;
+    stroke: #aaa;
+    stroke-dasharray: 4 3;
+    stroke-width: 1.5;
+}
+
+.sim-bal.flight.hidden {
+    fill: #eef;
+    stroke: #99a;
+}
+
+.sim-counters {
+    display: flex;
+    gap: 14px;
+    margin: 10px 0 12px;
+}
+
+.sim-counter {
+    background: #f5f5f5;
+    border: 1px solid #ddd;
+    flex: 1;
+    font-size: 0.9em;
+    line-height: 1.3;
+    padding: 8px 10px;
+}
+
+.sim-counter.hl {
+    background: #fffbe8;
+    border-color: #d9251c;
+}
+
+.sim-counter .k {
+    color: gray;
+    display: block;
+    font-size: 0.8em;
+    letter-spacing: 0.04em;
+    margin-bottom: 3px;
+    text-transform: uppercase;
+}
+
+.sim-counter.hl .k {
+    color: #d9251c;
+}
+
+.sim-counter .n {
+    color: gray;
+    font-size: 0.85em;
+    margin-top: 3px;
+}
+
+.sim-counter .n:empty {
+    display: none;
+}
+
+.sim-copy {
+    min-height: 8em;
+}
+
+.sim-copy ul {
+    margin: 6px 0;
+    padding-left: 24px;
+}
+
+@media (max-width: 600px) {
+    .sim-counters { flex-direction: column; }
+}

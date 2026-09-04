@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta content="text/html; charset=utf-8" http-equiv="Content-Type">
+    <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1" />
+    <link rel="preload" href="/style.css" as="style">
+    <link rel="preload" href="/shared.js" as="script">
+    <link rel="icon" href="/favicon.ico" type="image/x-icon">
+
+    <title>commonware > Scalable Private Payments</title>
+    <meta name="description" content="Every private payment system has
+an ever growing global nullifier set. We desigm a payment system where
+state only grows with the number of accounts.">
+    <meta name="author" content="Guru Vamsi Policharla">
+    <meta name="keywords" content="commonware, open source, common goods, software, internet, ownership, trust, blockchain, decentralization, crypto">
+
+    <meta property="og:url" content="https://commonware.xyz/blogs/private-payments" />
+    <meta property="og:type" content="article" />
+    <meta property="og:site_name" content="commonware" />
+    <meta property="og:image" content="https://commonware.xyz/imgs/private-payments.png" />
+    <meta property="og:title" content="Scalable Private Payments" />
+    <meta property="og:description" content="Every private payment
+system has an ever growing global nullifier set. We desigm a payment
+system where state only grows with the number of accounts." />
+    <meta property="article:author" content="Guru Vamsi Policharla" />
+    <meta property="article:published_time" content="2026-09-03T00:00:00Z" />
+    <meta property="article:modified_time" content="2026-09-03T00:00:00Z" />
+
+    <link rel="canonical" href="https://commonware.xyz/blogs/private-payments" />
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta property="twitter:domain" content="commonware.xyz" />
+    <meta property="twitter:url" content="https://commonware.xyz/blogs/private-payments" />
+    <meta property="twitter:title" content="Scalable Private
+Payments" />
+    <meta property="twitter:description" content="Every private payment
+system has an ever growing global nullifier set. We desigm a payment
+system where state only grows with the number of accounts." />
+    <meta property="twitter:image" content="https://commonware.xyz/imgs/private-payments.png" />
+    <meta property="twitter:site" content="@commonwarexyz" />
+        <meta property="twitter:creator" content="https://x.com/guruvamsip" />
+    
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/katex.min.js"
+        onload="document.querySelectorAll('.math').forEach(function (el) {
+            katex.render(el.textContent, el, {
+                displayMode: el.classList.contains('display'),
+                throwOnError: false
+            });
+        });"></script>
+    
+    <link rel="stylesheet" type="text/css" href="/style.css">
+</head>
+
+<body>
+    <div id="logo-placeholder">
+        <div class="logo-line">
+            <span class="edge-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="edge-logo-symbol">*</span>
+        </div>
+        <div class="logo-line">
+            <span class="vertical-logo-symbol">|</span>
+            <span class="logo-text"> commonware </span>
+            <span class="vertical-logo-symbol"> </span>
+        </div>
+        <div class="logo-line">
+            <span class="edge-logo-symbol">*</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">*</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="edge-logo-symbol">+</span>
+        </div>
+    </div>
+    <div class="content">
+        <h1>Scalable Private Payments</h1>
+        <div class="meta">
+
+                        <div class="author">By <a href="https://x.com/guruvamsip">Guru
+Vamsi Policharla</a></div>
+                        <div class="date">September 3rd, 2026</div>
+        </div>
+        <link rel="stylesheet" href="private-payments.css">
+        <div class="live-box">
+            Since you opened this page, a ledger running at 1M private payments/s would
+            have added <span class="live" id="live-bytes">0 MB</span> of nullifiers, across
+            <span class="live" id="live-txs">0</span> transactions.
+        </div>
+        <p>Our goal is to build extremely high throughput private
+        payments (1M+ TPS) with low latency. Assuming every payment is
+        <span class="math inline">\approx 200</span> bytes and takes
+        <span class="math inline">0.5-1</span> ms to verify (using <a
+        href="https://eprint.iacr.org/2016/260">Groth16</a> say), this
+        requires massive amounts of:</p>
+        <ul>
+        <li><strong>bandwidth:</strong> leaders disseminate <u>200 MB of
+        data, every second</u></li>
+        <li><strong>storage:</strong> the nullifier set (32 bytes per
+        transaction) grows by <u>a petabyte every year</u></li>
+        <li><strong>compute:</strong> equivalent of <u>500-1000
+        dedicated CPU cores</u>/validator</li>
+        </ul>
+        <p>Below we present our design for a private payment scheme
+        where</p>
+        <ul>
+        <li><strong>a million transactions</strong> can be verified on
+        an M5 Macbook Pro (18 cores)</li>
+        <li>validator storage grows <strong>logarithmically in
+        #(transactions)</strong> and linearly in #(accounts)</li>
+        <li>work done by users <strong>only depends on the transactions
+        they are involved in</strong></li>
+        </ul>
+        <h2 id="decentralizing-the-bank">Decentralizing the Bank</h2>
+        <p>Four accounts pay one another at random, and the same stream
+        of payments is shown under each of eight designs. The top row
+        shows who talks to whom, the balances, and what the ledger
+        publishes; the row beneath shows what validators and users must
+        store, drawn as the data structures they actually keep. The
+        boxes at the bottom call out what each move changes. Step
+        through with the arrows.</p>
+        <div id="sim" role="region" aria-label="A bank to our construction.">
+            <noscript>
+                <style>
+                    #sim-source { display: block; }
+                </style>
+            </noscript>
+        </div>
+        <!-- Step text for the simulation. Each ### heading starts a step; the content
+        under it is shown beneath the stage when that step is selected. The block is
+        hidden when JavaScript is enabled and shown as plain sections otherwise. -->
+        <div id="sim-source">
+        <h3 id="a-bank">A Bank</h3>
+        <p>A bank keeps every balance and moves money between them. A
+        payment is a single instruction, <em>A pays B 120</em>, and the
+        bank applies it. Storage could not be smaller: one balance per
+        account and nothing per payment, and that is the baseline we
+        will work our way back to. The cost is on the other side. The
+        bank is inside every payment and sees everything about it: who
+        paid whom, how much, and every balance.</p>
+        <h3 id="ecash">ecash</h3>
+        <p>Split the payment in two so the bank is no longer inside it.
+        To <em>send</em>, the sender has the bank blind-sign a coin
+        carrying a fresh random serial number, its <em>nullifier</em>,
+        and hands the coin to the receiver directly, off the ledger (the
+        dashed arc). To <em>receive</em>, the receiver presents the
+        coin, and the bank credits it after checking that its nullifier
+        has not been seen before. Blindness means the bank cannot
+        connect a send to a receive, so it no longer learns who paid
+        whom. It still sees both halves, with amounts.</p>
+        <p>The price is in the storage panel: the nullifier set grows by
+        one entry per coin and can never be pruned, because a coin sent
+        years ago is still valid. And the bank remains the only thing
+        between a coin and a double spend, one party that everyone must
+        trust and that has to serve the whole world.</p>
+        <h3 id="decentralized-ecash">Decentralized ecash</h3>
+        <p>Replace the bank with a fault-tolerant committee of
+        validators. Sends and receives become transactions, the coin’s
+        signature is issued by the committee, and the account table and
+        the nullifier set move with it. This buys fault tolerance and,
+        designed with care, confirmation latency competitive with a
+        round trip to a bank (<a href="/blogs/multimmit">Multimmit</a>).
+        But the ledger panel has not changed: every validator, and
+        anyone reading the ledger, sees every balance and every
+        account’s inflow and outflow. Even if the committee is trusted
+        to run the ledger, users may not want to share their balances
+        with all of it. So hide them.</p>
+        <h3 id="hide-balances">Hide balances</h3>
+        <p>Replace each balance with a hiding commitment to the balance
+        and a secret key, and let users update their own commitments
+        with a zero-knowledge proof; validators only verify. The coin
+        becomes a commitment too, a <em>receipt</em> that binds the
+        amount, the sender, and the receiver, and since it hides its
+        contents an ordinary validator signature on it does what the
+        blind signature did. The two transactions prove minimal
+        statements:</p>
+        <ul>
+        <li><strong>send</strong>: the new commitment is the old one
+        minus <span class="math inline">v</span>, and the receipt opens
+        to <span class="math inline">(v, A \to B)</span>, with <span
+        class="math inline">0 \le v \le \mathsf{balance}</span>.</li>
+        <li><strong>receive</strong>: the new commitment is the old one
+        plus <span class="math inline">v</span>, I hold a validator
+        signature on some receipt for <span class="math inline">(v,
+        \cdot \to B)</span>, and this nullifier is derived from that
+        receipt under my committed key.</li>
+        </ul>
+        <p>The nullifier is the price of hiding <em>which</em> signed
+        receipt is being claimed: validators never see the receipt
+        again, so they keep the set of nullifiers and reject repeats. It
+        plays exactly the role the coin’s nullifier played in ecash, and
+        the storage panel is unchanged. Balances and amounts are gone
+        from the ledger, but a send still carries a receipt and a
+        receive a nullifier, so it still shows who sent and who
+        received.</p>
+        <h3 id="hide-operations">Hide operations</h3>
+        <p>Whether a transaction is a send or a receive is one bit, and
+        zero knowledge removes it: give both transactions the same
+        public form, a new commitment, a receipt, a nullifier, and a
+        proof, and prove a disjunction. Either this is a valid send, the
+        receipt is genuine and the nullifier is a fresh dummy, or it is
+        a valid receive, the receipt is a dummy of a fixed form that can
+        never be claimed, and the nullifier belongs to the receipt being
+        consumed. The two kinds of row in the ledger are now
+        indistinguishable, and the observer learns only that <span
+        class="math inline">X</span> acted. The <a
+        href="#histories">consistent-histories</a> section below shows
+        how much that one bit is worth.</p>
+        <p>Note the cost in the storage panel: every transaction now
+        publishes a nullifier, real or dummy, so the set grows twice as
+        fast.</p>
+        <h3 id="prune-receipts">Prune receipts</h3>
+        <p>This is the privacy we settle for: the observer learns which
+        account acted, and nothing else. Now scale it. At a million
+        transactions per second every validator receives about 200 MB of
+        transaction data each second, the nullifier set grows by a
+        petabyte a year and must sit in fast storage because every
+        transaction is checked against it, and at 0.5 to 1 ms per proof
+        verification alone occupies 500 to 1000 cores. Bandwidth is the
+        tractable one, since erasure-coded dissemination lets a proposer
+        use the whole network’s egress; storage and compute are the
+        problem.</p>
+        <p>Start with the receipts. A committee signature on every
+        receipt is a threshold signature per transaction, so instead
+        accumulate receipts in a Merkle Mountain Range and sign once per
+        block. Validators keep only the frontier, a logarithmic number
+        of hashes that suffices to append and to compute the root, and a
+        short window of recent roots; the receive relation names one of
+        them and proves membership of the receipt under it. The receipt
+        itself, its position, and its opening live with the two parties:
+        the sender hands them over off the ledger, exactly as it handed
+        over the coin at the start.</p>
+        <h3 id="delegate-nullifier-storage">Delegate nullifier
+        storage</h3>
+        <p>The petabyte is the nullifier set, and it exists because
+        validators do the crediting. But a receipt is committed to its
+        recipient, so only <span class="math inline">B</span> can ever
+        claim it, and only <span class="math inline">B</span> needs to
+        remember which receipts it has claimed. Move the set into <span
+        class="math inline">B</span>’s account: the commitment now also
+        commits to the root of <span class="math inline">B</span>’s own
+        Merkle tree of nullifiers, the nullifier is derived from the
+        receipt’s position under <span class="math inline">B</span>’s
+        committed key and is never published, and the receive relation
+        proves that it was absent from the old tree and is present in
+        the new one. Positions are unique, so no sender can collide with
+        another’s payment, and <span class="math inline">A</span>, who
+        does not know <span class="math inline">B</span>’s key, never
+        learns when its payment was claimed. Watch the nullifier tree
+        leave the validators’ side and reappear on the users’ side, one
+        tree per account, appended in insertion order and threaded in
+        sorted order: whoever credits keeps the list, as the bank did at
+        the start, and now that is the receiver.</p>
+        <p>Validator storage now grows with accounts, not transactions.
+        Compute is handled by the proof system: ZK-Pari proofs are two
+        group elements and a field element, and a batch of <span
+        class="math inline">N</span> of them verifies with three
+        multi-scalar multiplications and three pairings, a million per
+        second on 18 cores. One thing still grows, though: each user’s
+        own tree holds every nullifier it has ever received.</p>
+        <h3 id="prune-nullifiers">Prune nullifiers</h3>
+        <p>Divide the ledger into epochs. A receipt’s position fixes the
+        block it was recorded in, and so its epoch, which gates senders
+        to the current epoch: nobody can manufacture a receipt that
+        belongs to the past. The receiver now keeps one nullifier tree
+        per epoch and, in its account commitment, a second tree whose
+        leaves are the epoch roots, appended once per epoch like an MMR.
+        A receive proves the insertion in the tree of the receipt’s
+        epoch and the update of that one leaf.</p>
+        <p>Honest senders deliver receipts as soon as they are recorded,
+        so once an epoch has ended the receiver expects nothing more
+        from it and can drop that epoch’s nullifiers, keeping only the
+        root (a sender that withheld a receipt across the boundary can
+        still be accommodated from cold storage, but never on the common
+        path). Watch each user’s tree empty at the epoch boundary while
+        its root joins the user’s own small mountain range of epoch
+        roots. What everyone keeps at hand is now bounded by activity
+        within an epoch: validators by the number of accounts, users by
+        one epoch of receipts and one hash per epoch. Nothing grows with
+        lifetime history, and the observer still learns only who acted.
+        What that one hidden bit buys is the subject of the rest of this
+        page.</p>
+        </div>
+        <h2 id="histories">Chapter 2: How many histories?</h2>
+        <p>In our private payment scheme a payment is two transactions:
+        the sender publishes a receipt, and the receiver later claims
+        it. Validators learn which account acts, and nothing about
+        amounts or counterparties. Whether they also learn the
+        <em>type</em> of a transaction is the difference between two
+        leakage functions:</p>
+        <ul>
+        <li><code>L_unl</code> reveals <code>(op, account)</code>: the
+        ledger sees that <span class="math inline">A</span> sent and
+        that <span class="math inline">B</span> received.</li>
+        <li><code>L_ind</code> reveals only <code>account</code>: the
+        ledger sees that <span class="math inline">A</span> acted and
+        that <span class="math inline">B</span> acted.</li>
+        </ul>
+        <p>A <em>history</em> assigns every transaction a role, either a
+        send or a receive claiming a specific earlier receipt,
+        consistent with what the ledger saw. A receipt can be claimed
+        only after it is published, and at most once; whether an account
+        may claim its own receipt is a toggle below. Build a log below;
+        the demo enumerates every history consistent with each
+        transcript and draws them as a tree, one level per transaction.
+        Each root-to-leaf path is one history. The one that actually
+        happened is highlighted.</p>
+        <h3 id="log-heading">Log</h3>
+        <div id="controls" class="panel">
+            <div class="control-row">
+                <label for="acct">Account</label>
+                <select id="acct"></select>
+                <label for="op">Operation</label>
+                <select id="op">
+                    <option value="send">send to</option>
+                    <option value="recv">receive</option>
+                </select>
+                <select id="target"></select>
+                <button id="add">add</button>
+            </div>
+            <div class="control-row">
+                <button id="undo">undo</button>
+                <button id="clear">clear</button>
+                <button id="random">random</button>
+                <label for="rand-n" class="inline">length</label>
+                <input id="rand-n" type="number" min="1" max="14" value="8">
+                <label for="num-accts" class="inline">accounts</label>
+                <input id="num-accts" type="number" min="2" max="6">
+                <input id="allow-self" type="checkbox" class="inline">
+                <label for="allow-self">allow self-payments</label>
+            </div>
+            <div id="status" class="status"></div>
+        </div>
+        <p>Each leakage function’s columns show what it sees of a
+        transaction and how many histories are consistent with
+        everything it has seen so far. With self-payments allowed, the
+        <code>L_ind</code> count depends only on the length <span
+        class="math inline">n</span> of the log: a history is a partial
+        matching of the <span class="math inline">n</span> positions
+        into send-claim pairs, and these are counted by the telephone
+        numbers <span class="math inline">T(n) = 1, 2, 4, 10, 26, 76,
+        232, \ldots</span>, with</p>
+        <p><span class="math display">
+        T(n) = T(n-1) + (n-1)\,T(n-2).
+        </span></p>
+        <p>Without self-payments a claim’s actor must differ from the
+        receipt’s creator, and the count comes to depend on who acted
+        when.</p>
+        <table id="log">
+            <thead>
+                <tr>
+                    <th rowspan="2">t</th>
+                    <th rowspan="2">what happened</th>
+                    <th colspan="2"><code>L_unl</code></th>
+                    <th colspan="2"><code>L_ind</code></th>
+                </tr>
+                <tr>
+                    <th>sees</th><th class="num">histories</th>
+                    <th>sees</th><th class="num">histories</th>
+                </tr>
+            </thead>
+            <tbody></tbody>
+        </table>
+        <h3 id="consistent-histories">Consistent histories</h3>
+        <p id="summary" class="summary"></p>
+        <div id="trees" class="tree-row"></div>
+        <div class="image-caption">
+        <p>One level per transaction; each root-to-leaf path is a
+        history, and the one that happened is highlighted. Node labels:
+        <span class="math inline">S</span> is a send; <span
+        class="math inline">R_i</span> is a receive claiming the receipt
+        published at <span class="math inline">t_i</span>. The first six
+        levels are drawn in full; beyond that, each level shows only its
+        number of consistent histories. Amounts and the recipients of
+        unclaimed receipts are hidden under both leakage functions.</p>
+        </div>
+        <script src="private-payments.sim.js"></script>
+        <script src="private-payments.histories.js"></script>
+        <p>(<a
+        href="https://github.com/guruvamsi-policharla/zk-pari/tree/vanishing-poly-zk">code</a>)</p>
+        <div id="footer-placeholder"></div>
+        <script src="/shared.js"></script>
+</body>
+
+</html>
