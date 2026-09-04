@@ -302,6 +302,10 @@ struct Cli {
     #[arg(long, default_value_t = deploy::DEFAULT_MARSHAL_MATERIALIZED_CACHE_BYTES)]
     marshal_materialized_cache_bytes: usize,
 
+    /// Target encoded bytes per cold application-delivery read.
+    #[arg(long)]
+    marshal_delivery_bytes: Option<NonZeroUsize>,
+
     /// Run without the terminal UI and emit structured logs.
     #[arg(long)]
     headless: bool,
@@ -338,6 +342,7 @@ struct RunConfig {
     production_interval: Duration,
     marshal_live_cache_bytes: usize,
     marshal_materialized_cache_bytes: usize,
+    marshal_delivery_bytes: Option<NonZeroUsize>,
     headless: bool,
     monitoring_ip: Option<IpAddr>,
     trace_sampling: f64,
@@ -774,6 +779,9 @@ fn main() {
             NonZeroUsize::new(config.marshal_materialized_cache_bytes)
                 .expect("marshal materialized cache is non-empty");
         marshal_config.max_pending_acks = DELIVERY_ACK_WINDOW;
+        if let Some(bytes) = config.marshal_delivery_bytes {
+            marshal_config.max_delivery_bytes = bytes;
+        }
         // Bound one sealed pending segment (the unit of custody reclamation and sealed-reader
         // recovery) to roughly 128 MiB regardless of the configured body size, and keep one
         // maximum admission cut within one segment.
@@ -1028,6 +1036,7 @@ fn load_run_config(cli: Cli) -> RunConfig {
         production_interval: Duration::from_millis(cli.production_interval_ms),
         marshal_live_cache_bytes: cli.marshal_live_cache_bytes,
         marshal_materialized_cache_bytes: cli.marshal_materialized_cache_bytes,
+        marshal_delivery_bytes: cli.marshal_delivery_bytes,
         headless: cli.headless,
         monitoring_ip: None,
         trace_sampling: 0.0,
@@ -1092,6 +1101,7 @@ fn load_remote_config(config_path: PathBuf, hosts_path: PathBuf) -> RunConfig {
         production_interval: Duration::from_millis(config.production_interval_ms),
         marshal_live_cache_bytes: config.marshal_live_cache_bytes,
         marshal_materialized_cache_bytes: config.marshal_materialized_cache_bytes,
+        marshal_delivery_bytes: config.marshal_delivery_bytes,
         headless: true,
         monitoring_ip: Some(hosts.monitoring.private),
         trace_sampling: config.trace_sampling,
@@ -1102,6 +1112,27 @@ fn load_remote_config(config_path: PathBuf, hosts_path: PathBuf) -> RunConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_delivery_budget_is_optional_and_nonzero() {
+        let args = ["log-multimmit", "--me", "0@3000", "--storage-dir", "unused"];
+        let default = load_run_config(Cli::try_parse_from(args).unwrap());
+        assert_eq!(default.marshal_delivery_bytes, None);
+        let explicit = load_run_config(
+            Cli::try_parse_from(
+                args.into_iter()
+                    .chain(["--marshal-delivery-bytes", "134217728"]),
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            explicit.marshal_delivery_bytes,
+            Some(NZUsize!(128 * 1024 * 1024))
+        );
+        assert!(
+            Cli::try_parse_from(args.into_iter().chain(["--marshal-delivery-bytes", "0"])).is_err()
+        );
+    }
 
     #[test]
     fn profile_is_valid_for_the_shipped_committee() {

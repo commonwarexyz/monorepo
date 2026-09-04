@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeSet,
     fs,
+    num::NonZeroUsize,
     path::{Path, PathBuf},
 };
 use tracing::info;
@@ -133,6 +134,10 @@ pub struct Deploy {
     #[arg(long, default_value_t = DEFAULT_MARSHAL_MATERIALIZED_CACHE_BYTES)]
     marshal_materialized_cache_bytes: usize,
 
+    /// Target encoded bytes per cold application-delivery read.
+    #[arg(long)]
+    marshal_delivery_bytes: Option<NonZeroUsize>,
+
     /// Validator consensus-plane port.
     #[arg(long, default_value_t = 3000)]
     port: u16,
@@ -185,6 +190,8 @@ pub struct NodeConfig {
     pub production_interval_ms: u64,
     pub marshal_live_cache_bytes: usize,
     pub marshal_materialized_cache_bytes: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub marshal_delivery_bytes: Option<NonZeroUsize>,
     pub storage_dir: PathBuf,
     pub trace_sampling: f64,
 }
@@ -355,6 +362,7 @@ impl Deploy {
                 production_interval_ms: self.production_interval_ms,
                 marshal_live_cache_bytes: self.marshal_live_cache_bytes,
                 marshal_materialized_cache_bytes: self.marshal_materialized_cache_bytes,
+                marshal_delivery_bytes: self.marshal_delivery_bytes,
                 storage_dir: PathBuf::from("/home/ubuntu/data"),
                 trace_sampling: self.trace_sampling,
             };
@@ -519,6 +527,20 @@ mod tests {
         let deploy = parse(&["deploy"]);
         assert_eq!(deploy.port, 3_000);
         assert_eq!(deploy.bulk_port(), 3_001);
+    }
+
+    #[test]
+    fn delivery_budget_is_optional_and_nonzero() {
+        assert_eq!(parse(&["deploy"]).marshal_delivery_bytes, None);
+        assert_eq!(
+            parse(&["deploy", "--marshal-delivery-bytes", "134217728"]).marshal_delivery_bytes,
+            NonZeroUsize::new(128 * 1024 * 1024),
+        );
+        assert!(
+            <Deploy as Args>::augment_args(Command::new("deploy"))
+                .try_get_matches_from(["deploy", "--marshal-delivery-bytes", "0"])
+                .is_err()
+        );
     }
 
     #[test]
