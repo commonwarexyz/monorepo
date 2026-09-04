@@ -6,7 +6,7 @@
 //! typed result.
 
 use super::waiter::{WaiterId, WaiterState};
-use crate::{Buf, Error, IoBuf, IoBufMut, IoBufs};
+use crate::{Error, IoBuf, IoBufMut, IoBufs};
 use commonware_utils::channel::oneshot;
 use io_uring::{opcode, squeue::Entry as SqueueEntry, types::Fd};
 use std::{
@@ -28,21 +28,40 @@ pub(super) const IOVEC_BATCH_SIZE: usize = 1024;
 /// Preserves a single-buffer fast path and a vectored path with reusable
 /// iovec scratch space.
 pub(super) enum WriteBuffers {
+    /// Contiguous bytes and their completed prefix.
     Single {
+        /// Original owner, retained through terminal completion.
         buf: IoBuf,
+        /// Number of bytes already written.
+        offset: usize,
     },
+    /// Chunked bytes and stable scratch for each vectored submission.
     Vectored {
+        /// Original owners, including completely consumed chunks.
         bufs: IoBufs,
+        /// Index of the next chunk to write.
+        chunk: usize,
+        /// Completed prefix within the current chunk.
+        offset: usize,
+        /// Number of bytes left across all chunks.
+        remaining: usize,
+        /// Kernel-visible iovec array with stable backing storage.
         iovecs: Box<[libc::iovec]>,
     },
 }
+
+// SAFETY: `WriteBuffers` owns both the immutable byte owners and the boxed iovec
+// array. Scratch pointers are never dereferenced by Rust and are refreshed from
+// those owners before submission. Moving this owner does not move either backing
+// allocation. Only its owning worker accesses it while a submission is active.
+unsafe impl Send for WriteBuffers {}
 
 impl From<IoBufs> for WriteBuffers {
     /// Normalize caller-provided buffers into either a single-buffer fast path
     /// or a vectored representation with reusable iovec scratch space.
     fn from(bufs: IoBufs) -> Self {
         match bufs.try_into_single() {
-            Ok(buf) => Self::Single { buf },
+            Ok(buf) => Self::Single { buf, offset: 0 },
             Err(bufs) => {
                 let max_iovecs = bufs.chunk_count().min(IOVEC_BATCH_SIZE);
                 let iovecs: Box<[libc::iovec]> = std::iter::repeat_n(
@@ -53,7 +72,13 @@ impl From<IoBufs> for WriteBuffers {
                     max_iovecs,
                 )
                 .collect();
-                Self::Vectored { bufs, iovecs }
+                Self::Vectored {
+                    remaining: bufs.len(),
+                    bufs,
+                    chunk: 0,
+                    offset: 0,
+                    iovecs,
+                }
             }
         }
     }
@@ -63,8 +88,8 @@ impl WriteBuffers {
     /// Return the remaining number of bytes that still need to be written.
     fn remaining_len(&self) -> usize {
         match self {
-            Self::Single { buf } => buf.len(),
-            Self::Vectored { bufs, .. } => bufs.len(),
+            Self::Single { buf, offset } => buf.len() - offset,
+            Self::Vectored { remaining, .. } => *remaining,
         }
     }
 
@@ -73,13 +98,55 @@ impl WriteBuffers {
         self.remaining_len() == 0
     }
 
-    /// Advance the remaining bytes after a successful CQE.
-    fn advance(&mut self, n: usize) {
+    /// Advance progress without destroying or cloning any buffer owner.
+    ///
+    /// A consumed chunk may own a user value whose destructor reenters the
+    /// runtime. Retain it until request retirement outside the local borrow.
+    fn advance(&mut self, mut n: usize) {
+        assert!(
+            n <= self.remaining_len(),
+            "write CQE exceeds remaining bytes"
+        );
         match self {
-            Self::Single { buf } => buf.advance(n),
-            Self::Vectored { bufs, .. } => bufs.advance(n),
+            Self::Single { offset, .. } => *offset += n,
+            Self::Vectored {
+                bufs,
+                chunk,
+                offset,
+                remaining,
+                ..
+            } => {
+                *remaining -= n;
+                while n > 0 {
+                    let len = bufs.chunk_at(*chunk).expect("missing write chunk").len() - *offset;
+                    if n < len {
+                        *offset += n;
+                        break;
+                    }
+                    n -= len;
+                    *chunk += 1;
+                    *offset = 0;
+                }
+            }
         }
     }
+}
+
+/// Fill stable iovec scratch from the current cursor without touching owners.
+fn fill_iovecs(bufs: &IoBufs, chunk: usize, offset: usize, iovecs: &mut [libc::iovec]) -> u32 {
+    let mut count = 0;
+    for (index, iovec) in iovecs.iter_mut().enumerate() {
+        let Some(bytes) = bufs.chunk_at(chunk + index) else {
+            break;
+        };
+        let bytes = if index == 0 { &bytes[offset..] } else { bytes };
+        *iovec = libc::iovec {
+            iov_base: bytes.as_ptr().cast_mut().cast(),
+            iov_len: bytes.len(),
+        };
+        count += 1;
+    }
+    count
 }
 
 /// In-flight request state machine stored in the waiter table.
@@ -90,15 +157,6 @@ impl WriteBuffers {
 /// and [complete](Self::complete) or [timeout](Self::timeout) to
 /// deliver results.
 ///
-// SAFETY: `WriteBuffers::Vectored` owns both the `IoBufs` backing storage and
-// the scratch `libc::iovec` array used to describe it to the kernel. The
-// iovec entries are initialized with dangling pointers and may be stale
-// between `build_sqe` calls, but they are never dereferenced in Rust. Each
-// `build_sqe` refreshes them from the co-owned `IoBufs` immediately before the
-// kernel can observe them, and the backing buffers remain owned by the same
-// waiter slot for the request lifetime.
-unsafe impl Send for Request {}
-
 pub(super) enum Request {
     #[cfg_attr(not(feature = "iouring-network"), allow(dead_code))]
     Send(SendRequest),
@@ -288,9 +346,10 @@ impl SendRequest {
     fn build_sqe(&mut self) -> SqueueEntry {
         let fd = Fd(self.fd.as_raw_fd());
         match &mut self.write {
-            WriteBuffers::Single { buf } => {
-                let ptr = buf.as_ptr();
-                let remaining = buf.remaining();
+            WriteBuffers::Single { buf, offset } => {
+                let bytes = &buf.as_ref()[*offset..];
+                let ptr = bytes.as_ptr();
+                let remaining = bytes.len();
                 opcode::Send::new(
                     fd,
                     ptr,
@@ -300,22 +359,17 @@ impl SendRequest {
                 )
                 .build()
             }
-            WriteBuffers::Vectored { bufs, iovecs } => {
-                let max_iovecs = bufs.chunk_count().min(iovecs.len());
-                // SAFETY: `IoSlice` is ABI-compatible with `libc::iovec` on Unix.
-                let io_slices: &mut [std::io::IoSlice<'_>] = unsafe {
-                    std::slice::from_raw_parts_mut(
-                        iovecs.as_mut_ptr().cast::<std::io::IoSlice<'_>>(),
-                        max_iovecs,
-                    )
-                };
-                let iovecs_len = bufs
-                    .chunks_vectored(io_slices)
-                    .try_into()
-                    .expect("iovecs_len exceeds u32");
+            WriteBuffers::Vectored {
+                bufs,
+                chunk,
+                offset,
+                iovecs,
+                ..
+            } => {
+                let iovecs_len = fill_iovecs(bufs, *chunk, *offset, iovecs);
 
                 // `Writev` is sufficient here because network sends only need
-                // ordered byte delivery; this layer does not need sendmsg
+                // ordered byte delivery. This layer does not need sendmsg
                 // ancillary data or zerocopy completion management.
                 opcode::Writev::new(fd, iovecs.as_ptr(), iovecs_len).build()
             }
@@ -646,12 +700,13 @@ impl WriteAtRequest {
         }
 
         let fd = Fd(self.file.as_raw_fd());
-        let offset = self.offset + self.written as u64;
+        let file_offset = self.offset + self.written as u64;
         let rw_flags = self.rw_flags();
         match &mut self.write {
-            WriteBuffers::Single { buf } => {
-                let ptr = buf.as_ptr();
-                let remaining = buf.remaining();
+            WriteBuffers::Single { buf, offset } => {
+                let bytes = &buf.as_ref()[*offset..];
+                let ptr = bytes.as_ptr();
+                let remaining = bytes.len();
                 opcode::Write::new(
                     fd,
                     ptr,
@@ -659,26 +714,21 @@ impl WriteAtRequest {
                         .try_into()
                         .expect("single-buffer SQE length exceeds u32"),
                 )
-                .offset(offset)
+                .offset(file_offset)
                 .rw_flags(rw_flags)
                 .build()
             }
-            WriteBuffers::Vectored { bufs, iovecs } => {
-                let max_iovecs = bufs.chunk_count().min(iovecs.len());
-                // SAFETY: `IoSlice` is ABI-compatible with `libc::iovec` on Unix.
-                let io_slices: &mut [std::io::IoSlice<'_>] = unsafe {
-                    std::slice::from_raw_parts_mut(
-                        iovecs.as_mut_ptr().cast::<std::io::IoSlice<'_>>(),
-                        max_iovecs,
-                    )
-                };
-                let iovecs_len = bufs
-                    .chunks_vectored(io_slices)
-                    .try_into()
-                    .expect("iovecs_len exceeds u32");
+            WriteBuffers::Vectored {
+                bufs,
+                chunk,
+                offset,
+                iovecs,
+                ..
+            } => {
+                let iovecs_len = fill_iovecs(bufs, *chunk, *offset, iovecs);
 
                 opcode::Writev::new(fd, iovecs.as_ptr(), iovecs_len)
-                    .offset(offset)
+                    .offset(file_offset)
                     .rw_flags(rw_flags)
                     .build()
             }
@@ -744,6 +794,7 @@ impl SyncRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
     use commonware_utils::channel::oneshot;
     use futures::executor::block_on;
     use std::{
@@ -752,6 +803,7 @@ mod tests {
             unix::net::UnixStream,
         },
         panic::{AssertUnwindSafe, catch_unwind},
+        sync::atomic::AtomicUsize,
     };
 
     fn make_socket_fd() -> Arc<OwnedFd> {
@@ -790,6 +842,82 @@ mod tests {
             result: None,
             sender: oneshot::channel().0,
         }
+    }
+
+    #[test]
+    fn test_write_cursor_retains_owners_across_batches() {
+        struct Owner {
+            dropped: Arc<AtomicUsize>,
+            bytes: [u8; 3],
+        }
+        impl AsRef<[u8]> for Owner {
+            fn as_ref(&self) -> &[u8] {
+                &self.bytes
+            }
+        }
+        impl Drop for Owner {
+            fn drop(&mut self) {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let count = IOVEC_BATCH_SIZE + 2;
+        let mut bufs = IoBufs::default();
+        for _ in 0..count {
+            bufs.append(IoBuf::from(Bytes::from_owner(Owner {
+                dropped: dropped.clone(),
+                bytes: *b"abc",
+            })));
+        }
+        let mut write = WriteBuffers::from(bufs);
+        let inspect = |write: &mut WriteBuffers, expected: &[u8], expected_count| {
+            let WriteBuffers::Vectored {
+                bufs,
+                chunk,
+                offset,
+                iovecs,
+                ..
+            } = write
+            else {
+                panic!("expected vectored buffers");
+            };
+            assert_eq!(fill_iovecs(bufs, *chunk, *offset, iovecs), expected_count);
+            assert_eq!(iovecs[0].iov_len, expected.len());
+            // SAFETY: scratch points into `bufs`, retained and immutably borrowed
+            // throughout this inspection. Its length describes initialized bytes.
+            let first = unsafe {
+                std::slice::from_raw_parts(iovecs[0].iov_base.cast::<u8>(), iovecs[0].iov_len)
+            };
+            assert_eq!(first, expected);
+        };
+        inspect(&mut write, b"abc", IOVEC_BATCH_SIZE as u32);
+        write.advance(1);
+        inspect(&mut write, b"bc", IOVEC_BATCH_SIZE as u32);
+        write.advance(2);
+        inspect(&mut write, b"abc", IOVEC_BATCH_SIZE as u32);
+        write.advance(3 * IOVEC_BATCH_SIZE);
+        inspect(&mut write, b"abc", 1);
+        write.advance(3);
+        assert!(write.is_complete());
+        assert_eq!(dropped.load(Ordering::Relaxed), 0);
+        drop(write);
+        assert_eq!(dropped.load(Ordering::Relaxed), count);
+    }
+
+    #[test]
+    fn test_write_cursor_single_and_overrun() {
+        let mut write = WriteBuffers::from(IoBufs::from(IoBuf::from(b"abc")));
+        write.advance(1);
+        let WriteBuffers::Single { buf, offset } = &write else {
+            panic!("expected single buffer");
+        };
+        assert_eq!(buf.as_ref(), b"abc");
+        assert_eq!(*offset, 1);
+        assert!(catch_unwind(AssertUnwindSafe(|| write.advance(3))).is_err());
+        assert_eq!(write.remaining_len(), 2);
+        write.advance(2);
+        assert!(write.is_complete());
     }
 
     #[test]
