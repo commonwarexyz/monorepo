@@ -360,10 +360,9 @@ impl CacheRef {
                     // Another thread is already fetching this page, so clone its existing future.
                     let entry = o.into_mut();
                     entry.waiters += 1;
-                    let fetch_future = entry.fetch.clone();
                     let fetch = entry.fetch.clone();
                     (
-                        fetch_future,
+                        fetch.clone(),
                         PageFetchGuard::new(Arc::clone(&self.cache), key, fetch),
                     )
                 }
@@ -393,15 +392,14 @@ impl CacheRef {
                     };
 
                     // Make the future shareable and insert it into the map.
-                    let fetch_future = future.boxed().shared();
-                    let fetch = fetch_future.clone();
+                    let fetch = future.boxed().shared();
                     v.insert(PageFetchEntry {
                         fetch: fetch.clone(),
                         waiters: 1,
                     });
 
                     (
-                        fetch_future,
+                        fetch.clone(),
                         PageFetchGuard::new(Arc::clone(&self.cache), key, fetch),
                     )
                 }
@@ -413,10 +411,7 @@ impl CacheRef {
         // cleanup while the fetch is still unresolved.
         let fetch_result = fetch_future.await;
         fetch_guard.disarm();
-        let page_buf = match fetch_result {
-            Ok(page_buf) => page_buf,
-            Err(err) => return Err(err),
-        };
+        let page_buf = fetch_result?;
 
         // Copy the requested portion of the page into the buffer.
         let bytes_to_copy = std::cmp::min(buf.len(), page_buf.len() - offset_in_page);
