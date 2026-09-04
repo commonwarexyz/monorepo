@@ -172,6 +172,20 @@ impl Admissions {
         Ok(self.entries[id.index].waker.replace(waker))
     }
 
+    /// Whether a live registration owns reserved waiter capacity.
+    pub fn is_granted(&self, id: AdmissionId) -> bool {
+        self.contains(id) && matches!(self.entries[id.index].state, AdmissionState::Granted)
+    }
+
+    /// Whether a live registration already holds an equivalent observer.
+    pub fn will_wake(&self, id: AdmissionId, waker: &Waker) -> bool {
+        self.contains(id)
+            && self.entries[id.index]
+                .waker
+                .as_ref()
+                .is_some_and(|registered| registered.will_wake(waker))
+    }
+
     /// Consume a reserved grant and detach any refreshed waker.
     ///
     /// An ungranted or stale identity returns `Err(())`. On success the owner

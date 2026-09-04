@@ -111,43 +111,53 @@ impl Future for Sleep {
                 Some(*timer_id),
             ),
         };
-        let (closed, now) = {
-            let local = owner.borrow();
-            (local.closing, local.now)
-        };
-        assert!(!closed, "io_uring sleep polled after its worker closed");
-        if deadline <= now {
-            this.state = State::Done;
-            if let Some(timer_id) = registered {
-                let mut local = owner.borrow_mut();
-                local.deferred.drops.reserve(1);
-                if let Some(waker) = local.timers.cancel(timer_id) {
+        let mut incoming = None;
+        loop {
+            let mut local = owner.borrow_mut();
+            assert!(
+                !local.closing,
+                "io_uring sleep polled after its worker closed"
+            );
+            if deadline <= local.now {
+                this.state = State::Done;
+                if let Some(timer_id) = registered
+                    && let Some(waker) = local.timers.cancel(timer_id)
+                {
                     local.deferred.drops.push(waker);
                 }
+                if let Some(incoming) = incoming {
+                    local.deferred.drops.push(incoming);
+                }
+                return Poll::Ready(());
             }
-            return Poll::Ready(());
-        }
-
-        // Waker cloning can reenter the runtime. Clone before borrowing Local,
-        // then retain displaced ownership in the worker's deferred drop batch.
-        let incoming = cx.waker().clone();
-        let mut local = owner.borrow_mut();
-        local.deferred.drops.reserve(1);
-        if let Some(timer_id) = registered {
-            let old = local
-                .timers
-                .refresh(timer_id, incoming)
-                .expect("live io_uring sleeper registration missing");
-            local.deferred.drops.push(old);
-        } else {
-            let timer_id = local.timers.insert(deadline, incoming);
-            this.state = State::Registered {
-                mailbox: Arc::downgrade(&local.mailbox),
-                timer_id,
-                deadline,
+            if incoming.is_none()
+                && registered.is_some_and(|id| local.timers.will_wake(id, cx.waker()))
+            {
+                return Poll::Pending;
+            }
+            let Some(incoming) = incoming.take() else {
+                // Cloning can reenter deadline service or panic. Retain the
+                // registration identity and recheck expiry before refreshing.
+                drop(local);
+                incoming = Some(cx.waker().clone());
+                continue;
             };
+            if let Some(timer_id) = registered {
+                let old = local
+                    .timers
+                    .refresh(timer_id, incoming)
+                    .expect("live io_uring sleeper registration missing");
+                local.deferred.drops.push(old);
+            } else {
+                let timer_id = local.timers.insert(deadline, incoming);
+                this.state = State::Registered {
+                    mailbox: Arc::downgrade(&local.mailbox),
+                    timer_id,
+                    deadline,
+                };
+            }
+            return Poll::Pending;
         }
-        Poll::Pending
     }
 }
 
@@ -240,6 +250,17 @@ impl Timers {
         self.deadlines.push(Reverse((deadline, id)));
         self.len += 1;
         id
+    }
+
+    /// Whether a live registration already holds an equivalent observer.
+    pub fn will_wake(&self, id: TimerId, waker: &Waker) -> bool {
+        self.contains(id)
+            && self.entries[id.index]
+                .registration
+                .as_ref()
+                .unwrap()
+                .waker
+                .will_wake(waker)
     }
 
     /// Refresh a registered sleeper's waker and return the displaced waker.

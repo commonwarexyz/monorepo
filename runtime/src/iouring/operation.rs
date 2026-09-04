@@ -221,134 +221,169 @@ impl Future for Operation {
             }
             State::Done => panic!("io_uring operation polled after completion"),
         };
-        // Clone before touching Local because arbitrary RawWaker clone callbacks
-        // may reenter the runtime. Done is installed before displaced ownership
-        // can be destroyed or any terminal result is returned.
-        let incoming = cx.waker().clone();
-        let state = mem::replace(&mut this.state, State::Done);
-        let (request, mailbox, registration) = match state {
-            State::Unbound(request) => {
-                let mailbox = Arc::downgrade(&owner.borrow().mailbox);
-                (request, mailbox, None)
-            }
-            State::Admitting {
-                request,
-                mailbox,
-                registration,
-            } => (request, mailbox, Some(registration)),
-            State::Waiting {
-                mailbox,
-                operation_id,
-            } => {
-                let mut local = owner.borrow_mut();
-                local.deferred.drops.reserve(1);
-                if local.closing {
+        let mut incoming = None;
+        loop {
+            let mut local = owner.borrow_mut();
+            if local.closing {
+                if let Some(incoming) = incoming {
                     local.deferred.drops.push(incoming);
-                    return Poll::Ready(Err(Error::Closed));
                 }
-                match local
-                    .operations
-                    .get_mut(operation_id)
-                    .expect("live operation entry missing")
-                {
-                    EntryState::Pending { waker, .. } => {
-                        let old = waker.replace(incoming);
+                drop(local);
+                drop(Self {
+                    state: mem::replace(&mut this.state, State::Done),
+                });
+                return Poll::Ready(Err(Error::Closed));
+            }
+            match &this.state {
+                State::Waiting { operation_id, .. } => {
+                    match local
+                        .operations
+                        .get_mut(*operation_id)
+                        .expect("live operation entry missing")
+                    {
+                        EntryState::Ready(_) => {
+                            let Some(EntryState::Ready(output)) =
+                                local.operations.take(*operation_id)
+                            else {
+                                unreachable!()
+                            };
+                            this.state = State::Done;
+                            if let Some(incoming) = incoming {
+                                local.deferred.drops.push(incoming);
+                            }
+                            return Poll::Ready(Ok(output));
+                        }
+                        EntryState::Pending { waker, .. } => {
+                            if incoming.is_none()
+                                && waker
+                                    .as_ref()
+                                    .is_some_and(|waker| waker.will_wake(cx.waker()))
+                            {
+                                return Poll::Pending;
+                            }
+                        }
+                    }
+                }
+                State::Unbound(request) | State::Admitting { request, .. } => {
+                    if request
+                        .deadline()
+                        .is_some_and(|deadline| deadline <= local.now)
+                    {
+                        let request = match mem::replace(&mut this.state, State::Done) {
+                            State::Unbound(request) => request,
+                            State::Admitting {
+                                request,
+                                registration,
+                                ..
+                            } => {
+                                local.cancel_admission(registration);
+                                request
+                            }
+                            _ => unreachable!(),
+                        };
+                        let (output, retired) = request.timeout();
+                        local.deferred.resources.push(retired);
+                        if let Some(incoming) = incoming {
+                            local.deferred.drops.push(incoming);
+                        }
+                        return Poll::Ready(Ok(output));
+                    }
+                    local.reconcile_admissions();
+                    if let State::Admitting { registration, .. } = &this.state
+                        && !local.admissions.is_granted(*registration)
+                        && incoming.is_none()
+                        && local.admissions.will_wake(*registration, cx.waker())
+                    {
+                        return Poll::Pending;
+                    }
+                }
+                State::Done => unreachable!(),
+            }
+            let Some(incoming) = incoming.take() else {
+                // Keep cancellation identity through a clone panic. Reentry can
+                // complete or expire this registration, so inspect it again.
+                drop(local);
+                incoming = Some(cx.waker().clone());
+                continue;
+            };
+            let (request, mailbox, registration) = match mem::replace(&mut this.state, State::Done)
+            {
+                State::Unbound(request) => (request, Arc::downgrade(&local.mailbox), None),
+                State::Admitting {
+                    request,
+                    mailbox,
+                    registration,
+                } => (request, mailbox, Some(registration)),
+                State::Waiting {
+                    mailbox,
+                    operation_id,
+                } => {
+                    let Some(EntryState::Pending { waker, .. }) =
+                        local.operations.get_mut(operation_id)
+                    else {
+                        unreachable!()
+                    };
+                    if let Some(old) = waker.replace(incoming) {
+                        local.deferred.drops.push(old);
+                    }
+                    this.state = State::Waiting {
+                        mailbox,
+                        operation_id,
+                    };
+                    return Poll::Pending;
+                }
+                State::Done => unreachable!(),
+            };
+            // A grant already owns capacity. Fresh callers may only use capacity
+            // left after older registrations received their FIFO reservations.
+            let granted = match registration {
+                Some(id) => match local.admissions.take_grant(id) {
+                    Ok(old) => {
                         if let Some(old) = old {
                             local.deferred.drops.push(old);
                         }
-                        this.state = State::Waiting {
-                            mailbox,
-                            operation_id,
-                        };
-                        return Poll::Pending;
+                        true
                     }
-                    EntryState::Ready(_) => {
-                        local.deferred.drops.push(incoming);
-                        let Some(EntryState::Ready(output)) = local.operations.take(operation_id)
-                        else {
-                            unreachable!()
-                        };
-                        return Poll::Ready(Ok(output));
+                    Err(()) => false,
+                },
+                None => local
+                    .admissions
+                    .can_admit(local.driver.as_ref().unwrap().free_slots()),
+            };
+            if granted {
+                let id = local.operations.reserve();
+                let waiter = local
+                    .driver
+                    .as_mut()
+                    .unwrap()
+                    .admit(request, Observer::Ordinary(id));
+                local.operations.insert(id, waiter, incoming);
+                this.state = State::Waiting {
+                    mailbox,
+                    operation_id: id,
+                };
+            } else {
+                let id = match registration {
+                    Some(id) => {
+                        let old = local
+                            .admissions
+                            .refresh(id, incoming)
+                            .expect("live admission missing");
+                        if let Some(old) = old {
+                            local.deferred.drops.push(old);
+                        }
+                        id
                     }
-                }
+                    None => local.admissions.register(request.deadline(), incoming),
+                };
+                this.state = State::Admitting {
+                    mailbox,
+                    request,
+                    registration: id,
+                };
             }
-            State::Done => panic!("io_uring operation polled after completion"),
-        };
-        let mut local = owner.borrow_mut();
-        local.deferred.drops.reserve(2);
-        if local.closing {
-            local.deferred.drops.push(incoming);
-            drop(local);
-            drop(request);
-            return Poll::Ready(Err(Error::Closed));
+            return Poll::Pending;
         }
-        if request
-            .deadline()
-            .is_some_and(|deadline| deadline <= local.now)
-        {
-            if let Some(id) = registration {
-                local.cancel_admission(id);
-            }
-            local.deferred.resources.reserve(1);
-            let (output, retired) = request.timeout();
-            local.deferred.resources.push(retired);
-            local.deferred.drops.push(incoming);
-            return Poll::Ready(Ok(output));
-        }
-        local.reconcile_admissions();
-        // A grant already owns capacity. Fresh callers may only use capacity
-        // left after older registrations have received their FIFO reservations.
-        let granted = match registration {
-            Some(id) => match local.admissions.take_grant(id) {
-                Ok(old) => {
-                    if let Some(old) = old {
-                        local.deferred.drops.push(old);
-                    }
-                    true
-                }
-                Err(()) => false,
-            },
-            None => local
-                .admissions
-                .can_admit(local.driver.as_ref().unwrap().free_slots()),
-        };
-        if granted {
-            // Reserve the unbounded observer entry before consuming a bounded
-            // waiter. Both identities become visible in the same local borrow.
-            let id = local.operations.reserve();
-            let waiter = local
-                .driver
-                .as_mut()
-                .unwrap()
-                .admit(request, Observer::Ordinary(id));
-            local.operations.insert(id, waiter, incoming);
-            this.state = State::Waiting {
-                mailbox,
-                operation_id: id,
-            };
-        } else {
-            // Repeated polls replace only the observer waker. The original FIFO
-            // position and deadline remain attached to the same registration.
-            let id = match registration {
-                Some(id) => {
-                    let old = local
-                        .admissions
-                        .refresh(id, incoming)
-                        .expect("live admission missing");
-                    if let Some(old) = old {
-                        local.deferred.drops.push(old);
-                    }
-                    id
-                }
-                None => local.admissions.register(request.deadline(), incoming),
-            };
-            this.state = State::Admitting {
-                mailbox,
-                request,
-                registration: id,
-            };
-        }
-        Poll::Pending
     }
 }
 
@@ -409,16 +444,24 @@ impl Future for SyncAdmission {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
-        let incoming = cx.waker().clone();
         if this.mailbox.is_none() {
             let owner = runtime::current().expect("io_uring sync requires a current worker");
             this.mailbox = Some(Arc::downgrade(&owner.borrow().mailbox));
         }
         let owner = bound(this.mailbox.as_ref().unwrap());
         if let Ok(owner) = owner {
-            let mut local = owner.borrow_mut();
-            local.deferred.drops.reserve(2);
-            if !local.closing {
+            let mut incoming = None;
+            loop {
+                let mut local = owner.borrow_mut();
+                if local.closing {
+                    if let Some(incoming) = incoming {
+                        local.deferred.drops.push(incoming);
+                    }
+                    if let Some(id) = this.registration.take() {
+                        local.cancel_admission(id);
+                    }
+                    break;
+                }
                 local.reconcile_admissions();
                 let granted = match this.registration {
                     Some(id) => match local.admissions.take_grant(id) {
@@ -435,7 +478,9 @@ impl Future for SyncAdmission {
                         .can_admit(local.driver.as_ref().unwrap().free_slots()),
                 };
                 if granted {
-                    local.deferred.drops.push(incoming);
+                    if let Some(incoming) = incoming {
+                        local.deferred.drops.push(incoming);
+                    }
                     let request = this.request.take().expect("sync polled after admission");
                     let sender = this.sender.take().unwrap();
                     local
@@ -446,6 +491,18 @@ impl Future for SyncAdmission {
                     this.registration = None;
                     return Poll::Ready(this.receiver.take().unwrap());
                 }
+                if incoming.is_none()
+                    && this
+                        .registration
+                        .is_some_and(|id| local.admissions.will_wake(id, cx.waker()))
+                {
+                    return Poll::Pending;
+                }
+                let Some(incoming) = incoming.take() else {
+                    drop(local);
+                    incoming = Some(cx.waker().clone());
+                    continue;
+                };
                 this.registration = Some(match this.registration {
                     Some(id) => {
                         let old = local
@@ -460,10 +517,6 @@ impl Future for SyncAdmission {
                     None => local.admissions.register(None, incoming),
                 });
                 return Poll::Pending;
-            }
-            local.deferred.drops.push(incoming);
-            if let Some(id) = this.registration.take() {
-                local.cancel_admission(id);
             }
         }
         // Closure rejects unstarted work and publishes only after releasing
@@ -613,7 +666,7 @@ mod tests {
         *,
     };
     use crate::{
-        Clock as _, IoBufMut, IoBufs, Runner as _,
+        Blob as _, Clock as _, IoBufMut, IoBufs, Runner as _, Storage as _,
         iouring::{Config, RingConfig, Runner},
         utils::{extract_panic_message, reschedule},
     };
@@ -633,6 +686,7 @@ mod tests {
         wakes: AtomicUsize,
         drops: AtomicUsize,
         panic_callback: AtomicUsize,
+        on_clone: Option<fn()>,
     }
 
     impl Reentrant {
@@ -664,6 +718,9 @@ mod tests {
             Self::check_local();
             owner.clones.fetch_add(1, Ordering::Relaxed);
             owner.panic_once(Self::CLONE);
+            if let Some(on_clone) = owner.on_clone {
+                on_clone();
+            }
             RawWaker::new(Arc::into_raw(Arc::clone(&owner)).cast(), &Self::VTABLE)
         }
 
@@ -705,6 +762,149 @@ mod tests {
     }
 
     #[test]
+    fn sync_admission_clones_only_changed_pending_observers() {
+        for queued in [false, true] {
+            let callbacks = Arc::new(Reentrant::default());
+            runner().start(|context| async move {
+                let (blob, _) = context.open("observer_sync", b"file").await.unwrap();
+                let (fd, _peer) = socket();
+                let mut blocker = queued.then(|| recv(fd, None));
+                if let Some(blocker) = &mut blocker {
+                    assert!(poll!(blocker).is_pending());
+                }
+                let mut admission = Box::pin(blob.start_sync());
+                let waker = callbacks.waker();
+                let mut cx = Context::from_waker(&waker);
+                if queued {
+                    assert!(admission.poll_unpin(&mut cx).is_pending());
+                    assert!(admission.poll_unpin(&mut cx).is_pending());
+                    assert_eq!(callbacks.clones.load(Ordering::Relaxed), 1);
+                    drop(blocker);
+                    while callbacks.wakes.load(Ordering::Relaxed) == 0 {
+                        reschedule().await;
+                    }
+                }
+                let Poll::Ready(handle) = admission.poll_unpin(&mut cx) else {
+                    panic!("available sync admission must complete");
+                };
+                assert_eq!(
+                    callbacks.clones.load(Ordering::Relaxed),
+                    usize::from(queued)
+                );
+                handle.await.unwrap();
+            });
+        }
+    }
+
+    #[test]
+    fn observer_clone_reentry_rechecks_expired_registrations() {
+        for sleep_first in [false, true] {
+            let callbacks = Arc::new(Reentrant {
+                on_clone: Some(|| {
+                    let owner = runtime::current().unwrap();
+                    let mut local = owner.borrow_mut();
+                    local.now += Duration::from_secs(120);
+                    local.reconcile_admissions();
+                    let Local {
+                        now, timers, deferred, ..
+                    } = &mut *local;
+                    timers.expire(*now, &mut deferred.wakes);
+                }),
+                ..Default::default()
+            });
+            runner().start(|_| async {
+                let (fd, _peer) = socket();
+                let mut blocker = recv(fd.clone(), None);
+                assert!(poll!(&mut blocker).is_pending());
+                let mut queued = recv(
+                    fd,
+                    Some(std::time::Instant::now() + Duration::from_secs(60)),
+                );
+                let mut sleep = super::super::sleep::Sleep::new(Duration::from_secs(60));
+                assert!(poll!(&mut queued).is_pending());
+                assert!(poll!(&mut sleep).is_pending());
+                let waker = callbacks.waker();
+                let mut cx = Context::from_waker(&waker);
+                if sleep_first {
+                    assert!(sleep.poll_unpin(&mut cx).is_ready());
+                }
+                assert!(matches!(
+                    queued.poll_unpin(&mut cx),
+                    Poll::Ready(Ok(RequestOutput::Recv(Err((_, Error::Timeout)))))
+                ));
+                assert!(sleep.poll_unpin(&mut cx).is_ready());
+                assert_eq!(callbacks.clones.load(Ordering::Relaxed), 1);
+            });
+        }
+    }
+
+    #[test]
+    fn sleep_clone_panic_preserves_registration_cancellation() {
+        runner().start(|_| async {
+            let mut sleep = super::super::sleep::Sleep::new(Duration::from_secs(60));
+            let registered = Arc::new(Reentrant::default());
+            let registered_waker = registered.waker();
+            assert!(
+                sleep
+                    .poll_unpin(&mut Context::from_waker(&registered_waker))
+                    .is_pending()
+            );
+            let callbacks = Arc::new(Reentrant::default());
+            callbacks
+                .panic_callback
+                .store(Reentrant::CLONE, Ordering::Relaxed);
+            let waker = callbacks.waker();
+            let panic = catch_unwind(AssertUnwindSafe(|| {
+                let _ = sleep.poll_unpin(&mut Context::from_waker(&waker));
+            }))
+            .expect_err("changed sleep observer must clone");
+            assert_eq!(extract_panic_message(&*panic), "waker callback panic 1");
+            drop(sleep);
+            reschedule().await;
+            assert_eq!(registered.drops.load(Ordering::Relaxed), 1);
+        });
+    }
+
+    #[test]
+    fn pending_observers_retain_equivalent_wakers() {
+        let callbacks = Arc::new(Reentrant::default());
+        runner().start(|_| async {
+            let (fd, _peer) = socket();
+            let mut admitted = recv(fd.clone(), None);
+            let mut queued = recv(fd, None);
+            let mut sleep = super::super::sleep::Sleep::new(Duration::from_secs(60));
+            let waker = callbacks.waker();
+            let mut cx = Context::from_waker(&waker);
+            assert!(admitted.poll_unpin(&mut cx).is_pending());
+            assert!(queued.poll_unpin(&mut cx).is_pending());
+            assert!(sleep.poll_unpin(&mut cx).is_pending());
+            let clones = callbacks.clones.load(Ordering::Relaxed);
+            assert!(admitted.poll_unpin(&mut cx).is_pending());
+            assert!(queued.poll_unpin(&mut cx).is_pending());
+            assert!(sleep.poll_unpin(&mut cx).is_pending());
+            assert_eq!(callbacks.clones.load(Ordering::Relaxed), clones);
+        });
+    }
+
+    #[test]
+    fn ready_observer_does_not_clone_unused_waker() {
+        let callbacks = Arc::new(Reentrant::default());
+        runner().start(|_| async {
+            let (fd, _peer) = socket();
+            let mut operation = send(fd);
+            let waker = callbacks.waker();
+            let mut cx = Context::from_waker(&waker);
+            assert!(operation.poll_unpin(&mut cx).is_pending());
+            while callbacks.wakes.load(Ordering::Relaxed) == 0 {
+                reschedule().await;
+            }
+            let clones = callbacks.clones.load(Ordering::Relaxed);
+            assert!(operation.poll_unpin(&mut cx).is_ready());
+            assert_eq!(callbacks.clones.load(Ordering::Relaxed), clones);
+        });
+    }
+
+    #[test]
     fn observer_clone_wake_and_drop_run_outside_local_borrows() {
         let callbacks = Arc::new(Reentrant::default());
         runner().start(|_| async {
@@ -715,6 +915,11 @@ mod tests {
             assert!(operation.poll_unpin(&mut cx).is_pending());
             // Refreshing displaces the first observer. The deferred destructor
             // must run without keeping the operation slab borrowed.
+            assert!(
+                operation
+                    .poll_unpin(&mut Context::from_waker(Waker::noop()))
+                    .is_pending()
+            );
             assert!(operation.poll_unpin(&mut cx).is_pending());
             while callbacks.wakes.load(Ordering::Relaxed) == 0 {
                 reschedule().await;
@@ -722,9 +927,9 @@ mod tests {
             assert!(operation.poll_unpin(&mut cx).is_ready());
             drop(waker);
         });
-        assert_eq!(callbacks.clones.load(Ordering::Relaxed), 3);
+        assert_eq!(callbacks.clones.load(Ordering::Relaxed), 2);
         assert_eq!(callbacks.wakes.load(Ordering::Relaxed), 1);
-        assert_eq!(callbacks.drops.load(Ordering::Relaxed), 3);
+        assert_eq!(callbacks.drops.load(Ordering::Relaxed), 2);
         assert_eq!(Arc::strong_count(&callbacks), 1);
     }
 
@@ -741,7 +946,7 @@ mod tests {
                 let mut operation = recv(fd.clone(), None);
                 let waker = callbacks.waker();
                 let mut cx = Context::from_waker(&waker);
-                assert!(operation.poll_unpin(&mut cx).is_pending());
+                assert!(poll!(&mut operation).is_pending());
                 let registration = match &operation.state {
                     State::Admitting { registration, .. } => (Some(*registration), None),
                     State::Waiting { operation_id, .. } => (None, Some(*operation_id)),
@@ -796,7 +1001,11 @@ mod tests {
                     if callback == Reentrant::DROP {
                         // Replacing an observer queues its destructor. The
                         // receive stays pending until failure cleanup cancels it.
-                        assert!(operation.poll_unpin(&mut cx).is_pending());
+                        assert!(
+                            operation
+                                .poll_unpin(&mut Context::from_waker(Waker::noop()))
+                                .is_pending()
+                        );
                     }
                     futures::future::pending::<()>().await;
                 });
