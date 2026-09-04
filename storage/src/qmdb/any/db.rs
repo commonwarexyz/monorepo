@@ -214,7 +214,7 @@ where
                 panic!("location does not reference update operation. loc={loc}");
             };
             if data.key() == key {
-                result = Some(data.value().clone());
+                result = Some(data.into_value());
                 break;
             }
         }

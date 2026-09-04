@@ -561,6 +561,7 @@ mod tests {
         test_fixed_prune_after_uncommitted_apply_batch_recovery => run_prune_after_uncommitted_apply_batch_recovery, open;
         test_fixed_rewind_preserves_collision_bucket => run_rewind_preserves_collision_bucket, open;
         test_fixed_get_many => run_get_many, open;
+        test_fixed_get_many_duplicate_keys => run_get_many_duplicate_keys, open;
         test_fixed_get_many_unexpected_data => run_get_many_unexpected_data, open;
         test_fixed_rewind_after_reopen_repeated_key_gap => run_rewind_after_reopen_repeated_key_gap, open;
         test_fixed_rewind_after_reopen_mixed_gap_retained => run_rewind_after_reopen_mixed_gap_retained, open;
