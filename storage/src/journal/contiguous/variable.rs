@@ -1110,7 +1110,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             if blob == floor_blob
                 && floor > blob_first_position(blob, items_per_blob)?
                 && floor > offsets.pruning_boundary()
-                && valid <= offsets.read(floor - 1).await?
+                && valid <= offsets.reader().read(floor - 1).await?
             {
                 return Err(Error::Corruption(format!(
                     "blob {blob} no longer backs acknowledged items: well-formed prefix {valid} \
@@ -1323,7 +1323,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         let discard_blob = position_to_blob(size, self.items_per_blob.get());
 
         // The byte offset of the first discarded item is the data truncation point.
-        let discard_offset = self.offsets.read(size).await?;
+        let discard_offset = self.offsets.reader().read(size).await?;
 
         // Rewind offsets before data. Rewinding the offsets journal persists a lowered recovery
         // watermark before any state moves backward, so a crash anywhere in this sequence leaves
@@ -2363,27 +2363,27 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     }
 }
 
-impl<E: Context, V: CodecShared> Contiguous for Inner<E, V> {
+impl<E: Context, V: CodecShared> Contiguous for Journal<E, V> {
     type Item = V;
 
     fn bounds(&self) -> Range<u64> {
-        self.bounds.clone()
+        self.0.bounds.clone()
     }
 
     async fn read(&self, position: u64) -> Result<V, Error> {
-        self.reader().read(position).await
+        self.0.reader().read(position).await
     }
 
     async fn read_many(&self, positions: &[u64]) -> Result<Vec<V>, Error> {
-        self.reader().read_many(positions).await
+        self.0.reader().read_many(positions).await
     }
 
     fn try_read_sync(&self, position: u64) -> Option<V> {
-        self.reader().try_read_sync(position)
+        self.0.reader().try_read_sync(position)
     }
 
     fn try_read_many_sync(&self, positions: &[u64]) -> Vec<Option<V>> {
-        self.reader().try_read_many_sync(positions)
+        self.0.reader().try_read_many_sync(positions)
     }
 
     async fn replay(
@@ -2392,45 +2392,12 @@ impl<E: Context, V: CodecShared> Contiguous for Inner<E, V> {
         buffer: NonZeroUsize,
         read_options: ReadOptions,
     ) -> Result<impl Stream<Item = Result<(u64, V), Error>> + Send, Error> {
-        let reader = self.reader();
+        let reader = self.0.reader();
         let states = reader
             .replay_states(start_pos, buffer, read_options)
             .await?;
 
         Ok(super::replay_stream_from_states(states))
-    }
-}
-
-impl<E: Context, V: CodecShared> Contiguous for Journal<E, V> {
-    type Item = V;
-
-    fn bounds(&self) -> Range<u64> {
-        Contiguous::bounds(&*self.0)
-    }
-
-    async fn read(&self, position: u64) -> Result<V, Error> {
-        Contiguous::read(&*self.0, position).await
-    }
-
-    async fn read_many(&self, positions: &[u64]) -> Result<Vec<V>, Error> {
-        Contiguous::read_many(&*self.0, positions).await
-    }
-
-    fn try_read_sync(&self, position: u64) -> Option<V> {
-        Contiguous::try_read_sync(&*self.0, position)
-    }
-
-    fn try_read_many_sync(&self, positions: &[u64]) -> Vec<Option<V>> {
-        Contiguous::try_read_many_sync(&*self.0, positions)
-    }
-
-    async fn replay(
-        &self,
-        start_pos: u64,
-        buffer: NonZeroUsize,
-        read_options: ReadOptions,
-    ) -> Result<impl Stream<Item = Result<(u64, V), Error>> + Send, Error> {
-        Contiguous::replay(&*self.0, start_pos, buffer, read_options).await
     }
 }
 
@@ -2525,7 +2492,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         &mut self,
         position: u64,
     ) -> Result<(), Error> {
-        let offset = self.0.offsets.read(position).await?;
+        let offset = self.0.offsets.reader().read(position).await?;
         let blob = position_to_blob(position, self.0.items_per_blob.get());
         if blob == self.0.blobs.tail_blob_index() {
             self.0.blobs.rewind_tail(offset).await
@@ -2737,9 +2704,9 @@ mod tests {
             drop(journal);
             let journal = make(pending.clone()).await.unwrap();
             assert_eq!(journal.offsets.recovery_watermark(), 4);
-            assert_eq!(journal.bounds(), 0..4);
+            assert_eq!(journal.bounds, 0..4);
             for i in 0..4u64 {
-                assert_eq!(journal.read(i).await.unwrap(), i + 1);
+                assert_eq!(journal.reader().read(i).await.unwrap(), i + 1);
             }
             journal.destroy().await.unwrap();
         });
