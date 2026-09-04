@@ -647,9 +647,11 @@ impl PendingAcks {
         let current = self.queue.front_mut().map(|pending| &mut pending.waiter);
         let syncing = self.syncing.as_mut().map(|syncing| &mut syncing.completion);
         match (current, syncing) {
+            // A ready cursor sync must retire even when application acknowledgements are
+            // continuously ready, so durable progress does not depend on an idle delivery window.
             (Some(current), Some(syncing)) => select! {
-                result = current => AcknowledgementEvent::Ready(result),
                 result = syncing => AcknowledgementEvent::Durable(result),
+                result = current => AcknowledgementEvent::Ready(result),
             },
             (Some(current), None) => AcknowledgementEvent::Ready(current.await),
             (None, Some(syncing)) => AcknowledgementEvent::Durable(syncing.await),
@@ -1236,6 +1238,41 @@ mod tests {
     }
 
     #[test]
+    fn completed_cursor_sync_precedes_ready_application_acknowledgements() {
+        deterministic::Runner::default().start(|context| async move {
+            let metrics = metrics::Delivery::new(&context);
+            let mut pending = PendingAcks::new(NonZeroUsize::MIN);
+            let (first, waiter) = Exact::handle();
+            pending.push(OutputIndex::ZERO, waiter);
+            first.acknowledge();
+            let result = pending.current().now_or_never().unwrap();
+            let (through, outputs) = pending.complete(result).unwrap();
+            pending.coalesce_ready(through, outputs, || {
+                metrics.acknowledgement_completion.timer(&context)
+            });
+            let ready = pending.take_ready().unwrap();
+            pending.start_sync(
+                ready,
+                metrics.acknowledgement_durability.timer(&context),
+                futures::future::ready(Ok(())).boxed(),
+            );
+
+            let (next, waiter) = Exact::handle();
+            pending.push(OutputIndex::new(1), waiter);
+            next.acknowledge();
+            assert!(matches!(
+                pending.next_event().await,
+                AcknowledgementEvent::Durable(Ok(()))
+            ));
+            assert_eq!(
+                pending.complete_sync(Ok(())).unwrap().through,
+                OutputIndex::ZERO
+            );
+            assert_eq!(pending.queue.len(), 1);
+        });
+    }
+
+    #[test]
     fn ready_acknowledgements_release_capacity_during_cursor_sync() {
         deterministic::Runner::default().start(|context| async move {
             let metrics = metrics::Delivery::new(&context);
@@ -1273,7 +1310,9 @@ mod tests {
 
             third.acknowledge();
             fourth.acknowledge();
-            let result = pending.current().now_or_never().unwrap();
+            let AcknowledgementEvent::Ready(result) = pending.next_event().await else {
+                panic!("pending durability prevented ready acknowledgement processing");
+            };
             let (through, outputs) = pending.complete(result).unwrap();
             pending.coalesce_ready(through, outputs, || {
                 metrics.acknowledgement_completion.timer(&context)
