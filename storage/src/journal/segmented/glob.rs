@@ -151,7 +151,8 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
                 decode_all(Cursor::new(compressed_data)).map_err(|_| Error::DecompressionFailed)?;
             V::decode_cfg(Bytes::from(decompressed), &self.codec_config).map_err(Error::Codec)?
         } else {
-            V::decode_cfg(buf.slice(..data_len), &self.codec_config).map_err(Error::Codec)?
+            V::decode_cfg(Bytes::from(buf.slice(..data_len)), &self.codec_config)
+                .map_err(Error::Codec)?
         };
 
         Ok(value)
