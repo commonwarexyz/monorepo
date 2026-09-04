@@ -35,6 +35,7 @@ use commonware_utils::sequence::Unit;
 use futures::StreamExt as _;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
+    future::Future,
     marker::PhantomData,
     num::{NonZeroU64, NonZeroUsize},
     sync::Arc,
@@ -112,6 +113,18 @@ where
 {
     bodies: Option<BodyJournal<E, H, B>>,
     metadata: Option<MetadataJournal<E, H>>,
+}
+
+/// Completed journal writes awaiting publication into the catalog's custody indexes.
+pub(in crate::multimmit::marshal) struct Append<E, H, B>
+where
+    E: Context,
+    H: Hasher,
+    B: Codec + Digestible<Digest = H::Digest>,
+{
+    position: u64,
+    meta: BlockMeta<H::Digest>,
+    segment: Segment<E, H, B>,
 }
 
 impl<E, H, B> Segment<E, H, B>
@@ -810,12 +823,6 @@ where
             .with_attribute("segment", segment)
     }
 
-    async fn open_bodies(&self, segment: u64) -> Result<BodyJournal<E, H, B>, Error> {
-        BodyJournal::init(self.body_context(segment), self.body_config(segment))
-            .await
-            .map_err(Error::from)
-    }
-
     fn metadata_config(&self, segment: u64) -> variable::Config<()> {
         variable::Config {
             partition: self.segment_prefix("metadata", segment),
@@ -827,18 +834,40 @@ where
         }
     }
 
-    async fn open_segment(&self, segment: u64) -> Result<Segment<E, H, B>, Error> {
-        let metadata = MetadataJournal::<E, H>::init(
-            self.metadata_context(segment),
-            self.metadata_config(segment),
-        );
-        let (bodies, metadata) = futures::try_join!(self.open_bodies(segment), async move {
-            metadata.await.map_err(Error::from)
-        })?;
-        Ok(Segment {
-            bodies: Some(bodies),
-            metadata: Some(metadata),
-        })
+    /// Absent manifest coordinates reset both journals before reuse, discarding any residue
+    /// from interrupted segment destruction. Existing coordinates use authoritative recovery.
+    fn open_segment(
+        &self,
+        segment: u64,
+    ) -> impl Future<Output = Result<Segment<E, H, B>, Error>> + Send + use<T, E, H, B> {
+        let body_context = self.body_context(segment);
+        let body_config = self.body_config(segment);
+        let metadata_context = self.metadata_context(segment);
+        let metadata_config = self.metadata_config(segment);
+        let exists = self.segments.contains(&segment);
+        async move {
+            let (bodies, metadata) = futures::try_join!(
+                async move {
+                    if exists {
+                        BodyJournal::init(body_context, body_config).await
+                    } else {
+                        BodyJournal::init_at_size(body_context, body_config, 0).await
+                    }
+                },
+                async move {
+                    if exists {
+                        MetadataJournal::<E, H>::init(metadata_context, metadata_config).await
+                    } else {
+                        MetadataJournal::<E, H>::init_at_size(metadata_context, metadata_config, 0)
+                            .await
+                    }
+                },
+            )?;
+            Ok(Segment {
+                bodies: Some(bodies),
+                metadata: Some(metadata),
+            })
+        }
     }
 
     /// Opens a sealed segment's compact-metadata snapshot after proving both of its journals
@@ -857,26 +886,6 @@ where
         );
         let (_, metadata) = futures::try_join!(bodies, metadata)?;
         Ok(metadata)
-    }
-
-    /// Reset both journals together before an absent manifest coordinate is reused. This is the
-    /// recovery path for residue left by an interrupted post-manifest segment destruction.
-    async fn open_new_segment(&self, segment: u64) -> Result<Segment<E, H, B>, Error> {
-        let bodies =
-            BodyJournal::init_at_size(self.body_context(segment), self.body_config(segment), 0);
-        let metadata = MetadataJournal::<E, H>::init_at_size(
-            self.metadata_context(segment),
-            self.metadata_config(segment),
-            0,
-        );
-        let (bodies, metadata) = futures::try_join!(
-            async move { bodies.await.map_err(Error::from) },
-            async move { metadata.await.map_err(Error::from) },
-        )?;
-        Ok(Segment {
-            bodies: Some(bodies),
-            metadata: Some(metadata),
-        })
     }
 
     fn state_snapshot(&self) -> Result<PendingState, Error> {
@@ -916,11 +925,7 @@ where
             return Ok(());
         }
         let exists = self.segments.contains(&segment);
-        let opened = if exists {
-            self.open_segment(segment).await?
-        } else {
-            self.open_new_segment(segment).await?
-        };
+        let opened = self.open_segment(segment).await?;
         self.open_segments.insert(segment, opened);
         if exists {
             Ok(())
@@ -1079,11 +1084,32 @@ where
     }
 
     /// Buffers a complete block at one globally unique archive position.
+    #[cfg(test)]
     pub(in crate::multimmit::marshal) async fn put(
         &mut self,
         reference: BlockRef<H::Digest>,
         block: Arc<TransactionBlock<H, B>>,
     ) -> Result<(), Error> {
+        if let Some(append) = self.start_put(reference, block)? {
+            let append = append.await?;
+            self.finish_put(append)?;
+        }
+        Ok(())
+    }
+
+    /// Lends the append journals to one owned operation while retaining the read directory.
+    ///
+    /// Only immutable body reads may run until `finish_put` returns the journals. The occupied
+    /// segment slot keeps an appendable segment from being mistaken for a cold sealed segment.
+    #[allow(clippy::type_complexity)]
+    pub(in crate::multimmit::marshal) fn start_put(
+        &mut self,
+        reference: BlockRef<H::Digest>,
+        block: Arc<TransactionBlock<H, B>>,
+    ) -> Result<
+        Option<impl Future<Output = Result<Append<E, H, B>, Error>> + Send + use<T, E, H, B>>,
+        Error,
+    > {
         if !self.admits(reference) {
             return Err(Error::Inconsistent(
                 "pending block is outside the custody floor",
@@ -1102,7 +1128,7 @@ where
             return Err(Error::Inconsistent("pending block identity is invalid"));
         }
         match self.by_digest.get(&digest) {
-            Some(entry) if entry.reference == reference && entry.meta == meta => return Ok(()),
+            Some(entry) if entry.reference == reference && entry.meta == meta => return Ok(None),
             Some(_) => return Err(Error::Inconsistent("pending digest identity changed")),
             None => {}
         }
@@ -1110,33 +1136,65 @@ where
         let position = self.next_position;
         let segment_id = self.segment_id(position);
         let local = position % self.segment_capacity;
-        self.ensure_segment(segment_id).await?;
-        let segment = self
-            .open_segments
-            .get_mut(&segment_id)
-            .expect("pending segment was ensured");
-        if segment.bodies().size() != local || segment.metadata().size() != local {
-            return Err(Error::Inconsistent(
-                "pending journals do not match the append coordinate",
-            ));
+        let segment = self.open_segments.insert(
+            segment_id,
+            Segment {
+                bodies: None,
+                metadata: None,
+            },
+        );
+        let opening = segment.is_none().then(|| self.open_segment(segment_id));
+        Ok(Some(async move {
+            let mut segment = match segment {
+                Some(segment) => segment,
+                None => opening.expect("a missing segment has open inputs").await?,
+            };
+            if segment.bodies().size() != local || segment.metadata().size() != local {
+                return Err(Error::Inconsistent(
+                    "pending journals do not match the append coordinate",
+                ));
+            }
+            let bodies = segment.bodies.take().expect("append owns pending bodies");
+            let metadata = segment
+                .metadata
+                .take()
+                .expect("append owns pending block metadata");
+            let stored_body = Shared::new(block);
+            let (bodies, metadata) = futures::try_join!(
+                async move { bodies.append(&stored_body).await.map_err(Error::from) },
+                async { metadata.append(&meta).await.map_err(Error::from) },
+            )?;
+            if bodies.1 != local || metadata.1 != local {
+                return Err(Error::Inconsistent(
+                    "pending journals assigned different local positions",
+                ));
+            }
+            segment.bodies = Some(bodies.0);
+            segment.metadata = Some(metadata.0);
+            Ok(Append {
+                position,
+                meta,
+                segment,
+            })
+        }))
+    }
+
+    /// Publishes one completed append; no other mutable operation may have intervened.
+    pub(in crate::multimmit::marshal) fn finish_put(
+        &mut self,
+        append: Append<E, H, B>,
+    ) -> Result<(), Error> {
+        let Append {
+            position,
+            meta,
+            segment,
+        } = append;
+        assert_eq!(position, self.next_position, "appends complete in order");
+        let segment_id = self.segment_id(position);
+        self.open_segments.insert(segment_id, segment);
+        if self.segments.insert(segment_id) {
+            self.stage_state()?;
         }
-        let bodies = segment.bodies.take().expect("catalog owns pending bodies");
-        let metadata = segment
-            .metadata
-            .take()
-            .expect("catalog owns pending block metadata");
-        let stored_body = Shared::new(block);
-        let (bodies, metadata) = futures::try_join!(
-            async move { bodies.append(&stored_body).await.map_err(Error::from) },
-            async { metadata.append(&meta).await.map_err(Error::from) },
-        )?;
-        if bodies.1 != local || metadata.1 != local {
-            return Err(Error::Inconsistent(
-                "pending journals assigned different local positions",
-            ));
-        }
-        segment.bodies = Some(bodies.0);
-        segment.metadata = Some(metadata.0);
         self.next_position = position
             .checked_add(1)
             .ok_or(Error::Inconsistent("pending position overflow"))?;
@@ -1679,6 +1737,49 @@ mod tests {
             locator.encoded_len += 1;
             let reader = store.active_readers.get(&0).unwrap();
             assert!(reader.read(locator).await.is_err());
+        });
+    }
+
+    #[test]
+    fn owned_append_preserves_snapshot_and_publishes_only_on_completion() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut store = open(&context, "store", "pending_owned_append").await;
+            let first = block(0, 1, 1);
+            let second = block(0, 2, 2);
+            store.put(first.reference(), first.clone()).await.unwrap();
+            sync(&mut store).await;
+
+            let append = store
+                .start_put(second.reference(), second.clone())
+                .unwrap()
+                .unwrap();
+            let refs = [(0, first.reference()), (1, second.reference())];
+            let mut groups = store.body_read_groups(refs, u64::MAX, 1).unwrap();
+            assert_eq!(groups.len(), 1);
+            assert_eq!(
+                groups.pop().unwrap().read().await.unwrap(),
+                vec![(0, first.clone())]
+            );
+            assert_eq!(store.next_position, 1);
+            assert!(!store.by_digest.contains_key(&second.reference().digest()));
+
+            let append = Box::pin(append).await.unwrap();
+            assert!(!store.by_digest.contains_key(&second.reference().digest()));
+            store.finish_put(append).unwrap();
+            assert_eq!(store.next_position, 2);
+            assert!(store.by_digest.contains_key(&second.reference().digest()));
+            assert!(
+                store
+                    .body_read_groups([(0, second.reference())], u64::MAX, 1)
+                    .unwrap()
+                    .is_empty()
+            );
+            sync(&mut store).await;
+            let values = store
+                .blocks(&[first.reference(), second.reference()])
+                .await
+                .unwrap();
+            assert_eq!(values, vec![Some(first), Some(second)]);
         });
     }
 

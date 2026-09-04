@@ -555,7 +555,15 @@ where
         &self,
         references: Vec<BlockRef<H::Digest>>,
     ) -> Result<BodyValues<H, B>, Error> {
-        let mut bodies = self.catalog.bodies(references.clone()).await?;
+        let bodies = self.catalog.bodies(references.clone()).await?;
+        self.fill_immutable(&references, bodies).await
+    }
+
+    async fn fill_immutable(
+        &self,
+        references: &[BlockRef<H::Digest>],
+        mut bodies: BodyValues<H, B>,
+    ) -> Result<BodyValues<H, B>, Error> {
         if let Some(promoter) = &self.promoter {
             let missing = references
                 .iter()
@@ -574,6 +582,7 @@ where
         Ok(bodies)
     }
 
+    /// Materializes references obtained from a published catalog checkpoint.
     #[tracing::instrument(
         name = "multimmit.marshal.bodies.materialize",
         level = "info",
@@ -584,8 +593,12 @@ where
         &self,
         refs: &[StoredRef<H::Digest>],
     ) -> Result<Vec<Arc<TransactionBlock<H, B>>>, Error> {
-        let references = refs.iter().map(|output| output.reference).collect();
-        let bodies = self.blocks(references).await?;
+        let references = refs
+            .iter()
+            .map(|output| output.reference)
+            .collect::<Vec<_>>();
+        let bodies = self.catalog.committed_bodies(references.clone()).await?;
+        let bodies = self.fill_immutable(&references, bodies).await?;
         let mut bodies = bodies.into_iter();
         refs.iter()
             .map(|output| {
