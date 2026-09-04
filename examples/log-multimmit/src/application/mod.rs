@@ -6,6 +6,7 @@
 //! Relay broadcasts each block only after consensus has crossed the exact custody fence.
 
 mod actor;
+mod workload;
 pub use actor::{
     Application, ApplicationMetrics, Block, Body, NoopReporter, Production, ProposalLatency,
 };

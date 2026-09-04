@@ -1,3 +1,4 @@
+use super::workload::Workload;
 use bytes::{BufMut, Bytes};
 use commonware_actor::Feedback;
 use commonware_codec::{
@@ -27,7 +28,7 @@ use commonware_utils::{Acknowledgement as _, channel::oneshot, sync::Mutex};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque, btree_map::Entry},
     future::{Future, ready},
-    num::NonZeroUsize,
+    num::{NonZeroU64, NonZeroUsize},
     sync::Arc,
     time::{Duration, SystemTime},
 };
@@ -116,6 +117,7 @@ pub type Marshal = Mailbox<Sha256, MinPk, Body, ed25519::PublicKey>;
 struct ProposalStart {
     block: BlockRef<Sha256Digest>,
     started_at: SystemTime,
+    input_ready_at: Option<SystemTime>,
     finalized: bool,
 }
 
@@ -130,6 +132,7 @@ pub struct ProposalLatency {
     capacity: usize,
     finality: Histogram,
     ordering: Histogram,
+    input_finality: Histogram,
     dropped: Counter,
     finality_evicted: Counter,
 }
@@ -150,6 +153,11 @@ impl ProposalLatency {
                 "time from block build to delivery in the total order",
                 WAN_LATENCY,
             ),
+            input_finality: context.histogram(
+                "input_finalization_latency",
+                "time from the last input byte arriving to protocol finalization, including input queueing",
+                WAN_LATENCY,
+            ),
             dropped: context.counter(
                 "proposal_latency_dropped_total",
                 "proposal latency samples evicted before ordered delivery",
@@ -161,7 +169,12 @@ impl ProposalLatency {
         }
     }
 
-    fn start(&self, block: BlockRef<Sha256Digest>, started_at: SystemTime) {
+    fn start(
+        &self,
+        block: BlockRef<Sha256Digest>,
+        started_at: SystemTime,
+        input_ready_at: Option<SystemTime>,
+    ) {
         let mut started = self.started.lock();
         if started.iter().any(|start| start.block == block) {
             return;
@@ -176,6 +189,7 @@ impl ProposalLatency {
         started.push_back(ProposalStart {
             block,
             started_at,
+            input_ready_at,
             finalized: false,
         });
     }
@@ -214,12 +228,15 @@ impl ProposalLatency {
         for start in self.started.lock().iter_mut() {
             if !start.finalized && finalized.contains(&start.block) {
                 start.finalized = true;
-                samples.push(start.started_at);
+                samples.push((start.started_at, start.input_ready_at));
             }
         }
         let now = SystemTime::now();
-        for started_at in samples {
+        for (started_at, input_ready_at) in samples {
             self.finality.observe_between(started_at, now);
+            if let Some(input_ready_at) = input_ready_at {
+                self.input_finality.observe_between(input_ready_at, now);
+            }
         }
     }
 
@@ -306,6 +323,7 @@ pub struct ApplicationMetrics {
     ///
     /// Splits marshal body dissemination out of the engine's end-to-end validation latency.
     pub body_wait: Histogram,
+    input_queue: Histogram,
 }
 
 impl ApplicationMetrics {
@@ -316,6 +334,11 @@ impl ApplicationMetrics {
             body_wait: context.histogram(
                 "verify_body_wait",
                 "time a remote verification waits for complete-body resolution and durable custody",
+                WAN_LATENCY,
+            ),
+            input_queue: context.histogram(
+                "input_queue_latency",
+                "time from the last input byte arriving to the start of block construction",
                 WAN_LATENCY,
             ),
         }
@@ -330,6 +353,8 @@ pub struct Production {
     /// Minimum time between two blocks this producer builds; zero builds as fast as block
     /// custody admits.
     pub interval: Duration,
+    /// Independent payload arrival rate per producer; absent means saturated input.
+    pub offered_bytes_per_second: Option<NonZeroU64>,
 }
 
 /// Deterministic application attachment backed by marshal block custody.
@@ -338,6 +363,7 @@ pub struct Application<E: Clock + Spawner> {
     seed: u64,
     production: Production,
     last_build: Arc<Mutex<Option<SystemTime>>>,
+    workload: Option<Arc<Mutex<Workload>>>,
     publication_retention: NonZeroUsize,
     producer_chain: Option<ChainId>,
     marshal: Marshal,
@@ -352,6 +378,7 @@ impl<E: Clock + Spawner> Clone for Application<E> {
             seed: self.seed,
             production: self.production,
             last_build: Arc::clone(&self.last_build),
+            workload: self.workload.clone(),
             publication_retention: self.publication_retention,
             producer_chain: self.producer_chain,
             marshal: self.marshal.clone(),
@@ -361,7 +388,7 @@ impl<E: Clock + Spawner> Clone for Application<E> {
     }
 }
 
-impl<E: Clock + Spawner> Application<E> {
+impl<E: Clock + Spawner + Metrics> Application<E> {
     /// Creates an application whose complete blocks are transported and retained by `marshal`.
     pub fn new(
         context: E,
@@ -372,11 +399,19 @@ impl<E: Clock + Spawner> Application<E> {
         marshal: Marshal,
         metrics: ApplicationMetrics,
     ) -> Self {
+        let workload = production.offered_bytes_per_second.map(|rate| {
+            Arc::new(Mutex::new(Workload::new(
+                &context,
+                rate,
+                production.body_size,
+            )))
+        });
         Self {
             context: Arc::new(context),
             seed,
             production,
             last_build: Arc::new(Mutex::new(None)),
+            workload,
             publication_retention,
             producer_chain,
             marshal,
@@ -399,15 +434,23 @@ impl<E: Clock + Spawner> Automaton for Application<E> {
         let marshal = self.marshal.clone();
         let staged = self.staged.clone();
         let proposal_latency = self.metrics.proposal_latency.clone();
+        let input_queue = self.metrics.input_queue.clone();
+        let workload = self.workload.clone();
+        let input_ready_at = workload.as_ref().map(|workload| {
+            workload
+                .lock()
+                .ready_at(context.height().get(), self.context.current())
+        });
         let (mut sender, receiver) = oneshot::channel();
-        // Pace this producer to its interval: the next build starts no earlier than the
-        // interval after the previous one began.
+        // The optional block interval and the availability of a full input batch independently
+        // constrain the build. Neither moves the input arrival schedule under backpressure.
         let next_build = {
             let mut last_build = self.last_build.lock();
             let now = self.context.current();
             let next = last_build
                 .map_or(now, |last| last + self.production.interval)
                 .max(now);
+            let next = input_ready_at.map_or(next, |ready| ready.max(next));
             *last_build = Some(next);
             next
         };
@@ -419,9 +462,11 @@ impl<E: Clock + Spawner> Automaton for Application<E> {
                     _ = sender.closed() => return,
                     () = runtime.sleep_until(next_build) => {},
                 }
-                // Latency is measured from the moment the block is built, not from the
-                // request: the pacing wait above is production policy, not consensus time.
+                // Proposal latency starts at construction; input queueing is measured separately.
                 let started_at = runtime.current();
+                if let Some(input_ready_at) = input_ready_at {
+                    input_queue.observe_between(input_ready_at, started_at);
+                }
                 let block = Arc::new(TransactionBlock::from_context(
                     context,
                     Body::junk(seed, context, body_size),
@@ -443,7 +488,7 @@ impl<E: Clock + Spawner> Automaton for Application<E> {
                 if !staged.insert_with_custody(block, Some(custody)) {
                     return;
                 }
-                proposal_latency.start(reference, started_at);
+                proposal_latency.start(reference, started_at, input_ready_at);
                 info!(
                     chain = context.chain().get(),
                     height = context.height().get(),
@@ -454,6 +499,8 @@ impl<E: Clock + Spawner> Automaton for Application<E> {
                 );
                 if sender.send(body_digest).is_err() {
                     proposal_latency.cancel(reference);
+                } else if let Some(workload) = workload {
+                    workload.lock().admit(context.height().get());
                 }
             });
         ready(receiver)
@@ -650,6 +697,7 @@ mod tests {
                         Sha256::hash(&[&height.to_be_bytes()]),
                     ),
                     SystemTime::now(),
+                    None,
                 );
             }
             let started = latency.started.lock();
@@ -672,22 +720,63 @@ mod tests {
                     Sha256::hash(&[&height.to_be_bytes()]),
                 )
             };
-            latency.start(reference(1), runtime.current());
+            latency.start(reference(1), runtime.current(), None);
             latency.finalize(&[reference(1)], &staged);
-            latency.start(reference(2), runtime.current());
+            latency.start(reference(2), runtime.current(), None);
             assert_eq!(latency.dropped.get(), 1);
             assert_eq!(latency.finality_evicted.get(), 0);
 
-            latency.start(reference(3), runtime.current());
+            latency.start(reference(3), runtime.current(), None);
             assert_eq!(latency.dropped.get(), 2);
             assert_eq!(latency.finality_evicted.get(), 1);
 
             latency.cancel(reference(3));
-            latency.start(reference(4), runtime.current());
+            latency.start(reference(4), runtime.current(), None);
             latency.order(reference(4));
-            latency.start(reference(5), runtime.current());
+            latency.start(reference(5), runtime.current(), None);
             assert_eq!(latency.dropped.get(), 2);
             assert_eq!(latency.finality_evicted.get(), 1);
+        });
+    }
+
+    #[test]
+    fn input_finality_includes_queueing_and_ignores_cancelled_proposals() {
+        deterministic::Runner::default().start(|context| async move {
+            let latency = ProposalLatency::new(&context, NZUsize!(2));
+            let staged = Staged::default();
+            let block = |height| {
+                BlockRef::new(
+                    ChainId::new(0),
+                    Height::new(height),
+                    Sha256::hash(&[b"block"]),
+                )
+            };
+            let started = SystemTime::now();
+            let input = started - Duration::from_secs(1);
+            latency.start(block(1), started, Some(input));
+            latency.cancel(block(1));
+            latency.finalize(&[block(1)], &staged);
+            latency.start(block(2), started, Some(input));
+            latency.finalize(&[block(2)], &staged);
+            latency.finalize(&[block(2)], &staged);
+            let encoded = context.encode();
+            assert!(encoded.contains("input_finalization_latency_count 1\n"));
+            let sum = |name: &str| {
+                encoded
+                    .lines()
+                    .find_map(|line| line.strip_prefix(name))
+                    .unwrap()
+                    .trim()
+                    .parse::<f64>()
+                    .unwrap()
+            };
+            assert!(
+                (sum("input_finalization_latency_sum ")
+                    - sum("proposal_finalization_latency_sum ")
+                    - 1.0)
+                    .abs()
+                    < 1e-9
+            );
         });
     }
 
@@ -711,7 +800,7 @@ mod tests {
                 Sha256::hash(&[b"newest"]),
             );
             for reference in [old, newer, newest] {
-                latency.start(reference, SystemTime::now());
+                latency.start(reference, SystemTime::now(), None);
             }
 
             let started = latency.started.lock();
@@ -743,7 +832,7 @@ mod tests {
             ));
             assert!(staged.insert(Arc::clone(&left)));
             assert!(staged.insert(Arc::clone(&right)));
-            latency.start(left.reference(), SystemTime::now());
+            latency.start(left.reference(), SystemTime::now(), None);
 
             latency.finalize(&[right.reference()], &staged);
             assert!(
@@ -776,7 +865,7 @@ mod tests {
             ));
             assert!(staged.insert(Arc::clone(&parent)));
             assert!(staged.insert(Arc::clone(&child)));
-            latency.start(parent.reference(), SystemTime::now());
+            latency.start(parent.reference(), SystemTime::now(), None);
 
             latency.finalize(&[child.reference()], &staged);
             assert!(latency.started.lock().iter().all(|start| start.finalized));
@@ -794,7 +883,7 @@ mod tests {
                 Height::new(1),
                 Sha256::hash(&[b"block"]),
             );
-            latency.start(block, SystemTime::now());
+            latency.start(block, SystemTime::now(), None);
             latency.order(block);
             assert!(latency.started.lock().is_empty());
             latency.order(block);

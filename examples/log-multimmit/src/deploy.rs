@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeSet,
     fs,
-    num::NonZeroUsize,
+    num::{NonZeroU64, NonZeroUsize},
     path::{Path, PathBuf},
 };
 use tracing::info;
@@ -126,6 +126,10 @@ pub struct Deploy {
     #[arg(long, default_value_t = 0)]
     production_interval_ms: u64,
 
+    /// Independent payload arrival rate per producer; omitted means saturated input.
+    #[arg(long)]
+    offered_bytes_per_second: Option<NonZeroU64>,
+
     /// Bytes reserved for live producer blocks awaiting ordered delivery.
     #[arg(long, default_value_t = DEFAULT_MARSHAL_LIVE_CACHE_BYTES)]
     marshal_live_cache_bytes: usize,
@@ -188,6 +192,8 @@ pub struct NodeConfig {
     pub proposal_policy: ProposalPolicyArg,
     #[serde(default)]
     pub production_interval_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offered_bytes_per_second: Option<NonZeroU64>,
     pub marshal_live_cache_bytes: usize,
     pub marshal_materialized_cache_bytes: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -360,6 +366,7 @@ impl Deploy {
                 extension_bound: self.extension_bound,
                 proposal_policy: self.proposal_policy,
                 production_interval_ms: self.production_interval_ms,
+                offered_bytes_per_second: self.offered_bytes_per_second,
                 marshal_live_cache_bytes: self.marshal_live_cache_bytes,
                 marshal_materialized_cache_bytes: self.marshal_materialized_cache_bytes,
                 marshal_delivery_bytes: self.marshal_delivery_bytes,
@@ -539,6 +546,20 @@ mod tests {
         assert!(
             <Deploy as Args>::augment_args(Command::new("deploy"))
                 .try_get_matches_from(["deploy", "--marshal-delivery-bytes", "0"])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn offered_load_is_optional_and_nonzero() {
+        assert_eq!(parse(&["deploy"]).offered_bytes_per_second, None);
+        assert_eq!(
+            parse(&["deploy", "--offered-bytes-per-second", "5120000"]).offered_bytes_per_second,
+            NonZeroU64::new(5_120_000),
+        );
+        assert!(
+            <Deploy as Args>::augment_args(Command::new("deploy"))
+                .try_get_matches_from(["deploy", "--offered-bytes-per-second", "0"])
                 .is_err()
         );
     }

@@ -294,6 +294,10 @@ struct Cli {
     #[arg(long, default_value_t = 0)]
     production_interval_ms: u64,
 
+    /// Independent payload arrival rate per producer; omitted means saturated input.
+    #[arg(long)]
+    offered_bytes_per_second: Option<NonZeroU64>,
+
     /// Bytes reserved for live producer blocks awaiting ordered delivery.
     #[arg(long, default_value_t = deploy::DEFAULT_MARSHAL_LIVE_CACHE_BYTES)]
     marshal_live_cache_bytes: usize,
@@ -340,6 +344,7 @@ struct RunConfig {
     extension_bound: u32,
     proposal_policy: ProposalPolicy,
     production_interval: Duration,
+    offered_bytes_per_second: Option<NonZeroU64>,
     marshal_live_cache_bytes: usize,
     marshal_materialized_cache_bytes: usize,
     marshal_delivery_bytes: Option<NonZeroUsize>,
@@ -858,6 +863,7 @@ fn main() {
             application::Production {
                 body_size: config.body_size,
                 interval: config.production_interval,
+                offered_bytes_per_second: config.offered_bytes_per_second,
             },
             publication_retention,
             producer_chain,
@@ -1034,6 +1040,7 @@ fn load_run_config(cli: Cli) -> RunConfig {
         extension_bound: cli.extension_bound,
         proposal_policy: cli.proposal_policy.into(),
         production_interval: Duration::from_millis(cli.production_interval_ms),
+        offered_bytes_per_second: cli.offered_bytes_per_second,
         marshal_live_cache_bytes: cli.marshal_live_cache_bytes,
         marshal_materialized_cache_bytes: cli.marshal_materialized_cache_bytes,
         marshal_delivery_bytes: cli.marshal_delivery_bytes,
@@ -1099,6 +1106,7 @@ fn load_remote_config(config_path: PathBuf, hosts_path: PathBuf) -> RunConfig {
         extension_bound: config.extension_bound,
         proposal_policy: config.proposal_policy.into(),
         production_interval: Duration::from_millis(config.production_interval_ms),
+        offered_bytes_per_second: config.offered_bytes_per_second,
         marshal_live_cache_bytes: config.marshal_live_cache_bytes,
         marshal_materialized_cache_bytes: config.marshal_materialized_cache_bytes,
         marshal_delivery_bytes: config.marshal_delivery_bytes,
@@ -1112,6 +1120,29 @@ fn load_remote_config(config_path: PathBuf, hosts_path: PathBuf) -> RunConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_offered_load_is_optional_and_nonzero() {
+        let args = ["log-multimmit", "--me", "0@3000", "--storage-dir", "unused"];
+        let default = load_run_config(Cli::try_parse_from(args).unwrap());
+        assert_eq!(default.offered_bytes_per_second, None);
+        let explicit = load_run_config(
+            Cli::try_parse_from(
+                args.into_iter()
+                    .chain(["--offered-bytes-per-second", "5120000"]),
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            explicit.offered_bytes_per_second,
+            NonZeroU64::new(5_120_000)
+        );
+        assert_eq!(explicit.production_interval, Duration::ZERO);
+        assert!(
+            Cli::try_parse_from(args.into_iter().chain(["--offered-bytes-per-second", "0"]))
+                .is_err()
+        );
+    }
 
     #[test]
     fn local_delivery_budget_is_optional_and_nonzero() {
