@@ -310,14 +310,16 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         // Metadata stores the pruning boundary as a leaf index. Journal recovery compares node
         // positions.
         let key: U64 = U64::new(PRUNED_TO_PREFIX, 0);
-        let metadata_pruned_to = Location::<F>::new(metadata.get(&key).map_or(0, |bytes| {
-            u64::from_be_bytes(
-                bytes
-                    .as_slice()
-                    .try_into()
-                    .expect("metadata pruned_to is not 8 bytes"),
-            )
-        }));
+        let metadata_pruned_to = match metadata.get(&key) {
+            Some(bytes) => {
+                let raw: [u8; 8] = bytes.as_slice().try_into().map_err(|_| {
+                    error!(len = bytes.len(), "metadata pruned_to is not 8 bytes");
+                    Error::DataCorrupted("metadata pruned_to is not 8 bytes")
+                })?;
+                Location::<F>::new(u64::from_be_bytes(raw))
+            }
+            None => Location::<F>::new(0),
+        };
         let metadata_prune_pos = Position::try_from(metadata_pruned_to)?;
         let journal_bounds_start = journal.bounds().start;
 
@@ -2916,6 +2918,70 @@ mod tests {
     fn test_full_init_stale_metadata_returns_error_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(full_init_stale_metadata_returns_error_inner::<mmb::Family>);
+    }
+
+    // Regression test that init() returns a typed corruption error (rather than panicking) when the
+    // metadata pruning-boundary value is checksum-valid but not exactly 8 bytes long.
+    async fn full_init_malformed_pruned_to_returns_error_inner<F: Family>(
+        context: deterministic::Context,
+    ) {
+        let hasher = Standard::<Sha256>::new(ForwardFold);
+
+        // Create a non-empty structure so init() takes the recovery path that reads the boundary.
+        let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
+            context.child("init"),
+            &hasher,
+            test_config(&context),
+        )
+        .await
+        .unwrap();
+        let mut batch = mmr.new_batch();
+        for i in 0..50 {
+            batch = batch.add(&hasher, &test_digest(i));
+        }
+        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        mmr = mmr.apply_batch(&batch).unwrap();
+        let mmr = mmr.sync().await.unwrap();
+        drop(mmr);
+
+        // Overwrite the pruning-boundary value with a malformed (non-8-byte) payload.
+        let meta_cfg = MConfig {
+            partition: test_config(&context).metadata_partition,
+            codec_config: ((0..).into(), ()),
+        };
+        let metadata =
+            Metadata::<_, U64, Vec<u8>>::init(context.child("meta_tamper"), meta_cfg)
+                .await
+                .unwrap();
+        let key = U64::new(PRUNED_TO_PREFIX, 0);
+        metadata.put_sync(key, vec![0u8]).await.unwrap();
+
+        // Reopen the structure: before the fix this panicked in `try_into().expect(..)`; now it
+        // surfaces a typed corruption error.
+        let result = Merkle::<F, _, Digest, Sequential>::init(
+            context.child("reopened"),
+            &hasher,
+            test_config(&context),
+        )
+        .await;
+
+        match result {
+            Err(Error::DataCorrupted(_)) => {} // expected
+            Ok(_) => panic!("expected DataCorrupted error, got Ok"),
+            Err(e) => panic!("expected DataCorrupted error, got {:?}", e),
+        }
+    }
+
+    #[test_traced("WARN")]
+    fn test_full_init_malformed_pruned_to_returns_error_mmr() {
+        let executor = deterministic::Runner::default();
+        executor.start(full_init_malformed_pruned_to_returns_error_inner::<mmr::Family>);
+    }
+
+    #[test_traced("WARN")]
+    fn test_full_init_malformed_pruned_to_returns_error_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(full_init_malformed_pruned_to_returns_error_inner::<mmb::Family>);
     }
 
     async fn full_init_rejects_prune_boundary_beyond_recovered_size_inner<F: Family>(
