@@ -1711,7 +1711,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-glue-fuzz"
-version = "2026.7.0"
+version = "2026.9.0"
 dependencies = [
  "arbitrary",
  "commonware-actor",

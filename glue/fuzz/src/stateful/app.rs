@@ -258,8 +258,8 @@ impl Application<deterministic::Context> for CorrectApp {
         _context: (deterministic::Context, Self::Context),
         block: &Self::Block,
         batches: Batches,
-    ) -> MerkleizedBatches {
-        execute(block.height(), CORRECT_BUMP, batches).await
+    ) -> Option<MerkleizedBatches> {
+        Some(execute(block.height(), CORRECT_BUMP, batches).await)
     }
 
     async fn capture(
@@ -448,7 +448,7 @@ impl Application<deterministic::Context> for FaultyApp {
         context: (deterministic::Context, Self::Context),
         block: &Self::Block,
         batches: Batches,
-    ) -> MerkleizedBatches {
+    ) -> Option<MerkleizedBatches> {
         self.inner.apply(context, block, batches).await
     }
 
