@@ -4,7 +4,7 @@ use crate::{
 };
 #[cfg(not(feature = "std"))]
 use alloc::borrow::{Cow, ToOwned};
-use bytes::{Buf, BufMut};
+use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
@@ -362,6 +362,21 @@ impl Batch {
             message,
         );
         true
+    }
+
+    /// Append an item whose namespaced `payload` was already framed with
+    /// [`union_unique`], so one payload can be shared across many signatures.
+    pub(crate) fn add_payload(
+        &mut self,
+        payload: Bytes,
+        public_key: &PublicKey,
+        signature: &Signature,
+    ) {
+        self.verifier.queue_payload(
+            public_key.key,
+            ed_core::Signature::from(signature.raw),
+            payload,
+        );
     }
 }
 
