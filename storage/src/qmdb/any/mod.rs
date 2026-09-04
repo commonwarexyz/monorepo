@@ -86,7 +86,7 @@ use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_runtime::Spawner;
-use core::num::NonZeroUsize;
+use core::{future::Future, num::NonZeroUsize};
 use std::sync::Arc;
 use tracing::warn;
 
@@ -165,17 +165,25 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
-    init_with_bitmap::<F, E, U, H, I, J, S, BITMAP_CHUNK_BYTES>(context, cfg, None).await
+    let (db, ()) = init_with_bitmap::<F, E, U, H, I, J, S, BITMAP_CHUNK_BYTES, _, _, _>(
+        context,
+        cfg,
+        None,
+        |_| async { Ok(()) },
+    )
+    .await?;
+    Ok(db)
 }
 
 /// Like [`init`] but accepts a pre-allocated bitmap (used by `current::Db`, which sizes pruned
 /// chunks from grafted metadata). `bitmap = None` allocates internally.
 #[boxed]
-pub(crate) async fn init_with_bitmap<F, E, U, H, I, J, S, const N: usize>(
+pub(crate) async fn init_with_bitmap<F, E, U, H, I, J, S, const N: usize, O, X, XF>(
     context: E,
     cfg: Config<I::Translator, J::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
     bitmap: Option<Arc<Shared<N>>>,
-) -> Result<db::Db<F, E, J, I, H, U, N, S>, crate::qmdb::Error<F>>
+    overlap: X,
+) -> Result<(db::Db<F, E, J, I, H, U, N, S>, O), crate::qmdb::Error<F>>
 where
     F: Family,
     E: Context + Spawner,
@@ -185,6 +193,9 @@ where
     J: authenticated::Backing<E, Item = Operation<F, U>> + 'static,
     S: Strategy,
     Operation<F, U>: Codec,
+    O: Send + 'static,
+    X: FnOnce(Arc<db::AuthenticatedLog<F, E, J, H, S>>) -> XF,
+    XF: Future<Output = Result<O, crate::qmdb::Error<F>>> + Send + 'static,
 {
     let mut log = authenticated::Journal::<F, E, J, H, S>::new(
         context.child("log"),
@@ -205,7 +216,7 @@ where
     let index = I::new(context.child("index"), cfg.translator);
     let snapshot_context = context.child("snapshot");
     let metrics = Metrics::new(context);
-    db::Db::init_from_log(
+    db::Db::init_from_log_with_overlap(
         snapshot_context,
         index,
         log,
@@ -214,6 +225,7 @@ where
         cfg.init_buffer,
         cfg.init_cache_size,
         metrics,
+        overlap,
     )
     .await
 }
@@ -1315,7 +1327,7 @@ pub(crate) mod test {
         ordered::{fixed::Db as OrderedFixedDb, variable::Db as OrderedVariableDb},
         unordered::{fixed::Db as UnorderedFixedDb, variable::Db as UnorderedVariableDb},
     };
-    use commonware_macros::{test_group, test_traced};
+    use commonware_macros::{select, test_group, test_traced};
     use commonware_parallel::{Sequential, Strategy};
     use commonware_runtime::{Clock as _, Metrics as _, Runner as _, deterministic};
     use core::time::Duration;
@@ -1729,6 +1741,59 @@ pub(crate) mod test {
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
 
             db.destroy().await.unwrap();
+        });
+    }
+
+    /// Dropping an in-flight init (e.g. losing a select against a timeout) aborts the
+    /// spawned overlap task rather than leaving it running and retaining the log.
+    #[test_traced("INFO")]
+    fn test_init_overlap_aborted_on_cancel() {
+        /// Pin every `init_with_bitmap` parameter; the overlap never completes, so a
+        /// finished init is a bug in the test itself.
+        async fn init_with_pending_overlap(
+            context: Context,
+            cfg: VariableConfig<OneCap, ((), ()), Sequential>,
+        ) -> Result<(UnorderedVariable, ()), crate::qmdb::Error<mmr::Family>> {
+            init_with_bitmap(context, cfg, None, |_| futures::future::pending()).await
+        }
+
+        /// Sum of the runtime's running-task gauges for overlap tasks.
+        fn running_overlap_tasks(metrics: &str) -> u64 {
+            metrics
+                .lines()
+                .filter(|line| {
+                    line.starts_with("runtime_tasks_running{") && line.contains("init_overlap")
+                })
+                .filter_map(|line| line.rsplit_once(' ')?.1.trim().parse::<u64>().ok())
+                .sum()
+        }
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let ctx = context.child("db");
+            {
+                let init = init_with_pending_overlap(
+                    ctx.child("storage"),
+                    variable_db_config::<OneCap>("cancel", &ctx),
+                );
+                pin_mut!(init);
+                select! {
+                    _ = &mut init => {
+                        panic!("init completed despite a pending overlap");
+                    },
+                    _ = context.sleep(Duration::from_millis(100)) => {},
+                }
+
+                // The overlap task is alive while the init future is pending.
+                let metrics = context.encode();
+                assert_eq!(running_overlap_tasks(&metrics), 1, "{metrics}");
+            }
+
+            // Leaving the scope dropped the init future; give the runtime a beat to reap
+            // the aborted overlap task.
+            context.sleep(Duration::from_millis(10)).await;
+            let metrics = context.encode();
+            assert_eq!(running_overlap_tasks(&metrics), 0, "{metrics}");
         });
     }
 
