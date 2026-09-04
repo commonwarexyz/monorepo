@@ -88,7 +88,7 @@ pub mod partitioned {
     use commonware_parallel::Strategy;
     use commonware_runtime::Spawner;
 
-    /// An ordered key-value QMDB with a partitioned snapshot index and variable-size values.
+    /// An ordered key-value QMDB with a partitioned key index and variable-size values.
     ///
     /// This is the partitioned variant of [super::Db]. The const generic `P` specifies
     /// the number of prefix bytes used for partitioning:
