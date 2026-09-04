@@ -34,7 +34,8 @@ use commonware_cryptography::{Crc32, crc32};
 use commonware_runtime::{Blob as _, ReadOptions, Storage, WriteOptions};
 use commonware_runtime::{BufMut, Error as RError, Handle};
 use std::{io::Cursor, num::NonZeroUsize};
-use zstd::{bulk::compress, decode_all};
+use zstd::bulk::compress;
+use std::io::Read as IoRead;
 
 /// Physical overhead appended to every frame: the CRC32 of the frame's data.
 pub(crate) const CHECKSUM_SIZE: usize = crc32::Digest::SIZE;
@@ -146,8 +147,23 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
 
         // Decompress if needed and decode
         let value = if self.compression.is_some() {
-            let decompressed =
-                decode_all(Cursor::new(compressed_data)).map_err(|_| Error::DecompressionFailed)?;
+            let compressed_len = compressed_data.len();
+            let cap = (compressed_len
+                .saturating_mul(super::super::frame::MAX_DECOMPRESSION_RATIO))
+            .max(super::super::frame::MIN_DECOMPRESSED_CAP);
+            let mut decompressed = Vec::new();
+            let decoder = zstd::Decoder::new(Cursor::new(compressed_data))
+                .map_err(|_| Error::DecompressionFailed)?;
+            (&mut IoRead::take(decoder, (cap + 1) as u64))
+                .read_to_end(&mut decompressed)
+                .map_err(|_| Error::DecompressionFailed)?;
+            if decompressed.len() > cap {
+                return Err(Error::DecompressionLimitExceeded {
+                    compressed_len,
+                    decompressed_len: decompressed.len(),
+                    limit: cap,
+                });
+            }
             V::decode_cfg(decompressed.as_ref(), &self.codec_config).map_err(Error::Codec)?
         } else {
             V::decode_cfg(compressed_data, &self.codec_config).map_err(Error::Codec)?
