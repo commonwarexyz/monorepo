@@ -91,10 +91,10 @@ stability_scope!(ALPHA {
     pub mod faulty;
     pub mod memory;
 });
-stability_scope!(ALPHA, cfg(feature = "iouring-storage") {
+stability_scope!(ALPHA, cfg(all(target_os = "linux", feature = "iouring")) {
     pub mod iouring;
 });
-stability_scope!(BETA, cfg(all(not(target_arch = "wasm32"), not(feature = "iouring-storage"))) {
+stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     pub mod tokio;
 });
 stability_scope!(BETA {
@@ -554,23 +554,14 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        // Read and write concurrently
-        let write_task = tokio::spawn({
-            let blob = blob.clone();
-            async move {
-                blob.write_at(0, IoBuf::from(b"concurrent write"), WriteOptions::default())
-                    .await
-                    .unwrap();
-            }
-        });
-
-        let read_task = tokio::spawn({
-            let blob = blob.clone();
-            async move { blob.read_at(0, 16, ReadOptions::default()).await.unwrap() }
-        });
-
-        write_task.await.unwrap();
-        let buffer = read_task.await.unwrap();
+        // Poll both operations concurrently on the caller's runtime. Keeping
+        // the requests together also exercises admission with a single worker.
+        let (write, read) = futures::join!(
+            blob.write_at(0, IoBuf::from(b"concurrent write"), WriteOptions::default()),
+            blob.read_at(0, 16, ReadOptions::default()),
+        );
+        write.unwrap();
+        let buffer = read.unwrap();
 
         assert_eq!(
             buffer.coalesce(),

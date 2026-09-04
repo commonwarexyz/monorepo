@@ -160,16 +160,28 @@ impl IoBufs {
     /// io_uring requests retain every buffer until kernel retirement and keep a
     /// separate progress cursor. Indexing avoids rescanning the consumed prefix
     /// each time a partial completion needs another submission.
-    #[cfg(all(
-        target_os = "linux",
-        any(feature = "iouring-network", feature = "iouring-storage")
-    ))]
+    #[cfg(all(target_os = "linux", feature = "iouring"))]
     pub(crate) fn chunk_at(&self, index: usize) -> Option<&[u8]> {
         match &self.inner {
             IoBufsInner::Single(buf) => (index == 0 && !buf.is_empty()).then(|| buf.as_ref()),
             IoBufsInner::Pair(bufs) => bufs.get(index).map(AsRef::as_ref),
             IoBufsInner::Triple(bufs) => bufs.get(index).map(AsRef::as_ref),
             IoBufsInner::Chunked(bufs) => bufs.get(index).map(AsRef::as_ref),
+        }
+    }
+
+    /// Move every chunk into an isolated retirement action without cloning owners.
+    ///
+    /// The io_uring caller catches each destructor panic inside `retire`, so a
+    /// failing external owner cannot make container drop glue destroy another
+    /// external owner during the same unwind.
+    #[cfg(all(target_os = "linux", feature = "iouring"))]
+    pub(crate) fn retire_chunks(self, mut retire: impl FnMut(IoBuf)) {
+        match self.inner {
+            IoBufsInner::Single(buf) => retire(buf),
+            IoBufsInner::Pair(bufs) => bufs.into_iter().for_each(retire),
+            IoBufsInner::Triple(bufs) => bufs.into_iter().for_each(retire),
+            IoBufsInner::Chunked(bufs) => bufs.into_iter().for_each(retire),
         }
     }
 

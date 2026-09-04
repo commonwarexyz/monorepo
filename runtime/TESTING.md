@@ -60,3 +60,38 @@ loop {
 - For shutdown, assert the task-prefix count becomes non-zero before shutdown and zero afterward.
 - Run a scenario twice with the same seed when its state is meant to be deterministic.
 - Include recovery cases when the changed component has those boundaries.
+
+## Native io_uring tests
+
+Native runtime integration tests run on Linux 6.1 or newer with io_uring enabled
+by the host. They use real rings and are separate from deterministic protocol
+tests. Run the focused backend tests, then the shared runtime contracts:
+
+```bash
+just test -p commonware-runtime --features iouring iouring::
+just test -p commonware-runtime --features iouring
+just test -p commonware-runtime --features iouring --profile slow
+```
+
+Task, admission, operation-result, and sleeper state tests avoid constructing a
+ring where possible. Keep size-one ring tests to exercise staging, independent
+timer progress, retained completions, and cancellation under capacity pressure.
+Use synchronization to gate race order. A timeout guards against a hung test,
+but does not establish that the intended race occurred.
+
+Foreign-wake Loom models cover the userspace publication protocol, including
+empty-to-nonempty batches, transfer counts, delayed signaling, both wait modes,
+and closure. They do not model kernel CQE ordering or `io_uring_enter`. Real-ring
+tests cover those service and rearm boundaries. The Loom recipe already enables
+release mode:
+
+```bash
+just test-loom --features iouring
+just miri iouring::task:: -p commonware-runtime --features iouring
+just miri utils::handle::tests::local_task_context_replacement_does_not_replace_abort_waker -p commonware-runtime --features iouring
+```
+
+Miri applies to pinned task cells and pure local-state tests, not tests that
+create rings. On macOS, check all runtime targets with `--features iouring` to
+verify that the Linux implementation compiles out. Feature-enabled doctests
+remain part of the fast CI matrix.

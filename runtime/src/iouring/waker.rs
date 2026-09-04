@@ -1,8 +1,8 @@
 //! Hybrid futex/eventfd wake coordination for the io_uring loop.
 //!
-//! This module implements the producer-to-loop wake protocol used by [`super::IoUringLoop`]:
-//! - Producers call [`Waker::publish`] after enqueueing work.
-//! - The loop calls [`Waker::park_idle`] when it is fully idle.
+//! This module implements the producer-to-worker mailbox wake protocol:
+//! - Producers call [`Waker::publish_deferred`] when enqueueing a new batch.
+//! - The loop calls [`Waker::park_idle_until`] when it is fully idle.
 //! - The loop acquires an [`ArmGuard`] from [`Waker::arm`] before
 //!   blocking in `submit_and_wait`.
 //! - Producers wake only the currently armed wait target.
@@ -67,10 +67,11 @@ pub const HALF_SUBMISSION_SEQUENCE_DOMAIN: u32 = SUBMISSION_SEQ_MASK.div_ceil(2)
 /// RAII guard returned by [`Waker::arm`] for a `submit_and_wait` blocking section.
 ///
 /// While this guard is live, the loop is armed to receive an eventfd-based
-/// wake if producers publish new work or the final handle disconnects.
+/// wake if producers publish new work or request an out-of-band notification.
 pub struct ArmGuard<'a> {
     waker: &'a Waker,
     still_idle: bool,
+    #[cfg(test)]
     wake_latched: bool,
 }
 
@@ -83,6 +84,7 @@ impl ArmGuard<'_> {
     }
 
     /// Return whether a wake was already latched before or during arming.
+    #[cfg(test)]
     pub const fn wake_latched(&self) -> bool {
         self.wake_latched
     }
@@ -112,8 +114,7 @@ impl Drop for ArmGuard<'_> {
 /// transferred batch awaiting its processed increment, independently of message
 /// count. This makes the modular delta `submitted_seq - processed_seq`
 /// directional: a nonzero delta smaller than half the domain means publication
-/// is ahead. Individual submissions from a bounded channel satisfy the same
-/// requirement when its capacity stays below half the sequence domain.
+/// is ahead. No bound on the number of messages in a batch is needed.
 ///
 /// Blocking follows an arm-and-recheck protocol:
 /// - The loop first checks for a published-ahead delta, then arms a wait target.
@@ -159,10 +160,10 @@ struct WakerInner {
 
 /// Internal hybrid futex/eventfd wake source for the io_uring loop.
 ///
-/// - Publish submissions from producers via [`Waker::publish`]
+/// - Publish submissions from producers via [`Waker::publish_deferred`]
 /// - Wake without publishing via [`Waker::wake`]
 /// - Test whether published work is still pending via [`Waker::pending`]
-/// - Park in the fully-idle path via [`Waker::park_idle`]
+/// - Park in the fully-idle path via [`Waker::park_idle_until`]
 /// - Arm a `submit_and_wait` blocking section via [`Waker::arm`]
 /// - Drain `eventfd` readiness on wake CQEs via [`Waker::acknowledge`]
 /// - Re-arm the multishot poll request when needed via [`Waker::reinstall`]
@@ -226,13 +227,12 @@ impl Waker {
     /// the bit.
     ///
     /// All claimed wakes flow through this path, whether they come from
-    /// `publish()` on an armed epoch or from an out-of-band caller such as the
-    /// final sender disconnecting.
+    /// `publish()` on an armed epoch or from an out-of-band caller such as a
+    /// runtime stop notification.
     pub fn wake(&self) {
-        // `HandleInner::drop` uses this path without bumping the submission
-        // sequence. Publish that disconnect here so that after the loop resumes
-        // and `clear_wait()` acquires, the next channel check cannot observe
-        // the wake without also observing the disconnect that caused it.
+        // Publish the notification before signaling. The owner's disarm
+        // acquire then observes the state that caused an out-of-band wake,
+        // even when no mailbox batch advanced the sequence.
         let prev = self
             .inner
             .state
@@ -267,6 +267,7 @@ impl Waker {
     /// claims `WAKE_SIGNALLED_BIT` with a follow-up atomic update and then
     /// signals the armed wait target.
     #[inline]
+    #[cfg(test)]
     pub fn publish(&self) {
         if self.publish_deferred() {
             self.wake();
@@ -324,6 +325,7 @@ impl Waker {
     /// kernel and later resumed. Returns `None` if the armed snapshot already
     /// showed published work or a latched wake, or if a concurrent state
     /// change rejected the snapshot before the thread could sleep.
+    #[cfg(test)]
     pub fn park_idle(&self, processed_seq: u32) -> Option<Duration> {
         self.park_idle_until(processed_seq, None)
     }
@@ -374,9 +376,8 @@ impl Waker {
     ///
     /// The returned guard automatically clears the current wait state on drop.
     /// Call [`ArmGuard::still_idle`] to decide whether the loop may block on
-    /// the normal "still idle" path, or [`ArmGuard::wake_latched`] to detect
-    /// an already-latched wake without conflating it with published-ahead
-    /// sequence progress.
+    /// normal idle path. A latched wake or any unpublished processing gap
+    /// rejects sleeping and requires the owner to recheck its work.
     pub fn arm(&self, processed_seq: u32) -> ArmGuard<'_> {
         // Arming only updates the packed wake state machine. It does not
         // publish queue memory or consume any out-of-band wake publication, so
@@ -400,6 +401,7 @@ impl Waker {
         ArmGuard {
             waker: self,
             still_idle,
+            #[cfg(test)]
             wake_latched,
         }
     }
@@ -408,7 +410,7 @@ impl Waker {
     ///
     /// This acknowledges kernel-visible `eventfd` readiness. Wait gating is
     /// tracked separately in the packed `state` atomic and is managed by
-    /// [`Waker::park_idle`] and [`Waker::arm`].
+    /// [`Waker::park_idle_until`] and [`Waker::arm`].
     ///
     /// Retries on `EINTR`. Treats `EAGAIN` as "nothing to drain". Without
     /// `EFD_SEMAPHORE`, one successful read drains the full counter to zero.
@@ -713,7 +715,27 @@ pub mod tests {
     use std::{
         mem::size_of,
         os::fd::{AsRawFd, FromRawFd},
+        sync::atomic::AtomicBool,
     };
+
+    /// Restore a test-only signal handler after the targeted notifier has joined.
+    #[cfg(not(feature = "loom"))]
+    struct RestoreSignal(libc::sigaction);
+
+    #[cfg(not(feature = "loom"))]
+    impl Drop for RestoreSignal {
+        fn drop(&mut self) {
+            // SAFETY: The saved action came from sigaction for this signal.
+            // Its storage remains live while the kernel copies it, and the
+            // notifier has been joined before the guard is normally dropped.
+            unsafe {
+                libc::sigaction(libc::SIGUSR2, &self.0, std::ptr::null_mut());
+            }
+        }
+    }
+
+    #[cfg(not(feature = "loom"))]
+    extern "C" fn interrupt_wait(_: libc::c_int) {}
 
     pub fn wait_until_futex_armed(waker: &Waker) {
         while waker.inner.state.load(Ordering::Relaxed) & WAITING_ON_FUTEX_BIT == 0 {
@@ -794,6 +816,69 @@ pub mod tests {
         assert!(waker.pending(0));
         assert_eq!(state_bits(&waker) & WAITING_MASK, 0);
         assert_eq!(eventfd_count(&waker), 0);
+    }
+
+    #[cfg(not(feature = "loom"))]
+    #[test]
+    fn test_timed_park_interruption_preserves_absolute_deadline() {
+        // SAFETY: sigaction consists of integer fields, pointers, and a signal
+        // mask. Zero initialization supplies valid storage before its handler
+        // and mask are initialized below, and `previous` is filled by the OS.
+        let (mut action, mut previous): (libc::sigaction, libc::sigaction) =
+            unsafe { std::mem::zeroed() };
+        action.sa_sigaction = interrupt_wait as *const () as usize;
+        // SAFETY: Both action structures are initialized stack storage retained
+        // through the synchronous call. The handler performs no operations and
+        // has the signal ABI, and sigemptyset receives its writable mask.
+        unsafe {
+            assert_eq!(libc::sigemptyset(&mut action.sa_mask), 0);
+            assert_eq!(libc::sigaction(libc::SIGUSR2, &action, &mut previous), 0);
+        }
+        let _restore = RestoreSignal(previous);
+        // SAFETY: pthread_self returns the live identifier of this test thread,
+        // which remains running until the notifier is joined.
+        let target = unsafe { libc::pthread_self() };
+        let waker = Waker::new().unwrap();
+        let done = Arc::new(AtomicBool::new(false));
+        let notifier = std::thread::spawn({
+            let waker = waker.clone();
+            let done = done.clone();
+            move || {
+                while state_bits(&waker) & WAITING_ON_FUTEX_BIT == 0 {
+                    if done.load(Ordering::Acquire) {
+                        return;
+                    }
+                    std::thread::yield_now();
+                }
+                while !done.load(Ordering::Acquire) {
+                    // SAFETY: The parent thread owns this pthread identifier
+                    // and joins us before exiting or restoring its handler.
+                    unsafe {
+                        libc::pthread_kill(target, libc::SIGUSR2);
+                    }
+                    std::thread::yield_now();
+                }
+            }
+        });
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let first = waker.park_idle_until(0, Some(deadline));
+        let interrupted = Instant::now() < deadline;
+        done.store(true, Ordering::Release);
+        notifier.join().unwrap();
+        assert!(
+            interrupted,
+            "signal must interrupt the wait before its deadline"
+        );
+        assert!(first.is_none());
+        assert_eq!(state_bits(&waker), 0);
+        // Reuse the same deadline after EINTR. The next wait consumes only its
+        // remaining interval and timeout still produces no spinner feedback.
+        while Instant::now() < deadline {
+            assert!(waker.park_idle_until(0, Some(deadline)).is_none());
+        }
+        assert!(Instant::now() >= deadline);
+        assert_eq!(state_bits(&waker), 0);
+        assert_eq!(submitted_seq(&waker), 0);
     }
 
     #[test]
@@ -1330,6 +1415,93 @@ mod loom_tests {
             producer.join().unwrap();
             assert_eq!(submitted_seq(&waker), 1);
             assert_eq!(state_bits(&waker), 0);
+            assert_eq!(eventfd_count(&waker), 0);
+        });
+    }
+
+    #[test]
+    fn batch_close_with_retained_scratch_and_delayed_signal() {
+        // Closure transfers shared ownership while one already processed
+        // batch still has local messages. Publication and deferred signaling
+        // may race that transfer, but no accepted or rejected message is lost.
+        loom::model(|| {
+            let waker = Waker::new().unwrap();
+            let inbox = Arc::new(Mutex::new((true, vec![0, 1])));
+            assert!(!waker.publish_deferred());
+            let mut scratch = Vec::new();
+            {
+                let mut inbox = inbox.lock().unwrap();
+                std::mem::swap(&mut inbox.1, &mut scratch);
+            }
+            let processed = 1;
+            assert!(!waker.pending(processed));
+            let first = scratch.remove(0);
+            let arm = waker.arm(processed);
+            let producer = thread::spawn({
+                let waker = waker.clone();
+                let inbox = inbox.clone();
+                move || {
+                    let (rejected, signal) = {
+                        let mut inbox = inbox.lock().unwrap();
+                        if inbox.0 {
+                            let first = inbox.1.is_empty();
+                            inbox.1.push(2);
+                            (None, first && waker.publish_deferred())
+                        } else {
+                            (Some(2), false)
+                        }
+                    };
+                    thread::yield_now();
+                    if signal {
+                        waker.wake();
+                    }
+                    rejected
+                }
+            });
+
+            let mut detached = {
+                let mut inbox = inbox.lock().unwrap();
+                inbox.0 = false;
+                std::mem::take(&mut inbox.1)
+            };
+            drop(arm);
+            let rejected = producer.join().unwrap();
+            let accepted = usize::from(rejected.is_none());
+            assert_eq!(submitted_seq(&waker), processed + accepted as u32);
+            detached.push(first);
+            detached.append(&mut scratch);
+            detached.extend(rejected);
+            detached.sort_unstable();
+            assert_eq!(detached, [0, 1, 2]);
+            assert_eq!(state_bits(&waker) & WAITING_MASK, 0);
+            waker.acknowledge();
+        });
+    }
+
+    #[test]
+    fn timed_futex_expiry_races_batch_publication() {
+        // The kernel's elapsed timeout is represented by an already-due
+        // absolute deadline. Loom explores publication and delayed signaling
+        // across the same arm/disarm transition. Real tests cover syscall
+        // timeout delivery, which this userspace model does not simulate.
+        loom::model(|| {
+            let waker = Waker::new().unwrap();
+            let deadline = Instant::now();
+            let producer = thread::spawn({
+                let waker = waker.clone();
+                move || {
+                    let signal = waker.publish_deferred();
+                    thread::yield_now();
+                    if signal {
+                        waker.wake();
+                    }
+                }
+            });
+            assert!(waker.park_idle_until(0, Some(deadline)).is_none());
+            producer.join().unwrap();
+            assert!(waker.pending(0));
+            assert_eq!(submitted_seq(&waker), 1);
+            assert_eq!(state_bits(&waker) & WAITING_MASK, 0);
             assert_eq!(eventfd_count(&waker), 0);
         });
     }

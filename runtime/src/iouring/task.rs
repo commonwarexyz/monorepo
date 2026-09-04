@@ -19,12 +19,100 @@
 //! used by the poll. Retirement also returns owned values to the worker, so
 //! user destructors and waker callbacks run outside the local state borrow.
 
+use super::{
+    mailbox::{Mailbox, Message},
+    runtime,
+};
+use futures::task::{ArcWake, waker};
 use std::{
     collections::VecDeque,
     future::Future,
     pin::Pin,
+    sync::{Arc, Weak},
     task::{Context, Poll, Waker},
 };
+
+/// Root or spawned task selected by an escaped routing waker.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum Target {
+    /// The root future pinned separately on the worker's stack.
+    Root,
+    /// A generational entry in the local task arena.
+    Task(TaskId),
+}
+
+/// Safe shared routing state that owns neither a future nor mutable local state.
+pub(super) struct Wake {
+    /// Weak origin identity, retained even after the worker has shut down.
+    mailbox: Weak<Mailbox>,
+    /// Root-ready flag or task identity to notify on the owning worker.
+    target: Target,
+}
+
+impl Wake {
+    /// Construct the cached routing waker outside any local borrow.
+    pub(super) fn waker(mailbox: Weak<Mailbox>, target: Target) -> Waker {
+        waker(Arc::new(Self { mailbox, target }))
+    }
+}
+
+impl ArcWake for Wake {
+    fn wake_by_ref(arc_self: &Arc<Self>) {
+        if let Some(local) = runtime::current() {
+            let mut local = local.borrow_mut();
+            if std::ptr::eq(Arc::as_ptr(&local.mailbox), arc_self.mailbox.as_ptr()) {
+                if !local.closing {
+                    match arc_self.target {
+                        Target::Root if local.root_live => local.root_ready = true,
+                        Target::Root => {}
+                        Target::Task(id) => local.tasks.wake(id),
+                    }
+                }
+                return;
+            }
+        }
+        if let Some(mailbox) = arc_self.mailbox.upgrade() {
+            let _ = mailbox.send(Message::Wake(arc_self.target));
+        }
+    }
+}
+
+/// Register on the origin worker, using direct insertion for a local spawn.
+///
+/// The caller owns rejected task destruction and runs it outside all borrows.
+pub(super) fn register(
+    mailbox: &Weak<Mailbox>,
+    cell: Pin<Box<dyn Runnable>>,
+) -> Result<(), Pin<Box<dyn Runnable>>> {
+    if let Some(local) = runtime::current() {
+        let id = {
+            let mut state = local.borrow_mut();
+            if std::ptr::eq(Arc::as_ptr(&state.mailbox), mailbox.as_ptr()) {
+                if state.closing {
+                    return Err(cell);
+                }
+                Some(state.tasks.reserve())
+            } else {
+                None
+            }
+        };
+        if let Some(id) = id {
+            // The routing object performs no user callback during construction.
+            // No task registration can interleave with this reserved insertion.
+            let waker = Wake::waker(mailbox.clone(), Target::Task(id));
+            local.borrow_mut().tasks.insert(id, cell, waker);
+            return Ok(());
+        }
+    }
+    let Some(mailbox) = mailbox.upgrade() else {
+        return Err(cell);
+    };
+    match mailbox.send(Message::Spawn(cell)) {
+        Ok(()) => Ok(()),
+        Err(Message::Spawn(cell)) => Err(cell),
+        Err(_) => unreachable!("spawn publication returned another message kind"),
+    }
+}
 
 /// Full-width identity carried by ready tokens and routing wakers.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

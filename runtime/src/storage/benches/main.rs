@@ -22,22 +22,38 @@ use crate::{
     filesystem::{cleanup_root, prepare_root},
     workload::run_benchmark,
 };
-use commonware_runtime::{Runner as _, tokio};
+use commonware_runtime::Runner as _;
+#[cfg(all(target_os = "linux", feature = "iouring"))]
+use commonware_runtime::iouring;
+#[cfg(not(all(target_os = "linux", feature = "iouring")))]
+use commonware_runtime::tokio;
 
 fn main() -> Result<()> {
     let mut cfg = Config::parse();
     cfg.root = prepare_root(&cfg.root)?;
 
-    let mut runtime_cfg = tokio::Config::default()
-        .with_worker_threads(cfg.worker_threads)
-        .with_storage_directory(cfg.root.clone());
-
-    if let Some(global_queue_interval) = cfg.global_queue_interval {
-        runtime_cfg = runtime_cfg.with_global_queue_interval(global_queue_interval);
-    }
-
-    let report = tokio::Runner::new(runtime_cfg)
-        .start(|context| async { run_benchmark(&cfg, context).await });
+    #[cfg(all(target_os = "linux", feature = "iouring"))]
+    let report = {
+        let runtime_cfg = iouring::Config::default()
+            .with_storage_directory(cfg.root.clone())
+            .with_ring_config(iouring::RingConfig {
+                size: cfg.effective_ring_size().unwrap(),
+                ..Default::default()
+            });
+        iouring::Runner::new(runtime_cfg)
+            .start(|context| async { run_benchmark(&cfg, context).await })
+    };
+    #[cfg(not(all(target_os = "linux", feature = "iouring")))]
+    let report = {
+        let mut runtime_cfg = tokio::Config::default()
+            .with_worker_threads(cfg.worker_threads)
+            .with_storage_directory(cfg.root.clone());
+        if let Some(global_queue_interval) = cfg.global_queue_interval {
+            runtime_cfg = runtime_cfg.with_global_queue_interval(global_queue_interval);
+        }
+        tokio::Runner::new(runtime_cfg)
+            .start(|context| async { run_benchmark(&cfg, context).await })
+    };
 
     cleanup_root(&cfg.root)?;
 

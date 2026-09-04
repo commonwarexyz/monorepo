@@ -22,10 +22,11 @@ const HOLD_NAME: &str = ".hold";
 /// A backend shares the hold (via [Arc]) with everything that can still touch
 /// the directory after its storage instance is gone. For tokio that is every
 /// blob's file handle and every dispatched blocking operation. For io_uring it
-/// is the ring thread, which the instance and every blob keep alive through
-/// their ring handles. The hold is released only once all of them have
-/// finished, including operations whose futures were dropped, since dropping a
-/// future does not cancel work already handed to a blocking pool or ring.
+/// is storage, every blob's held file, and every admitted storage request, even
+/// when an operation executes on a different worker or runner. The hold is
+/// released only once all of them have finished, including mutations whose
+/// futures were dropped. Dropping a future does not stop retained writes or
+/// syncs already handed to a blocking pool or ring.
 /// [Hold::acquire] waits for that release.
 ///
 /// The lock lives on the open file description, not the file: the OS releases

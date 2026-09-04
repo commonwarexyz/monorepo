@@ -1,8 +1,8 @@
 //! Deferred callbacks and panic isolation at worker ownership boundaries.
 //!
 //! Local transitions detach values before invoking user-controlled callbacks.
-//! [`Actions`] batches waker notifications and destruction. Other owned values
-//! remain in typed retirement batches, with each destructor run through
+//! The worker batches notifications and destruction in typed retirement storage,
+//! with each callback run through
 //! [`Panics::run`] after the local borrow has ended.
 //!
 //! A cleanup panic must not prevent kernel retirement or sibling cleanup. The
@@ -14,7 +14,6 @@ use std::{
     any::Any,
     mem,
     panic::{AssertUnwindSafe, catch_unwind},
-    task::Waker,
 };
 
 /// Payload preserved for delivery after mandatory worker cleanup.
@@ -67,48 +66,6 @@ impl Drop for Panics {
     }
 }
 
-/// Arbitrary waker behavior deferred until local state is no longer borrowed.
-pub(super) enum Action {
-    /// Notify an observer after committing its state transition.
-    Wake(Waker),
-    /// Release a displaced or cancelled observer without notifying it.
-    Drop(Waker),
-}
-
-/// Reusable callback batch owned by the worker loop.
-#[derive(Default)]
-pub(super) struct Actions {
-    /// Callbacks in transition order, retaining allocation across drain turns.
-    pending: Vec<Action>,
-}
-
-impl Actions {
-    /// Reserve callback slots before committing a local transition.
-    pub(super) fn reserve(&mut self, additional: usize) {
-        self.pending.reserve(additional);
-    }
-
-    /// Append a detached callback after reserving sufficient space.
-    pub(super) fn push(&mut self, action: Action) {
-        self.pending.push(action);
-    }
-
-    /// Whether callbacks must run before the worker can park.
-    pub(super) fn is_empty(&self) -> bool {
-        self.pending.is_empty()
-    }
-
-    /// Execute every callback independently, retaining the first panic.
-    pub(super) fn run(&mut self, panics: &mut Panics) {
-        for action in self.pending.drain(..) {
-            panics.run(|| match action {
-                Action::Wake(waker) => waker.wake(),
-                Action::Drop(waker) => drop(waker),
-            });
-        }
-    }
-}
-
 /// Abort if infrastructure unwinds through kernel retirement.
 ///
 /// Unexpected infrastructure failures cannot release buffers still referenced
@@ -126,7 +83,7 @@ impl RetirementGuard {
     }
 
     /// Record that all kernel-visible resources can now be released.
-    pub(super) fn disarm(&mut self) {
+    pub(super) const fn disarm(&mut self) {
         self.armed = false;
     }
 }
@@ -163,18 +120,16 @@ mod tests {
     #[test]
     fn callback_failure_does_not_skip_siblings() {
         let calls = Arc::new(AtomicUsize::new(0));
-        let mut actions = Actions::default();
-        actions.reserve(3);
-        for panics in [true, false] {
-            actions.push(Action::Wake(waker(Arc::new(Callback {
+        let callbacks = [true, false].map(|panics| {
+            waker(Arc::new(Callback {
                 calls: calls.clone(),
                 panics,
-            }))));
-        }
-        actions.push(Action::Drop(futures::task::noop_waker()));
+            }))
+        });
         let mut panics = Panics::default();
-        actions.run(&mut panics);
-        assert!(actions.is_empty());
+        for callback in callbacks {
+            panics.run(|| callback.wake());
+        }
         assert!(panics.is_pending());
         assert_eq!(calls.load(Ordering::Relaxed), 2);
         assert!(panics.take().is_some());

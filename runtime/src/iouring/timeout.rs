@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 /// Monotonic timeout-wheel tick in the wheel's local time domain.
 ///
 /// This is derived from `start` and `tick_nanos` inside [`TimeoutWheel::advance`]
-/// and [`TimeoutWheel::target_tick`]. It is not wall-clock time and should be
+/// and [`TimeoutWheel::checked_target_tick`]. It is not wall-clock time and should be
 /// treated as an opaque counter.
 pub type Tick = u64;
 
@@ -78,7 +78,7 @@ pub struct TimeoutWheel {
     min_scheduled_tick: Tick,
     /// Count of currently active deadline-tracked entries.
     active_deadlines: usize,
-    /// Maximum timeout horizon used for deadline clamping.
+    /// Maximum remaining operation timeout accepted during deadline registration.
     max_timeout_nanos: u64,
     /// Tick size in nanoseconds.
     tick_nanos: u64,
@@ -152,8 +152,7 @@ impl TimeoutWheel {
     /// Create a timeout wheel.
     ///
     /// - `tick` defines the wheel granularity.
-    /// - `max_timeout` defines the scheduling horizon (deadlines are clamped to
-    ///   at most this distance).
+    /// - `max_timeout` bounds remaining operation time during registration.
     /// - `start` is the epoch used to convert `Instant` values into wheel ticks.
     ///
     /// The slot count is rounded up to a power of two for fast masking.
@@ -178,24 +177,6 @@ impl TimeoutWheel {
             tick_nanos,
             start,
         }
-    }
-
-    /// Compute a target timeout tick for `deadline`.
-    ///
-    /// Returns:
-    /// - `None` if `deadline` is already expired in the current wheel tick domain.
-    /// - `Some(tick)` for schedulable deadlines, clamped to at most
-    ///   `current_tick + max_timeout_ticks`.
-    ///
-    /// This does not read wall-clock time, callers are expected to keep
-    /// `current_tick` fresh by calling [`Self::advance`] each loop iteration.
-    pub fn target_tick(&self, deadline: Instant) -> Option<Tick> {
-        let now = self.instant_at_tick(self.current_tick);
-        let limit = now
-            .checked_add(Duration::from_nanos(self.max_timeout_nanos))
-            .expect("timeout wheel horizon overflow");
-        self.checked_target_tick(deadline.min(limit), now)
-            .expect("clamped timeout wheel deadline must fit")
     }
 
     /// Compute a target tick after advancing the wheel with `now`.
@@ -395,6 +376,7 @@ impl TimeoutWheel {
     ///
     /// For precise results, callers should consume entries returned by `advance` and
     /// call `remove` for each active expiry before querying this method.
+    #[cfg(test)]
     pub fn next_deadline(&self) -> Option<Duration> {
         self.next_deadline_at().map(|deadline| {
             deadline.saturating_duration_since(self.instant_at_tick(self.current_tick))
@@ -405,7 +387,7 @@ impl TimeoutWheel {
     ///
     /// Deriving this from the wheel epoch avoids extending the wait when user
     /// callbacks run between deadline service and parking. As with
-    /// [`Self::next_deadline`], remove active expiries before querying it.
+    /// deadline queries, remove active expiries before querying it.
     pub fn next_deadline_at(&self) -> Option<Instant> {
         if self.min_scheduled_tick == Tick::MAX {
             return None;
@@ -622,18 +604,21 @@ mod tests {
 
         // Past deadline(s) are already expired.
         let past_deadline = start.checked_sub(Duration::from_millis(1)).unwrap_or(start);
-        assert_eq!(wheel.target_tick(past_deadline), None);
-        assert_eq!(wheel.target_tick(start), None);
+        assert_eq!(
+            wheel.checked_target_tick(past_deadline, start).unwrap(),
+            None
+        );
+        assert_eq!(wheel.checked_target_tick(start, start).unwrap(), None);
 
-        // Very far deadline clamps to max_timeout (100ms => 20 ticks at 5ms).
+        // Unsupported horizons are rejected instead of shortened.
         let far_deadline = start + Duration::from_secs(10);
-        assert_eq!(wheel.target_tick(far_deadline), Some(20));
+        assert!(wheel.checked_target_tick(far_deadline, start).is_err());
 
         // Target tick should be computed relative to current_tick after advances.
         assert!(advance(&mut wheel, 7).is_empty());
         let now = start + Duration::from_millis(35);
         let deadline = now + Duration::from_millis(12); // ceil(12/5)=3 ticks.
-        assert_eq!(wheel.target_tick(deadline), Some(10));
+        assert_eq!(wheel.checked_target_tick(deadline, now).unwrap(), Some(10));
     }
 
     #[test]
@@ -738,7 +723,8 @@ mod tests {
         let now = wheel.start + Duration::from_millis(50); // tick 10
         let deadline = now + Duration::from_millis(10); // +2 ticks => tick 12
         let target_tick = wheel
-            .target_tick(deadline)
+            .checked_target_tick(deadline, wheel.start)
+            .unwrap()
             .expect("deadline should be schedulable");
         assert_eq!(target_tick, 12);
         wheel.schedule(WaiterId::new(1, 0), target_tick);

@@ -10,7 +10,11 @@ use crate::{
         warm_read_loop,
     },
 };
-use commonware_runtime::{Blob as _, Storage as _, tokio::Context};
+#[cfg(all(target_os = "linux", feature = "iouring"))]
+use commonware_runtime::iouring::Context;
+#[cfg(not(all(target_os = "linux", feature = "iouring")))]
+use commonware_runtime::tokio::Context;
+use commonware_runtime::{Blob as _, Storage as _};
 use commonware_utils::TestRng;
 use futures::{TryStreamExt, stream::FuturesUnordered};
 use rand::{RngExt as _, SeedableRng, rngs::SmallRng};

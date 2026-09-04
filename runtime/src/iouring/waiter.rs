@@ -5,8 +5,11 @@
 //! requests are still tracked and whether each currently has an operation SQE
 //! outstanding.
 
-use super::{Tick, UserData, request::Request};
+use super::{UserData, operation::OperationId, request::Request, timeout::Tick};
+use crate::Error;
+use commonware_utils::channel::oneshot;
 use io_uring::squeue::Entry as SqueueEntry;
+use std::time::Instant;
 use tracing::warn;
 
 /// Stable waiter identity packed into SQE/CQE `user_data`.
@@ -111,6 +114,33 @@ pub enum WaiterState {
     CancelRequested,
 }
 
+/// Destination of a logical request's terminal output.
+///
+/// Ordinary observation is owner-local. Detached sync retains its explicit
+/// completion channel. Orphaning removes observation while the request may
+/// remain alive until the kernel releases its resources.
+pub(super) enum Observer {
+    /// Entry in the owner's ordinary-operation slab.
+    Ordinary(OperationId),
+    /// Explicit completion handle for a sync admitted before its caller returns.
+    DetachedSync(oneshot::Sender<Result<(), Error>>),
+    /// No caller remains to observe the result.
+    Orphaned,
+}
+
+/// Resources detached when a waiter leaves the bounded slab.
+///
+/// The caller must consume the request into an output and a retirement batch,
+/// without dropping user-owned buffers while local state is borrowed.
+pub(super) struct Retired {
+    /// Logical request whose kernel access interval has ended.
+    pub request: Request,
+    /// Destination detached together with the request.
+    pub observer: Observer,
+    /// Deadline still tracked by the wheel, if cancellation did not remove it.
+    pub target_tick: Option<Tick>,
+}
+
 /// State for one tracked logical request.
 struct Waiter {
     /// Stable identity of this waiter slot instance.
@@ -119,6 +149,8 @@ struct Waiter {
     state: WaiterState,
     /// Whether the logical request currently has an operation SQE in flight.
     in_flight: bool,
+    /// Destination owned by this waiter until observation or retirement ends.
+    observer: Observer,
     /// The active request state machine.
     request: Request,
 }
@@ -127,13 +159,10 @@ struct Waiter {
 pub enum StageOutcome {
     /// The waiter was canceled while parked in the ready queue and should
     /// complete locally with timeout rather than issuing another SQE.
-    Timeout(Request),
+    Timeout(Retired),
     /// The original caller dropped its wait handle before this SQE could be
     /// staged, so the waiter was retired locally.
-    Orphaned {
-        /// Active deadline tracking to remove from the timeout wheel, if any.
-        target_tick: Option<Tick>,
-    },
+    Orphaned(Retired),
     /// The waiter is still active and produced an SQE for submission.
     Submit(SqueueEntry),
 }
@@ -150,6 +179,8 @@ pub enum CompletionOutcome {
     Complete {
         /// The completed request, ready to deliver its cached result.
         request: Request,
+        /// Destination detached before recycling waiter capacity.
+        observer: Observer,
         /// Active deadline tracking to remove from the timeout wheel, when
         /// completion happened before cancellation was requested.
         target_tick: Option<Tick>,
@@ -206,7 +237,12 @@ impl Waiters {
     /// Insert a request and return its assigned id.
     ///
     /// Panics if no free slot is available.
-    pub fn insert(&mut self, request: Request, target_tick: Option<Tick>) -> WaiterId {
+    pub fn insert(
+        &mut self,
+        request: Request,
+        target_tick: Option<Tick>,
+        observer: Observer,
+    ) -> WaiterId {
         let id = self
             .free
             .pop()
@@ -216,6 +252,7 @@ impl Waiters {
             id,
             state: WaiterState::Active { target_tick },
             in_flight: false,
+            observer,
             request,
         });
         assert!(replaced.is_none(), "free slot should not contain waiter");
@@ -223,16 +260,116 @@ impl Waiters {
         id
     }
 
-    /// Remove the waiter stored at `index`, returning its owned request.
+    /// Remove the waiter stored at `index`, returning its request and observer.
     ///
     /// Panics if `index` is out of bounds or the slot is empty. Callers must
     /// already have validated that the slot still belongs to the expected
     /// waiter.
-    fn take(&mut self, index: usize) -> Request {
+    fn take(&mut self, index: usize) -> Retired {
         let slot = self.entries[index].take().expect("tracked waiter missing");
         self.free.push(slot.id.next_generation());
         self.len -= 1;
-        slot.request
+        Retired {
+            request: slot.request,
+            observer: slot.observer,
+            target_tick: match slot.state {
+                WaiterState::Active { target_tick } => target_tick,
+                WaiterState::CancelRequested => None,
+            },
+        }
+    }
+
+    /// Return the matching live waiter, rejecting stale userspace queue entries.
+    fn get(&self, id: WaiterId) -> Option<&Waiter> {
+        self.entries
+            .get(id.index() as usize)?
+            .as_ref()
+            .filter(|slot| slot.id == id)
+    }
+
+    /// Whether a queued identity still names its original live request.
+    pub fn contains(&self, id: WaiterId) -> bool {
+        self.get(id).is_some()
+    }
+
+    /// Number of immediately available waiter slots.
+    pub const fn free_slots(&self) -> usize {
+        self.entries.len() - self.len
+    }
+
+    /// Absolute request deadline for a validated live identity.
+    pub fn deadline(&self, id: WaiterId) -> Option<Instant> {
+        self.get(id)
+            .expect("deadline requested for stale waiter")
+            .request
+            .deadline()
+    }
+
+    /// Deadline tick that still contributes to the wheel's active counts.
+    pub fn target_tick(&self, id: WaiterId) -> Option<Tick> {
+        match self.get(id)?.state {
+            WaiterState::Active { target_tick } => target_tick,
+            WaiterState::CancelRequested => None,
+        }
+    }
+
+    /// Install the initial deadline after the driver's service-time advance.
+    pub fn set_deadline(&mut self, id: WaiterId, tick: Tick) {
+        let slot = self.entries[id.index() as usize]
+            .as_mut()
+            .expect("deadline waiter missing");
+        assert_eq!(slot.id, id);
+        let WaiterState::Active { target_tick } = &mut slot.state else {
+            panic!("deadline installed on cancelled waiter");
+        };
+        assert!(
+            target_tick.replace(tick).is_none(),
+            "deadline installed twice"
+        );
+    }
+
+    /// Detach one ordinary observer after validating its full operation identity.
+    pub fn orphan(&mut self, id: WaiterId, operation: OperationId) -> bool {
+        let Some(slot) = self
+            .entries
+            .get_mut(id.index() as usize)
+            .and_then(Option::as_mut)
+        else {
+            return false;
+        };
+        if slot.id != id
+            || !matches!(slot.observer, Observer::Ordinary(current) if current == operation)
+        {
+            return false;
+        }
+        slot.observer = Observer::Orphaned;
+        true
+    }
+
+    /// Whether a live request must finish its logical write or sync after drop.
+    pub fn retains_on_orphan(&self, id: WaiterId) -> bool {
+        self.get(id)
+            .expect("orphaned waiter missing")
+            .request
+            .retains_on_orphan()
+    }
+
+    /// Ordinary observers still owned by the driver during shutdown.
+    pub fn ordinary_observers(&self) -> impl Iterator<Item = (WaiterId, OperationId)> + '_ {
+        self.entries.iter().filter_map(|slot| {
+            let slot = slot.as_ref()?;
+            match slot.observer {
+                Observer::Ordinary(operation) => Some((slot.id, operation)),
+                _ => None,
+            }
+        })
+    }
+
+    /// Remove a request that has no kernel-visible SQE outstanding.
+    pub fn retire(&mut self, id: WaiterId) -> Retired {
+        let slot = self.get(id).expect("retired waiter missing");
+        assert!(!slot.in_flight, "cannot retire kernel-visible request");
+        self.take(id.index() as usize)
     }
 
     /// Request cancellation for an active waiter.
@@ -285,23 +422,32 @@ impl Waiters {
             .and_then(Option::as_mut)
             .expect("stage called for untracked waiter");
         assert_eq!(slot.id, waiter_id, "stage called with stale waiter id");
+        // Cancellation does not end the kernel's access interval. Even a
+        // cancelled waiter must receive its own CQE before a queue visit can
+        // retire it or build another SQE from the same owners.
+        assert!(
+            !slot.in_flight,
+            "stage called for waiter with op already in flight"
+        );
 
         match slot.state {
             WaiterState::CancelRequested => StageOutcome::Timeout(self.take(index)),
-            WaiterState::Active { target_tick } if slot.request.is_orphaned() => {
+            WaiterState::Active { .. }
+                if matches!(slot.observer, Observer::Orphaned)
+                    && !slot.request.retains_on_orphan() =>
+            {
                 // The current request still owns all resources, but there is no
                 // caller left to observe more progress, so retire it locally
                 // instead of issuing another SQE.
-                let _ = self.take(index);
-                StageOutcome::Orphaned { target_tick }
+                StageOutcome::Orphaned(self.take(index))
             }
             WaiterState::Active { .. } => {
-                assert!(
-                    !slot.in_flight,
-                    "stage called for waiter with op already in flight"
-                );
+                // Construction can reject an invalid buffer range. Until it
+                // succeeds, no SQE exists and cleanup must remain able to retire
+                // the request locally without waiting for a kernel completion.
+                let sqe = slot.request.build_sqe(waiter_id);
                 slot.in_flight = true;
-                StageOutcome::Submit(slot.request.build_sqe(waiter_id))
+                StageOutcome::Submit(sqe)
             }
         }
     }
@@ -355,7 +501,9 @@ impl Waiters {
 
         let state = slot.state;
         let completed = slot.request.on_cqe(slot.state, result);
-        if completed || slot.request.is_orphaned() {
+        if completed
+            || (matches!(slot.observer, Observer::Orphaned) && !slot.request.retains_on_orphan())
+        {
             // Either the request reached a terminal state, or the current SQE
             // made non-terminal progress for a caller that is already gone. In
             // both cases, remove the waiter now instead of requeueing another SQE.
@@ -364,8 +512,10 @@ impl Waiters {
                 WaiterState::CancelRequested => None,
             };
 
+            let retired = self.take(index);
             CompletionOutcome::Complete {
-                request: self.take(index),
+                request: retired.request,
+                observer: retired.observer,
                 target_tick,
             }
         } else {
@@ -388,29 +538,50 @@ mod tests {
     use super::*;
     use crate::{
         IoBuf, IoBufMut, IoBufs,
-        iouring::request::{Cache, ReadAtRequest, RecvRequest, Request, SendRequest, SyncRequest},
+        iouring::request::{
+            Cache, Held, ReadAtRequest, RecvRequest, Request, SendRequest, SyncRequest,
+        },
+        storage::hold::Hold,
     };
-    use commonware_utils::channel::oneshot;
     use std::{
         os::fd::{FromRawFd, IntoRawFd},
         panic::{AssertUnwindSafe, catch_unwind},
-        sync::Arc,
+        sync::{Arc, OnceLock},
     };
 
     /// Build a `Sync` request backed by a socket fd so waiter tests can
     /// exercise slot lifecycle without touching the filesystem.
-    fn make_sync_request() -> (Request, oneshot::Receiver<Result<(), crate::Error>>) {
-        let (sock_left, _sock_right) =
-            std::os::unix::net::UnixStream::pair().expect("failed to create unix socket pair");
-        // SAFETY: sock_left is a valid fd that we own.
-        let file = unsafe { std::fs::File::from_raw_fd(sock_left.into_raw_fd()) };
-        let (tx, rx) = oneshot::channel();
-        let request = Request::Sync(SyncRequest {
-            file: Arc::new(file),
-            result: None,
-            sender: tx,
+    fn operation() -> OperationId {
+        OperationId {
+            index: 0,
+            generation: 0,
+        }
+    }
+
+    fn observer() -> Observer {
+        Observer::Ordinary(operation())
+    }
+
+    fn held(file: std::fs::File) -> Arc<Held> {
+        static HOLD: OnceLock<Arc<Hold>> = OnceLock::new();
+        let hold = HOLD.get_or_init(|| {
+            Hold::acquire(
+                &std::env::temp_dir()
+                    .join(format!("commonware_waiter_test_{}", std::process::id())),
+            )
+            .unwrap()
         });
-        (request, rx)
+        Held::new(Arc::new(file), hold.clone())
+    }
+
+    fn make_sync_request() -> Request {
+        let (sock_left, _sock_right) = std::os::unix::net::UnixStream::pair().unwrap();
+        // SAFETY: The owned socket descriptor is transferred once into File.
+        let file = unsafe { std::fs::File::from_raw_fd(sock_left.into_raw_fd()) };
+        Request::Sync(SyncRequest {
+            file: held(file),
+            result: None,
+        })
     }
 
     fn waiter_state(waiters: &Waiters, waiter_id: WaiterId) -> Option<WaiterState> {
@@ -430,7 +601,7 @@ mod tests {
             slot.id, waiter_id,
             "remove_waiter called with stale waiter id"
         );
-        waiters.take(index)
+        waiters.take(index).request
     }
 
     #[test]
@@ -465,10 +636,10 @@ mod tests {
         assert!(waiters.is_empty());
 
         // Populate two slots so the test can later free and reuse one of them.
-        let (req0, _rx0) = make_sync_request();
-        let (req1, _rx1) = make_sync_request();
-        let id0 = waiters.insert(req0, Some(5));
-        let id1 = waiters.insert(req1, Some(9));
+        let req0 = make_sync_request();
+        let req1 = make_sync_request();
+        let id0 = waiters.insert(req0, Some(5), observer());
+        let id1 = waiters.insert(req1, Some(9), observer());
         assert_eq!((id0.index(), id1.index()), (0, 1));
         assert_eq!(waiters.len(), 2);
         assert!(!waiters.is_full());
@@ -493,8 +664,8 @@ mod tests {
         assert_eq!(waiters.len(), 1);
 
         // Next allocation reuses the freed slot with incremented generation.
-        let (req2, _rx2) = make_sync_request();
-        let id2 = waiters.insert(req2, Some(11));
+        let req2 = make_sync_request();
+        let id2 = waiters.insert(req2, Some(11), observer());
         assert_eq!(id2.index(), id1.index());
         assert_eq!(
             id2.generation(),
@@ -515,8 +686,8 @@ mod tests {
         // discard late cancel CQEs once the original operation has already completed.
         let mut waiters = Waiters::new(3);
 
-        let (req, _rx) = make_sync_request();
-        let waiter_id = waiters.insert(req, Some(2));
+        let req = make_sync_request();
+        let waiter_id = waiters.insert(req, Some(2), observer());
 
         let stale = WaiterId::new(waiter_id.index(), waiter_id.generation().wrapping_add(1));
         assert!(!waiters.cancel(stale));
@@ -555,12 +726,47 @@ mod tests {
     }
 
     #[test]
+    fn test_failed_sqe_construction_keeps_request_unsubmitted() {
+        let mut waiters = Waiters::new(1);
+        let request = Request::Recv(RecvRequest {
+            fd: Arc::new(std::os::unix::net::UnixStream::pair().unwrap().0.into()),
+            buf: IoBufMut::with_capacity(4),
+            offset: 0,
+            len: 5,
+            exact: true,
+            deadline: None,
+            result: None,
+        });
+        let id = waiters.insert(request, None, observer());
+        assert!(catch_unwind(AssertUnwindSafe(|| waiters.stage(id))).is_err());
+        // Construction failed before an SQE could leave the waiter. Cleanup
+        // must retire locally instead of waiting for an impossible operation CQE.
+        assert!(!waiters.is_in_flight(id));
+        let retired = waiters.retire(id);
+        drop(retired.request.complete());
+    }
+
+    #[test]
+    fn test_cancelled_in_flight_request_cannot_be_revisited_for_staging() {
+        let mut waiters = Waiters::new(1);
+        let id = waiters.insert(make_sync_request(), None, observer());
+        assert!(matches!(waiters.stage(id), StageOutcome::Submit(_)));
+        assert!(waiters.cancel(id));
+        assert!(catch_unwind(AssertUnwindSafe(|| waiters.stage(id))).is_err());
+        assert!(waiters.is_in_flight(id));
+        assert!(matches!(
+            waiters.on_completion(id.user_data(), 0),
+            CompletionOutcome::Complete { .. }
+        ));
+    }
+
+    #[test]
     fn test_waiters_track_in_flight_state() {
         // Verify `stage` tracks a staged operation and that the bit is
         // cleared again when the matching op CQE is processed.
         let mut waiters = Waiters::new(1);
-        let (req, _rx) = make_sync_request();
-        let waiter_id = waiters.insert(req, Some(4));
+        let req = make_sync_request();
+        let waiter_id = waiters.insert(req, Some(4), observer());
 
         assert!(waiters.is_full());
         assert!(!waiters.is_in_flight(waiter_id));
@@ -579,12 +785,12 @@ mod tests {
         // Verify stale waiter ids cannot observe in-flight state after
         // their slot has been recycled to a new generation.
         let mut waiters = Waiters::new(1);
-        let (req0, _rx0) = make_sync_request();
-        let stale_id = waiters.insert(req0, Some(1));
+        let req0 = make_sync_request();
+        let stale_id = waiters.insert(req0, Some(1), observer());
         let _ = remove_waiter(&mut waiters, stale_id);
 
-        let (req1, _rx1) = make_sync_request();
-        let active_id = waiters.insert(req1, Some(2));
+        let req1 = make_sync_request();
+        let active_id = waiters.insert(req1, Some(2), observer());
         assert_ne!(active_id, stale_id);
 
         assert!(!waiters.is_in_flight(stale_id));
@@ -634,8 +840,8 @@ mod tests {
         let mut waiters = Waiters::new(2);
 
         // First build a waiter that still has an operation SQE outstanding.
-        let (active_req, _active_rx) = make_sync_request();
-        let active = waiters.insert(active_req, Some(2));
+        let active_req = make_sync_request();
+        let active = waiters.insert(active_req, Some(2), observer());
         assert!(matches!(waiters.stage(active), StageOutcome::Submit(_)));
         assert!(waiters.cancel(active));
         assert!(waiters.is_in_flight(active));
@@ -643,8 +849,8 @@ mod tests {
         assert!(matches!(active_state, WaiterState::CancelRequested));
 
         // Then build a waiter that has been canceled before any SQE was staged.
-        let (ready_req, _ready_rx) = make_sync_request();
-        let ready = waiters.insert(ready_req, Some(3));
+        let ready_req = make_sync_request();
+        let ready = waiters.insert(ready_req, Some(3), observer());
         assert!(waiters.cancel(ready));
         assert!(!waiters.is_in_flight(ready));
         let ready_state = waiter_state(&waiters, ready).expect("ready waiter missing");
@@ -658,23 +864,22 @@ mod tests {
         {
             // Send request orphaned before first submit.
             let mut waiters = Waiters::new(1);
-            let (tx, rx) = oneshot::channel();
-            drop(rx);
             let waiter_id = waiters.insert(
                 Request::Send(SendRequest {
                     fd: Arc::new(std::os::unix::net::UnixStream::pair().unwrap().0.into()),
                     write: IoBufs::from(IoBuf::from(b"hello")).into(),
                     deadline: None,
                     result: None,
-                    sender: tx,
                 }),
                 Some(7),
+                Observer::Orphaned,
             );
 
             match waiters.stage(waiter_id) {
-                StageOutcome::Orphaned {
+                StageOutcome::Orphaned(Retired {
                     target_tick: Some(7),
-                } => {}
+                    ..
+                }) => {}
                 _ => panic!("closed send waiter should be orphaned before staging"),
             }
             assert!(waiters.is_empty());
@@ -687,26 +892,25 @@ mod tests {
                 std::os::unix::net::UnixStream::pair().expect("failed to create unix socket pair");
             // SAFETY: sock_left is a valid fd that we own.
             let file = unsafe { std::fs::File::from_raw_fd(sock_left.into_raw_fd()) };
-            let (tx, rx) = oneshot::channel();
-            drop(rx);
             let waiter_id = waiters.insert(
                 Request::ReadAt(ReadAtRequest {
-                    file: Arc::new(file),
+                    file: held(file),
                     offset: 0,
                     len: 8,
                     read: 0,
                     buf: IoBufMut::with_capacity(8),
                     cache: Cache::Enabled,
                     result: None,
-                    sender: tx,
                 }),
                 Some(8),
+                Observer::Orphaned,
             );
 
             match waiters.stage(waiter_id) {
-                StageOutcome::Orphaned {
+                StageOutcome::Orphaned(Retired {
                     target_tick: Some(8),
-                } => {}
+                    ..
+                }) => {}
                 _ => panic!("closed read waiter should be orphaned before staging"),
             }
             assert!(waiters.is_empty());
@@ -720,25 +924,25 @@ mod tests {
         {
             // Send request orphaned after a retryable CQE.
             let mut waiters = Waiters::new(1);
-            let (tx, rx) = oneshot::channel();
             let waiter_id = waiters.insert(
                 Request::Send(SendRequest {
                     fd: Arc::new(std::os::unix::net::UnixStream::pair().unwrap().0.into()),
                     write: IoBufs::from(IoBuf::from(b"hello")).into(),
                     deadline: None,
                     result: None,
-                    sender: tx,
                 }),
                 Some(5),
+                observer(),
             );
             assert!(matches!(waiters.stage(waiter_id), StageOutcome::Submit(_)));
-            drop(rx);
+            assert!(waiters.orphan(waiter_id, operation()));
 
             match waiters.on_completion(waiter_id.user_data(), -libc::EAGAIN) {
                 CompletionOutcome::Complete {
                     request,
                     target_tick: Some(5),
-                } => request.complete(),
+                    ..
+                } => drop(request.complete()),
                 _ => panic!("closed send waiter should be orphaned after retry CQE"),
             }
             assert!(waiters.is_empty());
@@ -747,25 +951,25 @@ mod tests {
         {
             // Send request orphaned after a partial-progress CQE.
             let mut waiters = Waiters::new(1);
-            let (tx, rx) = oneshot::channel();
             let waiter_id = waiters.insert(
                 Request::Send(SendRequest {
                     fd: Arc::new(std::os::unix::net::UnixStream::pair().unwrap().0.into()),
                     write: IoBufs::from(IoBuf::from(b"hello")).into(),
                     deadline: None,
                     result: None,
-                    sender: tx,
                 }),
                 Some(5),
+                observer(),
             );
             assert!(matches!(waiters.stage(waiter_id), StageOutcome::Submit(_)));
-            drop(rx);
+            assert!(waiters.orphan(waiter_id, operation()));
 
             match waiters.on_completion(waiter_id.user_data(), 2) {
                 CompletionOutcome::Complete {
                     request,
                     target_tick: Some(5),
-                } => request.complete(),
+                    ..
+                } => drop(request.complete()),
                 _ => panic!("closed send waiter should be orphaned after partial CQE"),
             }
             assert!(waiters.is_empty());
@@ -774,7 +978,6 @@ mod tests {
         {
             // Exact recv orphaned after a retryable CQE.
             let mut waiters = Waiters::new(1);
-            let (tx, rx) = oneshot::channel();
             let waiter_id = waiters.insert(
                 Request::Recv(RecvRequest {
                     fd: Arc::new(std::os::unix::net::UnixStream::pair().unwrap().0.into()),
@@ -784,18 +987,19 @@ mod tests {
                     exact: true,
                     deadline: None,
                     result: None,
-                    sender: tx,
                 }),
                 Some(6),
+                observer(),
             );
             assert!(matches!(waiters.stage(waiter_id), StageOutcome::Submit(_)));
-            drop(rx);
+            assert!(waiters.orphan(waiter_id, operation()));
 
             match waiters.on_completion(waiter_id.user_data(), -libc::EAGAIN) {
                 CompletionOutcome::Complete {
                     request,
                     target_tick: Some(6),
-                } => request.complete(),
+                    ..
+                } => drop(request.complete()),
                 _ => panic!("closed recv waiter should be orphaned after retry CQE"),
             }
             assert!(waiters.is_empty());
@@ -804,7 +1008,6 @@ mod tests {
         {
             // Exact recv orphaned after a partial-progress CQE.
             let mut waiters = Waiters::new(1);
-            let (tx, rx) = oneshot::channel();
             let waiter_id = waiters.insert(
                 Request::Recv(RecvRequest {
                     fd: Arc::new(std::os::unix::net::UnixStream::pair().unwrap().0.into()),
@@ -814,18 +1017,19 @@ mod tests {
                     exact: true,
                     deadline: None,
                     result: None,
-                    sender: tx,
                 }),
                 Some(6),
+                observer(),
             );
             assert!(matches!(waiters.stage(waiter_id), StageOutcome::Submit(_)));
-            drop(rx);
+            assert!(waiters.orphan(waiter_id, operation()));
 
             match waiters.on_completion(waiter_id.user_data(), 3) {
                 CompletionOutcome::Complete {
                     request,
                     target_tick: Some(6),
-                } => request.complete(),
+                    ..
+                } => drop(request.complete()),
                 _ => panic!("closed recv waiter should be orphaned after partial CQE"),
             }
             assert!(waiters.is_empty());
@@ -838,28 +1042,28 @@ mod tests {
                 std::os::unix::net::UnixStream::pair().expect("failed to create unix socket pair");
             // SAFETY: sock_left is a valid fd that we own.
             let file = unsafe { std::fs::File::from_raw_fd(sock_left.into_raw_fd()) };
-            let (tx, rx) = oneshot::channel();
             let waiter_id = waiters.insert(
                 Request::ReadAt(ReadAtRequest {
-                    file: Arc::new(file),
+                    file: held(file),
                     offset: 0,
                     len: 8,
                     read: 0,
                     buf: IoBufMut::with_capacity(8),
                     cache: Cache::Enabled,
                     result: None,
-                    sender: tx,
                 }),
                 Some(9),
+                observer(),
             );
             assert!(matches!(waiters.stage(waiter_id), StageOutcome::Submit(_)));
-            drop(rx);
+            assert!(waiters.orphan(waiter_id, operation()));
 
             match waiters.on_completion(waiter_id.user_data(), 3) {
                 CompletionOutcome::Complete {
                     request,
                     target_tick: Some(9),
-                } => request.complete(),
+                    ..
+                } => drop(request.complete()),
                 _ => panic!("closed read waiter should be orphaned after partial CQE"),
             }
             assert!(waiters.is_empty());
@@ -872,8 +1076,8 @@ mod tests {
         // for the original operation CQE to finish it later.
         for result in [0, -libc::EALREADY, -libc::ENOENT] {
             let mut waiters = Waiters::new(1);
-            let (req, _rx) = make_sync_request();
-            let waiter_id = waiters.insert(req, Some(2));
+            let req = make_sync_request();
+            let waiter_id = waiters.insert(req, Some(2), observer());
             assert!(matches!(waiters.stage(waiter_id), StageOutcome::Submit(_)));
             assert!(waiters.cancel(waiter_id));
 
@@ -891,8 +1095,8 @@ mod tests {
         // Verify unexpected negative cancel CQEs are ignored rather than
         // corrupting waiter state.
         let mut waiters = Waiters::new(1);
-        let (req, _rx) = make_sync_request();
-        let waiter_id = waiters.insert(req, Some(2));
+        let req = make_sync_request();
+        let waiter_id = waiters.insert(req, Some(2), observer());
         assert!(matches!(waiters.stage(waiter_id), StageOutcome::Submit(_)));
         assert!(waiters.cancel(waiter_id));
 
@@ -909,8 +1113,8 @@ mod tests {
         // Verify `EINVAL` remains a hard invariant failure because the kernel
         // rejected our async cancel SQE.
         let mut waiters = Waiters::new(1);
-        let (req, _rx) = make_sync_request();
-        let waiter_id = waiters.insert(req, Some(2));
+        let req = make_sync_request();
+        let waiter_id = waiters.insert(req, Some(2), observer());
         assert!(matches!(waiters.stage(waiter_id), StageOutcome::Submit(_)));
         assert!(waiters.cancel(waiter_id));
 
@@ -924,12 +1128,12 @@ mod tests {
     fn test_waiters_stale_ids_cannot_remove_reused_slots() {
         // Verify stale waiter ids cannot observe state or remove a reused slot.
         let mut waiters = Waiters::new(1);
-        let (req0, _rx0) = make_sync_request();
-        let waiter_id = waiters.insert(req0, Some(1));
+        let req0 = make_sync_request();
+        let waiter_id = waiters.insert(req0, Some(1), observer());
         let _ = remove_waiter(&mut waiters, waiter_id);
 
-        let (req1, _rx1) = make_sync_request();
-        let reused_id = waiters.insert(req1, Some(2));
+        let req1 = make_sync_request();
+        let reused_id = waiters.insert(req1, Some(2), observer());
         assert_ne!(reused_id, waiter_id);
         assert!(waiter_state(&waiters, waiter_id).is_none());
         let stale_remove = catch_unwind(AssertUnwindSafe(|| {
@@ -945,29 +1149,29 @@ mod tests {
         let mut waiters = Waiters::new(2);
 
         // Inserting beyond configured capacity should panic.
-        let (req0, _rx0) = make_sync_request();
-        let (req1, _rx1) = make_sync_request();
-        let _ = waiters.insert(req0, None);
-        let _ = waiters.insert(req1, None);
+        let req0 = make_sync_request();
+        let req1 = make_sync_request();
+        let _ = waiters.insert(req0, None, observer());
+        let _ = waiters.insert(req1, None, observer());
         assert!(waiters.is_full());
         let insert_overflow = catch_unwind(AssertUnwindSafe(|| {
-            let (req2, _rx2) = make_sync_request();
-            let _ = waiters.insert(req2, None);
+            let req2 = make_sync_request();
+            let _ = waiters.insert(req2, None, observer());
         }));
         assert!(insert_overflow.is_err());
 
         // Cancellation is allowed even when no deadline is tracked.
         let mut waiters = Waiters::new(2);
-        let (req, _rx) = make_sync_request();
-        let no_deadline = waiters.insert(req, None);
+        let req = make_sync_request();
+        let no_deadline = waiters.insert(req, None, observer());
         assert!(
             waiters.cancel(no_deadline),
             "cancel should support active waiter without deadline"
         );
 
         // Repeated cancel on the same waiter must be ignored.
-        let (req, _rx) = make_sync_request();
-        let active = waiters.insert(req, Some(3));
+        let req = make_sync_request();
+        let active = waiters.insert(req, Some(3), observer());
         assert!(waiters.cancel(active));
         assert!(!waiters.cancel(active));
     }

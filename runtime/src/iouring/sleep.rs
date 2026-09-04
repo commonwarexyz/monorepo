@@ -16,7 +16,151 @@
 //! to caller-owned action storage. Waking and destruction happen only after
 //! releasing that borrow, with the worker's normal cleanup panic isolation.
 
-use std::{cmp::Reverse, collections::BinaryHeap, task::Waker, time::Instant};
+use super::{
+    mailbox::{Mailbox, Message},
+    operation, runtime,
+    timeout::TimeoutWheel,
+};
+use std::{
+    cmp::Reverse,
+    collections::BinaryHeap,
+    future::Future,
+    mem,
+    pin::Pin,
+    sync::{Arc, Weak},
+    task::{Context, Poll, Waker},
+    time::{Duration, Instant, SystemTime},
+};
+
+/// Ownership held by a sleep between polls.
+enum State {
+    /// Absolute monotonic deadline established at creation.
+    Unregistered { deadline: Instant },
+    /// Registration bound to the worker selected by the first pending poll.
+    Registered {
+        /// Weak identity used for affinity checks and foreign cancellation.
+        mailbox: Weak<Mailbox>,
+        /// Full-width registration identity.
+        timer_id: TimerId,
+        /// Original deadline, independent of the registration's lifetime.
+        deadline: Instant,
+    },
+    /// Immediate or completed sleep, requiring no worker access.
+    Done,
+}
+
+/// Concrete sleep future that never consumes an io_uring waiter slot.
+pub(super) struct Sleep {
+    /// Deadline or registration retained without any local reference.
+    state: State,
+}
+
+impl Sleep {
+    /// Establish a relative deadline, clamping far-future sleeps to 30 years.
+    ///
+    /// Zero sleeps take the ready path without reading a clock or accessing TLS.
+    pub(super) fn new(duration: Duration) -> Self {
+        if duration.is_zero() {
+            return Self { state: State::Done };
+        }
+        let deadline = Instant::now()
+            .checked_add(duration.min(TimeoutWheel::MAX_TIMEOUT))
+            .expect("30-year sleep deadline is not representable");
+        Self {
+            state: State::Unregistered { deadline },
+        }
+    }
+
+    /// Convert a wall-clock deadline once, preserving already elapsed readiness.
+    pub(super) fn until(deadline: SystemTime) -> Self {
+        let duration = deadline
+            .duration_since(SystemTime::now())
+            .unwrap_or_default();
+        Self::new(duration)
+    }
+}
+
+impl Future for Sleep {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        let this = self.get_mut();
+        let (owner, deadline, registered) = match &this.state {
+            State::Done => return Poll::Ready(()),
+            State::Unregistered { deadline } => {
+                // A first poll can occur after a long synchronous user action.
+                // Check fresh time here so an already elapsed sleep never waits
+                // for the loop's older cached sample to catch up.
+                if *deadline <= Instant::now() {
+                    this.state = State::Done;
+                    return Poll::Ready(());
+                }
+                (
+                    runtime::current().expect("io_uring sleep requires a current worker"),
+                    *deadline,
+                    None,
+                )
+            }
+            State::Registered {
+                mailbox,
+                timer_id,
+                deadline,
+            } => (
+                operation::bound(mailbox).expect("io_uring sleep polled after its worker closed"),
+                *deadline,
+                Some(*timer_id),
+            ),
+        };
+        let (closed, now) = {
+            let local = owner.borrow();
+            (local.closing, local.now)
+        };
+        assert!(!closed, "io_uring sleep polled after its worker closed");
+        if deadline <= now {
+            this.state = State::Done;
+            if let Some(timer_id) = registered {
+                let mut local = owner.borrow_mut();
+                local.drops.reserve(1);
+                if let Some(waker) = local.timers.cancel(timer_id) {
+                    local.drops.push(waker);
+                }
+            }
+            return Poll::Ready(());
+        }
+
+        // Waker cloning can reenter the runtime. Clone before borrowing Local,
+        // then retain displaced ownership in the worker's deferred drop batch.
+        let incoming = cx.waker().clone();
+        let mut local = owner.borrow_mut();
+        local.drops.reserve(1);
+        if let Some(timer_id) = registered {
+            let old = local
+                .timers
+                .refresh(timer_id, incoming)
+                .expect("live io_uring sleeper registration missing");
+            local.drops.push(old);
+        } else {
+            let timer_id = local.timers.insert(deadline, incoming);
+            this.state = State::Registered {
+                mailbox: Arc::downgrade(&local.mailbox),
+                timer_id,
+                deadline,
+            };
+        }
+        Poll::Pending
+    }
+}
+
+impl Drop for Sleep {
+    fn drop(&mut self) {
+        if let State::Registered {
+            mailbox, timer_id, ..
+        } = mem::replace(&mut self.state, State::Done)
+        {
+            operation::cancel(&mailbox, Message::CancelTimer(timer_id));
+        }
+    }
+}
 
 /// Full-width identity for one sleeper registration.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -224,6 +368,41 @@ mod tests {
         fn wake(self: Arc<Self>) {
             self.0.fetch_add(1, Ordering::Relaxed);
         }
+    }
+
+    #[test]
+    fn zero_and_elapsed_sleeps_are_ready_without_a_worker() {
+        let mut zero = Sleep::new(Duration::ZERO);
+        let mut elapsed = Sleep::until(SystemTime::UNIX_EPOCH);
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(Pin::new(&mut zero).poll(&mut cx).is_ready());
+        assert!(Pin::new(&mut elapsed).poll(&mut cx).is_ready());
+        assert!(matches!(zero.state, State::Done));
+        assert!(matches!(elapsed.state, State::Done));
+    }
+
+    #[test]
+    fn overdue_first_poll_does_not_require_timer_registration() {
+        let mut sleep = Sleep {
+            state: State::Unregistered {
+                deadline: Instant::now(),
+            },
+        };
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(Pin::new(&mut sleep).poll(&mut cx).is_ready());
+        assert!(matches!(sleep.state, State::Done));
+    }
+
+    #[test]
+    fn far_future_sleep_creation_clamps_the_monotonic_deadline() {
+        let before = Instant::now();
+        let sleep = Sleep::new(Duration::MAX);
+        let after = Instant::now();
+        let State::Unregistered { deadline } = sleep.state else {
+            panic!("positive sleep must retain a deadline");
+        };
+        assert!(deadline >= before + TimeoutWheel::MAX_TIMEOUT);
+        assert!(deadline <= after + TimeoutWheel::MAX_TIMEOUT);
     }
 
     #[test]

@@ -1,16 +1,37 @@
-//! Request types and state machines for the io_uring loop.
+//! Request ownership and progress state machines for each worker's ring.
 //!
-//! Callers submit logical operations through [super::Handle]. The handle
-//! constructs a [Request] that owns all resources (buffers, FDs, progress
-//! cursors, completion sender) needed to build follow-up SQEs and deliver a
-//! typed result.
+//! An admitted [`Request`] owns every descriptor, buffer, and stable scratch
+//! allocation referenced by its SQEs. Only the owning worker changes progress.
+//! Completions return typed [`RequestOutput`] values and [`RetiredResources`],
+//! allowing the driver to recycle capacity before invoking any caller code.
+//!
+//! ```text
+//! operation -> waiter -> Request -> SQE -> kernel
+//!                           ^                |
+//!                           +----- CQE ------+
+//!                                  |
+//!                  terminal completion
+//!                     /            \
+//!              RequestOutput   RetiredResources
+//!              operation slab  drop outside Local
+//! ```
+//!
+//! Consumed write chunks remain owned until terminal retirement. Progress never
+//! drops external buffer owners while local runtime state is borrowed. A cancel
+//! acknowledgement does not retire resources, only the operation's own CQE can
+//! establish that the kernel has stopped accessing them.
 
-use super::waiter::{WaiterId, WaiterState};
-use crate::{Error, IoBuf, IoBufMut, IoBufs};
-use commonware_utils::channel::oneshot;
+use super::{
+    callbacks::Panics,
+    sockaddr::SockAddr,
+    waiter::{WaiterId, WaiterState},
+};
+use crate::{Error, IoBuf, IoBufMut, IoBufs, storage::hold::Hold};
 use io_uring::{opcode, squeue::Entry as SqueueEntry, types::Fd};
 use std::{
     fs::File,
+    net::TcpListener,
+    ops::Deref,
     os::fd::{AsRawFd, OwnedFd},
     sync::{
         Arc,
@@ -21,13 +42,13 @@ use std::{
 
 /// Linux rejects more than IOV_MAX (1024) iovecs with EINVAL. Use the maximum so storage writes
 /// span as few submissions as possible.
-pub(super) const IOVEC_BATCH_SIZE: usize = 1024;
+pub(crate) const IOVEC_BATCH_SIZE: usize = 1024;
 
 /// Normalized write buffer for [SendRequest] and [WriteAtRequest].
 ///
 /// Preserves a single-buffer fast path and a vectored path with reusable
 /// iovec scratch space.
-pub(super) enum WriteBuffers {
+pub(crate) enum WriteBuffers {
     /// Contiguous bytes and their completed prefix.
     Single {
         /// Original owner, retained through terminal completion.
@@ -85,6 +106,23 @@ impl From<IoBufs> for WriteBuffers {
 }
 
 impl WriteBuffers {
+    /// Release external owners one at a time after leaving the worker borrow.
+    fn retire(self, panics: &mut Panics) {
+        match self {
+            Self::Single { buf, .. } => {
+                panics.run(|| drop(buf));
+            }
+            Self::Vectored { bufs, iovecs, .. } => {
+                // Scratch no longer has kernel users. Drop it before invoking
+                // owners, each of which may independently panic or reenter.
+                drop(iovecs);
+                bufs.retire_chunks(|buf| {
+                    panics.run(|| drop(buf));
+                });
+            }
+        }
+    }
+
     /// Return the remaining number of bytes that still need to be written.
     fn remaining_len(&self) -> usize {
         match self {
@@ -151,23 +189,26 @@ fn fill_iovecs(bufs: &IoBufs, chunk: usize, offset: usize, iovecs: &mut [libc::i
 
 /// In-flight request state machine stored in the waiter table.
 ///
-/// Each variant owns its completion sender, all buffers and FDs needed by the
+/// Each variant owns all buffers and FDs needed by the
 /// kernel, and progress cursors. The loop calls [build_sqe](Self::build_sqe)
 /// to produce the next SQE, [on_cqe](Self::on_cqe) to evaluate completions,
 /// and [complete](Self::complete) or [timeout](Self::timeout) to
-/// deliver results.
-///
-pub(super) enum Request {
-    #[cfg_attr(not(feature = "iouring-network"), allow(dead_code))]
+/// return results without invoking observers.
+pub(crate) enum Request {
+    /// Send a whole logical buffer sequence.
     Send(SendRequest),
-    #[cfg_attr(not(feature = "iouring-network"), allow(dead_code))]
+    /// Receive bytes into a retained destination buffer.
     Recv(RecvRequest),
-    #[cfg_attr(not(feature = "iouring-storage"), allow(dead_code))]
+    /// Read a fixed byte range from a held file.
     ReadAt(ReadAtRequest),
-    #[cfg_attr(not(feature = "iouring-storage"), allow(dead_code))]
+    /// Write a fixed byte range, optionally followed by data sync.
     WriteAt(WriteAtRequest),
-    #[cfg_attr(not(feature = "iouring-storage"), allow(dead_code))]
+    /// Make a held file durable.
     Sync(SyncRequest),
+    /// Connect a socket using a stable native address.
+    Connect(ConnectRequest),
+    /// Observe one readiness event without consuming socket data.
+    Poll(PollRequest),
 }
 
 impl Request {
@@ -176,28 +217,18 @@ impl Request {
         match self {
             Self::Send(r) => r.deadline,
             Self::Recv(r) => r.deadline,
+            Self::Connect(r) => r.deadline,
+            Self::Poll(r) => r.deadline,
             Self::ReadAt(_) | Self::WriteAt(_) | Self::Sync(_) => None,
         }
     }
 
-    /// Return whether this request carries a deadline.
-    pub const fn has_deadline(&self) -> bool {
-        self.deadline().is_some()
-    }
-
-    /// Return whether this request should be treated as orphaned.
+    /// Return whether logical work continues after its observer disappears.
     ///
-    /// A request is orphaned only when its completion receiver has been dropped
-    /// and this request kind stops driving follow-up SQEs in that state.
-    pub fn is_orphaned(&self) -> bool {
-        match self {
-            Self::Send(s) => s.sender.is_closed(),
-            Self::Recv(r) => r.sender.is_closed(),
-            Self::ReadAt(r) => r.sender.is_closed(),
-            // Keep storage write/sync behavior aligned with `storage/tokio/unix.rs`,
-            // where spawned blocking work continues running after caller drop.
-            Self::WriteAt(_) | Self::Sync(_) => false,
-        }
+    /// Storage mutations retain the same detached-work contract as blocking
+    /// storage. Cancellation of reads and network requests stops follow-up SQEs.
+    pub const fn retains_on_orphan(&self) -> bool {
+        matches!(self, Self::WriteAt(_) | Self::Sync(_))
     }
 
     /// Build the next SQE for this request, tagged with `waiter_id`.
@@ -208,6 +239,8 @@ impl Request {
             Self::ReadAt(r) => r.build_sqe(),
             Self::WriteAt(w) => w.build_sqe(),
             Self::Sync(s) => s.build_sqe(),
+            Self::Connect(r) => r.build_sqe(),
+            Self::Poll(r) => r.build_sqe(),
         };
         sqe.user_data(waiter_id.user_data())
     }
@@ -223,58 +256,210 @@ impl Request {
             Self::ReadAt(r) => r.on_cqe(state, result),
             Self::WriteAt(w) => w.on_cqe(state, result),
             Self::Sync(s) => s.on_cqe(state, result),
+            Self::Connect(r) => r.on_cqe(state, result),
+            Self::Poll(r) => r.on_cqe(state, result),
         }
     }
 
-    /// Deliver the stored result to the caller via its oneshot sender.
-    pub fn complete(self) {
+    /// Take the typed result and every owner that is no longer kernel-visible.
+    ///
+    /// The driver calls this only after the operation CQE or before staging its
+    /// first SQE. Both returned values must leave the local borrow before they
+    /// can be destroyed or delivered to an observer.
+    pub fn complete(self) -> (RequestOutput, RetiredResources) {
         match self {
-            Self::Send(s) => {
-                let _ = s.sender.send(s.result.unwrap_or(Err(Error::SendFailed)));
-            }
+            Self::Send(r) => (
+                RequestOutput::Send(r.result.unwrap_or(Err(Error::SendFailed))),
+                RetiredResources::Send {
+                    fd: r.fd,
+                    write: r.write,
+                },
+            ),
             Self::Recv(r) => {
                 let result = match r.result.unwrap_or(Err(Error::RecvFailed)) {
                     Ok(read) => Ok((r.buf, read)),
                     Err(err) => Err((r.buf, err)),
                 };
-                let _ = r.sender.send(result);
+                (
+                    RequestOutput::Recv(result),
+                    RetiredResources::Socket { fd: r.fd },
+                )
             }
             Self::ReadAt(r) => {
                 let result = match r.result.unwrap_or(Err(Error::ReadFailed)) {
                     Ok(()) => Ok(r.buf),
                     Err(err) => Err((r.buf, err)),
                 };
-                let _ = r.sender.send(result);
+                (
+                    RequestOutput::ReadAt(result),
+                    RetiredResources::File {
+                        file: r.file,
+                        cache: Some(r.cache),
+                        write: None,
+                    },
+                )
             }
-            Self::WriteAt(w) => {
-                let _ = w.sender.send(w.result.unwrap_or(Err(Error::WriteFailed)));
-            }
-            Self::Sync(s) => {
-                let _ = s.sender.send(s.result.unwrap_or(Ok(())));
-            }
+            Self::WriteAt(r) => (
+                RequestOutput::WriteAt(r.result.unwrap_or(Err(Error::WriteFailed))),
+                RetiredResources::File {
+                    file: r.file,
+                    cache: Some(r.cache),
+                    write: Some(r.write),
+                },
+            ),
+            Self::Sync(r) => (
+                RequestOutput::Sync(r.result.unwrap_or(Err(Error::Closed))),
+                RetiredResources::File {
+                    file: r.file,
+                    cache: None,
+                    write: None,
+                },
+            ),
+            Self::Connect(r) => (
+                RequestOutput::Connect(r.result.unwrap_or(Err(Error::ConnectionFailed))),
+                RetiredResources::Connect {
+                    fd: r.fd,
+                    address: r.address,
+                },
+            ),
+            Self::Poll(r) => (
+                RequestOutput::Poll(r.result.unwrap_or(Err(Error::ConnectionFailed))),
+                RetiredResources::Listener { listener: r.fd },
+            ),
         }
     }
 
-    /// Deliver a timeout error. Used when a deadline expires before the
-    /// first SQE is submitted.
-    pub fn timeout(self) {
-        match self {
-            Self::Send(s) => {
-                let _ = s.sender.send(Err(Error::Timeout));
-            }
-            Self::Recv(r) => {
-                let _ = r.sender.send(Err((r.buf, Error::Timeout)));
-            }
-            Self::ReadAt(r) => {
-                let _ = r.sender.send(Err((r.buf, Error::Timeout)));
-            }
-            Self::WriteAt(w) => {
-                let _ = w.sender.send(Err(Error::Timeout));
-            }
-            Self::Sync(s) => {
-                let _ = s.sender.send(Err(Error::Timeout));
-            }
+    /// Complete a request whose deadline expired before another SQE was staged.
+    pub fn timeout(self) -> (RequestOutput, RetiredResources) {
+        self.fail(Error::Timeout)
+    }
+
+    /// Record a local rejection and return its typed result without dropping owners.
+    pub fn fail(mut self, error: Error) -> (RequestOutput, RetiredResources) {
+        match &mut self {
+            Self::Send(r) => r.result = Some(Err(error)),
+            Self::Recv(r) => r.result = Some(Err(error)),
+            Self::ReadAt(r) => r.result = Some(Err(error)),
+            Self::WriteAt(r) => r.result = Some(Err(error)),
+            Self::Sync(r) => r.result = Some(Err(error)),
+            Self::Connect(r) => r.result = Some(Err(error)),
+            Self::Poll(r) => r.result = Some(Err(error)),
         }
+        self.complete()
+    }
+}
+
+/// Typed terminal results retained separately from active waiter capacity.
+#[derive(Debug)]
+pub(crate) enum RequestOutput {
+    /// Completion of a logical network send.
+    Send(Result<(), Error>),
+    /// Receive result and its destination owner, including on error.
+    Recv(Result<(IoBufMut, usize), (IoBufMut, Error)>),
+    /// Positioned read result and its destination owner, including on error.
+    ReadAt(Result<IoBufMut, (IoBufMut, Error)>),
+    /// Completion of the whole positioned write and durability sequence.
+    WriteAt(Result<(), Error>),
+    /// Completion of a data sync.
+    Sync(Result<(), Error>),
+    /// Completion of a socket connection attempt.
+    Connect(Result<(), Error>),
+    /// Completion of one socket readiness observation.
+    Poll(Result<(), Error>),
+}
+
+/// Owners detached at terminal completion and destroyed outside local state.
+///
+/// The concrete variants preserve the backing resources through cancellation
+/// and move them without invoking buffer destructors or observer callbacks.
+pub(crate) enum RetiredResources {
+    /// Listener retained while an accept readiness observation is outstanding.
+    Listener {
+        /// Shared listener whose accept queue remains observable.
+        listener: Arc<TcpListener>,
+    },
+    /// Socket retained by a receive operation.
+    Socket {
+        /// Descriptor no longer referenced by an operation SQE.
+        fd: Arc<OwnedFd>,
+    },
+    /// Socket and all write owners retained by a logical send.
+    Send {
+        /// Descriptor used by the completed send sequence.
+        fd: Arc<OwnedFd>,
+        /// Original byte owners, including consumed chunks.
+        write: WriteBuffers,
+    },
+    /// File, directory hold, and any positioned I/O buffer/cache owners.
+    File {
+        /// File owner carrying its original storage directory hold.
+        file: Arc<Held>,
+        /// Shared capability state retained by positioned I/O.
+        cache: Option<Cache>,
+        /// Original write owners, absent for reads and standalone sync.
+        write: Option<WriteBuffers>,
+    },
+    /// Socket and stable address retained by a connection attempt.
+    Connect {
+        /// Descriptor used by the connection attempt.
+        fd: Arc<OwnedFd>,
+        /// Boxed native address whose kernel access has ended.
+        address: Box<SockAddr>,
+    },
+}
+
+impl RetiredResources {
+    /// Release each runtime-owned buffer chunk under independent panic isolation.
+    ///
+    /// Calling `drop` on the whole vectored container could run a second owner
+    /// destructor during the first owner's unwind, aborting mandatory cleanup.
+    pub(super) fn retire(self, panics: &mut Panics) {
+        match self {
+            Self::Send { fd, write } => {
+                write.retire(panics);
+                drop(fd);
+            }
+            Self::File { file, cache, write } => {
+                if let Some(write) = write {
+                    write.retire(panics);
+                }
+                drop(cache);
+                drop(file);
+            }
+            Self::Connect { fd, address } => {
+                drop(address);
+                drop(fd);
+            }
+            Self::Socket { fd } => drop(fd),
+            Self::Listener { listener } => drop(listener),
+        }
+    }
+}
+
+/// A blob's file bundled with the hold on its storage directory.
+///
+/// Every request must retain this owner to access the file. Moving a blob to a
+/// different worker or runner therefore carries its original directory hold
+/// through that worker's eventual kernel retirement.
+pub(crate) struct Held {
+    /// Shared underlying file, also used for synchronous metadata operations.
+    file: Arc<File>,
+    /// Directory exclusion retained until every file and request is released.
+    _hold: Arc<Hold>,
+}
+
+impl Held {
+    /// Retain a file and the directory hold that protects its storage.
+    pub(crate) fn new(file: Arc<File>, hold: Arc<Hold>) -> Arc<Self> {
+        Arc::new(Self { file, _hold: hold })
+    }
+}
+
+impl Deref for Held {
+    type Target = File;
+
+    fn deref(&self) -> &Self::Target {
+        &self.file
     }
 }
 
@@ -328,17 +513,15 @@ impl CqeResult {
 }
 
 /// Logical network send request and its in-loop state.
-pub(super) struct SendRequest {
+pub(crate) struct SendRequest {
     /// Socket used by the current send SQE.
-    pub(super) fd: Arc<OwnedFd>,
+    pub(crate) fd: Arc<OwnedFd>,
     /// Write cursor and buffers that still need to be sent.
-    pub(super) write: WriteBuffers,
+    pub(crate) write: WriteBuffers,
     /// Absolute deadline for the whole logical request.
-    pub(super) deadline: Option<Instant>,
-    /// Terminal result captured by `on_cqe` and delivered by `finish`.
-    pub(super) result: Option<Result<(), Error>>,
-    /// Completion channel for the top-level caller.
-    pub(super) sender: oneshot::Sender<Result<(), Error>>,
+    pub(crate) deadline: Option<Instant>,
+    /// Terminal result captured by `on_cqe` and returned by `complete`.
+    pub(crate) result: Option<Result<(), Error>>,
 }
 
 impl SendRequest {
@@ -413,23 +596,21 @@ impl SendRequest {
 }
 
 /// Logical network recv request and its in-loop state.
-pub(super) struct RecvRequest {
+pub(crate) struct RecvRequest {
     /// Socket used by the current recv SQE.
-    pub(super) fd: Arc<OwnedFd>,
+    pub(crate) fd: Arc<OwnedFd>,
     /// Destination buffer owned by the request.
-    pub(super) buf: IoBufMut,
+    pub(crate) buf: IoBufMut,
     /// Byte offset into `buf` where the next recv should write.
-    pub(super) offset: usize,
+    pub(crate) offset: usize,
     /// Total recv target, including any existing filled prefix before `offset`.
-    pub(super) len: usize,
+    pub(crate) len: usize,
     /// Whether the recv must fill the full target before succeeding.
-    pub(super) exact: bool,
+    pub(crate) exact: bool,
     /// Absolute deadline for the whole logical request.
-    pub(super) deadline: Option<Instant>,
-    /// Terminal result captured by `on_cqe` and delivered by `finish`.
-    pub(super) result: Option<Result<usize, Error>>,
-    /// Completion channel for the top-level caller.
-    pub(super) sender: oneshot::Sender<Result<(IoBufMut, usize), (IoBufMut, Error)>>,
+    pub(crate) deadline: Option<Instant>,
+    /// Terminal result captured by `on_cqe` and returned by `complete`.
+    pub(crate) result: Option<Result<usize, Error>>,
 }
 
 impl RecvRequest {
@@ -493,23 +674,21 @@ impl RecvRequest {
 }
 
 /// Logical positioned file read request and its in-loop state.
-pub(super) struct ReadAtRequest {
+pub(crate) struct ReadAtRequest {
     /// File used by the current read SQE.
-    pub(super) file: Arc<File>,
+    pub(crate) file: Arc<Held>,
     /// Starting file offset for the logical read.
-    pub(super) offset: u64,
+    pub(crate) offset: u64,
     /// Total number of bytes requested.
-    pub(super) len: usize,
+    pub(crate) len: usize,
     /// Bytes already read into `buf`.
-    pub(super) read: usize,
+    pub(crate) read: usize,
     /// Destination buffer owned by the request.
-    pub(super) buf: IoBufMut,
+    pub(crate) buf: IoBufMut,
     /// Page-cache policy for this request.
-    pub(super) cache: Cache,
-    /// Terminal result captured by `on_cqe` and delivered by `finish`.
-    pub(super) result: Option<Result<(), Error>>,
-    /// Completion channel for the top-level caller.
-    pub(super) sender: oneshot::Sender<Result<IoBufMut, (IoBufMut, Error)>>,
+    pub(crate) cache: Cache,
+    /// Terminal result captured by `on_cqe` and returned by `complete`.
+    pub(crate) result: Option<Result<(), Error>>,
 }
 
 impl ReadAtRequest {
@@ -584,7 +763,6 @@ pub(crate) enum Cache {
     /// Use the operating system's normal page-cache behavior.
     Enabled,
     /// Best-effort bypass of the page cache while the backend supports it.
-    #[cfg_attr(not(feature = "iouring-storage"), allow(dead_code))]
     Disabled(Arc<AtomicBool>),
 }
 
@@ -617,8 +795,7 @@ impl Cache {
 
 /// Progress and durability policy for one positioned write request.
 #[derive(Eq, PartialEq)]
-#[cfg_attr(not(feature = "iouring-storage"), allow(dead_code))]
-pub(super) enum WriteAtState {
+pub(crate) enum WriteAtState {
     /// Submit writes without per-write durability.
     Writing,
     /// Submit writes with `RWF_DSYNC`.
@@ -658,23 +835,21 @@ fn on_sync_cqe(output: &mut Option<Result<(), Error>>, state: WaiterState, resul
 }
 
 /// Logical positioned file write request and its in-loop state.
-pub(super) struct WriteAtRequest {
+pub(crate) struct WriteAtRequest {
     /// File used by the current write SQE.
-    pub(super) file: Arc<File>,
+    pub(crate) file: Arc<Held>,
     /// Starting file offset for the logical write.
-    pub(super) offset: u64,
+    pub(crate) offset: u64,
     /// Bytes already written successfully.
-    pub(super) written: usize,
+    pub(crate) written: usize,
     /// Write cursor and buffers that still need to be written.
-    pub(super) write: WriteBuffers,
+    pub(crate) write: WriteBuffers,
     /// Current write and durability phase.
-    pub(super) state: WriteAtState,
+    pub(crate) state: WriteAtState,
     /// Page-cache policy for this request.
-    pub(super) cache: Cache,
-    /// Terminal result captured by `on_cqe` and delivered by `finish`.
-    pub(super) result: Option<Result<(), Error>>,
-    /// Completion channel for the top-level caller.
-    pub(super) sender: oneshot::Sender<Result<(), Error>>,
+    pub(crate) cache: Cache,
+    /// Terminal result captured by `on_cqe` and returned by `complete`.
+    pub(crate) result: Option<Result<(), Error>>,
 }
 
 impl WriteAtRequest {
@@ -769,13 +944,11 @@ impl WriteAtRequest {
 }
 
 /// Logical fsync request and its in-loop state.
-pub(super) struct SyncRequest {
+pub(crate) struct SyncRequest {
     /// File descriptor to sync.
-    pub(super) file: Arc<File>,
-    /// Terminal result captured by `on_cqe` and delivered by `finish`.
-    pub(super) result: Option<Result<(), Error>>,
-    /// Completion channel for the top-level caller.
-    pub(super) sender: oneshot::Sender<Result<(), Error>>,
+    pub(crate) file: Arc<Held>,
+    /// Terminal result captured by `on_cqe` and returned by `complete`.
+    pub(crate) result: Option<Result<(), Error>>,
 }
 
 impl SyncRequest {
@@ -791,19 +964,107 @@ impl SyncRequest {
     }
 }
 
+/// Socket connection request with stable kernel address storage.
+pub(crate) struct ConnectRequest {
+    /// Socket retained through its operation CQE.
+    pub(crate) fd: Arc<OwnedFd>,
+    /// Native address that cannot move after its pointer is staged.
+    pub(crate) address: Box<SockAddr>,
+    /// Absolute deadline covering admission and every retry.
+    pub(crate) deadline: Option<Instant>,
+    /// Terminal connection result.
+    pub(crate) result: Option<Result<(), Error>>,
+}
+
+impl ConnectRequest {
+    /// Build a connection SQE pointing into the boxed native address.
+    fn build_sqe(&self) -> SqueueEntry {
+        let (address, len) = self.address.as_raw();
+        opcode::Connect::new(Fd(self.fd.as_raw_fd()), address, len).build()
+    }
+
+    /// Preserve connection success when it races a cancellation request.
+    fn on_cqe(&mut self, state: WaiterState, result: i32) -> bool {
+        if result == -libc::EISCONN || result == 0 {
+            self.result = Some(Ok(()));
+            return true;
+        }
+        let result = if result == -libc::EALREADY {
+            -libc::EAGAIN
+        } else {
+            result
+        };
+        match CqeResult::from_raw(result, state) {
+            CqeResult::Retry if !matches!(state, WaiterState::CancelRequested) => false,
+            CqeResult::Retry | CqeResult::Cancelled => {
+                self.result = Some(Err(Error::Timeout));
+                true
+            }
+            CqeResult::Error(code) => {
+                self.result = Some(Err(Error::Io(
+                    std::io::Error::from_raw_os_error(-code).into(),
+                )));
+                true
+            }
+            CqeResult::Zero | CqeResult::Positive(_) => {
+                self.result = Some(Err(Error::ConnectionFailed));
+                true
+            }
+        }
+    }
+}
+
+/// Single-shot readiness observation that never consumes an accepted socket.
+pub(crate) struct PollRequest {
+    /// Descriptor retained until readiness completes or cancellation retires.
+    pub(crate) fd: Arc<TcpListener>,
+    /// Native poll flags identifying the readiness event of interest.
+    pub(crate) flags: u32,
+    /// Absolute deadline for this readiness observation.
+    pub(crate) deadline: Option<Instant>,
+    /// Terminal readiness result.
+    pub(crate) result: Option<Result<(), Error>>,
+}
+
+impl PollRequest {
+    /// Build one readiness SQE, leaving multishot mode disabled.
+    fn build_sqe(&self) -> SqueueEntry {
+        opcode::PollAdd::new(Fd(self.fd.as_raw_fd()), self.flags).build()
+    }
+
+    /// Treat readiness as a hint, allowing the caller to retry the actual syscall.
+    fn on_cqe(&mut self, state: WaiterState, result: i32) -> bool {
+        match CqeResult::from_raw(result, state) {
+            CqeResult::Retry if !matches!(state, WaiterState::CancelRequested) => false,
+            CqeResult::Retry | CqeResult::Cancelled => {
+                self.result = Some(Err(Error::Timeout));
+                true
+            }
+            CqeResult::Error(code) => {
+                self.result = Some(Err(Error::Io(
+                    std::io::Error::from_raw_os_error(-code).into(),
+                )));
+                true
+            }
+            CqeResult::Zero | CqeResult::Positive(_) => {
+                self.result = Some(Ok(()));
+                true
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use commonware_utils::channel::oneshot;
-    use futures::executor::block_on;
     use std::{
         os::{
             fd::{FromRawFd, IntoRawFd},
             unix::net::UnixStream,
         },
         panic::{AssertUnwindSafe, catch_unwind},
-        sync::atomic::AtomicUsize,
+        sync::{OnceLock, atomic::AtomicUsize},
     };
 
     fn make_socket_fd() -> Arc<OwnedFd> {
@@ -811,11 +1072,19 @@ mod tests {
         Arc::new(left.into())
     }
 
-    fn make_file_fd() -> Arc<File> {
+    fn make_file_fd() -> Arc<Held> {
         let (left, _right) = UnixStream::pair().expect("failed to create unix socket pair");
         // SAFETY: `left` is a valid owned fd and is transferred into `File`.
         let file = unsafe { File::from_raw_fd(left.into_raw_fd()) };
-        Arc::new(file)
+        static HOLD: OnceLock<Arc<Hold>> = OnceLock::new();
+        let hold = HOLD.get_or_init(|| {
+            Hold::acquire(
+                &std::env::temp_dir()
+                    .join(format!("commonware_request_test_{}", std::process::id())),
+            )
+            .unwrap()
+        });
+        Held::new(Arc::new(file), hold.clone())
     }
 
     fn make_read_request(cache: Cache) -> ReadAtRequest {
@@ -827,7 +1096,6 @@ mod tests {
             buf: IoBufMut::with_capacity(5),
             cache,
             result: None,
-            sender: oneshot::channel().0,
         }
     }
 
@@ -840,7 +1108,6 @@ mod tests {
             state: WriteAtState::Writing,
             cache,
             result: None,
-            sender: oneshot::channel().0,
         }
     }
 
@@ -921,6 +1188,114 @@ mod tests {
     }
 
     #[test]
+    fn test_connect_and_poll_completion_rules() {
+        let active = WaiterState::Active { target_tick: None };
+        for result in [-libc::EALREADY, -libc::EAGAIN, -libc::EINTR] {
+            let connect = ConnectRequest {
+                fd: make_socket_fd(),
+                address: Box::new(
+                    "127.0.0.1:1234"
+                        .parse::<std::net::SocketAddr>()
+                        .unwrap()
+                        .into(),
+                ),
+                deadline: None,
+                result: None,
+            };
+            let pointer = connect.address.as_raw();
+            connect.build_sqe();
+            let mut connect = std::hint::black_box(connect);
+            assert_eq!(connect.address.as_raw(), pointer);
+            assert!(!connect.on_cqe(active, result));
+            assert!(connect.on_cqe(WaiterState::CancelRequested, result));
+            assert!(matches!(connect.result, Some(Err(Error::Timeout))));
+        }
+        for result in [0, -libc::EISCONN] {
+            let mut connect = ConnectRequest {
+                fd: make_socket_fd(),
+                address: Box::new("[::1]:1234".parse::<std::net::SocketAddr>().unwrap().into()),
+                deadline: None,
+                result: None,
+            };
+            assert!(connect.on_cqe(WaiterState::CancelRequested, result));
+            assert!(matches!(connect.result, Some(Ok(()))));
+        }
+        for state in [active, WaiterState::CancelRequested] {
+            let mut poll = PollRequest {
+                fd: Arc::new(TcpListener::bind("127.0.0.1:0").unwrap()),
+                flags: libc::POLLIN as u32,
+                deadline: None,
+                result: None,
+            };
+            assert!(poll.on_cqe(state, -libc::ECANCELED));
+            match poll.result.unwrap().unwrap_err() {
+                Error::Io(error) if matches!(state, WaiterState::Active { .. }) => {
+                    assert_eq!(error.raw_os_error(), Some(libc::ECANCELED));
+                }
+                Error::Timeout if matches!(state, WaiterState::CancelRequested) => {}
+                error => panic!("unexpected cancellation result: {error:?}"),
+            }
+        }
+        let mut poll = PollRequest {
+            fd: Arc::new(TcpListener::bind("127.0.0.1:0").unwrap()),
+            flags: libc::POLLIN as u32,
+            deadline: None,
+            result: None,
+        };
+        assert!(!poll.on_cqe(active, -libc::EINTR));
+        assert!(poll.on_cqe(WaiterState::CancelRequested, libc::POLLIN as i32));
+        assert!(matches!(poll.result, Some(Ok(()))));
+    }
+
+    #[test]
+    fn test_partial_progress_isolates_reentrant_panicking_owners() {
+        struct Owner {
+            local: Arc<commonware_utils::sync::Mutex<usize>>,
+            bytes: [u8; 3],
+        }
+        impl AsRef<[u8]> for Owner {
+            fn as_ref(&self) -> &[u8] {
+                &self.bytes
+            }
+        }
+        impl Drop for Owner {
+            fn drop(&mut self) {
+                *self
+                    .local
+                    .try_lock()
+                    .expect("owner dropped under local borrow") += 1;
+                panic!("external owner panic");
+            }
+        }
+
+        let local = Arc::new(commonware_utils::sync::Mutex::new(0));
+        let mut bufs = IoBufs::from(IoBuf::from(Bytes::from_owner(Owner {
+            local: local.clone(),
+            bytes: *b"abc",
+        })));
+        bufs.append(IoBuf::from(Bytes::from_owner(Owner {
+            local: local.clone(),
+            bytes: *b"def",
+        })));
+        let mut request = Request::Send(SendRequest {
+            fd: make_socket_fd(),
+            write: bufs.into(),
+            deadline: None,
+            result: None,
+        });
+        let guard = local.lock();
+        assert!(!request.on_cqe(WaiterState::Active { target_tick: None }, 3));
+        let (output, retired) = request.timeout();
+        assert!(matches!(output, RequestOutput::Send(Err(Error::Timeout))));
+        assert_eq!(*guard, 0);
+        drop(guard);
+        let mut panics = Panics::default();
+        retired.retire(&mut panics);
+        assert!(panics.is_pending());
+        assert_eq!(*local.lock(), 2);
+    }
+
+    #[test]
     fn test_cqe_result_from_raw_retryable_codes() {
         for code in [-libc::EAGAIN, -libc::EWOULDBLOCK, -libc::EINTR] {
             assert!(matches!(
@@ -948,10 +1323,8 @@ mod tests {
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
             deadline: Some(send_deadline),
             result: None,
-            sender: oneshot::channel().0,
         });
         assert_eq!(send.deadline(), Some(send_deadline));
-        assert!(send.has_deadline());
 
         let recv_deadline = Instant::now();
         let recv = Request::Recv(RecvRequest {
@@ -962,10 +1335,8 @@ mod tests {
             exact: true,
             deadline: Some(recv_deadline),
             result: None,
-            sender: oneshot::channel().0,
         });
         assert_eq!(recv.deadline(), Some(recv_deadline));
-        assert!(recv.has_deadline());
 
         let read = Request::ReadAt(ReadAtRequest {
             file: make_file_fd(),
@@ -975,10 +1346,8 @@ mod tests {
             buf: IoBufMut::with_capacity(4),
             cache: Cache::Enabled,
             result: None,
-            sender: oneshot::channel().0,
         });
         assert_eq!(read.deadline(), None);
-        assert!(!read.has_deadline());
 
         // Invalid request shapes should still panic as soon as low-level SQE
         // construction would observe them.
@@ -991,7 +1360,6 @@ mod tests {
                 exact: true,
                 deadline: None,
                 result: None,
-                sender: oneshot::channel().0,
             });
             let _ = request.build_sqe(WaiterId::new(0, 0));
         });
@@ -1006,7 +1374,6 @@ mod tests {
                 exact: true,
                 deadline: None,
                 result: None,
-                sender: oneshot::channel().0,
             });
             let _ = request.build_sqe(WaiterId::new(0, 0));
         });
@@ -1021,7 +1388,6 @@ mod tests {
                 buf: IoBufMut::with_capacity(4),
                 cache: Cache::Enabled,
                 result: None,
-                sender: oneshot::channel().0,
             });
             let _ = request.build_sqe(WaiterId::new(0, 0));
         });
@@ -1036,7 +1402,6 @@ mod tests {
                 buf: IoBufMut::with_capacity(8),
                 cache: Cache::Enabled,
                 result: None,
-                sender: oneshot::channel().0,
             });
             let _ = request.build_sqe(WaiterId::new(0, 0));
         });
@@ -1048,130 +1413,130 @@ mod tests {
         // Verify send state handling across retry, timeout, success, and hard-failure CQEs.
 
         // Retryable CQEs should simply requeue while the request is still active.
-        let (tx, _rx) = oneshot::channel();
+
         let mut request = Request::Send(SendRequest {
             fd: make_socket_fd(),
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
             deadline: None,
             result: None,
-            sender: tx,
         });
         assert!(!request.on_cqe(WaiterState::Active { target_tick: None }, -libc::EAGAIN));
 
         // Partial progress followed by a retry after timeout should resolve to timeout.
-        let (tx, rx) = oneshot::channel();
+
         let mut request = Request::Send(SendRequest {
             fd: make_socket_fd(),
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
             deadline: None,
             result: None,
-            sender: tx,
         });
         assert!(!request.on_cqe(WaiterState::Active { target_tick: None }, 2));
         assert!(request.on_cqe(WaiterState::CancelRequested, -libc::EAGAIN));
-        request.complete();
-        assert!(matches!(
-            block_on(rx).expect("missing send result"),
-            Err(Error::Timeout)
-        ));
+        let (output, retired) = request.complete();
+        let RequestOutput::Send(result) = output else {
+            panic!("unexpected request output");
+        };
+        drop(retired);
+        assert!(matches!(result, Err(Error::Timeout)));
 
         // Partial progress after timeout must also resolve to timeout rather than requeueing.
-        let (tx, rx) = oneshot::channel();
+
         let mut request = Request::Send(SendRequest {
             fd: make_socket_fd(),
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
             deadline: None,
             result: None,
-            sender: tx,
         });
         assert!(!request.on_cqe(WaiterState::Active { target_tick: None }, 2));
         assert!(request.on_cqe(WaiterState::CancelRequested, 1));
-        request.complete();
-        assert!(matches!(
-            block_on(rx).expect("missing partial-timeout result"),
-            Err(Error::Timeout)
-        ));
+        let (output, retired) = request.complete();
+        let RequestOutput::Send(result) = output else {
+            panic!("unexpected request output");
+        };
+        drop(retired);
+        assert!(matches!(result, Err(Error::Timeout)));
 
         // A canceled send that comes back as ECANCELED should also resolve to timeout.
-        let (tx, rx) = oneshot::channel();
+
         let mut request = Request::Send(SendRequest {
             fd: make_socket_fd(),
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
             deadline: None,
             result: None,
-            sender: tx,
         });
         assert!(request.on_cqe(WaiterState::CancelRequested, -libc::ECANCELED));
-        request.complete();
-        assert!(matches!(
-            block_on(rx).expect("missing timeout-cancel result"),
-            Err(Error::Timeout)
-        ));
+        let (output, retired) = request.complete();
+        let RequestOutput::Send(result) = output else {
+            panic!("unexpected request output");
+        };
+        drop(retired);
+        assert!(matches!(result, Err(Error::Timeout)));
 
         // Vectored writes should advance across multiple CQEs and complete once all bytes are sent.
         let mut vectored = IoBufs::default();
         vectored.append(IoBuf::from(b"abc"));
         vectored.append(IoBuf::from(b"de"));
-        let (tx, rx) = oneshot::channel();
+
         let mut request = Request::Send(SendRequest {
             fd: make_socket_fd(),
             write: vectored.into(),
             deadline: None,
             result: None,
-            sender: tx,
         });
         assert!(!request.on_cqe(WaiterState::Active { target_tick: None }, 3));
         assert!(request.on_cqe(WaiterState::Active { target_tick: None }, 2));
-        request.complete();
-        block_on(rx)
-            .expect("missing send completion")
-            .expect("send should complete successfully");
+        let (output, retired) = request.complete();
+        let RequestOutput::Send(result) = output else {
+            panic!("unexpected request output");
+        };
+        drop(retired);
+        result.expect("send should complete successfully");
 
         // Zero-byte and hard-error CQEs should both surface as send failures.
-        let (tx, rx) = oneshot::channel();
+
         let mut request = Request::Send(SendRequest {
             fd: make_socket_fd(),
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
             deadline: None,
             result: None,
-            sender: tx,
         });
         assert!(request.on_cqe(WaiterState::Active { target_tick: None }, 0));
-        request.complete();
-        assert!(matches!(
-            block_on(rx).expect("missing zero-result completion"),
-            Err(Error::SendFailed)
-        ));
+        let (output, retired) = request.complete();
+        let RequestOutput::Send(result) = output else {
+            panic!("unexpected request output");
+        };
+        drop(retired);
+        assert!(matches!(result, Err(Error::SendFailed)));
 
-        let (tx, rx) = oneshot::channel();
         let mut request = Request::Send(SendRequest {
             fd: make_socket_fd(),
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
             deadline: None,
             result: None,
-            sender: tx,
         });
         assert!(request.on_cqe(WaiterState::Active { target_tick: None }, -libc::EIO));
-        request.complete();
-        assert!(matches!(
-            block_on(rx).expect("missing hard-error completion"),
-            Err(Error::SendFailed)
-        ));
+        let (output, retired) = request.complete();
+        let RequestOutput::Send(result) = output else {
+            panic!("unexpected request output");
+        };
+        drop(retired);
+        assert!(matches!(result, Err(Error::SendFailed)));
 
         // A fully successful CQE still wins even if timeout was already requested.
-        let (tx, rx) = oneshot::channel();
+
         let mut request = Request::Send(SendRequest {
             fd: make_socket_fd(),
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
             deadline: None,
             result: None,
-            sender: tx,
         });
         assert!(request.on_cqe(WaiterState::CancelRequested, 5));
-        request.complete();
-        block_on(rx)
-            .expect("missing send completion")
-            .expect("send should complete successfully");
+        let (output, retired) = request.complete();
+        let RequestOutput::Send(result) = output else {
+            panic!("unexpected request output");
+        };
+        drop(retired);
+        result.expect("send should complete successfully");
     }
 
     #[test]
@@ -1179,7 +1544,7 @@ mod tests {
         // Verify recv state handling across buffered progress, timeout, success, and hard failure.
 
         // Retryable CQEs should requeue while the recv is still active.
-        let (tx, _rx) = oneshot::channel();
+
         let mut request = Request::Recv(RecvRequest {
             fd: make_socket_fd(),
             buf: IoBufMut::with_capacity(5),
@@ -1188,12 +1553,11 @@ mod tests {
             exact: true,
             deadline: None,
             result: None,
-            sender: tx,
         });
         assert!(!request.on_cqe(WaiterState::Active { target_tick: None }, -libc::EAGAIN));
 
         // Non-exact recv should complete as soon as any positive byte count arrives.
-        let (tx, rx) = oneshot::channel();
+
         let mut request = Request::Recv(RecvRequest {
             fd: make_socket_fd(),
             buf: IoBufMut::with_capacity(5),
@@ -1202,18 +1566,19 @@ mod tests {
             exact: false,
             deadline: None,
             result: None,
-            sender: tx,
         });
         assert!(request.on_cqe(WaiterState::Active { target_tick: None }, 3));
-        request.complete();
-        let (_buf, read) = block_on(rx)
-            .expect("missing recv completion")
-            .expect("recv should complete successfully");
+        let (output, retired) = request.complete();
+        let RequestOutput::Recv(result) = output else {
+            panic!("unexpected request output");
+        };
+        drop(retired);
+        let (_buf, read) = result.expect("recv should complete successfully");
         assert_eq!(read, 3);
 
         // Exact recv should requeue after partial progress, but timeout wins if the follow-up CQE
         // arrives after cancellation was requested.
-        let (tx, rx) = oneshot::channel();
+
         let mut request = Request::Recv(RecvRequest {
             fd: make_socket_fd(),
             buf: IoBufMut::with_capacity(5),
@@ -1222,18 +1587,18 @@ mod tests {
             exact: true,
             deadline: None,
             result: None,
-            sender: tx,
         });
         assert!(!request.on_cqe(WaiterState::Active { target_tick: None }, 3));
         assert!(request.on_cqe(WaiterState::CancelRequested, 1));
-        request.complete();
-        assert!(matches!(
-            block_on(rx).expect("missing timeout completion"),
-            Err((_, Error::Timeout))
-        ));
+        let (output, retired) = request.complete();
+        let RequestOutput::Recv(result) = output else {
+            panic!("unexpected request output");
+        };
+        drop(retired);
+        assert!(matches!(result, Err((_, Error::Timeout))));
 
         // Retryable and ECANCELED completions after timeout should both resolve to timeout.
-        let (tx, rx) = oneshot::channel();
+
         let mut request = Request::Recv(RecvRequest {
             fd: make_socket_fd(),
             buf: IoBufMut::with_capacity(5),
@@ -1242,16 +1607,15 @@ mod tests {
             exact: true,
             deadline: None,
             result: None,
-            sender: tx,
         });
         assert!(request.on_cqe(WaiterState::CancelRequested, -libc::EINTR));
-        request.complete();
-        assert!(matches!(
-            block_on(rx).expect("missing retryable completion"),
-            Err((_, Error::Timeout))
-        ));
+        let (output, retired) = request.complete();
+        let RequestOutput::Recv(result) = output else {
+            panic!("unexpected request output");
+        };
+        drop(retired);
+        assert!(matches!(result, Err((_, Error::Timeout))));
 
-        let (tx, rx) = oneshot::channel();
         let mut request = Request::Recv(RecvRequest {
             fd: make_socket_fd(),
             buf: IoBufMut::with_capacity(5),
@@ -1260,17 +1624,17 @@ mod tests {
             exact: true,
             deadline: None,
             result: None,
-            sender: tx,
         });
         assert!(request.on_cqe(WaiterState::CancelRequested, -libc::ECANCELED));
-        request.complete();
-        assert!(matches!(
-            block_on(rx).expect("missing timeout-cancel completion"),
-            Err((_, Error::Timeout))
-        ));
+        let (output, retired) = request.complete();
+        let RequestOutput::Recv(result) = output else {
+            panic!("unexpected request output");
+        };
+        drop(retired);
+        assert!(matches!(result, Err((_, Error::Timeout))));
 
         // A fully successful CQE still wins after timeout was requested.
-        let (tx, rx) = oneshot::channel();
+
         let mut request = Request::Recv(RecvRequest {
             fd: make_socket_fd(),
             buf: IoBufMut::with_capacity(5),
@@ -1279,18 +1643,19 @@ mod tests {
             exact: true,
             deadline: None,
             result: None,
-            sender: tx,
         });
         assert!(request.on_cqe(WaiterState::CancelRequested, 5));
-        request.complete();
-        let (_buf, read) = block_on(rx)
-            .expect("missing successful completion")
-            .expect("recv should complete successfully");
+        let (output, retired) = request.complete();
+        let RequestOutput::Recv(result) = output else {
+            panic!("unexpected request output");
+        };
+        drop(retired);
+        let (_buf, read) = result.expect("recv should complete successfully");
         assert_eq!(read, 5);
 
         // A kernel completion larger than the requested remaining length must
         // trip the local invariant before it can corrupt buffer state.
-        let (tx, _rx) = oneshot::channel();
+
         let mut request = Request::Recv(RecvRequest {
             fd: make_socket_fd(),
             buf: IoBufMut::with_capacity(5),
@@ -1299,7 +1664,6 @@ mod tests {
             exact: true,
             deadline: None,
             result: None,
-            sender: tx,
         });
         let overflow = catch_unwind(AssertUnwindSafe(|| {
             let _ = request.on_cqe(WaiterState::Active { target_tick: None }, 6);
@@ -1307,7 +1671,7 @@ mod tests {
         assert!(overflow.is_err());
 
         // Zero-byte and hard-error CQEs should both surface as recv failures.
-        let (tx, rx) = oneshot::channel();
+
         let mut request = Request::Recv(RecvRequest {
             fd: make_socket_fd(),
             buf: IoBufMut::with_capacity(5),
@@ -1316,16 +1680,15 @@ mod tests {
             exact: true,
             deadline: None,
             result: None,
-            sender: tx,
         });
         assert!(request.on_cqe(WaiterState::Active { target_tick: None }, 0));
-        request.complete();
-        assert!(matches!(
-            block_on(rx).expect("missing zero completion"),
-            Err((_, Error::RecvFailed))
-        ));
+        let (output, retired) = request.complete();
+        let RequestOutput::Recv(result) = output else {
+            panic!("unexpected request output");
+        };
+        drop(retired);
+        assert!(matches!(result, Err((_, Error::RecvFailed))));
 
-        let (tx, rx) = oneshot::channel();
         let mut request = Request::Recv(RecvRequest {
             fd: make_socket_fd(),
             buf: IoBufMut::with_capacity(5),
@@ -1334,14 +1697,14 @@ mod tests {
             exact: true,
             deadline: None,
             result: None,
-            sender: tx,
         });
         assert!(request.on_cqe(WaiterState::Active { target_tick: None }, -libc::EIO));
-        request.complete();
-        assert!(matches!(
-            block_on(rx).expect("missing error completion"),
-            Err((_, Error::RecvFailed))
-        ));
+        let (output, retired) = request.complete();
+        let RequestOutput::Recv(result) = output else {
+            panic!("unexpected request output");
+        };
+        drop(retired);
+        assert!(matches!(result, Err((_, Error::RecvFailed))));
     }
 
     #[test]
@@ -1349,7 +1712,7 @@ mod tests {
         // Verify read-at state handling across retry, EOF, timeout-cancel, and hard failure.
 
         // Retryable CQEs should requeue the positioned read.
-        let (tx, _rx) = oneshot::channel();
+
         let mut request = Request::ReadAt(ReadAtRequest {
             file: make_file_fd(),
             offset: 0,
@@ -1358,12 +1721,11 @@ mod tests {
             buf: IoBufMut::with_capacity(5),
             cache: Cache::Enabled,
             result: None,
-            sender: tx,
         });
         assert!(!request.on_cqe(WaiterState::Active { target_tick: None }, -libc::EAGAIN));
 
         // Partial reads should requeue until the full logical length is satisfied.
-        let (tx, rx) = oneshot::channel();
+
         let mut request = Request::ReadAt(ReadAtRequest {
             file: make_file_fd(),
             offset: 0,
@@ -1372,17 +1734,18 @@ mod tests {
             buf: IoBufMut::with_capacity(5),
             cache: Cache::Enabled,
             result: None,
-            sender: tx,
         });
         assert!(!request.on_cqe(WaiterState::Active { target_tick: None }, 2));
         assert!(request.on_cqe(WaiterState::Active { target_tick: None }, 3));
-        request.complete();
-        block_on(rx)
-            .expect("missing read completion")
-            .expect("read should complete successfully");
+        let (output, retired) = request.complete();
+        let RequestOutput::ReadAt(result) = output else {
+            panic!("unexpected request output");
+        };
+        drop(retired);
+        result.expect("read should complete successfully");
 
         // EOF and hard-error CQEs should map to the storage read error surface.
-        let (tx, rx) = oneshot::channel();
+
         let mut request = Request::ReadAt(ReadAtRequest {
             file: make_file_fd(),
             offset: 0,
@@ -1391,16 +1754,15 @@ mod tests {
             buf: IoBufMut::with_capacity(5),
             cache: Cache::Enabled,
             result: None,
-            sender: tx,
         });
         assert!(request.on_cqe(WaiterState::Active { target_tick: None }, 0));
-        request.complete();
-        assert!(matches!(
-            block_on(rx).expect("missing eof completion"),
-            Err((_, Error::BlobInsufficientLength))
-        ));
+        let (output, retired) = request.complete();
+        let RequestOutput::ReadAt(result) = output else {
+            panic!("unexpected request output");
+        };
+        drop(retired);
+        assert!(matches!(result, Err((_, Error::BlobInsufficientLength))));
 
-        let (tx, rx) = oneshot::channel();
         let mut request = Request::ReadAt(ReadAtRequest {
             file: make_file_fd(),
             offset: 0,
@@ -1409,17 +1771,17 @@ mod tests {
             buf: IoBufMut::with_capacity(5),
             cache: Cache::Enabled,
             result: None,
-            sender: tx,
         });
         assert!(request.on_cqe(WaiterState::Active { target_tick: None }, -libc::EIO));
-        request.complete();
-        assert!(matches!(
-            block_on(rx).expect("missing read failure"),
-            Err((_, Error::ReadFailed))
-        ));
+        let (output, retired) = request.complete();
+        let RequestOutput::ReadAt(result) = output else {
+            panic!("unexpected request output");
+        };
+        drop(retired);
+        assert!(matches!(result, Err((_, Error::ReadFailed))));
 
         // Timeout cancellation should also surface as a read failure.
-        let (tx, rx) = oneshot::channel();
+
         let mut request = Request::ReadAt(ReadAtRequest {
             file: make_file_fd(),
             offset: 0,
@@ -1428,14 +1790,14 @@ mod tests {
             buf: IoBufMut::with_capacity(5),
             cache: Cache::Enabled,
             result: None,
-            sender: tx,
         });
         assert!(request.on_cqe(WaiterState::CancelRequested, -libc::ECANCELED));
-        request.complete();
-        assert!(matches!(
-            block_on(rx).expect("missing timeout-cancel failure"),
-            Err((_, Error::ReadFailed))
-        ));
+        let (output, retired) = request.complete();
+        let RequestOutput::ReadAt(result) = output else {
+            panic!("unexpected request output");
+        };
+        drop(retired);
+        assert!(matches!(result, Err((_, Error::ReadFailed))));
     }
 
     #[test]
@@ -1495,7 +1857,7 @@ mod tests {
         // Verify write-at state handling across retry, partial progress, timeout-cancel, and failure.
 
         // Retryable CQEs should requeue the positioned write.
-        let (tx, _rx) = oneshot::channel();
+
         let mut write = WriteAtRequest {
             file: make_file_fd(),
             offset: 0,
@@ -1504,14 +1866,13 @@ mod tests {
             state: WriteAtState::Writing,
             cache: Cache::Enabled,
             result: None,
-            sender: tx,
         };
         assert_eq!(write.rw_flags(), 0);
         let mut request = Request::WriteAt(write);
         assert!(!request.on_cqe(WaiterState::Active { target_tick: None }, -libc::EAGAIN));
 
         // Single-buffer writes should track partial progress until complete.
-        let (tx, rx) = oneshot::channel();
+
         let mut request = Request::WriteAt(WriteAtRequest {
             file: make_file_fd(),
             offset: 0,
@@ -1520,20 +1881,21 @@ mod tests {
             state: WriteAtState::Writing,
             cache: Cache::Enabled,
             result: None,
-            sender: tx,
         });
         assert!(!request.on_cqe(WaiterState::Active { target_tick: None }, 2));
         assert!(request.on_cqe(WaiterState::Active { target_tick: None }, 3));
-        request.complete();
-        block_on(rx)
-            .expect("missing write completion")
-            .expect("write should complete successfully");
+        let (output, retired) = request.complete();
+        let RequestOutput::WriteAt(result) = output else {
+            panic!("unexpected request output");
+        };
+        drop(retired);
+        result.expect("write should complete successfully");
 
         // Vectored writes should advance across buffer boundaries and then complete.
         let mut vectored = IoBufs::default();
         vectored.append(IoBuf::from(b"abc"));
         vectored.append(IoBuf::from(b"de"));
-        let (tx, rx) = oneshot::channel();
+
         let mut request = Request::WriteAt(WriteAtRequest {
             file: make_file_fd(),
             offset: 0,
@@ -1542,17 +1904,18 @@ mod tests {
             state: WriteAtState::Writing,
             cache: Cache::Enabled,
             result: None,
-            sender: tx,
         });
         assert!(!request.on_cqe(WaiterState::Active { target_tick: None }, 4));
         assert!(request.on_cqe(WaiterState::Active { target_tick: None }, 1));
-        request.complete();
-        block_on(rx)
-            .expect("missing vectored write completion")
-            .expect("vectored write should complete successfully");
+        let (output, retired) = request.complete();
+        let RequestOutput::WriteAt(result) = output else {
+            panic!("unexpected request output");
+        };
+        drop(retired);
+        result.expect("vectored write should complete successfully");
 
         // Zero-byte and hard-error CQEs should surface as write failures.
-        let (tx, rx) = oneshot::channel();
+
         let mut request = Request::WriteAt(WriteAtRequest {
             file: make_file_fd(),
             offset: 0,
@@ -1561,16 +1924,15 @@ mod tests {
             state: WriteAtState::Writing,
             cache: Cache::Enabled,
             result: None,
-            sender: tx,
         });
         assert!(request.on_cqe(WaiterState::Active { target_tick: None }, 0));
-        request.complete();
-        assert!(matches!(
-            block_on(rx).expect("missing zero-result write"),
-            Err(Error::WriteFailed)
-        ));
+        let (output, retired) = request.complete();
+        let RequestOutput::WriteAt(result) = output else {
+            panic!("unexpected request output");
+        };
+        drop(retired);
+        assert!(matches!(result, Err(Error::WriteFailed)));
 
-        let (tx, rx) = oneshot::channel();
         let mut request = Request::WriteAt(WriteAtRequest {
             file: make_file_fd(),
             offset: 0,
@@ -1579,18 +1941,18 @@ mod tests {
             state: WriteAtState::Writing,
             cache: Cache::Enabled,
             result: None,
-            sender: tx,
         });
         assert!(request.on_cqe(WaiterState::Active { target_tick: None }, -libc::EIO));
-        request.complete();
-        assert!(matches!(
-            block_on(rx).expect("missing write failure"),
-            Err(Error::WriteFailed)
-        ));
+        let (output, retired) = request.complete();
+        let RequestOutput::WriteAt(result) = output else {
+            panic!("unexpected request output");
+        };
+        drop(retired);
+        assert!(matches!(result, Err(Error::WriteFailed)));
 
         // Single-submission synchronous writes use the same logical error
         // surface as regular writes and add `RWF_DSYNC` to the SQE flags.
-        let (tx, rx) = oneshot::channel();
+
         let mut write = WriteAtRequest {
             file: make_file_fd(),
             offset: 0,
@@ -1599,19 +1961,19 @@ mod tests {
             state: WriteAtState::WritingSync,
             cache: Cache::Enabled,
             result: None,
-            sender: tx,
         };
         assert_eq!(write.rw_flags(), libc::RWF_DSYNC);
         let mut request = Request::WriteAt(write);
         assert!(request.on_cqe(WaiterState::Active { target_tick: None }, -libc::EINVAL));
-        request.complete();
-        assert!(matches!(
-            block_on(rx).expect("missing sync write failure"),
-            Err(Error::WriteFailed)
-        ));
+        let (output, retired) = request.complete();
+        let RequestOutput::WriteAt(result) = output else {
+            panic!("unexpected request output");
+        };
+        drop(retired);
+        assert!(matches!(result, Err(Error::WriteFailed)));
 
         // Timeout cancellation should also surface as a write failure.
-        let (tx, rx) = oneshot::channel();
+
         let mut request = Request::WriteAt(WriteAtRequest {
             file: make_file_fd(),
             offset: 0,
@@ -1620,20 +1982,20 @@ mod tests {
             state: WriteAtState::Writing,
             cache: Cache::Enabled,
             result: None,
-            sender: tx,
         });
         assert!(request.on_cqe(WaiterState::CancelRequested, -libc::ECANCELED));
-        request.complete();
-        assert!(matches!(
-            block_on(rx).expect("missing timeout-cancel write failure"),
-            Err(Error::WriteFailed)
-        ));
+        let (output, retired) = request.complete();
+        let RequestOutput::WriteAt(result) = output else {
+            panic!("unexpected request output");
+        };
+        drop(retired);
+        assert!(matches!(result, Err(Error::WriteFailed)));
     }
 
     #[test]
     fn test_uncached_sync_write_retries_without_hint_when_unsupported() {
         let dont_cache_supported = Arc::new(AtomicBool::new(true));
-        let (tx, _rx) = oneshot::channel();
+
         let mut request = WriteAtRequest {
             file: make_file_fd(),
             offset: 0,
@@ -1642,7 +2004,6 @@ mod tests {
             state: WriteAtState::WritingSync,
             cache: Cache::Disabled(dont_cache_supported.clone()),
             result: None,
-            sender: tx,
         };
 
         assert_eq!(request.rw_flags(), libc::RWF_DSYNC | libc::RWF_DONTCACHE);
@@ -1658,107 +2019,108 @@ mod tests {
         // Verify sync state handling across retry, timeout-cancel, error conversion, and success.
 
         // Retryable CQEs should requeue the fsync request.
-        let (tx, _rx) = oneshot::channel();
+
         let mut request = Request::Sync(SyncRequest {
             file: make_file_fd(),
             result: None,
-            sender: tx,
         });
         assert!(!request.on_cqe(WaiterState::Active { target_tick: None }, -libc::EINTR));
 
         // Timeout cancellation should preserve the kernel ECANCELED surface for sync callers.
-        let (tx, rx) = oneshot::channel();
+
         let mut request = Request::Sync(SyncRequest {
             file: make_file_fd(),
             result: None,
-            sender: tx,
         });
         assert!(request.on_cqe(WaiterState::CancelRequested, -libc::ECANCELED));
-        request.complete();
-        let err = block_on(rx)
-            .expect("missing timeout cancel result")
-            .expect_err("expected timeout cancel error");
+        let (output, retired) = request.complete();
+        let RequestOutput::Sync(result) = output else {
+            panic!("unexpected request output");
+        };
+        drop(retired);
+        let err = result.expect_err("expected timeout cancel error");
         match err {
             Error::Io(err) => assert_eq!(err.raw_os_error(), Some(libc::ECANCELED)),
             other => panic!("expected io error, got {other:?}"),
         }
 
         // Hard errors should round-trip as std::io::Error values.
-        let (tx, rx) = oneshot::channel();
+
         let mut request = Request::Sync(SyncRequest {
             file: make_file_fd(),
             result: None,
-            sender: tx,
         });
         assert!(request.on_cqe(WaiterState::Active { target_tick: None }, -libc::EIO));
-        request.complete();
-        let err = block_on(rx)
-            .expect("missing hard error result")
-            .expect_err("expected hard error");
+        let (output, retired) = request.complete();
+        let RequestOutput::Sync(result) = output else {
+            panic!("unexpected request output");
+        };
+        drop(retired);
+        let err = result.expect_err("expected hard error");
         match err {
             Error::Io(err) => assert_eq!(err.raw_os_error(), Some(libc::EIO)),
             other => panic!("expected io error, got {other:?}"),
         }
 
         // Both zero and positive CQE results should count as sync success.
-        let (tx, rx) = oneshot::channel();
+
         let mut request = Request::Sync(SyncRequest {
             file: make_file_fd(),
             result: None,
-            sender: tx,
         });
         assert!(request.on_cqe(WaiterState::Active { target_tick: None }, 0));
-        request.complete();
-        block_on(rx)
-            .expect("missing zero-result completion")
-            .expect("sync should succeed on zero");
+        let (output, retired) = request.complete();
+        let RequestOutput::Sync(result) = output else {
+            panic!("unexpected request output");
+        };
+        drop(retired);
+        result.expect("sync should succeed on zero");
 
-        let (tx, rx) = oneshot::channel();
         let mut request = Request::Sync(SyncRequest {
             file: make_file_fd(),
             result: None,
-            sender: tx,
         });
         assert!(request.on_cqe(WaiterState::Active { target_tick: None }, 1));
-        request.complete();
-        block_on(rx)
-            .expect("missing positive-result completion")
-            .expect("sync should succeed on positive");
+        let (output, retired) = request.complete();
+        let RequestOutput::Sync(result) = output else {
+            panic!("unexpected request output");
+        };
+        drop(retired);
+        result.expect("sync should succeed on positive");
 
-        let (tx, rx) = oneshot::channel();
         let request = Request::Sync(SyncRequest {
             file: make_file_fd(),
             result: None,
-            sender: tx,
         });
-        request.timeout();
-        let err = block_on(rx)
-            .expect("missing timeout result")
-            .expect_err("expected timeout error");
+        let (output, retired) = request.timeout();
+        let RequestOutput::Sync(result) = output else {
+            panic!("unexpected request output");
+        };
+        drop(retired);
+        let err = result.expect_err("expected timeout error");
         assert!(matches!(err, Error::Timeout));
     }
 
     #[test]
     fn test_finish_without_cqe_uses_fallback_results() {
-        // Verify shutdown-abandonment fallback results are delivered even if no CQE was processed.
+        // Verify unstarted requests preserve their kind-specific failure results.
         // Network and storage requests each have their own fallback error surface.
 
         // Network sends and recvs should preserve their wrapper-specific fallback errors.
-        let (tx, rx) = oneshot::channel();
+
         let request = Request::Send(SendRequest {
             fd: make_socket_fd(),
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
             deadline: None,
             result: None,
-            sender: tx,
         });
-        request.complete();
-        assert!(matches!(
-            block_on(rx).expect("missing send fallback"),
-            Err(Error::SendFailed)
-        ));
+        let (output, retired) = request.complete();
+        let RequestOutput::Send(result) = output else {
+            panic!("unexpected request output");
+        };
+        drop(retired);
+        assert!(matches!(result, Err(Error::SendFailed)));
 
-        let (tx, rx) = oneshot::channel();
         let request = Request::Recv(RecvRequest {
             fd: make_socket_fd(),
             buf: IoBufMut::with_capacity(5),
@@ -1767,16 +2129,16 @@ mod tests {
             exact: true,
             deadline: None,
             result: None,
-            sender: tx,
         });
-        request.complete();
-        assert!(matches!(
-            block_on(rx).expect("missing recv fallback"),
-            Err((_, Error::RecvFailed))
-        ));
+        let (output, retired) = request.complete();
+        let RequestOutput::Recv(result) = output else {
+            panic!("unexpected request output");
+        };
+        drop(retired);
+        assert!(matches!(result, Err((_, Error::RecvFailed))));
 
         // Storage reads and writes should surface the corresponding storage wrapper errors.
-        let (tx, rx) = oneshot::channel();
+
         let request = Request::ReadAt(ReadAtRequest {
             file: make_file_fd(),
             offset: 0,
@@ -1785,15 +2147,14 @@ mod tests {
             buf: IoBufMut::with_capacity(5),
             cache: Cache::Enabled,
             result: None,
-            sender: tx,
         });
-        request.complete();
-        assert!(matches!(
-            block_on(rx).expect("missing read fallback"),
-            Err((_, Error::ReadFailed))
-        ));
+        let (output, retired) = request.complete();
+        let RequestOutput::ReadAt(result) = output else {
+            panic!("unexpected request output");
+        };
+        drop(retired);
+        assert!(matches!(result, Err((_, Error::ReadFailed))));
 
-        let (tx, rx) = oneshot::channel();
         let request = Request::WriteAt(WriteAtRequest {
             file: make_file_fd(),
             offset: 0,
@@ -1802,26 +2163,26 @@ mod tests {
             state: WriteAtState::Writing,
             cache: Cache::Enabled,
             result: None,
-            sender: tx,
         });
-        request.complete();
-        assert!(matches!(
-            block_on(rx).expect("missing write fallback"),
-            Err(Error::WriteFailed)
-        ));
+        let (output, retired) = request.complete();
+        let RequestOutput::WriteAt(result) = output else {
+            panic!("unexpected request output");
+        };
+        drop(retired);
+        assert!(matches!(result, Err(Error::WriteFailed)));
 
-        // Sync fallback remains success because the wrapper treats "no CQE seen"
-        // as an already-finished local sync during shutdown abandonment.
-        let (tx, rx) = oneshot::channel();
+        // A sync that never executed must not falsely report durability.
+
         let request = Request::Sync(SyncRequest {
             file: make_file_fd(),
             result: None,
-            sender: tx,
         });
-        request.complete();
-        block_on(rx)
-            .expect("missing sync fallback")
-            .expect("sync fallback should be success");
+        let (output, retired) = request.complete();
+        let RequestOutput::Sync(result) = output else {
+            panic!("unexpected request output");
+        };
+        drop(retired);
+        assert!(matches!(result, Err(Error::Closed)));
     }
 
     #[test]
@@ -1831,21 +2192,20 @@ mod tests {
         // timeout surface when no CQE was processed yet.
 
         // Network operations should map directly to the shared logical timeout.
-        let (tx, rx) = oneshot::channel();
+
         let request = Request::Send(SendRequest {
             fd: make_socket_fd(),
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
             deadline: None,
             result: None,
-            sender: tx,
         });
-        request.timeout();
-        assert!(matches!(
-            block_on(rx).expect("missing send timeout"),
-            Err(Error::Timeout)
-        ));
+        let (output, retired) = request.timeout();
+        let RequestOutput::Send(result) = output else {
+            panic!("unexpected request output");
+        };
+        drop(retired);
+        assert!(matches!(result, Err(Error::Timeout)));
 
-        let (tx, rx) = oneshot::channel();
         let request = Request::Recv(RecvRequest {
             fd: make_socket_fd(),
             buf: IoBufMut::with_capacity(5),
@@ -1854,16 +2214,16 @@ mod tests {
             exact: true,
             deadline: None,
             result: None,
-            sender: tx,
         });
-        request.timeout();
-        assert!(matches!(
-            block_on(rx).expect("missing recv timeout"),
-            Err((_, Error::Timeout))
-        ));
+        let (output, retired) = request.timeout();
+        let RequestOutput::Recv(result) = output else {
+            panic!("unexpected request output");
+        };
+        drop(retired);
+        assert!(matches!(result, Err((_, Error::Timeout))));
 
         // Storage reads and writes also use the common logical timeout surface.
-        let (tx, rx) = oneshot::channel();
+
         let request = Request::ReadAt(ReadAtRequest {
             file: make_file_fd(),
             offset: 0,
@@ -1872,15 +2232,14 @@ mod tests {
             buf: IoBufMut::with_capacity(5),
             cache: Cache::Enabled,
             result: None,
-            sender: tx,
         });
-        request.timeout();
-        assert!(matches!(
-            block_on(rx).expect("missing read timeout"),
-            Err((_, Error::Timeout))
-        ));
+        let (output, retired) = request.timeout();
+        let RequestOutput::ReadAt(result) = output else {
+            panic!("unexpected request output");
+        };
+        drop(retired);
+        assert!(matches!(result, Err((_, Error::Timeout))));
 
-        let (tx, rx) = oneshot::channel();
         let request = Request::WriteAt(WriteAtRequest {
             file: make_file_fd(),
             offset: 0,
@@ -1889,24 +2248,24 @@ mod tests {
             state: WriteAtState::Writing,
             cache: Cache::Enabled,
             result: None,
-            sender: tx,
         });
-        request.timeout();
-        assert!(matches!(
-            block_on(rx).expect("missing write timeout"),
-            Err(Error::Timeout)
-        ));
+        let (output, retired) = request.timeout();
+        let RequestOutput::WriteAt(result) = output else {
+            panic!("unexpected request output");
+        };
+        drop(retired);
+        assert!(matches!(result, Err(Error::Timeout)));
 
-        let (tx, rx) = oneshot::channel();
         let request = Request::Sync(SyncRequest {
             file: make_file_fd(),
             result: None,
-            sender: tx,
         });
-        request.timeout();
-        let err = block_on(rx)
-            .expect("missing sync timeout")
-            .expect_err("sync timeout should be an error");
+        let (output, retired) = request.timeout();
+        let RequestOutput::Sync(result) = output else {
+            panic!("unexpected request output");
+        };
+        drop(retired);
+        let err = result.expect_err("sync timeout should be an error");
         assert!(matches!(err, Error::Timeout));
     }
 }

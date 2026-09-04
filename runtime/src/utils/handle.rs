@@ -154,6 +154,62 @@ where
         )
     }
 
+    /// Wrap a native worker task without erasing its concrete future type.
+    ///
+    /// The cleanup guard exists before registration and therefore also runs
+    /// when a task is rejected or dropped before its first poll. Supervision
+    /// closes before publishing a successful result, so retained contexts cannot
+    /// spawn descendants beneath a completed task.
+    #[cfg(all(feature = "iouring", target_os = "linux"))]
+    #[inline(always)]
+    pub(crate) fn init_local<F>(
+        future: F,
+        metric: MetricHandle,
+        panicker: Panicker,
+        tree: Arc<Tree>,
+        on_cleanup_failure: Arc<dyn Fn(Panic) + Send + Sync>,
+    ) -> (impl Future<Output = ()> + Send + 'static, Self)
+    where
+        F: Future<Output = T> + Send + 'static,
+    {
+        let (sender, receiver) = oneshot::channel();
+        let (abort_handle, abort_registration) = AbortHandle::new_pair();
+        let cleanup = LocalCleanup {
+            tree: Some(tree),
+            metric: Some(metric.clone()),
+            on_failure: on_cleanup_failure,
+        };
+        let task = async move {
+            let mut cleanup = cleanup;
+            let result = Abortable::new(
+                AssertUnwindSafe(LocalFuture { future }).catch_unwind(),
+                abort_registration,
+            )
+            .await;
+            cleanup.finish();
+            match result {
+                Ok(Ok(output)) => {
+                    let _ = sender.send(Ok(output));
+                }
+                Ok(Err(panic)) => {
+                    panicker.notify(panic);
+                    let _ = sender.send(Err(Error::Exited));
+                }
+                Err(Aborted) => {}
+            }
+        };
+        (
+            task,
+            Self {
+                state: HandleState::Task {
+                    receiver,
+                    abort_handle,
+                    metric,
+                },
+            },
+        )
+    }
+
     /// Returns a handle backed by a completion receiver.
     pub fn from_receiver(receiver: oneshot::Receiver<Result<T, Error>>) -> Self {
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
@@ -281,6 +337,67 @@ where
     }
 }
 
+/// Cleanup retained by a native task even before the task's first poll.
+#[cfg(all(feature = "iouring", target_os = "linux"))]
+struct LocalCleanup {
+    /// Consumed parent whose descendants stop when this task exits.
+    tree: Option<Arc<Tree>>,
+    /// Exactly-once task metric completion.
+    metric: Option<MetricHandle>,
+    /// Runner infrastructure failure path, independent of user panic policy.
+    on_failure: Arc<dyn Fn(Panic) + Send + Sync>,
+}
+
+/// Keep user context mutation inside the concrete native future wrapper.
+///
+/// Abortable registers its cancellation waker after polling the inner future.
+/// A user Future can safely replace its mutable Context, so it receives a fresh
+/// Context borrowing the same waker. This preserves the worker-owned abort
+/// waker and keeps supervision wakeups independent of arbitrary user callbacks.
+#[cfg(all(feature = "iouring", target_os = "linux"))]
+struct LocalFuture<F> {
+    /// Concrete future pinned with the enclosing task allocation.
+    future: F,
+}
+
+#[cfg(all(feature = "iouring", target_os = "linux"))]
+impl<F: Future> Future for LocalFuture<F> {
+    type Output = F::Output;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut isolated = Context::from_waker(cx.waker());
+        // SAFETY: LocalFuture owns this field and never moves it once pinned.
+        // The wrapper has no custom destructor or other field access, so the
+        // future is destroyed in place with its containing task. This exclusive
+        // projection lasts only for the current statically dispatched poll.
+        unsafe { self.map_unchecked_mut(|this| &mut this.future) }.poll(&mut isolated)
+    }
+}
+
+#[cfg(all(feature = "iouring", target_os = "linux"))]
+impl LocalCleanup {
+    /// Finish independent cleanup steps without letting one panic skip another.
+    fn finish(&mut self) {
+        if let Some(tree) = self.tree.take()
+            && let Err(panic) = std::panic::catch_unwind(AssertUnwindSafe(|| tree.abort()))
+        {
+            (self.on_failure)(panic);
+        }
+        if let Some(metric) = self.metric.take()
+            && let Err(panic) = std::panic::catch_unwind(AssertUnwindSafe(|| metric.finish()))
+        {
+            (self.on_failure)(panic);
+        }
+    }
+}
+
+#[cfg(all(feature = "iouring", target_os = "linux"))]
+impl Drop for LocalCleanup {
+    fn drop(&mut self) {
+        self.finish();
+    }
+}
+
 impl<T> Future for Handle<T>
 where
     T: Send + 'static,
@@ -338,6 +455,8 @@ pub type Panic = Box<dyn Any + Send + 'static>;
 pub(crate) struct Panicker {
     catch: bool,
     sender: Arc<Mutex<Option<oneshot::Sender<Panic>>>>,
+    /// Optional native runner retention for failures racing root completion.
+    fallback: Option<Arc<dyn Fn(Panic) + Send + Sync>>,
 }
 
 impl Panicker {
@@ -347,8 +466,20 @@ impl Panicker {
         let panicker = Self {
             catch,
             sender: Arc::new(Mutex::new(Some(sender))),
+            fallback: None,
         };
         let panicked = Panicked { receiver };
+        (panicker, panicked)
+    }
+
+    /// Create a notifier that retains payloads undeliverable to the root.
+    #[cfg(all(feature = "iouring", target_os = "linux"))]
+    pub(crate) fn new_with_fallback(
+        catch: bool,
+        fallback: Arc<dyn Fn(Panic) + Send + Sync>,
+    ) -> (Self, Panicked) {
+        let (mut panicker, panicked) = Self::new(catch);
+        panicker.fallback = Some(fallback);
         (panicker, panicked)
     }
 
@@ -370,13 +501,21 @@ impl Panicker {
         }
 
         // If we've already sent a panic, ignore the new one
-        let mut sender = self.sender.lock();
-        let Some(sender) = sender.take() else {
+        let sender = self.sender.lock().take();
+        let Some(sender) = sender else {
+            if let Some(fallback) = &self.fallback {
+                fallback(panic);
+            }
             return;
         };
 
-        // Send the panic
-        let _ = sender.send(panic);
+        // Channel publication can invoke an arbitrary root waker. The sender
+        // has already been detached from the notifier mutex.
+        if let Err(panic) = sender.send(panic)
+            && let Some(fallback) = &self.fallback
+        {
+            fallback(panic);
+        }
     }
 }
 
@@ -386,6 +525,23 @@ pub(crate) struct Panicked {
 }
 
 impl Panicked {
+    /// Poll a native root interrupt without unwinding through its user future.
+    #[cfg(all(feature = "iouring", target_os = "linux"))]
+    pub(crate) fn poll_panic(&mut self, cx: &mut Context<'_>) -> Poll<Option<Panic>> {
+        Pin::new(&mut self.receiver).poll(cx).map(Result::ok)
+    }
+
+    /// Close reception and take any panic that raced normal root completion.
+    ///
+    /// After closure, a concurrent sender receives its payload back and routes
+    /// it through the configured fallback. No successful send can be lost in
+    /// the boundary between accepting the root result and worker teardown.
+    #[cfg(all(feature = "iouring", target_os = "linux"))]
+    pub(crate) fn close(&mut self) -> Option<Panic> {
+        self.receiver.close();
+        self.receiver.try_recv().ok()
+    }
+
     /// Polls a task that should be interrupted by a panic.
     pub(crate) async fn interrupt<Fut>(self, task: Fut) -> Fut::Output
     where
@@ -443,6 +599,41 @@ mod tests {
     use futures::future;
 
     const METRIC_PREFIX: &str = "runtime_tasks_running{";
+
+    #[cfg(all(feature = "iouring", target_os = "linux"))]
+    #[test]
+    fn local_task_context_replacement_does_not_replace_abort_waker() {
+        struct PanicWake;
+        impl std::task::Wake for PanicWake {
+            fn wake(self: std::sync::Arc<Self>) {
+                panic!("user waker must not replace the task abort waker");
+            }
+        }
+        static BAD: std::sync::OnceLock<std::task::Waker> = std::sync::OnceLock::new();
+        let bad = BAD.get_or_init(|| std::task::Waker::from(std::sync::Arc::new(PanicWake)));
+        let future = futures::future::poll_fn(move |cx| {
+            *cx = std::task::Context::from_waker(bad);
+            std::task::Poll::<()>::Pending
+        });
+        let tree = crate::utils::supervision::Tree::root();
+        let (panicker, _) = crate::utils::Panicker::new(true);
+        let (task, handle) = Handle::init_local(
+            future,
+            crate::utils::MetricHandle::new(Default::default()),
+            panicker,
+            tree.clone(),
+            std::sync::Arc::new(|panic| std::panic::resume_unwind(panic)),
+        );
+        tree.register(handle.aborter().unwrap());
+        futures::pin_mut!(task);
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(std::future::Future::poll(task.as_mut(), &mut cx).is_pending());
+        let aborted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handle.abort()));
+        assert!(
+            aborted.is_ok(),
+            "task abort must retain the original worker waker"
+        );
+    }
 
     fn running_tasks_for_label(metrics: &str, label: &str) -> Option<u64> {
         let label_fragment = format!("name=\"{label}\"");
