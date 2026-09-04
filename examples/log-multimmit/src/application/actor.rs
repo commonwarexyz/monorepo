@@ -122,8 +122,8 @@ struct ProposalStart {
 /// Tracks a producer's blocks from build to consensus finality and to ordered delivery.
 ///
 /// Finality is the pool fact that places the block under a directly finalized leader. Ordering
-/// is the block's delivery in the total order, the point DAG-based protocols report as commit
-/// latency. A start is kept until the block is ordered or evicted.
+/// is the block's delivery in the total order. A start is kept until the block is ordered or
+/// evicted, including after its finality sample has been recorded.
 #[derive(Clone)]
 pub struct ProposalLatency {
     started: Arc<Mutex<VecDeque<ProposalStart>>>,
@@ -131,6 +131,7 @@ pub struct ProposalLatency {
     finality: Histogram,
     ordering: Histogram,
     dropped: Counter,
+    finality_evicted: Counter,
 }
 
 impl ProposalLatency {
@@ -153,6 +154,10 @@ impl ProposalLatency {
                 "proposal_latency_dropped_total",
                 "proposal latency samples evicted before ordered delivery",
             ),
+            finality_evicted: context.counter(
+                "proposal_finalization_latency_evicted",
+                "proposal starts evicted before their finalization latency was recorded",
+            ),
         }
     }
 
@@ -162,7 +167,10 @@ impl ProposalLatency {
             return;
         }
         while started.len() >= self.capacity {
-            started.pop_front();
+            let evicted = started.pop_front().expect("proposal capacity is nonzero");
+            if !evicted.finalized {
+                self.finality_evicted.inc();
+            }
             self.dropped.inc();
         }
         started.push_back(ProposalStart {
@@ -647,6 +655,39 @@ mod tests {
             let started = latency.started.lock();
             assert_eq!(started.len(), 2);
             assert_eq!(started.front().unwrap().block.height(), Height::new(2));
+            assert_eq!(latency.dropped.get(), 1);
+            assert_eq!(latency.finality_evicted.get(), 1);
+        });
+    }
+
+    #[test]
+    fn proposal_latency_distinguishes_finality_and_ordering_evictions() {
+        deterministic::Runner::default().start(|runtime| async move {
+            let latency = ProposalLatency::new(&runtime, NZUsize!(1));
+            let staged = Staged::default();
+            let reference = |height: u64| {
+                BlockRef::new(
+                    ChainId::new(0),
+                    Height::new(height),
+                    Sha256::hash(&[&height.to_be_bytes()]),
+                )
+            };
+            latency.start(reference(1), runtime.current());
+            latency.finalize(&[reference(1)], &staged);
+            latency.start(reference(2), runtime.current());
+            assert_eq!(latency.dropped.get(), 1);
+            assert_eq!(latency.finality_evicted.get(), 0);
+
+            latency.start(reference(3), runtime.current());
+            assert_eq!(latency.dropped.get(), 2);
+            assert_eq!(latency.finality_evicted.get(), 1);
+
+            latency.cancel(reference(3));
+            latency.start(reference(4), runtime.current());
+            latency.order(reference(4));
+            latency.start(reference(5), runtime.current());
+            assert_eq!(latency.dropped.get(), 2);
+            assert_eq!(latency.finality_evicted.get(), 1);
         });
     }
 
