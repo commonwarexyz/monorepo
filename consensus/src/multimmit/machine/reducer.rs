@@ -49,6 +49,10 @@ use std::{
 /// the vote a quarter of a view later once proposals ran deep.
 const SIGN_PASS_CHAINS_PER_CREDIT: usize = 4;
 
+/// Emitted-but-unacknowledged barriers allowed before ordinary batches stop entering the
+/// journal pipeline. The journal must flush by this limit to release the core's capacity.
+pub(crate) const MAX_INFLIGHT_BARRIERS: usize = 4;
+
 /// A serialized input to the local state machine.
 #[derive(Clone, Debug)]
 pub(super) enum Input<V: Variant, D: Digest> {
@@ -3581,12 +3585,9 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     /// these ceilings, including room for one indivisible event larger than the byte target.
     pub(crate) const MAX_BATCH_EVENTS: usize = 32;
     pub(crate) const MAX_BATCH_BYTES: usize = 1 << 20;
-    /// Emitted-but-unacknowledged barriers allowed before ordinary batches stop entering the
-    /// journal pipeline.
-    const MAX_INFLIGHT_BARRIERS: usize = 4;
     /// Total unacknowledged batches retained by the synchronous owner: the journal pipeline,
     /// one coalescing batch, and one urgent successor that must not merge behind it.
-    pub(crate) const MAX_STAGED_BARRIERS: usize = Self::MAX_INFLIGHT_BARRIERS + 2;
+    pub(crate) const MAX_STAGED_BARRIERS: usize = MAX_INFLIGHT_BARRIERS + 2;
 
     /// Stages one durable change: applies it immediately and queues it for group commit.
     ///
@@ -3733,7 +3734,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                 continue;
             }
             let forced = force_through.is_some_and(|through| index <= through);
-            if inflight >= Self::MAX_INFLIGHT_BARRIERS && !forced {
+            if inflight >= MAX_INFLIGHT_BARRIERS && !forced {
                 break;
             }
             let last = index + 1 == staged;
