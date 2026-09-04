@@ -533,7 +533,17 @@
 }
 
 .sim-copy {
-    min-height: 8em;
+    background: #f5f5f5;
+    border: 1px solid #ddd;
+    padding: 12px 16px;
+}
+
+.sim-copy > :first-child {
+    margin-top: 0;
+}
+
+.sim-copy > :last-child {
+    margin-bottom: 0;
 }
 
 .sim-copy ul {

@@ -776,8 +776,7 @@
                     label(g, X0, Y0, step <= 1 ? 'bank storage' : 'validator storage', 'sim-h left');
                     label(g, X0, Y0 + 62, step <= 2 ? 'balances: one per account' : 'commitments: one per account', 'sim-seg-label');
                     const gx = X0 + arrayW + 36;
-                    if (step === 0) label(g, gx, Y0 + 14 + 21, 'nothing per payment', 'sim-seg-label sim-muted');
-                    else {
+                    if (step > 0) {
                         label(g, gx, Y0, `nullifiers: ${nfCount}`, 'sim-h left red');
                         label(g, gx, Y0 + 18, step <= 3 ? 'one per receive, never pruned' : 'one per send/receive, never pruned', 'sim-seg-label sim-muted');
                     }

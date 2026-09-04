@@ -57,13 +57,13 @@ hidden when JavaScript is enabled and shown as plain sections otherwise. -->
 
 ### A Bank
 
-A bank keeps every balance and moves money between them. A payment is a single instruction, *A pays B 120*, and the bank applies it. Storage could not be smaller: one balance per account and nothing per payment, and that is the baseline we will work our way back to. The cost is on the other side. The bank is inside every payment and sees everything about it: who paid whom, how much, and every balance.
+A centralized party maintains custody of all funds and applies all changes to balances. The bank is an intermediary in every transfer and is aware of who pays whom, and how much.
 
 ### ecash
 
-Split the payment in two so the bank is no longer inside it. To *send*, the sender has the bank blind-sign a coin carrying a fresh random serial number, its *nullifier*, and hands the coin to the receiver directly, off the ledger (the dashed arc). To *receive*, the receiver presents the coin, and the bank credits it after checking that its nullifier has not been seen before. Blindness means the bank cannot connect a send to a receive, so it no longer learns who paid whom. It still sees both halves, with amounts.
+David Chaum introduced [ecash] -- the first payment system to achieve *unlinkability* between the sender and receiver. The bank authorizes the withdrawal of a single unit (say 1\$) through a *blind signature*, which the sender can provide to a receiver who can then redeem the signature on the coin for 1\$. 
 
-The price is in the storage panel: the nullifier set grows by one entry per coin and can never be pruned, because a coin sent years ago is still valid. And the bank remains the only thing between a coin and a double spend, one party that everyone must trust and that has to serve the whole world.
+Since the communication between the sender and receiver is hidden, the system hides who paid whom but the central authority/bank can still see balances and inflows/outflows of an account. However, the bank must remember a unique nullifer for every coin that was ever redeemed.
 
 ### Decentralized ecash
 
