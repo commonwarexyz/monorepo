@@ -762,7 +762,7 @@ enum CatalogEvent<D, A, R, M, S, C, Q> {
     Materialization(M),
     Seal(S),
     Command(C),
-    CommittedRead(Q),
+    Read(Q),
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -773,10 +773,9 @@ async fn next_catalog_event<D, A, R, M, S, C, Q>(
     materialization: M,
     seal: S,
     command: C,
-    committed_read: Q,
+    read: Q,
     accept_acknowledgements: bool,
     accept_commands: bool,
-    accept_committed_reads: bool,
 ) -> CatalogEvent<D::Output, A::Output, R::Output, M::Output, S::Output, C::Output, Q::Output>
 where
     D: Future,
@@ -801,13 +800,6 @@ where
             pending().await
         }
     };
-    let committed_read = async move {
-        if accept_committed_reads {
-            committed_read.await
-        } else {
-            pending().await
-        }
-    };
     select! {
         completion = durability => CatalogEvent::Durability(completion),
         acknowledgement = acknowledgement => CatalogEvent::DeliveryCursor(acknowledgement),
@@ -815,7 +807,7 @@ where
         completion = materialization => CatalogEvent::Materialization(completion),
         completion = seal => CatalogEvent::Seal(completion),
         command = command => CatalogEvent::Command(command),
-        read = committed_read => CatalogEvent::CommittedRead(read),
+        read = read => CatalogEvent::Read(read),
     }
 }
 #[cfg(test)]
@@ -991,6 +983,26 @@ where
         }
     }
 
+    fn read_canceled(&self) -> bool {
+        match self {
+            Self::Bodies(_, reply) => reply.is_closed(),
+            Self::BodyCandidateByDigest(_, _, reply) => reply.is_closed(),
+            Self::HeaderSegments(_, _, reply) => reply.is_closed(),
+            Self::OutputRefs(_, _, _, reply) => reply.is_closed(),
+            _ => unreachable!("only independent reads use the read lane"),
+        }
+    }
+
+    async fn read_closed(&mut self) {
+        match self {
+            Self::Bodies(_, reply) => reply.closed().await,
+            Self::BodyCandidateByDigest(_, _, reply) => reply.closed().await,
+            Self::HeaderSegments(_, _, reply) => reply.closed().await,
+            Self::OutputRefs(_, _, _, reply) => reply.closed().await,
+            _ => unreachable!("only independent reads use the read lane"),
+        }
+    }
+
     fn fail(self, error: Error) {
         match self {
             #[cfg(test)]
@@ -1022,6 +1034,30 @@ where
     }
 }
 
+/// Leaves a capacity-blocked read at the mailbox head until it can start or is canceled.
+async fn next_read<H, V, B>(
+    reads: &mut mailbox::Receiver<TracedCommand<H, V, B>>,
+    deferred: &mut Option<TracedCommand<H, V, B>>,
+    accept: bool,
+    ready: bool,
+) -> Option<TracedCommand<H, V, B>>
+where
+    H: Hasher,
+    V: Variant,
+    B: Codec + Digestible<Digest = H::Digest>,
+{
+    if !accept {
+        return pending().await;
+    }
+    if let Some(read) = deferred {
+        if !ready {
+            read.command.read_closed().await;
+        }
+        return deferred.take();
+    }
+    reads.recv().await
+}
+
 impl<H, V, B> Policy for TracedCommand<H, V, B>
 where
     H: Hasher,
@@ -1044,7 +1080,7 @@ where
 {
     commands: mailbox::Sender<TracedCommand<H, V, B>>,
     delivery_cursors: mailbox::Sender<DeliveryCursorControl>,
-    committed_reads: mailbox::Sender<TracedCommand<H, V, B>>,
+    independent_reads: mailbox::Sender<TracedCommand<H, V, B>>,
     admission_capacity: usize,
     /// Reads the runtime clock at enqueue so the actor can measure mailbox dwell.
     now: EnqueueClock,
@@ -1066,7 +1102,7 @@ where
         Self {
             commands: self.commands.clone(),
             delivery_cursors: self.delivery_cursors.clone(),
-            committed_reads: self.committed_reads.clone(),
+            independent_reads: self.independent_reads.clone(),
             admission_capacity: self.admission_capacity,
             now: self.now.clone(),
         }
@@ -1085,7 +1121,15 @@ where
     ) -> Result<T, Error> {
         let (reply, receiver) = oneshot::channel();
         let command = TracedCommand::stamped(make(reply), (self.now)());
-        if self.commands.enqueue(command) == Feedback::Closed {
+        // These lookups may overtake queued admissions and observe an earlier miss. They
+        // establish neither custody nor an admission barrier; custody checks stay FIFO.
+        let mailbox = match &command.command {
+            Command::BodyCandidateByDigest(..)
+            | Command::HeaderSegments(..)
+            | Command::OutputRefs(..) => &self.independent_reads,
+            _ => &self.commands,
+        };
+        if mailbox.enqueue(command) == Feedback::Closed {
             return Err(Error::Closed);
         }
         receiver.await.unwrap_or(Err(Error::Closed))
@@ -1130,7 +1174,7 @@ where
     ) -> Result<BodyValues<H, B>, Error> {
         let (reply, receiver) = oneshot::channel();
         let command = TracedCommand::stamped(Command::Bodies(references, reply), (self.now)());
-        if self.committed_reads.enqueue(command) == Feedback::Closed {
+        if self.independent_reads.enqueue(command) == Feedback::Closed {
             return Err(Error::Closed);
         }
         receiver.await.unwrap_or(Err(Error::Closed))
@@ -1413,11 +1457,15 @@ where
     pending_delivery_bytes: u64,
     commands: mailbox::Receiver<TracedCommand<H, V, B>>,
     delivery_cursors: mailbox::Receiver<DeliveryCursorControl>,
-    committed_reads: mailbox::Receiver<TracedCommand<H, V, B>>,
-    committed_reads_open: bool,
+    independent_reads: mailbox::Receiver<TracedCommand<H, V, B>>,
+    independent_reads_open: bool,
+    deferred_read: Option<TracedCommand<H, V, B>>,
     deferred: Option<TracedCommand<H, V, B>>,
     durability: Pool<'static, DurabilityCompletion<H::Digest>>,
-    metadata_reads: Pool<'static, MetadataCompletion<E, H>>,
+    // Block metadata remains catalog-owned during admissions. History continuations can need
+    // the pending-history journal, so they run only after the admission returns ownership.
+    block_reads: Pool<'static, MetadataCompletion<E, H>>,
+    history_reads: Pool<'static, MetadataCompletion<E, H>>,
     metadata_steps: usize,
     metadata_step_capacity: usize,
     /// In-flight sealed-segment proofs; optimization-only writes that never gate barriers.
@@ -1486,7 +1534,7 @@ where
                 !command.commit_barrier()
                     || (self.barrier_ready()
                         && (!command.body_barrier()
-                            || (self.materializer.is_idle() && self.metadata_reads.is_empty())))
+                            || (self.materializer.is_idle() && self.metadata_steps == 0)))
             }
         }
     }
@@ -1534,11 +1582,19 @@ where
 
             // Service at most one independent read before returning to mutable work. A floor
             // installation closes intake while its existing readers drain.
-            if self.accept_committed_reads() {
-                match self.committed_reads.try_recv() {
-                    Ok(read) => self.process_command(read).await?,
-                    Err(TryRecvError::Disconnected) => self.committed_reads_open = false,
-                    Err(TryRecvError::Empty) => {}
+            let accept_reads = self.accept_independent_reads();
+            let read_ready = self.deferred_read_ready();
+            if let Some(read) = next_read(
+                &mut self.independent_reads,
+                &mut self.deferred_read,
+                accept_reads,
+                read_ready,
+            )
+            .now_or_never()
+            {
+                match read {
+                    Some(read) => self.process_read(read)?,
+                    None => self.independent_reads_open = false,
                 }
             }
 
@@ -1552,7 +1608,7 @@ where
             // Direct draining is safe only when no completion can become ready.
             } else if commands_open
                 && self.durability.is_empty()
-                && self.metadata_reads.is_empty()
+                && self.metadata_steps == 0
                 && self.seals.is_empty()
                 && self.materializer.is_idle()
             {
@@ -1569,12 +1625,13 @@ where
 
             if !commands_open
                 && !delivery_cursors_open
-                && !self.committed_reads_open
+                && !self.independent_reads_open
+                && self.deferred_read.is_none()
                 && self.deferred.is_none()
                 && self.pending_admission.is_none()
                 && !self.admission_active
                 && self.durability.is_empty()
-                && self.metadata_reads.is_empty()
+                && self.metadata_steps == 0
                 && self.seals.is_empty()
                 && self.materializer.is_idle()
                 && self.body_waiters.is_empty()
@@ -1587,18 +1644,28 @@ where
                 .as_ref()
                 .map_or("event", |command| command.command.kind());
             let started = self.clock.current();
-            let accept_committed_reads = self.accept_committed_reads();
+            let accept_independent_reads = self.accept_independent_reads();
+            let read_ready = self.deferred_read_ready();
             let event = next_catalog_event(
                 self.durability.next_completed(),
                 self.delivery_cursors.recv(),
-                self.metadata_reads.next_completed(),
+                async {
+                    select! {
+                        completion = self.history_reads.next_completed() => completion,
+                        completion = self.block_reads.next_completed() => completion,
+                    }
+                },
                 self.materializer.complete_next(),
                 self.seals.next_completed(),
                 self.commands.recv(),
-                self.committed_reads.recv(),
+                next_read(
+                    &mut self.independent_reads,
+                    &mut self.deferred_read,
+                    accept_independent_reads,
+                    read_ready,
+                ),
                 delivery_cursors_open,
                 commands_open && self.deferred.is_none(),
-                accept_committed_reads,
             )
             .await;
             self.metrics
@@ -1616,7 +1683,7 @@ where
                 CatalogEvent::Seal(_) => Some("seal"),
                 CatalogEvent::Materialization(_) => Some("materialization"),
                 CatalogEvent::Command(_)
-                | CatalogEvent::CommittedRead(_)
+                | CatalogEvent::Read(_)
                 | CatalogEvent::DeliveryCursor(None) => None,
             };
             let started = self.clock.current();
@@ -1646,8 +1713,8 @@ where
                         self.process_command(command).await?;
                     }
                     CatalogEvent::Command(None) => commands_open = false,
-                    CatalogEvent::CommittedRead(Some(read)) => self.process_command(read).await?,
-                    CatalogEvent::CommittedRead(None) => self.committed_reads_open = false,
+                    CatalogEvent::Read(Some(read)) => self.process_read(read)?,
+                    CatalogEvent::Read(None) => self.independent_reads_open = false,
                 }
                 Ok::<_, Error>(())
             }
@@ -1660,13 +1727,73 @@ where
         }
     }
 
-    fn accept_committed_reads(&self) -> bool {
-        self.committed_reads_open
-            && self.body_waiters.len() < self.body_waiter_capacity
+    fn accept_independent_reads(&self) -> bool {
+        self.independent_reads_open
             && self
                 .deferred
                 .as_ref()
                 .is_none_or(|command| !command.command.body_barrier())
+    }
+
+    fn deferred_read_ready(&self) -> bool {
+        self.deferred_read
+            .as_ref()
+            .is_none_or(|read| self.command_ready(&read.command))
+    }
+
+    fn process_read(&mut self, read: TracedCommand<H, V, B>) -> Result<(), Error> {
+        if read.command.read_canceled() {
+            return Ok(());
+        }
+        if !self.command_ready(&read.command) {
+            assert!(self.deferred_read.is_none());
+            self.deferred_read = Some(read);
+            return Ok(());
+        }
+        let operation = read.command.kind();
+        let span = info_span!(parent: &read.span, "multimmit.marshal.catalog.process",
+            command = operation, handler_ns = tracing::field::Empty);
+        let started = self.clock.current();
+        let result = {
+            let _guard = span.enter();
+            self.process_lookup(read.command)
+        };
+        let finished = self.clock.current();
+        self.metrics.work("command", operation, started, finished);
+        span.record(
+            "handler_ns",
+            u64::try_from(
+                finished
+                    .duration_since(started)
+                    .unwrap_or_default()
+                    .as_nanos(),
+            )
+            .unwrap_or(u64::MAX),
+        );
+        result
+    }
+
+    fn process_lookup(&mut self, command: Command<H, V, B>) -> Result<(), Error> {
+        match command {
+            Command::Bodies(references, reply) => self.process_bodies(references, reply),
+            Command::BodyCandidateByDigest(chain, digest, reply) => {
+                let candidate = match self.cached_block_by_digest(chain, digest) {
+                    Some(block) => Some((block.reference(), Some(block))),
+                    None => self
+                        .stores
+                        .pending_reference_by_digest(chain, digest)
+                        .map(|reference| (reference, None)),
+                };
+                respond(reply, Ok(candidate))
+            }
+            Command::HeaderSegments(requests, max_bytes, reply) => {
+                self.start_header_segments(requests, max_bytes, reply)
+            }
+            Command::OutputRefs(start, max_items, max_bytes, reply) => {
+                self.start_output_refs(start, max_items, max_bytes, reply)
+            }
+            _ => unreachable!("only independent reads use the read lane"),
+        }
     }
 
     /// Drives immutable reads while one admission exclusively owns its mutable journals.
@@ -1675,37 +1802,28 @@ where
         let write = self.stores.start_admission(write)?;
         let mut write = std::pin::pin!(write);
         loop {
-            let accept_reads = self.accept_committed_reads();
-            let read = async {
-                if accept_reads {
-                    self.committed_reads.recv().await
-                } else {
-                    pending().await
-                }
-            };
+            let accept_reads = self.accept_independent_reads();
+            let read_ready = self.deferred_read_ready();
+            let read = next_read(
+                &mut self.independent_reads,
+                &mut self.deferred_read,
+                accept_reads,
+                read_ready,
+            );
             select! {
                 result = &mut write => return self.stores.finish_admission(result?),
+                completion = self.block_reads.next_completed() => {
+                    self.complete_metadata(completion).map_err(Error::storage)?;
+                },
                 completion = self.materializer.complete_next() => {
                     self.finish_materialization(completion).map_err(Error::storage)?;
                 },
                 read = read => {
                     let Some(read) = read else {
-                        self.committed_reads_open = false;
+                        self.independent_reads_open = false;
                         continue;
                     };
-                    let Command::Bodies(references, reply) = read.command else {
-                        unreachable!("the committed read lane carries only body requests");
-                    };
-                    let span = info_span!(parent: &read.span, "multimmit.marshal.catalog.process",
-                        command = "bodies", handler_ns = tracing::field::Empty);
-                    let started = self.clock.current();
-                    let result = {
-                        let _guard = span.enter();
-                        self.process_bodies(references, reply)
-                    };
-                    span.record("handler_ns", u64::try_from(self.clock.current()
-                        .duration_since(started).unwrap_or_default().as_nanos()).unwrap_or(u64::MAX));
-                    result.map_err(Error::storage)?;
+                    self.process_read(read).map_err(Error::storage)?;
                 },
             }
         }
@@ -1983,9 +2101,13 @@ where
 
     fn fail(&mut self, error: Error) {
         self.materializer.fail(error.clone());
-        self.metadata_reads.cancel_all();
+        self.block_reads.cancel_all();
+        self.history_reads.cancel_all();
         self.metadata_steps = 0;
         self.seals.cancel_all();
+        if let Some(read) = self.deferred_read.take() {
+            read.fail(error.clone());
+        }
         if let Some(command) = self.deferred.take() {
             command.fail(error.clone());
         }
@@ -2006,7 +2128,7 @@ where
         while let Ok(control) = self.delivery_cursors.try_recv() {
             control.fail(error.clone());
         }
-        while let Ok(read) = self.committed_reads.try_recv() {
+        while let Ok(read) = self.independent_reads.try_recv() {
             read.fail(error.clone());
         }
         std::mem::replace(&mut self.commit_state, CommitState::Idle).fail(error);
@@ -2949,11 +3071,16 @@ where
             .checked_add(steps)
             .expect("metadata step count does not overflow");
         assert!(self.metadata_steps <= self.metadata_step_capacity);
-        self.metadata_reads.push(job.execute());
+        self.resume_metadata(job);
     }
 
     fn resume_metadata(&mut self, job: MetadataJob<E, H>) {
-        self.metadata_reads.push(job.execute());
+        match job {
+            MetadataJob::History { .. } => self.history_reads.push(job.execute()),
+            MetadataJob::Headers { .. } | MetadataJob::Outputs { .. } => {
+                self.block_reads.push(job.execute());
+            }
+        }
     }
 
     const fn release_metadata_steps(&mut self, steps: usize) {
@@ -3434,9 +3561,6 @@ where
             Command::HistorySegment(key, max_items, max_bytes, reply) => {
                 self.start_history_segment(key, max_items, max_bytes, reply)
             }
-            Command::HeaderSegments(requests, max_bytes, reply) => {
-                self.start_header_segments(requests, max_bytes, reply)
-            }
             Command::WaitForCustody(references, reply) => {
                 if references
                     .iter()
@@ -3457,20 +3581,10 @@ where
                     respond(reply, result)
                 }
             }
-            Command::Bodies(references, reply) => self.process_bodies(references, reply),
-            Command::BodyCandidateByDigest(chain, digest, reply) => {
-                let candidate = match self.cached_block_by_digest(chain, digest) {
-                    Some(block) => Some((block.reference(), Some(block))),
-                    None => self
-                        .stores
-                        .pending_reference_by_digest(chain, digest)
-                        .map(|reference| (reference, None)),
-                };
-                respond(reply, Ok(candidate))
-            }
-            Command::OutputRefs(start, max_items, max_bytes, reply) => {
-                self.start_output_refs(start, max_items, max_bytes, reply)
-            }
+            command @ (Command::Bodies(..)
+            | Command::BodyCandidateByDigest(..)
+            | Command::HeaderSegments(..)
+            | Command::OutputRefs(..)) => self.process_lookup(command),
             Command::Commit(batch, handoff, reply) => {
                 if self.durable_checkpoint == batch.checkpoint {
                     let (completion, receipt) = oneshot::channel();
@@ -3755,13 +3869,12 @@ where
     let (commands, receiver) = mailbox::new(context.child("mailbox"), capacity);
     let (delivery_cursors, delivery_cursor_receiver) =
         mailbox::new(context.child("delivery_cursor_mailbox"), NonZeroUsize::MIN);
-    let (committed_reads, committed_read_receiver) =
-        mailbox::new(context.child("committed_read_mailbox"), capacity);
+    let (independent_reads, read_receiver) = mailbox::new(context.child("read_mailbox"), capacity);
     let enqueue_clock = context.child("enqueue_clock");
     let client = CatalogClient {
         commands,
         delivery_cursors,
-        committed_reads,
+        independent_reads,
         admission_capacity: admission_cut_capacity.get(),
         now: Arc::new(move || enqueue_clock.current()),
     };
@@ -3795,11 +3908,13 @@ where
             pending_delivery_bytes: 0,
             commands: receiver,
             delivery_cursors: delivery_cursor_receiver,
-            committed_reads: committed_read_receiver,
-            committed_reads_open: true,
+            independent_reads: read_receiver,
+            independent_reads_open: true,
+            deferred_read: None,
             deferred: None,
             durability: Pool::default(),
-            metadata_reads: Pool::default(),
+            block_reads: Pool::default(),
+            history_reads: Pool::default(),
             metadata_steps: 0,
             metadata_step_capacity: metadata_step_capacity.get(),
             seals: Pool::default(),
@@ -4521,10 +4636,24 @@ mod tests {
         });
     }
 
+    #[derive(Clone, Copy)]
+    enum IndependentReadCase {
+        Body,
+        Candidate,
+        Headers,
+        Outputs,
+    }
+
     #[rstest::rstest]
-    #[case(false)]
-    #[case(true)]
-    fn committed_body_read_completes_during_segment_open(#[case] sealed: bool) {
+    #[case::body(false, IndependentReadCase::Body)]
+    #[case::sealed_body(true, IndependentReadCase::Body)]
+    #[case::candidate(false, IndependentReadCase::Candidate)]
+    #[case::headers(false, IndependentReadCase::Headers)]
+    #[case::outputs(false, IndependentReadCase::Outputs)]
+    fn independent_read_completes_during_segment_open(
+        #[case] sealed: bool,
+        #[case] read_case: IndependentReadCase,
+    ) {
         deterministic::Runner::default().start(|context| async move {
             let committee = Committee::<MinPk>::new_with_namespace_and_producers(
                 81,
@@ -4608,16 +4737,53 @@ mod tests {
                 _ = context.sleep(std::time::Duration::from_millis(1)) => {},
             }
             let bodies = promoter::Bodies::new(client.clone(), None);
-            let mut read = Box::pin(bodies.materialize(&refs));
+            let mut read = Box::pin(async {
+                match read_case {
+                    IndependentReadCase::Body => {
+                        assert_eq!(
+                            bodies.materialize(&refs).await.unwrap()[0].as_ref(),
+                            first.as_ref()
+                        );
+                    }
+                    IndependentReadCase::Candidate => {
+                        let candidate = client
+                            .request(|reply| {
+                                Command::BodyCandidateByDigest(
+                                    first.reference().chain(),
+                                    first.reference().digest(),
+                                    reply,
+                                )
+                            })
+                            .await
+                            .unwrap()
+                            .expect("the stored block has a candidate");
+                        assert_eq!(candidate.0, first.reference());
+                    }
+                    IndependentReadCase::Headers => {
+                        let headers = client
+                            .header_segments(vec![(first.reference(), 1)], 1024)
+                            .await
+                            .unwrap();
+                        assert_eq!(headers, vec![vec![first.header().clone()]]);
+                    }
+                    IndependentReadCase::Outputs => {
+                        let outputs = client
+                            .output_refs(OutputIndex::ZERO, NZUsize!(1), NZUsize!(1024))
+                            .await
+                            .unwrap();
+                        assert_eq!(outputs[0].reference, first.reference());
+                    }
+                }
+            });
             select! {
-                result = &mut read => assert_eq!(result.unwrap()[0].as_ref(), first.as_ref()),
+                _ = &mut read => {},
                 _ = context.sleep(std::time::Duration::from_millis(10)) => {
-                    panic!("committed body read waited for unrelated segment-open I/O");
+                    panic!("independent catalog read waited for unrelated segment-open I/O");
                 },
             }
             assert_eq!(
                 metric_total(&context.encode(), "materialized_bodies_total"),
-                1
+                u64::from(matches!(read_case, IndependentReadCase::Body))
             );
             syncs.unblock();
             admission.await.unwrap().wait().await.unwrap();
@@ -4679,6 +4845,14 @@ mod tests {
                 result = &mut second_read => panic!("body request bypassed materialization backpressure: {result:?}"),
                 _ = context.sleep(std::time::Duration::from_millis(1)) => {},
             }
+
+            let headers = select! {
+                result = client.header_segments(vec![(evictor.reference(), 1)], 1024) => result.unwrap(),
+                _ = context.sleep(std::time::Duration::from_millis(10)) => {
+                    panic!("body backpressure blocked an independent header lookup");
+                },
+            };
+            assert_eq!(headers, vec![vec![evictor.header().clone()]]);
 
             gate.release.send(()).unwrap();
             assert_eq!(first_read.await.unwrap().as_deref(), Some(first.as_ref()));
@@ -5430,8 +5604,16 @@ mod tests {
                 inner: context.child("delayed"),
                 pending: reads.clone(),
             };
-            let (client, handle, _delivery) =
-                spawn_catalog(configure(&context), delayed.child("reopened")).await;
+            let (delivery, _delivery) = delivery::channel(delayed.child("delivery_mailbox"));
+            let (client, handle, _, promoter_handle, _) = configure(&context)
+                .spawn::<_, Sha256>(delayed.child("reopened"), delivery)
+                .await
+                .unwrap();
+            // This fixture owns every metadata request so its read gates and credits are exact.
+            if let Some(promoter_handle) = promoter_handle {
+                promoter_handle.abort();
+                let _ = promoter_handle.await;
+            }
             let first = reads.arm();
             let second = reads.arm();
             let tail = (speculative_tail || limited).then(|| reads.arm());
@@ -5460,6 +5642,30 @@ mod tests {
             }
 
             if canceled {
+                let mut deferred = Box::pin(client.header_segments(
+                    vec![(blocks[0].reference(), 1)], 1024,
+                ));
+                select! {
+                    _ = &mut deferred => panic!("header request exceeded metadata credits"),
+                    _ = context.sleep(std::time::Duration::from_millis(1)) => {},
+                }
+                let progress = select! {
+                    result = client.progress() => result.unwrap(),
+                    _ = context.sleep(std::time::Duration::from_millis(10)) => {
+                        panic!("read backpressure blocked the command lane");
+                    },
+                };
+                assert_eq!(progress.committed, Some(OutputIndex::new(u64::from(count - 1))));
+                drop(deferred);
+                let candidate = select! {
+                    result = client.request(|reply| Command::BodyCandidateByDigest(
+                        blocks[0].reference().chain(), Sha256::hash(&[b"missing candidate"]), reply,
+                    )) => result.unwrap(),
+                    _ = context.sleep(std::time::Duration::from_millis(10)) => {
+                        panic!("canceled read blocked the independent lane behind occupied credits");
+                    },
+                };
+                assert!(candidate.is_none());
                 drop(request);
                 let replacement = client.output_refs(OutputIndex::ZERO, NZUsize!(2), NZUsize!(1024 * 1024));
                 let outputs = commonware_macros::select! {
