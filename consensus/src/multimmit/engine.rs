@@ -778,9 +778,9 @@ where
                 codec,
                 limits: ingress_limits(&config.profile),
                 mailbox_size: config.mailbox_size,
-                // The voter merges every queued cohort into one step of at most one verification
-                // batch, so queuing more cohorts than that only moves artifacts out of the fair
-                // ingress lanes into a FIFO the step cannot consume.
+                // The voter merges queued bulk cohorts up to one verification batch while
+                // keeping critical cohorts intact. More cohort credits would only move artifacts
+                // out of the fair ingress lanes into a FIFO a single step cannot consume.
                 observation_capacity: NonZeroUsize::new(
                     config.profile.resources().max_verification_batch(),
                 )
