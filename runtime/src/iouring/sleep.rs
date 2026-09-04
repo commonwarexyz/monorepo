@@ -120,9 +120,9 @@ impl Future for Sleep {
             this.state = State::Done;
             if let Some(timer_id) = registered {
                 let mut local = owner.borrow_mut();
-                local.drops.reserve(1);
+                local.deferred.drops.reserve(1);
                 if let Some(waker) = local.timers.cancel(timer_id) {
-                    local.drops.push(waker);
+                    local.deferred.drops.push(waker);
                 }
             }
             return Poll::Ready(());
@@ -132,13 +132,13 @@ impl Future for Sleep {
         // then retain displaced ownership in the worker's deferred drop batch.
         let incoming = cx.waker().clone();
         let mut local = owner.borrow_mut();
-        local.drops.reserve(1);
+        local.deferred.drops.reserve(1);
         if let Some(timer_id) = registered {
             let old = local
                 .timers
                 .refresh(timer_id, incoming)
                 .expect("live io_uring sleeper registration missing");
-            local.drops.push(old);
+            local.deferred.drops.push(old);
         } else {
             let timer_id = local.timers.insert(deadline, incoming);
             this.state = State::Registered {

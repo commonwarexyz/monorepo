@@ -34,7 +34,8 @@
 //!
 //! The runner closes admission, aborts supervised tasks, and retires kernel
 //! requests before returning. Admitted writes and syncs finish even if their
-//! callers are gone. Shutdown joins every one-off worker and has no time limit.
+//! callers are gone. Shutdown waits for accepted worker runtime cleanup and failure publication.
+//! Native thread-local destruction may follow. Shutdown has no time limit.
 //!
 //! # Examples
 //!

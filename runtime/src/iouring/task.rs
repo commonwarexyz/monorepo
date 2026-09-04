@@ -27,10 +27,31 @@ use futures::task::{ArcWake, waker};
 use std::{
     collections::VecDeque,
     future::Future,
+    mem,
+    panic::{AssertUnwindSafe, catch_unwind},
     pin::Pin,
     sync::{Arc, Weak},
     task::{Context, Poll, Waker},
 };
+
+/// Contain task disposal, independently of the inner user-poll panic policy.
+///
+/// Abortable can destroy the user future during poll. Both poll and later cell
+/// destruction use this boundary outside Local. The caller retires failed IDs
+/// before destroying their cells.
+pub(super) fn contain<T>(f: impl FnOnce() -> T) -> Option<T> {
+    match catch_unwind(AssertUnwindSafe(f)) {
+        Ok(output) => Some(output),
+        Err(panic) => {
+            // Payload destruction can also run user code. A secondary panic
+            // cannot escape this task boundary or replace a worker failure.
+            if let Err(secondary) = catch_unwind(AssertUnwindSafe(|| drop(panic))) {
+                mem::forget(secondary);
+            }
+            None
+        }
+    }
+}
 
 /// Root or spawned task selected by an escaped routing waker.
 #[derive(Clone, Copy, Debug)]
@@ -337,7 +358,61 @@ impl Tasks {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        Error, Runner as _, Spawner as _, Supervisor as _,
+        iouring::{Config, Runner},
+    };
+    use commonware_utils::channel::oneshot;
     use futures::task::noop_waker;
+
+    struct PanickingDrop;
+
+    impl Drop for PanickingDrop {
+        fn drop(&mut self) {
+            panic!("task disposal panic");
+        }
+    }
+
+    #[test]
+    fn cancelled_task_disposal_is_contained() {
+        for catch in [false, true] {
+            for placement in 0..3 {
+                Runner::new(Config::default().with_catch_panics(catch)).start(
+                    |context| async move {
+                        let child = context.child("cancelled");
+                        let child = match placement {
+                            0 => child,
+                            1 => child.dedicated(),
+                            _ => child.shared(true),
+                        };
+                        let (started, ready) = oneshot::channel();
+                        let handle = child.spawn(|_| async move {
+                            let _guard = PanickingDrop;
+                            started.send(()).unwrap();
+                            std::future::pending::<()>().await;
+                        });
+                        ready.await.unwrap();
+                        handle.abort();
+                        assert!(matches!(handle.await, Err(Error::Closed)));
+                        context.child("survivor").spawn(|_| async {}).await.unwrap();
+                    },
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unpolled_accepted_task_disposal_is_contained() {
+        for catch in [false, true] {
+            Runner::new(Config::default().with_catch_panics(catch)).start(|context| async move {
+                let guard = PanickingDrop;
+                let _handle = context.spawn(|_| async move {
+                    let _guard = guard;
+                    std::future::pending::<()>().await;
+                });
+            });
+        }
+    }
 
     fn insert(tasks: &mut Tasks) -> TaskId {
         let id = tasks.reserve();

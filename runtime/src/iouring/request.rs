@@ -22,7 +22,6 @@
 //! establish that the kernel has stopped accessing them.
 
 use super::{
-    callbacks::Panics,
     sockaddr::SockAddr,
     waiter::{WaiterId, WaiterState},
 };
@@ -106,23 +105,6 @@ impl From<IoBufs> for WriteBuffers {
 }
 
 impl WriteBuffers {
-    /// Release external owners one at a time after leaving the worker borrow.
-    fn retire(self, panics: &mut Panics) {
-        match self {
-            Self::Single { buf, .. } => {
-                panics.run(|| drop(buf));
-            }
-            Self::Vectored { bufs, iovecs, .. } => {
-                // Scratch no longer has kernel users. Drop it before invoking
-                // owners, each of which may independently panic or reenter.
-                drop(iovecs);
-                bufs.retire_chunks(|buf| {
-                    panics.run(|| drop(buf));
-                });
-            }
-        }
-    }
-
     /// Return the remaining number of bytes that still need to be written.
     fn remaining_len(&self) -> usize {
         match self {
@@ -271,8 +253,8 @@ impl Request {
             Self::Send(r) => (
                 RequestOutput::Send(r.result.unwrap_or(Err(Error::SendFailed))),
                 RetiredResources::Send {
-                    fd: r.fd,
-                    write: r.write,
+                    _fd: r.fd,
+                    _write: r.write,
                 },
             ),
             Self::Recv(r) => {
@@ -282,7 +264,7 @@ impl Request {
                 };
                 (
                     RequestOutput::Recv(result),
-                    RetiredResources::Socket { fd: r.fd },
+                    RetiredResources::Socket { _fd: r.fd },
                 )
             }
             Self::ReadAt(r) => {
@@ -293,38 +275,38 @@ impl Request {
                 (
                     RequestOutput::ReadAt(result),
                     RetiredResources::File {
-                        file: r.file,
-                        cache: Some(r.cache),
-                        write: None,
+                        _file: r.file,
+                        _cache: Some(r.cache),
+                        _write: None,
                     },
                 )
             }
             Self::WriteAt(r) => (
                 RequestOutput::WriteAt(r.result.unwrap_or(Err(Error::WriteFailed))),
                 RetiredResources::File {
-                    file: r.file,
-                    cache: Some(r.cache),
-                    write: Some(r.write),
+                    _file: r.file,
+                    _cache: Some(r.cache),
+                    _write: Some(r.write),
                 },
             ),
             Self::Sync(r) => (
                 RequestOutput::Sync(r.result.unwrap_or(Err(Error::Closed))),
                 RetiredResources::File {
-                    file: r.file,
-                    cache: None,
-                    write: None,
+                    _file: r.file,
+                    _cache: None,
+                    _write: None,
                 },
             ),
             Self::Connect(r) => (
                 RequestOutput::Connect(r.result.unwrap_or(Err(Error::ConnectionFailed))),
                 RetiredResources::Connect {
-                    fd: r.fd,
-                    address: r.address,
+                    _fd: r.fd,
+                    _address: r.address,
                 },
             ),
             Self::Poll(r) => (
                 RequestOutput::Poll(r.result.unwrap_or(Err(Error::ConnectionFailed))),
-                RetiredResources::Listener { listener: r.fd },
+                RetiredResources::Listener { _listener: r.fd },
             ),
         }
     }
@@ -376,64 +358,36 @@ pub(crate) enum RetiredResources {
     /// Listener retained while an accept readiness observation is outstanding.
     Listener {
         /// Shared listener whose accept queue remains observable.
-        listener: Arc<TcpListener>,
+        _listener: Arc<TcpListener>,
     },
     /// Socket retained by a receive operation.
     Socket {
         /// Descriptor no longer referenced by an operation SQE.
-        fd: Arc<OwnedFd>,
+        _fd: Arc<OwnedFd>,
     },
     /// Socket and all write owners retained by a logical send.
     Send {
         /// Descriptor used by the completed send sequence.
-        fd: Arc<OwnedFd>,
+        _fd: Arc<OwnedFd>,
         /// Original byte owners, including consumed chunks.
-        write: WriteBuffers,
+        _write: WriteBuffers,
     },
     /// File, directory hold, and any positioned I/O buffer/cache owners.
     File {
         /// File owner carrying its original storage directory hold.
-        file: Arc<Held>,
+        _file: Arc<Held>,
         /// Shared capability state retained by positioned I/O.
-        cache: Option<Cache>,
+        _cache: Option<Cache>,
         /// Original write owners, absent for reads and standalone sync.
-        write: Option<WriteBuffers>,
+        _write: Option<WriteBuffers>,
     },
     /// Socket and stable address retained by a connection attempt.
     Connect {
         /// Descriptor used by the connection attempt.
-        fd: Arc<OwnedFd>,
+        _fd: Arc<OwnedFd>,
         /// Boxed native address whose kernel access has ended.
-        address: Box<SockAddr>,
+        _address: Box<SockAddr>,
     },
-}
-
-impl RetiredResources {
-    /// Release each runtime-owned buffer chunk under independent panic isolation.
-    ///
-    /// Calling `drop` on the whole vectored container could run a second owner
-    /// destructor during the first owner's unwind, aborting mandatory cleanup.
-    pub(super) fn retire(self, panics: &mut Panics) {
-        match self {
-            Self::Send { fd, write } => {
-                write.retire(panics);
-                drop(fd);
-            }
-            Self::File { file, cache, write } => {
-                if let Some(write) = write {
-                    write.retire(panics);
-                }
-                drop(cache);
-                drop(file);
-            }
-            Self::Connect { fd, address } => {
-                drop(address);
-                drop(fd);
-            }
-            Self::Socket { fd } => drop(fd),
-            Self::Listener { listener } => drop(listener),
-        }
-    }
 }
 
 /// A blob's file bundled with the hold on its storage directory.
@@ -1038,6 +992,7 @@ impl PollRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::iouring::callbacks::Panics;
     use bytes::Bytes;
     use std::{
         os::{
@@ -1229,10 +1184,11 @@ mod tests {
     }
 
     #[test]
-    fn test_partial_progress_isolates_reentrant_panicking_owners() {
+    fn test_partial_progress_retires_reentrant_panicking_owner() {
         struct Owner {
             local: Arc<commonware_utils::sync::Mutex<usize>>,
             bytes: [u8; 3],
+            panic: bool,
         }
         impl AsRef<[u8]> for Owner {
             fn as_ref(&self) -> &[u8] {
@@ -1245,7 +1201,9 @@ mod tests {
                     .local
                     .try_lock()
                     .expect("owner dropped under local borrow") += 1;
-                panic!("external owner panic");
+                if self.panic {
+                    panic!("external owner panic");
+                }
             }
         }
 
@@ -1253,10 +1211,12 @@ mod tests {
         let mut bufs = IoBufs::from(IoBuf::from(Bytes::from_owner(Owner {
             local: local.clone(),
             bytes: *b"abc",
+            panic: true,
         })));
         bufs.append(IoBuf::from(Bytes::from_owner(Owner {
             local: local.clone(),
             bytes: *b"def",
+            panic: false,
         })));
         let mut request = Request::Send(SendRequest {
             fd: make_socket_fd(),
@@ -1271,8 +1231,11 @@ mod tests {
         assert_eq!(*guard, 0);
         drop(guard);
         let mut panics = Panics::default();
-        retired.retire(&mut panics);
-        assert!(panics.is_pending());
+        // One outer boundary contains the owner panic while ordinary container
+        // drop glue releases the remaining nonpanicking owner.
+        panics.run(|| drop(retired));
+        let panic = panics.take().expect("owner panic was not caught");
+        assert_eq!(panic.downcast_ref::<&str>(), Some(&"external owner panic"));
         assert_eq!(*local.lock(), 2);
     }
 

@@ -170,21 +170,6 @@ impl IoBufs {
         }
     }
 
-    /// Move every chunk into an isolated retirement action without cloning owners.
-    ///
-    /// The io_uring caller catches each destructor panic inside `retire`, so a
-    /// failing external owner cannot make container drop glue destroy another
-    /// external owner during the same unwind.
-    #[cfg(all(target_os = "linux", feature = "iouring"))]
-    pub(crate) fn retire_chunks(self, mut retire: impl FnMut(IoBuf)) {
-        match self.inner {
-            IoBufsInner::Single(buf) => retire(buf),
-            IoBufsInner::Pair(bufs) => bufs.into_iter().for_each(retire),
-            IoBufsInner::Triple(bufs) => bufs.into_iter().for_each(retire),
-            IoBufsInner::Chunked(bufs) => bufs.into_iter().for_each(retire),
-        }
-    }
-
     /// Whether all buffers are empty.
     #[inline]
     pub fn is_empty(&self) -> bool {

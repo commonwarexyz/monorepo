@@ -60,8 +60,10 @@ usage matters more than sparse wake latency.
 Shutdown closes admission, aborts supervised tasks, and waits for kernel
 retirement. Admitted writes and syncs finish even if their callers were dropped.
 `start_sync().await` admits the sync before returning its completion handle.
-Dropping or aborting that handle only stops observation. The runner joins all
-one-off threads before returning, with no configured shutdown time limit.
+Dropping or aborting that handle only stops observation. The runner waits for
+all accepted one-off workers to finish runtime cleanup and failure reporting,
+with no configured shutdown time limit. Native thread-local destruction may
+continue afterward.
 Escaped storage resources retain the directory hold until their resources and
 requests are released. Nested native runners on the same thread are rejected
 before acquiring another directory hold.

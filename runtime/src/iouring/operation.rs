@@ -20,7 +20,6 @@
 
 use super::{
     admission::AdmissionId,
-    callbacks::Panics,
     mailbox::{Mailbox, Message},
     request::{Request, RequestOutput},
     runtime::{self, Local},
@@ -32,7 +31,6 @@ use std::{
     cell::RefCell,
     future::Future,
     mem,
-    panic::resume_unwind,
     pin::Pin,
     rc::Rc,
     sync::{Arc, Weak},
@@ -243,9 +241,9 @@ impl Future for Operation {
                 operation_id,
             } => {
                 let mut local = owner.borrow_mut();
-                local.drops.reserve(1);
+                local.deferred.drops.reserve(1);
                 if local.closing {
-                    local.drops.push(incoming);
+                    local.deferred.drops.push(incoming);
                     return Poll::Ready(Err(Error::Closed));
                 }
                 match local
@@ -256,7 +254,7 @@ impl Future for Operation {
                     EntryState::Pending { waker, .. } => {
                         let old = waker.replace(incoming);
                         if let Some(old) = old {
-                            local.drops.push(old);
+                            local.deferred.drops.push(old);
                         }
                         this.state = State::Waiting {
                             mailbox,
@@ -265,7 +263,7 @@ impl Future for Operation {
                         return Poll::Pending;
                     }
                     EntryState::Ready(_) => {
-                        local.drops.push(incoming);
+                        local.deferred.drops.push(incoming);
                         let Some(EntryState::Ready(output)) = local.operations.take(operation_id)
                         else {
                             unreachable!()
@@ -277,11 +275,11 @@ impl Future for Operation {
             State::Done => panic!("io_uring operation polled after completion"),
         };
         let mut local = owner.borrow_mut();
-        local.drops.reserve(2);
+        local.deferred.drops.reserve(2);
         if local.closing {
-            local.drops.push(incoming);
+            local.deferred.drops.push(incoming);
             drop(local);
-            retire_request(request);
+            drop(request);
             return Poll::Ready(Err(Error::Closed));
         }
         if request
@@ -291,10 +289,10 @@ impl Future for Operation {
             if let Some(id) = registration {
                 local.cancel_admission(id);
             }
-            local.retired_resources.reserve(1);
+            local.deferred.resources.reserve(1);
             let (output, retired) = request.timeout();
-            local.retired_resources.push(retired);
-            local.drops.push(incoming);
+            local.deferred.resources.push(retired);
+            local.deferred.drops.push(incoming);
             return Poll::Ready(Ok(output));
         }
         local.reconcile_admissions();
@@ -304,7 +302,7 @@ impl Future for Operation {
             Some(id) => match local.admissions.take_grant(id) {
                 Ok(old) => {
                     if let Some(old) = old {
-                        local.drops.push(old);
+                        local.deferred.drops.push(old);
                     }
                     true
                 }
@@ -338,7 +336,7 @@ impl Future for Operation {
                         .refresh(id, incoming)
                         .expect("live admission missing");
                     if let Some(old) = old {
-                        local.drops.push(old);
+                        local.deferred.drops.push(old);
                     }
                     id
                 }
@@ -363,31 +361,14 @@ impl Drop for Operation {
                 request,
             } => {
                 cancel(&mailbox, Message::CancelAdmission(registration));
-                retire_request(request);
+                drop(request);
             }
             State::Waiting {
                 mailbox,
                 operation_id,
             } => cancel(&mailbox, Message::OrphanOperation(operation_id)),
-            State::Unbound(request) => retire_request(request),
+            State::Unbound(request) => drop(request),
             State::Done => {}
-        }
-    }
-}
-
-/// Retire unsubmitted buffers independently, including during a foreign drop.
-fn retire_request(request: Request) {
-    let (output, resources) = request.fail(Error::Closed);
-    let mut panics = Panics::default();
-    panics.run(|| drop(output));
-    resources.retire(&mut panics);
-    if let Some(panic) = panics.take() {
-        // A task destructor may already be unwinding. Starting another unwind
-        // here would interrupt the worker's mandatory kernel retirement.
-        if std::thread::panicking() {
-            mem::forget(panic);
-        } else {
-            resume_unwind(panic);
         }
     }
 }
@@ -436,14 +417,14 @@ impl Future for SyncAdmission {
         let owner = bound(this.mailbox.as_ref().unwrap());
         if let Ok(owner) = owner {
             let mut local = owner.borrow_mut();
-            local.drops.reserve(2);
+            local.deferred.drops.reserve(2);
             if !local.closing {
                 local.reconcile_admissions();
                 let granted = match this.registration {
                     Some(id) => match local.admissions.take_grant(id) {
                         Ok(old) => {
                             if let Some(old) = old {
-                                local.drops.push(old);
+                                local.deferred.drops.push(old);
                             }
                             true
                         }
@@ -454,7 +435,7 @@ impl Future for SyncAdmission {
                         .can_admit(local.driver.as_ref().unwrap().free_slots()),
                 };
                 if granted {
-                    local.drops.push(incoming);
+                    local.deferred.drops.push(incoming);
                     let request = this.request.take().expect("sync polled after admission");
                     let sender = this.sender.take().unwrap();
                     local
@@ -472,7 +453,7 @@ impl Future for SyncAdmission {
                             .refresh(id, incoming)
                             .expect("sync admission missing");
                         if let Some(old) = old {
-                            local.drops.push(old);
+                            local.deferred.drops.push(old);
                         }
                         id
                     }
@@ -480,7 +461,7 @@ impl Future for SyncAdmission {
                 });
                 return Poll::Pending;
             }
-            local.drops.push(incoming);
+            local.deferred.drops.push(incoming);
             if let Some(id) = this.registration.take() {
                 local.cancel_admission(id);
             }
@@ -517,9 +498,9 @@ pub(super) fn cancel(mailbox: &Weak<Mailbox>, message: Message) {
                 Message::CancelAdmission(id) => local.cancel_admission(id),
                 Message::OrphanOperation(id) => local.orphan_operation(id),
                 Message::CancelTimer(id) => {
-                    local.drops.reserve(1);
+                    local.deferred.drops.reserve(1);
                     if let Some(waker) = local.timers.cancel(id) {
-                        local.drops.push(waker);
+                        local.deferred.drops.push(waker);
                     }
                 }
                 _ => unreachable!("invalid cancellation message"),
@@ -540,14 +521,14 @@ impl Local {
             .as_ref()
             .expect("driver present during local access")
             .free_slots();
-        self.admissions.reconcile(self.now, free, &mut self.wakes);
+        self.admissions.reconcile(self.now, free, &mut self.deferred.wakes);
     }
 
     /// Release an admission reservation and immediately grant its successor.
     pub(super) fn cancel_admission(&mut self, id: AdmissionId) {
-        self.drops.reserve(1);
+        self.deferred.drops.reserve(1);
         if let Some(waker) = self.admissions.cancel(id) {
-            self.drops.push(waker);
+            self.deferred.drops.push(waker);
         }
         if !self.closing {
             self.reconcile_admissions();
@@ -556,12 +537,12 @@ impl Local {
 
     /// Detach an observer before changing its waiter's cancellation state.
     pub(super) fn orphan_operation(&mut self, id: OperationId) {
-        self.drops.reserve(1);
-        self.retired_outputs.reserve(1);
+        self.deferred.drops.reserve(1);
+        self.deferred.outputs.reserve(1);
         match self.operations.take(id) {
             Some(EntryState::Pending { waiter_id, waker }) => {
                 if let Some(waker) = waker {
-                    self.drops.push(waker);
+                    self.deferred.drops.push(waker);
                 }
                 self.driver
                     .as_mut()
@@ -569,19 +550,19 @@ impl Local {
                     .orphan(waiter_id, id, &mut self.completed);
                 self.apply_completions();
             }
-            Some(EntryState::Ready(output)) => self.retired_outputs.push(output),
+            Some(EntryState::Ready(output)) => self.deferred.outputs.push(output),
             None => {}
         }
     }
 
     /// Transfer terminal results out of bounded waiter capacity before waking.
     pub(super) fn apply_completions(&mut self) {
-        self.wakes.reserve(self.completed.len());
-        self.retired_outputs.reserve(self.completed.len());
-        self.retired_resources.reserve(self.completed.len());
-        self.sync_results.reserve(self.completed.len());
+        self.deferred.wakes.reserve(self.completed.len());
+        self.deferred.outputs.reserve(self.completed.len());
+        self.deferred.resources.reserve(self.completed.len());
+        self.deferred.sync_results.reserve(self.completed.len());
         for completed in self.completed.drain(..) {
-            self.retired_resources.push(completed.retired);
+            self.deferred.resources.push(completed.retired);
             match completed.observer {
                 Observer::Ordinary(id) => {
                     // Driver retirement has already returned waiter capacity.
@@ -596,16 +577,16 @@ impl Local {
                         panic!("operation completed twice")
                     };
                     if let Some(waker) = waker {
-                        self.wakes.push(waker);
+                        self.deferred.wakes.push(waker);
                     }
                 }
                 Observer::DetachedSync(sender) => {
                     let RequestOutput::Sync(output) = completed.output else {
                         panic!("sync observer received other request")
                     };
-                    self.sync_results.push((sender, output));
+                    self.deferred.sync_results.push((sender, output));
                 }
-                Observer::Orphaned => self.retired_outputs.push(completed.output),
+                Observer::Orphaned => self.deferred.outputs.push(completed.output),
             }
         }
         if !self.closing {
