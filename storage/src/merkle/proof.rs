@@ -382,11 +382,6 @@ impl<F: Family, D: Digest> Proof<F, D> {
             return None;
         }
 
-        let pinned_positions: Vec<_> = F::nodes_to_pin(start_loc).collect();
-        if pinned_positions.len() != pinned_nodes.len() {
-            return None;
-        }
-
         let end_loc = start_loc.checked_add(elements.len() as u64)?;
         let bp = Blueprint::new(
             self.leaves,
@@ -396,10 +391,15 @@ impl<F: Family, D: Digest> Proof<F, D> {
         )
         .ok()?;
 
-        let mut pinned_map: BTreeMap<Position<F>, D> = pinned_positions
-            .into_iter()
-            .zip(pinned_nodes.iter().copied())
-            .collect();
+        // Pair each pinned position with its digest, rejecting a count mismatch in either direction.
+        let mut pinned_map = BTreeMap::new();
+        let mut pinned_digests = pinned_nodes.iter();
+        for pos in F::nodes_to_pin(start_loc) {
+            pinned_map.insert(pos, *pinned_digests.next()?);
+        }
+        if pinned_digests.next().is_some() {
+            return None;
+        }
 
         // Fold-prefix peaks of the larger tree may have merged several pins together. Reconstruct
         // each peak's digest by hashing the pins beneath it up to the peak, then compare the
