@@ -5,12 +5,13 @@ use super::{CHECKSUM_SIZE, STORAGE_PAGE_SIZE, get_page_from_blob};
 use crate::{Blob, BufferPool, BufferPooler, Error, IoBuf, IoBufMut, ReadOptions};
 use ahash::AHashMap;
 use commonware_utils::{Widen, cache::Clock, sync::RwLock};
-use futures::{FutureExt, future::Shared};
+use futures::{
+    FutureExt,
+    future::{BoxFuture, Shared},
+};
 use std::{
     collections::hash_map::Entry,
-    future::Future,
     num::{NonZeroU16, NonZeroUsize},
-    pin::Pin,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -18,20 +19,17 @@ use std::{
 };
 use tracing::{debug, error, trace};
 
-/// Shared future for one logical page fetch. The output uses `Arc<Error>` because `Shared`
-/// requires cloneable results. The `IoBuf` contains only the logical, validated page bytes.
-type PageFetchFuture = Shared<Pin<Box<dyn Future<Output = Result<IoBuf, Arc<Error>>> + Send>>>;
-
-/// Shared handle to one in-flight fetch generation. The cache keeps one copy in `page_fetches`,
-/// and each waiter clones the `Arc` while it is still interested in the result.
-type PageFetch = Arc<PageFetchFuture>;
+/// Shared future for one logical page fetch. The cache keeps one clone in `page_fetches` and
+/// each waiter holds another while it is still interested in the result. The `IoBuf` contains
+/// only the logical, validated page bytes.
+type PageFetch = Shared<BoxFuture<'static, Result<IoBuf, Error>>>;
 
 /// One in-flight fetch generation for a single `(blob_id, page_num)`.
 ///
 /// `fetch` is shared by every waiter that joined this generation. `waiters` counts the still
 /// armed waiters whose drop path may need to remove this entry if they become the last
 /// unresolved waiter. If `page_fetches[key]` is later replaced by a newer generation, stale
-/// waiters from the old generation must ignore it and rely on `Arc::ptr_eq` against their saved
+/// waiters from the old generation must ignore it and rely on `Shared::ptr_eq` against their saved
 /// `fetch`.
 struct PageFetchEntry {
     /// Shared page fetch future that reads and validates the logical page exactly once.
@@ -41,15 +39,15 @@ struct PageFetchEntry {
 }
 
 /// Removes a stale in-flight page fetch when the last unresolved waiter is dropped.
-struct PageFetchGuard {
-    cache: Arc<RwLock<Cache>>,
+struct PageFetchGuard<'a> {
+    cache: &'a RwLock<Cache>,
     key: (u64, u64),
     fetch: PageFetch,
     armed: bool,
 }
 
-impl PageFetchGuard {
-    const fn new(cache: Arc<RwLock<Cache>>, key: (u64, u64), fetch: PageFetch) -> Self {
+impl<'a> PageFetchGuard<'a> {
+    const fn new(cache: &'a RwLock<Cache>, key: (u64, u64), fetch: PageFetch) -> Self {
         Self {
             cache,
             key,
@@ -63,7 +61,7 @@ impl PageFetchGuard {
     }
 }
 
-impl Drop for PageFetchGuard {
+impl Drop for PageFetchGuard<'_> {
     fn drop(&mut self) {
         if !self.armed {
             return;
@@ -79,7 +77,8 @@ impl Drop for PageFetchGuard {
         let Entry::Occupied(mut current) = cache.page_fetches.entry(self.key) else {
             return;
         };
-        if !Arc::ptr_eq(&current.get().fetch, &self.fetch) {
+        // Neither stored clone is ever polled, so `ptr_eq` never sees a terminated future.
+        if !current.get().fetch.ptr_eq(&self.fetch) {
             return;
         }
         if current.get().waiters == 1 {
@@ -346,7 +345,8 @@ impl CacheRef {
         // Create or clone a future that retrieves the desired page from the underlying blob. This
         // requires a write lock on the page cache since we may need to modify `page_fetches` if
         // this task is the first fetcher.
-        let (fetch_future, mut fetch_guard) = {
+        let key = (blob_id, page_num);
+        let fetch = {
             let mut cache = self.cache.write();
 
             // There's a (small) chance the page was fetched & buffered by another task before we
@@ -356,18 +356,12 @@ impl CacheRef {
                 return Ok(count);
             }
 
-            let key = (blob_id, page_num);
             match cache.page_fetches.entry(key) {
                 Entry::Occupied(o) => {
                     // Another thread is already fetching this page, so clone its existing future.
                     let entry = o.into_mut();
                     entry.waiters += 1;
-                    let fetch_future = entry.fetch.as_ref().clone();
-                    let fetch = Arc::clone(&entry.fetch);
-                    (
-                        fetch_future,
-                        PageFetchGuard::new(Arc::clone(&self.cache), key, fetch),
-                    )
+                    entry.fetch.clone()
                 }
                 Entry::Vacant(v) => {
                     // Nobody is currently fetching this page, so create a future that will do the
@@ -395,30 +389,23 @@ impl CacheRef {
                     };
 
                     // Make the future shareable and insert it into the map.
-                    let fetch_future = future.boxed().shared();
-                    let fetch = Arc::new(fetch_future.clone());
+                    let fetch = future.boxed().shared();
                     v.insert(PageFetchEntry {
-                        fetch: Arc::clone(&fetch),
+                        fetch: fetch.clone(),
                         waiters: 1,
                     });
-
-                    (
-                        fetch_future,
-                        PageFetchGuard::new(Arc::clone(&self.cache), key, fetch),
-                    )
+                    fetch
                 }
             }
         };
+        let mut fetch_guard = PageFetchGuard::new(&self.cache, key, fetch.clone());
 
         // Await the shared fetch. The future itself logs failures, caches the resolved page, and
         // removes the in-flight marker before it returns, so waiters only need cancellation
         // cleanup while the fetch is still unresolved.
-        let fetch_result = fetch_future.await;
+        let fetch_result = fetch.await;
         fetch_guard.disarm();
-        let page_buf = match fetch_result {
-            Ok(page_buf) => page_buf,
-            Err(err) => return Err(err.as_ref().clone()),
-        };
+        let page_buf = fetch_result?;
 
         // Copy the requested portion of the page into the buffer.
         let bytes_to_copy = std::cmp::min(buf.len(), page_buf.len() - offset_in_page);
@@ -581,12 +568,10 @@ async fn fetch_cacheable_page(
     blob: &impl Blob,
     page_num: u64,
     page_size: NonZeroU16,
-) -> Result<IoBuf, Arc<Error>> {
+) -> Result<IoBuf, Error> {
     // CacheRef retains the page, so the source page need not remain in the OS page cache.
     let width: u64 = page_size.widen();
-    let page = get_page_from_blob(blob, page_num, width, ReadOptions::DONT_CACHE)
-        .await
-        .map_err(Arc::new)?;
+    let page = get_page_from_blob(blob, page_num, width, ReadOptions::DONT_CACHE).await?;
 
     // We should never be fetching partial pages through the page cache. This can happen if a
     // non-last page is corrupted and falls back to a partial CRC.
@@ -599,7 +584,7 @@ async fn fetch_cacheable_page(
             actual = len,
             "attempted to fetch partial page from blob"
         );
-        return Err(Arc::new(Error::InvalidChecksum));
+        return Err(Error::InvalidChecksum);
     }
 
     Ok(page)
