@@ -147,8 +147,8 @@ pub struct Deploy {
 
     /// Fraction of traces sent to the monitoring instance.
     ///
-    /// Sampling keys on the deterministic per-view trace identifier, so every validator keeps
-    /// or drops the same views and each kept view arrives as one deployment-wide trace.
+    /// Sampling applies to trace identifiers. Independent validator round roots are sampled
+    /// separately, not as one deployment-wide trace.
     #[arg(long, default_value_t = 0.25, value_parser = parse_sampling_rate)]
     trace_sampling: f64,
 

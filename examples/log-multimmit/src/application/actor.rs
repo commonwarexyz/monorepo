@@ -5,10 +5,11 @@ use commonware_codec::{
     varint::{MAX_U32_VARINT_SIZE, MAX_U64_VARINT_SIZE},
 };
 use commonware_consensus::{
-    Automaton, Epochable as _, Heightable as _, LATENCY, Relay, Reporter,
+    Automaton, Epochable as _, Heightable as _, Relay, Reporter,
     multimmit::{
         Artifact,
         marshal::{Custody, Error as MarshalError, Mailbox, Update},
+        telemetry::WAN_LATENCY,
         types::{Activity, BlockRef, ChainId, Context, TransactionBlock, TransactionBlockHeader},
     },
 };
@@ -141,12 +142,12 @@ impl ProposalLatency {
             finality: context.histogram(
                 "proposal_finalization_latency",
                 "time from block build to inclusion by a directly finalized leader",
-                LATENCY,
+                WAN_LATENCY,
             ),
             ordering: context.histogram(
                 "proposal_ordering_latency",
                 "time from block build to delivery in the total order",
-                LATENCY,
+                WAN_LATENCY,
             ),
             dropped: context.counter(
                 "proposal_latency_dropped_total",
@@ -306,8 +307,8 @@ impl ApplicationMetrics {
             proposal_latency: ProposalLatency::new(context, proposal_capacity),
             body_wait: context.histogram(
                 "verify_body_wait",
-                "time a remote block verification waits for its complete body from marshal",
-                LATENCY,
+                "time a remote verification waits for complete-body resolution and durable custody",
+                WAN_LATENCY,
             ),
         }
     }
@@ -492,7 +493,7 @@ impl<E: Clock + Spawner> Automaton for Application<E> {
                     }
                     return;
                 }
-                let requested_at = SystemTime::now();
+                let requested_at = runtime.current();
                 // A full marshal mailbox rejects the request outright; back off briefly and retry
                 // before reporting no verdict, which consensus answers by validating again later.
                 let mut attempt = 0u32;
@@ -514,7 +515,7 @@ impl<E: Clock + Spawner> Automaton for Application<E> {
                 };
                 match subscription {
                     Ok(block) => {
-                        body_wait.observe_between(requested_at, SystemTime::now());
+                        body_wait.observe_between(requested_at, runtime.current());
                         if block.header() != &header {
                             let _ = sender.send(false);
                             return;

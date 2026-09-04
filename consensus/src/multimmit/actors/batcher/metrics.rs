@@ -28,7 +28,7 @@ pub(super) struct Metrics {
     pub verify_latency: histogram::Timed,
     /// Transcript messages of one verified certificate.
     pub certificate_transcript_messages: Histogram,
-    /// Transcript messages of one verified certificate that a locally verified vote discharged.
+    /// Cached verified votes supplied to one certificate verification, before transcript matching.
     pub certificate_known_messages: Histogram,
 }
 
@@ -73,7 +73,7 @@ impl Metrics {
         );
         let certificate_known_messages = context.histogram(
             "certificate_known_messages",
-            "transcript messages of one verified certificate discharged by known votes",
+            "cached verified votes supplied to one certificate verification before transcript matching",
             [
                 0.0, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 48.0, 64.0, 128.0, 256.0,
             ],

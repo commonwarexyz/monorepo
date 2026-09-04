@@ -1,4 +1,7 @@
-use crate::{LATENCY, multimmit::actors::metrics::Traffic};
+use crate::{
+    LATENCY,
+    multimmit::{actors::metrics::Traffic, telemetry::WAN_LATENCY},
+};
 use commonware_runtime::{
     Metrics as MetricsTrait,
     telemetry::metrics::{
@@ -196,6 +199,8 @@ pub(super) struct Metrics {
     pub proposal_certified_anchors: Histogram,
     /// Proposal positions endorsed by one signed vote. Coverage per unit of bandwidth.
     pub vote_positions: Histogram,
+    /// Extension entries carried by one signed vote, summed over chains.
+    pub vote_extensions: Histogram,
     /// Signed votes endorsing nothing; wasted bandwidth and signing capacity.
     pub empty_votes: Counter,
     /// Deviation records per aggregated certificate; drives redundant verification at scale.
@@ -390,7 +395,7 @@ impl Metrics {
         let da_vote_latency = context.histogram(
             "da_vote_latency",
             "time from first network observation of a transaction block to its DA-vote signing",
-            LATENCY,
+            WAN_LATENCY,
         );
         let da_recovery_latency = context.histogram(
             "da_recovery_latency",
@@ -407,23 +412,23 @@ impl Metrics {
             histogram::Buckets::CRYPTOGRAPHY,
         );
         let round_latency =
-            context.histogram("round_latency", "leader-chain round latency", LATENCY);
+            context.histogram("round_latency", "leader-chain round latency", WAN_LATENCY);
         let vqc_latency = context.histogram(
             "vqc_latency",
             "leader-observed V-QC formation latency",
-            LATENCY,
+            WAN_LATENCY,
         );
         let lqc_latency = context.histogram(
             "lqc_latency",
             "leader-observed L-QC formation latency",
-            LATENCY,
+            WAN_LATENCY,
         );
         let build_latency =
             context.histogram("build_latency", "application build latency", LATENCY);
         let validation_latency = context.histogram(
             "validation_latency",
             "application validation latency",
-            LATENCY,
+            WAN_LATENCY,
         );
         let proposal_payloads = context.histogram(
             "proposal_payloads",
@@ -443,6 +448,11 @@ impl Metrics {
         let empty_votes = context.counter(
             "empty_votes",
             "signed ordinary votes endorsing no positions and carrying no extensions",
+        );
+        let vote_extensions = context.histogram(
+            "vote_extensions",
+            "extension entries carried by one signed ordinary vote, summed over chains",
+            COVERAGE,
         );
         let qc_deviations = context.histogram(
             "qc_deviations",
@@ -525,6 +535,7 @@ impl Metrics {
             proposal_payloads,
             proposal_certified_anchors,
             vote_positions,
+            vote_extensions,
             empty_votes,
             qc_deviations,
             qc_bytes,
@@ -611,13 +622,30 @@ mod tests {
     #[test]
     fn voter_series_footprint_stays_within_budget() {
         const CHAINS: usize = 50;
-        const BUDGET: usize = 720;
+        // This includes five 213-bucket WAN histograms and one aggregate extension histogram.
+        const BUDGET: usize = 1_508;
 
         deterministic::Runner::default().start(|context| async move {
             let voter = context.child("engine").child("voter");
             let _metrics = Metrics::new(&voter, CHAINS);
 
             let encoded = context.encode();
+            for name in [
+                "da_vote_latency",
+                "round_latency",
+                "vqc_latency",
+                "lqc_latency",
+                "validation_latency",
+            ] {
+                let prefix = format!("engine_voter_{name}_");
+                let samples: Vec<_> = encoded
+                    .lines()
+                    .filter(|line| line.starts_with(&prefix))
+                    .collect();
+                assert_eq!(samples.len(), WAN_LATENCY.len() + 3, "{name}");
+                assert!(samples.iter().any(|line| line.contains("le=\"0.485\"")));
+                assert!(samples.iter().all(|line| !line.contains("chain=\"")));
+            }
             let series = encoded
                 .lines()
                 .filter(|line| line.starts_with("engine_voter_"))
