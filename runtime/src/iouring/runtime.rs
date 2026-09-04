@@ -1213,12 +1213,11 @@ impl Worker {
                 timers,
                 drops,
                 driver,
-                completed,
                 ..
             } = &mut *local;
             admissions.clear(drops);
             timers.clear(drops);
-            driver.as_mut().unwrap().close(completed);
+            driver.as_mut().unwrap().close();
             local.apply_completions();
             local.update_pending();
         }
@@ -1390,7 +1389,6 @@ impl Worker {
             .service(*now, defer_kernel_service, completed)
             .expect("io_uring driver service failed");
         local.apply_completions();
-        local.reconcile_admissions();
         let Local {
             timers, now, wakes, ..
         } = &mut *local;

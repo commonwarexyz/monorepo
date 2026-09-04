@@ -276,7 +276,7 @@ impl Blob {
         Self {
             partition,
             name: name.to_vec(),
-            file: Held::new(Arc::new(file), hold),
+            file: Held::new(file, hold),
             pool,
             data_offset,
             dont_cache_supported: Arc::new(AtomicBool::new(true)),

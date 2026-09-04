@@ -442,15 +442,15 @@ impl RetiredResources {
 /// different worker or runner therefore carries its original directory hold
 /// through that worker's eventual kernel retirement.
 pub(crate) struct Held {
-    /// Shared underlying file, also used for synchronous metadata operations.
-    file: Arc<File>,
+    /// File shared through this owner, including synchronous metadata access.
+    file: File,
     /// Directory exclusion retained until every file and request is released.
     _hold: Arc<Hold>,
 }
 
 impl Held {
     /// Retain a file and the directory hold that protects its storage.
-    pub(crate) fn new(file: Arc<File>, hold: Arc<Hold>) -> Arc<Self> {
+    pub(crate) fn new(file: File, hold: Arc<Hold>) -> Arc<Self> {
         Arc::new(Self { file, _hold: hold })
     }
 }
@@ -1084,7 +1084,7 @@ mod tests {
             )
             .unwrap()
         });
-        Held::new(Arc::new(file), hold.clone())
+        Held::new(file, hold.clone())
     }
 
     fn make_read_request(cache: Cache) -> ReadAtRequest {

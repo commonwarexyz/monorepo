@@ -355,6 +355,7 @@ impl Waiters {
     }
 
     /// Ordinary observers still owned by the driver during shutdown.
+    #[cfg(test)]
     pub fn ordinary_observers(&self) -> impl Iterator<Item = (WaiterId, OperationId)> + '_ {
         self.entries.iter().filter_map(|slot| {
             let slot = slot.as_ref()?;
@@ -571,7 +572,7 @@ mod tests {
             )
             .unwrap()
         });
-        Held::new(Arc::new(file), hold.clone())
+        Held::new(file, hold.clone())
     }
 
     fn make_sync_request() -> Request {

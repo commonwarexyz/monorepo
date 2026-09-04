@@ -219,17 +219,12 @@ impl Driver {
         }
     }
 
-    /// Close admission and cancel ordinary observations still owned by the driver.
+    /// Close admission after the caller detaches its ordinary observations.
     ///
     /// The caller first clears its operation slab and admission registrations.
     /// Detached sync observers remain available for terminal publication.
-    pub fn close(&mut self, completed: &mut Vec<Completed>) {
+    pub const fn close(&mut self) {
         self.state.closed = true;
-        let observers = self.state.waiters.ordinary_observers().collect::<Vec<_>>();
-        completed.reserve(observers.len());
-        for (id, operation) in observers {
-            self.orphan(id, operation, completed);
-        }
     }
 
     /// Service posted completions, logical deadlines, and pending SQ work.
@@ -675,7 +670,18 @@ mod tests {
         }
 
         fn drain(&mut self) {
-            self.driver.close(&mut self.completed);
+            // The harness admits directly without Local's operation slab, so
+            // detach its observers before closing admission and retiring I/O.
+            let observers = self
+                .driver
+                .state
+                .waiters
+                .ordinary_observers()
+                .collect::<Vec<_>>();
+            for (id, operation) in observers {
+                self.driver.orphan(id, operation, &mut self.completed);
+            }
+            self.driver.close();
             let limit = Instant::now() + Duration::from_secs(10);
             while !self.driver.is_empty() || self.driver.has_pending_submissions() {
                 assert!(Instant::now() < limit, "driver retirement stalled");
@@ -1186,15 +1192,13 @@ mod tests {
             std::env::temp_dir().join(format!("commonware_driver_test_{}", std::process::id()));
         let hold = Hold::acquire(&directory).unwrap();
         let path = directory.join("durable");
-        let file = Arc::new(
-            OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(&path)
-                .unwrap(),
-        );
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .unwrap();
         let held = Held::new(file, hold);
         let bufs = IoBufs::from(
             (0..IOVEC_BATCH_SIZE + 1)
