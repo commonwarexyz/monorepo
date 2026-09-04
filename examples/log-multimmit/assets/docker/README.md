@@ -14,6 +14,13 @@ This produces two files:
 
 Use `just build linux/amd64` when the selected EC2 instance type is x86-64. The image builds the
 locked `release-with-debug` profile and exports binaries rather than a runtime container image.
+For Graviton4 instances, select the Neoverse V2 CPU explicitly:
+
+```sh
+just build linux/arm64 deploy neoverse-v2
+```
+
+The CPU defaults to `generic`. CPU-specific binaries must only run on compatible instances.
 Keep the debug binary locally for on-demand symbolication:
 
 ```sh
