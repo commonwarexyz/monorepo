@@ -27,7 +27,7 @@ blocks as fast as its leader can build them. In a global deployment of
 your browser." />
     <meta property="article:author" content="Brendan Chou" />
     <meta property="article:published_time" content="2026-08-12T00:00:00Z" />
-    <meta property="article:modified_time" content="2026-08-12T00:00:00Z" />
+    <meta property="article:modified_time" content="2026-08-13T00:00:00Z" />
 
     <link rel="canonical" href="https://commonware.xyz/blogs/pipelining-simplex" />
 
@@ -239,8 +239,12 @@ Chou</a></div>
         rest of the term through Simplex’s normal nullification
         path.</p>
         <p>The term boundary is also a leader handoff, so optimistic
-        work stops there. The first view of a new term must start from
-        certified ancestry. Together, these rules let Simplex views
+        work stops there by default: the first view of a new term must
+        start from certified ancestry. A <em>pipelined handoff</em> lets
+        the incoming leader propose on the outgoing leader’s tip before
+        it notarizes. The incoming leader therefore trusts the outgoing
+        leader not to equivocate. Rotating leaders benefit most, since
+        every view is a handoff. Together, these rules let Simplex views
         pipeline without changing the evidence required for
         finalization.</p>
         <p>The consensus configuration also sets a bound on how many
