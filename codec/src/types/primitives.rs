@@ -47,8 +47,8 @@ macro_rules! impl_numeric {
                 buf.$try_read_method().map_err(|_| Error::EndOfBuffer)
             }
 
-            // Since the upfront size check guarantees the buffer contains every requested
-            // value, elements are read directly without per-element bounds checks.
+            // The upfront check bounds the allocation and lets the infallible getters
+            // below run without panicking.
             #[inline]
             fn read_vec(buf: &mut impl Buf, len: usize, _: &()) -> Result<Vec<Self>, Error> {
                 at_least_items(buf, len, Self::SIZE)?;
@@ -113,14 +113,7 @@ impl Read for u8 {
     fn read_vec(buf: &mut impl Buf, len: usize, _: &()) -> Result<Vec<Self>, Error> {
         at_least(buf, len)?;
         let mut values = Vec::with_capacity(len);
-        let mut remaining = len;
-        while remaining > 0 {
-            let chunk = buf.chunk();
-            let n = chunk.len().min(remaining);
-            values.extend_from_slice(&chunk[..n]);
-            buf.advance(n);
-            remaining -= n;
-        }
+        values.put(buf.take(len));
         Ok(values)
     }
 

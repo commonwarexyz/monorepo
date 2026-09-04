@@ -236,16 +236,6 @@ pub(crate) mod tests {
             self.inner.advance(cnt)
         }
 
-        fn copy_to_slice(&mut self, dst: &mut [u8]) {
-            self.bulk_read_calls += 1;
-            self.inner.copy_to_slice(dst);
-        }
-
-        fn try_copy_to_slice(&mut self, dst: &mut [u8]) -> Result<(), TryGetError> {
-            self.bulk_read_calls += 1;
-            self.inner.try_copy_to_slice(dst)
-        }
-
         fn get_u8(&mut self) -> u8 {
             self.byte_read_calls += 1;
             self.inner.get_u8()
