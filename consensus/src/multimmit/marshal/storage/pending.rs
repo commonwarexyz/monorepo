@@ -3,6 +3,7 @@
 //! Blocks and their compact metadata use aligned local positions within independently reclaimable
 //! segments. The segment identifier and local position form one global append coordinate. A
 //! durable manifest preserves that coordinate and each chain's logical prune floor across crashes.
+//! Segment capacity bounds each journal's size; the journals do not need internal blob rotation.
 
 use super::{
     archive::Shared,
@@ -46,7 +47,7 @@ type BodySnapshot<E, H, B> = variable::Reader<'static, E, StoredBody<H, B>>;
 type MetadataJournal<E, H> = variable::Journal<E, BlockMeta<<H as Hasher>::Digest>>;
 type MetadataSnapshot<E, H> = variable::Reader<'static, E, BlockMeta<<H as Hasher>::Digest>>;
 
-const STATE_VERSION: u8 = 1;
+const STATE_VERSION: u8 = 2;
 /// Bounds file descriptors and filesystem operations used by one segment I/O wave.
 pub(in crate::multimmit::marshal) const BODY_READ_CONCURRENCY: usize = 16;
 
@@ -789,8 +790,7 @@ where
     fn body_config(&self, segment: u64) -> variable::Config<B::Cfg> {
         variable::Config {
             partition: self.segment_prefix("bodies", segment),
-            items_per_section: NonZeroU64::new(self.segment_capacity)
-                .expect("segment capacity is nonzero"),
+            items_per_section: NonZeroU64::MAX,
             compression: None,
             codec_config: self.body_codec_config.clone(),
             page_cache: self.archive.page_cache.clone(),
@@ -819,8 +819,7 @@ where
     fn metadata_config(&self, segment: u64) -> variable::Config<()> {
         variable::Config {
             partition: self.segment_prefix("metadata", segment),
-            items_per_section: NonZeroU64::new(self.segment_capacity)
-                .expect("segment capacity is nonzero"),
+            items_per_section: NonZeroU64::MAX,
             compression: None,
             codec_config: (),
             page_cache: self.archive.page_cache.clone(),
@@ -1680,6 +1679,46 @@ mod tests {
             locator.encoded_len += 1;
             let reader = store.active_readers.get(&0).unwrap();
             assert!(reader.read(locator).await.is_err());
+        });
+    }
+
+    #[test]
+    fn segment_rollover_does_not_rotate_inner_journals() {
+        deterministic::Runner::default().start(|context| async move {
+            let prefix = "pending_single_blob_segments";
+            let mut store = open(&context, "store", prefix).await;
+            let references = fill_first_segment(&mut store).await;
+
+            for segment in 0..=1 {
+                for family in ["bodies", "metadata"] {
+                    for suffix in ["data", "offsets-blobs"] {
+                        let partition = format!("{prefix}_{family}_{segment}_{suffix}");
+                        assert_eq!(
+                            context.scan(&partition).await.unwrap(),
+                            vec![0u64.to_be_bytes().to_vec()],
+                            "pending segments bound their journals: {partition}"
+                        );
+                    }
+                }
+            }
+
+            drop(store);
+            let mut store = open(&context, "reopened", prefix).await;
+            for reference in references {
+                assert_eq!(
+                    store.block(reference).await.unwrap().unwrap().reference(),
+                    reference
+                );
+            }
+            let next = block(1, 2, 4);
+            let reference = next.reference();
+            store.put(reference, next).await.unwrap();
+            sync(&mut store).await;
+            assert_eq!(store.next_position, 4);
+            assert_eq!(
+                store.block(reference).await.unwrap().unwrap().reference(),
+                reference
+            );
         });
     }
 
