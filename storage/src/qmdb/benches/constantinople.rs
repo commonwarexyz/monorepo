@@ -7,7 +7,7 @@
 //! any optimization must reproduce identical roots).
 //!
 //! Usage:
-//!   cargo bench -p commonware-storage --bench constantinople -- <db> [depth] [iters] [keys] [reads] [read_chunks] [updates] [threads] [page_cache]
+//!   cargo bench -p commonware-storage --bench constantinople -- <db> [depth] [iters] [keys] [reads] [read_chunks] [updates] [threads] [page_cache] [mode]
 //!
 //! - db: one of "any::unordered::fixed::mmb", "any::ordered::fixed::mmb",
 //!   "any::unordered::variable::mmb", "current::unordered::fixed::mmb", or
@@ -23,6 +23,11 @@
 //! - threads: strategy pool threads (default 8)
 //! - page_cache: page cache capacity in 4096-byte pages (default 131,072 = 512MiB, enough
 //!   to hold the default working set; shrink it to measure miss-heavy regimes)
+//! - mode: cache regime for the timed load (default "warm"). "warm" = no cache drop (in-RAM
+//!   baseline); "cold" = drop the OS page cache before each timed load so app-cache misses hit
+//!   disk (pair with a small page_cache and large keys for a true out-of-RAM regime); "prefetch"
+//!   = drop, then warm the block's read set into the page cache before timing (models a gap-time
+//!   prefetch). The load_p50/load_mean columns of the cold vs prefetch runs bound the prefetch win.
 
 use commonware_cryptography::{DigestOf, Hasher as _, Sha256};
 use commonware_parallel::Rayon;
@@ -152,10 +157,36 @@ struct Args {
     num_updates: u64,
     num_reads: u64,
     read_chunks: usize,
+    // Cache regime for the timed load: "warm" (no drop, in-RAM baseline), "cold" (drop the OS
+    // page cache before each timed load so app-cache misses hit disk), or "prefetch" (drop, then
+    // warm the block's read set into the page cache before timing, modeling a gap-time prefetch).
+    mode: String,
 }
 
 fn key(i: u64) -> Digest {
     Sha256::hash(&[&i.to_be_bytes()])
+}
+
+/// Drop the OS page cache (requires passwordless sudo), returning whether it succeeded. Combined
+/// with a page cache smaller than the state, this forces the timed load into the disk-bound
+/// (out-of-RAM) regime the prefetch optimization targets.
+fn drop_os_caches() -> bool {
+    #[cfg(target_os = "linux")]
+    let status = std::process::Command::new("sh")
+        .args([
+            "-c",
+            "sync && echo 3 | sudo -n tee /proc/sys/vm/drop_caches > /dev/null",
+        ])
+        .status();
+    #[cfg(target_os = "macos")]
+    let status = std::process::Command::new("sudo")
+        .args(["-n", "purge"])
+        .status();
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let status = std::io::Result::<std::process::ExitStatus>::Err(std::io::Error::other(
+        "unsupported platform",
+    ));
+    matches!(status, Ok(s) if s.success())
 }
 
 fn gen_muts(rng: &mut TestRng, num_updates: u64, num_keys: u64) -> Vec<(Digest, Digest)> {
@@ -167,20 +198,23 @@ fn gen_muts(rng: &mut TestRng, num_updates: u64, num_keys: u64) -> Vec<(Digest, 
         .collect()
 }
 
-fn report(db: &str, args: &Args, mut times_ms: Vec<f64>) {
+fn report(db: &str, args: &Args, mut times_ms: Vec<f64>, mut load_ms: Vec<f64>) {
     times_ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let p = |q: f64| times_ms[((times_ms.len() - 1) as f64 * q) as usize];
-    let mean: f64 = times_ms.iter().sum::<f64>() / times_ms.len() as f64;
+    load_ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let pct = |v: &[f64], q: f64| v[((v.len() - 1) as f64 * q) as usize];
+    let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
     println!(
-        "RESULT db={db} depth={} reads={} read_chunks={} updates={} p10={:.2} p50={:.2} mean={:.2} max={:.2}",
+        "RESULT db={db} mode={} depth={} reads={} read_chunks={} updates={} total_p50={:.2} total_mean={:.2} load_p50={:.2} load_mean={:.2} load_max={:.2}",
+        args.mode,
         args.depth,
         args.num_reads,
         args.read_chunks,
         args.num_updates,
-        p(0.1),
-        p(0.5),
-        mean,
-        times_ms[times_ms.len() - 1]
+        pct(&times_ms, 0.5),
+        mean(&times_ms),
+        pct(&load_ms, 0.5),
+        mean(&load_ms),
+        load_ms[load_ms.len() - 1]
     );
 }
 
@@ -217,6 +251,7 @@ macro_rules! run_pipeline {
 
         let mut rng = TestRng::new(99);
         let mut times_ms: Vec<f64> = Vec::with_capacity(args.iters);
+        let mut load_ms: Vec<f64> = Vec::with_capacity(args.iters);
         for iter in 0..args.iters {
             // Pending ancestors are rebuilt per iteration and never applied (untimed). The
             // whole chain is held alive: dropping an uncommitted ancestor before merkleize
@@ -249,6 +284,22 @@ macro_rules! run_pipeline {
                     .map_or_else(|| db.new_batch(), |p| p.new_batch::<Sha256>())
             };
 
+            // Out-of-RAM regime: drop the OS page cache so the timed load's app-cache misses hit
+            // disk (paired with a page cache smaller than the state).
+            if args.mode != "warm" && !drop_os_caches() {
+                eprintln!(
+                    "WARNING: drop_os_caches failed (need passwordless sudo); load is NOT cold"
+                );
+            }
+            // Gap prefetch: warm this block's access set (read set for the load, write set for
+            // the grafted-tree inputs) via the real fork-agnostic prefetch API, modeling a
+            // prefetch issued during the inter-block gap.
+            if args.mode == "prefetch" {
+                let write_keys: Vec<&Digest> =
+                    updates.iter().map(|&(idx, _)| &reads[idx].0).collect();
+                db.prefetch(keys.as_slice(), &write_keys).await;
+            }
+
             // Timed: load all touched keys, merkleize selected updates, read root. The
             // load returns a staged batch that consumes `(read_index, value)` pairs after the
             // caller has computed them.
@@ -274,6 +325,7 @@ macro_rules! run_pipeline {
             let elapsed = start.elapsed();
 
             times_ms.push(elapsed.as_secs_f64() * 1000.0);
+            load_ms.push(t_load.as_secs_f64() * 1000.0);
             println!(
                 "iter={iter} ms={:.2} load={:.2} merkleize={:.2} root={root}",
                 times_ms[iter],
@@ -282,7 +334,7 @@ macro_rules! run_pipeline {
             );
         }
 
-        report($label, &args, times_ms);
+        report($label, &args, times_ms, load_ms);
         db.destroy().await.unwrap();
     }};
 }
@@ -305,6 +357,7 @@ fn main() {
         num_reads: raw.get(5).and_then(|s| s.parse().ok()).unwrap_or(32_768),
         read_chunks: raw.get(6).and_then(|s| s.parse().ok()).unwrap_or(1),
         num_updates: raw.get(7).and_then(|s| s.parse().ok()).unwrap_or(32_768),
+        mode: raw.get(10).cloned().unwrap_or_else(|| "warm".to_string()),
     };
     let threads: NonZeroUsize = raw
         .get(8)
@@ -333,10 +386,20 @@ fn main() {
         "iters, keys, and updates must be non-zero, and reads must be >= updates"
     );
     assert!(args.read_chunks > 0, "read_chunks must be non-zero");
+    assert!(
+        matches!(args.mode.as_str(), "warm" | "cold" | "prefetch"),
+        "mode: warm|cold|prefetch"
+    );
 
     eprintln!(
-        "constantinople db={db_kind} depth={} iters={} keys={} reads={} read_chunks={} updates={} threads={threads} page_cache={page_cache}",
-        args.depth, args.iters, args.num_keys, args.num_reads, args.read_chunks, args.num_updates
+        "constantinople db={db_kind} depth={} iters={} keys={} reads={} read_chunks={} updates={} threads={threads} page_cache={page_cache} mode={}",
+        args.depth,
+        args.iters,
+        args.num_keys,
+        args.num_reads,
+        args.read_chunks,
+        args.num_updates,
+        args.mode
     );
 
     Runner::new(RConfig::default()).start(|ctx| async move {

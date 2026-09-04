@@ -40,6 +40,12 @@ pub(crate) struct Metrics<E: Clock> {
     get_many_duration: Timed,
     /// Lookups requested by read paths, whether or not they are found.
     pub lookups_requested: Counter,
+    /// Best-effort prefetch (cache-warming) calls.
+    pub prefetch_calls: Counter,
+    /// Duration of prefetch calls.
+    prefetch_duration: Timed,
+    /// Keys submitted to prefetch calls (read plus write).
+    pub prefetch_keys: Counter,
     /// Durable commit calls.
     pub commit_calls: Counter,
     /// Duration of commit calls.
@@ -93,6 +99,16 @@ impl<E: RuntimeMetrics + Clock> Metrics<E> {
                 "lookups_requested",
                 "Number of lookups requested by get/get-many calls, including misses",
             ),
+            prefetch_calls: context.counter("prefetch_calls", "Number of prefetch calls"),
+            prefetch_duration: Timed::register(
+                &context,
+                "prefetch_duration",
+                "Duration of prefetch calls",
+            ),
+            prefetch_keys: context.counter(
+                "prefetch_keys",
+                "Number of keys submitted to prefetch calls (read plus write)",
+            ),
             commit_calls: context.counter("commit_calls", "Number of commit calls"),
             commit_duration: Timed::register(
                 &context,
@@ -120,6 +136,10 @@ impl<E: Clock> Metrics<E> {
 
     pub(crate) fn get_many_timer(&self) -> ScopedTimer<E> {
         self.get_many_duration.scoped(&self.clock)
+    }
+
+    pub(crate) fn prefetch_timer(&self) -> ScopedTimer<E> {
+        self.prefetch_duration.scoped(&self.clock)
     }
 
     pub(crate) fn commit_timer(&self) -> ScopedTimer<E> {
