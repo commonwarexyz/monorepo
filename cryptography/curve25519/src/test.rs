@@ -22,6 +22,10 @@
 #[cfg(test)]
 mod vectors;
 
+/// ZIP215 point encodings shared with the curve property tests.
+#[cfg(test)]
+pub(crate) const ZIP215_POINTS: [[u8; 32]; 14] = vectors::ZIP215_POINTS;
+
 use crate::{
     key_exchange::{PublicKey as ExchangePublicKey, SecretKey},
     signing::{BatchVerifier, Signature, SigningKey, VerifyingKey},
@@ -30,7 +34,7 @@ use arbitrary::{Arbitrary, Unstructured};
 use commonware_codec::DecodeExt as _;
 use commonware_formatting::hex;
 use commonware_math::algebra::Random as _;
-use commonware_parallel::Sequential;
+use commonware_parallel::{Sequential, Strategy};
 use commonware_utils::{FuzzRng, union_unique};
 use ed25519_consensus::SigningKey as ConsensusSigningKey;
 
@@ -142,7 +146,7 @@ struct SecretBytes([u8; 32]);
 
 impl Arbitrary<'_> for SecretBytes {
     fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
-        let bytes = if u.ratio(3, 4)? {
+        let bytes = if u.ratio(1, 4)? {
             *u.choose(&INTERESTING_SECRET_BYTES)?
         } else {
             u.arbitrary()?
@@ -404,8 +408,23 @@ impl Item {
     }
 
     fn verify(&self) -> bool {
-        self.verifying_key
-            .verify(&self.namespace, &self.message, &self.signature)
+        let actual = self
+            .verifying_key
+            .verify(&self.namespace, &self.message, &self.signature);
+        let decoded = VerifyingKey::decode(self.verifying_key.as_ref()).unwrap();
+        assert_eq!(
+            decoded.verify(&self.namespace, &self.message, &self.signature),
+            actual
+        );
+
+        let signature = ed25519_consensus::Signature::try_from(self.signature.as_ref()).unwrap();
+        let expected = ed25519_consensus::VerificationKey::try_from(self.verifying_key.as_ref())
+            .is_ok_and(|key| {
+                key.verify(&signature, &union_unique(&self.namespace, &self.message))
+                    .is_ok()
+            });
+        assert_eq!(actual, expected, "item: {self:#?}");
+        actual
     }
 }
 
@@ -470,7 +489,25 @@ impl Arbitrary<'_> for Batch {
 
 impl Batch {
     fn run(self) {
-        let expected = !self.items.is_empty() && self.items.iter().all(Item::verify);
+        let mut expected = !self.items.is_empty();
+        for item in &self.items {
+            expected &= item.verify();
+        }
+        assert_eq!(self.verify(&Sequential), expected, "batch: {self:#?}");
+        #[cfg(test)]
+        {
+            let strategy = commonware_parallel::Rayon::new(commonware_utils::NZUsize!(4))
+                .unwrap()
+                .manual();
+            assert_eq!(
+                self.verify(&strategy),
+                expected,
+                "parallel batch: {self:#?}"
+            );
+        }
+    }
+
+    fn verify(&self, strategy: &impl Strategy) -> bool {
         let mut batch = BatchVerifier::new(self.items.len());
         for item in &self.items {
             batch.add(
@@ -481,14 +518,13 @@ impl Batch {
             );
         }
         let SecretBytes(rng_seed) = self.rng_seed;
-        let actual = batch.verify(&mut FuzzRng::new(rng_seed.to_vec()), &Sequential);
-        assert_eq!(actual, expected, "batch: {self:#?}");
+        batch.verify(&mut FuzzRng::new(rng_seed.to_vec()), strategy)
     }
 }
 
 /// Fuzzing operations for public API invariants.
 pub mod fuzz {
-    use super::{Batch, KeyExchange, Signing};
+    use super::{Batch, Item, KeyExchange, Signing};
     use arbitrary::{Arbitrary, Unstructured};
 
     /// A public API fuzzing operation.
@@ -498,6 +534,8 @@ pub mod fuzz {
         BatchMatchesIndividual,
         /// Check that signing agrees with `ed25519-consensus`.
         SigningMatchesConsensus,
+        /// Check that verification agrees with `ed25519-consensus`.
+        VerificationMatchesConsensus,
         /// Check that key exchange agrees with `x25519-dalek`.
         KeyExchangeMatchesDalek,
     }
@@ -508,6 +546,9 @@ pub mod fuzz {
             match self {
                 Self::BatchMatchesIndividual => u.arbitrary::<Batch>()?.run(),
                 Self::SigningMatchesConsensus => u.arbitrary::<Signing>()?.run(),
+                Self::VerificationMatchesConsensus => {
+                    u.arbitrary::<Item>()?.verify();
+                }
                 Self::KeyExchangeMatchesDalek => u.arbitrary::<KeyExchange>()?.run(),
             }
             Ok(())
@@ -534,6 +575,15 @@ pub mod fuzz {
 
     #[cfg(test)]
     #[test]
+    fn minifuzz_verification_matches_consensus() {
+        commonware_invariants::minifuzz::Builder::default()
+            .with_seed(0)
+            .with_search_limit(100)
+            .test(|u| Plan::VerificationMatchesConsensus.run(u));
+    }
+
+    #[cfg(test)]
+    #[test]
     fn minifuzz_key_exchange_matches_dalek() {
         commonware_invariants::minifuzz::Builder::default()
             .with_seed(0)
@@ -551,8 +601,13 @@ mod tests {
             WYCHEPROOF_X25519, ZIP215_POINTS,
         },
     };
-    use crate::{key_exchange::SecretKey, signing::SigningKey};
+    use crate::{
+        key_exchange::SecretKey,
+        signing::{BatchVerifier, SigningKey},
+    };
     use commonware_codec::DecodeExt as _;
+    use commonware_parallel::{Rayon, Sequential, Strategy};
+    use commonware_utils::{NZUsize, test_rng};
 
     #[test]
     fn rfc8032_ed25519_vectors() {
@@ -570,6 +625,11 @@ mod tests {
                 "RFC 8032 test {} signature",
                 vector.name,
             );
+            let signature = Signature::decode(vector.signature.as_slice()).unwrap();
+            let cached = signing_key.verifying_key();
+            let decoded = VerifyingKey::decode(vector.public_key.as_slice()).unwrap();
+            assert!(cached.verify_raw(vector.message, &signature));
+            assert!(decoded.verify_raw(vector.message, &signature));
         }
     }
 
@@ -577,8 +637,21 @@ mod tests {
     fn wycheproof_ed25519_vectors() {
         for vector in WYCHEPROOF_ED25519 {
             let verifying_key = VerifyingKey::decode(vector.public_key.as_slice()).unwrap();
-            let valid = Signature::decode(vector.signature)
-                .is_ok_and(|signature| verifying_key.verify_raw(vector.message, &signature));
+            let valid = Signature::decode(vector.signature).is_ok_and(|signature| {
+                let valid = verifying_key.verify_raw(vector.message, &signature);
+                let batch = || {
+                    let mut batch = BatchVerifier::new(1);
+                    batch.add_raw(vector.message, &verifying_key, &signature);
+                    batch
+                };
+                assert_eq!(
+                    batch().verify(&mut test_rng(), &Sequential),
+                    vector.valid_zip215,
+                    "sequential Wycheproof test {}",
+                    vector.tc_id
+                );
+                valid
+            });
             assert_eq!(
                 valid, vector.valid_zip215,
                 "Wycheproof Ed25519 test {}",
@@ -638,6 +711,9 @@ mod tests {
         const NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_CURVE25519_ZIP215_VECTORS";
 
         let message = b"Zcash";
+        let parallel = Rayon::new(NZUsize!(4)).unwrap().manual();
+        let mut all_sequential = BatchVerifier::new(196);
+        let mut all_parallel = BatchVerifier::new(196);
 
         // These are the 196 ZIP215 test vectors: every pairing of the eight canonical
         // low-order encodings and their six non-canonical aliases. With s = 0, each pair
@@ -653,7 +729,17 @@ mod tests {
                     verifying_key.verify(NAMESPACE, message, &signature),
                     "ZIP215 vector failed for A={public_key_bytes:?}, R={r_bytes:?}",
                 );
+                let batch = || {
+                    let mut batch = BatchVerifier::new(1);
+                    batch.add(NAMESPACE, message, &verifying_key, &signature);
+                    batch
+                };
+                assert!(batch().verify(&mut test_rng(), &Sequential));
+                all_sequential.add(NAMESPACE, message, &verifying_key, &signature);
+                all_parallel.add(NAMESPACE, message, &verifying_key, &signature);
             }
         }
+        assert!(all_sequential.verify(&mut test_rng(), &Sequential));
+        assert!(all_parallel.verify(&mut test_rng(), &parallel));
     }
 }

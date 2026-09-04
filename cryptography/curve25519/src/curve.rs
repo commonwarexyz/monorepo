@@ -99,12 +99,15 @@ impl F {
             l[i + 1] += l[i] >> 51;
             l[i] &= MASK_51;
         }
-        l[0] += (l[4] >> 51) * 19;
+        let high = l[4] >> 51;
+        l[0] += (high << 4) + (high << 1) + high;
         l[4] &= MASK_51;
         Self(l)
     }
 
     /// Carry-propagates the limbs for canonical serialization.
+    ///
+    /// All limbs are below `2^51`, except limb 1, which may equal `2^51`.
     fn carry(&self) -> Self {
         let mut l = Self::reduce(self.0).0;
         l[1] += l[0] >> 51;
@@ -148,11 +151,15 @@ impl F {
     }
 
     /// Returns whether two canonical representatives are equal.
+    ///
+    /// Variable-time; use only with public field elements.
     pub fn eq(&self, other: &Self) -> bool {
         self.to_bytes() == other.to_bytes()
     }
 
     /// Returns whether the canonical representative is zero.
+    ///
+    /// Variable-time; use only with public field elements.
     pub fn is_zero(&self) -> bool {
         self.eq(&Self::ZERO)
     }
@@ -188,7 +195,8 @@ impl F {
             c[i + 1] += c[i] >> 51;
             c[i] &= MASK;
         }
-        c[0] += 19 * (c[4] >> 51);
+        let high = c[4] >> 51;
+        c[0] += (high << 4) + (high << 1) + high;
         c[4] &= MASK;
         c[1] += c[0] >> 51;
         c[0] &= MASK;
@@ -209,7 +217,8 @@ impl F {
         }
         let (low, high) = c.split_at_mut(5);
         for (low, high) in low.iter_mut().zip(high) {
-            *low += 19 * *high;
+            // Checked u128 multiplication by 19 can emit operand-dependent branches on AArch64.
+            *low += (*high << 4) + (*high << 1) + *high;
         }
         Self::from_wide([c[0], c[1], c[2], c[3], c[4]])
     }
@@ -334,6 +343,8 @@ impl FVec {
     }
 
     /// Selects `other` in lanes whose corresponding mask is true.
+    ///
+    /// Variable-time; the mask must be public.
     fn select_lanes(self, other: Self, select_other: &[bool; LANES]) -> Self {
         let masks = select_other.map(|select| 0u64.wrapping_sub(select as u64));
         Self {
@@ -432,8 +443,8 @@ impl G {
         //   C = 2d * T1 * T2                 G = D + C        Z3 = F*G
         //   D = 2 * Z1 * Z2                  H = B + A        T3 = E*H
         //
-        // The formula is complete because d is non-square. The extended-coordinate invariant
-        // holds identically: (E*H)*(F*G) = (E*F)*(G*H).
+        // The formula is complete because a = -1 is a square and d is non-square. The
+        // extended-coordinate invariant holds identically: (E*H)*(F*G) = (E*F)*(G*H).
         let a = self.y.sub(self.x).mul(rhs.y.sub(rhs.x));
         let b = self.y.add(self.x).mul(rhs.y.add(rhs.x));
         let c = self.t.mul(rhs.t).mul(F::EDWARDS_D2);
@@ -574,6 +585,8 @@ impl GAffine {
     };
 
     /// Decompresses a point encoding, accepting non-canonical `y` values per ZIP215.
+    ///
+    /// Also accepts `x = 0` with the sign bit set (negative zero), as ZIP215 requires.
     pub fn decompress(bytes: &[u8; 32]) -> Option<Self> {
         let sign = bytes[31] >> 7;
         let y = F::from_bytes(bytes);
@@ -778,7 +791,11 @@ impl GAffineVec {
     }
 
     /// Untransposes backend lanes into scalar affine points.
-    #[cfg(any(test, feature = "fuzz", not(target_arch = "aarch64")))]
+    #[cfg(any(
+        test,
+        feature = "fuzz",
+        not(all(target_arch = "aarch64", target_feature = "neon"))
+    ))]
     pub fn untranspose(self) -> [GAffine; LANES] {
         let x = self.x.untranspose();
         let y = self.y.untranspose();
@@ -791,6 +808,8 @@ impl GAffineVec {
     }
 
     /// Packs affine points, negating the selected lanes.
+    ///
+    /// Variable-time; the lane signs must be public.
     pub fn from_signed_lanes<B: FBackend>(
         backend: B,
         lanes: &[GAffine; LANES],
@@ -883,9 +902,13 @@ pub mod montgomery;
 // Now, a module for each backend.
 #[cfg(all(target_arch = "x86_64", any(feature = "std", test)))]
 mod avx512;
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
 mod neon;
-#[cfg(any(test, feature = "fuzz", not(target_arch = "aarch64")))]
+#[cfg(any(
+    test,
+    feature = "fuzz",
+    not(all(target_arch = "aarch64", target_feature = "neon"))
+))]
 mod portable;
 #[cfg(any(test, feature = "fuzz"))]
 pub mod test;
@@ -899,8 +922,9 @@ pub fn test_backend() -> impl Backend {
 /// Run a computation with the best [`Backend`] this CPU supports.
 ///
 /// This is the only way to gain access to a backend. AVX-512 requires runtime feature detection;
-/// AArch64 includes NEON in its baseline ISA. Every use is forced through this single gate so an
-/// accelerated backend is only constructed where its instructions are guaranteed to be available.
+/// NEON is selected only when enabled by the AArch64 target. Every use is forced through this
+/// single gate so an accelerated backend is only constructed where its instructions are
+/// guaranteed to be available.
 pub fn with_backend<F: WithBackend>(f: F) -> F::Output {
     #[cfg(all(target_arch = "x86_64", any(feature = "std", test)))]
     {
@@ -910,12 +934,12 @@ pub fn with_backend<F: WithBackend>(f: F) -> F::Output {
             return unsafe { backend.call(f) };
         }
     }
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
     {
-        // NEON is part of the AArch64 baseline, so no runtime feature check is needed.
+        // The target guarantees NEON support, so no runtime feature check is needed.
         f.call(neon::Backend::new())
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
     {
         // Portable fallback, available everywhere.
         f.call(portable::Backend::new())

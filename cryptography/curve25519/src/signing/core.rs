@@ -65,8 +65,8 @@ impl Signature {
 /// CSPRNG (and never revealed) are indistinguishable from exactly that. Deriving each signature's
 /// coefficient from its *position* rather than drawing all of them from the shared `rng` up
 /// front lets every thread compute its own signatures' coefficients locally -- and makes the
-/// batch's entire execution a deterministic function of `(items, seed)`, identical at every
-/// thread count.
+/// batch's coefficients and verdict deterministic functions of `(items, seed)`, identical at
+/// every thread count.
 fn batch_coefficients(seed: &[u8; 32], block: u64) -> [Scalar; 4] {
     let digest = sha512(&[seed, &block.to_le_bytes()]);
     core::array::from_fn(|k| {
@@ -428,15 +428,15 @@ mod tests {
         let a = batch_coefficients(&seed, 0);
         let b = batch_coefficients(&seed, 0);
         for k in 0..4 {
-            assert_eq!(a[k].0, b[k].0);
+            assert_eq!(a[k].to_bytes(), b[k].to_bytes());
         }
         assert_ne!(
-            batch_coefficients(&seed, 0)[0].0,
-            batch_coefficients(&seed, 1)[0].0
+            batch_coefficients(&seed, 0)[0].to_bytes(),
+            batch_coefficients(&seed, 1)[0].to_bytes()
         );
         assert_ne!(
-            batch_coefficients(&seed, 0)[0].0,
-            batch_coefficients(&[8u8; 32], 0)[0].0
+            batch_coefficients(&seed, 0)[0].to_bytes(),
+            batch_coefficients(&[8u8; 32], 0)[0].to_bytes()
         );
     }
 
