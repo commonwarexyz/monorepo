@@ -461,6 +461,21 @@ impl BatchVerifier {
         });
     }
 
+    /// Queues an unframed message for raw Ed25519 test-vector checks.
+    #[cfg(test)]
+    pub(crate) fn add_raw(
+        &mut self,
+        message: &[u8],
+        public_key: &VerifyingKey,
+        signature: &Signature,
+    ) {
+        self.items.push(BatchItem {
+            message: message.to_vec(),
+            public_key: public_key.bytes,
+            signature: core::Signature::from_bytes(signature.bytes),
+        });
+    }
+
     /// Checks all the signatures in the batch.
     ///
     /// Empty batches and batches containing more than `u32::MAX` signatures are rejected. Within
