@@ -634,24 +634,41 @@ mod tests {
     use crate::{
         Clock as _, IoBufMut, IoBufs, Runner as _,
         iouring::{Config, RingConfig, Runner},
-        utils::reschedule,
+        utils::{extract_panic_message, reschedule},
     };
     use futures::{FutureExt as _, poll};
     use std::{
         os::{fd::OwnedFd, unix::net::UnixStream},
+        panic::{AssertUnwindSafe, catch_unwind},
         sync::atomic::{AtomicUsize, Ordering},
         task::{RawWaker, RawWakerVTable},
         time::Duration,
     };
 
     /// Arbitrary waker callbacks that reenter the current worker's local state.
+    #[derive(Default)]
     struct Reentrant {
         clones: AtomicUsize,
         wakes: AtomicUsize,
         drops: AtomicUsize,
+        panic_callback: AtomicUsize,
     }
 
     impl Reentrant {
+        const CLONE: usize = 1;
+        const WAKE: usize = 2;
+        const DROP: usize = 3;
+
+        fn panic_once(&self, callback: usize) {
+            if self
+                .panic_callback
+                .compare_exchange(callback, 0, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                panic!("waker callback panic {callback}");
+            }
+        }
+
         fn check_local() {
             if let Some(local) = runtime::current() {
                 // A callback under an outstanding Local borrow fails here.
@@ -665,6 +682,7 @@ mod tests {
             let owner = mem::ManuallyDrop::new(unsafe { Arc::from_raw(data.cast::<Self>()) });
             Self::check_local();
             owner.clones.fetch_add(1, Ordering::Relaxed);
+            owner.panic_once(Self::CLONE);
             RawWaker::new(Arc::into_raw(Arc::clone(&owner)).cast(), &Self::VTABLE)
         }
 
@@ -674,6 +692,7 @@ mod tests {
             let owner = unsafe { Arc::from_raw(data.cast::<Self>()) };
             Self::check_local();
             owner.wakes.fetch_add(1, Ordering::Relaxed);
+            owner.panic_once(Self::WAKE);
         }
 
         unsafe fn wake_by_ref(data: *const ()) {
@@ -682,6 +701,7 @@ mod tests {
             let owner = mem::ManuallyDrop::new(unsafe { Arc::from_raw(data.cast::<Self>()) });
             Self::check_local();
             owner.wakes.fetch_add(1, Ordering::Relaxed);
+            owner.panic_once(Self::WAKE);
         }
 
         unsafe fn drop(data: *const ()) {
@@ -689,6 +709,7 @@ mod tests {
             let owner = unsafe { Arc::from_raw(data.cast::<Self>()) };
             Self::check_local();
             owner.drops.fetch_add(1, Ordering::Relaxed);
+            owner.panic_once(Self::DROP);
         }
 
         const VTABLE: RawWakerVTable =
@@ -704,11 +725,7 @@ mod tests {
 
     #[test]
     fn observer_clone_wake_and_drop_run_outside_local_borrows() {
-        let callbacks = Arc::new(Reentrant {
-            clones: AtomicUsize::new(0),
-            wakes: AtomicUsize::new(0),
-            drops: AtomicUsize::new(0),
-        });
+        let callbacks = Arc::new(Reentrant::default());
         runner().start(|_| async {
             let (fd, _peer) = socket();
             let mut operation = send(fd);
@@ -728,6 +745,100 @@ mod tests {
         assert_eq!(callbacks.wakes.load(Ordering::Relaxed), 1);
         assert_eq!(callbacks.drops.load(Ordering::Relaxed), 3);
         assert_eq!(Arc::strong_count(&callbacks), 1);
+    }
+
+    #[test]
+    fn observer_clone_panic_preserves_queued_and_admitted_cancellation() {
+        for queued in [false, true] {
+            let callbacks = Arc::new(Reentrant::default());
+            let (fd, _peer) = socket();
+            runner().start(|_| async {
+                let mut blocker = queued.then(|| recv(fd.clone(), None));
+                if let Some(blocker) = &mut blocker {
+                    assert!(poll!(blocker).is_pending());
+                }
+                let mut operation = recv(fd.clone(), None);
+                let waker = callbacks.waker();
+                let mut cx = Context::from_waker(&waker);
+                assert!(operation.poll_unpin(&mut cx).is_pending());
+                let registration = match &operation.state {
+                    State::Admitting { registration, .. } => (Some(*registration), None),
+                    State::Waiting { operation_id, .. } => (None, Some(*operation_id)),
+                    _ => panic!("operation did not register"),
+                };
+                callbacks
+                    .panic_callback
+                    .store(Reentrant::CLONE, Ordering::Relaxed);
+                let panic = catch_unwind(AssertUnwindSafe(|| {
+                    let _ = operation.poll_unpin(&mut cx);
+                }))
+                .expect_err("observer clone must panic");
+                assert_eq!(extract_panic_message(&*panic), "waker callback panic 1");
+                let retained = match &operation.state {
+                    State::Admitting { registration, .. } if queued => (Some(*registration), None),
+                    State::Waiting { operation_id, .. } if !queued => (None, Some(*operation_id)),
+                    _ => panic!("clone panic lost cancellation identity"),
+                };
+                assert_eq!(retained, registration);
+                // Dropping after the caught poll failure must return both the
+                // queued grant and any admitted waiter to the size-one driver.
+                drop(operation);
+                drop(blocker);
+                assert!(matches!(
+                    send(fd.clone()).await,
+                    Ok(RequestOutput::Send(Ok(())))
+                ));
+            });
+            assert_eq!(Arc::strong_count(&fd), 1);
+            assert_eq!(Arc::strong_count(&callbacks), 1);
+        }
+    }
+
+    #[test]
+    fn observer_wake_and_drop_panics_finish_worker_retirement() {
+        for callback in [Reentrant::WAKE, Reentrant::DROP] {
+            let callbacks = Arc::new(Reentrant::default());
+            let (fd, _peer) = socket();
+            let mut retained_local = None;
+            let panic = catch_unwind(AssertUnwindSafe(|| {
+                runner().start(|_| async {
+                    retained_local = runtime::current();
+                    let mut operation = if callback == Reentrant::WAKE {
+                        send(fd.clone())
+                    } else {
+                        recv(fd.clone(), None)
+                    };
+                    let waker = callbacks.waker();
+                    let mut cx = Context::from_waker(&waker);
+                    assert!(operation.poll_unpin(&mut cx).is_pending());
+                    callbacks.panic_callback.store(callback, Ordering::Relaxed);
+                    if callback == Reentrant::DROP {
+                        // Replacing an observer queues its destructor. The
+                        // receive stays pending until failure cleanup cancels it.
+                        assert!(operation.poll_unpin(&mut cx).is_pending());
+                    }
+                    futures::future::pending::<()>().await;
+                });
+            }))
+            .expect_err("deferred observer callback must fail the runner");
+            assert_eq!(
+                extract_panic_message(&*panic),
+                format!("waker callback panic {callback}")
+            );
+            let local = retained_local.unwrap();
+            let local = local.borrow();
+            assert!(
+                local
+                    .operations
+                    .entries
+                    .iter()
+                    .all(|entry| entry.state.is_none())
+            );
+            assert!(local.driver.is_none());
+            assert!(runtime::current().is_none());
+            assert_eq!(Arc::strong_count(&fd), 1);
+            assert_eq!(Arc::strong_count(&callbacks), 1);
+        }
     }
 
     fn runner() -> Runner {
