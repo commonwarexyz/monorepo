@@ -107,7 +107,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         );
         assert_eq!(
             polynomial.required(),
-            participants.quorum::<M>(),
+            participants.quorum_count::<M>(),
             "polynomial threshold must equal quorum"
         );
         #[cfg(feature = "std")]
@@ -154,7 +154,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         );
         assert_eq!(
             polynomial.required(),
-            participants.quorum::<M>(),
+            participants.quorum_count::<M>(),
             "polynomial threshold must equal quorum"
         );
         #[cfg(feature = "std")]
@@ -773,9 +773,7 @@ mod tests {
     use commonware_codec::{DecodeExt, Encode, types::lazy::Lazy};
     use commonware_math::algebra::{Additive, Random};
     use commonware_parallel::Sequential;
-    use commonware_utils::{
-        Faults, N3f1, N5f1, NZU32, Participant, TryCollect, ordered::Set, test_rng,
-    };
+    use commonware_utils::{N3f1, N5f1, NZU32, Participant, TryCollect, ordered::Set, test_rng};
 
     const NAMESPACE: &[u8] = b"test-bls12381-threshold";
     const MESSAGE: &[u8] = b"test message";
@@ -883,7 +881,8 @@ mod tests {
     fn test_verify_attestations_filters_invalid<V: Variant>() {
         let mut rng = test_rng();
         let (schemes, _, _) = setup_signers::<V>(&mut rng, 5);
-        let quorum = N3f1::quorum(schemes.len() as u32) as usize;
+        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+            .expect("quorum exceeds usize::MAX");
 
         let attestations: Vec<_> = schemes
             .iter()
@@ -945,7 +944,8 @@ mod tests {
     fn test_assemble_certificate<V: Variant>() {
         let mut rng = test_rng();
         let (schemes, verifier, _) = setup_signers::<V>(&mut rng, 4);
-        let quorum = N3f1::quorum(schemes.len() as u32) as usize;
+        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+            .expect("quorum exceeds usize::MAX");
 
         let attestations: Vec<_> = schemes
             .iter()
@@ -982,7 +982,8 @@ mod tests {
     fn test_verify_certificate<V: Variant>() {
         let mut rng = test_rng();
         let (schemes, verifier, _) = setup_signers::<V>(&mut rng, 4);
-        let quorum = N3f1::quorum(schemes.len() as u32) as usize;
+        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+            .expect("quorum exceeds usize::MAX");
 
         let attestations: Vec<_> = schemes
             .iter()
@@ -1018,7 +1019,8 @@ mod tests {
     fn test_verify_certificate_detects_corruption<V: Variant>() {
         let mut rng = test_rng();
         let (schemes, verifier, _) = setup_signers::<V>(&mut rng, 4);
-        let quorum = N3f1::quorum(schemes.len() as u32) as usize;
+        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+            .expect("quorum exceeds usize::MAX");
 
         let attestations: Vec<_> = schemes
             .iter()
@@ -1066,7 +1068,8 @@ mod tests {
     fn test_certificate_codec_roundtrip<V: Variant>() {
         let mut rng = test_rng();
         let (schemes, _, _) = setup_signers::<V>(&mut rng, 4);
-        let quorum = N3f1::quorum(schemes.len() as u32) as usize;
+        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+            .expect("quorum exceeds usize::MAX");
 
         let attestations: Vec<_> = schemes
             .iter()
@@ -1096,7 +1099,7 @@ mod tests {
     fn test_certificate_rejects_sub_quorum<V: Variant>() {
         let mut rng = test_rng();
         let (schemes, _, _) = setup_signers::<V>(&mut rng, 4);
-        let expected = N3f1::quorum(schemes.len());
+        let expected = u64::from(schemes[0].participants().quorum_count::<N3f1>());
         let found = expected - 1;
         let found_count = usize::try_from(found).expect("quorum exceeds usize::MAX");
 
@@ -1126,8 +1129,8 @@ mod tests {
     fn test_certificate_rejects_duplicate_signers<V: Variant>() {
         let mut rng = test_rng();
         let (schemes, _, _) = setup_signers::<V>(&mut rng, 4);
-        let quorum =
-            usize::try_from(N3f1::quorum(schemes.len())).expect("quorum exceeds usize::MAX");
+        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+            .expect("quorum exceeds usize::MAX");
         let mut attestations: Vec<_> = schemes
             .iter()
             .take(quorum)
@@ -1157,8 +1160,8 @@ mod tests {
     fn test_certificate_rejects_unknown_signer<V: Variant>() {
         let mut rng = test_rng();
         let (schemes, _, _) = setup_signers::<V>(&mut rng, 4);
-        let quorum =
-            usize::try_from(N3f1::quorum(schemes.len())).expect("quorum exceeds usize::MAX");
+        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+            .expect("quorum exceeds usize::MAX");
         let mut attestations: Vec<_> = schemes
             .iter()
             .take(quorum)
@@ -1190,8 +1193,8 @@ mod tests {
     fn test_certificate_rejects_malformed_signature<V: Variant>() {
         let mut rng = test_rng();
         let (schemes, _, _) = setup_signers::<V>(&mut rng, 4);
-        let quorum =
-            usize::try_from(N3f1::quorum(schemes.len())).expect("quorum exceeds usize::MAX");
+        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+            .expect("quorum exceeds usize::MAX");
         let mut attestations: Vec<_> = schemes
             .iter()
             .take(quorum)
@@ -1222,7 +1225,8 @@ mod tests {
     fn test_verify_certificates_batch<V: Variant>() {
         let mut rng = test_rng();
         let (schemes, verifier, _) = setup_signers::<V>(&mut rng, 4);
-        let quorum = N3f1::quorum(schemes.len() as u32) as usize;
+        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+            .expect("quorum exceeds usize::MAX");
 
         let messages: [Bytes; 3] = [
             Bytes::from_static(b"msg1"),
@@ -1274,7 +1278,8 @@ mod tests {
     fn test_verify_certificates_batch_detects_failure<V: Variant>() {
         let mut rng = test_rng();
         let (schemes, verifier, _) = setup_signers::<V>(&mut rng, 4);
-        let quorum = N3f1::quorum(schemes.len() as u32) as usize;
+        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+            .expect("quorum exceeds usize::MAX");
 
         let messages: [Bytes; 2] = [Bytes::from_static(b"msg1"), Bytes::from_static(b"msg2")];
         let mut certificates = Vec::new();
@@ -1325,7 +1330,8 @@ mod tests {
     fn test_certificate_verifier<V: Variant>() {
         let mut rng = test_rng();
         let (schemes, _, polynomial) = setup_signers::<V>(&mut rng, 4);
-        let quorum = N3f1::quorum(schemes.len() as u32) as usize;
+        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+            .expect("quorum exceeds usize::MAX");
 
         let attestations: Vec<_> = schemes
             .iter()
@@ -1632,7 +1638,8 @@ mod tests {
     fn certificate_decode_rejects_length_mismatch<V: Variant>() {
         let mut rng = test_rng();
         let (schemes, _, _) = setup_signers::<V>(&mut rng, 4);
-        let quorum = N3f1::quorum(schemes.len() as u32) as usize;
+        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+            .expect("quorum exceeds usize::MAX");
 
         let attestations: Vec<_> = schemes
             .iter()

@@ -37,7 +37,7 @@ fn bench_threshold_batch_verify_same_message_pre(c: &mut Criterion) {
                                 || {
                                     let mut rng = test_rng();
                                     let players = (0..n)
-                                        .map(|i| PrivateKey::from_seed(i as u64).public_key())
+                                        .map(|i| PrivateKey::from_seed(i).public_key())
                                         .try_collect()
                                         .unwrap();
                                     let (output, shares) =
