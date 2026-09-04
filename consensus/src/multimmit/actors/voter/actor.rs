@@ -1914,6 +1914,32 @@ where
 
     fn flush_activities(&mut self) {
         while let Some(activity) = self.pending_activities.pop_front() {
+            if let Activity::LeaderFinalized { fact } | Activity::LeaderFinalityUpdated { fact } =
+                &activity
+            {
+                let _finality = info_span!(
+                    "multimmit.voter.finality",
+                    epoch = fact.round().epoch().get().traced(),
+                    view = fact.round().view().get().traced(),
+                    votes = fact.votes().traced(),
+                    updated = matches!(&activity, Activity::LeaderFinalityUpdated { .. }),
+                    settled_chains = fact
+                        .settled()
+                        .iter()
+                        .filter(|settled| **settled)
+                        .count()
+                        .traced(),
+                    extension_blocks = fact
+                        .blocks()
+                        .iter()
+                        .zip(fact.proposed())
+                        .map(|(block, proposed)| {
+                            block.height().get().saturating_sub(proposed.get())
+                        })
+                        .fold(0u64, u64::saturating_add)
+                        .traced(),
+                );
+            }
             let _ = self.reporter.report(activity);
         }
     }

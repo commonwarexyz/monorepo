@@ -295,10 +295,12 @@ where
                     async move {
                         let block = resolver
                             .subscribe_block(reference)
+                            .instrument(info_span!("multimmit.marshal.subscribe.resolve"))
                             .await
                             .map_err(mailbox::Error::failed)?;
                         catalog
                             .admit_block(reference, Arc::clone(&block))
+                            .instrument(info_span!("multimmit.marshal.subscribe.custody"))
                             .await
                             .map_err(mailbox::Error::failed)?;
                         Ok(block)

@@ -185,6 +185,7 @@ where
                                     .sum::<u64>();
                                 span.record("positions", positions.traced());
                                 span.record("extensions", extensions.traced());
+                                self.metrics.vote_extensions.observe(extensions as f64);
                                 self.metrics.vote_positions.observe(positions as f64);
                                 if positions == 0 && extensions == 0 {
                                     self.metrics.empty_votes.inc();

@@ -238,6 +238,7 @@ pub mod mocks;
 pub mod scheme;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod storage;
+pub mod telemetry;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests;
 #[cfg(all(test, not(target_arch = "wasm32")))]

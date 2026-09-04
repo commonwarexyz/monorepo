@@ -12,11 +12,15 @@ use crate::{
     types::Height,
 };
 use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+#[cfg(not(target_arch = "wasm32"))]
+use commonware_runtime::telemetry::traces::TracedExt as _;
 use core::{ops::Bound, time::Duration};
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::Arc,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use tracing::{Span, info_span};
 
 #[derive(Clone, Debug)]
 enum SigningSubject<V: Variant, D: Digest> {
@@ -58,6 +62,9 @@ pub(crate) struct VoteBodyPass<V: Variant, D: Digest> {
     positions: Vec<Position>,
     extensions: Vec<Extension<D>>,
     extension_bound: usize,
+    /// Owns the snapshot-to-body interval, including yields between chain decisions.
+    #[cfg(not(target_arch = "wasm32"))]
+    span: Option<Span>,
 }
 
 pub(crate) enum VoteBodyProgress<D: Digest> {
@@ -1709,6 +1716,18 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         profile: &Profile<impl Hasher<Digest = D>, V>,
         leader: LeaderBlock<V, D>,
     ) -> VoteBodyPass<V, D> {
+        #[cfg(not(target_arch = "wasm32"))]
+        let span = info_span!(
+            "multimmit.vote.build",
+            epoch = leader.round().epoch().get().traced(),
+            view = leader.round().view().get().traced(),
+            extension_bound = profile.protocol().codec_config().extension_bound().traced(),
+            complete = false,
+            eligible_extensions = tracing::field::Empty,
+            short_chains = tracing::field::Empty,
+            extension_cap_chains = tracing::field::Empty,
+            late_da_chains = tracing::field::Empty,
+        );
         VoteBodyPass {
             leader,
             da_frontiers: self
@@ -1725,6 +1744,8 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             positions: Vec::with_capacity(profile.protocol().codec_config().chains()),
             extensions: Vec::with_capacity(profile.protocol().codec_config().chains()),
             extension_bound: profile.protocol().codec_config().extension_bound(),
+            #[cfg(not(target_arch = "wasm32"))]
+            span: Some(span),
         }
     }
 
@@ -1747,6 +1768,49 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
                 profile.protocol().codec_config(),
             )
             .map_err(|_| ChainError::Context)?;
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(span) = pass.span.take()
+                && !span.is_disabled()
+            {
+                let mut eligible_extensions = 0usize;
+                let mut short_chains = 0usize;
+                let mut extension_cap_chains = 0usize;
+                for ((proposal, position), extension) in pass
+                    .leader
+                    .proposals()
+                    .iter()
+                    .zip(&pass.positions)
+                    .zip(&pass.extensions)
+                {
+                    let position = position.get() as usize;
+                    let full = position == proposal.payloads().len();
+                    if full {
+                        eligible_extensions += extension.len();
+                    }
+                    short_chains += usize::from(!full);
+                    extension_cap_chains += usize::from(
+                        pass.extension_bound > 0 && extension.len() == pass.extension_bound,
+                    );
+                }
+                // A later DA choice can miss this vote's immutable snapshot even while body
+                // construction is still yielding between chains.
+                let late_da_chains = self
+                    .chains
+                    .iter()
+                    .zip(&pass.da_frontiers)
+                    .filter(|(chain, frozen)| {
+                        chain
+                            .local_da_votes
+                            .last_key_value()
+                            .is_some_and(|(height, _)| height > *frozen)
+                    })
+                    .count();
+                span.record("eligible_extensions", eligible_extensions.traced());
+                span.record("short_chains", short_chains.traced());
+                span.record("extension_cap_chains", extension_cap_chains.traced());
+                span.record("late_da_chains", late_da_chains.traced());
+                span.record("complete", true);
+            }
             return Ok(VoteBodyProgress::Complete(body));
         }
 
