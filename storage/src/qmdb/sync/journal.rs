@@ -44,7 +44,7 @@ pub trait Journal<F: Family>: Sized + Send {
     fn size(&self) -> u64;
 
     /// Append a non-empty batch of operations.
-    fn append(self, ops: &[Self::Op]) -> impl Future<Output = Result<Self, Self::Error>> + Send;
+    fn append(self, ops: Vec<Self::Op>) -> impl Future<Output = Result<Self, Self::Error>> + Send;
 }
 
 impl<F, E, V> Journal<F> for crate::journal::contiguous::variable::Journal<E, V>
@@ -83,8 +83,8 @@ where
         Contiguous::bounds(self).end
     }
 
-    async fn append(self, ops: &[Self::Op]) -> Result<Self, Self::Error> {
-        let (journal, _) = self.append_many(Many::Flat(ops)).await?;
+    async fn append(self, ops: Vec<Self::Op>) -> Result<Self, Self::Error> {
+        let (journal, _) = self.append_many(Many::Flat(&ops)).await?;
         Ok(journal)
     }
 }
@@ -151,8 +151,8 @@ where
         Contiguous::bounds(self).end
     }
 
-    async fn append(self, ops: &[Self::Op]) -> Result<Self, Self::Error> {
-        let (journal, _) = self.append_many(Many::Flat(ops)).await?;
+    async fn append(self, ops: Vec<Self::Op>) -> Result<Self, Self::Error> {
+        let (journal, _) = self.append_many(Many::Flat(&ops)).await?;
         Ok(journal)
     }
 }
@@ -175,7 +175,7 @@ impl<F, E, Op> Journal<F> for Memory<F, E, Op>
 where
     F: Family,
     E: Send,
-    Op: Clone + Send + Sync,
+    Op: Send + Sync,
 {
     type Context = E;
     type Config = ();
@@ -213,8 +213,8 @@ where
         *self.start + self.ops.len() as u64
     }
 
-    async fn append(mut self, ops: &[Self::Op]) -> Result<Self, Self::Error> {
-        self.ops.extend_from_slice(ops);
+    async fn append(mut self, ops: Vec<Self::Op>) -> Result<Self, Self::Error> {
+        self.ops.extend(ops);
         Ok(self)
     }
 }
@@ -270,7 +270,7 @@ mod tests {
             assert_eq!(journal.size(), 10);
 
             // Appends extend the size.
-            let journal = journal.append(&[1, 2, 3]).await.unwrap();
+            let journal = journal.append(vec![1, 2, 3]).await.unwrap();
             assert_eq!(journal.size(), 13);
 
             // A resize within the retained ops drains the prefix.
@@ -284,7 +284,7 @@ mod tests {
             let journal = <Mem as Journal<F>>::new((), (), range.clone())
                 .await
                 .unwrap();
-            let journal = journal.append(&[1, 2]).await.unwrap();
+            let journal = journal.append(vec![1, 2]).await.unwrap();
             let journal = journal.resize(Location::new(15)).await.unwrap();
             assert_eq!(journal.size(), 15);
             let (start, ops) = journal.into_parts();
@@ -293,7 +293,7 @@ mod tests {
 
             // A resize before the start clears.
             let journal = <Mem as Journal<F>>::new((), (), range).await.unwrap();
-            let journal = journal.append(&[1]).await.unwrap();
+            let journal = journal.append(vec![1]).await.unwrap();
             let journal = journal.resize(Location::new(5)).await.unwrap();
             assert_eq!(journal.size(), 5);
             let (start, ops) = journal.into_parts();
