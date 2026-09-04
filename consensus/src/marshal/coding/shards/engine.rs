@@ -152,6 +152,7 @@ use crate::{
     },
     types::{Epoch, Round, coding::Commitment},
 };
+use bytes::Bytes;
 use commonware_actor::mailbox;
 use commonware_codec::{Decode, Error as CodecError, Read};
 use commonware_coding::{Config as CodingConfig, Scheme as CodingScheme};
@@ -815,7 +816,7 @@ where
 
         // Attempt to decode the block from the encoded blob
         let (inner, config): (B, CodingConfig) =
-            Decode::decode_cfg(&mut blob.as_slice(), &(self.block_codec_cfg.clone(), ()))?;
+            Decode::decode_cfg(Bytes::from(blob), &(self.block_codec_cfg.clone(), ()))?;
 
         match validate_reconstruction(&inner, config, commitment) {
             Ok(()) => {}
