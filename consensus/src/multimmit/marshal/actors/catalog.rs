@@ -53,7 +53,10 @@ use commonware_runtime::{
 };
 use commonware_storage::{Context, metadata::Metadata, translator::Translator};
 use commonware_utils::{channel::oneshot, futures::Pool, sequence::Unit};
-use futures::future::{pending, try_join_all};
+use futures::{
+    FutureExt as _,
+    future::{pending, try_join_all},
+};
 use std::{
     collections::{BTreeSet, HashMap, HashSet, VecDeque},
     future::Future,
@@ -536,6 +539,8 @@ type HistorySegment<H> = Vec<Arc<TipRecord<<H as Hasher>::Digest>>>;
 type HeaderSegment<H> = Vec<TransactionBlockHeader<<H as Hasher>::Digest>>;
 type HeaderSegments<H> = Vec<HeaderSegment<H>>;
 type OutputRefs<H> = Vec<StoredRef<<H as Hasher>::Digest>>;
+type OutputReadResult<H> = Result<storage::FinalBlockReadOutcome<H>, Error>;
+type OutputReads<H> = Pool<(u64, OutputReadResult<H>)>;
 type CustodyWaiter<H> = (
     Vec<BlockRef<<H as Hasher>::Digest>>,
     Reply<CustodyValues<H>>,
@@ -568,6 +573,31 @@ struct OutputRefsState<H: Hasher> {
     max_bytes: u64,
     encoded_bytes: u64,
     outputs: OutputRefs<H>,
+    // Ready suffixes retain metadata credits until the contiguous prefix is resolved.
+    reads: VecDeque<Option<OutputReadResult<H>>>,
+}
+
+impl<H: Hasher> OutputRefsState<H> {
+    /// Whether the contiguous results determine a response or require archive continuation.
+    fn prefix_ready(&self) -> bool {
+        let mut encoded_bytes = self.encoded_bytes;
+        let mut nonempty = !self.outputs.is_empty();
+        for result in &self.reads {
+            match result {
+                None => return false,
+                Some(Ok(FinalizedReadOutcome::Done(Some((_, meta))))) => {
+                    let next = encoded_bytes.checked_add(meta.block().encoded_len());
+                    if nonempty && next.is_none_or(|total| total > self.max_bytes) {
+                        return true;
+                    }
+                    encoded_bytes = next.unwrap_or(u64::MAX);
+                    nonempty = true;
+                }
+                Some(_) => return true,
+            }
+        }
+        true
+    }
 }
 
 enum MetadataJob<E: Context, H: Hasher> {
@@ -584,7 +614,7 @@ enum MetadataJob<E: Context, H: Hasher> {
     Outputs {
         state: OutputRefsState<H>,
         reply: Reply<OutputRefs<H>>,
-        step: storage::FinalBlockReadStep<E, H>,
+        steps: OutputReads<H>,
     },
 }
 
@@ -605,15 +635,16 @@ enum MetadataCompletion<E: Context, H: Hasher> {
     Outputs {
         state: OutputRefsState<H>,
         reply: Reply<OutputRefs<H>>,
-        result: Result<storage::FinalBlockReadOutcome<H>, Error>,
+        steps: OutputReads<H>,
     },
 }
 
 impl<E: Context, H: Hasher> MetadataCompletion<E, H> {
-    const fn steps(&self) -> usize {
+    fn steps(&self) -> usize {
         match self {
             Self::Canceled(steps) => *steps,
-            Self::History { .. } | Self::Headers { .. } | Self::Outputs { .. } => 1,
+            Self::History { .. } | Self::Headers { .. } => 1,
+            Self::Outputs { state, .. } => state.reads.len(),
         }
     }
 }
@@ -621,8 +652,9 @@ impl<E: Context, H: Hasher> MetadataCompletion<E, H> {
 impl<E: Context, H: Hasher> MetadataJob<E, H> {
     fn steps(&self) -> usize {
         match self {
-            Self::History { .. } | Self::Outputs { .. } => 1,
+            Self::History { .. } => 1,
             Self::Headers { steps, .. } => steps.len(),
+            Self::Outputs { state, .. } => state.reads.len(),
         }
     }
 
@@ -662,18 +694,28 @@ impl<E: Context, H: Hasher> MetadataJob<E, H> {
                 }
             }
             Self::Outputs {
-                state,
+                mut state,
                 mut reply,
-                step,
+                mut steps,
             } => {
-                let result = select! {
-                    _ = reply.closed() => return MetadataCompletion::Canceled(1),
-                    result = step.execute() => result.map_err(Error::storage),
-                };
+                let count = state.reads.len();
+                while !state.prefix_ready() {
+                    let completed = select! {
+                        _ = reply.closed() => return MetadataCompletion::Canceled(count),
+                        completed = steps.next_completed() => completed,
+                    };
+                    let mut completed = Some(completed);
+                    while let Some((index, result)) = completed {
+                        let offset = usize::try_from(index - state.next)
+                            .expect("the read belongs to the active output window");
+                        state.reads[offset] = Some(result);
+                        completed = steps.next_completed().now_or_never();
+                    }
+                }
                 MetadataCompletion::Outputs {
                     state,
                     reply,
-                    result,
+                    steps,
                 }
             }
         }
@@ -1247,7 +1289,7 @@ where
     /// Reads a dense committed prefix as compact references.
     #[tracing::instrument(
         name = "multimmit.marshal.catalog.output_refs",
-        level = "debug",
+        level = "info",
         skip_all,
         fields(start = start.get(), max_items = max_items.get(), max_bytes = max_bytes.get())
     )]
@@ -3132,22 +3174,46 @@ where
             .and_then(|distance| distance.checked_add(1))
             .and_then(|count| usize::try_from(count).ok())
             .unwrap_or(usize::MAX);
-        let step = match self.stores.final_block_at_read(start.get()) {
-            Ok(step) => step,
-            Err(error) => return respond(reply, Err(error)),
-        };
-        self.push_metadata(MetadataJob::Outputs {
-            state: OutputRefsState {
+        self.start_output_window(
+            OutputRefsState {
                 next: start.get(),
                 remaining: max_items.min(available),
                 max_bytes: u64::try_from(max_bytes.get()).unwrap_or(u64::MAX),
                 encoded_bytes: 0,
                 outputs: Vec::new(),
+                reads: VecDeque::new(),
             },
             reply,
-            step,
-        });
+        );
         Ok(())
+    }
+
+    fn start_output_window(&mut self, mut state: OutputRefsState<H>, reply: Reply<OutputRefs<H>>) {
+        let count = state
+            .remaining
+            .min(self.metadata_step_capacity - self.metadata_steps);
+        assert!(count > 0 && state.reads.is_empty());
+        state.reads.resize_with(count, || None);
+        let mut steps = Pool::default();
+        for offset in 0..count {
+            let index = state
+                .next
+                .checked_add(offset as u64)
+                .expect("the output window is bounded by its committed frontier");
+            let step = self.stores.final_block_at_read(index);
+            steps.push(async move {
+                let result = match step {
+                    Ok(step) => step.execute().await.map_err(Error::storage),
+                    Err(error) => Err(error),
+                };
+                (index, result)
+            });
+        }
+        self.push_metadata(MetadataJob::Outputs {
+            state,
+            reply,
+            steps,
+        });
     }
 
     fn complete_metadata(&mut self, completion: MetadataCompletion<E, H>) -> Result<(), Error> {
@@ -3259,53 +3325,80 @@ where
             MetadataCompletion::Outputs {
                 mut state,
                 reply,
-                result,
+                mut steps,
             } => {
                 if reply.is_closed() {
                     return Ok(());
                 }
-                let outcome = match result {
-                    Ok(outcome) => outcome,
-                    Err(error) => return respond(reply, Err(error)),
-                };
-                let value = match outcome {
-                    FinalizedReadOutcome::Continue(request) => {
-                        let step = match self.stores.continue_final_block_read(request) {
-                            Ok(step) => step,
-                            Err(error) => return respond(reply, Err(error)),
-                        };
-                        self.push_metadata(MetadataJob::Outputs { state, reply, step });
-                        return Ok(());
+                while let Some(result) = state.reads.front_mut().and_then(Option::take) {
+                    let value = match result {
+                        Ok(FinalizedReadOutcome::Done(value)) => value,
+                        Ok(FinalizedReadOutcome::Continue(request)) => {
+                            *state.reads.front_mut().expect("the prefix exists") =
+                                Some(Ok(FinalizedReadOutcome::Continue(request)));
+                            break;
+                        }
+                        Err(error) => return respond(reply, Err(error)),
+                    };
+                    state.reads.pop_front();
+                    let output = match self.stores.stored_ref(state.next, value) {
+                        Ok(output) => output,
+                        Err(error) => return respond(reply, Err(error)),
+                    };
+                    if !state.outputs.is_empty()
+                        && state
+                            .encoded_bytes
+                            .checked_add(output.encoded_len)
+                            .is_none_or(|total| total > state.max_bytes)
+                    {
+                        return respond(reply, Ok(state.outputs));
                     }
-                    FinalizedReadOutcome::Done(value) => value,
-                };
-                let output = match self.stores.stored_ref(state.next, value) {
-                    Ok(output) => output,
-                    Err(error) => return respond(reply, Err(error)),
-                };
-                if !state.outputs.is_empty()
-                    && state
-                        .encoded_bytes
-                        .checked_add(output.encoded_len)
-                        .is_none_or(|total| total > state.max_bytes)
-                {
-                    return respond(reply, Ok(state.outputs));
+                    state.encoded_bytes = state.encoded_bytes.saturating_add(output.encoded_len);
+                    state.outputs.push(output);
+                    state.remaining -= 1;
+                    if state.remaining == 0 {
+                        return respond(reply, Ok(state.outputs));
+                    }
+                    state.next = match state.next.checked_add(1) {
+                        Some(next) => next,
+                        None => {
+                            return respond(reply, Err(Error::Invalid("output index overflow")));
+                        }
+                    };
                 }
-                state.encoded_bytes = state.encoded_bytes.saturating_add(output.encoded_len);
-                state.outputs.push(output);
-                state.remaining -= 1;
-                if state.remaining == 0 {
-                    return respond(reply, Ok(state.outputs));
+                if state.reads.is_empty() {
+                    self.start_output_window(state, reply);
+                } else {
+                    for (offset, slot) in state.reads.iter_mut().enumerate() {
+                        let Some(result) = slot.take() else {
+                            continue;
+                        };
+                        let request = match result {
+                            Ok(FinalizedReadOutcome::Continue(request)) => request,
+                            result => {
+                                *slot = Some(result);
+                                continue;
+                            }
+                        };
+                        let index = state
+                            .next
+                            .checked_add(offset as u64)
+                            .expect("the output window is bounded by its committed frontier");
+                        let step = self.stores.continue_final_block_read(request);
+                        steps.push(async move {
+                            let result = match step {
+                                Ok(step) => step.execute().await.map_err(Error::storage),
+                                Err(error) => Err(error),
+                            };
+                            (index, result)
+                        });
+                    }
+                    self.push_metadata(MetadataJob::Outputs {
+                        state,
+                        reply,
+                        steps,
+                    });
                 }
-                state.next = match state.next.checked_add(1) {
-                    Some(next) => next,
-                    None => return respond(reply, Err(Error::Invalid("output index overflow"))),
-                };
-                let step = match self.stores.final_block_at_read(state.next) {
-                    Ok(step) => step,
-                    Err(error) => return respond(reply, Err(error)),
-                };
-                self.push_metadata(MetadataJob::Outputs { state, reply, step });
                 Ok(())
             }
         }
@@ -5240,6 +5333,197 @@ mod tests {
             assert_eq!(metadata_read.await.unwrap()[0].reference, cold.reference());
             drop(client);
             assert!(handle.await.is_ok());
+        });
+    }
+
+    #[derive(Clone, Copy)]
+    enum DescriptorReadCase {
+        Concurrent,
+        SpeculativeTail,
+        Limited,
+        Canceled,
+    }
+
+    #[rstest::rstest]
+    #[case::prunable(ArchiveMode::Prunable, DescriptorReadCase::Concurrent)]
+    #[case::immutable(ArchiveMode::Immutable, DescriptorReadCase::Concurrent)]
+    #[case::prunable_speculative_tail(ArchiveMode::Prunable, DescriptorReadCase::SpeculativeTail)]
+    #[case::immutable_speculative_tail(ArchiveMode::Immutable, DescriptorReadCase::SpeculativeTail)]
+    #[case::prunable_limited(ArchiveMode::Prunable, DescriptorReadCase::Limited)]
+    #[case::immutable_limited(ArchiveMode::Immutable, DescriptorReadCase::Limited)]
+    #[case::prunable_canceled(ArchiveMode::Prunable, DescriptorReadCase::Canceled)]
+    #[case::immutable_canceled(ArchiveMode::Immutable, DescriptorReadCase::Canceled)]
+    fn committed_output_descriptors_read_concurrently(
+        #[case] archive: ArchiveMode,
+        #[case] scenario: DescriptorReadCase,
+    ) {
+        deterministic::Runner::timed(std::time::Duration::from_secs(10)).start(|context| async move {
+            let committee = Committee::<MinPk>::new_with_namespace_and_producers(
+                62,
+                b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_OUTPUT_DESCRIPTOR_READS",
+                6,
+                (0..4).map(Participant::new).collect(),
+                Limits::new(2, 2).unwrap(),
+            );
+            let speculative_tail = matches!(scenario, DescriptorReadCase::SpeculativeTail);
+            let limited = matches!(scenario, DescriptorReadCase::Limited);
+            let canceled = matches!(scenario, DescriptorReadCase::Canceled);
+            let count = if speculative_tail || limited { 3 } else { 2 };
+            let blocks = (0..count)
+                .map(|chain| producer_block(&committee, chain, 62 + u64::from(chain)))
+                .collect::<Vec<_>>();
+            let configure = |context: &DeterministicContext| {
+                let mut config = config(context, &committee);
+                config.max_commit_outputs = NonZeroUsize::new(blocks.len()).unwrap();
+                config.finalized_blocks = archive;
+                if limited || canceled {
+                    config.backfill_concurrency = NZUsize!(2);
+                }
+                config
+            };
+            let (client, handle, _delivery) =
+                spawn_catalog(configure(&context), context.child("initial")).await;
+            for block in &blocks {
+                client
+                    .admit_block(block.reference(), Arc::clone(block))
+                    .await
+                    .unwrap();
+            }
+            let current = client.checkpoint().await.unwrap();
+            let mut emitted = current.emitted().to_vec();
+            for block in &blocks {
+                emitted[block.reference().chain().get() as usize] = block.reference();
+            }
+            client
+                .commit(Commit {
+                    selected: Vec::new(),
+                    history: Vec::new(),
+                    outputs: blocks
+                        .iter()
+                        .enumerate()
+                        .map(|(index, block)| output_row(OutputIndex::new(index as u64), block))
+                        .collect(),
+                    checkpoint: Checkpoint::new(
+                        current.epoch(),
+                        current.generation(),
+                        current.archive_layout(),
+                        current.floor(),
+                        current.history(),
+                        current.history_index(),
+                        current.ordered().to_vec(),
+                        emitted,
+                        Some(OutputIndex::new(u64::from(count - 1))),
+                    )
+                    .unwrap(),
+                })
+                .await
+                .unwrap();
+            drop(client);
+            handle.abort();
+            let _ = handle.await;
+
+            let reads = PendingReads::default();
+            let delayed = DelayedReadContext {
+                inner: context.child("delayed"),
+                pending: reads.clone(),
+            };
+            let (client, handle, _delivery) =
+                spawn_catalog(configure(&context), delayed.child("reopened")).await;
+            let first = reads.arm();
+            let second = reads.arm();
+            let tail = (speculative_tail || limited).then(|| reads.arm());
+            let mut request = Box::pin(client.output_refs(
+                OutputIndex::ZERO,
+                NonZeroUsize::new(blocks.len()).unwrap(),
+                if speculative_tail {
+                    NonZeroUsize::MIN
+                } else {
+                    NZUsize!(1024 * 1024)
+                },
+            ));
+            commonware_macros::select! {
+                result = first.blocked => result.expect("first descriptor read gate closed"),
+                _ = &mut request => panic!("descriptor request completed before its first read"),
+                _ = context.sleep(std::time::Duration::from_millis(100)) => {
+                    panic!("first committed output descriptor did not reach storage");
+                },
+            }
+            commonware_macros::select! {
+                result = second.blocked => result.expect("second descriptor read gate closed"),
+                _ = &mut request => panic!("descriptor request completed while its first read was blocked"),
+                _ = context.sleep(std::time::Duration::from_millis(100)) => {
+                    panic!("second committed output descriptor waited for the first metadata read");
+                },
+            }
+
+            if canceled {
+                drop(request);
+                let replacement = client.output_refs(OutputIndex::ZERO, NZUsize!(2), NZUsize!(1024 * 1024));
+                let outputs = commonware_macros::select! {
+                    result = replacement => result.unwrap(),
+                    _ = context.sleep(std::time::Duration::from_millis(100)) => {
+                        panic!("canceled descriptor window did not release its credits");
+                    },
+                };
+                assert_eq!(outputs.len(), blocks.len());
+                assert!(first.release.is_closed() && second.release.is_closed());
+                drop(client);
+                handle.abort();
+                let _ = handle.await;
+                return;
+            }
+            let mut prefix_releases = Some([first.release, second.release]);
+            let tail_release = if let Some(tail) = tail {
+                let mut blocked = Box::pin(tail.blocked);
+                if limited {
+                    commonware_macros::select! {
+                        _ = &mut blocked => panic!("descriptor reads exceeded metadata credits"),
+                        _ = &mut request => panic!("descriptor request skipped its blocked prefix"),
+                        _ = context.sleep(std::time::Duration::from_millis(10)) => {},
+                    }
+                    for release in prefix_releases.take().unwrap() {
+                        release.send(()).unwrap();
+                    }
+                }
+                commonware_macros::select! {
+                    result = &mut blocked => result.expect("trailing descriptor read gate closed"),
+                    _ = &mut request => panic!("descriptor request completed while its prefix was blocked"),
+                    _ = context.sleep(std::time::Duration::from_millis(100)) => {
+                        panic!("speculative output descriptor did not reach storage");
+                    },
+                }
+                if limited {
+                    tail.release.send(()).unwrap();
+                    None
+                } else {
+                    Some(tail.release)
+                }
+            } else {
+                None
+            };
+            if let Some(releases) = prefix_releases {
+                for release in releases.into_iter().rev() {
+                    release.send(()).unwrap();
+                }
+            }
+            let outputs = commonware_macros::select! {
+                result = &mut request => result.unwrap(),
+                _ = context.sleep(std::time::Duration::from_millis(100)) => {
+                    panic!("ready descriptor prefix waited for speculative tail I/O");
+                },
+            };
+            drop(request);
+            if let Some(tail_release) = tail_release {
+                assert!(tail_release.is_closed(), "unused descriptor read was not canceled");
+            }
+            assert_eq!(outputs.len(), if speculative_tail { 1 } else { blocks.len() });
+            for (index, (output, block)) in outputs.iter().zip(&blocks).enumerate() {
+                assert_eq!(output.index, OutputIndex::new(index as u64));
+                assert_eq!(output.reference, block.reference());
+            }
+            drop(client);
+            handle.abort();
+            let _ = handle.await;
         });
     }
 
