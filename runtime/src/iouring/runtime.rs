@@ -1006,7 +1006,10 @@ impl Drop for Scope {
 
 /// Return the current worker for a short owner-local transition.
 pub(super) fn current() -> Option<Rc<RefCell<Local>>> {
-    CURRENT.with(|current| current.borrow().clone())
+    CURRENT
+        .try_with(|current| current.borrow().clone())
+        .ok()
+        .flatten()
 }
 
 /// Reusable typed callback storage detached from Local before invocation.
@@ -2242,6 +2245,50 @@ mod tests {
             "primary root panic"
         );
         assert_eq!(observed.load(Ordering::SeqCst), 9);
+    }
+
+    #[test]
+    fn foreign_tls_destructor_can_wake_after_current_key_destruction() {
+        struct OnExit {
+            waker: Waker,
+            result: mpsc::Sender<bool>,
+        }
+
+        impl Drop for OnExit {
+            fn drop(&mut self) {
+                // Catch inside TLS destruction so a regression fails the test
+                // instead of aborting the process with an escaping panic.
+                let panicked = catch_unwind(AssertUnwindSafe(|| self.waker.wake_by_ref())).is_err();
+                let _ = self.result.send(panicked);
+            }
+        }
+
+        thread_local! {
+            static EXIT: RefCell<Option<OnExit>> = const { RefCell::new(None) };
+        }
+
+        let panicked = Runner::new(config()).start(|_| {
+            std::future::poll_fn(|cx| {
+                let waker = cx.waker().clone();
+                let (result, received) = mpsc::channel();
+                thread::spawn(move || {
+                    // Initialize user TLS first. The foreign wake initializes
+                    // CURRENT afterward, so CURRENT is destroyed before EXIT.
+                    EXIT.with(|slot| {
+                        *slot.borrow_mut() = Some(OnExit {
+                            waker: waker.clone(),
+                            result,
+                        });
+                    });
+                    waker.wake_by_ref();
+                })
+                .join()
+                .unwrap();
+                // Keep the owning runner alive through foreign TLS destruction.
+                Poll::Ready(received.recv().unwrap())
+            })
+        });
+        assert!(!panicked, "ordinary wake accessed destroyed runtime TLS");
     }
 }
 
