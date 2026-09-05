@@ -155,6 +155,22 @@ impl IoBufs {
         }
     }
 
+    /// Borrow a readable chunk by index without consuming preceding owners.
+    ///
+    /// io_uring requests retain every buffer until kernel retirement and keep a
+    /// separate progress cursor. Indexing avoids rescanning the consumed prefix
+    /// each time a partial completion needs another submission.
+    #[commonware_macros::stability(ALPHA)]
+    #[cfg(all(target_os = "linux", feature = "iouring"))]
+    pub(crate) fn chunk_at(&self, index: usize) -> Option<&[u8]> {
+        match &self.inner {
+            IoBufsInner::Single(buf) => (index == 0 && !buf.is_empty()).then(|| buf.as_ref()),
+            IoBufsInner::Pair(bufs) => bufs.get(index).map(AsRef::as_ref),
+            IoBufsInner::Triple(bufs) => bufs.get(index).map(AsRef::as_ref),
+            IoBufsInner::Chunked(bufs) => bufs.get(index).map(AsRef::as_ref),
+        }
+    }
+
     /// Whether all buffers are empty.
     #[inline]
     pub fn is_empty(&self) -> bool {

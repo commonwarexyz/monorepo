@@ -28,16 +28,13 @@ jobs:
         os: [ubuntu-latest, macos-latest]
         partition: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
         flags:
-          - "--features commonware-runtime/iouring-storage"
-          - "--features commonware-runtime/iouring-network"
+          - "--features commonware-runtime/iouring"
           - "--no-default-features"
           - ""
         exclude:
           # Only run io_uring features on Ubuntu
           - os: macos-latest
-            flags: "--features commonware-runtime/iouring-storage"
-          - os: macos-latest
-            flags: "--features commonware-runtime/iouring-network"
+            flags: "--features commonware-runtime/iouring"
           # Only run --no-default-features on Ubuntu
           - os: macos-latest
             flags: "--no-default-features"
@@ -91,9 +88,6 @@ jobs:
           - package: commonware-storage
             test_flags: "--features test-traits"
             lint_flags: "--cfg full_bench"
-          - package: commonware-storage
-            test_flags: "--features commonware-runtime/iouring-storage,test-traits"
-            lint_flags: "--cfg full_bench"
           - package: commonware-coding
             test_flags: ""
             lint_flags: ""
@@ -134,6 +128,18 @@ jobs:
         tool: just@1.43.0
     - name: Test benchmarks
       run: just partition=${{ matrix.partition || '1/1' }} test-benches ${{ matrix.package }} '${{ matrix.test_flags }}' '${{ matrix.lint_flags }}'
+    # This harness accepts workload arguments instead of Criterion test flags.
+    - name: Test native runtime storage benchmark
+      if: matrix.package == 'commonware-storage'
+      run: |
+        cargo bench -p commonware-runtime --bench storage --features iouring -- \
+          --workload read_seq --cache warm --duration 1 --file-size 1M \
+          --inflight 2 --worker-threads 1 --ring-size 8 --output json > iouring-read.json
+        cargo bench -p commonware-runtime --bench storage --features iouring -- \
+          --workload write_sync --duration 1 --file-size 1M \
+          --inflight 2 --worker-threads 1 --ring-size 8 --output json > iouring-write-sync.json
+        jq -e '.backend == "iouring" and .worker_threads == 1 and .ring_size == 8 and .read.ops > 0' iouring-read.json
+        jq -e '.backend == "iouring" and .worker_threads == 1 and .ring_size == 8 and .write.ops > 0' iouring-write-sync.json
 
   Fuzz:
     name: "Fuzz (${{ matrix.fuzz_dir }}) (partition: ${{ matrix.partition || '1/1' }})"

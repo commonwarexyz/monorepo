@@ -187,7 +187,7 @@ impl<N: crate::Network> crate::Network for Network<N> {
 #[cfg(test)]
 mod tests {
     use crate::{
-        Error, IoBuf, IoBufs, Listener as _, Network as _, Sink as _, Stream as _,
+        Error, IoBuf, IoBufs, Listener as _, Network as _, Runner as _, Sink as _, Stream as _,
         deterministic::Auditor,
         network::{
             audited::Network as AuditedNetwork, deterministic::Network as DeterministicNetwork,
@@ -225,27 +225,31 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_trait() {
-        tests::test_network_trait(|| {
-            AuditedNetwork::new(
-                DeterministicNetwork::default(),
-                Arc::new(Auditor::default()),
-            )
-        })
-        .await;
+    #[test]
+    fn test_trait() {
+        crate::tokio::Runner::default().start(|context| async move {
+            tests::test_network_trait(context, || {
+                AuditedNetwork::new(
+                    DeterministicNetwork::default(),
+                    Arc::new(Auditor::default()),
+                )
+            })
+            .await;
+        });
     }
 
     #[test_group("slow")]
-    #[tokio::test]
-    async fn test_stress_trait() {
-        tests::stress_test_network_trait(|| {
-            AuditedNetwork::new(
-                DeterministicNetwork::default(),
-                Arc::new(Auditor::default()),
-            )
-        })
-        .await;
+    #[test]
+    fn test_stress_trait() {
+        crate::tokio::Runner::default().start(|context| async move {
+            tests::stress_test_network_trait(context, || {
+                AuditedNetwork::new(
+                    DeterministicNetwork::default(),
+                    Arc::new(Auditor::default()),
+                )
+            })
+            .await;
+        });
     }
 
     // Test that running the same network operations on two audited networks

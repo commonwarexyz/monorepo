@@ -167,7 +167,7 @@ impl<N: crate::Network> crate::Network for Network<N> {
 #[cfg(test)]
 mod tests {
     use crate::{
-        Listener as _, Network as _, Sink as _, Stream as _,
+        Listener as _, Network as _, Runner as _, Sink as _, Stream as _,
         network::{
             deterministic::Network as DeterministicNetwork, metered::Network as MeteredNetwork,
             tests,
@@ -176,23 +176,27 @@ mod tests {
     use commonware_macros::test_group;
     use std::net::SocketAddr;
 
-    #[tokio::test]
-    async fn test_trait() {
-        tests::test_network_trait(|| {
-            let mut registry = crate::telemetry::metrics::Registry::default();
-            MeteredNetwork::new(DeterministicNetwork::default(), &mut registry)
-        })
-        .await;
+    #[test]
+    fn test_trait() {
+        crate::tokio::Runner::default().start(|context| async move {
+            tests::test_network_trait(context, || {
+                let mut registry = crate::telemetry::metrics::Registry::default();
+                MeteredNetwork::new(DeterministicNetwork::default(), &mut registry)
+            })
+            .await;
+        });
     }
 
     #[test_group("slow")]
-    #[tokio::test]
-    async fn test_stress_trait() {
-        tests::stress_test_network_trait(|| {
-            let mut registry = crate::telemetry::metrics::Registry::default();
-            MeteredNetwork::new(DeterministicNetwork::default(), &mut registry)
-        })
-        .await;
+    #[test]
+    fn test_stress_trait() {
+        crate::tokio::Runner::default().start(|context| async move {
+            tests::stress_test_network_trait(context, || {
+                let mut registry = crate::telemetry::metrics::Registry::default();
+                MeteredNetwork::new(DeterministicNetwork::default(), &mut registry)
+            })
+            .await;
+        });
     }
 
     #[tokio::test]

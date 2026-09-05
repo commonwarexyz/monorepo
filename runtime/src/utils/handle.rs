@@ -154,6 +154,61 @@ where
         )
     }
 
+    /// Wrap a native worker task without erasing its concrete future type.
+    ///
+    /// The cleanup guard exists before registration and therefore also runs
+    /// when a task is rejected or dropped before its first poll. Supervision
+    /// closes before publishing a successful result, so retained contexts cannot
+    /// spawn descendants beneath a completed task.
+    ///
+    /// As with the Tokio wrapper, user futures must preserve their polling
+    /// Context so Abortable retains the runtime's cancellation waker.
+    #[commonware_macros::stability(ALPHA)]
+    #[cfg(all(feature = "iouring", target_os = "linux"))]
+    #[inline(always)]
+    pub(crate) fn init_local<F>(
+        future: F,
+        metric: MetricHandle,
+        panicker: Panicker,
+        tree: Arc<Tree>,
+    ) -> (impl Future<Output = ()> + Send + 'static, Self)
+    where
+        F: Future<Output = T> + Send + 'static,
+    {
+        let (sender, receiver) = oneshot::channel();
+        let (abort_handle, abort_registration) = AbortHandle::new_pair();
+        let cleanup = LocalCleanup {
+            tree: Some(tree),
+            metric: Some(metric.clone()),
+        };
+        let task = async move {
+            let mut cleanup = cleanup;
+            let result =
+                Abortable::new(AssertUnwindSafe(future).catch_unwind(), abort_registration).await;
+            cleanup.finish();
+            match result {
+                Ok(Ok(output)) => {
+                    let _ = sender.send(Ok(output));
+                }
+                Ok(Err(panic)) => {
+                    panicker.notify(panic);
+                    let _ = sender.send(Err(Error::Exited));
+                }
+                Err(Aborted) => {}
+            }
+        };
+        (
+            task,
+            Self {
+                state: HandleState::Task {
+                    receiver,
+                    abort_handle,
+                    metric,
+                },
+            },
+        )
+    }
+
     /// Returns a handle backed by a completion receiver.
     pub fn from_receiver(receiver: oneshot::Receiver<Result<T, Error>>) -> Self {
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
@@ -281,6 +336,38 @@ where
     }
 }
 
+/// Cleanup retained by a native task even before the task's first poll.
+#[commonware_macros::stability(ALPHA)]
+#[cfg(all(feature = "iouring", target_os = "linux"))]
+struct LocalCleanup {
+    /// Consumed parent whose descendants stop when this task exits.
+    tree: Option<Arc<Tree>>,
+    /// Exactly-once task metric completion.
+    metric: Option<MetricHandle>,
+}
+
+#[commonware_macros::stability(ALPHA)]
+#[cfg(all(feature = "iouring", target_os = "linux"))]
+impl LocalCleanup {
+    /// Close supervision and finish metrics before publishing a task result.
+    fn finish(&mut self) {
+        if let Some(tree) = self.tree.take() {
+            tree.abort();
+        }
+        if let Some(metric) = self.metric.take() {
+            metric.finish();
+        }
+    }
+}
+
+#[commonware_macros::stability(ALPHA)]
+#[cfg(all(feature = "iouring", target_os = "linux"))]
+impl Drop for LocalCleanup {
+    fn drop(&mut self) {
+        self.finish();
+    }
+}
+
 impl<T> Future for Handle<T>
 where
     T: Send + 'static,
@@ -369,14 +456,22 @@ impl Panicker {
             return;
         }
 
-        // If we've already sent a panic, ignore the new one
-        let mut sender = self.sender.lock();
-        let Some(sender) = sender.take() else {
-            return;
-        };
+        self.send(panic);
+    }
 
-        // Send the panic
-        let _ = sender.send(panic);
+    /// Report a native worker failure independently of user task panic policy.
+    #[commonware_macros::stability(ALPHA)]
+    #[cfg(all(feature = "iouring", target_os = "linux"))]
+    pub(crate) fn notify_fatal(&self, panic: Panic) {
+        self.send(panic);
+    }
+
+    fn send(&self, panic: Panic) {
+        // Publication and discarded payload destruction run after unlocking.
+        let sender = self.sender.lock().take();
+        if let Some(sender) = sender {
+            let _ = sender.send(panic);
+        }
     }
 }
 
@@ -386,6 +481,24 @@ pub(crate) struct Panicked {
 }
 
 impl Panicked {
+    /// Poll a native root interrupt without unwinding through its user future.
+    #[commonware_macros::stability(ALPHA)]
+    #[cfg(all(feature = "iouring", target_os = "linux"))]
+    pub(crate) fn poll_panic(&mut self, cx: &mut Context<'_>) -> Poll<Option<Panic>> {
+        Pin::new(&mut self.receiver).poll(cx).map(Result::ok)
+    }
+
+    /// Close reception and take any panic that raced normal root completion.
+    ///
+    /// The native runner calls this after its worker completion barrier, so no
+    /// accepted worker still has an unfinished failure publication.
+    #[commonware_macros::stability(ALPHA)]
+    #[cfg(all(feature = "iouring", target_os = "linux"))]
+    pub(crate) fn close(&mut self) -> Option<Panic> {
+        self.receiver.close();
+        self.receiver.try_recv().ok()
+    }
+
     /// Polls a task that should be interrupted by a panic.
     pub(crate) async fn interrupt<Fut>(self, task: Fut) -> Fut::Output
     where
@@ -443,6 +556,39 @@ mod tests {
     use futures::future;
 
     const METRIC_PREFIX: &str = "runtime_tasks_running{";
+
+    #[commonware_macros::stability(ALPHA)]
+    #[cfg(all(feature = "iouring", target_os = "linux"))]
+    #[test]
+    fn local_task_cleanup_covers_unpolled_and_completed_tasks() {
+        for completed in [false, true] {
+            let gauge = super::Gauge::default();
+            let tree = super::Tree::root();
+            let (panicker, _) = super::Panicker::new(true);
+            let (task, handle) = Handle::init_local(
+                async { 7 },
+                super::MetricHandle::new(gauge.clone()),
+                panicker,
+                tree.clone(),
+            );
+            tree.register(handle.aborter().unwrap());
+            assert_eq!(gauge.get(), 1);
+            if completed {
+                futures::executor::block_on(task);
+            } else {
+                drop(task);
+            }
+            assert_eq!(gauge.get(), 0);
+            assert!(super::Tree::child(&tree).1);
+            let output = futures::executor::block_on(handle);
+            if completed {
+                assert_eq!(output.unwrap(), 7);
+            } else {
+                assert!(matches!(output, Err(Error::Closed)));
+            }
+            assert_eq!(gauge.get(), 0);
+        }
+    }
 
     fn running_tasks_for_label(metrics: &str, label: &str) -> Option<u64> {
         let label_fragment = format!("name=\"{label}\"");
