@@ -1349,6 +1349,9 @@ impl Worker {
             };
             if poll_root {
                 let mut cx = TaskContext::from_waker(root_waker);
+                // Shared retains the sender until failure publication or the end
+                // of polling, so closure without a payload cannot occur here.
+                // Final receiver closure follows cleanup and the worker barrier.
                 if let Some(interrupts) = interrupts.as_mut()
                     && let Poll::Ready(Some(panic)) = interrupts.poll_panic(&mut cx)
                 {

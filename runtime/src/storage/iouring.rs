@@ -9,7 +9,9 @@
 //!
 //! A shared directory hold follows each blob's file into admitted requests.
 //! Dropping a caller never releases that hold while the kernel can still access
-//! the file. Writes and syncs finish their logical work after caller cancellation.
+//! the file. Once admitted, writes and syncs finish their logical work after caller
+//! cancellation. Dropping an operation while it is still waiting for admission
+//! prevents submission.
 //!
 //! ## Memory Safety
 //!
