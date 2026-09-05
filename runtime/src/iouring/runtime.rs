@@ -126,7 +126,8 @@ pub struct Config {
     idle_spinner: SpinnerConfig,
     /// Stack size for one-off worker and Rayon threads.
     thread_stack_size: usize,
-    /// Whether user task panics report Exited instead of failing the runner.
+    /// Whether user closure and poll panics report Exited instead of failing the runner.
+    /// Task disposal escaping that wrapper is contained with either setting.
     catch_panics: bool,
     /// Base directory held while storage resources or requests remain alive.
     storage_directory: PathBuf,
@@ -191,7 +192,13 @@ impl Config {
         self
     }
 
-    /// Set whether user task panics are caught. Infrastructure failures remain fatal.
+    /// Set whether user closure and poll panics are caught. Infrastructure failures remain fatal.
+    ///
+    /// Cancellation-time and task-disposal panics escaping the user-poll wrapper
+    /// are contained with either setting. An unpublished result may resolve to
+    /// [`Error::Closed`], while an already-published result remains available.
+    /// Destruction inside the selected-worker wrapper's poll follows the
+    /// configured user-panic policy.
     pub const fn with_catch_panics(mut self, catch: bool) -> Self {
         self.catch_panics = catch;
         self
@@ -2074,17 +2081,16 @@ mod tests {
                     drops,
                 };
                 context.shared.fail_launch.store(true, Ordering::Relaxed);
-                let failed =
-                    context
-                        .child("failed_launch")
-                        .shared(true)
-                        .spawn(move |_| async move {
-                            let _payload = payload;
-                        });
-                assert!(matches!(failed.await, Err(Error::Closed)));
+                context
+                    .child("failed_launch")
+                    .shared(true)
+                    .spawn(move |_| async move {
+                        let _payload = payload;
+                    });
             });
         }));
-        assert!(result.is_err());
+        let panic = result.expect_err("thread creation failure must panic in its caller");
+        assert!(extract_panic_message(&*panic).contains("failed to spawn io_uring worker"));
         assert_eq!(observed.load(Ordering::SeqCst), 1);
     }
 

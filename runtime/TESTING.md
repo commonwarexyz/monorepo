@@ -88,7 +88,7 @@ release mode:
 ```bash
 just test-loom --features iouring
 just miri iouring::task:: -p commonware-runtime --features iouring
-just miri utils::handle::tests::local_task_context_replacement_does_not_replace_abort_waker -p commonware-runtime --features iouring
+just miri utils::handle::tests::local_task_cleanup_covers_unpolled_and_completed_tasks -p commonware-runtime --features iouring
 ```
 
 Miri applies to pinned task cells and pure local-state tests, not tests that

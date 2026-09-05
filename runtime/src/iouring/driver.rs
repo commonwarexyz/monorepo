@@ -386,6 +386,9 @@ impl State {
     }
 
     /// Build and push the SQE for a validated live waiter.
+    ///
+    /// SQE construction for requests retained after orphaning is callback-free
+    /// and cannot unwind for valid, validated request state.
     fn stage_request(
         &mut self,
         id: WaiterId,

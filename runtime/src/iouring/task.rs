@@ -286,7 +286,7 @@ impl Tasks {
         let entry = self.entries.get(id.0).expect("running task missing");
         assert!(matches!(entry.state, State::Running | State::Notified));
         // The poll-local Running owns both callback-bearing values.
-        debug_assert!(entry.cell.is_none() && entry.cached_waker.is_none());
+        assert!(entry.cell.is_none() && entry.cached_waker.is_none());
         self.entries.remove(id.0);
     }
 
