@@ -472,7 +472,9 @@ impl<
 
         // Persist the nullify if it is a first attempt
         if !retry {
-            self = self.append_journal(Artifact::Nullify(nullify.clone())).await;
+            self = self
+                .append_journal(Artifact::Nullify(nullify.clone()))
+                .await;
             return (self, Some((nullify, None)));
         }
 
@@ -553,7 +555,9 @@ impl<
         };
 
         // Record the vote locally before sharing it.
-        self = self.append_journal(Artifact::Notarize(notarize.clone())).await;
+        self = self
+            .append_journal(Artifact::Notarize(notarize.clone()))
+            .await;
         (self, Some(notarize))
     }
 
@@ -618,7 +622,9 @@ impl<
         };
 
         // Record the vote locally before sharing it.
-        self = self.append_journal(Artifact::Finalize(finalize.clone())).await;
+        self = self
+            .append_journal(Artifact::Finalize(finalize.clone()))
+            .await;
         (self, Some(finalize))
     }
 
