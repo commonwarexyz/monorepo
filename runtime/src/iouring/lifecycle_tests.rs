@@ -466,3 +466,96 @@ fn ready_future_destructor_uses_selected_worker_poll_panic_policy() {
         }
     }
 }
+
+#[test]
+fn callback_generated_work_prevents_parking() {
+    enum Work {
+        Wake(Waker, Arc<AtomicBool>),
+        Spawn(Context, oneshot::Sender<()>),
+    }
+
+    struct Callback {
+        remaining: usize,
+        work: Option<Work>,
+    }
+
+    // The destructor performs the callback, which Waker::noop cannot model.
+    #[allow(clippy::manual_noop_waker)]
+    impl std::task::Wake for Callback {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    impl Drop for Callback {
+        fn drop(&mut self) {
+            let work = self.work.take().unwrap();
+            if self.remaining != 0 {
+                current()
+                    .unwrap()
+                    .borrow_mut()
+                    .deferred
+                    .drops
+                    .push(Waker::from(Arc::new(Self {
+                        remaining: self.remaining - 1,
+                        work: Some(work),
+                    })));
+                return;
+            }
+            match work {
+                Work::Wake(waker, ready) => {
+                    ready.store(true, Ordering::SeqCst);
+                    waker.wake();
+                }
+                Work::Spawn(context, sender) => {
+                    context.spawn(|_| async move {
+                        sender.send(()).unwrap();
+                    });
+                }
+            }
+        }
+    }
+
+    for spinner in [SpinnerConfig::disabled(), SpinnerConfig::default()] {
+        for spawn in [false, true] {
+            for remaining in [0, 2] {
+                Runner::new(config().with_idle_spinner(spinner.clone())).start(
+                    |context| async move {
+                        let (sender, mut receiver) = oneshot::channel();
+                        let mut sender = Some(sender);
+                        let ready = Arc::new(AtomicBool::new(false));
+                        let mut queued = false;
+                        futures::future::poll_fn(|cx| {
+                            if !queued {
+                                queued = true;
+                                let work = if spawn {
+                                    Work::Spawn(
+                                        context.child("callback_work"),
+                                        sender.take().unwrap(),
+                                    )
+                                } else {
+                                    Work::Wake(cx.waker().clone(), ready.clone())
+                                };
+                                let local = current().unwrap();
+                                let mut local = local.borrow_mut();
+                                local.forbid_park = true;
+                                // Longer chains leave a fresh batch after both normal
+                                // callback passes. All progress is local to this worker.
+                                local.deferred.drops.push(Waker::from(Arc::new(Callback {
+                                    remaining,
+                                    work: Some(work),
+                                })));
+                            }
+                            if spawn {
+                                Pin::new(&mut receiver).poll(cx).map(Result::unwrap)
+                            } else if ready.load(Ordering::SeqCst) {
+                                Poll::Ready(())
+                            } else {
+                                Poll::Pending
+                            }
+                        })
+                        .await;
+                    },
+                );
+            }
+        }
+    }
+}

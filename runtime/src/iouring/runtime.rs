@@ -890,6 +890,9 @@ pub(super) struct Local {
     shared: Arc<Shared>,
     /// This worker's contribution currently included in the aggregate gauge.
     reported_pending: usize,
+    /// Fail immediately if a callback-progress regression reaches the idle path.
+    #[cfg(test)]
+    forbid_park: bool,
 }
 
 impl Local {
@@ -927,6 +930,8 @@ impl Local {
             completed: Vec::new(),
             shared,
             reported_pending: 0,
+            #[cfg(test)]
+            forbid_park: false,
         })
     }
 
@@ -1349,6 +1354,16 @@ impl Worker {
                 }
             }
 
+            // Polls can leave cancelled observers behind. Run one batch before
+            // deciding whether kernel service can wait until parking. Reentrant
+            // work remains visible to the complete readiness checks below.
+            if !self.local.borrow().deferred.is_empty() {
+                self.callbacks();
+                if let Some(panic) = self.panics.take() {
+                    return Err(panic);
+                }
+            }
+
             let defer = !self.local.borrow().is_ready()
                 && self.inbox.is_empty()
                 && !mailbox.waker.pending(self.processed_seq);
@@ -1392,6 +1407,11 @@ impl Worker {
                 continue;
             }
 
+            #[cfg(test)]
+            assert!(
+                !self.local.borrow().forbid_park,
+                "callback work reached the idle path"
+            );
             if needs_kernel {
                 let result = self
                     .local
