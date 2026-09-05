@@ -94,6 +94,9 @@ pub(super) struct Driver {
     ring: IoUring,
     /// Kept separately to allow batching SQ access while updating request state.
     state: State,
+    /// Inject one service error after transferring a terminal completion.
+    #[cfg(test)]
+    pub(super) fail_service_after_completion: bool,
 }
 
 /// Request state borrowed independently of the ring's SQ and CQ mappings.
@@ -138,6 +141,8 @@ impl Driver {
         let size = cfg.size as usize;
         Ok(Self {
             ring,
+            #[cfg(test)]
+            fail_service_after_completion: false,
             state: State {
                 waiters: Waiters::new(size),
                 ready_queue: VecDeque::with_capacity(size),
@@ -262,6 +267,13 @@ impl Driver {
             self.state.submit_retry = !self.ring.submission().is_empty();
         }
         woke |= self.state.reap(&mut self.ring, completed);
+        // Preserve real retirement before simulating a later service failure.
+        #[cfg(test)]
+        if !completed.is_empty() && std::mem::take(&mut self.fail_service_after_completion) {
+            return Err(std::io::Error::other(
+                "injected service failure after completion",
+            ));
+        }
         // A final CQE can terminate multishot polling. `park` checks this flag
         // again before every blocking enter, including this final-reap case.
         Ok(woke)

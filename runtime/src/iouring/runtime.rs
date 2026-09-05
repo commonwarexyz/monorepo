@@ -1279,12 +1279,13 @@ impl Worker {
             completed,
             ..
         } = &mut *local;
-        let woke = driver
+        let result = driver
             .as_mut()
             .unwrap()
-            .service(*now, defer_kernel_service, completed)
-            .expect("io_uring driver service failed");
+            .service(*now, defer_kernel_service, completed);
+        // Reconcile retired waiters before an error can trigger observer disposal.
         local.apply_completions();
+        let woke = result.expect("io_uring driver service failed");
         let Local {
             timers,
             now,

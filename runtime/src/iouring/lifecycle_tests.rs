@@ -1,15 +1,66 @@
 //! Controlled checks of worker admission, cleanup, and failure publication.
 
-use super::*;
-use crate::{Blob as _, Runner as _, Storage as _, WriteOptions, utils::extract_panic_message};
+use super::{
+    super::{
+        operation::Operation,
+        request::{RecvRequest, Request},
+    },
+    *,
+};
+use crate::{
+    Blob as _, IoBufMut, Runner as _, Storage as _, WriteOptions, utils::extract_panic_message,
+};
 use futures::FutureExt;
 use std::{
     fs::{self, File},
+    io::Write as _,
+    os::unix::net::UnixStream,
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 fn config() -> Config {
     Config::new().with_idle_spinner(SpinnerConfig::disabled())
+}
+
+#[test]
+fn service_error_reconciles_completions_before_cleanup() {
+    let (socket, mut peer) = UnixStream::pair().unwrap();
+    socket.set_nonblocking(true).unwrap();
+    peer.write_all(b"x").unwrap();
+    let retained = Arc::new(Mutex::new(Operation::new(Request::Recv(RecvRequest {
+        fd: Arc::new(socket.into()),
+        buf: IoBufMut::with_capacity(1),
+        offset: 0,
+        len: 1,
+        exact: true,
+        deadline: None,
+        result: None,
+    }))));
+    let operation = retained.clone();
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        Runner::new(config()).start(|_| async move {
+            current()
+                .unwrap()
+                .borrow_mut()
+                .driver
+                .as_mut()
+                .unwrap()
+                .fail_service_after_completion = true;
+            // Keep the observer alive beyond root destruction so cleanup must
+            // reconcile the retired waiter before closing ordinary operations.
+            futures::future::poll_fn(|cx| {
+                assert!(Pin::new(&mut *operation.lock()).poll(cx).is_pending());
+                Poll::<()>::Pending
+            })
+            .await;
+        });
+    }));
+    let panic = result.expect_err("injected service failure must fail the runner");
+    let message = extract_panic_message(&*panic);
+    assert!(message.contains("io_uring driver service failed"));
+    assert!(message.contains("injected service failure after completion"));
+    // The escaped future can be destroyed after its worker has closed.
+    drop(retained);
 }
 
 #[test]
