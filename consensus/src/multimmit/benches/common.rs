@@ -1,10 +1,8 @@
-use bytes::BytesMut;
-use commonware_codec::{Read, Write};
 use commonware_consensus::{
     multimmit::{
         config::{CodecConfig, Config, Limits},
         mocks,
-        scheme::bls12381_threshold::{Roster, Scheme},
+        scheme::bls12381_threshold::Scheme,
         types::{
             Anchor, BlockRef, CertificateId, ChainId, ChainProposal, EpochGenesis, Extension,
             Height, LeaderBlock, Lqc, Nullify, Position, SignedTransactionBlock, TipRecord,
@@ -14,20 +12,10 @@ use commonware_consensus::{
     types::{Epoch, Round, View},
 };
 use commonware_cryptography::{
-    Hasher, Sha256, Signer,
-    bls12381::primitives::{
-        group::{Private, Scalar, Share},
-        ops,
-        sharing::{Mode, ModeVersion, Sharing},
-        variant::Variant,
-    },
-    ed25519,
-    sha256::Digest,
+    Hasher, Sha256, Signer, bls12381::primitives::variant::Variant, ed25519, sha256::Digest,
 };
-use commonware_math::poly::Poly;
 use commonware_parallel::{Rayon, Sequential};
 use commonware_utils::{NZUsize, Participant, TestRng, ordered::Set};
-use core::num::NonZeroU32;
 
 pub const PARTICIPANTS: u32 = 31;
 const NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_MULTIMMIT_CRYPTO_BENCH";
@@ -60,55 +48,7 @@ impl<V: Variant> Fixture<V> {
         .unwrap();
 
         let mut rng = TestRng::new(1_234);
-        let mut ordinary = Vec::with_capacity(participants_count as usize);
-        let participants = identities
-            .iter()
-            .map(|identity| {
-                let (private, public) = ops::keypair::<_, V>(&mut rng);
-                let proof = Roster::<ed25519::PublicKey, V>::proof_of_possession(
-                    epoch_config.namespace(),
-                    &private,
-                );
-                ordinary.push(private);
-                (identity.clone(), public, proof)
-            })
-            .collect();
-        let roster = Roster::verify(
-            epoch_config.namespace(),
-            codec.participants(),
-            participants,
-            &Sequential,
-        )
-        .unwrap();
-        let (da, da_shares) = sharing::<V>(
-            &mut rng,
-            participants_count,
-            u32::try_from(codec.da_quorum()).unwrap(),
-        );
-        let (nullification, nullification_shares) = sharing::<V>(
-            &mut rng,
-            participants_count,
-            u32::try_from(codec.nullification_quorum()).unwrap(),
-        );
-
-        let signers = ordinary
-            .into_iter()
-            .zip(da_shares)
-            .zip(nullification_shares)
-            .map(|((ordinary, da_share), nullification_share)| {
-                Scheme::signer(
-                    &epoch_config,
-                    roster.clone(),
-                    ordinary,
-                    da.clone(),
-                    da_share,
-                    nullification.clone(),
-                    nullification_share,
-                )
-                .unwrap()
-            })
-            .collect();
-        let verifier = Scheme::verifier(&epoch_config, roster, da, nullification).unwrap();
+        let (signers, verifier) = mocks::schemes(&mut rng, &epoch_config, &identities);
         let tips = epoch_config.genesis().tips().to_vec();
         let parent_history = TipRecord::at_tips(
             genesis_history::<Sha256>(epoch_config.genesis()),
@@ -237,29 +177,6 @@ impl<V: Variant> Fixture<V> {
 
 pub fn rayon() -> Rayon {
     Rayon::new(NZUsize!(8)).unwrap()
-}
-
-fn sharing<V: Variant>(
-    rng: &mut TestRng,
-    participants: u32,
-    required: u32,
-) -> (Sharing<V>, Vec<Share>) {
-    let private = Poly::<Scalar>::new(rng, required - 1);
-    let shares = (0..participants)
-        .map(|index| {
-            let point = Scalar::from_u64(u64::from(index) + 1);
-            Share::new(Participant::new(index), Private::new(private.eval(&point)))
-        })
-        .collect();
-    let public = Poly::<V::Public>::commit(private);
-    let mut encoded = BytesMut::new();
-    Mode::NonZeroCounter.write(&mut encoded);
-    participants.write(&mut encoded);
-    public.write(&mut encoded);
-    let mut encoded = encoded.freeze();
-    let total = NonZeroU32::new(participants).unwrap();
-    let sharing = Sharing::read_cfg(&mut encoded, &(total, ModeVersion::v0())).unwrap();
-    (sharing, shares)
 }
 
 fn digest(label: &[u8], marker: u64) -> Digest {
