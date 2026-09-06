@@ -2286,10 +2286,9 @@ fn lqc_output_waits_for_earlier_owner_claim() {
     assert!(matches!(
         released.as_slice(),
         [super::finality::FinalityOutput::Finality(
-            artifact_id,
             observation,
             certificate,
-        )] if *artifact_id == later_id
+        )] if certificate.id::<Sha256>() == later_id
             && *observation == later_observation
             && certificate.as_ref() == later.as_ref()
     ));
@@ -2376,10 +2375,9 @@ fn later_duplicate_completion_preserves_an_earlier_finality_observation() {
     assert!(matches!(
         released.as_slice(),
         [super::finality::FinalityOutput::Finality(
-            artifact_id,
             observation,
             artifact,
-        )] if *artifact_id == certificate_id
+        )] if artifact.id::<Sha256>() == certificate_id
             && *observation == first_observation
             && artifact.as_ref() == certificate.as_ref()
     ));
@@ -2429,10 +2427,9 @@ fn retiring_pending_finality_claim_releases_later_certificate() {
     assert!(matches!(
         released.as_slice(),
         [super::finality::FinalityOutput::Finality(
-            artifact_id,
             observation,
             certificate,
-        )] if *artifact_id == later_id
+        )] if certificate.id::<Sha256>() == later_id
             && *observation == later_observation
             && certificate.as_ref() == later.as_ref()
     ));
@@ -5599,14 +5596,14 @@ fn late_finality_admissions_retain_only_the_highest_proof_without_parents() {
     }
     let retained_parents = machine.views.retained_parents();
 
-    for view in [3, 4, 5] {
+    for view in [3, 4, 5, 5, 4] {
         let finalized = leader(&machine, view);
         let votes = (0..5)
             .map(|signer| view_vote(&machine, &finalized, signer))
             .collect::<Vec<_>>();
         let proof = Arc::new(Artifact::Lqc(lqc(&machine, finalized, &votes)));
         machine
-            .apply_finality(proof.id::<Sha256>(), Observation::new(view, 0), proof)
+            .apply_finality(Observation::new(view, 0), proof)
             .unwrap();
     }
 
@@ -6748,7 +6745,7 @@ fn finality_state_retains_its_lqc_after_artifact_cache_compaction() {
     assert!(!machine.artifacts.contains_key(&proof_id));
     machine
         .views
-        .observe_finality(proof_id, &proof)
+        .observe_finality(&proof)
         .expect("finality admits only authenticated L-QCs to the view state");
 
     let change = machine
@@ -6769,7 +6766,6 @@ fn covered_finality_update_does_not_retain_its_lqc() {
         .map(|signer| view_vote(&machine, &finalized, signer))
         .collect::<Vec<_>>();
     let proof = Arc::new(Artifact::Lqc(lqc(&machine, finalized, &votes)));
-    let proof_id = proof.id::<Sha256>();
 
     let verification = observe(&mut machine, proof.as_ref().clone());
     let admitted = complete_with_step(&mut machine, &verification, true);
@@ -6782,7 +6778,7 @@ fn covered_finality_update_does_not_retain_its_lqc() {
     let retained_parents = machine.views.retained_parents();
 
     machine
-        .apply_finality(proof_id, Observation::new(2, 0), proof)
+        .apply_finality(Observation::new(2, 0), proof)
         .expect("the covered L-QC remains valid finality evidence");
 
     assert_eq!(machine.views.retained_finality_proofs(), 0);
@@ -10129,10 +10125,7 @@ fn finality_floor_preserves_an_lqc_aggregation_reservation() {
         .map(|signer| view_vote(&machine, &competing, signer))
         .collect::<Vec<_>>();
     let competing = Arc::new(Artifact::Lqc(lqc(&machine, competing, &votes)));
-    machine
-        .views
-        .observe_finality(competing.id::<Sha256>(), &competing)
-        .unwrap();
+    machine.views.observe_finality(&competing).unwrap();
     let Artifact::Lqc(certificate) = competing.as_ref() else {
         unreachable!()
     };

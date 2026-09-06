@@ -77,8 +77,6 @@ struct MessageRecord<V: Variant, D: Digest> {
     artifact: Arc<Artifact<V, D>>,
 }
 
-type FinalityProofs<V, D> = BTreeMap<(View, ArtifactId<D>), Arc<Artifact<V, D>>>;
-
 #[derive(Clone, Debug)]
 struct NullifyRecord<V: Variant, D: Digest> {
     observation: Observation,
@@ -555,12 +553,11 @@ pub(crate) struct ViewState<V: Variant, D: Digest> {
     pass_restarts: (View, u8),
     next_certificate: u64,
     capabilities: Vec<ViewEffect<V, D>>,
-    /// Admitted L-QCs not yet consumed by the durable signing floor.
+    /// Highest admitted L-QC not yet consumed by the durable signing floor.
     ///
-    /// This index owns each proof because finality evidence can outlive its general ready-artifact
-    /// cache entry. The identifier remains in the key only to order same-view proofs
-    /// deterministically.
-    finality_proofs: FinalityProofs<V, D>,
+    /// Finality evidence owns its proof because it can outlive its general ready-artifact cache
+    /// entry. Equal-view arrivals retain the first proof.
+    finality_proof: Option<(View, Arc<Artifact<V, D>>)>,
 }
 
 #[derive(Clone, Debug)]
@@ -729,29 +726,26 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
             pass_restarts: (View::zero(), 0),
             next_certificate: 0,
             capabilities: Vec::new(),
-            finality_proofs: BTreeMap::new(),
+            finality_proof: None,
         }
     }
 
     /// Applies E3 after Finality admits a full L-QC.
     pub(crate) fn observe_finality(
         &mut self,
-        artifact_id: ArtifactId<D>,
         artifact: &Arc<Artifact<V, D>>,
     ) -> Result<bool, ViewError> {
         let Artifact::Lqc(certificate) = artifact.as_ref() else {
             return Err(ViewError::Certificate);
         };
         if self
-            .finality_proofs
-            .last_key_value()
-            .is_some_and(|((view, _), _)| *view >= certificate.view())
+            .finality_proof
+            .as_ref()
+            .is_some_and(|(view, _)| *view >= certificate.view())
         {
             return Ok(false);
         }
-        self.finality_proofs.clear();
-        self.finality_proofs
-            .insert((certificate.view(), artifact_id), Arc::clone(artifact));
+        self.finality_proof = Some((certificate.view(), Arc::clone(artifact)));
         Ok(true)
     }
 
@@ -763,10 +757,9 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
     /// view. Requiring the candidate to cover the current view would make floor progress a
     /// race against the ordinary exit, which the aggregation loses whenever it is not inline.
     pub(crate) fn signing_floor_candidate(&self, floor: View) -> Option<Arc<Artifact<V, D>>> {
-        self.finality_proofs
-            .iter()
-            .next_back()
-            .and_then(|((view, _), proof)| (*view > floor).then(|| Arc::clone(proof)))
+        self.finality_proof
+            .as_ref()
+            .and_then(|(view, proof)| (*view > floor).then(|| Arc::clone(proof)))
     }
 
     /// Reconstructs the exact safe-tip opening committed by a leader from its retained parent.
@@ -792,18 +785,18 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
     }
 
     pub(crate) fn retire_finality_proofs_through(&mut self, floor: View) {
-        while self
-            .finality_proofs
-            .first_key_value()
-            .is_some_and(|((view, _), _)| *view <= floor)
+        if self
+            .finality_proof
+            .as_ref()
+            .is_some_and(|(view, _)| *view <= floor)
         {
-            self.finality_proofs.pop_first();
+            self.finality_proof = None;
         }
     }
 
     #[cfg(test)]
     pub(crate) fn retained_finality_proofs(&self) -> usize {
-        self.finality_proofs.len()
+        usize::from(self.finality_proof.is_some())
     }
 
     #[cfg(test)]

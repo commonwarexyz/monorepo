@@ -1467,8 +1467,8 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             prepared,
         )?;
         for output in outputs {
-            let FinalityOutput::Finality(artifact_id, observation, certificate) = output;
-            self.apply_finality(artifact_id, observation, certificate)?;
+            let FinalityOutput::Finality(observation, certificate) = output;
+            self.apply_finality(observation, certificate)?;
         }
         Ok(())
     }
@@ -1486,8 +1486,8 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             &self.profile,
         )?;
         for output in outputs {
-            let FinalityOutput::Finality(artifact_id, observation, certificate) = output;
-            self.apply_finality(artifact_id, observation, certificate)?;
+            let FinalityOutput::Finality(observation, certificate) = output;
+            self.apply_finality(observation, certificate)?;
         }
         Ok(())
     }
@@ -1495,15 +1495,14 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     fn retire_finality_through(&mut self, floor: View) -> Result<(), StepError> {
         let outputs = self.finality.retire_through::<H>(&self.profile, floor)?;
         for output in outputs {
-            let FinalityOutput::Finality(artifact_id, observation, certificate) = output;
-            self.apply_finality(artifact_id, observation, certificate)?;
+            let FinalityOutput::Finality(observation, certificate) = output;
+            self.apply_finality(observation, certificate)?;
         }
         Ok(())
     }
 
     pub(super) fn apply_finality(
         &mut self,
-        artifact_id: ArtifactId<H::Digest>,
         observation: Observation,
         certificate: Arc<Artifact<V, H::Digest>>,
     ) -> Result<(), StepError> {
@@ -1515,7 +1514,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         }
         let selected = self
             .views
-            .observe_finality(artifact_id, &certificate)
+            .observe_finality(&certificate)
             .map_err(|_| StepError::ViewInvariant)?;
         if !selected || lqc.view() < self.durable.view {
             return Ok(());
