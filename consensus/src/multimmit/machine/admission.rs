@@ -307,20 +307,20 @@ impl<V: Variant, D: Digest> Artifact<V, D> {
         }
     }
 
-    pub(crate) fn dependencies(&self) -> Vec<Dependency<D>> {
+    pub(crate) const fn dependency(&self) -> Option<Dependency<D>> {
         match self {
-            Self::LeaderBlock(block) => vec![Dependency::Vqc(block.block().parent())],
-            Self::Vote(vote) => vec![Dependency::Leader {
+            Self::LeaderBlock(block) => Some(Dependency::Vqc(block.block().parent())),
+            Self::Vote(vote) => Some(Dependency::Leader {
                 round: vote.body().round(),
                 digest: vote.body().leader(),
-            }],
-            Self::Vqc(_) | Self::Lqc(_) => Vec::new(),
+            }),
+            Self::Vqc(_) | Self::Lqc(_) => None,
             Self::TransactionBlock(_)
             | Self::DaVote(_)
             | Self::DaCertificate(_)
             | Self::NoVote(_)
             | Self::Nullify(_)
-            | Self::Nullification(_) => Vec::new(),
+            | Self::Nullification(_) => None,
         }
     }
 
