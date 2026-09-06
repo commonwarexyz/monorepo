@@ -281,7 +281,7 @@ where
     }
 
     fn dispatch(&mut self, command: Command<H, V, B>) {
-        let command = match command.request {
+        match command.request {
             Request::SubscribeBlock(reference, reply) => {
                 let resolver = self.resolver.clone();
                 let catalog = self.catalog.clone();
@@ -306,11 +306,7 @@ where
                     }
                     .instrument(span),
                 );
-                return;
             }
-            command => command,
-        };
-        match command {
             Request::Hint(activity) => match activity {
                 crate::multimmit::types::Activity::ProtocolAccepted {
                     artifact_id,
@@ -448,7 +444,6 @@ where
                     Ok(())
                 });
             }
-            Request::SubscribeBlock(_, _) => unreachable!("subscriptions are dispatched above"),
             Request::InstallFloor(floor, reply) => {
                 let synchronizer = self.synchronizer.clone();
                 let resolver = self.resolver.clone();
