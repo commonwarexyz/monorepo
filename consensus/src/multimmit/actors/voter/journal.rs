@@ -988,6 +988,13 @@ where
         Ok(())
     }
 
+    #[tracing::instrument(
+        name = "multimmit.voter.journal.append.process",
+        level = "info",
+        skip_all,
+        parent = &append.span,
+        fields(barrier = append.job.id().get())
+    )]
     async fn append(
         &mut self,
         append: Append<V, D>,
@@ -1000,10 +1007,7 @@ where
         self.gates
             .before_append(point, self.context.current())
             .await;
-        let result = journal
-            .append_persist(&append.job)
-            .instrument(append.span.clone())
-            .await;
+        let result = journal.append_persist(&append.job).await;
         let (journal, ack) = match result {
             Ok(result) => result,
             Err(error) => {
@@ -1154,6 +1158,11 @@ where
     }
 
     #[cfg_attr(not(test), allow(clippy::unused_async))]
+    #[tracing::instrument(
+        name = "multimmit.voter.journal.roll.process",
+        level = "info",
+        skip_all
+    )]
     async fn roll(&mut self, responder: Responder<()>) -> Result<(), JournalFailure> {
         if !self.pending.is_empty() || self.sync.is_some() {
             let _ = responder.send(Err(JournalFailure::Busy));
@@ -1167,6 +1176,11 @@ where
         Ok(())
     }
 
+    #[tracing::instrument(
+        name = "multimmit.voter.journal.prune.process",
+        level = "info",
+        skip_all
+    )]
     async fn prune(&mut self, responder: Responder<()>) -> Result<(), JournalFailure> {
         if !self.pending.is_empty() || self.sync.is_some() {
             let _ = responder.send(Err(JournalFailure::Busy));
@@ -1335,6 +1349,158 @@ mod tests {
     };
     use commonware_utils::{NZU16, NZUsize};
     use futures::poll;
+    use tracing::{Subscriber, span};
+    use tracing_subscriber::{
+        Layer, layer::Context as LayerContext, prelude::*, registry::LookupSpan,
+    };
+
+    struct RecordedSpan {
+        id: u64,
+        name: &'static str,
+        parent: Option<u64>,
+        closed: bool,
+    }
+
+    #[derive(Clone, Default)]
+    struct Spans(Arc<Mutex<Vec<RecordedSpan>>>);
+
+    impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for Spans {
+        fn on_new_span(
+            &self,
+            attrs: &span::Attributes<'_>,
+            id: &span::Id,
+            ctx: LayerContext<'_, S>,
+        ) {
+            let parent = ctx
+                .span(id)
+                .unwrap()
+                .parent()
+                .map(|parent| parent.id().into_u64());
+            self.0.lock().push(RecordedSpan {
+                id: id.into_u64(),
+                name: attrs.metadata().name(),
+                parent,
+                closed: false,
+            });
+        }
+
+        fn on_close(&self, id: span::Id, _: LayerContext<'_, S>) {
+            self.0
+                .lock()
+                .iter_mut()
+                .rev()
+                .find(|span| span.id == id.into_u64())
+                .unwrap()
+                .closed = true;
+        }
+    }
+
+    #[test]
+    fn owner_processing_spans_begin_at_dequeue() {
+        let spans = Spans::default();
+        tracing::subscriber::with_default(
+            tracing_subscriber::registry().with(spans.clone()),
+            || {
+                deterministic::Runner::default().start(|context| async move {
+                    let epoch = Epoch::new(8);
+                    let (context, journal, pending, baseline) =
+                        open_delayed(context, "journal_tracing", epoch).await;
+                    let gates = TestGates::default();
+                    let mut gate = gates.arm_next_append();
+                    let (client, monitor) = spawn_with_gates(
+                        context.child("owner"),
+                        journal,
+                        NZUsize!(8),
+                        large_byte_budget(),
+                        Duration::from_secs(3600),
+                        gates,
+                    );
+                    let callers = [
+                        tracing::info_span!("first_persist"),
+                        tracing::info_span!("second_persist"),
+                    ];
+                    let first = client
+                        .try_append(callers[0].clone(), job(epoch, 1, 0, true))
+                        .unwrap();
+                    let second = client
+                        .try_append(callers[1].clone(), job(epoch, 2, 1, false))
+                        .unwrap();
+                    let roll_parent = tracing::info_span!("busy_roll");
+                    let prune_parent = tracing::info_span!("busy_prune");
+                    let roll = roll_parent.in_scope(|| client.try_roll().unwrap());
+                    let prune = prune_parent.in_scope(|| client.try_prune().unwrap());
+                    assert!(
+                        !spans
+                            .0
+                            .lock()
+                            .iter()
+                            .any(|span| span.name.starts_with("multimmit.voter.journal."))
+                    );
+                    gate.wait_entered().await;
+                    {
+                        let recorded = spans.0.lock();
+                        let processing = recorded
+                            .iter()
+                            .filter(|span| span.name == "multimmit.voter.journal.append.process")
+                            .collect::<Vec<_>>();
+                        assert_eq!(
+                            processing.len(),
+                            1,
+                            "only the dequeued append has a processing child"
+                        );
+                        assert_eq!(
+                            processing[0].parent,
+                            callers[0].id().map(|id| id.into_u64())
+                        );
+                        assert!(!processing[0].closed);
+                    }
+                    gate.release();
+                    wait_for_starts(&pending, baseline + 1).await;
+                    assert!(matches!(roll.await, Err(JournalFailure::Busy)));
+                    assert!(matches!(prune.await, Err(JournalFailure::Busy)));
+                    {
+                        let recorded = spans.0.lock();
+                        for caller in &callers {
+                            assert!(
+                                recorded.iter().any(|span| span.name
+                                    == "multimmit.voter.journal.append.process"
+                                    && span.parent == caller.id().map(|id| id.into_u64())
+                                    && span.closed),
+                                "append processing ends before its durability wait"
+                            );
+                        }
+                    }
+                    release_next(&pending).await;
+                    assert_eq!(first.await.unwrap().span.id(), callers[0].id());
+                    assert_eq!(second.await.unwrap().span.id(), callers[1].id());
+                    assert_eq!(pending.starts(), baseline + 1);
+                    let ready_roll = tracing::info_span!("ready_roll");
+                    ready_roll
+                        .in_scope(|| client.try_roll().unwrap())
+                        .await
+                        .unwrap();
+                    let ready_prune = tracing::info_span!("ready_prune");
+                    drive_pending_syncs(
+                        &pending,
+                        ready_prune.in_scope(|| client.try_prune().unwrap()),
+                    )
+                    .await
+                    .unwrap();
+                    for (operation, parent) in [
+                        ("multimmit.voter.journal.roll.process", roll_parent),
+                        ("multimmit.voter.journal.prune.process", prune_parent),
+                        ("multimmit.voter.journal.roll.process", ready_roll),
+                        ("multimmit.voter.journal.prune.process", ready_prune),
+                    ] {
+                        assert!(spans.0.lock().iter().any(|span| span.name == operation
+                            && span.parent == parent.id().map(|id| id.into_u64())
+                            && span.closed));
+                    }
+                    finish(client, monitor, &pending).await;
+                });
+            },
+        );
+    }
 
     type TestJob = PersistJob<MinPk, Sha256Digest>;
     type DelayedContext = DelayedSyncContext<deterministic::Context>;
